@@ -429,6 +429,9 @@ pub const HandlerVerifier = struct {
     // State isolation (Check 7)
     handler_scope_id: ?ir.ScopeId = null,
     has_module_mutation: bool = false,
+    /// Local bindings initialised from a module-scope or builtin binding. A
+    /// member write through one of them writes shared state.
+    shared_aliases: std.ArrayList(u32) = .empty,
     /// A route call exists, but its complete target set is not known. The
     /// caller uses this separately from `has_module_mutation`: unknown code
     /// makes state isolation unproven without claiming an observed mutation.
@@ -472,6 +475,7 @@ pub const HandlerVerifier = struct {
         self.checked_journal.deinit(self.allocator);
         self.all_bindings.deinit(self.allocator);
         self.import_bindings.deinit(self.allocator);
+        self.shared_aliases.deinit(self.allocator);
     }
 
     // -----------------------------------------------------------------------
@@ -872,6 +876,7 @@ pub const HandlerVerifier = struct {
                 // Check if the init expression is a call to a result-producing function
                 if (decl.init != null_node) {
                     self.walkExprForRefs(decl.init);
+                    self.recordSharedAlias(decl);
 
                     if (self.resultProducingCallSource(decl.init)) |rfs| {
                         self.result_bindings.append(self.allocator, .{
@@ -1822,11 +1827,26 @@ pub const HandlerVerifier = struct {
     fn checkModuleScopeMutation(self: *HandlerVerifier, target: NodeIndex, assign_node: NodeIndex) void {
         const handler_scope = self.handler_scope_id orelse return;
         const target_tag = self.ir_view.getTag(target) orelse return;
-        if (target_tag != .identifier) return;
+        // A member or index write changes the object its base names, so the base
+        // decides whether the object is shared between requests.
+        const base = switch (target_tag) {
+            .identifier => target,
+            .member_access, .computed_access => self.memberBase(target) orelse return,
+            // exhaustive: any other target form names no binding to test, and the
+            // check returned for it before member writes were added. A write through
+            // a call result such as `getStore().x = 1` stays unchecked here.
+            else => return,
+        };
 
-        const binding = self.ir_view.getBinding(target) orelse return;
-        // Module-scope bindings have a scope_id lower than the handler's
-        if (binding.scope_id < handler_scope and binding.kind != .undeclared_global) {
+        const binding = self.bindingOf(base) orelse return;
+        // Module-scope bindings have a scope_id lower than the handler's. A builtin
+        // such as Math is an undeclared global: a write to the name itself is not
+        // state, a write through it changes an object every request shares.
+        const shared = if (base == target)
+            binding.scope_id < handler_scope and binding.kind != .undeclared_global
+        else
+            binding.scope_id < handler_scope or binding.kind == .undeclared_global or self.isSharedAlias(binding);
+        if (shared) {
             self.has_module_mutation = true;
             self.addDiagnostic(.{
                 .severity = .err,
@@ -1836,6 +1856,42 @@ pub const HandlerVerifier = struct {
                 .help = "use const instead of let for module-scope declarations, or move state to zttp:cache",
             });
         }
+    }
+
+    /// The identifier at the root of a chain of member and index accesses.
+    fn memberBase(self: *const HandlerVerifier, node: NodeIndex) ?NodeIndex {
+        var current = node;
+        while (true) {
+            const tag = self.ir_view.getTag(current) orelse return null;
+            switch (tag) {
+                .identifier => return current,
+                .member_access, .optional_chain, .computed_access => {
+                    const member = self.ir_view.getMember(current) orelse return null;
+                    current = member.object;
+                },
+                // exhaustive: a call result, literal, or other expression at the root
+                // names no binding, so no shared-state verdict is possible from it.
+                else => return null,
+            }
+        }
+    }
+
+    fn isSharedAlias(self: *const HandlerVerifier, binding: ir.BindingRef) bool {
+        const key = bindingKey(binding.scope_id, binding.slot);
+        for (self.shared_aliases.items) |alias| {
+            if (alias == key) return true;
+        }
+        return false;
+    }
+
+    /// `const m = Math;` and `const s = moduleObject;` make `m` and `s` names for
+    /// shared objects. An alias of an alias is recorded too, in source order.
+    fn recordSharedAlias(self: *HandlerVerifier, decl: Node.VarDecl) void {
+        const handler_scope = self.handler_scope_id orelse return;
+        if ((self.ir_view.getTag(decl.init) orelse return) != .identifier) return;
+        const source = self.bindingOf(decl.init) orelse return;
+        if (source.scope_id >= handler_scope and source.kind != .undeclared_global and !self.isSharedAlias(source)) return;
+        self.shared_aliases.append(self.allocator, bindingKey(decl.binding.scope_id, decl.binding.slot)) catch self.markAllocationFailure();
     }
 
     // -----------------------------------------------------------------------
@@ -2125,6 +2181,27 @@ fn routeVerifierCounts(source: []const u8) !RouteVerifierCounts {
     counts.unresolved_dispatch = verifier.unresolved_route_dispatch;
     counts.has_module_mutation = verifier.has_module_mutation;
     return counts;
+}
+
+test "a member or index write through a builtin or module-scope binding breaks state isolation" {
+    const Case = struct { source: []const u8, mutations: u32 };
+    const cases = [_]Case{
+        .{ .source = "function handler(req) { parseInt.x = 1; return Response.text(\"ok\"); }", .mutations = 1 },
+        .{ .source = "function handler(req) { const m = Math; m.x = 1; return Response.text(\"ok\"); }", .mutations = 1 },
+        .{ .source = "const store = { a: \"\" };\nfunction handler(req) { store.a = \"x\"; return Response.text(\"ok\"); }", .mutations = 1 },
+        .{ .source = "const store = { a: \"\" };\nfunction handler(req) { store[\"a\"] = \"x\"; return Response.text(\"ok\"); }", .mutations = 1 },
+        .{ .source = "const store = { a: { b: 1 } };\nfunction handler(req) { store.a.b = 2; return Response.text(\"ok\"); }", .mutations = 1 },
+        .{ .source = "const store = { a: \"\" };\nfunction handler(req) { const s = store; s.a = \"x\"; return Response.text(\"ok\"); }", .mutations = 1 },
+        .{ .source = "function handler(req) { const o = { a: \"\" }; o.a = \"x\"; return Response.text(\"ok\"); }", .mutations = 0 },
+        .{ .source = "function handler(req) { req.x = 1; return Response.text(\"ok\"); }", .mutations = 0 },
+        .{ .source = "const store = { a: \"\" };\nfunction handler(req) { const s = { a: store.a }; s.a = \"x\"; return Response.text(\"ok\"); }", .mutations = 0 },
+    };
+    for (cases) |case| {
+        const counts = try routeVerifierCounts(case.source);
+        if (counts.module_mutation != case.mutations) std.debug.print("source: {s}\n", .{case.source});
+        try std.testing.expectEqual(case.mutations, counts.module_mutation);
+        try std.testing.expectEqual(case.mutations > 0, counts.has_module_mutation);
+    }
 }
 
 test "response total checks routerMatch route functions" {

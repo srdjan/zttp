@@ -97,10 +97,11 @@ packages/zts/src/fault_coverage.zig parseExternalSeverities catch-multiline
 packages/zts/src/fault_coverage.zig getOrPutEntry catch-block
 
 # HandlerVerifier checks allocation_failed before it returns a verdict. Its
-# fact, import, walk, checked-flag journal, and diagnostic catches only defer
+# fact, import, walk, checked-flag journal, shared-alias, and diagnostic catches only defer
 # that failure.
 packages/zts/src/handler_verifier.zig addDiagnostic catch-poison
 packages/zts/src/handler_verifier.zig collectImportBindings catch-poison
+packages/zts/src/handler_verifier.zig recordSharedAlias catch-poison
 packages/zts/src/handler_verifier.zig resolveFacts catch-block
 packages/zts/src/handler_verifier.zig scanImports catch-poison
 packages/zts/src/handler_verifier.zig setCheckedFlag catch-poison
