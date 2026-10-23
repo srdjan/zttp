@@ -278,7 +278,7 @@ pub fn runCommand(
 /// tool must not read, or null when the read may proceed. The message never
 /// carries file content.
 ///
-/// The fixed basename deny list in `isSecretBasename` applies first and
+/// The fixed deny list in `isSecretPath` applies first, to every component, and
 /// unconditionally, so a committed or untracked `.env` is refused whatever git
 /// says. Then `git check-ignore -v -- <relative>` runs in the workspace root.
 /// Exit 0 means ignored and the tool refuses, naming the matching pattern and
@@ -293,7 +293,7 @@ pub fn ignoredRefusal(
     relative: []const u8,
     comptime tool_name: []const u8,
 ) !?[]u8 {
-    if (isSecretBasename(std.fs.path.basename(relative))) {
+    if (isSecretPath(relative)) {
         return try allocator.dupe(u8, tool_name ++ ": path matches the secret file deny list and is not readable\n");
     }
     const argv = [_][]const u8{ "git", "check-ignore", "-v", "--", relative };
@@ -325,6 +325,14 @@ pub fn isSecretBasename(base: []const u8) bool {
         std.mem.endsWith(u8, base, ".key") or
         std.mem.startsWith(u8, base, "id_rsa") or
         std.mem.startsWith(u8, base, "id_ed25519");
+}
+
+/// `isSecretBasename` applied to every component, so a file under a directory
+/// such as `.env.d/` is refused too.
+pub fn isSecretPath(path: []const u8) bool {
+    var parts = std.mem.tokenizeAny(u8, path, "/\\");
+    while (parts.next()) |part| if (isSecretBasename(part)) return true;
+    return false;
 }
 
 /// An in-process analyzer run shaped as a finished child process, so a tool

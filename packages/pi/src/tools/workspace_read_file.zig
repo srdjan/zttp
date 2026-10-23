@@ -383,6 +383,22 @@ test "workspace_read_file: deny list matches the documented basenames only" {
     try testing.expect(!common.isSecretBasename("handler.ts"));
 }
 
+test "workspace_read_file: a file under a secret-named directory is refused" {
+    try testing.expect(common.isSecretPath("config/.env.d/prod.txt"));
+    try testing.expect(common.isSecretPath("keys/id_rsa.d/config"));
+    try testing.expect(common.isSecretPath(".env"));
+    try testing.expect(!common.isSecretPath("src/environment/handler.ts"));
+    try testing.expect(!common.isSecretPath("src/handler.ts"));
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    const refusal = (try common.ignoredRefusal(testing.allocator, root, "config/.env.d/prod.txt", name)) orelse return error.TestUnexpectedResult;
+    defer testing.allocator.free(refusal);
+    try testing.expect(std.mem.indexOf(u8, refusal, "secret file deny list") != null);
+}
+
 test "workspace_read_file: a tracked .env in a git workspace is refused" {
     const allocator = testing.allocator;
     var tmp = try IsolatedTmp.init(allocator, "workspace-read-tracked-env");

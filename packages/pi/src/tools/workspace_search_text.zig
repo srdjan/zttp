@@ -174,7 +174,7 @@ fn renderSearchOutput(
     // `.env`, so every record is checked here whatever produced it.
     var kept: usize = 0;
     for (records.items) |record| {
-        if (common.isSecretBasename(std.fs.path.basename(record.path))) continue;
+        if (common.isSecretPath(record.path)) continue;
         records.items[kept] = record;
         kept += 1;
     }
