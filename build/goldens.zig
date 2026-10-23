@@ -21,7 +21,7 @@ pub fn add(ctx: Context, bins: artifacts.Binaries) Result {
     const zts_exe = bins.zts_exe;
     const cli_exe = bins.cli_exe;
 
-    const run_module_governance = b.addRunArtifact(zts_exe);
+    const run_module_governance = runEmitted(b, zts_exe);
     run_module_governance.addArgs(&.{ "verify-modules", "--builtins", "--strict", "--json" });
     const module_governance_step = b.step("test-module-governance", "Run built-in module governance audit");
     module_governance_step.dependOn(&run_module_governance.step);
@@ -120,7 +120,7 @@ pub fn add(ctx: Context, bins: artifacts.Binaries) Result {
     // Compiler-only goal runs must never consult cloud credentials or local
     // model readiness. Keep this at the executable boundary so dispatch and
     // environment injection cannot regress independently of the pi unit tests.
-    const goal_without_model = b.addRunArtifact(cli_exe);
+    const goal_without_model = runEmitted(b, cli_exe);
     goal_without_model.addArgs(&.{
         "expert",
         "--handler",
@@ -142,7 +142,7 @@ pub fn add(ctx: Context, bins: artifacts.Binaries) Result {
     // The follow-up absence check is the execution floor for that ordering.
     const init_preflight_root = b.addWriteFiles();
     _ = init_preflight_root.add("preflight-fixture", "");
-    const init_preflight = b.addRunArtifact(cli_exe);
+    const init_preflight = runEmitted(b, cli_exe);
     init_preflight.addArgs(&.{ "init", "demo", "--expert" });
     init_preflight.setCwd(init_preflight_root.getDirectory());
     init_preflight.removeEnvironmentVariable("HOME");
@@ -222,7 +222,7 @@ fn addExpertMetaGolden(
         std.debug.panic("meta golden {s} is missing the {s} field", .{ golden_rel, marker });
     const version_independent_tail = golden[idx..];
 
-    const run = b.addRunArtifact(exe);
+    const run = runEmitted(b, exe);
     run.addArgs(&.{ "meta", "--json" });
     run.expectExitCode(0);
     run.expectStdOutMatch("{\"compiler_version\":\"");
@@ -251,7 +251,7 @@ fn addExpertRun(
     expected_exit: u8,
     golden_rel: ?[]const u8,
 ) void {
-    const run = b.addRunArtifact(exe);
+    const run = runEmitted(b, exe);
     run.addArgs(args);
     // A handler argument is a plain string in argv, so the run step does not
     // see it as an input and reuses a cached result after the handler is
@@ -277,4 +277,12 @@ fn addExpertRun(
         run.addCheck(.{ .expect_stdout_snapshot = b.path(rel) });
     }
     step.dependOn(&run.step);
+}
+
+/// Zig 0.17 runs an installed artifact from its `zig-out` copy, which a
+/// concurrent install can replace mid-run. Run the build's own output instead.
+fn runEmitted(b: *std.Build, exe: *std.Build.Step.Compile) *std.Build.Step.Run {
+    const run = std.Build.Step.Run.create(b, b.fmt("run {s}", .{exe.name}));
+    run.addFileArg(exe.getEmittedBin());
+    return run;
 }
