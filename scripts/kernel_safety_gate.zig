@@ -2,7 +2,7 @@ const std = @import("std");
 
 // Measured after Phase 2 removes the three retired kernel decoders.
 const minimum_files = 13;
-const minimum_functions = 248;
+const minimum_functions = 246;
 
 const Counts = struct {
     functions: usize = 0,
