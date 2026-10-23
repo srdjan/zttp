@@ -92,11 +92,11 @@ that call reaches, so it does not claim that the call is safe.
 The security chips are not sound proofs in v0.22.3 and earlier. On
 2026-10-18, the analyzer accepted a declared capsule for each handler shape
 below, and the handler leaked when it ran under `zttp serve`, or the shape
-uses the same mechanism as one that leaked. Do not rely on a security chip for
-a handler that contains one of these shapes. A flow-checker redesign is
-planned to close them.
+uses the same mechanism as one that leaked. In v0.22.3 and earlier, do not
+rely on a security chip for a handler that contains one of these shapes.
+v0.24.0 closes every row.
 
-| Shape | Chip that is proven but false |
+| Shape | Chip that v0.22.3 proved falsely |
 |---|---|
 | A `let` that is reassigned in an `if` or `else` branch, where one branch holds raw input | `injection_safe` |
 | A `let` that carries a value from one `for...of` iteration to the next | `injection_safe` |
@@ -125,7 +125,8 @@ v0.22.3. The change that fixed `cacheIncr` also marks the results of
 The two runtime rows are fixed after v0.22.3 in code generation: the analysis
 was right about the program, and the runtime did not run it as written.
 `packages/runtime/src/server_test.zig` holds their regression tests. Each
-other row has a permanent fixture in `packages/tools/src/flow_false_proofs.zig`.
+other row has a permanent fixture in `packages/tools/src/flow_false_proofs.zig`,
+and v0.24.0 refuses each fixture or leaves its property unproven.
 
 The structural chips (`pure`, `read_only`, `deterministic`, `retry_safe`,
 `idempotent`) were not part of this check. Treat that as unmeasured, not as
