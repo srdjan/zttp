@@ -1167,8 +1167,6 @@ pub const CostEntry = struct {
 pub const CostEnvelope = struct {
     entries: std.ArrayList(CostEntry) = .empty,
     total: Bound = .{ .constant = 0 },
-    /// Mirrors behaviors_exhaustive: false when PathGenerator hit MAX_PATHS.
-    exhaustive: bool = true,
 
     pub fn find(self: *const CostEnvelope, module: []const u8) ?*const Bound {
         for (self.entries.items) |*entry| {
@@ -1190,7 +1188,6 @@ pub const CostEnvelope = struct {
         var copy = CostEnvelope{
             .entries = .empty,
             .total = try self.total.dupeOwned(allocator),
-            .exhaustive = self.exhaustive,
         };
         errdefer copy.deinit(allocator);
 

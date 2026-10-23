@@ -1730,7 +1730,6 @@ fn setTestCostEnvelope(
     contract.cost_envelope = .{
         .entries = .empty,
         .total = try total.dupeOwned(allocator),
-        .exhaustive = true,
     };
 }
 

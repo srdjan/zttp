@@ -1048,7 +1048,6 @@ pub const PathGenerator = struct {
         else
             try handler_cost.dupeOwned(allocator);
         errdefer envelope.deinit(allocator);
-        envelope.exhaustive = self.pathsExhaustive();
 
         if (truncated or self.unresolved_route_dispatch or self.route_composition_unmodeled) {
             const unbounded_desc = try allocator.dupe(
@@ -3714,7 +3713,7 @@ test "recursive handler gets no constant cost bound" {
     defer envelope.deinit(allocator);
 
     try std.testing.expect(envelope.total.class() == .unbounded);
-    try std.testing.expect(!envelope.exhaustive);
+    try std.testing.expect(!fixture.generator.pathsExhaustive());
 }
 
 test "handler calling a recursive helper gets no constant cost bound" {
@@ -3771,7 +3770,7 @@ test "non-recursive helper keeps its constant cost bound" {
     defer envelope.deinit(allocator);
 
     try std.testing.expect(envelope.total.class() != .unbounded);
-    try std.testing.expect(envelope.exhaustive);
+    try std.testing.expect(fixture.generator.pathsExhaustive());
 }
 
 test "unavailable effect facts conservatively report recursion" {
@@ -3838,7 +3837,6 @@ test "envelope is not exhaustive when a loop body is summarized" {
     var envelope = try fixture.generator.buildCostEnvelope(allocator);
     defer envelope.deinit(allocator);
 
-    try std.testing.expect(!envelope.exhaustive);
     try std.testing.expect(!fixture.generator.pathsExhaustive());
 }
 
@@ -3859,7 +3857,6 @@ test "envelope stays exhaustive for a loop-free handler" {
     var envelope = try fixture.generator.buildCostEnvelope(allocator);
     defer envelope.deinit(allocator);
 
-    try std.testing.expect(envelope.exhaustive);
     try std.testing.expect(fixture.generator.pathsExhaustive());
 }
 
@@ -3885,7 +3882,7 @@ test "a summarized loop does not make the cost total unbounded" {
     var envelope = try fixture.generator.buildCostEnvelope(allocator);
     defer envelope.deinit(allocator);
 
-    try std.testing.expect(!envelope.exhaustive);
+    try std.testing.expect(!fixture.generator.pathsExhaustive());
     try std.testing.expect(envelope.total.class() != .unbounded);
 }
 
@@ -3911,7 +3908,7 @@ test "for...of over request-derived array yields linear io multiplicity" {
 
     // Spec gap 11: the loop body is summarized, not enumerated, so the envelope
     // cannot claim exhaustive path coverage. The cost bound below is unaffected.
-    try std.testing.expect(!envelope.exhaustive);
+    try std.testing.expect(!fixture.generator.pathsExhaustive());
     const total = envelope.total.linear;
     try std.testing.expectEqual(@as(u32, 1), total.coefficient);
     try std.testing.expectEqual(@as(u32, 1), total.base);

@@ -540,7 +540,6 @@ const CostEntryWire = struct {
 };
 
 const CostEnvelopeWire = struct {
-    exhaustive: bool = true,
     total: BoundWire = .{ .class = .{ .bytes = "constant" } },
     perModule: []const CostEntryWire = &.{},
 };
@@ -1533,7 +1532,6 @@ fn projectCostEnvelope(
     const value = wire orelse return null;
     var envelope = CostEnvelope{
         .total = try projectBound(allocator, &value.total),
-        .exhaustive = value.exhaustive,
     };
     errdefer envelope.deinit(allocator);
     try envelope.entries.ensureTotalCapacity(allocator, value.perModule.len);

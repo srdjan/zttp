@@ -603,7 +603,6 @@ fn writeCostEnvelopeJson(
     envelope: *const contract_types.CostEnvelope,
 ) !void {
     try writer.writeAll("  \"" ++ comptime contractKey(json_version, "costEnvelope") ++ "\": {\n");
-    try writer.print("    \"exhaustive\": {s},\n", .{if (envelope.exhaustive) "true" else "false"});
     try writer.writeAll("    \"total\": ");
     try writeBoundJson(writer, envelope.total);
     try writer.writeAll(",\n");

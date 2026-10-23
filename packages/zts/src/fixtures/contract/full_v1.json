@@ -252,7 +252,6 @@
     }
   ],
   "costEnvelope": {
-    "exhaustive": true,
     "total": { "class": "linear", "coefficient": 3, "base": 2, "source": { "line": 4, "column": 6, "desc": "items.length" } },
     "perModule": [
       { "module": "zttp:cache", "bound": { "class": "constant", "value": 2 } }, 

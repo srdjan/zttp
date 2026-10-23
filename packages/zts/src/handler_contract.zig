@@ -843,7 +843,6 @@ test "costEnvelope serialization roundtrip" {
                 .desc = try allocator.dupe(u8, "for...of over `ids`"),
             },
         } },
-        .exhaustive = true,
     };
 
     var output: std.ArrayList(u8) = .empty;
@@ -856,7 +855,6 @@ test "costEnvelope serialization roundtrip" {
     defer parsed.deinit(allocator);
 
     const envelope = parsed.cost_envelope.?;
-    try std.testing.expect(envelope.exhaustive);
     try std.testing.expectEqual(BoundClass.linear, envelope.total.class());
     try std.testing.expectEqual(@as(u32, 1), envelope.total.linear.coefficient);
     try std.testing.expectEqual(@as(u32, 3), envelope.total.linear.base);
@@ -912,7 +910,6 @@ test "unknown sibling keys around costEnvelope are skipped" {
         \\  "behaviorsExhaustive": true,
         \\  "unknownBeforeCost": { "nested": [1, { "x": true }] },
         \\  "costEnvelope": {
-        \\    "exhaustive": true,
         \\    "total": { "class": "constant", "value": 2 },
         \\    "perModule": [
         \\      { "module": "fetch", "bound": { "class": "constant", "value": 2 } }

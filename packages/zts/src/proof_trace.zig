@@ -934,7 +934,6 @@ test "unbounded cost trace carries loop counterexample and lever" {
             .column = 5,
             .desc = try testing.allocator.dupe(u8, "for...of over `ids`"),
         } },
-        .exhaustive = true,
     };
 
     const traces = try collect(
