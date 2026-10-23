@@ -269,7 +269,7 @@ source that differs. It also rejects a missing, malformed, or stale marker.
 
 ## What `zig build test` Excludes
 
-Ten build steps run only under `scripts/verify.sh`:
+Four build steps run only under `scripts/verify.sh`:
 
 - **`test-zruntime`**, the `zruntime_tests.zig` root. See the next section.
 - **`test-module-scope-panic`**, a focused executable that proves authorization
@@ -279,17 +279,14 @@ Ten build steps run only under `scripts/verify.sh`:
   This step also depends on `test-module-scope-panic`.
 - **`smoke-v1`**, a build step that runs the v1 user flow in a temporary
   directory.
-- **Six single-script drift gates**, each its own build step that starts one
-  script: `test-idiom-table`, `test-canonical-style`, `test-grammar-drift`,
-  `test-decision-registry`, `test-meta-drift`, and `test-agent-determinism`.
-  The table below lists what each asserts.
+
+The six single-script drift gates run inside `zig build test`: `test-idiom-table`, `test-canonical-style`, `test-grammar-drift`, `test-decision-registry`, `test-meta-drift`, and `test-agent-determinism`. `test-meta-drift` also compares `describe-rule --hash` with `policy-hash.txt`.
 
 Four scripts and two commands run only under `scripts/verify.sh`, with no
 build step of their own: `scripts/check-normalize-idempotent.sh`,
 `scripts/check-semantics-spec.sh`, `scripts/test-install-archive-safety.sh`,
 and `scripts/test-release-notes.sh` (release routes only), plus
-`zts module-spec-render --check`, the policy-hash and expert-subsystem
-assertions, and `zig fmt --check`. The release routes also run
+`zts module-spec-render --check` and `zig fmt --check`. The release routes also run
 `release-provenance`, `smoke-getting-started`, `release-check`, and
 `bench-check`. `tooling/verification_routes.zig` is the list that
 `scripts/verify.sh` follows.

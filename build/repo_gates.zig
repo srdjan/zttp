@@ -26,6 +26,10 @@ pub const Result = struct {
     convergence_emitter: *std.Build.Step.Run,
     evidence_marker: *std.Build.Step.Run,
     docs_drift_step: *std.Build.Step,
+    idiom_table: *std.Build.Step.Run,
+    canonical_style: *std.Build.Step.Run,
+    grammar_drift: *std.Build.Step.Run,
+    decision_registry: *std.Build.Step.Run,
     meta_drift: *std.Build.Step.Run,
     agent_determinism: *std.Build.Step.Run,
     doc_links: *std.Build.Step.Run,
@@ -84,10 +88,10 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
     convergence_emitter.run.step.dependOn(&evidence_marker.run.step);
 
     const docs_drift = ctx.addGate(&.{ "/bin/bash", "scripts/check-docs-drift.sh" }, "test-docs-drift", "Check docs against current registry and build paths");
-    _ = ctx.addGate(&.{ "/bin/bash", "scripts/check-idiom-table.sh" }, "test-idiom-table", "Check spec 4.2.1's idiom table against the registry");
-    _ = ctx.addGate(&.{ "/bin/bash", "scripts/check-canonical-style.sh" }, "test-canonical-style", "Check the canonical-style skill's examples against the rule registry");
-    _ = ctx.addGate(&.{ "/bin/bash", "scripts/check-grammar-drift.sh" }, "test-grammar-drift", "Check spec section 8's grammar against the registry");
-    _ = ctx.addGate(&.{ "/bin/bash", "scripts/check-decision-registry.sh" }, "test-decision-registry", "Check every published decision kind is emitted somewhere");
+    const idiom_table = ctx.addGate(&.{ "/bin/bash", "scripts/check-idiom-table.sh" }, "test-idiom-table", "Check spec 4.2.1's idiom table against the registry");
+    const canonical_style = ctx.addGate(&.{ "/bin/bash", "scripts/check-canonical-style.sh" }, "test-canonical-style", "Check the canonical-style skill's examples against the rule registry");
+    const grammar_drift = ctx.addGate(&.{ "/bin/bash", "scripts/check-grammar-drift.sh" }, "test-grammar-drift", "Check spec section 8's grammar against the registry");
+    const decision_registry = ctx.addGate(&.{ "/bin/bash", "scripts/check-decision-registry.sh" }, "test-decision-registry", "Check every published decision kind is emitted somewhere");
     // artifacts.zig appends the built `zts` binary to this gate's arguments.
     const meta_drift = ctx.addGate(&.{ "/bin/bash", "scripts/check-meta-drift.sh" }, "test-meta-drift", "Check meta's published registry hashes against their pins");
     meta_drift.run.addArtifactArg(tools.repo_gate_exe);
@@ -104,6 +108,10 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
         .convergence_emitter = convergence_emitter.run,
         .evidence_marker = evidence_marker.run,
         .docs_drift_step = docs_drift.step,
+        .idiom_table = idiom_table.run,
+        .canonical_style = canonical_style.run,
+        .grammar_drift = grammar_drift.run,
+        .decision_registry = decision_registry.run,
         .meta_drift = meta_drift.run,
         .agent_determinism = agent_determinism.run,
         .doc_links = doc_links.run,

@@ -70,6 +70,12 @@ pub fn build(b: *std.Build) void {
     // test-doc-links a second time.
     test_step.dependOn(gates.docs_drift_step);
     test_step.dependOn(&gates.doc_links.step);
+    test_step.dependOn(&gates.idiom_table.step);
+    test_step.dependOn(&gates.canonical_style.step);
+    test_step.dependOn(&gates.grammar_drift.step);
+    test_step.dependOn(&gates.decision_registry.step);
+    test_step.dependOn(&gates.meta_drift.step);
+    test_step.dependOn(&gates.agent_determinism.step);
     test_step.dependOn(&gates.convergence_emitter.step);
     test_step.dependOn(&gates.evidence_marker.step);
     test_step.dependOn(&golden.run_module_governance.step);

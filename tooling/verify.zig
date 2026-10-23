@@ -18,10 +18,6 @@ pub fn main(init: std.process.Init) !void {
         } else if (route.release_pipeline) continue;
         if (route.release_only and !release) continue;
         executed += 1;
-        if (route.expert_metadata) {
-            try checkExpertMetadata(init.arena.allocator(), init.io);
-            continue;
-        }
         var argv: std.ArrayList([]const u8) = .empty;
         try argv.appendSlice(init.arena.allocator(), route.argv);
         if (argv.items.len > 0 and std.mem.eql(u8, argv.items[0], "zig")) argv.items[0] = args[1];
@@ -43,21 +39,4 @@ pub fn main(init: std.process.Init) !void {
         return;
     }
     std.debug.print("\nverify.sh: all {s}gates passed\n", .{if (release) "per-commit and release " else "per-commit "});
-}
-
-fn checkExpertMetadata(allocator: std.mem.Allocator, io: std.Io) !void {
-    const expected = try std.Io.Dir.cwd().readFileAlloc(io, "policy-hash.txt", allocator, .limited(128));
-    const hash = try std.process.run(allocator, io, .{ .argv = &.{ "./zig-out/bin/zts", "describe-rule", "--hash" } });
-    if (hash.term != .exited or hash.term.exited != 0 or
-        !std.mem.eql(u8, std.mem.trim(u8, hash.stdout, "\r\n"), std.mem.trim(u8, expected, "\r\n")))
-        return error.PolicyHashMismatch;
-    const result = try std.process.run(allocator, io, .{ .argv = &.{ "./zig-out/bin/zts", "meta", "--json" } });
-    if (result.term != .exited or result.term.exited != 0) return error.MetadataCommandFailed;
-    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, result.stdout, .{});
-    const object = if (parsed.value == .object) parsed.value.object else return error.InvalidMetadata;
-    const count = object.get("rule_count") orelse return error.InvalidMetadata;
-    const policy = object.get("policy_hash") orelse return error.InvalidMetadata;
-    if (count != .integer or count.integer < 25 or policy != .string or policy.string.len != 64)
-        return error.InvalidMetadata;
-    std.debug.print("policy hash and expert metadata OK\n", .{});
 }

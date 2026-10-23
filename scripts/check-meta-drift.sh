@@ -43,6 +43,11 @@ if [[ -z "$REPO_GATE" ]]; then
     --global-cache-dir "$work/global-cache"
 fi
 
+# policy-hash.txt is the committed copy of the same policy identity.
+rule_hash="$("$ZTS" describe-rule --hash)" || fail "describe-rule --hash failed"
+[[ "$rule_hash" == "$(tr -d '\r\n' < policy-hash.txt)" ]] ||
+  fail "describe-rule --hash ($rule_hash) differs from policy-hash.txt"
+
 printf '{"schema_version":2,"operation":"meta","project_root":".","input":{}}\n' |
   "$ZTS" agent --stdin-json > "$work/meta.json" 2> "$work/err" ||
   fail "the meta operation failed: $(head -n 1 "$work/err")"

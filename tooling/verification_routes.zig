@@ -7,7 +7,6 @@ pub const Route = struct {
     argv: []const []const u8,
     release_only: bool = false,
     release_pipeline: bool = false,
-    expert_metadata: bool = false,
 };
 
 pub const routes = [_]Route{
@@ -18,14 +17,7 @@ pub const routes = [_]Route{
     .{ .label = "v1 user-flow smoke", .argv = &.{ "zig", "build", "smoke-v1" } },
     .{ .label = "handler panic isolation", .argv = &.{ "zig", "build", "test-panic-isolation" } },
     .{ .label = "normalization idempotence", .argv = &.{ "bash", "scripts/check-normalize-idempotent.sh" } },
-    .{ .label = "spec idiom table", .argv = &.{ "zig", "build", "test-idiom-table" } },
-    .{ .label = "canonical-style examples", .argv = &.{ "zig", "build", "test-canonical-style" } },
-    .{ .label = "spec grammar", .argv = &.{ "zig", "build", "test-grammar-drift" } },
-    .{ .label = "decision producers", .argv = &.{ "zig", "build", "test-decision-registry" } },
-    .{ .label = "registry hash pins", .argv = &.{ "zig", "build", "test-meta-drift" } },
-    .{ .label = "agent transport determinism", .argv = &.{ "zig", "build", "test-agent-determinism" } },
     .{ .label = "installer archive safety", .argv = &.{ "bash", "scripts/test-install-archive-safety.sh" } },
-    .{ .label = "policy hash and expert metadata", .argv = &.{}, .expert_metadata = true },
     .{ .label = "strict semantics specification", .argv = &.{ "bash", "scripts/check-semantics-spec.sh" } },
     .{ .label = "module binding specifications", .argv = &.{ "./zig-out/bin/zts", "module-spec-render", "--check" } },
     .{ .label = "curated release notes", .argv = &.{ "sh", "scripts/test-release-notes.sh" }, .release_only = true },
@@ -41,20 +33,14 @@ pub const routes = [_]Route{
 pub fn validate(items: []const Route) !void {
     var aggregate: usize = 0;
     var runtime: usize = 0;
-    var metadata: usize = 0;
     for (items) |route| {
         const ordinary = !route.release_only and !route.release_pipeline;
-        if (route.expert_metadata) {
-            if (ordinary) metadata += 1;
-            if (route.argv.len != 0) return error.AmbiguousRoute;
-            continue;
-        }
         if (route.argv.len == 0) return error.EmptyCommand;
         const task = buildTask(route.argv) orelse continue;
         if (ordinary and std.mem.eql(u8, task, "test")) aggregate += 1;
         if (ordinary and std.mem.eql(u8, task, "test-zruntime")) runtime += 1;
     }
-    if (aggregate != 1 or runtime != 1 or metadata != 1) return error.InvalidVerificationFloor;
+    if (aggregate != 1 or runtime != 1) return error.InvalidVerificationFloor;
 }
 
 pub fn buildTask(argv: []const []const u8) ?[]const u8 {
@@ -98,7 +84,7 @@ test "mandatory routes cannot be moved out of ordinary verification" {
     var rejected: usize = 0;
     for (routes, 0..) |route, index| {
         const task = buildTask(route.argv);
-        const mandatory = route.expert_metadata or (task != null and
+        const mandatory = (task != null and
             (std.mem.eql(u8, task.?, "test") or std.mem.eql(u8, task.?, "test-zruntime")));
         if (!mandatory) continue;
         var changed = routes;
@@ -110,7 +96,7 @@ test "mandatory routes cannot be moved out of ordinary verification" {
         try std.testing.expectError(error.InvalidVerificationFloor, validate(&changed));
         rejected += 1;
     }
-    try std.testing.expectEqual(@as(usize, 6), rejected);
+    try std.testing.expectEqual(@as(usize, 4), rejected);
 }
 
 test "build selection rejects empty named suites and filtered aggregate execution" {
