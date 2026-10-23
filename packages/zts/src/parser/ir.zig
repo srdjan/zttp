@@ -1842,9 +1842,10 @@ pub const IrView = struct {
     /// `visit` is monomorphized per call site, so there is no indirect-call cost.
     ///
     /// This is a pure structural descent with no analysis state and no ordering
-    /// policy beyond source order. Flow-sensitive or expression-walking analyses
-    /// (`collectCallCounts`, `collectAssignments`, `bool_checker`, `flow_checker`)
-    /// must keep their own arms; do not route them through here.
+    /// policy beyond source order. It does not enter expressions. An
+    /// expression-walking analysis (`collectCallCounts`, `collectAssignments`)
+    /// uses `expressionChildren`, and a flow-sensitive one (`bool_checker`,
+    /// `flow_checker`) keeps its own arms; do not route them through here.
     pub fn forEachChild(
         self: IrView,
         node: NodeIndex,

@@ -178,6 +178,13 @@ pub const StrictChecker = struct {
     type_checker: ?*TypeChecker,
     diagnostics: std.ArrayList(Diagnostic),
     assigned_bindings: std.AutoHashMapUnmanaged(u32, void),
+    /// Names assigned through a captured reference. A closure reads and writes a
+    /// captured binding through an upvalue reference whose scope and slot index
+    /// the closure's own capture table, so `assigned_bindings` cannot hold it.
+    /// The name atom is the identity that survives the capture. A name shared by
+    /// two declarations makes both count as assigned, which only withholds a
+    /// ZTS604 refusal.
+    assigned_upvalue_atoms: std.AutoHashMapUnmanaged(u16, void),
     annotated_function_bindings: std.AutoHashMapUnmanaged(u32, void),
     /// Every binding whose initializer is a function, annotated or not. A named
     /// helper handed to a callback slot is a body this checker cannot read, and
@@ -188,6 +195,13 @@ pub const StrictChecker = struct {
     /// a round trip spelled across two statements is seen as one.
     entries_derived_bindings: std.AutoHashMapUnmanaged(u32, EntryChain),
     call_counts: std.AutoHashMapUnmanaged(u32, u32),
+    /// Calls made through a captured reference, counted by name atom for the
+    /// same reason as `assigned_upvalue_atoms`.
+    upvalue_call_counts: std.AutoHashMapUnmanaged(u16, u32),
+    /// How many `var_decl` and `function_decl` nodes declare each name. An
+    /// upvalue call count is attributed to a declaration only when the name
+    /// is declared once, so a shadowing name cannot add a false reuse.
+    declared_name_counts: std.AutoHashMapUnmanaged(u16, u32),
     imported_functions: std.ArrayList(ImportedFunction),
     /// Shared import index, injected by the orchestrator when one exists.
     /// Borrowed; must outlive the checker. Null means build a private one.
@@ -229,11 +243,14 @@ pub const StrictChecker = struct {
             .type_checker = type_checker,
             .diagnostics = .empty,
             .assigned_bindings = .empty,
+            .assigned_upvalue_atoms = .empty,
             .annotated_function_bindings = .empty,
             .function_valued_bindings = .empty,
             .static_literal_bindings = .empty,
             .entries_derived_bindings = .empty,
             .call_counts = .empty,
+            .upvalue_call_counts = .empty,
+            .declared_name_counts = .empty,
             .imported_functions = .empty,
             .allocation_failed = false,
         };
@@ -248,12 +265,15 @@ pub const StrictChecker = struct {
         }
         if (self.owned_facts) |*owned| owned.deinit();
         self.imported_functions.deinit(self.allocator);
+        self.declared_name_counts.deinit(self.allocator);
+        self.upvalue_call_counts.deinit(self.allocator);
         self.call_counts.deinit(self.allocator);
         self.static_literal_bindings.deinit(self.allocator);
         self.entries_derived_bindings.deinit(self.allocator);
         self.annotated_function_bindings.deinit(self.allocator);
         self.function_valued_bindings.deinit(self.allocator);
         self.assigned_bindings.deinit(self.allocator);
+        self.assigned_upvalue_atoms.deinit(self.allocator);
         self.diagnostics.deinit(self.allocator);
     }
 
@@ -417,7 +437,10 @@ pub const StrictChecker = struct {
             },
             .var_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
-                if (decl.kind == .let and !self.assigned_bindings.contains(bindingKey(decl.binding))) {
+                if (decl.kind == .let and
+                    !self.assigned_bindings.contains(bindingKey(decl.binding)) and
+                    !self.assigned_upvalue_atoms.contains(decl.binding.name_atom))
+                {
                     self.addDiagnostic(.{
                         .severity = .err,
                         .kind = .avoidable_let,
@@ -547,9 +570,15 @@ pub const StrictChecker = struct {
                 const bin = self.ir_view.getBinary(node) orelse break :blk true;
                 break :blk self.isPureExpr(bin.left) and self.isPureExpr(bin.right);
             },
-            .unary_op, .spread => blk: {
+            .unary_op => blk: {
                 const un = self.ir_view.getUnary(node) orelse break :blk true;
                 break :blk self.isPureExpr(un.operand);
+            },
+            // The spread operand is payload word `a`, read by `getOptValue`.
+            // `getUnary` reads word `b`, which is not the operand here.
+            .spread => blk: {
+                const operand = self.ir_view.getOptValue(node) orelse break :blk true;
+                break :blk self.isPureExpr(operand);
             },
             .member_access, .optional_chain => blk: {
                 const member = self.ir_view.getMember(node) orelse break :blk true;
@@ -592,7 +621,17 @@ pub const StrictChecker = struct {
                 }
                 break :blk true;
             },
-            else => true,
+            // A tag named above is read by its own arm. Any other tag is pure
+            // when every child it holds is pure; a leaf has no child and is
+            // pure. The earlier `true` answered for a node whose children this
+            // walk never read.
+            else => blk: {
+                var children = self.ir_view.expressionChildren(node);
+                while (children.next()) |child| {
+                    if (!self.isPureExpr(child)) break :blk false;
+                }
+                break :blk true;
+            },
         };
     }
 
@@ -819,9 +858,14 @@ pub const StrictChecker = struct {
                 self.walkExpr(bin.left);
                 self.walkExpr(bin.right);
             },
-            .unary_op, .spread => {
+            .unary_op => {
                 const un = self.ir_view.getUnary(node) orelse return;
                 self.walkExpr(un.operand);
+            },
+            // The operand is payload word `a`; `getUnary` reads word `b`.
+            .spread => {
+                const operand = self.ir_view.getOptValue(node) orelse return;
+                self.walkExpr(operand);
             },
             .ternary => {
                 const ternary = self.ir_view.getTernary(node) orelse return;
@@ -947,7 +991,13 @@ pub const StrictChecker = struct {
                 self.checkFunctionAnnotation(node);
                 if (self.ir_view.getFunction(node)) |func| self.walkFunctionBody(func.body);
             },
-            else => {},
+            // A tag named above is read by its own arm. Any other tag, for
+            // example `assert`, passes each child to the statement walk, which
+            // hands an expression back to this walk. A leaf has no child.
+            else => {
+                var children = self.ir_view.expressionChildren(node);
+                while (children.next()) |child| self.walkStmt(child);
+            },
         }
     }
 
@@ -1222,9 +1272,14 @@ pub const StrictChecker = struct {
                 return self.findScrutineeFieldRead(bin.left, scrutinee, depth + 1) orelse
                     self.findScrutineeFieldRead(bin.right, scrutinee, depth + 1);
             },
-            .unary_op, .spread => {
+            .unary_op => {
                 const un = self.ir_view.getUnary(node) orelse return null;
                 return self.findScrutineeFieldRead(un.operand, scrutinee, depth + 1);
+            },
+            // The operand is payload word `a`; `getUnary` reads word `b`.
+            .spread => {
+                const operand = self.ir_view.getOptValue(node) orelse return null;
+                return self.findScrutineeFieldRead(operand, scrutinee, depth + 1);
             },
             .ternary => {
                 const t = self.ir_view.getTernary(node) orelse return null;
@@ -1475,82 +1530,19 @@ pub const StrictChecker = struct {
         });
     }
 
-    /// Depth-first search for an in-place mutation of `target`. Mirrors
-    /// `scanBindingRead`'s descent; the two differ only in what they look for
-    /// at each node.
+    /// Depth-first search for an in-place mutation of `target`. It reads every
+    /// child that `IrView.expressionChildren` yields, so a mutation inside a
+    /// spread operand, an array or object literal, a member base, a `match`
+    /// arm, or the body of a nested function is found. A closure can run
+    /// during the loop, so its body counts.
     fn scanLiveMutation(self: *const StrictChecker, node: NodeIndex, target: ir.BindingRef) bool {
         if (node == null_node) return false;
         if (self.isLiveMutationOf(node, target)) return true;
-        const tag = self.ir_view.getTag(node) orelse return false;
-        switch (tag) {
-            .program, .block => {
-                const block = self.ir_view.getBlock(node) orelse return false;
-                for (0..block.stmts_count) |i| {
-                    if (self.scanLiveMutation(self.ir_view.getListIndex(block.stmts_start, @intCast(i)), target)) return true;
-                }
-                return false;
-            },
-            .var_decl, .function_decl => {
-                const decl = self.ir_view.getVarDecl(node) orelse return false;
-                return self.scanLiveMutation(decl.init, target);
-            },
-            .function_expr, .arrow_function => {
-                const func = self.ir_view.getFunction(node) orelse return false;
-                return self.scanLiveMutation(func.body, target);
-            },
-            .if_stmt => {
-                const if_stmt = self.ir_view.getIfStmt(node) orelse return false;
-                return self.scanLiveMutation(if_stmt.condition, target) or
-                    self.scanLiveMutation(if_stmt.then_branch, target) or
-                    self.scanLiveMutation(if_stmt.else_branch, target);
-            },
-            .for_of_stmt => {
-                const inner = self.ir_view.getForIter(node) orelse return false;
-                return self.scanLiveMutation(inner.iterable, target) or
-                    self.scanLiveMutation(inner.body, target);
-            },
-            .return_stmt, .expr_stmt => {
-                const value = self.ir_view.getOptValue(node) orelse return false;
-                return self.scanLiveMutation(value, target);
-            },
-            .binary_op => {
-                const bin = self.ir_view.getBinary(node) orelse return false;
-                return self.scanLiveMutation(bin.left, target) or self.scanLiveMutation(bin.right, target);
-            },
-            .unary_op, .spread => {
-                const un = self.ir_view.getUnary(node) orelse return false;
-                return self.scanLiveMutation(un.operand, target);
-            },
-            .ternary => {
-                const tern = self.ir_view.getTernary(node) orelse return false;
-                return self.scanLiveMutation(tern.condition, target) or
-                    self.scanLiveMutation(tern.then_branch, target) or
-                    self.scanLiveMutation(tern.else_branch, target);
-            },
-            .assignment => {
-                const assign = self.ir_view.getAssignment(node) orelse return false;
-                return self.scanLiveMutation(assign.value, target);
-            },
-            .call, .method_call => {
-                const call = self.ir_view.getCall(node) orelse return false;
-                if (self.scanLiveMutation(call.callee, target)) return true;
-                for (0..call.args_count) |i| {
-                    if (self.scanLiveMutation(self.ir_view.getListIndex(call.args_start, @intCast(i)), target)) return true;
-                }
-                return false;
-            },
-            .match_expr => {
-                const match = self.ir_view.getMatchExpr(node) orelse return false;
-                if (self.scanLiveMutation(match.discriminant, target)) return true;
-                for (0..match.arms_count) |i| {
-                    const arm_idx = self.ir_view.getListIndex(match.arms_start, @intCast(i));
-                    const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
-                    if (self.scanLiveMutation(arm.body, target)) return true;
-                }
-                return false;
-            },
-            else => return false,
+        var children = self.ir_view.expressionChildren(node);
+        while (children.next()) |child| {
+            if (self.scanLiveMutation(child, target)) return true;
         }
+        return false;
     }
 
     /// True when `node` mutates `target` in place: a mutating array method
@@ -1583,7 +1575,13 @@ pub const StrictChecker = struct {
     fn isBindingReference(self: *const StrictChecker, node: NodeIndex, target: ir.BindingRef) bool {
         if (self.ir_view.getTag(node) != .identifier) return false;
         const binding = self.ir_view.getBinding(node) orelse return false;
-        return binding.scope_id == target.scope_id and binding.slot == target.slot;
+        if (binding.scope_id == target.scope_id and binding.slot == target.slot) return true;
+        // A closure names a captured binding through an upvalue reference with
+        // its own scope and slot. The name atom is the identity that
+        // survives the capture. Matching on it can only report a mutation
+        // that is not one, when a nested declaration reuses the name.
+        if (binding.kind != .upvalue and target.kind != .upvalue) return false;
+        return binding.name_atom == target.name_atom;
     }
 
     fn functionNeedsAnnotation(self: *StrictChecker, node: NodeIndex, func: ir.Node.FunctionExpr) bool {
@@ -1783,61 +1781,29 @@ pub const StrictChecker = struct {
             false;
     }
 
+    /// Record every assignment to a binding. The walk reads each child that
+    /// `IrView.expressionChildren` yields, so an assignment in a ternary arm,
+    /// a `match` arm, a spread operand, an `assert`, a literal element, or
+    /// the body of a closure counts as a reassignment.
     fn collectAssignments(self: *StrictChecker, node: NodeIndex) void {
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
-        switch (tag) {
-            .program, .block => {
-                const block = self.ir_view.getBlock(node) orelse return;
-                for (0..block.stmts_count) |i| {
-                    self.collectAssignments(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
-                }
-            },
-            .export_decl => {
-                // Every handler a user writes is `export function handler`, and
-                // without this arm no assignment inside one was ever recorded:
-                // `walkStmt` descended through the export and this walk did
-                // not, so a reassigned `let` there reported `avoidable_let` at
-                // error severity.
-                const export_decl = self.ir_view.getExportDecl(node) orelse return;
-                self.collectAssignments(export_decl.declaration);
-            },
-            .assignment => {
-                const assign = self.ir_view.getAssignment(node) orelse return;
-                if (self.ir_view.getTag(assign.target) == .identifier) {
-                    if (self.ir_view.getBinding(assign.target)) |binding| {
-                        self.assigned_bindings.put(self.allocator, bindingKey(binding), {}) catch self.markAllocationFailure();
+        if (tag == .assignment) {
+            const assign = self.ir_view.getAssignment(node) orelse return;
+            if (self.ir_view.getTag(assign.target) == .identifier) {
+                if (self.ir_view.getBinding(assign.target)) |binding| {
+                    if (binding.kind == .upvalue) {
+                        self.assigned_upvalue_atoms.put(self.allocator, binding.name_atom, {}) catch
+                            self.markAllocationFailure();
+                    } else {
+                        self.assigned_bindings.put(self.allocator, bindingKey(binding), {}) catch
+                            self.markAllocationFailure();
                     }
                 }
-                self.collectAssignments(assign.value);
-            },
-            .function_decl => {
-                const decl = self.ir_view.getVarDecl(node) orelse return;
-                self.collectAssignments(decl.init);
-            },
-            .function_expr, .arrow_function => {
-                if (self.ir_view.getFunction(node)) |func| self.collectAssignments(func.body);
-            },
-            .var_decl => {
-                const decl = self.ir_view.getVarDecl(node) orelse return;
-                self.collectAssignments(decl.init);
-            },
-            .if_stmt => {
-                const if_stmt = self.ir_view.getIfStmt(node) orelse return;
-                self.collectAssignments(if_stmt.condition);
-                self.collectAssignments(if_stmt.then_branch);
-                self.collectAssignments(if_stmt.else_branch);
-            },
-            .for_of_stmt => {
-                const for_iter = self.ir_view.getForIter(node) orelse return;
-                self.collectAssignments(for_iter.iterable);
-                self.collectAssignments(for_iter.body);
-            },
-            .return_stmt, .expr_stmt => {
-                if (self.ir_view.getOptValue(node)) |value| self.collectAssignments(value);
-            },
-            else => self.collectExprAssignments(node),
+            }
         }
+        var children = self.ir_view.expressionChildren(node);
+        while (children.next()) |child| self.collectAssignments(child);
     }
 
     fn collectStaticLiterals(self: *StrictChecker, node: NodeIndex) void {
@@ -1875,120 +1841,67 @@ pub const StrictChecker = struct {
         self.ir_view.forEachChild(node, self, collectEntriesDerivedBindings);
     }
 
-    fn collectExprAssignments(self: *StrictChecker, node: NodeIndex) void {
-        if (node == null_node) return;
-        const tag = self.ir_view.getTag(node) orelse return;
-        switch (tag) {
-            .binary_op => {
-                const bin = self.ir_view.getBinary(node) orelse return;
-                self.collectAssignments(bin.left);
-                self.collectAssignments(bin.right);
-            },
-            .unary_op, .spread => {
-                const un = self.ir_view.getUnary(node) orelse return;
-                self.collectAssignments(un.operand);
-            },
-            .call, .method_call => {
-                const call = self.ir_view.getCall(node) orelse return;
-                self.collectAssignments(call.callee);
-                for (0..call.args_count) |i| {
-                    self.collectAssignments(self.ir_view.getListIndex(call.args_start, @intCast(i)));
-                }
-            },
-            .member_access, .optional_chain, .computed_access => {
-                const member = self.ir_view.getMember(node) orelse return;
-                self.collectAssignments(member.object);
-                self.collectAssignments(member.computed);
-            },
-            else => {},
-        }
-    }
-
+    /// Count the calls to each callee binding, and the declarations of each
+    /// name. The walk reads each child that `IrView.expressionChildren`
+    /// yields, so a call inside a spread operand, a literal, or a closure
+    /// counts.
     fn collectCallCounts(self: *StrictChecker, node: NodeIndex) void {
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
         switch (tag) {
-            .program, .block => {
-                const block = self.ir_view.getBlock(node) orelse return;
-                for (0..block.stmts_count) |i| {
-                    self.collectCallCounts(self.ir_view.getListIndex(block.stmts_start, @intCast(i)));
-                }
-            },
-            .export_decl => {
-                const export_decl = self.ir_view.getExportDecl(node) orelse return;
-                self.collectCallCounts(export_decl.declaration);
-            },
-            .function_decl, .var_decl => {
-                const decl = self.ir_view.getVarDecl(node) orelse return;
-                self.collectCallCounts(decl.init);
-            },
-            .function_expr, .arrow_function => {
-                if (self.ir_view.getFunction(node)) |func| self.collectCallCounts(func.body);
-            },
-            .if_stmt => {
-                const if_stmt = self.ir_view.getIfStmt(node) orelse return;
-                self.collectCallCounts(if_stmt.condition);
-                self.collectCallCounts(if_stmt.then_branch);
-                self.collectCallCounts(if_stmt.else_branch);
-            },
-            .for_of_stmt => {
-                const for_iter = self.ir_view.getForIter(node) orelse return;
-                self.collectCallCounts(for_iter.iterable);
-                self.collectCallCounts(for_iter.body);
-            },
-            .return_stmt, .expr_stmt => {
-                if (self.ir_view.getOptValue(node)) |value| self.collectCallCounts(value);
-            },
-            .binary_op => {
-                const bin = self.ir_view.getBinary(node) orelse return;
-                self.collectCallCounts(bin.left);
-                self.collectCallCounts(bin.right);
-            },
-            .unary_op, .spread => {
-                const un = self.ir_view.getUnary(node) orelse return;
-                self.collectCallCounts(un.operand);
-            },
-            .ternary => {
-                const ternary = self.ir_view.getTernary(node) orelse return;
-                self.collectCallCounts(ternary.condition);
-                self.collectCallCounts(ternary.then_branch);
-                self.collectCallCounts(ternary.else_branch);
-            },
             .call, .method_call => {
                 const call = self.ir_view.getCall(node) orelse return;
                 self.recordCall(call.callee);
-                self.collectCallCounts(call.callee);
-                for (0..call.args_count) |i| {
-                    self.collectCallCounts(self.ir_view.getListIndex(call.args_start, @intCast(i)));
+            },
+            .var_decl, .function_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                self.countDeclaredName(decl.binding.name_atom);
+            },
+            // A parameter declares a name too. A `function_decl` reaches this
+            // arm through its initializer.
+            .function_expr, .arrow_function => {
+                if (self.ir_view.getFunction(node)) |func| {
+                    for (0..func.params_count) |i| {
+                        const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
+                        const param = self.ir_view.paramBinding(param_idx) orelse continue;
+                        self.countDeclaredName(param.name_atom);
+                    }
                 }
             },
-            .member_access, .optional_chain, .computed_access => {
-                const member = self.ir_view.getMember(node) orelse return;
-                self.collectCallCounts(member.object);
-                self.collectCallCounts(member.computed);
+            .for_of_stmt => {
+                const for_iter = self.ir_view.getForIter(node) orelse return;
+                self.countDeclaredName(for_iter.binding.name_atom);
             },
-            .array_literal => {
-                const arr = self.ir_view.getArray(node) orelse return;
-                for (0..arr.elements_count) |i| {
-                    self.collectCallCounts(self.ir_view.getListIndex(arr.elements_start, @intCast(i)));
-                }
-            },
-            .object_literal => {
-                const obj = self.ir_view.getObject(node) orelse return;
-                for (0..obj.properties_count) |i| {
-                    const prop_idx = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
-                    const prop = self.ir_view.getProperty(prop_idx) orelse continue;
-                    self.collectCallCounts(prop.key);
-                    self.collectCallCounts(prop.value);
-                }
-            },
+            // exhaustive: every other tag only passes its children on, below.
+            // A `match` pattern binding is not counted; an upvalue call
+            // through one is a false reuse only when it shadows a helper.
             else => {},
         }
+        var children = self.ir_view.expressionChildren(node);
+        while (children.next()) |child| self.collectCallCounts(child);
+    }
+
+    fn countDeclaredName(self: *StrictChecker, name_atom: u16) void {
+        const gop = self.declared_name_counts.getOrPut(self.allocator, name_atom) catch {
+            self.markAllocationFailure();
+            return;
+        };
+        if (!gop.found_existing) gop.value_ptr.* = 0;
+        gop.value_ptr.* += 1;
     }
 
     fn recordCall(self: *StrictChecker, callee: NodeIndex) void {
         if (self.ir_view.getTag(callee) != .identifier) return;
         const binding = self.ir_view.getBinding(callee) orelse return;
+        if (binding.kind == .upvalue) {
+            const gop = self.upvalue_call_counts.getOrPut(self.allocator, binding.name_atom) catch {
+                self.markAllocationFailure();
+                return;
+            };
+            if (!gop.found_existing) gop.value_ptr.* = 0;
+            gop.value_ptr.* += 1;
+            return;
+        }
         const key = bindingKey(binding);
         const gop = self.call_counts.getOrPut(self.allocator, key) catch {
             self.markAllocationFailure();
@@ -1998,8 +1911,14 @@ pub const StrictChecker = struct {
         gop.value_ptr.* += 1;
     }
 
+    /// Calls to a binding. A call from inside a closure names the binding
+    /// through an upvalue reference, which `recordCall` counts by name. That
+    /// count joins this one only when one declaration owns the name.
     fn bindingCallCount(self: *const StrictChecker, binding: ir.BindingRef) u32 {
-        return self.call_counts.get(bindingKey(binding)) orelse 0;
+        const direct = self.call_counts.get(bindingKey(binding)) orelse 0;
+        const declared_once = (self.declared_name_counts.get(binding.name_atom) orelse 0) == 1;
+        if (!declared_once) return direct;
+        return direct + (self.upvalue_call_counts.get(binding.name_atom) orelse 0);
     }
 
     /// Which imported export a call names, if any.
@@ -3552,4 +3471,214 @@ test "the six arms cover it" {
     var h = try checkDirect("structural JsonValue =\n  | null\n  | boolean\n  | number\n  | string\n  | readonly JsonValue[]\n  | Dict<string, JsonValue>;\nfunction kindOf(value: JsonValue): string {\n  return match (value) {\n    when null: \"null\"\n    when boolean: \"boolean\"\n    when number: \"number\"\n    when string: \"string\"\n    when array: \"array\"\n    when Dict: \"dict\"\n  };\n}\nfunction handler(req: Request): Response {\n  return Response.json({ k: kindOf(1) });\n}\n");
     defer h.deinit();
     try expectNoKind(&h.checker, .non_exhaustive_profile_match);
+}
+
+// D12: spread operands, closures, and the default descent of the strict walks.
+
+test "a ternary in an array spread operand is checked for purity" {
+    // The spread operand is payload word `a`. The walk read word `b`, so a
+    // refused ternary inside `[...x]` was never reached.
+    var checker = try checkSource(
+        "function pick(n) { return [n]; } function handler(req) { const a = [...(req.method === \"GET\" ? pick(1) : [])]; return Response.json({ a: a }); }",
+    );
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_ternary_impure);
+}
+
+test "a pure ternary in an array spread operand is admitted" {
+    var checker = try checkSource(
+        "function handler(req) { const a = [...(req.method === \"GET\" ? [1] : [])]; return Response.json({ a: a }); }",
+    );
+    defer checker.deinit();
+    try expectNoKind(&checker, .canonical_ternary_impure);
+}
+
+test "a ternary in an object spread operand is checked for purity" {
+    var checker = try checkSource(
+        "function pick(n) { return { v: n }; } function handler(req) { const o = { ...(req.method === \"GET\" ? pick(1) : {}) }; return Response.json({ o: o }); }",
+    );
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_ternary_impure);
+}
+
+test "a call under an array spread makes the ternary arm impure" {
+    // `isPureExpr` met the spread element and read the wrong word, so the call
+    // under it answered pure.
+    var checker = try checkSource(
+        "function pick(n) { return [n]; } function handler(req) { const a = req.method === \"GET\" ? [...pick(1)] : []; return Response.json({ a: a }); }",
+    );
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_ternary_impure);
+}
+
+test "a ternary inside an assert is checked for purity" {
+    var checker = try checkSource(
+        "function pick(n) { return [n]; } function handler(req) { assert (req.method === \"GET\" ? pick(1) : []).length > 0, Response.text(\"no\"); return Response.text(\"yes\"); }",
+    );
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_ternary_impure);
+}
+
+test "a reused arrow helper called under array spreads is counted" {
+    var checker = try checkSource(
+        "function handler(req) { const h = () => [1]; const a = [...h(), ...h()]; return Response.json({ a: a }); }",
+    );
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_arrow_helper);
+}
+
+test "a reused arrow helper called under an object spread is counted" {
+    // The object spread was read as a property, so the call under it was not
+    // reached.
+    var checker = try checkSource(
+        "function handler(req) { const h = () => ({ v: 1 }); const a = { ...h() }; const b = h(); return Response.json({ a: a, b: b }); }",
+    );
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_arrow_helper);
+}
+
+test "a one-off arrow helper called once under a spread is admitted" {
+    var checker = try checkSource(
+        "function handler(req) { const h = () => [1]; const a = [...h()]; return Response.json({ a: a }); }",
+    );
+    defer checker.deinit();
+    try expectNoKind(&checker, .canonical_arrow_helper);
+}
+
+test "a reused arrow helper called from a closure is counted" {
+    // The closure names `h` through an upvalue reference, which carries a
+    // different scope and slot than the declaration.
+    var checker = try checkSource(
+        "function handler(req) { const h = () => 1; const g = () => h(); const a = g() + h(); return Response.json({ a: a }); }",
+    );
+    defer checker.deinit();
+    try expectKind(&checker, .canonical_arrow_helper);
+}
+
+test "a call from a closure is not counted for a shadowed helper name" {
+    // Two declarations share the name `h`, so the upvalue call cannot be
+    // attributed to the outer one. The outer `h` is called once.
+    var checker = try checkSource(
+        "function handler(req) { const h = () => 1; function other() { const h = () => 2; const g = () => h(); return g(); } const a = h(); return Response.json({ a: a, b: other() }); }",
+    );
+    defer checker.deinit();
+    try expectNoKind(&checker, .canonical_arrow_helper);
+}
+
+test "a call from a closure is not counted for a helper name a parameter shadows" {
+    // The closure calls the parameter `h`, not the outer arrow `h`, which is
+    // called once.
+    var checker = try checkSource(
+        "function handler(req) { const h = () => 1; function outer(h) { const g = () => h(); return g() + h(); } const a = h(); return Response.json({ a: a, b: outer(h) }); }",
+    );
+    defer checker.deinit();
+    try expectNoKind(&checker, .canonical_arrow_helper);
+}
+
+test "a call from a closure is not counted for a helper name a loop binding shadows" {
+    var checker = try checkSource(
+        "function handler(req) { const h = () => 1; const fs = [h]; let n = 0; for (const h of fs) { const g = () => h(); n = n + g(); } const a = h(); return Response.json({ a: a, n: n }); }",
+    );
+    defer checker.deinit();
+    try expectNoKind(&checker, .canonical_arrow_helper);
+}
+
+test "a let that only a closure reassigns is not flagged avoidable" {
+    // The closure writes through an upvalue reference, not the declaring
+    // binding. The write used to go unrecorded, and ZTS604 refused a binding
+    // that is reassigned.
+    var checker = try checkSource(
+        "function handler(req) { let v = 1; const g = () => { v = 2; return 1; }; const n = g(); return Response.json({ v: v, n: n }); }",
+    );
+    defer checker.deinit();
+    try expectNoKind(&checker, .avoidable_let);
+}
+
+test "a let that nothing reassigns is still flagged next to a closure" {
+    var checker = try checkSource(
+        "function handler(req) { let v = 1; const g = () => { return v; }; const n = g(); return Response.json({ v: v, n: n }); }",
+    );
+    defer checker.deinit();
+    try expectKind(&checker, .avoidable_let);
+}
+
+test "a let reassigned inside an array spread operand is not flagged avoidable" {
+    var checker = try checkSource(
+        "function wrap(n) { return [n]; } function handler(req) { let v = 1; const a = [...wrap((v = 2))]; return Response.json({ v: v, a: a }); }",
+    );
+    defer checker.deinit();
+    try expectNoKind(&checker, .avoidable_let);
+}
+
+test "a let reassigned in a ternary arm is not flagged avoidable" {
+    var checker = try checkSource(
+        "function handler(req) { let v = 1; const n = req.method === \"GET\" ? (v = 2) : 0; return Response.json({ v: v, n: n }); }",
+    );
+    defer checker.deinit();
+    try expectNoKind(&checker, .avoidable_let);
+}
+
+test "mutable_live_iteration fires when the push sits in an array spread operand" {
+    var checker = try checkSource(
+        "function wrap(n) { return [n]; } function handler(req) { const xs = [1, 2]; for (const x of xs) { const zs = [...wrap(xs.push(x))]; } return Response.json({ n: xs.length }); }",
+    );
+    defer checker.deinit();
+    try expectKind(&checker, .mutable_live_iteration);
+}
+
+test "mutable_live_iteration fires when the push sits in an object spread operand" {
+    var checker = try checkSource(
+        "function wrap(n) { return { v: n }; } function handler(req) { const xs = [1, 2]; for (const x of xs) { const o = { ...wrap(xs.push(x)) }; } return Response.json({ n: xs.length }); }",
+    );
+    defer checker.deinit();
+    try expectKind(&checker, .mutable_live_iteration);
+}
+
+test "mutable_live_iteration fires when the push sits in an array literal element" {
+    var checker = try checkSource(
+        "function handler(req) { const xs = [1, 2]; for (const x of xs) { const zs = [xs.push(x)]; } return Response.json({ n: xs.length }); }",
+    );
+    defer checker.deinit();
+    try expectKind(&checker, .mutable_live_iteration);
+}
+
+test "mutable_live_iteration fires when a closure in the loop pushes to the collection" {
+    // The closure names `xs` through an upvalue reference.
+    var checker = try checkSource(
+        "function handler(req) { const xs = [1, 2]; for (const x of xs) { const f = () => xs.push(x); f(); } return Response.json({ n: xs.length }); }",
+    );
+    defer checker.deinit();
+    try expectKind(&checker, .mutable_live_iteration);
+}
+
+test "mutable_live_iteration does not fire on a spread of a different collection" {
+    var checker = try checkSource(
+        "function wrap(n) { return [n]; } function handler(req) { const xs = [1, 2]; const ys = []; for (const x of xs) { const zs = [...wrap(ys.push(x))]; } return Response.json({ n: xs.length }); }",
+    );
+    defer checker.deinit();
+    try expectNoKind(&checker, .mutable_live_iteration);
+}
+
+test "canonical_redundant_bool_compare fires inside a nested function" {
+    var h = try checkSourceTyped(
+        "function handler(req) { function g() { const ready = req.method === \"GET\"; if (ready === false) { return \"no\"; } return \"yes\"; } return Response.text(g()); }",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .canonical_redundant_bool_compare);
+}
+
+test "canonical_redundant_bool_compare fires inside an arrow callback" {
+    var h = try checkSourceTyped(
+        "function handler(req) { const g = () => { const ready = req.method === \"GET\"; if (ready === false) { return \"no\"; } return \"yes\"; }; return Response.text(g()); }",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .canonical_redundant_bool_compare);
+}
+
+test "canonical_redundant_bool_compare fires inside an assert condition" {
+    var h = try checkSourceTyped(
+        "function handler(req) { const ready = req.method === \"GET\"; assert ready === true, Response.text(\"no\"); return Response.text(\"yes\"); }",
+    );
+    defer h.deinit();
+    try expectKind(&h.checker, .canonical_redundant_bool_compare);
 }
