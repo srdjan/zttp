@@ -10,6 +10,40 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-10-23
+
+### Highlights
+
+zttp 0.24.0 closes gaps in type checking and behavior path analysis.
+The analyzer checks more expression positions and records a path for each
+returned `match` arm. Source builds now require Zig 0.17.0.
+
+### Breaking changes
+
+- **Source builds require Zig 0.17.0.** Migration: install Zig 0.17.0 and
+  replace `-Doptimize=ReleaseFast` with `-Doptimize=fast` in build commands.
+- **Earlier contracts need a rebuild.** The path analysis version moves to 4
+  and changes the policy hash. Migration: rebuild handlers and regenerate
+  contracts before deployment.
+- **More programs fail type and proof checks.** The analyzer now reads calls,
+  assignments, captures, and spread operands that earlier checks missed.
+  Persistent reads and unresolved calls can now make a property unproven.
+  Migration: run `zttp check` on each handler, correct errors, and remove or
+  satisfy unsupported proof claims. Rebuild and redeploy earlier artifacts.
+- **SQL statements and validation schemas need static text inside functions.**
+  This applies to `sql(name, statement)` and `schemaCompile(name, schema)`.
+  Migration: use a literal or static constant, or register at module scope.
+- **Nested functions cannot control an outer loop.** The parser now refuses
+  `break` and `continue` in these functions. Migration: move loop control to
+  the function that owns the loop.
+- **Expert reads refuse git-ignored files.** Migration: move required source
+  outside ignored paths, or change the ignore rule for that source.
+- **Aggregate tests refuse filters.** Migration: use a named suite, such as
+  `zig build test-zts -Dtest-filter="name"`, for a filtered development run.
+- **The proof gate workflow moved.** Migration: copy
+  `docs/examples/proof-gate.yml` to `.github/workflows/proof-gate.yml` in
+  projects that need the workflow.
+
 ### Changed
 
 - **Building from source requires Zig 0.17.0.** The build uses tracked cache
@@ -29,6 +63,14 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ### Fixed
 
+- **Flow checks preserve uncertainty.** Persistent reads, unresolved calls,
+  callbacks, recursion, and additional response and egress sinks no longer
+  preserve unsupported proof claims. `renderToString` no longer proves that
+  its result passed input validation.
+- **Missing proof properties remain unproven.** Deploy and review projections
+  no longer read an absent property as true.
+- **Production acceptance also applies during builds.** Artifact builds now
+  refuse certificates that production startup refuses.
 - **The type checker reads more of the program.** It now checks calls in
   member bases, computed keys, and spread operands. An assignment inside a
   branch, a loop body, or a `match` arm now ends the narrowing after the join.
@@ -1056,7 +1098,8 @@ See git tags and `RELEASE_CHECKLIST.md` for the record of shipped items. Known-i
 - Static file path traversal via symlinks blocked with check-before-open + `follow_symlinks=false`.
 - HandlerPool test flake under the build runner (root cause was the closure destroyFull bug above).
 
-[Unreleased]: https://github.com/srdjan/zigttp/compare/v0.22.3...HEAD
+[Unreleased]: https://github.com/srdjan/zttp/compare/v0.24.0...HEAD
+[0.24.0]: https://github.com/srdjan/zttp/compare/v0.22.3...v0.24.0
 [0.22.3]: https://github.com/srdjan/zigttp/compare/v0.22.2...v0.22.3
 [0.22.2]: https://github.com/srdjan/zigttp/compare/v0.22.0...v0.22.2
 [0.22.0]: https://github.com/srdjan/zigttp/compare/v0.21.1...v0.22.0
