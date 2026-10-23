@@ -798,7 +798,7 @@ fn simdIndexOf(haystack: []const u8, needle: []const u8) ?u32 {
 }
 
 /// Scalar substring search
-fn scalarIndexOf(haystack: []const u8, needle: []const u8) ?u32 {
+pub fn scalarIndexOf(haystack: []const u8, needle: []const u8) ?u32 {
     if (needle.len == 0) return 0;
     if (needle.len > haystack.len) return null;
 

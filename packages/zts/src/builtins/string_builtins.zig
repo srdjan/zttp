@@ -168,7 +168,12 @@ pub fn stringIndexOf(ctx: *context.Context, this: value.JSValue, args: []const v
     const byte_start: usize = if (is_ascii) start_units else string.utf16IndexToByteOffset(data, @intCast(start_units));
     if (needle_data.len > data.len - byte_start) return value.JSValue.fromInt(-1);
 
-    if (std.mem.indexOf(u8, data[byte_start..], needle_data)) |rel_idx| {
+    // Zig 0.17 calls equality at every offset; the existing helper filters the first byte.
+    const match: ?usize = if (needle_data.len >= 2 and needle_data.len <= 4)
+        (if (string.scalarIndexOf(data[byte_start..], needle_data)) |offset| @as(usize, offset) else null)
+    else
+        std.mem.indexOf(u8, data[byte_start..], needle_data);
+    if (match) |rel_idx| {
         const byte_match = byte_start + rel_idx;
         const unit_idx: usize = if (is_ascii) byte_match else string.byteOffsetToUtf16Index(data, byte_match);
         return value.JSValue.fromInt(@intCast(unit_idx));
@@ -969,6 +974,22 @@ test "string length/charAt/slice index by UTF-16 code units ENG-utf16" {
     try std.testing.expectEqual(@as(i32, 3), stringLastIndexOf(ctx, hello, &.{l_needle}).getInt());
     // position arg is a code-unit index: searching from unit 3 skips the first 'l'.
     try std.testing.expectEqual(@as(i32, 3), stringIndexOf(ctx, hello, &.{ l_needle, value.JSValue.fromInt(3) }).getInt());
+
+    const short_cases = [_]struct { text: []const u8, needle: []const u8, start: i32, expected: i32 }{
+        .{ .text = "abXabcYabcd", .needle = "ab", .start = 1, .expected = 3 },
+        .{ .text = "abXabcYabcd", .needle = "abc", .start = 4, .expected = 7 },
+        .{ .text = "abXabcYabcd", .needle = "abcd", .start = 7, .expected = 7 },
+        .{ .text = "abXabcYabcd", .needle = "abcd", .start = 8, .expected = -1 },
+        .{ .text = "éxéfox", .needle = "éf", .start = 1, .expected = 2 },
+        .{ .text = "éxéfox", .needle = "fox", .start = 0, .expected = 3 },
+        .{ .text = "éxéfox", .needle = "fox", .start = 4, .expected = -1 },
+    };
+    for (short_cases) |case| {
+        const text = try ctx.createString(case.text);
+        const needle = try ctx.createString(case.needle);
+        const result = stringIndexOf(ctx, text, &.{ needle, value.JSValue.fromInt(case.start) });
+        try std.testing.expectEqual(case.expected, result.getInt());
+    }
 }
 
 test "stringConstructor converts scalars to strings ENG-String" {
