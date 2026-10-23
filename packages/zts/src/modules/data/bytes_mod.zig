@@ -99,10 +99,9 @@ pub const Failure = struct {
 /// Build `{ kind, ... }` and wrap it as the error arm of a `Result`.
 fn failure(ctx: *context.Context, f: Failure) error{OutOfMemory}!JSValue {
     const pool = ctx.hidden_class_pool orelse return helpers.createResultErr(ctx, JSValue.undefined_val);
-    const obj = ctx.createObject(null) catch return helpers.createResultErr(ctx, JSValue.undefined_val);
+    const obj = try ctx.createObject(null);
 
-    setText(ctx, pool, obj, "kind", f.kind.wire()) catch
-        return helpers.createResultErr(ctx, JSValue.undefined_val);
+    try setText(ctx, pool, obj, "kind", f.kind.wire());
 
     switch (f.kind) {
         .invalid_octet => {

@@ -9239,6 +9239,11 @@ test "get and set before a key without a parenthesis are refused" {
         try std.testing.expectError(error.ParseError, parser.parse());
         try std.testing.expect(parser.hasErrors());
     }
+    // `get` and `set` stay ordinary keys.
+    var keys = try Parser.init(allocator, "const o = { get: 1, set: 2 };");
+    defer keys.deinit();
+    _ = try keys.parse();
+    try std.testing.expect(!keys.hasErrors());
 }
 
 test "an unknown escape is refused rather than copied" {

@@ -387,33 +387,33 @@ fn parseJsonBytesNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) 
 /// exactly the fields spec 6.4 declares for that kind and no others.
 fn failure(ctx: *context.Context, f: Failure) error{OutOfMemory}!JSValue {
     const pool = ctx.hidden_class_pool orelse return helpers.createResultErr(ctx, JSValue.undefined_val);
-    const obj = ctx.createObject(null) catch return helpers.createResultErr(ctx, JSValue.undefined_val);
+    const obj = try ctx.createObject(null);
 
-    const kind_atom = ctx.atoms.intern("kind") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
-    const kind_text = ctx.createString(f.kind.wire()) catch return helpers.createResultErr(ctx, JSValue.undefined_val);
+    const kind_atom = try ctx.atoms.intern("kind");
+    const kind_text = try ctx.createString(f.kind.wire());
     try obj.setProperty(ctx.allocator, pool, kind_atom, kind_text);
 
     switch (f.kind) {
         .invalid_syntax, .non_finite_number => {
-            const off_atom = ctx.atoms.intern("offset") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
+            const off_atom = try ctx.atoms.intern("offset");
             try obj.setProperty(ctx.allocator, pool, off_atom, JSValue.fromInt(@intCast(f.offset)));
         },
         .duplicate_key => {
-            const off_atom = ctx.atoms.intern("offset") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
+            const off_atom = try ctx.atoms.intern("offset");
             try obj.setProperty(ctx.allocator, pool, off_atom, JSValue.fromInt(@intCast(f.offset)));
-            const key_atom = ctx.atoms.intern("key") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
-            const key_text = ctx.createString(f.key orelse "") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
+            const key_atom = try ctx.atoms.intern("key");
+            const key_text = try ctx.createString(f.key orelse "");
             try obj.setProperty(ctx.allocator, pool, key_atom, key_text);
         },
         .depth_limit, .size_limit => {
-            const limit_atom = ctx.atoms.intern("limit") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
+            const limit_atom = try ctx.atoms.intern("limit");
             try obj.setProperty(ctx.allocator, pool, limit_atom, JSValue.fromInt(@intCast(f.limit)));
         },
         .invalid_encoding => {
-            const enc_atom = ctx.atoms.intern("encoding") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
-            const enc_text = ctx.createString(f.encoding) catch return helpers.createResultErr(ctx, JSValue.undefined_val);
+            const enc_atom = try ctx.atoms.intern("encoding");
+            const enc_text = try ctx.createString(f.encoding);
             try obj.setProperty(ctx.allocator, pool, enc_atom, enc_text);
-            const off_atom = ctx.atoms.intern("offset") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
+            const off_atom = try ctx.atoms.intern("offset");
             try obj.setProperty(ctx.allocator, pool, off_atom, JSValue.fromInt(@intCast(f.offset)));
         },
         .cycle => {},
