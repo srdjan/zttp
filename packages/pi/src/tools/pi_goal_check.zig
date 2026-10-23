@@ -355,10 +355,22 @@ pub fn unprovenGoals(
     defer allocator.free(absolute);
     var project_paths = try zts_cli.edit_simulate.discoverProjectPaths(allocator, absolute);
     defer project_paths.deinit(allocator);
+    const policy_source: ?[]u8 = if (project_paths.policy) |policy_path|
+        zts.file_io.readFile(allocator, policy_path, 1024 * 1024) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                try unproven.appendSlice(allocator, goals);
+                return unproven.toOwnedSlice(allocator);
+            },
+        }
+    else
+        null;
+    defer if (policy_source) |src| allocator.free(src);
 
     var check = zts_cli.precompile.runCheckOnlyFromSourceWithOptions(allocator, source, absolute, .{
         .sql_schema_path = project_paths.sqlite,
         .json_mode = true,
+        .policy_source = policy_source,
     }) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => {
