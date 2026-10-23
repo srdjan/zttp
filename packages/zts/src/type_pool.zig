@@ -430,14 +430,6 @@ pub const TypePool = struct {
         });
     }
 
-    /// Drop every memoized canonical key. Call after any in-place edit to a
-    /// node, field, or member that a key could have been computed from.
-    pub fn invalidateTypeKeys(self: *TypePool, allocator: std.mem.Allocator) void {
-        var keys = self.key_memo.valueIterator();
-        while (keys.next()) |key| allocator.free(key.*);
-        self.key_memo.clearRetainingCapacity();
-    }
-
     /// The declared name of a `distinct type`, or the empty string for a
     /// non-nominal node. Two nominal nodes with different names are different
     /// types even when their tag and data agree.
