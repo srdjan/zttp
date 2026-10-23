@@ -78,7 +78,7 @@ pub const LookupResult = struct {
     binding: *const FunctionBinding,
 };
 
-/// Thin wrapper around `builtin_modules.findFunction` that validates the
+/// Thin wrapper around the `builtin_modules.all` search that validates the
 /// short module name matches. Exists as a named seam so tests can inject
 /// custom function lookup without reaching into `builtin_modules`.
 pub const LawRegistry = struct {

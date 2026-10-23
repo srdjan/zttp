@@ -80,9 +80,6 @@ pub const all = builtins;
 /// Runtime registration and registry identity continue to use `all`.
 pub const metadata = descriptors.describeModules(&all);
 
-/// Number of built-in modules.
-pub const count = all.len;
-
 pub const BuiltinGovernanceEntry = struct {
     specifier: []const u8,
     module_path: []const u8,
@@ -201,18 +198,6 @@ pub fn findExport(
     return null;
 }
 
-/// Get the binding for a function name (searches all modules).
-pub fn findFunction(func_name: []const u8) ?struct { binding: *const ModuleBinding, func: *const mb.FunctionBinding } {
-    for (&all) |*b| {
-        for (b.exports) |*f| {
-            if (std.mem.eql(u8, f.name, func_name)) {
-                return .{ .binding = b, .func = f };
-            }
-        }
-    }
-    return null;
-}
-
 // -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------
@@ -231,13 +216,6 @@ test "fromSpecifier finds known modules" {
     try std.testing.expect(fromSpecifier("zttp:unknown") == null);
 }
 
-test "findFunction finds known functions" {
-    const result = findFunction("sha256");
-    try std.testing.expect(result != null);
-    try std.testing.expectEqualStrings("zttp:crypto", result.?.binding.specifier);
-    try std.testing.expectEqual(mb.ReturnKind.string, result.?.func.returns);
-}
-
 test "findExport finds known module export" {
     const result = findExport("zttp:crypto", "sha256");
     try std.testing.expect(result != null);
@@ -245,22 +223,22 @@ test "findExport finds known module export" {
     try std.testing.expectEqual(mb.ReturnKind.string, result.?.func.returns);
 }
 
-test "findFunction finds result-producing functions" {
-    const result = findFunction("jwtVerify");
+test "findExport finds result-producing functions" {
+    const result = findExport("zttp:auth", "jwtVerify");
     try std.testing.expect(result != null);
     try std.testing.expectEqual(mb.ReturnKind.result, result.?.func.returns);
 }
 
-test "findFunction finds optional-producing functions" {
-    const env_fn = findFunction("env");
+test "findExport finds optional-producing functions" {
+    const env_fn = findExport("zttp:env", "env");
     try std.testing.expect(env_fn != null);
     try std.testing.expectEqual(mb.ReturnKind.optional_string, env_fn.?.func.returns);
 
-    const cache_fn = findFunction("cacheGet");
+    const cache_fn = findExport("zttp:cache", "cacheGet");
     try std.testing.expect(cache_fn != null);
     try std.testing.expectEqual(mb.ReturnKind.optional_string, cache_fn.?.func.returns);
 
-    const router_fn = findFunction("routerMatch");
+    const router_fn = findExport("zttp:router", "routerMatch");
     try std.testing.expect(router_fn != null);
     try std.testing.expectEqual(mb.ReturnKind.optional_object, router_fn.?.func.returns);
 }
@@ -268,28 +246,28 @@ test "findFunction finds optional-producing functions" {
 test "failure_severity annotations on failable functions" {
     // Critical: auth and validation failures. A bad webhook signature is an
     // authentication failure and returns boolean false.
-    try std.testing.expectEqual(mb.FailureSeverity.critical, findFunction("jwtVerify").?.func.failure_severity);
-    try std.testing.expectEqual(mb.FailureSeverity.critical, findFunction("verifyWebhookSignature").?.func.failure_severity);
-    try std.testing.expectEqual(mb.FailureSeverity.critical, findFunction("validateJson").?.func.failure_severity);
-    try std.testing.expectEqual(mb.FailureSeverity.critical, findFunction("validateObject").?.func.failure_severity);
-    try std.testing.expectEqual(mb.FailureSeverity.critical, findFunction("coerceJson").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.critical, findExport("zttp:auth", "jwtVerify").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.critical, findExport("zttp:auth", "verifyWebhookSignature").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.critical, findExport("zttp:validate", "validateJson").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.critical, findExport("zttp:validate", "validateObject").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.critical, findExport("zttp:validate", "coerceJson").?.func.failure_severity);
 
     // Expected: cache miss, missing config, route not matched
-    try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("env").?.func.failure_severity);
-    try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("cacheGet").?.func.failure_severity);
-    try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("routerMatch").?.func.failure_severity);
-    try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("parseBearer").?.func.failure_severity);
-    try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("sqlOne").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.expected, findExport("zttp:env", "env").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.expected, findExport("zttp:cache", "cacheGet").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.expected, findExport("zttp:router", "routerMatch").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.expected, findExport("zttp:auth", "parseBearer").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.expected, findExport("zttp:sql", "sqlOne").?.func.failure_severity);
     // cacheSet returns false on bad arguments, a clock error, or capacity
     // exceeded, and a failed write can leave an earlier value in place.
-    try std.testing.expectEqual(mb.FailureSeverity.expected, findFunction("cacheSet").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.expected, findExport("zttp:cache", "cacheSet").?.func.failure_severity);
     // Upstream: a non-2xx answer from an external endpoint.
-    try std.testing.expectEqual(mb.FailureSeverity.upstream, findFunction("fetch").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.upstream, findExport("zttp:fetch", "fetch").?.func.failure_severity);
 
     // None: functions that always succeed
-    try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("sha256").?.func.failure_severity);
-    try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("urlParse").?.func.failure_severity);
-    try std.testing.expectEqual(mb.FailureSeverity.none, findFunction("urlEncode").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.none, findExport("zttp:crypto", "sha256").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.none, findExport("zttp:url", "urlParse").?.func.failure_severity);
+    try std.testing.expectEqual(mb.FailureSeverity.none, findExport("zttp:url", "urlEncode").?.func.failure_severity);
 }
 
 fn bindingHasCapability(binding: *const ModuleBinding, capability: mb.ModuleCapability) bool {

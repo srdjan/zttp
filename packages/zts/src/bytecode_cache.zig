@@ -287,15 +287,7 @@ fn destroyDeserializedFunction(allocator: std.mem.Allocator, func: *bytecode.Fun
     object.JSObject.destroyFunctionBytecode(allocator, func, null);
 }
 
-/// Deserialize constants from a reader, reconstructing JSValues
-pub fn deserializeConstants(
-    reader: anytype,
-    allocator: std.mem.Allocator,
-    strings_table: ?*string.StringTable,
-) DeserializeError![]value.JSValue {
-    return deserializeConstantsAtDepth(reader, allocator, strings_table, 0);
-}
-
+/// Deserialize constants from a reader, reconstructing JSValues.
 /// `depth` is the nesting depth a function decoded from this pool would have.
 fn deserializeConstantsAtDepth(
     reader: anytype,
@@ -604,13 +596,6 @@ pub const BytecodeCache = struct {
         self.order.deinit(self.allocator);
     }
 
-    /// Generate cache key from source code
-    pub fn cacheKey(source: []const u8) CacheKey {
-        var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-        hasher.update(source);
-        return hasher.finalResult();
-    }
-
     fn hashField(hasher: *std.crypto.hash.sha2.Sha256, value_bytes: []const u8) void {
         var length: [4]u8 = undefined;
         std.mem.writeInt(u32, &length, @intCast(value_bytes.len), .little);
@@ -725,6 +710,14 @@ pub const BytecodeCache = struct {
     }
 };
 
+fn testCacheKey(source: []const u8) CacheKey {
+    return BytecodeCache.cacheKeyWithIdentity(source, .{
+        .core_profile_id = "zts-model-1",
+        .core_grammar_hash = @as([32]u8, @splat(0x11)),
+        .semantics_hash = @as([32]u8, @splat(0x22)),
+    });
+}
+
 test "BytecodeCache identity changes invalidate the same source" {
     const source = "function handler() { return true; }";
     const base = BytecodeCache.SourceIdentity{
@@ -749,10 +742,10 @@ test "BytecodeCache evicts oldest raw entry when bounded" {
     var cache = BytecodeCache.initWithMaxEntries(allocator, 2);
     defer cache.deinit();
 
-    const key1 = BytecodeCache.cacheKey("handler one");
-    const key2 = BytecodeCache.cacheKey("handler two");
-    const key3 = BytecodeCache.cacheKey("handler three");
-    const key4 = BytecodeCache.cacheKey("handler four");
+    const key1 = testCacheKey("handler one");
+    const key2 = testCacheKey("handler two");
+    const key3 = testCacheKey("handler three");
+    const key4 = testCacheKey("handler four");
 
     const one = [_]u8{1};
     const two = [_]u8{2};
@@ -784,7 +777,7 @@ test "BytecodeCache zero max entries disables storage" {
     var cache = BytecodeCache.initWithMaxEntries(allocator, 0);
     defer cache.deinit();
 
-    const key = BytecodeCache.cacheKey("handler");
+    const key = testCacheKey("handler");
     const data = [_]u8{ 1, 2, 3 };
 
     try cache.putRaw(key, &data);
@@ -853,22 +846,6 @@ pub const SliceReader = struct {
         return to_read;
     }
 };
-
-test "BytecodeCache cache key determinism" {
-    const source1 = "const x = 1;";
-    const source2 = "const x = 1;";
-    const source3 = "const y = 2;";
-
-    const key1 = BytecodeCache.cacheKey(source1);
-    const key2 = BytecodeCache.cacheKey(source2);
-    const key3 = BytecodeCache.cacheKey(source3);
-
-    // Same source should produce same key
-    try std.testing.expectEqual(key1, key2);
-
-    // Different source should produce different key
-    try std.testing.expect(!std.mem.eql(u8, &key1, &key3));
-}
 
 test "deserializeConstant rejects out-of-range ConstantTag byte" {
     const allocator = std.testing.allocator;
@@ -1031,7 +1008,7 @@ fn deserializeOwnedConstantsForAllocationTest(
     serialized: []const u8,
 ) !void {
     var reader = SliceReader{ .data = serialized };
-    const constants = try deserializeConstants(&reader, allocator, null);
+    const constants = try deserializeConstantsAtDepth(&reader, allocator, null, 0);
     defer destroyDeserializedConstants(allocator, constants, constants.len);
 }
 
@@ -1090,13 +1067,13 @@ test "full bytecode dispatch ownership is leak-free through shapes and deinit" {
     );
 }
 
-test "deserializeConstants cleans owned values on truncation and allocation failure" {
+test "deserializeConstantsAtDepth cleans owned values on truncation and allocation failure" {
     var buffer: [1024]u8 = undefined;
     const serialized = try serializeOwnedConstantsFixture(std.testing.allocator, &buffer);
 
     for (0..serialized.len) |truncated_len| {
         var reader = SliceReader{ .data = serialized[0..truncated_len] };
-        if (deserializeConstants(&reader, std.testing.allocator, null)) |constants| {
+        if (deserializeConstantsAtDepth(&reader, std.testing.allocator, null, 0)) |constants| {
             destroyDeserializedConstants(std.testing.allocator, constants, constants.len);
             return error.UnexpectedSuccessfulDecode;
         } else |_| {}
@@ -1131,7 +1108,7 @@ test "constant serialization - integers" {
 
     // Deserialize
     var reader = SliceReader{ .data = writer.getWritten() };
-    const restored = try deserializeConstants(&reader, allocator, null);
+    const restored = try deserializeConstantsAtDepth(&reader, allocator, null, 0);
     defer allocator.free(restored);
 
     // Verify
@@ -1173,7 +1150,7 @@ test "constant serialization - floats" {
 
     // Deserialize
     var reader = SliceReader{ .data = writer.getWritten() };
-    const restored = try deserializeConstants(&reader, allocator, null);
+    const restored = try deserializeConstantsAtDepth(&reader, allocator, null, 0);
     defer {
         for (restored) |v| {
             if (v.isPtr()) {
@@ -1214,7 +1191,7 @@ test "constant serialization - strings" {
 
     // Deserialize
     var reader = SliceReader{ .data = writer.getWritten() };
-    const restored = try deserializeConstants(&reader, allocator, null);
+    const restored = try deserializeConstantsAtDepth(&reader, allocator, null, 0);
     defer {
         for (restored) |v| {
             if (v.isString()) {
@@ -1248,7 +1225,7 @@ test "constant serialization - special values" {
 
     // Deserialize
     var reader = SliceReader{ .data = writer.getWritten() };
-    const restored = try deserializeConstants(&reader, allocator, null);
+    const restored = try deserializeConstantsAtDepth(&reader, allocator, null, 0);
     defer allocator.free(restored);
 
     // Verify
@@ -1289,7 +1266,7 @@ test "constant serialization - mixed types" {
 
     // Deserialize
     var reader = SliceReader{ .data = writer.getWritten() };
-    const restored = try deserializeConstants(&reader, allocator, null);
+    const restored = try deserializeConstantsAtDepth(&reader, allocator, null, 0);
     defer {
         for (restored) |v| {
             if (v.isFloat64()) {

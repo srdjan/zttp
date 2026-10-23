@@ -61,23 +61,6 @@ fn utf16SliceByteOffsets(data: []const u8, is_ascii: bool, start_units: u32, end
     return .{ .start = @intCast(c_start.byte), .end = @intCast(c_end.byte) };
 }
 
-/// String.prototype.length - Get string length
-pub fn stringLength(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = args;
-    // ASCII fast path: UTF-16 code units equal byte length, so stay O(1).
-    if (stringIsAscii(this)) {
-        if (getStringDataCtx(this, ctx)) |data| {
-            return value.JSValue.fromInt(@intCast(data.len));
-        }
-        return value.JSValue.fromInt(0);
-    }
-    // Non-ASCII: JS .length counts UTF-16 code units, not UTF-8 bytes.
-    if (getStringDataCtx(this, ctx)) |data| {
-        return value.JSValue.fromInt(@intCast(string.utf16Length(data)));
-    }
-    return value.JSValue.fromInt(0);
-}
-
 /// String.prototype.charAt(index) - Get character at index
 pub fn stringCharAt(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const data = getStringDataCtx(this, ctx) orelse return value.JSValue.undefined_val;
@@ -905,22 +888,20 @@ test "string length/charAt/slice index by UTF-16 code units ENG-utf16" {
     var ctx = try context.Context.init(allocator, &gc_state, .{});
     defer ctx.deinit();
 
-    const noargs = [_]value.JSValue{};
-
     // .length counts UTF-16 code units, not UTF-8 bytes.
     const e_acute = try ctx.createString("é"); // 2 bytes, 1 code unit
-    try std.testing.expectEqual(@as(i32, 1), stringLength(ctx, e_acute, &noargs).getInt());
+    try std.testing.expectEqual(@as(i32, 1), @as(i32, @intCast(string.utf16Length(getStringData(e_acute) orelse return error.TestUnexpectedResult))));
 
     const grin = try ctx.createString("😀"); // 4 bytes, 2 code units (surrogate pair)
-    try std.testing.expectEqual(@as(i32, 2), stringLength(ctx, grin, &noargs).getInt());
+    try std.testing.expectEqual(@as(i32, 2), @as(i32, @intCast(string.utf16Length(getStringData(grin) orelse return error.TestUnexpectedResult))));
 
     // ASCII length is unchanged (fast path).
     const ascii = try ctx.createString("hello");
-    try std.testing.expectEqual(@as(i32, 5), stringLength(ctx, ascii, &noargs).getInt());
+    try std.testing.expectEqual(@as(i32, 5), @as(i32, @intCast(string.utf16Length(getStringData(ascii) orelse return error.TestUnexpectedResult))));
 
     // h é l l o : 5 code units across 6 bytes.
     const hello = try ctx.createString("héllo");
-    try std.testing.expectEqual(@as(i32, 5), stringLength(ctx, hello, &noargs).getInt());
+    try std.testing.expectEqual(@as(i32, 5), @as(i32, @intCast(string.utf16Length(getStringData(hello) orelse return error.TestUnexpectedResult))));
 
     // charAt returns whole codepoints and never splits a UTF-8 sequence.
     try std.testing.expectEqualStrings("é", getStringData(stringCharAt(ctx, hello, &.{value.JSValue.fromInt(1)})) orelse return error.TestUnexpectedResult);
@@ -941,7 +922,7 @@ test "string length/charAt/slice index by UTF-16 code units ENG-utf16" {
     // start at the byte after the 2-byte 'é'.
     const long_input = "é" ++ (&@as([20:0]u8, @splat('a')));
     const long = try ctx.createString(long_input);
-    try std.testing.expectEqual(@as(i32, 21), stringLength(ctx, long, &noargs).getInt());
+    try std.testing.expectEqual(@as(i32, 21), @as(i32, @intCast(string.utf16Length(getStringData(long) orelse return error.TestUnexpectedResult))));
     try std.testing.expectEqualStrings(long_input, getStringData(stringSlice(ctx, long, &.{ value.JSValue.fromInt(0), value.JSValue.fromInt(21) })) orelse return error.TestUnexpectedResult);
     try std.testing.expectEqualStrings(&@as([20:0]u8, @splat('a')), getStringData(stringSlice(ctx, long, &.{value.JSValue.fromInt(1)})) orelse return error.TestUnexpectedResult);
 

@@ -267,20 +267,6 @@ pub fn freeSlice(allocator: std.mem.Allocator, slice: *SliceString) void {
 // UTF-8 Utilities
 // ============================================================================
 
-/// Count UTF-8 codepoints in a string
-pub fn countCodepoints(s: []const u8) u32 {
-    var count: u32 = 0;
-    var i: usize = 0;
-    while (i < s.len) {
-        // Count non-continuation bytes (those not starting with 10xxxxxx)
-        if ((s[i] & 0xC0) != 0x80) {
-            count += 1;
-        }
-        i += 1;
-    }
-    return count;
-}
-
 /// Get byte length of UTF-8 codepoint starting at given byte
 pub fn codepointByteLength(first_byte: u8) u3 {
     if (first_byte < 0x80) return 1; // ASCII
@@ -543,54 +529,6 @@ pub fn eqlStrings(a: []const u8, b: []const u8) bool {
 
     // Scalar fallback for remainder
     return std.mem.eql(u8, a[i..], b[i..]);
-}
-
-/// SIMD-accelerated single-byte search (memchr equivalent)
-/// Returns index of first occurrence of needle in haystack, or null
-pub fn findByte(haystack: []const u8, needle: u8) ?usize {
-    const Vec = @Vector(32, u8);
-    const needle_vec: Vec = @splat(needle);
-    var i: usize = 0;
-
-    // SIMD search for 32-byte chunks
-    while (i + 32 <= haystack.len) : (i += 32) {
-        const chunk: Vec = haystack[i..][0..32].*;
-        const matches = chunk == needle_vec;
-        if (@reduce(.Or, matches)) {
-            // Found match, find exact position
-            const match_bytes: [32]u8 = @bitCast(@as(@Vector(32, u8), @intFromBool(matches)));
-            for (match_bytes, 0..) |m, j| {
-                if (m != 0) return i + j;
-            }
-        }
-    }
-
-    // Scalar fallback for remainder
-    for (haystack[i..], i..) |c, idx| {
-        if (c == needle) return idx;
-    }
-    return null;
-}
-
-/// SIMD-accelerated count of byte occurrences
-pub fn countByte(haystack: []const u8, needle: u8) usize {
-    const Vec = @Vector(32, u8);
-    const needle_vec: Vec = @splat(needle);
-    var count: usize = 0;
-    var i: usize = 0;
-
-    // SIMD count for 32-byte chunks
-    while (i + 32 <= haystack.len) : (i += 32) {
-        const chunk: Vec = haystack[i..][0..32].*;
-        const matches = chunk == needle_vec;
-        count += @popCount(@as(u32, @bitCast(@as(@Vector(32, u1), @intFromBool(matches)))));
-    }
-
-    // Scalar fallback for remainder
-    for (haystack[i..]) |c| {
-        if (c == needle) count += 1;
-    }
-    return count;
 }
 
 /// XXHash64 for string hashing
@@ -883,53 +821,6 @@ pub fn concatMany(allocator: std.mem.Allocator, strings: []const *const JSString
     return str;
 }
 
-/// StringBuilder for efficient incremental string building
-/// Use when building a string from multiple parts dynamically
-pub const StringBuilder = struct {
-    parts: std.ArrayListUnmanaged(*const JSString),
-    allocator: std.mem.Allocator,
-    total_len: u32 = 0,
-    all_ascii: bool = true,
-
-    pub fn init(allocator: std.mem.Allocator) StringBuilder {
-        return .{
-            .parts = .empty,
-            .allocator = allocator,
-        };
-    }
-
-    pub fn deinit(self: *StringBuilder) void {
-        self.parts.deinit(self.allocator);
-    }
-
-    /// Add a string to the builder
-    pub fn append(self: *StringBuilder, str: *const JSString) !void {
-        try self.parts.append(self.allocator, str);
-        self.total_len += str.len;
-        self.all_ascii = self.all_ascii and str.flags.is_ascii;
-    }
-
-    /// Add a raw string slice to the builder (creates temporary JSString)
-    pub fn appendSlice(self: *StringBuilder, slice: []const u8) !void {
-        const str = try createString(self.allocator, slice);
-        try self.parts.append(self.allocator, str);
-        self.total_len += @intCast(slice.len);
-        self.all_ascii = self.all_ascii and isAscii(slice);
-    }
-
-    /// Build the final concatenated string
-    pub fn build(self: *StringBuilder) !*JSString {
-        return try concatMany(self.allocator, self.parts.items);
-    }
-
-    /// Clear the builder for reuse
-    pub fn clear(self: *StringBuilder) void {
-        self.parts.clearRetainingCapacity();
-        self.total_len = 0;
-        self.all_ascii = true;
-    }
-};
-
 /// Format an integer to a buffer without allocation
 /// Returns the slice of the buffer that contains the formatted number
 pub fn formatIntToBuf(buf: []u8, n: i32) []const u8 {
@@ -1015,50 +906,14 @@ test "SIMD string equality" {
     try std.testing.expect(!eqlStrings(long1, long3));
 }
 
-test "SIMD findByte" {
-    // Basic cases
-    try std.testing.expectEqual(@as(?usize, 0), findByte("hello", 'h'));
-    try std.testing.expectEqual(@as(?usize, 4), findByte("hello", 'o'));
-    try std.testing.expectEqual(@as(?usize, null), findByte("hello", 'x'));
-
-    // Empty string
-    try std.testing.expectEqual(@as(?usize, null), findByte("", 'x'));
-
-    // Long string (>32 bytes) - 48 chars
-    const long = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF";
-    try std.testing.expectEqual(@as(?usize, 10), findByte(long, 'A'));
-    try std.testing.expectEqual(@as(?usize, 8), findByte(long, '8')); // First '8' at position 8
-
-    // Find char that only appears after byte 32
-    const long2 = "________________________________X_______________"; // 'X' at position 32
-    try std.testing.expectEqual(@as(?usize, 32), findByte(long2, 'X'));
-}
-
-test "SIMD countByte" {
-    try std.testing.expectEqual(@as(usize, 2), countByte("hello", 'l'));
-    try std.testing.expectEqual(@as(usize, 1), countByte("hello", 'h'));
-    try std.testing.expectEqual(@as(usize, 0), countByte("hello", 'x'));
-    try std.testing.expectEqual(@as(usize, 0), countByte("", 'x'));
-
-    // Long string with multiple occurrences
-    const long = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"; // 52 a's
-    try std.testing.expectEqual(@as(usize, 52), countByte(long, 'a'));
-    try std.testing.expectEqual(@as(usize, 0), countByte(long, 'b'));
-}
-
 test "SIMD searches preserve every lane and scalar tail offset" {
     var bytes: [65]u8 = @splat('_');
-    try std.testing.expectEqual(@as(?usize, null), findByte(&bytes, 'x'));
     try std.testing.expectEqual(@as(?u32, null), simdIndexOf(&bytes, "x"));
     for (0..bytes.len) |offset| {
         bytes[offset] = 'x';
-        try std.testing.expectEqual(@as(?usize, offset), findByte(&bytes, 'x'));
         try std.testing.expectEqual(@as(?u32, @intCast(offset)), simdIndexOf(&bytes, "x"));
-        try std.testing.expectEqual(@as(usize, 1), countByte(&bytes, 'x'));
         bytes[offset] = '_';
     }
-    @memset(&bytes, 'x');
-    try std.testing.expectEqual(bytes.len, countByte(&bytes, 'x'));
 }
 
 test "string hashing" {
@@ -1082,13 +937,6 @@ test "ASCII detection" {
     try std.testing.expect(isAscii("Hello, World!"));
     try std.testing.expect(!isAscii("Hello, 世界!"));
     try std.testing.expect(isAscii(""));
-}
-
-test "UTF-8 codepoint counting" {
-    try std.testing.expectEqual(@as(u32, 5), countCodepoints("hello"));
-    try std.testing.expectEqual(@as(u32, 2), countCodepoints("世界")); // 2 CJK chars
-    try std.testing.expectEqual(@as(u32, 0), countCodepoints(""));
-    try std.testing.expectEqual(@as(u32, 9), countCodepoints("hello, 世界")); // 7 ASCII + 2 CJK
 }
 
 test "UTF-8 codepoint byte length" {
@@ -1212,30 +1060,6 @@ test "concatMany optimization" {
 
     try std.testing.expectEqualStrings("Hello, World!", result.data());
     try std.testing.expectEqual(@as(u32, 13), result.len);
-}
-
-test "StringBuilder" {
-    const allocator = std.testing.allocator;
-
-    var builder = StringBuilder.init(allocator);
-    defer builder.deinit();
-
-    const str1 = try createString(allocator, "Hello");
-    defer freeString(allocator, str1);
-    const str2 = try createString(allocator, " ");
-    defer freeString(allocator, str2);
-    const str3 = try createString(allocator, "World");
-    defer freeString(allocator, str3);
-
-    try builder.append(str1);
-    try builder.append(str2);
-    try builder.append(str3);
-
-    const result = try builder.build();
-    defer freeString(allocator, result);
-
-    try std.testing.expectEqualStrings("Hello World", result.data());
-    try std.testing.expectEqual(@as(u32, 11), result.len);
 }
 
 test "JSString methods" {

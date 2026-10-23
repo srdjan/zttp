@@ -395,14 +395,6 @@ pub const Heap = struct {
         header.gc_mark = marked;
     }
 
-    /// Get GC mark bit
-    pub fn getMark(self: *Heap, ptr: *anyopaque) bool {
-        _ = self;
-        const data_ptr: [*]u8 = @ptrCast(ptr);
-        const header: *MemBlockHeader = @ptrCast(@alignCast(data_ptr - @sizeOf(MemBlockHeader)));
-        return header.gc_mark;
-    }
-
     /// Allocate a Float64 box (raw allocation without extra header)
     pub fn allocFloat64(self: *Heap, val: f64) ?*value.JSValue.Float64Box {
         // Float64Box has its own header, so allocate raw without additional header
@@ -580,17 +572,19 @@ test "Heap GC mark bit" {
     defer heap.deinit();
 
     const ptr = heap.alloc(.object, 32).?;
+    const data_ptr: [*]u8 = @ptrCast(ptr);
+    const header: *MemBlockHeader = @ptrCast(@alignCast(data_ptr - @sizeOf(MemBlockHeader)));
 
     // Initially unmarked
-    try std.testing.expect(!heap.getMark(ptr));
+    try std.testing.expect(!header.gc_mark);
 
     // Mark it
     heap.setMark(ptr, true);
-    try std.testing.expect(heap.getMark(ptr));
+    try std.testing.expect(header.gc_mark);
 
     // Unmark it
     heap.setMark(ptr, false);
-    try std.testing.expect(!heap.getMark(ptr));
+    try std.testing.expect(!header.gc_mark);
 }
 
 test "Heap tag retrieval" {

@@ -756,30 +756,6 @@ pub const Context = struct {
     }
 
     // ========================================================================
-    // Index-Based Hidden Class Operations
-    // ========================================================================
-
-    /// Get a hidden class with an additional property
-    /// Returns the transitioned class index (cached if already exists)
-    pub fn getClassWithProperty(self: *Context, from: object.HiddenClassIndex, name: object.Atom) !object.HiddenClassIndex {
-        const pool = self.hidden_class_pool orelse return error.NoHiddenClassPool;
-        return pool.addProperty(from, name);
-    }
-
-    /// Look up property offset in a hidden class
-    /// Returns null if property not found
-    pub fn getPropertyOffset(self: *const Context, class_idx: object.HiddenClassIndex, name: object.Atom) ?u16 {
-        const pool = self.hidden_class_pool orelse return null;
-        return pool.findProperty(class_idx, name);
-    }
-
-    /// Get property count for a hidden class
-    pub fn getClassPropertyCount(self: *const Context, class_idx: object.HiddenClassIndex) u16 {
-        const pool = self.hidden_class_pool orelse return 0;
-        return pool.getPropertyCount(class_idx);
-    }
-
-    // ========================================================================
     // Stack Operations
     // ========================================================================
 
@@ -1251,10 +1227,10 @@ test "Context index-based hidden class pool" {
 
     // Root class index should be the empty class
     try std.testing.expectEqual(object.HiddenClassIndex.empty, ctx.root_class_idx);
-    try std.testing.expectEqual(@as(u16, 0), ctx.getClassPropertyCount(ctx.root_class_idx));
+    try std.testing.expectEqual(@as(u16, 0), ctx.hidden_class_pool.?.getPropertyCount(ctx.root_class_idx));
 }
 
-test "Context getClassWithProperty transitions" {
+test "Context hidden class pool transitions" {
     const allocator = std.testing.allocator;
 
     var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
@@ -1263,21 +1239,22 @@ test "Context getClassWithProperty transitions" {
     var ctx = try Context.init(allocator, &gc_state, .{});
     defer ctx.deinit();
 
+    const pool = ctx.hidden_class_pool.?;
     // Add property 'x' to empty class
-    const class_x = try ctx.getClassWithProperty(ctx.root_class_idx, .length);
-    try std.testing.expectEqual(@as(u16, 1), ctx.getClassPropertyCount(class_x));
+    const class_x = try pool.addProperty(ctx.root_class_idx, .length);
+    try std.testing.expectEqual(@as(u16, 1), pool.getPropertyCount(class_x));
 
     // Property offset should be 0
-    const offset = ctx.getPropertyOffset(class_x, .length);
+    const offset = pool.findProperty(class_x, .length);
     try std.testing.expect(offset != null);
     try std.testing.expectEqual(@as(u16, 0), offset.?);
 
     // Add another property 'y'
-    const class_xy = try ctx.getClassWithProperty(class_x, .name);
-    try std.testing.expectEqual(@as(u16, 2), ctx.getClassPropertyCount(class_xy));
+    const class_xy = try pool.addProperty(class_x, .name);
+    try std.testing.expectEqual(@as(u16, 2), pool.getPropertyCount(class_xy));
 
     // First property should still be at offset 0
-    try std.testing.expectEqual(@as(u16, 0), ctx.getPropertyOffset(class_xy, .length).?);
+    try std.testing.expectEqual(@as(u16, 0), pool.findProperty(class_xy, .length).?);
     // Second property at offset 1
-    try std.testing.expectEqual(@as(u16, 1), ctx.getPropertyOffset(class_xy, .name).?);
+    try std.testing.expectEqual(@as(u16, 1), pool.findProperty(class_xy, .name).?);
 }

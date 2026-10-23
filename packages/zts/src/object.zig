@@ -1992,12 +1992,6 @@ pub const JSObject = extern struct {
         return pool.findProperty(self.hidden_class_idx, name) != null;
     }
 
-    /// Check if property exists (including prototype chain)
-    pub fn hasProperty(self: *const JSObject, pool: *const HiddenClassPool, name: Atom) bool {
-        if (self.class_id == .result and isResultCoreProperty(name)) return true;
-        return self.getProperty(pool, name) != null;
-    }
-
     /// Delete property
     pub fn deleteProperty(self: *JSObject, pool: *const HiddenClassPool, name: Atom) bool {
         if (self.class_id == .array and name == .length) return false;
@@ -2459,13 +2453,6 @@ pub const InlineCache = struct {
         self.cached_class_idx = class_idx;
         self.cached_slot = slot;
     }
-
-    /// Cache hit ratio (for profiling)
-    pub fn hitRatio(self: *InlineCache) f64 {
-        const total = self.hit_count + self.miss_count;
-        if (total == 0) return 0.0;
-        return @as(f64, @floatFromInt(self.hit_count)) / @as(f64, @floatFromInt(total));
-    }
 };
 
 // ============================================================================
@@ -2476,15 +2463,6 @@ test "Atom predefined check" {
     try std.testing.expect(Atom.length.isPredefined());
     try std.testing.expect(Atom.prototype.isPredefined());
     try std.testing.expect(!(@as(Atom, @fromBackingInt(@intCast(Atom.FIRST_DYNAMIC))).isPredefined()));
-}
-
-test "InlineCache hit tracking" {
-    var ic = InlineCache{};
-    try std.testing.expectEqual(@as(f64, 0.0), ic.hitRatio());
-
-    ic.hit_count = 9;
-    ic.miss_count = 1;
-    try std.testing.expectEqual(@as(f64, 0.9), ic.hitRatio());
 }
 
 test "JSObject creation and property access" {
@@ -2531,24 +2509,6 @@ test "JSObject prototype chain lookup" {
 
     // But not as own property
     try std.testing.expect(child.getOwnProperty(pool, .toString) == null);
-}
-
-test "JSObject hasProperty" {
-    const allocator = std.testing.allocator;
-
-    var pool = try HiddenClassPool.init(allocator);
-    defer pool.deinit();
-
-    var obj = try JSObject.create(allocator, pool.getEmptyClass(), null, pool);
-    defer obj.destroy(allocator);
-
-    try std.testing.expect(!obj.hasOwnProperty(pool, .length));
-    try std.testing.expect(!obj.hasProperty(pool, .length));
-
-    try obj.setProperty(allocator, pool, .length, value.JSValue.fromInt(5));
-
-    try std.testing.expect(obj.hasOwnProperty(pool, .length));
-    try std.testing.expect(obj.hasProperty(pool, .length));
 }
 
 test "JSObject extensibility" {
@@ -2783,19 +2743,6 @@ test "JSObject getOwnEnumerableKeys" {
 
     try std.testing.expectEqual(@as(usize, 1), keys.len);
     try std.testing.expectEqual(Atom.length, keys[0]);
-}
-
-test "InlineCache hitRatio" {
-    var ic = InlineCache{};
-
-    // Initially 0/0 - returns 0
-    try std.testing.expectEqual(@as(f64, 0.0), ic.hitRatio());
-
-    // Simulate some hits and misses
-    ic.hit_count = 3;
-    ic.miss_count = 1;
-
-    try std.testing.expectEqual(@as(f64, 0.75), ic.hitRatio());
 }
 
 test "PropertyIterator" {

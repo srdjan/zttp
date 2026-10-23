@@ -92,17 +92,6 @@ pub const AtomTable = struct {
         }
     }
 
-    /// Reset atom table to initial state (for request isolation)
-    pub fn reset(self: *AtomTable) void {
-        var it = self.reverse.valueIterator();
-        while (it.next()) |key| {
-            self.allocator.free(key.*);
-        }
-        self.strings.clearRetainingCapacity();
-        self.reverse.clearRetainingCapacity();
-        self.next_id = object.Atom.FIRST_DYNAMIC;
-    }
-
     /// Get current atom count (for monitoring)
     pub fn count(self: *AtomTable) usize {
         return self.strings.count();
@@ -149,18 +138,4 @@ test "AtomTable count" {
     // Interning same string shouldn't increase count
     _ = try atoms.intern("first");
     try std.testing.expectEqual(@as(usize, 2), atoms.count());
-}
-
-test "AtomTable reset" {
-    const allocator = std.testing.allocator;
-
-    var atoms = AtomTable.init(allocator);
-    defer atoms.deinit();
-
-    _ = try atoms.intern("one");
-    _ = try atoms.intern("two");
-    try std.testing.expectEqual(@as(usize, 2), atoms.count());
-
-    atoms.reset();
-    try std.testing.expectEqual(@as(usize, 0), atoms.count());
 }

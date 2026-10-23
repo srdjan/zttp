@@ -70,11 +70,6 @@ pub const EventList = struct {
         self.allocator.free(self.data_storage);
         self.* = undefined;
     }
-
-    pub fn idFor(self: *const EventList, event: Event) []const u8 {
-        std.debug.assert(event.id_index < self.ids.len);
-        return self.ids[event.id_index];
-    }
 };
 
 pub const FrameResult = union(enum) {
@@ -492,7 +487,7 @@ fn expectFrames(body: []const u8, bounds: Bounds, expected: []const ExpectedEven
             for (expected, list.events) |want, actual| {
                 try std.testing.expectEqualStrings(want.event, actual.event);
                 try std.testing.expectEqualStrings(want.data, actual.data);
-                try std.testing.expectEqualStrings(want.id, list.idFor(actual));
+                try std.testing.expectEqualStrings(want.id, list.ids[actual.id_index]);
             }
         },
     }
@@ -706,7 +701,7 @@ test "SSE persistent ids use shared storage" {
             try std.testing.expectEqual(body[id_start..][0..id_len].ptr, list.ids[1].ptr);
             for (list.events) |event| {
                 try std.testing.expectEqual(@as(usize, 1), event.id_index);
-                try std.testing.expectEqual(list.ids[1].ptr, list.idFor(event).ptr);
+                try std.testing.expectEqual(list.ids[1].ptr, list.ids[event.id_index].ptr);
             }
         },
     }
