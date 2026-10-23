@@ -1949,6 +1949,7 @@ fn runWithImportedFunction(
     defer if (imported_type_checker) |*checker| checker.deinit();
     if (type_env_storage.envPtr()) |type_env| {
         imported_type_checker = type_checker.TypeChecker.init(allocator, imported_view, &imported_atoms, type_env);
+        imported_type_checker.?.scopes = &imported_parser.scopes;
         try std.testing.expectEqual(@as(u32, 0), try imported_type_checker.?.check(imported_root));
     }
 

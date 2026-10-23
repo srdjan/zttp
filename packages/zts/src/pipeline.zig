@@ -326,6 +326,7 @@ pub fn resolve(
         );
         errdefer tc.deinit();
         tc.import_facts = opts.type_import_facts;
+        tc.scopes = parsed.scopes;
         // The strict checker reports a match that is not exhaustive as ZTS603,
         // so the type checker leaves its ZTS205 out when strict runs.
         tc.strict_checker_follows = opts.strict;
@@ -1215,6 +1216,7 @@ pub const ModuleAnalysisSession = struct {
             self.type_env_storage.envPtr().?,
         );
         const checker = &self.standalone_checker.?;
+        checker.scopes = self.parsed.scopes;
         checker.import_facts = if (self.resolution_facts) |*facts_value|
             facts_value
         else if (self.contract_facts) |*facts_value|
@@ -1314,6 +1316,7 @@ pub const ModuleAnalysisSession = struct {
             self.extraction_type_env_storage.envPtr().?,
         );
         const checker = &self.extraction_checker.?;
+        checker.scopes = self.parsed.scopes;
         checker.import_facts = if (self.resolution_facts) |*facts_value| facts_value else null;
         _ = try self.extraction_opts.type_check(checker, self.parsed.root);
         try self.prepareContractFacts(true);
@@ -1480,6 +1483,7 @@ pub fn extractContractResultFromParsed(
         type_env,
     );
     defer type_checker.deinit();
+    type_checker.scopes = parsed.scopes;
     _ = try opts.type_check(&type_checker, parsed.root);
 
     try type_checker.ensureHealthy();
@@ -2102,6 +2106,7 @@ test "explicit type session extraction uses the completed caller session" {
     try storage.initWithSource(allocator, .omitted);
     var type_checker = TypeChecker.init(allocator, view, null, storage.envPtr().?);
     defer type_checker.deinit();
+    type_checker.scopes = &parsed_state.js_parser.scopes;
     _ = try type_checker.check(parsed.root);
 
     var contract = try extractContractFromTypeSession(
@@ -4610,6 +4615,7 @@ test "existing checker APIs preserve source selection and direct ownership" {
     } });
     var direct_checker = TypeChecker.init(allocator, direct_view, &direct_atoms, direct_storage.envPtr().?);
     defer direct_checker.deinit();
+    direct_checker.scopes = &direct_parser.scopes;
     _ = try direct_checker.check(direct_root);
     var direct_resolved = try resolve(allocator, direct_parsed, .{
         .type_env = direct_storage.envPtr(),
@@ -4936,6 +4942,7 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
     } });
     var checker = TypeChecker.init(allocator, accepted.ir_view, accepted.atoms, storage.envPtr().?);
     defer checker.deinit();
+    checker.scopes = &source_owner.parser.scopes;
     _ = try checker.check(accepted.root);
     var resolved = try resolve(allocator, parsed, .{
         .type_env = storage.envPtr(),

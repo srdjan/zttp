@@ -2377,6 +2377,7 @@ test "canonical profile counts reused arrow helper after typed arrow" {
         .atoms = &atoms,
     } });
     var tc = TypeChecker.init(testing.allocator, view, &atoms, &env);
+    tc.scopes = &parser.scopes;
     defer tc.deinit();
     _ = try tc.check(root);
     var checker = StrictChecker.init(testing.allocator, view, &atoms, &env, &tc);
@@ -2480,6 +2481,7 @@ fn checkSourceTyped(source: []const u8) !*TypedHarness {
     h.pool = type_pool_mod.TypePool.init(testing.allocator);
     h.env = TypeEnv.init(testing.allocator, &h.pool);
     h.tc = TypeChecker.init(testing.allocator, view, null, &h.env);
+    h.tc.scopes = &h.parser.scopes;
     _ = try h.tc.check(root);
     h.checker = StrictChecker.init(testing.allocator, view, null, &h.env, &h.tc);
     _ = try h.checker.check(root);
@@ -2500,6 +2502,74 @@ test "canonical_redundant_bool_compare fires on `!== false` for a boolean" {
     );
     defer h.deinit();
     try expectKind(&h.checker, .canonical_redundant_bool_compare);
+}
+
+test "canonical_redundant_bool_compare fires on a captured unannotated boolean const" {
+    // The strict checker asks the type checker for the operand's type after
+    // `check` has returned. A captured binding used to resolve through a name
+    // stack that is empty by then, so the operand had no type and the rule did
+    // not fire. The control with the same comparison in the declaring function
+    // fires either way.
+    var function_form = try checkSourceTyped(
+        "function handler(req) { const ready = req.method === \"GET\"; function g() { if (ready === false) { return \"no\"; } return \"yes\"; } return Response.text(g()); }",
+    );
+    defer function_form.deinit();
+    try expectKind(&function_form.checker, .canonical_redundant_bool_compare);
+
+    var arrow_form = try checkSourceTyped(
+        "function handler(req) { const ready = req.method === \"GET\"; const g = () => { if (ready === false) { return \"no\"; } return \"yes\"; }; return Response.text(g()); }",
+    );
+    defer arrow_form.deinit();
+    try expectKind(&arrow_form.checker, .canonical_redundant_bool_compare);
+
+    var local_form = try checkSourceTyped(
+        "function handler(req) { function g() { const ready = req.method === \"GET\"; if (ready === false) { return \"no\"; } return \"yes\"; } return Response.text(g()); }",
+    );
+    defer local_form.deinit();
+    try expectKind(&local_form.checker, .canonical_redundant_bool_compare);
+}
+
+test "canonical_redundant_bool_compare fires on a captured annotated boolean" {
+    // w9 bc_closure_upvalue.ts and bc_arrow_upvalue.ts, with the annotation.
+    var function_form = try checkDirect(
+        \\export function handler(req: Request): Response {
+        \\  const ready: boolean = req.method === "GET";
+        \\  function g(): string {
+        \\    if (ready === false) {
+        \\      return "no";
+        \\    }
+        \\    return "yes";
+        \\  }
+        \\  return Response.text(g());
+        \\}
+    );
+    defer function_form.deinit();
+    try expectKind(&function_form.checker, .canonical_redundant_bool_compare);
+
+    var arrow_form = try checkDirect(
+        \\export function handler(req: Request): Response {
+        \\  const ready: boolean = req.method === "GET";
+        \\  const g = (): string => {
+        \\    if (ready === false) {
+        \\      return "no";
+        \\    }
+        \\    return "yes";
+        \\  };
+        \\  return Response.text(g());
+        \\}
+    );
+    defer arrow_form.deinit();
+    try expectKind(&arrow_form.checker, .canonical_redundant_bool_compare);
+}
+
+test "canonical_redundant_bool_compare does not fire on a captured non-boolean" {
+    // Control: a captured number compared with a literal is not a boolean
+    // comparison, so typing the capture must not make the rule fire on it.
+    var h = try checkSourceTyped(
+        "function handler(req) { const n = 1; function g() { if (n === 1) { return \"a\"; } return \"b\"; } return Response.text(g()); }",
+    );
+    defer h.deinit();
+    try expectNoKind(&h.checker, .canonical_redundant_bool_compare);
 }
 
 /// Parse typed source and run both checkers against its syntax owners.
@@ -2545,6 +2615,7 @@ fn checkDirectWithSections(
         .atoms = &h.atoms,
     } });
     h.tc = TypeChecker.init(testing.allocator, view, &h.atoms, &h.env);
+    h.tc.scopes = &h.parser.scopes;
     errdefer h.tc.deinit();
     _ = try h.tc.check(root);
     h.checker = StrictChecker.init(testing.allocator, view, &h.atoms, &h.env, &h.tc);

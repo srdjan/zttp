@@ -10469,6 +10469,7 @@ fn expectDirectGenericConsumer(
         &direct_env,
     );
     defer direct_checker.deinit();
+    direct_checker.scopes = &direct.scopes;
     const type_ok = try direct_checker.check(direct_root);
     var direct_strict = strict_checker_mod.StrictChecker.init(
         std.testing.allocator,
@@ -10733,6 +10734,7 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
         &direct_env,
     );
     defer direct_checker.deinit();
+    direct_checker.scopes = &direct.scopes;
     const type_ok = try direct_checker.check(direct_root);
     var direct_strict = strict_checker_mod.StrictChecker.init(
         std.testing.allocator,
@@ -11384,6 +11386,7 @@ fn expectDirectPredicateConsumer(
         &direct_env,
     );
     defer direct_checker.deinit();
+    direct_checker.scopes = &direct.scopes;
     const type_ok = try direct_checker.check(direct_root);
     const expected_type: []const type_checker_mod.DiagnosticKind = switch (case) {
         .named_guard_unverified, .quoted_marker_space => &.{.invalid_type_predicate},
@@ -11954,6 +11957,7 @@ test "direct source pilot preserves runtime types owners checks and capsules" {
         &direct_env,
     );
     defer direct_checker.deinit();
+    direct_checker.scopes = &direct.scopes;
     try std.testing.expectEqual(@as(u32, 0), try direct_checker.check(direct_root));
 
     var direct_strict = strict_checker_mod.StrictChecker.init(
@@ -12038,6 +12042,7 @@ fn expectPilotCheckerContrast(
         &direct_env,
     );
     defer direct_checker.deinit();
+    direct_checker.scopes = &direct.scopes;
     try std.testing.expectEqual(expected_type_errors, try direct_checker.check(direct_root));
     try std.testing.expectEqual(@as(usize, expected_type_errors), direct_checker.getDiagnostics().len);
     if (expected_type_errors == 1) {
@@ -12373,6 +12378,7 @@ fn expectDirectDeclarationConsumer(
         &direct_env,
     );
     defer direct_checker.deinit();
+    direct_checker.scopes = &direct.scopes;
     try std.testing.expectEqual(@as(u32, @intCast(expected_diagnostics.len)), try direct_checker.check(direct_root));
     try std.testing.expectEqual(expected_diagnostics.len, direct_checker.getDiagnostics().len);
     for (direct_checker.getDiagnostics(), expected_diagnostics) |direct_diagnostic, expected| {
@@ -13125,6 +13131,7 @@ fn expectDirectConsumerMatrixCase(
         &direct_env,
     );
     defer direct_checker.deinit();
+    direct_checker.scopes = &direct.scopes;
     const direct_type_count = try direct_checker.check(direct_root);
     const direct_type_diagnostics = direct_checker.getDiagnostics();
     try std.testing.expectEqual(@as(u32, @intCast(expected_type_diagnostics.len)), direct_type_count);
@@ -13571,6 +13578,7 @@ test "direct consumers preserve present null failure and hide refused expression
         &direct_env,
     );
     defer direct_checker.deinit();
+    direct_checker.scopes = &direct.scopes;
     try std.testing.expectError(error.UnresolvedTypeBinding, direct_checker.check(direct_root));
     try direct_pool.ensureHealthy();
     try direct_env.ensureHealthy();

@@ -18,6 +18,7 @@ const std = @import("std");
 const SourceView = @import("zts-base").source_diagnostics.SourceView;
 const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const ir = @import("zts-engine").parser.ir;
+const ScopeAnalyzer = @import("zts-engine").parser.ScopeAnalyzer;
 const json_utils = @import("zts-base").json_utils;
 const object = @import("zts-engine").object;
 const context = @import("zts-engine").context;
@@ -158,12 +159,6 @@ pub const TypeChecker = struct {
         }
     };
 
-    const ActiveDeclaredType = struct {
-        name_atom: u16,
-        type_idx: TypeIndex,
-        callable: CallableMetadata = .unavailable,
-    };
-
     allocator: std.mem.Allocator,
     ir_view: IrView,
     atoms: ?*context.AtomTable,
@@ -190,9 +185,15 @@ pub const TypeChecker = struct {
     /// Consulted only where a declared parameter type is load-bearing:
     /// match-discriminant exhaustiveness.
     param_types: std.AutoHashMapUnmanaged(u64, TypeIndex),
-    /// Lexically active declarations, including untyped shadows. Upvalues use
-    /// this stack to resolve the nearest declaration by name.
-    active_declared_types: std.ArrayListUnmanaged(ActiveDeclaredType),
+    /// The parser's scope analysis, which records for each closure the exact
+    /// binding that each of its upvalues names. Set by the caller that owns the
+    /// parser, as the flow checker's `scopes` is. A reference of kind `upvalue`
+    /// resolves to its declaring binding through this record and never by
+    /// name, because a name finds an unrelated outer binding when the
+    /// captured one is a `for...of` or `match` binding. Without the record an
+    /// upvalue has no type and no callable signature: unknown, which skips a
+    /// check and grants nothing.
+    scopes: ?*const ScopeAnalyzer = null,
     bound_var_annotations: usize = 0,
     binding_resolution_failed: bool = false,
     /// Flow-sensitive narrowing: binding key -> narrowed TypeIndex
@@ -245,7 +246,6 @@ pub const TypeChecker = struct {
             .binding_types = .empty,
             .binding_callables = .empty,
             .param_types = .empty,
-            .active_declared_types = .empty,
             .narrowed = .empty,
             .narrow_journal = .empty,
             .admitted_predicates = .empty,
@@ -271,7 +271,6 @@ pub const TypeChecker = struct {
         self.binding_types.deinit(self.allocator);
         self.binding_callables.deinit(self.allocator);
         self.param_types.deinit(self.allocator);
-        self.active_declared_types.deinit(self.allocator);
         self.narrowed.deinit(self.allocator);
         self.context_types.deinit(self.allocator);
         self.narrow_journal.deinit(self.allocator);
@@ -692,8 +691,6 @@ pub const TypeChecker = struct {
         switch (tag) {
             .program, .block => {
                 const block = self.ir_view.getBlock(node) orelse return;
-                const active_start = self.active_declared_types.items.len;
-                defer self.active_declared_types.items.len = active_start;
                 for (0..block.stmts_count) |i| {
                     const stmt_idx = self.ir_view.getListIndex(block.stmts_start, @intCast(i));
                     self.walkStmt(stmt_idx);
@@ -923,14 +920,11 @@ pub const TypeChecker = struct {
             .function_decl => {
                 const decl = self.ir_view.getVarDecl(node) orelse return;
                 const func = self.ir_view.getFunction(decl.init) orelse return;
-                self.pushActiveDeclared(decl.binding.name_atom, null_type_idx);
                 // The signature is the one whose parameter list opens where this
                 // function's does. A name does not identify it: nested functions
                 // repeat names, and the later one used to win for both.
                 const sig = self.sourceFunctionSignature(decl.init);
                 self.bindCallableMetadata(decl.binding, sourceFunctionMetadata(func, sig));
-                const active_start = self.active_declared_types.items.len;
-                defer self.active_declared_types.items.len = active_start;
                 // Named declarations resolve signatures by binding identity.
                 const saved_return = self.current_return_type;
                 // A nested function has its own return contract. Leaving the
@@ -952,8 +946,6 @@ pub const TypeChecker = struct {
 
             .function_expr, .arrow_function => {
                 const func = self.ir_view.getFunction(node) orelse return;
-                const active_start = self.active_declared_types.items.len;
-                defer self.active_declared_types.items.len = active_start;
                 const sig = self.sourceFunctionSignature(node);
                 const saved_return = self.current_return_type;
                 // A nested function has its own return contract. Leaving the
@@ -1094,8 +1086,9 @@ pub const TypeChecker = struct {
                     // Kill rule 1: the guard that installed the narrowing
                     // described the value being overwritten.
                     self.killNarrowing(key);
-                    if (self.binding_types.get(key)) |declared| {
-                        if (asgn.op == null) {
+                    if (asgn.op == null) {
+                        const declared = self.assignmentTargetType(binding);
+                        if (declared != null_type_idx) {
                             const val_type = self.inferType(asgn.value);
                             if (val_type != null_type_idx and !self.env.isAssignableTo(val_type, declared)) {
                                 self.addTypeMismatch(node, declared, val_type);
@@ -1176,8 +1169,6 @@ pub const TypeChecker = struct {
 
             .function_expr, .arrow_function => {
                 const func = self.ir_view.getFunction(node) orelse return;
-                const active_start = self.active_declared_types.items.len;
-                defer self.active_declared_types.items.len = active_start;
                 const sig = self.sourceFunctionSignature(node);
                 const saved_return = self.current_return_type;
                 // A nested function has its own return contract. Leaving the
@@ -1885,8 +1876,6 @@ pub const TypeChecker = struct {
 
         // The guard extractors read the parameter's declared type, so register
         // the parameters for the length of the check and unwind after.
-        const active_start = self.active_declared_types.items.len;
-        defer self.active_declared_types.items.len = active_start;
         self.registerParamTypes(func, sig);
 
         if (self.predicateBodyProves(func.body, param_binding)) {
@@ -2868,15 +2857,7 @@ pub const TypeChecker = struct {
             self.env.bindVarType(binding.scope_id, binding.name_atom, declared) catch self.markAllocationFailure();
             self.bound_var_annotations += 1;
         }
-        self.pushActiveDeclared(binding.name_atom, declared);
         return declared;
-    }
-
-    fn pushActiveDeclared(self: *TypeChecker, name_atom: u16, type_idx: TypeIndex) void {
-        self.active_declared_types.append(self.allocator, .{
-            .name_atom = name_atom,
-            .type_idx = type_idx,
-        }) catch self.markAllocationFailure();
     }
 
     fn bindCallableMetadata(self: *TypeChecker, binding: ir.BindingRef, metadata: CallableMetadata) void {
@@ -2885,30 +2866,48 @@ pub const TypeChecker = struct {
             self.markAllocationFailure();
             return;
         };
+    }
 
-        var i = self.active_declared_types.items.len;
-        while (i > 0) {
-            i -= 1;
-            if (self.active_declared_types.items[i].name_atom == binding.name_atom) {
-                self.active_declared_types.items[i].callable = metadata;
-                return;
-            }
+    /// The declaring binding of an `upvalue` reference, read from the parser's
+    /// record of that closure's captures. The upvalue's `scope_id` is the
+    /// closure's function scope and its `slot` indexes that scope's upvalue
+    /// list, whose entry names the source scope and slot of the declaration
+    /// (a transitive capture keeps the original source). The declaration's
+    /// kind comes from the source scope's binding at that slot: a parameter is
+    /// an `argument` and anything else is a `local`, which is what a direct
+    /// read of it carries, so `bindingKey` of the result is the key the
+    /// declaration was bound under. A global is never captured: a reference
+    /// to one is `global` and shares its declaration's key.
+    ///
+    /// Null when the record is absent or does not hold the upvalue. The caller
+    /// then has no type for it. Searching by name instead would find an
+    /// unrelated outer binding whenever the captured one is a `for...of` or
+    /// `match` binding.
+    fn captureSource(self: *const TypeChecker, upvalue: ir.BindingRef) ?ir.BindingRef {
+        if (upvalue.kind != .upvalue) return upvalue;
+        const scopes = self.scopes orelse return null;
+        if (upvalue.scope_id >= scopes.scopes.items.len) return null;
+        const captures = scopes.scopes.items[upvalue.scope_id].upvalues.items;
+        if (upvalue.slot >= captures.len) return null;
+        const capture = captures[upvalue.slot];
+        if (capture.source_scope_id >= scopes.scopes.items.len) return null;
+        for (scopes.scopes.items[capture.source_scope_id].bindings.items) |source| {
+            if (source.slot != capture.source_slot) continue;
+            return .{
+                .scope_id = capture.source_scope_id,
+                .slot = capture.source_slot,
+                .name_atom = source.name_atom,
+                .kind = if (source.kind == .parameter) .argument else .local,
+            };
         }
+        return null;
     }
 
     fn boundCallableMetadata(self: *const TypeChecker, binding: ir.BindingRef) ?CallableMetadata {
-        if (binding.kind == .upvalue) {
-            var i = self.active_declared_types.items.len;
-            while (i > 0) {
-                i -= 1;
-                const active = self.active_declared_types.items[i];
-                if (active.name_atom == binding.name_atom) return active.callable;
-            }
-            return null;
-        }
-
-        const key = bindingKey(binding);
-        return self.binding_callables.get(key);
+        // A capture the record cannot resolve is unknown. `unavailable` says so
+        // and keeps the by-name module signature from answering for it.
+        const declaration = self.captureSource(binding) orelse return .unavailable;
+        return self.binding_callables.get(bindingKey(declaration));
     }
 
     fn callableSignatureForBinding(self: *const TypeChecker, binding: ir.BindingRef) ?type_env_mod.FunctionSig {
@@ -2992,18 +2991,17 @@ pub const TypeChecker = struct {
     }
 
     fn declaredTypeForBinding(self: *const TypeChecker, binding: ir.BindingRef) TypeIndex {
-        if (self.env.getVarTypeByBinding(binding.scope_id, binding.name_atom)) |declared| {
-            return declared;
+        // A captured binding has the type its declaration has. A closure can run
+        // at any time, so the narrowing the walk holds at the closure's position
+        // does not describe it: this never reads `narrowed`. It also reads the
+        // maps and not the walk's position, so it answers after `check` returns.
+        if (binding.kind == .upvalue) {
+            const declaration = self.captureSource(binding) orelse return null_type_idx;
+            return self.typeOfDeclaration(declaration);
         }
 
-        if (binding.kind == .upvalue) {
-            var i = self.active_declared_types.items.len;
-            while (i > 0) {
-                i -= 1;
-                const active = self.active_declared_types.items[i];
-                if (active.name_atom == binding.name_atom) return active.type_idx;
-            }
-            return null_type_idx;
+        if (self.env.getVarTypeByBinding(binding.scope_id, binding.name_atom)) |declared| {
+            return declared;
         }
 
         if (binding.kind == .undeclared_global) {
@@ -3011,6 +3009,27 @@ pub const TypeChecker = struct {
             return self.env.getVarTypeByName(name) orelse null_type_idx;
         }
         return null_type_idx;
+    }
+
+    /// The type a declaration holds, never the narrowing the walk has put on
+    /// it: the declared or inferred type of a `const`, `let`, `for...of` or
+    /// pattern binding, then the annotation in the environment, then the
+    /// parameter type. `declaration` is not an `upvalue`.
+    fn typeOfDeclaration(self: *const TypeChecker, declaration: ir.BindingRef) TypeIndex {
+        const key = bindingKey(declaration);
+        if (self.binding_types.get(key)) |t| return t;
+        const declared = self.declaredTypeForBinding(declaration);
+        if (declared != null_type_idx) return declared;
+        return self.param_types.get(key) orelse null_type_idx;
+    }
+
+    /// The type a value assigned to `target` must satisfy, or `null_type_idx`
+    /// when the target has none. One lookup for every identifier target: a
+    /// captured target resolves to its declaration first, so a `let` or a
+    /// parameter is checked the same way inside a closure and outside it.
+    fn assignmentTargetType(self: *const TypeChecker, target: ir.BindingRef) TypeIndex {
+        const declaration = self.captureSource(target) orelse return null_type_idx;
+        return self.typeOfDeclaration(declaration);
     }
 
     fn walkMatchWithNarrowing(self: *TypeChecker, me: ir.Node.MatchExpr) void {
@@ -3103,7 +3122,6 @@ pub const TypeChecker = struct {
             const param_idx = self.ir_view.getListIndex(func.params_start, @intCast(i));
             const binding = self.ir_view.paramBinding(param_idx) orelse continue;
             const param_type = if (i < sig.param_count) sig.param_types[i] else null_type_idx;
-            self.pushActiveDeclared(binding.name_atom, param_type);
             // A parameter typed `(x: number) => number` has exactly the
             // parameters its annotation lists, so the annotation bounds the
             // arguments of a call to it. A function type inferred from an
@@ -4527,6 +4545,7 @@ fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u3
         .atoms = &atoms,
     } });
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
+    checker.scopes = &parser.scopes;
     defer checker.deinit();
     const errors = try checker.check(root);
     try std.testing.expectEqual(expect_errors, errors);
@@ -4567,6 +4586,7 @@ fn checkTypedSourceSaying(source: []const u8, expect_errors: u32, needle: []cons
     } });
 
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
+    checker.scopes = &parser.scopes;
     defer checker.deinit();
 
     const errors = try checker.check(root);
@@ -4609,6 +4629,7 @@ fn formatFirstTernaryType(source: []const u8, buf: []u8) ![]const u8 {
     } });
 
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
+    checker.scopes = &parser.scopes;
     defer checker.deinit();
     _ = try checker.check(root);
 
@@ -5375,6 +5396,18 @@ fn typedDiagnostics(allocator: std.mem.Allocator, source: []const u8, strict_fol
 }
 
 fn typedDiagnosticsWithImportFacts(allocator: std.mem.Allocator, source: []const u8, strict_follows: bool, borrow_imports: bool) ![]SeenDiagnostic {
+    return typedDiagnosticsImpl(allocator, source, strict_follows, borrow_imports, true);
+}
+
+/// `with_scopes` is false for a caller that builds a checker with no parser
+/// record. A captured binding then has no type.
+fn typedDiagnosticsImpl(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    strict_follows: bool,
+    borrow_imports: bool,
+    with_scopes: bool,
+) ![]SeenDiagnostic {
     var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
@@ -5406,6 +5439,7 @@ fn typedDiagnosticsWithImportFacts(allocator: std.mem.Allocator, source: []const
     defer checker.deinit();
     checker.import_facts = if (import_facts) |*facts| facts else null;
     checker.strict_checker_follows = strict_follows;
+    if (with_scopes) checker.scopes = &parser.scopes;
     _ = try checker.check(root);
 
     var out = std.ArrayList(SeenDiagnostic).empty;
@@ -6544,6 +6578,7 @@ test "TypeChecker tracks schema enum members beyond 32 values" {
     } });
 
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
+    checker.scopes = &parser.scopes;
     defer checker.deinit();
 
     try std.testing.expectEqual(@as(u32, 0), try checker.check(root));
@@ -6693,6 +6728,7 @@ fn formatCallType(source: []const u8, callee: []const u8, buf: []u8) ![]const u8
     } });
 
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
+    checker.scopes = &parser.scopes;
     defer checker.deinit();
     _ = try checker.check(root);
 
@@ -7878,6 +7914,7 @@ test "a call that merely carries a callback keeps its mismatch at the outer retu
     } });
 
     var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
+    checker.scopes = &parser.scopes;
     defer checker.deinit();
     _ = try checker.check(root);
 
@@ -8312,4 +8349,252 @@ test "narrowing: more kills than the join buffer holds still kill every narrowin
     // Control: a few kills fit the buffer, and `x` keeps its narrowing.
     try expectKindCounts(manyKills(3, false), accepted);
     try expectKindCounts(manyKills(3, true), refused_once);
+}
+
+/// The `type_mismatch` diagnostics (ZTS200) `source` produces.
+fn expectTypeMismatches(source: []const u8, expected: usize) !void {
+    const allocator = std.testing.allocator;
+    const seen = try typedDiagnostics(allocator, source, false);
+    defer freeSeenDiagnostics(allocator, seen);
+    const actual = countKind(seen, .type_mismatch);
+    if (actual != expected) {
+        for (seen) |d| std.debug.print("diagnostic: {s}\n", .{d.message});
+    }
+    try std.testing.expectEqual(expected, actual);
+}
+
+test "capture: an assignment through a captured let is checked against its declared type" {
+    // cap_assign.ts. The target is an `upvalue` reference, whose key is not the
+    // declaration's, so the assignment lookup found no type and checked nothing.
+    const head =
+        \\function run(input: string | undefined): number {
+        \\  let x: string = "a";
+        \\  const f = (): number => {
+        \\    x = VALUE;
+        \\    return 1;
+        \\  };
+        \\  return f();
+        \\}
+    ;
+    try expectTypeMismatches(withMarker(head, "VALUE", "input"), 1);
+    // A value the declared type admits passes through the capture.
+    try expectTypeMismatches(withMarker(head, "VALUE", "\"b\""), 0);
+    // Control: the same assignment outside the closure.
+    try expectTypeMismatches(
+        \\function run(input: string | undefined): number {
+        \\  let x: string = "a";
+        \\  x = input;
+        \\  return 1;
+        \\}
+    , 1);
+}
+
+test "capture: an assignment through a transitive capture is checked" {
+    // The inner closure's upvalue names the declaration in `run`, two functions
+    // out, through the middle closure's own upvalue.
+    const source =
+        \\function run(input: string | undefined): number {
+        \\  let x: string = "a";
+        \\  const outer = (): number => {
+        \\    const inner = (): number => {
+        \\      x = VALUE;
+        \\      return 1;
+        \\    };
+        \\    return inner();
+        \\  };
+        \\  return outer();
+        \\}
+    ;
+    try expectTypeMismatches(withMarker(source, "VALUE", "input"), 1);
+    try expectTypeMismatches(withMarker(source, "VALUE", "\"b\""), 0);
+}
+
+test "capture: an assignment to a captured parameter is checked" {
+    const source =
+        \\function run(x: string, input: string | undefined): number {
+        \\  const f = (): number => {
+        \\    x = VALUE;
+        \\    return 1;
+        \\  };
+        \\  return f();
+        \\}
+    ;
+    try expectTypeMismatches(withMarker(source, "VALUE", "input"), 1);
+    try expectTypeMismatches(withMarker(source, "VALUE", "\"b\""), 0);
+}
+
+test "assignment: a parameter is checked against its declared type" {
+    // p16_param_assign.ts. The assignment arm read `binding_types`, which holds
+    // no parameter, so the check was skipped.
+    const source =
+        \\function run(x: string, input: string | undefined): number {
+        \\  x = VALUE;
+        \\  return 1;
+        \\}
+    ;
+    try expectTypeMismatches(withMarker(source, "VALUE", "input"), 1);
+    try expectTypeMismatches(withMarker(source, "VALUE", "\"b\""), 0);
+    // Control p16_ctrl.ts: a `let` with the same declared type.
+    try expectTypeMismatches(
+        \\function run(input: string | undefined): number {
+        \\  let x: string = "a";
+        \\  x = input;
+        \\  return 1;
+        \\}
+    , 1);
+}
+
+/// Replace the first `marker` in `source` with `value`.
+fn withMarker(comptime source: []const u8, comptime marker: []const u8, comptime value: []const u8) []const u8 {
+    const at = comptime std.mem.indexOf(u8, source, marker).?;
+    return source[0..at] ++ value ++ source[at + marker.len ..];
+}
+
+test "capture: a closure over a for...of binding reads that binding, not an outer name" {
+    // p1_unsound.ts and p1_forof_shadow.ts. `i` is a `for...of` binding, which
+    // no name search saw, so the capture resolved to the parameter `i`.
+    const source =
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function run(items: ELEM[], i: OUTER): number {
+        \\  let n = 0;
+        \\  for (const i of items) {
+        \\    const g = (): number => needS(i);
+        \\    n = n + g();
+        \\  }
+        \\  return n;
+        \\}
+    ;
+    // The element can be undefined and the outer `i` is a string: refused.
+    try expectKindCounts(withMarker(withMarker(source, "ELEM", "(string | undefined)"), "OUTER", "string"), refused_once);
+    // The element is a string and the outer `i` is a number: accepted.
+    try expectKindCounts(withMarker(withMarker(source, "ELEM", "string"), "OUTER", "number"), accepted);
+    // Control p1_unsound_direct.ts: the same call outside the closure.
+    try expectKindCounts(
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function run(items: (string | undefined)[]): number {
+        \\  let n = 0;
+        \\  for (const i of items) {
+        \\    n = n + needS(i);
+        \\  }
+        \\  return n;
+        \\}
+    , refused_once);
+    // Control p1_ctrl.ts: no outer name to confuse it with.
+    try expectKindCounts(
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function run(items: string[]): number {
+        \\  let n = 0;
+        \\  for (const i of items) {
+        \\    const g = (): number => needS(i);
+        \\    n = n + g();
+        \\  }
+        \\  return n;
+        \\}
+    , accepted);
+}
+
+test "capture: a closure over a match pattern binding reads that binding" {
+    // p2_unsound.ts and p2_match_binding.ts. A name search did not see the
+    // pattern binding `text`, so the capture resolved to the parameter `text`.
+    const source =
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function run(m: { kind: "a"; text: FIELD } | { kind: "b" }, text: OUTER): number {
+        \\  return match (m) {
+        \\    when { kind: "a", text }: ((): number => needS(text))()
+        \\    default: 0
+        \\  };
+        \\}
+    ;
+    try expectKindCounts(withMarker(withMarker(source, "FIELD", "string | undefined"), "OUTER", "string"), refused_once);
+    try expectKindCounts(withMarker(withMarker(source, "FIELD", "string"), "OUTER", "number"), accepted);
+    // Control p2_unsound_direct.ts: the same call outside the closure.
+    try expectKindCounts(
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function run(m: { kind: "a"; text: string | undefined } | { kind: "b" }): number {
+        \\  return match (m) {
+        \\    when { kind: "a", text }: needS(text)
+        \\    default: 0
+        \\  };
+        \\}
+    , refused_once);
+    // Control p2_ctrl.ts: no outer name to confuse it with.
+    try expectKindCounts(
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function run(m: { kind: "a"; text: string } | { kind: "b" }): number {
+        \\  return match (m) {
+        \\    when { kind: "a", text }: ((): number => needS(text))()
+        \\    default: 0
+        \\  };
+        \\}
+    , accepted);
+}
+
+test "capture: a captured binding is typed from its declaration and not from the narrowing at the closure" {
+    // The closure can run when the narrowing no longer holds, so it reads the
+    // declared type `string | undefined` and the call is refused.
+    try expectKindCounts(
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function run(input: string | undefined): number {
+        \\  if (input === undefined) {
+        \\    return 0;
+        \\  }
+        \\  const g = (): number => needS(input);
+        \\  return g();
+        \\}
+    , refused_once);
+    // A guard inside the closure narrows the captured name there.
+    try expectKindCounts(
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function run(input: string | undefined): number {
+        \\  const g = (): number => {
+        \\    if (input === undefined) {
+        \\      return 0;
+        \\    }
+        \\    return needS(input);
+        \\  };
+        \\  return g();
+        \\}
+    , accepted);
+}
+
+test "capture: without the parser record a captured binding has no type" {
+    // The same source as the refusal above, from a caller that sets no
+    // `scopes`. The capture is unknown: nothing is checked and nothing is
+    // granted, and no name search finds the parameter instead.
+    const allocator = std.testing.allocator;
+    const source =
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function run(items: (string | undefined)[], i: string): number {
+        \\  let n = 0;
+        \\  for (const i of items) {
+        \\    const g = (): number => needS(i);
+        \\    n = n + g();
+        \\  }
+        \\  return n;
+        \\}
+    ;
+    const without = try typedDiagnosticsImpl(allocator, source, false, false, false);
+    defer freeSeenDiagnostics(allocator, without);
+    try std.testing.expectEqual(@as(usize, 0), countKind(without, .arg_type_mismatch));
+    const with = try typedDiagnosticsImpl(allocator, source, false, false, true);
+    defer freeSeenDiagnostics(allocator, with);
+    try std.testing.expectEqual(@as(usize, 1), countKind(with, .arg_type_mismatch));
 }

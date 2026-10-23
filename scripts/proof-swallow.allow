@@ -121,7 +121,6 @@ packages/zts/src/type_checker.zig bindPatternBindings catch-poison
 packages/zts/src/type_checker.zig bindVarDeclaration catch-poison
 packages/zts/src/type_checker.zig endNarrowScope catch-poison
 packages/zts/src/type_checker.zig inferObjectLiteralType catch-block
-packages/zts/src/type_checker.zig pushActiveDeclared catch-poison
 packages/zts/src/type_checker.zig putNarrowed catch-poison
 packages/zts/src/type_checker.zig recordContextType catch-poison
 packages/zts/src/type_checker.zig recordNarrowChange catch-poison

@@ -2051,6 +2051,7 @@ fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32) !void {
 
     var type_checker = type_checker_mod.TypeChecker.init(allocator, ir_view, &atoms, &env);
     defer type_checker.deinit();
+    type_checker.scopes = &parser.scopes;
     _ = try type_checker.check(root);
 
     var verifier = HandlerVerifier.init(allocator, ir_view, &atoms, &env, &type_checker);

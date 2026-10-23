@@ -549,6 +549,7 @@ fn analyzeImportedFunction(
     if (type_check_clean) {
         if (type_env_storage.envPtr()) |type_env| {
             type_checker = zts.TypeChecker.init(allocator, view, capabilities.atoms, type_env);
+            type_checker.?.scopes = &file.source_owner.parser.scopes;
             const type_errors = type_checker.?.check(file.root) catch blk: {
                 type_check_clean = false;
                 break :blk 0;
