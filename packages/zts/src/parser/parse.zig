@@ -39,10 +39,6 @@ const Binding = scope_mod.Binding;
 
 const ErrorList = error_mod.ErrorList;
 
-pub const ExpressionProfile = enum {
-    kernel_expression,
-};
-
 pub const AdmissionFailure = union(enum) {
     diagnostic: type_syntax.AdmissionDiagnostic,
     unterminated_comment: type_syntax.AdmissionCommentFailure,
@@ -237,7 +233,7 @@ pub const Parser = struct {
     // Context flags
     in_loop: bool,
     in_function: bool,
-    expression_profile: ?ExpressionProfile,
+    expression_profile: bool,
     /// The scrutinee of the `match` currently being parsed. A type-test pattern
     /// lowers to a narrowing test over it (spec 5.5), so the pattern parser
     /// needs the node the arms are selecting on.
@@ -296,7 +292,7 @@ pub const Parser = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) !Parser {
-        return initWithProfile(allocator, allocator, source, null, false, null, false);
+        return initWithProfile(allocator, allocator, source, false, false, null, false);
     }
 
     /// Opt in before parsing only when source outlives this parser and any
@@ -312,11 +308,11 @@ pub const Parser = struct {
         type_allocator: std.mem.Allocator,
         source: []const u8,
     ) !Parser {
-        return initWithProfile(allocator, type_allocator, source, null, true, null, false);
+        return initWithProfile(allocator, type_allocator, source, false, true, null, false);
     }
 
-    pub fn initExpression(allocator: std.mem.Allocator, source: []const u8, profile: ExpressionProfile) !Parser {
-        return initWithProfile(allocator, allocator, source, profile, false, null, false);
+    pub fn initExpression(allocator: std.mem.Allocator, source: []const u8) !Parser {
+        return initWithProfile(allocator, allocator, source, true, false, null, false);
     }
 
     /// Private direct-source admission parser. It owns the syntax collector and
@@ -327,7 +323,7 @@ pub const Parser = struct {
         source: []const u8,
         mode: type_syntax.AdmissionMode,
     ) !Parser {
-        return initWithProfile(allocator, type_allocator, source, null, true, mode, false);
+        return initWithProfile(allocator, type_allocator, source, false, true, mode, false);
     }
 
     pub fn initSourceObserver(
@@ -336,14 +332,14 @@ pub const Parser = struct {
         source: []const u8,
         mode: type_syntax.AdmissionMode,
     ) !Parser {
-        return initWithProfile(allocator, type_allocator, source, null, true, mode, true);
+        return initWithProfile(allocator, type_allocator, source, false, true, mode, true);
     }
 
     fn initWithProfile(
         allocator: std.mem.Allocator,
         type_allocator: std.mem.Allocator,
         source: []const u8,
-        profile: ?ExpressionProfile,
+        expression_profile: bool,
         parse_type_syntax: bool,
         admission_mode: ?type_syntax.AdmissionMode,
         source_only: bool,
@@ -393,7 +389,7 @@ pub const Parser = struct {
             .atoms = null,
             .in_loop = false,
             .in_function = false,
-            .expression_profile = profile,
+            .expression_profile = expression_profile,
         };
         if (parser.admission) |*collector| collector.source = source;
         if (parser.admission_observations) |*history| history.source = source;
@@ -1212,7 +1208,7 @@ pub const Parser = struct {
     /// Parse exactly one expression with the profile selected by
     /// `initExpression`, using the same Pratt parser as full programs.
     pub fn parseExpressionOnly(self: *Parser) anyerror!NodeIndex {
-        if (self.expression_profile == null) return error.InvalidParserMode;
+        if (!self.expression_profile) return error.InvalidParserMode;
         if (self.check(.eof)) {
             self.errors.addErrorAt(.unexpected_eof, self.current, "expected expression");
             return error.UnexpectedToken;
@@ -1227,24 +1223,8 @@ pub const Parser = struct {
         return root;
     }
 
-    /// Parse one primary/unary/aggregate root and leave trailing input alone.
-    /// This is profile-only because it exists for the legacy JSON.parse
-    /// compatibility contract; full programs must continue to consume their
-    /// complete grammar.
-    pub fn parseExpressionPrefix(self: *Parser) anyerror!NodeIndex {
-        if (self.expression_profile == null) return error.InvalidParserMode;
-        if (self.check(.eof)) {
-            self.errors.addErrorAt(.unexpected_eof, self.current, "expected expression");
-            return error.UnexpectedToken;
-        }
-
-        const root = try self.parseExpression(.call);
-        if (self.errors.hasErrors()) return error.ParseError;
-        return root;
-    }
-
     fn recursionLimit(self: *const Parser) u32 {
-        return if (self.expression_profile != null) 64 else max_recursion_depth;
+        return if (self.expression_profile) 64 else max_recursion_depth;
     }
 
     fn tryConsumeTypeOnlyModule(self: *Parser) !bool {
@@ -5047,7 +5027,7 @@ pub const Parser = struct {
         return switch (op_tok.type) {
             // Loose equality is not supported - use strict equality
             .eq => {
-                if (self.expression_profile != null) {
+                if (self.expression_profile) {
                     self.advance();
                     const right = try self.parseExpression(prec);
                     return try self.nodes.add(Node.binaryOp(loc, .loose_eq, left, right));
@@ -5056,7 +5036,7 @@ pub const Parser = struct {
                 return error.ParseError;
             },
             .ne => {
-                if (self.expression_profile != null) {
+                if (self.expression_profile) {
                     self.advance();
                     const right = try self.parseExpression(prec);
                     return try self.nodes.add(Node.binaryOp(loc, .loose_neq, left, right));
@@ -5095,7 +5075,7 @@ pub const Parser = struct {
             => {
                 // In JavaScript, a unary operator on the left of ** is a syntax
                 // error (e.g. -3**2 is ambiguous). Require parentheses.
-                if (self.expression_profile == null and op_tok.type == .star_star and self.nodes.getTag(left) == .unary_op) {
+                if (!self.expression_profile and op_tok.type == .star_star and self.nodes.getTag(left) == .unary_op) {
                     self.errors.addErrorAt(.unsupported_feature, op_tok, "unary operator before '**' requires parentheses: (-3)**2 or -(3**2)");
                     return error.ParseError;
                 }
@@ -5375,7 +5355,7 @@ pub const Parser = struct {
         const has_separator = self.current.has_separator;
         self.advance();
 
-        if (self.expression_profile != null) {
+        if (self.expression_profile) {
             return self.parseExpressionNumber(loc, text);
         }
 
@@ -5489,7 +5469,7 @@ pub const Parser = struct {
         if (try self.observeCommittedString(token)) return error.AdmissionRefused;
         self.advance();
 
-        if (self.expression_profile != null) return self.addExpressionStringNode(token);
+        if (self.expression_profile) return self.addExpressionStringNode(token);
 
         // Strip quotes
         const loc = token.location();
@@ -5543,7 +5523,7 @@ pub const Parser = struct {
         // it does not survive as a distinct core IR node.
         const text = self.current.text(self.source);
         self.advance();
-        if (self.expression_profile != null and (text.len < 2 or text[text.len - 1] != '`')) {
+        if (self.expression_profile and (text.len < 2 or text[text.len - 1] != '`')) {
             self.errors.addError(.unterminated_template, loc, "unterminated template literal");
             return error.UnexpectedToken;
         }
@@ -5763,7 +5743,7 @@ pub const Parser = struct {
                         const key = self.current;
                         if (try self.observeCommittedString(key)) return error.AdmissionRefused;
                         self.advance();
-                        if (self.expression_profile != null) {
+                        if (self.expression_profile) {
                             key_node = try self.addExpressionStringNode(key);
                         } else {
                             const text = key.text(self.source);
@@ -9084,7 +9064,7 @@ test "unsupported: loose equality ==" {
 test "kernel expression profile preserves null and loose equality in IR" {
     const allocator = std.testing.allocator;
 
-    var parser = try Parser.initExpression(allocator, "null == undefined", .kernel_expression);
+    var parser = try Parser.initExpression(allocator, "null == undefined");
     defer parser.deinit();
 
     const root = try parser.parseExpressionOnly();
@@ -9096,24 +9076,11 @@ test "kernel expression profile preserves null and loose equality in IR" {
     try std.testing.expectEqual(NodeTag.lit_undefined, view.getTag(binary.right).?);
 }
 
-test "kernel expression profile parses one aggregate root prefix" {
-    const allocator = std.testing.allocator;
-    const source = "{ loose: [1, 2] } trailing";
-
-    var parser = try Parser.initExpression(allocator, source, .kernel_expression);
-    defer parser.deinit();
-
-    const root = try parser.parseExpressionPrefix();
-    try std.testing.expectEqual(NodeTag.object_literal, parser.nodes.getTag(root));
-    try std.testing.expectEqual(TokenType.identifier, parser.current.type);
-    try std.testing.expectEqualStrings("trailing", parser.current.text(source));
-}
-
 test "both profiles refuse the pipe operator with the same diagnostic" {
     // Both profiles refuse `|>` with one kind and one message.
     const allocator = std.testing.allocator;
 
-    var expression_parser = try Parser.initExpression(allocator, "\"value\" |> hash", .kernel_expression);
+    var expression_parser = try Parser.initExpression(allocator, "\"value\" |> hash");
     defer expression_parser.deinit();
     try std.testing.expectError(error.ParseError, expression_parser.parseExpressionOnly());
     try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, expression_parser.getErrors()[0].kind);
@@ -9128,7 +9095,7 @@ test "both profiles refuse the pipe operator with the same diagnostic" {
 test "kernel expression numeric separators remain isolated from programs" {
     const allocator = std.testing.allocator;
 
-    var expression_parser = try Parser.initExpression(allocator, "1_000", .kernel_expression);
+    var expression_parser = try Parser.initExpression(allocator, "1_000");
     defer expression_parser.deinit();
     const root = try expression_parser.parseExpressionOnly();
     const view = ir.IrView.fromIRStore(&expression_parser.nodes, &expression_parser.constants);
@@ -9288,7 +9255,7 @@ test "the legal escapes still parse" {
 test "kernel expression parsing decodes unicode escapes like programs" {
     const allocator = std.testing.allocator;
 
-    var expression_parser = try Parser.initExpression(allocator, "\"caf\\u00e9\"", .kernel_expression);
+    var expression_parser = try Parser.initExpression(allocator, "\"caf\\u00e9\"");
     defer expression_parser.deinit();
     const root = try expression_parser.parseExpressionOnly();
     const view = ir.IrView.fromIRStore(&expression_parser.nodes, &expression_parser.constants);
@@ -9298,7 +9265,7 @@ test "kernel expression parsing decodes unicode escapes like programs" {
 test "kernel expression unary before exponent preserves its legacy grammar" {
     const allocator = std.testing.allocator;
 
-    var expression_parser = try Parser.initExpression(allocator, "-3 ** 2", .kernel_expression);
+    var expression_parser = try Parser.initExpression(allocator, "-3 ** 2");
     defer expression_parser.deinit();
     const root = try expression_parser.parseExpressionOnly();
     const view = ir.IrView.fromIRStore(&expression_parser.nodes, &expression_parser.constants);

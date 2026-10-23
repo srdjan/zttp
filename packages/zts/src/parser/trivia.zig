@@ -206,53 +206,6 @@ fn firstOnLine(source: []const u8, offset: u32) bool {
 }
 
 // ---------------------------------------------------------------------------
-// Attachment
-// ---------------------------------------------------------------------------
-//
-// Attachment is a query over offsets rather than a field on a node. A node
-// carries the byte span of the token that opened it, so "the comments directly
-// above this node" and "the comment on this node's line" are both answerable
-// from the trivia list and the node's own position, and no node has to grow a
-// pointer for the printer's benefit.
-
-/// The own-line comments directly above `node_start`, with no code between them
-/// and it. A blank-line run does not break the attachment - a comment separated
-/// from its declaration by a blank line still documents it - but a comment that
-/// another declaration sits under is that declaration's, not this one's.
-///
-/// The result is a sub-slice of `trivia`, so it stays in source order.
-pub fn leadingFor(trivia: []const Trivia, node_start: u32) []const Trivia {
-    var end: usize = 0;
-    while (end < trivia.len and trivia[end].start < node_start) end += 1;
-
-    var begin = end;
-    while (begin > 0) {
-        const t = trivia[begin - 1];
-        if (t.kind == .blank_line_run) {
-            begin -= 1;
-            continue;
-        }
-        if (!t.own_line) break;
-        begin -= 1;
-    }
-
-    // Trim blank runs off both ends: they separate, they do not attach.
-    while (begin < end and trivia[begin].kind == .blank_line_run) begin += 1;
-    while (end > begin and trivia[end - 1].kind == .blank_line_run) end -= 1;
-    return trivia[begin..end];
-}
-
-/// The trailing comment on `line`, if any: a comment that shares its line with
-/// code and therefore stays on it.
-pub fn trailingOn(trivia: []const Trivia, line: u32) ?Trivia {
-    for (trivia) |t| {
-        if (t.kind == .blank_line_run) continue;
-        if (t.line == line and !t.own_line) return t;
-    }
-    return null;
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -293,9 +246,6 @@ test "a trailing comment is distinguished from an own-line one" {
     try testing.expectEqualStrings("// trailing", source[t[0].start..t[0].end]);
     try testing.expect(t[1].own_line);
     try testing.expectEqualStrings("// own line", source[t[1].start..t[1].end]);
-
-    try testing.expect(trailingOn(t, 1) != null);
-    try testing.expect(trailingOn(t, 2) == null);
 }
 
 test "a block comment keeps its bytes verbatim across lines" {
@@ -329,71 +279,6 @@ test "a single newline between declarations is not a blank run" {
     const t = try collectTest("const a = 1;\nconst b = 2;\n");
     defer testing.allocator.free(t);
     try testing.expectEqual(@as(usize, 0), t.len);
-}
-
-test "a comment above a declaration attaches to it and not to the one before" {
-    const source =
-        \\const a = 1;
-        \\// documents b
-        \\const b = 2;
-        \\
-    ;
-    const t = try collectTest(source);
-    defer testing.allocator.free(t);
-
-    const b_start: u32 = @intCast(std.mem.indexOf(u8, source, "const b").?);
-    const leading_b = leadingFor(t, b_start);
-    try testing.expectEqual(@as(usize, 1), leading_b.len);
-    try testing.expectEqualStrings("// documents b", source[leading_b[0].start..leading_b[0].end]);
-
-    // The declaration before it owns nothing: the comment is below it.
-    const a_start: u32 = @intCast(std.mem.indexOf(u8, source, "const a").?);
-    try testing.expectEqual(@as(usize, 0), leadingFor(t, a_start).len);
-}
-
-test "a trailing comment does not attach to the next declaration" {
-    const source =
-        \\const a = 1; // about a
-        \\const b = 2;
-        \\
-    ;
-    const t = try collectTest(source);
-    defer testing.allocator.free(t);
-    const b_start: u32 = @intCast(std.mem.indexOf(u8, source, "const b").?);
-    try testing.expectEqual(@as(usize, 0), leadingFor(t, b_start).len);
-}
-
-test "a blank line separates but does not detach" {
-    const source =
-        \\const a = 1;
-        \\
-        \\// documents b
-        \\
-        \\const b = 2;
-        \\
-    ;
-    const t = try collectTest(source);
-    defer testing.allocator.free(t);
-    const b_start: u32 = @intCast(std.mem.indexOf(u8, source, "const b").?);
-    const leading_b = leadingFor(t, b_start);
-    try testing.expectEqual(@as(usize, 1), leading_b.len);
-    try testing.expectEqualStrings("// documents b", source[leading_b[0].start..leading_b[0].end]);
-}
-
-test "consecutive own-line comments attach as one block" {
-    const source =
-        \\// first
-        \\// second
-        \\const a = 1;
-        \\
-    ;
-    const t = try collectTest(source);
-    defer testing.allocator.free(t);
-    const a_start: u32 = @intCast(std.mem.indexOf(u8, source, "const a").?);
-    const leading = leadingFor(t, a_start);
-    try testing.expectEqual(@as(usize, 2), leading.len);
-    try testing.expectEqualStrings("// first", source[leading[0].start..leading[0].end]);
-    try testing.expectEqualStrings("// second", source[leading[1].start..leading[1].end]);
 }
 
 test "trivia offsets index the source they were collected from" {

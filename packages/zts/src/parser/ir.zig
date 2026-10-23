@@ -928,11 +928,6 @@ pub const IRStore = struct {
         return self.data.items[idx];
     }
 
-    /// Get extra data slice
-    pub fn getExtra(self: *const IRStore, start: u32, count: u32) []const u32 {
-        return self.extra.items[start..][0..count];
-    }
-
     /// Add index list and return start position
     pub fn addIndexList(self: *IRStore, indices: []const NodeIndex) !NodeIndex {
         if (indices.len == 0) return null_node;
@@ -952,39 +947,6 @@ pub const IRStore = struct {
     /// Node count
     pub fn len(self: *const IRStore) usize {
         return self.tags.items.len;
-    }
-
-    // --- Convenience methods for common node types ---
-
-    /// Add integer literal
-    pub fn addLitInt(self: *IRStore, loc: SourceLocation, value: i32) !NodeIndex {
-        return self.addNode(.lit_int, loc, DataPayload.fromInt(value));
-    }
-
-    /// Add float literal (idx into constant pool)
-    pub fn addLitFloat(self: *IRStore, loc: SourceLocation, pool_idx: u16) !NodeIndex {
-        return self.addNode(.lit_float, loc, .{ .a = pool_idx, .b = 0 });
-    }
-
-    /// Add binary expression
-    pub fn addBinary(self: *IRStore, loc: SourceLocation, op: BinaryOp, left: NodeIndex, right: NodeIndex) !NodeIndex {
-        return self.addNode(.binary_op, loc, try DataPayload.fromBinary(op, left, right));
-    }
-
-    /// Add unary expression
-    pub fn addUnary(self: *IRStore, loc: SourceLocation, op: UnaryOp, operand: NodeIndex) !NodeIndex {
-        return self.addNode(.unary_op, loc, .{ .a = @backingInt(op), .b = operand });
-    }
-
-    /// Add identifier reference
-    pub fn addIdentifier(self: *IRStore, loc: SourceLocation, binding: BindingRef) !NodeIndex {
-        // Pack binding: scope_id(16) | slot(16) in a, kind(8) in b
-        const idx = try self.addNode(.identifier, loc, .{
-            .a = (@as(u32, binding.scope_id) << 16) | binding.slot,
-            .b = @backingInt(binding.kind),
-        });
-        self.setBindingName(idx, binding.name_atom);
-        return idx;
     }
 
     /// Unpack identifier binding
@@ -1486,14 +1448,14 @@ test "IRStore basic operations" {
     const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
 
     // Add integer literal
-    const idx1 = try store.addLitInt(loc, 42);
+    const idx1 = try store.add(Node.litInt(loc, 42));
     try std.testing.expectEqual(@as(NodeIndex, 0), idx1);
     try std.testing.expectEqual(NodeTag.lit_int, store.getTag(idx1));
     try std.testing.expectEqual(@as(i32, 42), store.getData(idx1).toInt());
 
     // Add binary expression
-    const idx2 = try store.addLitInt(loc, 10);
-    const idx3 = try store.addBinary(loc, .add, idx1, idx2);
+    const idx2 = try store.add(Node.litInt(loc, 10));
+    const idx3 = try store.add(Node.binaryOp(loc, .add, idx1, idx2));
 
     try std.testing.expectEqual(NodeTag.binary_op, store.getTag(idx3));
     const bin = store.getData(idx3).toBinary();
@@ -1515,7 +1477,7 @@ test "IRStore identifier binding" {
         .kind = .upvalue,
     };
 
-    const idx = try store.addIdentifier(loc, binding);
+    const idx = try store.add(Node.identifier(loc, binding));
     const unpacked = store.getBinding(idx);
 
     try std.testing.expectEqual(@as(ScopeId, 5), unpacked.scope_id);
@@ -1568,7 +1530,7 @@ test "IRStore extra data" {
 
     try std.testing.expectEqual(@as(u32, 0), start);
 
-    const retrieved = store.getExtra(start, 4);
+    const retrieved = store.extra.items[start..][0..4];
     try std.testing.expectEqual(@as(u32, 10), retrieved[0]);
     try std.testing.expectEqual(@as(u32, 20), retrieved[1]);
     try std.testing.expectEqual(@as(u32, 30), retrieved[2]);
@@ -1647,11 +1609,11 @@ test "packed node operands reject overflow and preserve nullable sentinels" {
     const view = IrView.fromIRStore(&store, &constants);
     const loc: SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
     const max = std.math.maxInt(u24);
-    const binary = try store.addBinary(loc, .mul, max, 0x1000000);
+    const binary = try store.add(Node.binaryOp(loc, .mul, max, 0x1000000));
     try std.testing.expectEqual(@as(NodeIndex, max), view.getBinary(binary).?.left);
     try std.testing.expectEqual(@as(NodeIndex, 0x1000000), view.getBinary(binary).?.right);
-    try std.testing.expectError(error.NodeIndexOverflow, store.addBinary(loc, .add, max + 1, 0));
-    try std.testing.expectError(error.NodeIndexOverflow, store.addBinary(loc, .add, null_node, 0));
+    try std.testing.expectError(error.NodeIndexOverflow, store.add(Node.binaryOp(loc, .add, max + 1, 0)));
+    try std.testing.expectError(error.NodeIndexOverflow, store.add(Node.binaryOp(loc, .add, null_node, 0)));
     const assignment = Node{ .tag = .assignment, .loc = loc, .data = .{ .assignment = .{ .target = 0, .value = max, .op = .add } } };
     const assigned = try store.add(assignment);
     try std.testing.expectEqual(@as(NodeIndex, max), view.getAssignment(assigned).?.value);
@@ -1687,7 +1649,7 @@ test "failed node append preserves the complete parallel prefix" {
             // Cross several growth boundaries, including the initially empty
             // store, so failure is tested for each independently growing column.
             for (0..64) |i| {
-                _ = store.addLitInt(loc, @intCast(i)) catch |err| {
+                _ = store.add(Node.litInt(loc, @intCast(i))) catch |err| {
                     try std.testing.expectEqual(i, store.tags.items.len);
                     try std.testing.expectEqual(i, store.locs.items.len);
                     try std.testing.expectEqual(i, store.data.items.len);
@@ -3200,7 +3162,7 @@ test "expressionChildren reads the operand of the operand-carrying tags from pay
     defer constants.deinit();
     const view = IrView.fromIRStore(&store, &constants);
 
-    const operand = try store.addLitInt(testLoc(), 9);
+    const operand = try store.add(Node.litInt(testLoc(), 9));
     const tags = [_]NodeTag{
         .spread,      .object_spread, .await_expr,     .yield_expr, .throw_stmt,
         .return_stmt, .expr_stmt,     .export_default, .export_all,
@@ -3220,7 +3182,7 @@ test "expressionChildren of a pattern with a default is the default value only" 
     defer constants.deinit();
     const view = IrView.fromIRStore(&store, &constants);
 
-    const default_value = try store.addLitInt(testLoc(), 4);
+    const default_value = try store.add(Node.litInt(testLoc(), 4));
     for ([_]NodeTag{ .pattern_element, .pattern_rest, .pattern_default }) |tag| {
         const with_default = try addPatternNode(&store, tag, default_value);
         try expectViewChildren(view, with_default, &.{.{ .tag = .lit_int, .int = 4 }});
@@ -3236,10 +3198,10 @@ test "expressionChildren of a loop reads init condition update and body in sourc
     defer constants.deinit();
     const view = IrView.fromIRStore(&store, &constants);
 
-    const init_node = try store.addLitInt(testLoc(), 1);
-    const condition = try store.addLitInt(testLoc(), 2);
-    const update = try store.addLitInt(testLoc(), 3);
-    const body = try store.addLitInt(testLoc(), 4);
+    const init_node = try store.add(Node.litInt(testLoc(), 1));
+    const condition = try store.add(Node.litInt(testLoc(), 2));
+    const update = try store.add(Node.litInt(testLoc(), 3));
+    const body = try store.add(Node.litInt(testLoc(), 4));
     const for_node = try store.add(.{
         .tag = .for_stmt,
         .loc = testLoc(),
@@ -3279,8 +3241,8 @@ test "expressionChildren of a for-in are the iterable then the body" {
     defer constants.deinit();
     const view = IrView.fromIRStore(&store, &constants);
 
-    const iterable = try store.addLitInt(testLoc(), 1);
-    const body = try store.addLitInt(testLoc(), 2);
+    const iterable = try store.add(Node.litInt(testLoc(), 1));
+    const body = try store.add(Node.litInt(testLoc(), 2));
     const node = try store.add(.{
         .tag = .for_in_stmt,
         .loc = testLoc(),
@@ -3305,10 +3267,10 @@ test "expressionChildren of a switch and its case clauses read the test and the 
     defer constants.deinit();
     const view = IrView.fromIRStore(&store, &constants);
 
-    const discriminant = try store.addLitInt(testLoc(), 1);
-    const test_expr = try store.addLitInt(testLoc(), 2);
-    const stmt_a = try store.addLitInt(testLoc(), 3);
-    const stmt_b = try store.addLitInt(testLoc(), 4);
+    const discriminant = try store.add(Node.litInt(testLoc(), 1));
+    const test_expr = try store.add(Node.litInt(testLoc(), 2));
+    const stmt_a = try store.add(Node.litInt(testLoc(), 3));
+    const stmt_b = try store.add(Node.litInt(testLoc(), 4));
     const body_list = try store.addIndexList(&.{ stmt_a, stmt_b });
     const clause = try store.add(.{
         .tag = .case_clause,
@@ -3348,8 +3310,8 @@ test "expressionChildren of an object method yields a non-string key before the 
     const view = IrView.fromIRStore(&store, &constants);
 
     const string_key = try store.add(Node.litString(testLoc(), 0));
-    const computed_key = try store.addLitInt(testLoc(), 5);
-    const value = try store.addLitInt(testLoc(), 6);
+    const computed_key = try store.add(Node.litInt(testLoc(), 5));
+    const value = try store.add(Node.litInt(testLoc(), 6));
     for ([_]NodeTag{ .object_property, .object_method, .object_getter, .object_setter }) |tag| {
         const literal_keyed = try store.add(.{
             .tag = tag,
@@ -3376,9 +3338,9 @@ test "expressionChildren of try and labeled statements reads the blocks and the 
     defer constants.deinit();
     const view = IrView.fromIRStore(&store, &constants);
 
-    const try_block = try store.addLitInt(testLoc(), 1);
-    const catch_block = try store.addLitInt(testLoc(), 2);
-    const finally_block = try store.addLitInt(testLoc(), 3);
+    const try_block = try store.add(Node.litInt(testLoc(), 1));
+    const catch_block = try store.add(Node.litInt(testLoc(), 2));
+    const finally_block = try store.add(Node.litInt(testLoc(), 3));
     const try_node = try store.add(.{
         .tag = .try_stmt,
         .loc = testLoc(),
@@ -3423,7 +3385,7 @@ test "expressionChildren of an export specifier is its declaration word only" {
     defer constants.deinit();
     const view = IrView.fromIRStore(&store, &constants);
 
-    const declaration = try store.addLitInt(testLoc(), 8);
+    const declaration = try store.add(Node.litInt(testLoc(), 8));
     const specifier_list = try store.addIndexList(&.{declaration});
     const specifier = try store.add(.{
         .tag = .export_specifier,

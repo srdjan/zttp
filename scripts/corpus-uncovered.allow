@@ -77,7 +77,7 @@ ZTS040 no producer for unexpected_character; `#` and `\` are reported as ZTS047 
 
 # --- Parser kinds produced only by the expression profile ------------------
 
-ZTS007 unexpected_eof is constructed only by parseExpressionOnly and parseExpressionPrefix (the legacy JSON.parse profile); a full program that ends early is reported as ZTS003
+ZTS007 unexpected_eof is constructed only by parseExpressionOnly (the legacy JSON.parse profile); a full program that ends early is reported as ZTS003
 ZTS009 unterminated_template is constructed only under the expression profile; in a full program an unterminated template literal is reported as ZTS047
 
 # --- DEFECT rows: a catalog code that does not fire when it should ---------

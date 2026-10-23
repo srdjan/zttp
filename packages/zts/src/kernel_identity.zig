@@ -100,7 +100,6 @@ const Parsed = struct {
         var parser = parser_mod.JsParser.initExpression(
             allocator,
             source,
-            .kernel_expression,
         ) catch return error.OutOfMemory;
         errdefer parser.deinit();
         parser.setAtomTable(atoms);

@@ -441,23 +441,6 @@ test "two distinct types over the same base do not share a key" {
     try testing.expect(!structurallyEqual(&pool, allocator, user_id, pool.idx_string));
 }
 
-test "two capability interfaces with the same shape do not share a key" {
-    const allocator = testing.allocator;
-    var pool = TypePool.init(allocator);
-    defer pool.deinit(allocator);
-
-    const method = pool.addFunction(allocator, &.{}, pool.idx_void);
-    const clock = pool.addRecord(allocator, &.{stringField(&pool, allocator, "now", method)});
-    const random = pool.addRecord(allocator, &.{stringField(&pool, allocator, "now", method)});
-    try testing.expect(structurallyEqual(&pool, allocator, clock, random));
-
-    pool.markNominal(allocator, clock, "Clock");
-    pool.markNominal(allocator, random, "Random");
-    // The keys were computed above, so branding has to invalidate them or the
-    // memo would answer with the pre-brand identity forever.
-    try testing.expect(!structurallyEqual(&pool, allocator, clock, random));
-}
-
 test "an optional type and its explicit union share one identity" {
     const allocator = testing.allocator;
     var pool = TypePool.init(allocator);

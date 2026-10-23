@@ -5646,7 +5646,7 @@ test "a local read with no declaration behind it is unresolved" {
     var constants = ir.ConstantPool.init(testing.allocator);
     defer constants.deinit();
     const binding: ir.BindingRef = .{ .scope_id = 3, .slot = 1, .name_atom = 0, .kind = .local };
-    const node = try store.addIdentifier(.{ .line = 1, .column = 1, .offset = 0 }, binding);
+    const node = try store.add(ir.Node.identifier(.{ .line = 1, .column = 1, .offset = 0 }, binding));
     var interp = FlowInterp.init(testing.allocator, IrView.fromIRStore(&store, &constants), null);
     defer interp.deinit();
 

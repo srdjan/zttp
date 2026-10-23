@@ -502,7 +502,7 @@ fn checkParseInput(
 ) !void {
     var parser = (switch (mode) {
         .program => Parser.init(allocator, input),
-        .expression => Parser.initExpression(allocator, input, .kernel_expression),
+        .expression => Parser.initExpression(allocator, input),
     }) catch |err| switch (err) {
         error.OutOfMemory => return,
     };
@@ -983,14 +983,14 @@ test "nesting: the parser expression profile refuses nesting past 64" {
         for ([_]usize{ 1, 8 }) |depth| {
             var source = try buildNested(allocator, shape, depth);
             defer source.deinit(allocator);
-            var parser = try Parser.initExpression(allocator, source.items, .kernel_expression);
+            var parser = try Parser.initExpression(allocator, source.items);
             defer parser.deinit();
             _ = try parser.parseExpressionOnly();
         }
         for ([_]usize{ 65, 600, very_deep }) |depth| {
             var source = try buildNested(allocator, shape, depth);
             defer source.deinit(allocator);
-            var parser = try Parser.initExpression(allocator, source.items, .kernel_expression);
+            var parser = try Parser.initExpression(allocator, source.items);
             defer parser.deinit();
             try std.testing.expectError(error.ParseError, parser.parseExpressionOnly());
             try std.testing.expect(parserNestingTooDeep(&parser));

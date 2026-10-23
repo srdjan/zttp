@@ -10168,7 +10168,7 @@ test "shadowed bindings and closure parameters retain their actual owners" {
     try std.testing.expectEqual(inner.scope_id, captured_binding.scope_id);
     const local_binding = store.annotations.items[1].binding;
     try std.testing.expectEqual(local_binding.name_atom, captured_binding.name_atom);
-    const captures = parser.scopes.getUpvalues(inner.scope_id);
+    const captures = parser.scopes.scopes.items[inner.scope_id].upvalues.items;
     try std.testing.expectEqual(@as(usize, 1), captures.len);
     try std.testing.expectEqual(@as(u16, captures[0].slot), captured_binding.slot);
     try std.testing.expectEqual(local_binding.scope_id, captures[0].source_scope_id);

@@ -153,18 +153,6 @@ pub const AdmissionObservationHistory = struct {
             self.diagnostics.items[self.diagnostics.items.len - 1];
     }
 
-    pub fn checkpoint(self: *const AdmissionObservationHistory) usize {
-        return self.diagnostics.items.len;
-    }
-
-    pub fn rollbackUnconfirmed(
-        self: *AdmissionObservationHistory,
-        checkpoint_value: usize,
-    ) void {
-        std.debug.assert(checkpoint_value <= self.diagnostics.items.len);
-        self.diagnostics.items.len = checkpoint_value;
-    }
-
     pub fn record(
         self: *AdmissionObservationHistory,
         diagnostic: AdmissionDiagnostic,
@@ -5843,16 +5831,6 @@ pub const AdmissionEndpointProgress = struct {
     classification_start: u32,
 };
 
-pub fn scanAdmissionEndpoint(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    raw_start: u32,
-    policy: AdmissionEndpointPolicy,
-    caught: *std.ArrayListUnmanaged(AdmissionDiagnostic),
-) !AdmissionEndpointResult {
-    return scanAdmissionEndpointCore(allocator, source, raw_start, policy, caught, null);
-}
-
 pub fn scanAdmissionEndpointWithPresentation(
     allocator: std.mem.Allocator,
     source: []const u8,
@@ -10273,12 +10251,13 @@ test "admitted declaration raw resume preserves caught body endpoints" {
             const body_start = skipTypeWhitespace(source, assign + 1);
             var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
             defer caught.deinit(std.testing.allocator);
-            const admitted_span = switch (try scanAdmissionEndpoint(
+            const admitted_span = switch (try scanAdmissionEndpointCore(
                 std.testing.allocator,
                 source,
                 body_start,
                 .declaration,
                 &caught,
+                null,
             )) {
                 .complete => |span| span,
                 .nesting_too_deep, .unterminated_comment => return error.TestUnexpectedResult,
@@ -10934,7 +10913,7 @@ test "admission collector preserves mode order deduplication and fatal selection
     try std.testing.expectEqual(AdmissionKind.any_type, compiled.items()[0].kind);
 }
 
-test "admission observation history preserves first kind and staged rollback" {
+test "admission observation history preserves the first kind at one position" {
     var history = AdmissionObservationHistory.init(std.testing.allocator);
     defer history.deinit();
 
@@ -10953,15 +10932,6 @@ test "admission observation history preserves first kind and staged rollback" {
 
     try std.testing.expectEqual(@as(usize, 2), history.items().len);
     try std.testing.expectEqual(AdmissionKind.any_type, history.items()[0].kind);
-    try std.testing.expectEqual(AdmissionKind.void_type, history.last().?.kind);
-
-    const checkpoint_value = history.checkpoint();
-    try history.record(.{
-        .kind = .optional_parameter,
-        .span = .{ .start = 20, .end = 21 },
-    });
-    history.rollbackUnconfirmed(checkpoint_value);
-    try std.testing.expectEqual(@as(usize, 2), history.items().len);
     try std.testing.expectEqual(AdmissionKind.void_type, history.last().?.kind);
 }
 
@@ -11957,43 +11927,47 @@ test "admission endpoints retain producer specific delimiters" {
     var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
     defer caught.deinit(std.testing.allocator);
 
-    const variable = try scanAdmissionEndpoint(
+    const variable = try scanAdmissionEndpointCore(
         std.testing.allocator,
         source,
         0,
         .{ .general = .variable },
         &caught,
+        null,
     );
     try std.testing.expectEqual(@as(u32, 6), variable.complete.end);
 
     const function_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '(').?);
-    const named = try scanAdmissionEndpoint(
+    const named = try scanAdmissionEndpointCore(
         std.testing.allocator,
         source,
         function_start,
         .{ .general = .named_return },
         &caught,
+        null,
     );
     const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{').?);
     try std.testing.expectEqual(body_start, named.complete.end);
 
     const arrow_start: u32 = @intCast(std.mem.indexOf(u8, source, "string { body }").?);
-    const arrow = try scanAdmissionEndpoint(
+    const arrow = try scanAdmissionEndpointCore(
         std.testing.allocator,
         source,
         arrow_start,
         .{ .general = .arrow_return },
         &caught,
+        null,
     );
     try std.testing.expectEqual(body_start, arrow.complete.end);
 
     const unmatched = "(string; any), next";
-    const continued = try scanAdmissionEndpoint(
+    const continued = try scanAdmissionEndpointCore(
         std.testing.allocator,
         unmatched,
         0,
         .{ .general = .variable },
         &caught,
+        null,
     );
     try std.testing.expectEqual(
         @as(u32, @intCast(std.mem.indexOfScalar(u8, unmatched, ',').?)),
@@ -12005,12 +11979,13 @@ test "admission endpoint reports only committed unfinished comments" {
     const source = "number /* unfinished";
     var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
     defer caught.deinit(std.testing.allocator);
-    const result = try scanAdmissionEndpoint(
+    const result = try scanAdmissionEndpointCore(
         std.testing.allocator,
         source,
         0,
         .{ .general = .variable },
         &caught,
+        null,
     );
     const failure = switch (result) {
         .unterminated_comment => |failure| failure,
@@ -12021,12 +11996,13 @@ test "admission endpoint reports only committed unfinished comments" {
     try std.testing.expectEqual(@as(usize, 0), caught.items.len);
 
     const bare = "/*";
-    const bare_result = try scanAdmissionEndpoint(
+    const bare_result = try scanAdmissionEndpointCore(
         std.testing.allocator,
         bare,
         0,
         .{ .general = .variable },
         &caught,
+        null,
     );
     const bare_failure = switch (bare_result) {
         .unterminated_comment => |bare_comment| bare_comment,
@@ -12038,12 +12014,13 @@ test "admission endpoint reports only committed unfinished comments" {
     const interface_body = "interface X extends { field: /* unfinished";
     const extends_end: u32 = @intCast(std.mem.indexOf(u8, interface_body, "extends").? + "extends".len);
     const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, interface_body, '{').?);
-    const interface_result = try scanAdmissionEndpoint(
+    const interface_result = try scanAdmissionEndpointCore(
         std.testing.allocator,
         interface_body,
         extends_end,
         .{ .general = .interface_extends },
         &caught,
+        null,
     );
     try std.testing.expectEqual(
         Span{ .start = extends_end, .end = body_start },
@@ -12051,23 +12028,25 @@ test "admission endpoint reports only committed unfinished comments" {
     );
 
     const quoted = "\"/* unfinished\";";
-    const quoted_result = try scanAdmissionEndpoint(
+    const quoted_result = try scanAdmissionEndpointCore(
         std.testing.allocator,
         quoted,
         0,
         .{ .general = .variable },
         &caught,
+        null,
     );
     const semicolon: u32 = @intCast(std.mem.indexOfScalar(u8, quoted, ';').?);
     try std.testing.expectEqual(Span{ .start = 0, .end = semicolon }, quoted_result.complete);
 
     const template = "`/* unfinished`;";
-    const template_result = try scanAdmissionEndpoint(
+    const template_result = try scanAdmissionEndpointCore(
         std.testing.allocator,
         template,
         0,
         .{ .general = .variable },
         &caught,
+        null,
     );
     const template_semicolon: u32 = @intCast(std.mem.indexOfScalar(u8, template, ';').?);
     try std.testing.expectEqual(
@@ -12081,23 +12060,25 @@ test "parameter endpoint follows legacy delimiter depth rules" {
     var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
     defer caught.deinit(std.testing.allocator);
 
-    const result = try scanAdmissionEndpoint(
+    const result = try scanAdmissionEndpointCore(
         std.testing.allocator,
         source,
         0,
         .parameter,
         &caught,
+        null,
     );
     const equals: u32 = @intCast(std.mem.indexOfScalar(u8, source, '=').?);
     try std.testing.expectEqual(equals, result.complete.end);
 
     const inside_brace = "{ value = fallback }, next)";
-    const nested_result = try scanAdmissionEndpoint(
+    const nested_result = try scanAdmissionEndpointCore(
         std.testing.allocator,
         inside_brace,
         0,
         .parameter,
         &caught,
+        null,
     );
     try std.testing.expectEqual(
         @as(u32, @intCast(std.mem.indexOfScalar(u8, inside_brace, '=').?)),
@@ -12110,12 +12091,13 @@ test "return endpoints preserve semicolon and unmatched brace distinctions" {
     defer caught.deinit(std.testing.allocator);
 
     const arrow_source = "string; any => value";
-    const arrow = try scanAdmissionEndpoint(
+    const arrow = try scanAdmissionEndpointCore(
         std.testing.allocator,
         arrow_source,
         0,
         .{ .general = .arrow_return },
         &caught,
+        null,
     );
     try std.testing.expectEqual(
         @as(u32, @intCast(std.mem.indexOf(u8, arrow_source, "=>").?)),
@@ -12124,32 +12106,35 @@ test "return endpoints preserve semicolon and unmatched brace distinctions" {
 
     const unmatched = "string } ; body";
     const semicolon: u32 = @intCast(std.mem.indexOfScalar(u8, unmatched, ';').?);
-    const named = try scanAdmissionEndpoint(
+    const named = try scanAdmissionEndpointCore(
         std.testing.allocator,
         unmatched,
         0,
         .{ .general = .named_return },
         &caught,
+        null,
     );
     try std.testing.expectEqual(semicolon, named.complete.end);
-    const interface = try scanAdmissionEndpoint(
+    const interface = try scanAdmissionEndpointCore(
         std.testing.allocator,
         unmatched,
         0,
         .{ .general = .interface_extends },
         &caught,
+        null,
     );
     try std.testing.expectEqual(semicolon, interface.complete.end);
 
     const full_interface = "interface X extends { field: any }";
     const extends_end: u32 = @intCast(std.mem.indexOf(u8, full_interface, "extends").? + "extends".len);
     const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, full_interface, '{').?);
-    const full_result = try scanAdmissionEndpoint(
+    const full_result = try scanAdmissionEndpointCore(
         std.testing.allocator,
         full_interface,
         extends_end,
         .{ .general = .interface_extends },
         &caught,
+        null,
     );
     try std.testing.expectEqual(body_start, full_result.complete.end);
 }
@@ -12158,12 +12143,13 @@ test "assertion endpoint keeps object braces and stops at expression delimiters"
     const source = "{ field: string }, after";
     var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
     defer caught.deinit(std.testing.allocator);
-    const result = try scanAdmissionEndpoint(
+    const result = try scanAdmissionEndpointCore(
         std.testing.allocator,
         source,
         0,
         .{ .general = .assertion },
         &caught,
+        null,
     );
     try std.testing.expectEqual(
         @as(u32, @intCast(std.mem.indexOfScalar(u8, source, ',').?)),

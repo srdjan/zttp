@@ -70,9 +70,10 @@ pub const Refusal = enum {
     }
 };
 
+/// The soft target. A line with no break point may exceed it.
+const line_width: u32 = 80;
+
 pub const Options = struct {
-    /// The soft target. A line with no break point may exceed it.
-    width: u32 = 80,
     /// Set to the reason when the printer refuses.
     reason_out: ?*Refusal = null,
 };
@@ -83,7 +84,7 @@ pub fn print(allocator: std.mem.Allocator, source: []const u8, options: Options)
     defer arena_inst.deinit();
     const arena = arena_inst.allocator();
 
-    const printed = try printInto(arena, source, options, true);
+    const printed = try printInto(arena, source, options);
     return allocator.dupe(u8, printed);
 }
 
@@ -1639,7 +1640,6 @@ fn printInto(
     arena: std.mem.Allocator,
     source: []const u8,
     options: Options,
-    self_check: bool,
 ) Error![]const u8 {
     if (std.mem.indexOfScalar(u8, source, '\r') != null) {
         return refuse(options, .carriage_return);
@@ -1667,11 +1667,11 @@ fn printInto(
     try markContext(chunks, options);
 
     var p = Printer{ .arena = arena, .options = options };
-    var renderer = Renderer{ .p = &p, .width = options.width };
+    var renderer = Renderer{ .p = &p, .width = line_width };
     try renderer.renderStatements(chunks, 0);
 
     const out = p.out.items;
-    if (self_check) try verify(arena, trivia_items, source, out, options);
+    try verify(arena, trivia_items, source, out, options);
     return out;
 }
 

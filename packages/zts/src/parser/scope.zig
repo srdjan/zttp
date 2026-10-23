@@ -397,11 +397,6 @@ pub const ScopeAnalyzer = struct {
         return &self.scopes.items[id];
     }
 
-    /// Get upvalues for a function scope
-    pub fn getUpvalues(self: *const ScopeAnalyzer, function_scope: ScopeId) []const Upvalue {
-        return self.scopes.items[function_scope].upvalues.items;
-    }
-
     /// Get local count for a function scope
     pub fn getLocalCount(self: *const ScopeAnalyzer, function_scope: ScopeId) u8 {
         return self.scopes.items[function_scope].max_local_count;
@@ -456,7 +451,7 @@ test "nested function creates upvalue" {
     try std.testing.expectEqual(@as(u8, 0), y_ref.slot);
 
     // Check upvalue was created
-    const upvalues = analyzer.getUpvalues(inner_scope_id);
+    const upvalues = analyzer.scopes.items[inner_scope_id].upvalues.items;
     try std.testing.expectEqual(@as(usize, 1), upvalues.len);
     try std.testing.expectEqualStrings("y", upvalues[0].name);
     try std.testing.expectEqual(@as(u8, 0), upvalues[0].capture.local);
@@ -474,12 +469,12 @@ test "transitive capture installs an upvalue in every parent function" {
     const resolved = try analyzer.resolveBinding("value", 1);
     try std.testing.expectEqual(BindingRef.BindingKind.upvalue, resolved.kind);
 
-    const middle_upvalues = analyzer.getUpvalues(middle_scope);
+    const middle_upvalues = analyzer.scopes.items[middle_scope].upvalues.items;
     try std.testing.expectEqual(@as(usize, 1), middle_upvalues.len);
     try std.testing.expectEqual(@as(u8, 0), middle_upvalues[0].capture.local);
     try std.testing.expectEqual(outer_scope, middle_upvalues[0].source_scope_id);
 
-    const inner_upvalues = analyzer.getUpvalues(inner_scope);
+    const inner_upvalues = analyzer.scopes.items[inner_scope].upvalues.items;
     try std.testing.expectEqual(@as(usize, 1), inner_upvalues.len);
     try std.testing.expectEqual(@as(u8, 0), inner_upvalues[0].capture.upvalue);
     try std.testing.expectEqual(outer_scope, inner_upvalues[0].source_scope_id);

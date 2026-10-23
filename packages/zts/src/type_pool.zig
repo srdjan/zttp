@@ -430,19 +430,6 @@ pub const TypePool = struct {
         });
     }
 
-    /// Brand an existing node in place. Used for a capability interface, which
-    /// is resolved as a record first and only then found to be nominal.
-    pub fn markNominal(self: *TypePool, allocator: std.mem.Allocator, idx: TypeIndex, name: []const u8) void {
-        if (idx == null_type_idx or idx >= self.nodes.items.len) return;
-        const n = self.addName(allocator, name);
-        self.nodes.items[idx].nominal = true;
-        self.nodes.items[idx].nominal_name = n;
-        // Branding changes this node's identity and the identity of every type
-        // built over it. Which keys embed it is not tracked, so the whole memo
-        // goes: a stale key is a wrong answer, and recomputing is only slower.
-        self.invalidateTypeKeys(allocator);
-    }
-
     /// Drop every memoized canonical key. Call after any in-place edit to a
     /// node, field, or member that a key could have been computed from.
     pub fn invalidateTypeKeys(self: *TypePool, allocator: std.mem.Allocator) void {
