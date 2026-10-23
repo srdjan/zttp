@@ -15,6 +15,7 @@ pub const max_read_entries: usize = 4096;
 pub const max_read_file_bytes: usize = 32 * 1024 * 1024;
 pub const max_read_set_bytes: usize = 128 * 1024 * 1024;
 var scratch_counter = std.atomic.Value(u64).init(0);
+const scratch_attempts: usize = 16;
 
 pub const ReadState = union(enum) {
     absent,
@@ -72,6 +73,32 @@ pub const Materialized = struct {
         return std.fs.path.resolve(allocator, &.{ self.root, relative_path });
     }
 };
+
+/// Create a scratch directory no other proof owns. A name that already exists
+/// is never reused: a stale or hostile directory would feed old bytes to the
+/// proof. Retries with the next sequence number, up to a bound.
+fn createScratchDir(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    tmp_dir: std.Io.Dir,
+    sec: u64,
+    nsec: u64,
+) ![]u8 {
+    for (0..scratch_attempts) |_| {
+        const sequence = scratch_counter.fetchAdd(1, .seq_cst);
+        const name = try allocator.print("zttp-proof-{d}-{d}-{d}", .{ sec, nsec, sequence });
+        errdefer allocator.free(name);
+        tmp_dir.createDir(io, name, @fromBackingInt(@intCast(0o700))) catch |err| switch (err) {
+            error.PathAlreadyExists => {
+                allocator.free(name);
+                continue;
+            },
+            else => return err,
+        };
+        return name;
+    }
+    return error.ScratchDirectoryExhausted;
+}
 
 pub const Snapshot = struct {
     project_root: []u8,
@@ -149,18 +176,15 @@ pub const Snapshot = struct {
     ) !Materialized {
         var now: std.posix.timespec = undefined;
         _ = std.c.clock_gettime(@fromBackingInt(@intCast(@backingInt(std.posix.CLOCK.REALTIME))), &now);
-        const sequence = scratch_counter.fetchAdd(1, .seq_cst);
-        const name = try allocator.print("zttp-proof-{d}-{d}-{d}", .{ @as(u64, @intCast(now.sec)), @as(u64, @intCast(now.nsec)), sequence });
-        errdefer allocator.free(name);
-        const root = try std.fs.path.resolve(allocator, &.{ "/tmp", name });
-        errdefer allocator.free(root);
-
         var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
         defer io_backend.deinit();
         const io = io_backend.io();
         var tmp_dir = try std.Io.Dir.openDirAbsolute(io, "/tmp", .{});
         defer tmp_dir.close(io);
-        try std.Io.Dir.createDirPath(tmp_dir, io, name);
+        const name = try createScratchDir(allocator, io, tmp_dir, @intCast(now.sec), @intCast(now.nsec));
+        errdefer allocator.free(name);
+        const root = try std.fs.path.resolve(allocator, &.{ "/tmp", name });
+        errdefer allocator.free(root);
         errdefer tmp_dir.deleteTree(io, name) catch {};
 
         for (self.entries) |entry| {
@@ -489,4 +513,24 @@ test "snapshot captures configured SQL and policy inputs regardless of extension
     try testing.expect(saw_policy);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "schema.custom", .data = "changed-schema" });
     try testing.expectError(error.ProofReadSetChanged, snapshot.recheck(testing.allocator));
+}
+
+test "scratch directory creation never reuses an existing directory" {
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    var tmp_dir = try std.Io.Dir.openDirAbsolute(io, "/tmp", .{});
+    defer tmp_dir.close(io);
+
+    // Pre-create the exact name the next call would pick.
+    const taken = try testing.allocator.print("zttp-proof-7-7-{d}", .{scratch_counter.load(.seq_cst)});
+    defer testing.allocator.free(taken);
+    tmp_dir.deleteTree(io, taken) catch {};
+    try std.Io.Dir.createDirPath(tmp_dir, io, taken);
+    defer tmp_dir.deleteTree(io, taken) catch {};
+
+    const name = try createScratchDir(testing.allocator, io, tmp_dir, 7, 7);
+    defer testing.allocator.free(name);
+    defer tmp_dir.deleteTree(io, name) catch {};
+    try testing.expect(!std.mem.eql(u8, taken, name));
 }
