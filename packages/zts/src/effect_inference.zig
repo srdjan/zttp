@@ -2677,7 +2677,7 @@ const ContractProjectionBuilder = struct {
             }
         }
 
-        if (self.facts.genericBindingForReference(binding, .legacy_slot)) |generic| {
+        if (self.facts.genericBindingForReference(binding, .module_reference)) |generic| {
             summary.has_any_call = true;
             if (builtin_modules.fromSpecifier(generic.module_specifier)) |module| {
                 for (module.exports) |exported| {
@@ -2695,7 +2695,7 @@ const ContractProjectionBuilder = struct {
         }
 
         if (self.registry) |registry| {
-            if (self.facts.extensionBindingForReference(binding, .legacy_slot)) |extension| {
+            if (self.facts.extensionBindingForReference(binding, .module_reference)) |extension| {
                 summary.has_any_call = true;
                 const manifest = registry.fromSpecifier(extension.module_specifier) orelse return;
                 for (manifest.exports.items) |exported| {

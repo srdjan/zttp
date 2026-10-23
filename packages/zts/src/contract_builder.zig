@@ -1311,7 +1311,7 @@ pub const ContractBuilder = struct {
                 }
 
                 // Check generic bindings from the module binding registry.
-                if (self.factsRef().genericBindingForReference(binding, .legacy_slot)) |gb| {
+                if (self.factsRef().genericBindingForReference(binding, .module_reference)) |gb| {
                     // Apply contract flags
                     if (gb.flags.sets_bearer_auth) self.api_bearer_auth = true;
                     if (gb.flags.sets_jwt_auth) self.api_jwt_auth = true;
@@ -1343,7 +1343,7 @@ pub const ContractBuilder = struct {
                 // extensions map. `fetch_host` rules also mirror into the
                 // top-level egress.endpoints so runtime egress policy enforcement
                 // sees one uniform list.
-                if (self.factsRef().extensionBindingForReference(binding, .legacy_slot)) |eb| {
+                if (self.factsRef().extensionBindingForReference(binding, .module_reference)) |eb| {
                     for (eb.extractions) |rule| {
                         try self.applyExtensionExtraction(call, eb.module_specifier, rule);
                     }
@@ -1547,7 +1547,7 @@ pub const ContractBuilder = struct {
         binding: ir.BindingRef,
         category: module_binding.ContractCategory,
     ) bool {
-        return self.factsRef().referenceHasCategory(binding, .legacy_slot, category);
+        return self.factsRef().referenceHasCategory(binding, .module_reference, category);
     }
 
     fn getCategoryTarget(self: *ContractBuilder, category: module_binding.ContractCategory) ?CategoryTarget {
@@ -2092,7 +2092,7 @@ pub const ContractBuilder = struct {
                         }
                     } else {
                         // Check for auth flags via generic bindings.
-                        if (self.factsRef().genericBindingForReference(binding, .legacy_slot)) |gb| {
+                        if (self.factsRef().genericBindingForReference(binding, .module_reference)) |gb| {
                             if (gb.flags.sets_bearer_auth) route.requires_bearer = true;
                             if (gb.flags.sets_jwt_auth) route.requires_jwt = true;
                         }
@@ -3149,7 +3149,7 @@ test "a write reached as a function value fails the handler properties closed" {
         bearer_auth: bool,
     }{
         .{ .source = value_ref, .bearer_auth = false },
-        .{ .source = slot_collision, .bearer_auth = true },
+        .{ .source = slot_collision, .bearer_auth = false },
     };
     for (cases) |case| {
         var contract = try buildTestContract(case.source);
@@ -3723,5 +3723,25 @@ test "a schema zttp:validate cannot compile is refused where a call would fail" 
         }
         if (refused != case.refused) std.debug.print("case '{s}': {d} ZTS514, expected {d}\n", .{ case.label, refused, case.refused });
         try std.testing.expectEqual(case.refused, refused);
+    }
+}
+
+test "a local whose slot equals an import's atom index does not enter the env list" {
+    // `length` is a predefined atom, so the import's slot is a small atom index.
+    // `mine` is the fifth local of `handler` and has the same slot number.
+    var contract = try buildTestContract(
+        \\import { env as length } from "zttp:env";
+        \\function handler(req) {
+        \\  const p1 = 1;
+        \\  const p2 = 2;
+        \\  const p3 = 3;
+        \\  const mine = (k) => k;
+        \\  const x = mine("LOCAL_ONLY_NAME");
+        \\  return Response.text(String(x));
+        \\}
+    );
+    defer contract.deinit(std.testing.allocator);
+    for (contract.env.literal.items) |name| {
+        try std.testing.expect(!std.mem.eql(u8, name, "LOCAL_ONLY_NAME"));
     }
 }

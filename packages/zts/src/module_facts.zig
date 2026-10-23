@@ -4,7 +4,7 @@
 //! the import declarations and the module binding registry. Contract builders
 //! and analyzer passes share its immutable records while retaining their own
 //! lookup policies. The type checker matches named imports by slot and binding
-//! kind; other consumers deliberately use raw slots or different filters.
+//! kind; the other consumers match slots of global references with their own filters.
 //!
 //! Built once, then immutable. Nothing appends to a `ModuleFacts` after
 //! `build` returns. `ContractBuilder.build` therefore COPIES `modules` and
@@ -82,13 +82,11 @@ pub const ImportRecord = struct {
     resolution: Resolution,
 };
 
-/// The binding eligibility that one existing consumer applies.
+/// The binding eligibility that a consumer applies.
 ///
 /// `module_reference` admits only references that can name a module import.
-/// `legacy_slot` preserves consumers that historically matched raw slots.
 pub const ReferenceEligibility = enum {
     module_reference,
-    legacy_slot,
 };
 
 pub const ImportResolutionFilter = enum {
@@ -456,7 +454,6 @@ pub const ModuleFacts = struct {
 fn referenceEligible(binding: ir.BindingRef, eligibility: ReferenceEligibility) bool {
     return switch (eligibility) {
         .module_reference => binding.kind == .global or binding.kind == .undeclared_global,
-        .legacy_slot => true,
     };
 }
 
@@ -613,7 +610,7 @@ test "module facts deduplicate a name imported twice" {
     try testing.expectEqual(@as(usize, 1), facts.functions.items[0].names.items.len);
 }
 
-test "filtered legacy lookup skips an earlier unresolved import with the same slot" {
+test "filtered lookup skips an earlier unresolved import with the same slot" {
     const allocator = testing.allocator;
     const h = try Harness.init(allocator,
         \\import { x as m } from "./x.ts";
@@ -638,7 +635,7 @@ test "filtered legacy lookup skips an earlier unresolved import with the same sl
     const binding = callee_binding orelse return error.CallBindingMissing;
     const record = facts.importForReference(
         binding,
-        .legacy_slot,
+        .module_reference,
         .builtin,
         .first,
     ) orelse return error.BuiltinImportMissing;
@@ -656,7 +653,7 @@ test "filtered legacy lookup skips an earlier unresolved import with the same sl
     try testing.expectEqualStrings("routerMatch", last.imported_name);
 }
 
-test "category lookup checks every legacy record with the same slot" {
+test "category lookup checks every record with the same slot" {
     const allocator = testing.allocator;
     const h = try Harness.init(allocator,
         \\import { cacheGet as m } from "zttp:cache";
@@ -678,7 +675,7 @@ test "category lookup checks every legacy record with the same slot" {
     const binding = callee_binding orelse return error.CallBindingMissing;
     try testing.expect(facts.referenceHasCategory(
         binding,
-        .legacy_slot,
+        .module_reference,
         .request_schema,
     ));
 }
@@ -705,7 +702,7 @@ test "first builtin lookup lets an earlier non-router import block a later route
     const binding = callee_binding orelse return error.CallBindingMissing;
     const first = facts.importForReference(
         binding,
-        .legacy_slot,
+        .module_reference,
         .builtin,
         .first,
     ) orelse return error.BuiltinImportMissing;

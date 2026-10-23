@@ -2535,7 +2535,7 @@ test "ambient egress summary follows inline callbacks but not named callback val
     try testing.expect(capsule.handler_reachable);
 }
 
-test "ambient egress summary keeps raw generic binding precedence" {
+test "a local function sharing a slot with an import atom still reports its egress" {
     const allocator = testing.allocator;
     const source =
         \\import { env as length } from "zttp:env";
@@ -2557,7 +2557,8 @@ test "ambient egress summary keeps raw generic binding precedence" {
     defer extraction.deinit(allocator);
 
     const props = extraction.contract.properties orelse return error.MissingProperties;
-    try testing.expect(!props.has_egress);
+    // The old slot-only lookup took `leaky` for the `env` import and hid the fetchSync.
+    try testing.expect(props.has_egress);
 }
 
 test "no-handler properties include every unused builtin import" {

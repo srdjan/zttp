@@ -383,7 +383,7 @@ pub const Resolver = struct {
         const binding = self.ir_view.getBinding(callee) orelse return false;
         const record = self.facts.importForReference(
             binding,
-            .legacy_slot,
+            .module_reference,
             .builtin,
             .first,
         ) orelse return false;
