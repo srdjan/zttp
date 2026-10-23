@@ -16,7 +16,7 @@ const std = @import("std");
 const sdk = @import("zttp-sdk");
 const state_limits = @import("../internal/state_limits.zig");
 
-const MODULE_STATE_SLOT: usize = 8; // module_slots.Slot.ratelimit
+pub const MODULE_STATE_SLOT: usize = 8; // module_slots.Slot.ratelimit
 
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:ratelimit",

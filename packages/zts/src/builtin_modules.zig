@@ -129,6 +129,21 @@ comptime {
     }
 }
 
+// Each module types its state slot by hand; join every literal to the registry.
+comptime {
+    const slots = @import("zts-base").module_slots.Slot;
+    const pairs = .{
+        .{ modules.data.sql.MODULE_STATE_SLOT, slots.sql },
+        .{ modules.security.validate.MODULE_STATE_SLOT, slots.validate },
+        .{ modules.data.cache.MODULE_STATE_SLOT, slots.cache },
+        .{ modules.data.ratelimit.MODULE_STATE_SLOT, slots.ratelimit },
+        .{ modules.net.fetch.MODULE_STATE_SLOT, slots.fetch },
+    };
+    for (pairs) |pair| {
+        if (pair[0] != @backingInt(pair[1])) @compileError("module state slot literal drifted from module_slots.Slot." ++ @tagName(pair[1]));
+    }
+}
+
 pub fn governanceEntries() []const BuiltinGovernanceEntry {
     return &builtin_governance_entries;
 }

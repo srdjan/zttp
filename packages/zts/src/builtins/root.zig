@@ -137,7 +137,8 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethod(ctx, allocator, pool, math_obj, root_class_idx, .random, wrap(math.mathRandom), 0);
 
     // Add Math constants as properties (NaN-boxing: no allocation needed)
-    try ctx.setPropertyChecked(math_obj, @fromBackingInt(@intCast(ctx.atoms.next_id)), value.JSValue.fromFloat(math.math_constants.PI));
+    const pi_atom = object.lookupPredefinedAtom("PI") orelse try ctx.atoms.intern("PI");
+    try ctx.setPropertyChecked(math_obj, pi_atom, value.JSValue.fromFloat(math.math_constants.PI));
     try ctx.setGlobal(.Math, math_obj.toValue());
 
     // Create JSON object - parse and stringify are hot builtins with fast dispatch
@@ -382,6 +383,31 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethod(ctx, allocator, pool, result_obj, root_class_idx, .err, wrap(result.resultErr), 1);
     try ctx.setPropertyChecked(result_obj, .prototype, result_proto.toValue());
     try ctx.setGlobal(.Result, result_obj.toValue());
+}
+
+test "Math.PI is stored under its own name and no other name reads it" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    try initBuiltins(ctx);
+
+    const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
+    const math_val = ctx.getGlobal(.Math) orelse return error.TestUnexpectedResult;
+    const math_obj = math_val.toPtr(object.JSObject);
+    // Intern an unrelated name first: the old code stored PI under the id the
+    // next interned name receives, so that name read 3.14159 on Math.
+    const has_own = object.lookupPredefinedAtom("hasOwn") orelse try ctx.atoms.intern("hasOwn");
+    try std.testing.expect(math_obj.getProperty(pool, has_own) == null);
+
+    const pi_atom = object.lookupPredefinedAtom("PI") orelse try ctx.atoms.intern("PI");
+    const pi = math_obj.getProperty(pool, pi_atom) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(f64, 3.141592653589793), pi.toNumber() orelse return error.TestUnexpectedResult);
 }
 
 // Run all sub-module tests

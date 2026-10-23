@@ -97,7 +97,7 @@ pub const Failure = struct {
 };
 
 /// Build `{ kind, ... }` and wrap it as the error arm of a `Result`.
-fn failure(ctx: *context.Context, f: Failure) JSValue {
+fn failure(ctx: *context.Context, f: Failure) error{OutOfMemory}!JSValue {
     const pool = ctx.hidden_class_pool orelse return helpers.createResultErr(ctx, JSValue.undefined_val);
     const obj = ctx.createObject(null) catch return helpers.createResultErr(ctx, JSValue.undefined_val);
 
@@ -106,19 +106,19 @@ fn failure(ctx: *context.Context, f: Failure) JSValue {
 
     switch (f.kind) {
         .invalid_octet => {
-            setNumber(ctx, pool, obj, "index", f.index) catch {};
-            setNumber(ctx, pool, obj, "value", f.val) catch {};
+            try setNumber(ctx, pool, obj, "index", f.index);
+            try setNumber(ctx, pool, obj, "value", f.val);
         },
         .invalid_encoding => {
-            setText(ctx, pool, obj, "encoding", f.encoding) catch {};
-            setNumber(ctx, pool, obj, "offset", @floatFromInt(f.offset)) catch {};
+            try setText(ctx, pool, obj, "encoding", f.encoding);
+            try setNumber(ctx, pool, obj, "offset", @floatFromInt(f.offset));
         },
         .invalid_bounds => {
-            setNumber(ctx, pool, obj, "start", f.start) catch {};
-            setNumber(ctx, pool, obj, "end", f.end) catch {};
+            try setNumber(ctx, pool, obj, "start", f.start);
+            try setNumber(ctx, pool, obj, "end", f.end);
         },
         .size_limit => {
-            setNumber(ctx, pool, obj, "limit", @floatFromInt(f.limit)) catch {};
+            try setNumber(ctx, pool, obj, "limit", @floatFromInt(f.limit));
         },
     }
     return helpers.createResultErr(ctx, JSValue.fromPtr(obj));

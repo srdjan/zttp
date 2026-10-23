@@ -16,7 +16,7 @@ const sdk = @import("zttp-sdk");
 const util = @import("../internal/util.zig");
 const state_limits = @import("../internal/state_limits.zig");
 
-const MODULE_STATE_SLOT: usize = 5; // module_slots.Slot.cache
+pub const MODULE_STATE_SLOT: usize = 5; // module_slots.Slot.cache
 
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:cache",

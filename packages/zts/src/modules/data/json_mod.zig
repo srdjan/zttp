@@ -42,7 +42,7 @@ pub const Limits = struct {
     max_input_bytes: usize = 8 * 1024 * 1024,
 };
 
-pub var limits: Limits = .{};
+pub const limits: Limits = .{};
 
 // Both exports are `replay_pure`: parsing and encoding read only their
 // arguments, so running them live during replay is hermetic. Both also
@@ -104,6 +104,7 @@ const Parser = struct {
     text: []const u8,
     pos: usize = 0,
     failure: Failure = .{ .kind = .invalid_syntax },
+    limits: Limits = limits,
     /// Storage for a duplicate key's text. The decoded key is freed on every
     /// path, so the failure cannot borrow it; a longer key is reported
     /// truncated rather than kept alive past its owner.
@@ -124,8 +125,8 @@ const Parser = struct {
     }
 
     fn parseValue(self: *Parser, depth: u16) ParseError!JSValue {
-        if (depth > limits.max_depth) {
-            self.failure = .{ .kind = .depth_limit, .offset = self.pos, .limit = limits.max_depth };
+        if (depth > self.limits.max_depth) {
+            self.failure = .{ .kind = .depth_limit, .offset = self.pos, .limit = self.limits.max_depth };
             return error.Failed;
         }
         self.skipWs();
@@ -384,36 +385,36 @@ fn parseJsonBytesNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) 
 
 /// Build the typed error value: `{ kind, offset?, key?, limit?, encoding? }`, carrying
 /// exactly the fields spec 6.4 declares for that kind and no others.
-fn failure(ctx: *context.Context, f: Failure) JSValue {
+fn failure(ctx: *context.Context, f: Failure) error{OutOfMemory}!JSValue {
     const pool = ctx.hidden_class_pool orelse return helpers.createResultErr(ctx, JSValue.undefined_val);
     const obj = ctx.createObject(null) catch return helpers.createResultErr(ctx, JSValue.undefined_val);
 
     const kind_atom = ctx.atoms.intern("kind") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
     const kind_text = ctx.createString(f.kind.wire()) catch return helpers.createResultErr(ctx, JSValue.undefined_val);
-    obj.setProperty(ctx.allocator, pool, kind_atom, kind_text) catch {};
+    try obj.setProperty(ctx.allocator, pool, kind_atom, kind_text);
 
     switch (f.kind) {
         .invalid_syntax, .non_finite_number => {
             const off_atom = ctx.atoms.intern("offset") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
-            obj.setProperty(ctx.allocator, pool, off_atom, JSValue.fromInt(@intCast(f.offset))) catch {};
+            try obj.setProperty(ctx.allocator, pool, off_atom, JSValue.fromInt(@intCast(f.offset)));
         },
         .duplicate_key => {
             const off_atom = ctx.atoms.intern("offset") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
-            obj.setProperty(ctx.allocator, pool, off_atom, JSValue.fromInt(@intCast(f.offset))) catch {};
+            try obj.setProperty(ctx.allocator, pool, off_atom, JSValue.fromInt(@intCast(f.offset)));
             const key_atom = ctx.atoms.intern("key") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
             const key_text = ctx.createString(f.key orelse "") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
-            obj.setProperty(ctx.allocator, pool, key_atom, key_text) catch {};
+            try obj.setProperty(ctx.allocator, pool, key_atom, key_text);
         },
         .depth_limit, .size_limit => {
             const limit_atom = ctx.atoms.intern("limit") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
-            obj.setProperty(ctx.allocator, pool, limit_atom, JSValue.fromInt(@intCast(f.limit))) catch {};
+            try obj.setProperty(ctx.allocator, pool, limit_atom, JSValue.fromInt(@intCast(f.limit)));
         },
         .invalid_encoding => {
             const enc_atom = ctx.atoms.intern("encoding") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
             const enc_text = ctx.createString(f.encoding) catch return helpers.createResultErr(ctx, JSValue.undefined_val);
-            obj.setProperty(ctx.allocator, pool, enc_atom, enc_text) catch {};
+            try obj.setProperty(ctx.allocator, pool, enc_atom, enc_text);
             const off_atom = ctx.atoms.intern("offset") catch return helpers.createResultErr(ctx, JSValue.undefined_val);
-            obj.setProperty(ctx.allocator, pool, off_atom, JSValue.fromInt(@intCast(f.offset))) catch {};
+            try obj.setProperty(ctx.allocator, pool, off_atom, JSValue.fromInt(@intCast(f.offset)));
         },
         .cycle => {},
     }
@@ -601,8 +602,8 @@ fn parse(h: *Harness, text: []const u8) !JSValue {
     return parser.parseValue(0);
 }
 
-fn parseFailure(h: *Harness, text: []const u8) !Failure {
-    var parser = Parser{ .ctx = h.ctx, .text = text };
+fn parseFailure(h: *Harness, text: []const u8, lim: Limits) !Failure {
+    var parser = Parser{ .ctx = h.ctx, .text = text, .limits = lim };
     _ = parser.parseValue(0) catch |err| switch (err) {
         error.Failed => return parser.failure,
         error.OutOfMemory => return error.OutOfMemory,
@@ -648,7 +649,7 @@ test "a duplicate key is refused and names the key" {
     const h = try harness();
     defer releaseHarness(h);
 
-    const f = try parseFailure(h, "{\"a\":1,\"a\":2}");
+    const f = try parseFailure(h, "{\"a\":1,\"a\":2}", .{});
     try testing.expectEqual(ErrorKind.duplicate_key, f.kind);
     try testing.expectEqualStrings("a", f.key orelse "");
 }
@@ -657,7 +658,7 @@ test "a syntax error names itself and carries an offset" {
     const h = try harness();
     defer releaseHarness(h);
 
-    const f = try parseFailure(h, "{oops}");
+    const f = try parseFailure(h, "{oops}", .{});
     try testing.expectEqual(ErrorKind.invalid_syntax, f.kind);
     try testing.expectEqual(@as(usize, 1), f.offset);
 }
@@ -668,16 +669,11 @@ test "the depth limit reports itself and not a syntax error" {
     const h = try harness();
     defer releaseHarness(h);
 
-    const saved = limits;
-    defer limits = saved;
-    limits.max_depth = 3;
-
-    const f = try parseFailure(h, "[[[[[1]]]]]");
+    const f = try parseFailure(h, "[[[[[1]]]]]", .{ .max_depth = 3 });
     try testing.expectEqual(ErrorKind.depth_limit, f.kind);
     try testing.expectEqual(@as(usize, 3), f.limit);
 
     // The control: the same document inside the limit parses.
-    limits.max_depth = 32;
     _ = try parse(h, "[[[[[1]]]]]");
 }
 
@@ -843,7 +839,7 @@ test "an escaped astral character is one scalar, not two refused halves" {
 
     // A lone high surrogate with no pair is still refused - the fix pairs
     // them, it does not admit halves.
-    const f = try parseFailure(h, "\"\\ud83d\"");
+    const f = try parseFailure(h, "\"\\ud83d\"", .{});
     try testing.expectEqual(ErrorKind.invalid_syntax, f.kind);
 }
 
