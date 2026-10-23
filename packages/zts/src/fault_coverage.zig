@@ -22,121 +22,10 @@ const path_gen = @import("path_generator.zig");
 const effect_inference = @import("effect_inference.zig");
 const handler_verifier = @import("handler_verifier.zig");
 
-const route_match = @import("zts-base").route_match;
 const Constraint = path_gen.Constraint;
 const StubInfo = path_gen.StubInfo;
 const GeneratedTest = path_gen.GeneratedTest;
 const IrView = parser_mod.IrView;
-
-// ---------------------------------------------------------------------------
-// External severity overrides
-// ---------------------------------------------------------------------------
-
-pub const ExternalSeverity = struct {
-    path: []const u8,
-    method: []const u8,
-    severity: mb.FailureSeverity,
-    reason: []const u8,
-};
-
-/// Parse external severity overrides from JSON bytes.
-/// Expected format:
-/// ```json
-/// {
-///   "callSites": [
-///     { "path": "/api/orders/:id/approve", "method": "POST",
-///       "severity": "critical", "reason": "Governed transition" }
-///   ]
-/// }
-/// ```
-pub fn parseExternalSeverities(
-    allocator: std.mem.Allocator,
-    json_bytes: []const u8,
-) ![]const ExternalSeverity {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, json_bytes, .{}) catch
-        return error.InvalidJson;
-    defer parsed.deinit();
-
-    if (parsed.value != .object) return error.InvalidJson;
-    const root = parsed.value.object;
-
-    const call_sites_val = root.get("callSites") orelse return error.InvalidJson;
-    if (call_sites_val != .array) return error.InvalidJson;
-    const call_sites = call_sites_val.array;
-
-    var result: std.ArrayList(ExternalSeverity) = .empty;
-    errdefer {
-        for (result.items) |item| {
-            allocator.free(item.path);
-            allocator.free(item.method);
-            allocator.free(item.reason);
-        }
-        result.deinit(allocator);
-    }
-
-    for (call_sites.items) |entry| {
-        if (entry != .object) continue;
-        const obj = entry.object;
-
-        const path_val = obj.get("path") orelse continue;
-        const method_val = obj.get("method") orelse continue;
-        const severity_val = obj.get("severity") orelse continue;
-
-        if (path_val != .string or method_val != .string or severity_val != .string) continue;
-
-        const severity = mapSeverityString(severity_val.string) orelse continue;
-
-        const reason_val = obj.get("reason");
-        const reason_str = if (reason_val) |rv|
-            (if (rv == .string) rv.string else "")
-        else
-            "";
-
-        const path_dupe = try allocator.dupe(u8, path_val.string);
-        errdefer allocator.free(path_dupe);
-        const method_dupe = try allocator.dupe(u8, method_val.string);
-        errdefer allocator.free(method_dupe);
-        const reason_dupe = try allocator.dupe(u8, reason_str);
-        errdefer allocator.free(reason_dupe);
-
-        try result.append(allocator, .{
-            .path = path_dupe,
-            .method = method_dupe,
-            .severity = severity,
-            .reason = reason_dupe,
-        });
-    }
-
-    return try result.toOwnedSlice(allocator);
-}
-
-/// Map a severity string to the FailureSeverity enum.
-/// "high" is treated as an alias for "critical".
-pub fn mapSeverityString(s: []const u8) ?mb.FailureSeverity {
-    if (std.mem.eql(u8, s, "critical")) return .critical;
-    if (std.mem.eql(u8, s, "high")) return .critical;
-    if (std.mem.eql(u8, s, "normal")) return .expected;
-    if (std.mem.eql(u8, s, "upstream")) return .upstream;
-    if (std.mem.eql(u8, s, "none")) return .none;
-    return null;
-}
-
-/// Return the more severe of two severity levels.
-/// Ordering: critical > upstream > expected > none.
-pub fn maxSeverity(a: mb.FailureSeverity, b: mb.FailureSeverity) mb.FailureSeverity {
-    return if (severityRank(a) >= severityRank(b)) a else b;
-}
-
-fn severityRank(s: mb.FailureSeverity) u8 {
-    return switch (s) {
-        .critical => 3,
-        .upstream => 2,
-        .expected => 1,
-        .none => 0,
-    };
-}
-
-const pathsMatch = route_match.pathsMatch;
 
 // ---------------------------------------------------------------------------
 // Diagnostic types
@@ -217,7 +106,6 @@ pub const FaultCoverageChecker = struct {
     tests: []const GeneratedTest,
     entries: std.ArrayList(CallSiteEntry),
     diagnostics: std.ArrayList(Diagnostic),
-    external_severities: ?[]const ExternalSeverity = null,
 
     pub fn init(allocator: std.mem.Allocator, tests: []const GeneratedTest) FaultCoverageChecker {
         return .{
@@ -226,10 +114,6 @@ pub const FaultCoverageChecker = struct {
             .entries = .empty,
             .diagnostics = .empty,
         };
-    }
-
-    pub fn setExternalSeverities(self: *FaultCoverageChecker, severities: []const ExternalSeverity) void {
-        self.external_severities = severities;
     }
 
     pub fn deinit(self: *FaultCoverageChecker) void {
@@ -248,9 +132,6 @@ pub const FaultCoverageChecker = struct {
         }
 
         for (self.tests) |test_case| {
-            // Determine external severity override for this test case's route
-            const ext_override = self.lookupExternalOverride(test_case);
-
             // Seed every failable site on every emitted path, on the handler
             // root as on route roots, including calls whose result the path
             // never branches on. A constraint below can prove that this exact
@@ -263,7 +144,6 @@ pub const FaultCoverageChecker = struct {
                     stub.module,
                     stub.func,
                     routedCallSiteId(test_case, stub.call_site, stub.seq),
-                    ext_override,
                 ) orelse continue;
                 // `export() ?? fallback`: the fallback is the explicit failure
                 // path for an absent value. The site is covered, and the
@@ -286,13 +166,12 @@ pub const FaultCoverageChecker = struct {
                     info.module,
                     info.func,
                     routedCallSiteId(test_case, info.call_site, 0),
-                    ext_override,
                 ) orelse continue;
 
                 if (c.isFailure()) {
                     entry.has_failure_path = true;
                     entry.failure_status = test_case.expected_status;
-                    try self.checkFailurePath(entry, test_case, ext_override);
+                    try self.checkFailurePath(entry, test_case);
                 }
             }
         }
@@ -321,7 +200,6 @@ pub const FaultCoverageChecker = struct {
         module: []const u8,
         func: []const u8,
         call_site: u64,
-        ext_override: ?ExternalSeverity,
     ) !?*CallSiteEntry {
         const key = try self.allocator.print("{d}\x00{s}\x00{s}", .{ call_site, module, func });
         const gop = seen.getOrPut(self.allocator, key) catch |err| {
@@ -329,8 +207,7 @@ pub const FaultCoverageChecker = struct {
             return err;
         };
         if (!gop.found_existing) {
-            var severity = lookupSeverity(module, func);
-            if (ext_override) |ext| severity = maxSeverity(severity, ext.severity);
+            const severity = lookupSeverity(module, func);
             if (severity == .none) {
                 _ = seen.remove(key);
                 self.allocator.free(key);
@@ -346,9 +223,6 @@ pub const FaultCoverageChecker = struct {
             };
         } else {
             self.allocator.free(key);
-            if (ext_override) |ext| {
-                gop.value_ptr.severity = maxSeverity(gop.value_ptr.severity, ext.severity);
-            }
         }
         return gop.value_ptr;
     }
@@ -369,7 +243,6 @@ pub const FaultCoverageChecker = struct {
         self: *FaultCoverageChecker,
         entry: *CallSiteEntry,
         test_case: GeneratedTest,
-        ext_override: ?ExternalSeverity,
     ) !void {
         const status = test_case.expected_status;
         if (status < 200 or status >= 300) return;
@@ -377,10 +250,7 @@ pub const FaultCoverageChecker = struct {
         switch (entry.severity) {
             .critical => {
                 entry.flagged = true;
-                const message = if (ext_override) |ext|
-                    ext.reason
-                else
-                    "handler returns 2xx when auth/validation fails";
+                const message = "handler returns 2xx when auth/validation fails";
                 try self.diagnostics.append(self.allocator, .{
                     .severity = .warning,
                     .kind = .success_on_critical_failure,
@@ -393,10 +263,7 @@ pub const FaultCoverageChecker = struct {
             },
             .upstream => {
                 entry.upstream_fallback = true;
-                const message = if (ext_override) |ext|
-                    ext.reason
-                else
-                    "handler returns 2xx on upstream failure (graceful degradation?)";
+                const message = "handler returns 2xx on upstream failure (graceful degradation?)";
                 try self.diagnostics.append(self.allocator, .{
                     .severity = .info,
                     .kind = .success_on_upstream_failure,
@@ -410,35 +277,6 @@ pub const FaultCoverageChecker = struct {
             .expected, .none => {},
         }
     }
-
-    fn lookupExternalOverride(self: *const FaultCoverageChecker, test_case: GeneratedTest) ?ExternalSeverity {
-        const externals = self.external_severities orelse return null;
-        if (test_case.route_root) {
-            // Route roots do not yet carry the route table's method and path.
-            // Any configured route can conservatively reach this function, so
-            // use the strictest override. This can report a false positive when
-            // one function serves routes with different severities, but it
-            // cannot hide a critical failure behind the synthetic GET `/`.
-            var strictest: ?ExternalSeverity = null;
-            for (externals) |ext| {
-                if (strictest == null or
-                    severityRank(ext.severity) > severityRank(strictest.?.severity))
-                {
-                    strictest = ext;
-                }
-            }
-            return strictest;
-        }
-        for (externals) |ext| {
-            if (pathsMatch(ext.path, test_case.url) and
-                std.ascii.eqlIgnoreCase(ext.method, test_case.method))
-            {
-                return ext;
-            }
-        }
-        return null;
-    }
-
     pub fn getReport(self: *const FaultCoverageChecker) FaultCoverageReport {
         var total_failable: u32 = 0;
         var covered: u32 = 0;
@@ -1029,242 +867,6 @@ test "format matrix output" {
     try std.testing.expect(std.mem.indexOf(u8, output, "jwtVerify") != null);
     try std.testing.expect(std.mem.indexOf(u8, output, "1/1") != null);
 }
-
-// ---------------------------------------------------------------------------
-// External severity override tests
-// ---------------------------------------------------------------------------
-
-test "parseExternalSeverities with valid JSON" {
-    const json =
-        \\{
-        \\  "callSites": [
-        \\    { "path": "/api/orders/:id/approve", "method": "POST", "severity": "critical", "reason": "Governed transition" },
-        \\    { "path": "/api/users", "method": "GET", "severity": "none", "reason": "Public endpoint" }
-        \\  ]
-        \\}
-    ;
-    const result = try parseExternalSeverities(std.testing.allocator, json);
-    defer {
-        for (result) |item| {
-            std.testing.allocator.free(item.path);
-            std.testing.allocator.free(item.method);
-            std.testing.allocator.free(item.reason);
-        }
-        std.testing.allocator.free(result);
-    }
-
-    try std.testing.expectEqual(@as(usize, 2), result.len);
-
-    try std.testing.expectEqualStrings("/api/orders/:id/approve", result[0].path);
-    try std.testing.expectEqualStrings("POST", result[0].method);
-    try std.testing.expectEqual(mb.FailureSeverity.critical, result[0].severity);
-    try std.testing.expectEqualStrings("Governed transition", result[0].reason);
-
-    try std.testing.expectEqualStrings("/api/users", result[1].path);
-    try std.testing.expectEqual(mb.FailureSeverity.none, result[1].severity);
-}
-
-test "severity string mapping" {
-    try std.testing.expectEqual(mb.FailureSeverity.critical, mapSeverityString("critical").?);
-    try std.testing.expectEqual(mb.FailureSeverity.critical, mapSeverityString("high").?);
-    try std.testing.expectEqual(mb.FailureSeverity.expected, mapSeverityString("normal").?);
-    try std.testing.expectEqual(mb.FailureSeverity.upstream, mapSeverityString("upstream").?);
-    try std.testing.expectEqual(mb.FailureSeverity.none, mapSeverityString("none").?);
-    try std.testing.expect(mapSeverityString("invalid") == null);
-    try std.testing.expect(mapSeverityString("") == null);
-}
-
-test "maxSeverity returns the more severe value" {
-    try std.testing.expectEqual(mb.FailureSeverity.critical, maxSeverity(.critical, .expected));
-    try std.testing.expectEqual(mb.FailureSeverity.critical, maxSeverity(.expected, .critical));
-    try std.testing.expectEqual(mb.FailureSeverity.upstream, maxSeverity(.upstream, .expected));
-    try std.testing.expectEqual(mb.FailureSeverity.upstream, maxSeverity(.none, .upstream));
-    try std.testing.expectEqual(mb.FailureSeverity.critical, maxSeverity(.critical, .critical));
-    try std.testing.expectEqual(mb.FailureSeverity.none, maxSeverity(.none, .none));
-}
-
-test "pathsMatch normalizes :id and {id} as equivalent" {
-    try std.testing.expect(pathsMatch("/api/orders/:id/approve", "/api/orders/{id}/approve"));
-    try std.testing.expect(pathsMatch("/api/orders/{id}/approve", "/api/orders/:id/approve"));
-    try std.testing.expect(pathsMatch("/api/orders/:id", "/api/orders/123"));
-    try std.testing.expect(pathsMatch("/api/orders/{id}", "/api/orders/123"));
-    try std.testing.expect(!pathsMatch("/api/orders", "/api/users"));
-    try std.testing.expect(!pathsMatch("/api/orders/:id", "/api/orders/:id/extra"));
-    try std.testing.expect(pathsMatch("/", "/"));
-}
-
-test "external severity elevates expected to critical" {
-    // cacheGet has .expected severity in builtin_modules. An external override
-    // on the route marks it as critical. The checker should produce a warning
-    // when the handler returns 2xx on the failure path.
-    const constraints = [_]Constraint{
-        .{ .stub_falsy = .{ .module = "cache", .func = "cacheGet", .returns = .optional_string } },
-    };
-    const tests = [_]GeneratedTest{
-        .{
-            .name = "cache miss elevated",
-            .method = "POST",
-            .url = "/api/orders/:id/approve",
-            .has_auth_header = false,
-            .expected_status = 200,
-            .io_stubs = .empty,
-            .constraints = &constraints,
-        },
-    };
-    const ext = [_]ExternalSeverity{
-        .{
-            .path = "/api/orders/:id/approve",
-            .method = "POST",
-            .severity = .critical,
-            .reason = "Governed transition",
-        },
-    };
-    var checker = FaultCoverageChecker.init(std.testing.allocator, &tests);
-    defer checker.deinit();
-    checker.setExternalSeverities(&ext);
-    try checker.analyze();
-    const report = checker.getReport();
-
-    // The entry should exist and be flagged as critical
-    try std.testing.expectEqual(@as(u32, 1), report.total_failable);
-    try std.testing.expectEqual(@as(u32, 1), report.covered);
-    try std.testing.expectEqual(@as(u32, 1), report.warning_count);
-    try std.testing.expect(!report.isClean());
-
-    // Diagnostic message should contain the external reason
-    try std.testing.expect(report.diagnostics.len > 0);
-    try std.testing.expectEqualStrings("Governed transition", report.diagnostics[0].message);
-}
-
-test "route roots use the strictest external severity" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\import { cacheGet } from "zttp:cache";
-        \\import { routerMatch } from "zttp:router";
-        \\function route(req) {
-        \\  const value = cacheGet("orders", "current");
-        \\  if (value === undefined) return Response.text("accepted");
-        \\  return Response.text(value);
-        \\}
-        \\const routes = { "POST /orders": route };
-        \\function handler(req) {
-        \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
-        \\  return found.handler(req);
-        \\}
-    ;
-
-    var parser = try parser_mod.JsParser.init(allocator, source);
-    defer parser.deinit();
-    var atoms = atom_table.AtomTable.init(allocator);
-    defer atoms.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
-        return error.HandlerNotFound;
-
-    var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
-    defer effect_facts.deinit(allocator);
-    var generator = path_gen.PathGenerator.init(
-        allocator,
-        ir_view,
-        &atoms,
-        .{ .complete = &effect_facts },
-    );
-    defer generator.deinit();
-    try generator.generate(handler_fn);
-
-    const overrides = [_]ExternalSeverity{.{
-        .path = "/orders",
-        .method = "POST",
-        .severity = .critical,
-        .reason = "order lookup must fail closed",
-    }};
-    var checker = FaultCoverageChecker.init(allocator, generator.getTests());
-    defer checker.deinit();
-    checker.setExternalSeverities(&overrides);
-    try checker.analyze();
-
-    const report = checker.getReport();
-    try std.testing.expect(!report.isClean());
-    // The one failable path is the cacheGet miss; its warning carries the
-    // external reason.
-    try std.testing.expectEqual(@as(u32, 1), report.warning_count);
-    try std.testing.expectEqualStrings("order lookup must fail closed", report.diagnostics[0].message);
-}
-
-test "external severity does not downgrade critical to expected" {
-    // jwtVerify is .critical in builtin_modules. An external override of
-    // .expected should not lower it - the function-level severity wins.
-    const constraints = [_]Constraint{
-        .{ .result_not_ok = .{ .module = "auth", .func = "jwtVerify", .returns = .result } },
-    };
-    const tests = [_]GeneratedTest{
-        .{
-            .name = "jwt failure not downgraded",
-            .method = "GET",
-            .url = "/api/public",
-            .has_auth_header = false,
-            .expected_status = 200,
-            .io_stubs = .empty,
-            .constraints = &constraints,
-        },
-    };
-    const ext = [_]ExternalSeverity{
-        .{
-            .path = "/api/public",
-            .method = "GET",
-            .severity = .expected,
-            .reason = "Public endpoint",
-        },
-    };
-    var checker = FaultCoverageChecker.init(std.testing.allocator, &tests);
-    defer checker.deinit();
-    checker.setExternalSeverities(&ext);
-    try checker.analyze();
-    const report = checker.getReport();
-
-    // Should still produce a warning because jwtVerify is .critical
-    try std.testing.expectEqual(@as(u32, 1), report.warning_count);
-    try std.testing.expect(report.diagnostics.len > 0);
-    try std.testing.expectEqual(DiagnosticKind.success_on_critical_failure, report.diagnostics[0].kind);
-}
-
-test "external severity with {id} matches :id route" {
-    const constraints = [_]Constraint{
-        .{ .stub_falsy = .{ .module = "cache", .func = "cacheGet", .returns = .optional_string } },
-    };
-    const tests = [_]GeneratedTest{
-        .{
-            .name = "cache miss brace id",
-            .method = "PUT",
-            .url = "/api/items/{id}",
-            .has_auth_header = false,
-            .expected_status = 200,
-            .io_stubs = .empty,
-            .constraints = &constraints,
-        },
-    };
-    const ext = [_]ExternalSeverity{
-        .{
-            .path = "/api/items/:id",
-            .method = "PUT",
-            .severity = .critical,
-            .reason = "Sensitive update",
-        },
-    };
-    var checker = FaultCoverageChecker.init(std.testing.allocator, &tests);
-    defer checker.deinit();
-    checker.setExternalSeverities(&ext);
-    try checker.analyze();
-    const report = checker.getReport();
-
-    // External override should match despite :id vs {id} difference
-    try std.testing.expectEqual(@as(u32, 1), report.warning_count);
-    try std.testing.expectEqualStrings("Sensitive update", report.diagnostics[0].message);
-}
-
 test "a handler whose only failable call is unseen is not covered" {
     // One failable call, on no emitted path. The report counts zero sites, so
     // the report alone would say nothing. The verdict must still be false.

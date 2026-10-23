@@ -246,19 +246,6 @@ pub const BehaviorDiff = struct {
     }
 };
 
-pub const ReplaySummary = struct {
-    total: u32 = 0,
-    identical: u32 = 0,
-    status_changed: u32 = 0,
-    body_changed: u32 = 0,
-    diverged: u32 = 0,
-
-    pub fn coverage(self: ReplaySummary) f64 {
-        if (self.total == 0) return 0.0;
-        return @as(f64, @floatFromInt(self.identical)) / @as(f64, @floatFromInt(self.total));
-    }
-};
-
 pub const ContractDiff = struct {
     routes: std.ArrayList(RouteChange),
     api_route_changes: std.ArrayList(ApiRouteChange),
@@ -332,7 +319,7 @@ pub const ContractDiff = struct {
         return new_class == .unbounded and self.costWidened();
     }
 
-    /// Classify the diff structurally (without replay data).
+    /// Classify the diff structurally.
     /// When `tryCanonicalEquivalence` has recorded fired laws, returns
     /// `.equivalent_modulo_laws` in place of `.equivalent`.
     pub fn classify(self: *const ContractDiff) Classification {
@@ -413,14 +400,6 @@ pub const ContractDiff = struct {
         if (has_added or self.capabilitiesWidened()) return .additive;
 
         return .equivalent;
-    }
-
-    /// Classify considering both structural diff and replay results.
-    pub fn classifyWithReplay(self: *const ContractDiff, replay: *const ReplaySummary) Classification {
-        // Any replay divergence is breaking regardless of structural diff
-        if (replay.total > 0 and replay.identical < replay.total) return .breaking;
-
-        return self.classify();
     }
 
     /// Attempt to upgrade `.equivalent` to `.equivalent_modulo_laws` by
@@ -938,7 +917,6 @@ pub fn generateRecommendation(
     allocator: std.mem.Allocator,
     classification: Classification,
     diff: *const ContractDiff,
-    replay: ?*const ReplaySummary,
 ) ![]const u8 {
     var msg: std.ArrayList(u8) = .empty;
     errdefer msg.deinit(allocator);
@@ -947,16 +925,7 @@ pub fn generateRecommendation(
 
     switch (classification) {
         .equivalent => {
-            try w.writeAll("Deploy immediately - ");
-            if (replay) |r| {
-                if (r.total > 0) {
-                    try w.writeAll("all behavior preserved with 100% trace coverage");
-                } else {
-                    try w.writeAll("contract unchanged, no traces provided");
-                }
-            } else {
-                try w.writeAll("contract unchanged");
-            }
+            try w.writeAll("Deploy immediately - contract unchanged");
         },
         .equivalent_modulo_laws => {
             try w.writeAll("Deploy immediately - canonical equivalence proved via ");
@@ -1025,26 +994,9 @@ pub fn generateRecommendation(
                 try w.print("{d} new SQL query(s)", .{sql_adds});
                 has_additions = true;
             }
-
-            if (replay) |r| {
-                if (r.total > 0) {
-                    try w.writeAll(", all existing behavior preserved");
-                }
-            }
         },
         .breaking => {
             try w.writeAll("Requires review - ");
-
-            if (replay) |r| {
-                if (r.total > 0 and r.identical < r.total) {
-                    const diverged = r.total - r.identical;
-                    try w.print("{d}/{d} traces diverged", .{ diverged, r.total });
-                    return (blk: {
-                        msg = aw.toArrayList();
-                        break :blk try msg.toOwnedSlice(allocator);
-                    });
-                }
-            }
 
             var has_removals = false;
             for (diff.routes.items) |r| {
@@ -2369,47 +2321,6 @@ test "diffContracts unchanged already-dynamic response is NOT breaking" {
     try std.testing.expectEqual(Classification.equivalent, diff.behavioralVerdict());
 }
 
-test "classifyWithReplay diverged traces are breaking" {
-    const allocator = std.testing.allocator;
-
-    var old = try makeTestContract(allocator);
-    defer old.deinit(allocator);
-    var new = try makeTestContract(allocator);
-    defer new.deinit(allocator);
-
-    var diff = try diffContracts(allocator, &old, &new);
-    defer diff.deinit(allocator);
-
-    // Structurally equivalent, but traces diverge
-    const replay = ReplaySummary{
-        .total = 100,
-        .identical = 95,
-        .status_changed = 3,
-        .body_changed = 2,
-    };
-
-    try std.testing.expectEqual(Classification.breaking, diff.classifyWithReplay(&replay));
-}
-
-test "classifyWithReplay all identical preserves structural classification" {
-    const allocator = std.testing.allocator;
-
-    var old = try makeTestContract(allocator);
-    defer old.deinit(allocator);
-    var new = try makeTestContract(allocator);
-    defer new.deinit(allocator);
-
-    var diff = try diffContracts(allocator, &old, &new);
-    defer diff.deinit(allocator);
-
-    const replay = ReplaySummary{
-        .total = 100,
-        .identical = 100,
-    };
-
-    try std.testing.expectEqual(Classification.equivalent, diff.classifyWithReplay(&replay));
-}
-
 test "generateRecommendation equivalent" {
     const allocator = std.testing.allocator;
 
@@ -2421,35 +2332,10 @@ test "generateRecommendation equivalent" {
     var diff = try diffContracts(allocator, &old, &new);
     defer diff.deinit(allocator);
 
-    const rec = try generateRecommendation(allocator, .equivalent, &diff, null);
+    const rec = try generateRecommendation(allocator, .equivalent, &diff);
     defer allocator.free(rec);
 
     try std.testing.expect(std.mem.indexOf(u8, rec, "Deploy immediately") != null);
-}
-
-test "generateRecommendation breaking with diverged traces" {
-    const allocator = std.testing.allocator;
-
-    var old = try makeTestContract(allocator);
-    defer old.deinit(allocator);
-    var new = try makeTestContract(allocator);
-    defer new.deinit(allocator);
-
-    var diff = try diffContracts(allocator, &old, &new);
-    defer diff.deinit(allocator);
-
-    const replay = ReplaySummary{
-        .total = 100,
-        .identical = 90,
-        .status_changed = 5,
-        .body_changed = 5,
-    };
-
-    const rec = try generateRecommendation(allocator, .breaking, &diff, &replay);
-    defer allocator.free(rec);
-
-    try std.testing.expect(std.mem.indexOf(u8, rec, "Requires review") != null);
-    try std.testing.expect(std.mem.indexOf(u8, rec, "traces diverged") != null);
 }
 
 test "diffBehaviors identical paths" {

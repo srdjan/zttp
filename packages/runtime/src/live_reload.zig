@@ -338,8 +338,6 @@ pub const LiveReloadState = struct {
                     self.allocator,
                     &diff,
                     classification,
-                    null,
-                    &new_contract,
                 ) catch |err| {
                     printProve("Upgrade analysis failed: {}. Reloading without proof comparison.\n", .{err});
                     if (self.doSwap(&new_code, &new_contract, analysis.configuredPolicy())) {

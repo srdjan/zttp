@@ -652,11 +652,6 @@ pub const ExtractContractOptions = struct {
     /// `ResolveOptions.module_facts`: it must outlive the returned contract's
     /// construction, not the contract itself, since the contract gets copies.
     module_facts: ?*const ModuleFacts = null,
-    /// The type session this compile already ran. When it carries a
-    /// `TypeChecker`, the contract is built on that checker rather than on a
-    /// second pool, env, and checker constructed identically and re-checked
-    /// over the same root.
-    resolved: ?*ResolvedModule = null,
     /// File-import effects prepared from earlier modules in one loaded graph.
     /// Borrowed through extraction only.
     imported_effects: []const ImportedEffect = &.{},
@@ -695,23 +690,6 @@ fn consumerTypeSource(
         .omitted => .omitted,
         .direct => .{ .direct = env },
     };
-}
-
-fn consumerTypeSourceForExistingChecker(
-    options: ExtractContractOptions,
-    parsed: ParsedModule,
-    env: *const TypeEnv,
-) !type_env_mod.ConsumerTypeSource {
-    if (options.source_types) |source| {
-        switch (source) {
-            .direct => _ = try sourceTypeInput(parsed, .direct),
-            .omitted => {},
-        }
-        const selected = consumerTypeSource(source, env);
-        _ = try selected.validate();
-        return selected;
-    }
-    return type_env_mod.ConsumerTypeSource.fromEnvironment(env);
 }
 
 fn hasAuthoredSource(source: ModuleSourceTypeInput) bool {
@@ -1332,7 +1310,6 @@ pub const ModuleAnalysisSession = struct {
     ) !ContractExtraction {
         var opts = base_opts;
         opts.source_types = if (self.profile == .contract_only) .omitted else self.source_types;
-        opts.resolved = null;
         opts.module_facts = self.completedContractFacts();
         opts.dispatch = self.contract_context.dispatch;
         opts.has_default_response = self.contract_context.has_default_response;
@@ -1371,186 +1348,6 @@ pub const ModuleAnalysisSession = struct {
         };
     }
 };
-
-/// Build a contract from a type session that the caller completed.
-pub fn extractContractFromTypeSession(
-    allocator: std.mem.Allocator,
-    parsed: ParsedModule,
-    filename: []const u8,
-    opts: ExtractContractOptions,
-    type_checker: *TypeChecker,
-) !HandlerContract {
-    var extraction = try extractContractResultFromTypeSession(
-        allocator,
-        parsed,
-        filename,
-        opts,
-        type_checker,
-    );
-    if (extraction.export_effects) |*effects| effects.deinit(allocator);
-    extraction.export_effects = null;
-    return extraction.contract;
-}
-
-/// Build a contract and optional export table from a completed type session.
-pub fn extractContractResultFromTypeSession(
-    allocator: std.mem.Allocator,
-    parsed: ParsedModule,
-    filename: []const u8,
-    opts: ExtractContractOptions,
-    type_checker: *TypeChecker,
-) !ContractExtraction {
-    if (opts.type_check != runContractTypeCheck or opts.resolved != null) {
-        return error.IncompatibleTypeSessionOptions;
-    }
-    try type_checker.ensureHealthy();
-    const source_types = try consumerTypeSourceForExistingChecker(opts, parsed, type_checker.env);
-
-    const handler_fn = handler_verifier_mod.findHandlerFunction(parsed.ir_view, parsed.root);
-    const handler_loc = if (handler_fn) |hf| parsed.ir_view.getLoc(hf) else null;
-    var extraction = try buildContractResultWithTemporaryFacts(
-        allocator,
-        parsed,
-        filename,
-        opts,
-        type_checker.env,
-        type_checker,
-        source_types,
-        handler_fn,
-        handler_loc,
-    );
-    errdefer extraction.deinit(allocator);
-    try type_checker.ensureHealthy();
-    return extraction;
-}
-
-/// Build an owned handler contract from an already-parsed module.
-pub fn extractContractFromParsed(
-    allocator: std.mem.Allocator,
-    parsed: ParsedModule,
-    filename: []const u8,
-    opts: ExtractContractOptions,
-) !HandlerContract {
-    var extraction = try extractContractResultFromParsed(allocator, parsed, filename, opts);
-    if (extraction.export_effects) |*effects| effects.deinit(allocator);
-    extraction.export_effects = null;
-    return extraction.contract;
-}
-
-/// Build a contract and optional export table from an already-parsed module.
-pub fn extractContractResultFromParsed(
-    allocator: std.mem.Allocator,
-    parsed: ParsedModule,
-    filename: []const u8,
-    opts: ExtractContractOptions,
-) !ContractExtraction {
-    const handler_fn = handler_verifier_mod.findHandlerFunction(parsed.ir_view, parsed.root);
-    const handler_loc = if (handler_fn) |hf| parsed.ir_view.getLoc(hf) else null;
-
-    if (opts.type_check == runContractTypeCheck) {
-        if (opts.resolved) |resolved| {
-            if (resolved.type_checker) |*tc| {
-                const source_types = try consumerTypeSourceForExistingChecker(opts, parsed, tc.env);
-                var extraction = try buildContractResultWithTemporaryFacts(
-                    allocator,
-                    parsed,
-                    filename,
-                    opts,
-                    tc.env,
-                    tc,
-                    source_types,
-                    handler_fn,
-                    handler_loc,
-                );
-                errdefer extraction.deinit(allocator);
-                try tc.ensureHealthy();
-                return extraction;
-            }
-        }
-    }
-
-    const selected = normalizeModuleSourceTypes(opts.source_types);
-
-    var storage: TypeEnvStorage = .{};
-    try storage.initWithSource(allocator, try sourceTypeInput(parsed, selected));
-    defer storage.deinit(allocator);
-    const type_env = storage.envPtr().?;
-
-    var type_checker = TypeChecker.init(
-        allocator,
-        parsed.ir_view,
-        parsed.atoms,
-        type_env,
-    );
-    defer type_checker.deinit();
-    type_checker.scopes = parsed.scopes;
-    _ = try opts.type_check(&type_checker, parsed.root);
-
-    try type_checker.ensureHealthy();
-    var extraction = try buildContractResultWithTemporaryFacts(
-        allocator,
-        parsed,
-        filename,
-        opts,
-        type_env,
-        &type_checker,
-        consumerTypeSource(selected, type_env),
-        handler_fn,
-        handler_loc,
-    );
-    errdefer extraction.deinit(allocator);
-    try type_checker.ensureHealthy();
-    return extraction;
-}
-
-fn buildContractResultWithTemporaryFacts(
-    allocator: std.mem.Allocator,
-    parsed: ParsedModule,
-    filename: []const u8,
-    opts: ExtractContractOptions,
-    type_env: *const TypeEnv,
-    type_checker: *TypeChecker,
-    source_types: type_env_mod.ConsumerTypeSource,
-    handler_fn: ?NodeIndex,
-    handler_loc: ?ir_mod.SourceLocation,
-) !ContractExtraction {
-    try type_checker.ensureHealthy();
-    var owned_module_facts: ?ModuleFacts = if (opts.module_facts == null)
-        try buildModuleFacts(allocator, parsed, opts.manifest_registry)
-    else
-        null;
-    defer if (owned_module_facts) |*facts| facts.deinit();
-    const module_facts = opts.module_facts orelse &owned_module_facts.?;
-
-    var effect_facts = try effect_inference.buildEffectFacts(
-        allocator,
-        parsed.ir_view,
-        parsed.atoms,
-        parsed.root,
-        .{
-            .manifest_registry = opts.manifest_registry,
-            .module_facts = module_facts,
-            .type_source = source_types,
-            .imported_effects = opts.imported_effects,
-            .contract_projection = .{ .complete = .{ .selected_handler = handler_fn } },
-        },
-    );
-    defer effect_facts.deinit(allocator);
-
-    return buildContractResultOn(
-        allocator,
-        parsed,
-        filename,
-        opts,
-        type_env,
-        type_checker,
-        source_types,
-        handler_fn,
-        handler_loc,
-        module_facts,
-        &effect_facts,
-    );
-}
 
 /// Build a contract from completed immutable module and effect facts.
 fn buildContractResultOn(
@@ -2091,43 +1888,6 @@ test "TypeEnvStorage rejects a second initialization before allocation" {
 
 fn rejectingContractTypeCheck(_: *TypeChecker, _: NodeIndex) anyerror!u32 {
     return error.TestTypeCheckRan;
-}
-
-test "explicit type session extraction uses the completed caller session" {
-    const allocator = testing.allocator;
-    const source = "function handler(req) { return Response.text('ok'); }\n";
-    var parsed_state = try parseSourceForTest(allocator, source);
-    defer parsed_state.js_parser.deinit();
-    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
-    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
-
-    var storage: TypeEnvStorage = .{};
-    defer storage.deinit(allocator);
-    try storage.initWithSource(allocator, .omitted);
-    var type_checker = TypeChecker.init(allocator, view, null, storage.envPtr().?);
-    defer type_checker.deinit();
-    type_checker.scopes = &parsed_state.js_parser.scopes;
-    _ = try type_checker.check(parsed.root);
-
-    var contract = try extractContractFromTypeSession(
-        allocator,
-        parsed,
-        "explicit-session.ts",
-        .{},
-        &type_checker,
-    );
-    defer contract.deinit(allocator);
-    try testing.expectEqualStrings("explicit-session.ts", contract.handler.path);
-    try testing.expectError(
-        error.IncompatibleTypeSessionOptions,
-        extractContractFromTypeSession(
-            allocator,
-            parsed,
-            "explicit-session.ts",
-            .{ .type_check = rejectingContractTypeCheck },
-            &type_checker,
-        ),
-    );
 }
 
 test "ModuleAnalysisSession requires completion and permits one extraction" {
@@ -4004,11 +3764,7 @@ test "a refused payload is a dynamic response schema in the contract, not an inf
         "  return Response.json({ error: \"Not Found\" }, { status: 404 });\n}";
     try withSession(testing.allocator, head ++ "  const joined = n + \"y\";" ++ tail, struct {
         fn run(session: Session) anyerror!void {
-            try testing.expect(session.resolved.type_checker.?.refusedExpressionCount() > 0);
-            var contract = try extractContractFromParsed(session.allocator, session.parsed, "probe.ts", .{
-                .source_types = .direct,
-                .resolved = session.resolved,
-            });
+            var contract = try extractContractOnlyForTest(session, true);
             defer contract.deinit(session.allocator);
             try testing.expectEqual(@as(usize, 1), contract.api.routes.items.len);
             const route = contract.api.routes.items[0];
@@ -4020,10 +3776,7 @@ test "a refused payload is a dynamic response schema in the contract, not an inf
     // dynamic answer above comes from the refusal and not from the route shape.
     try withSession(testing.allocator, head ++ "  const joined = n + 2;" ++ tail, struct {
         fn run(session: Session) anyerror!void {
-            var contract = try extractContractFromParsed(session.allocator, session.parsed, "probe.ts", .{
-                .source_types = .direct,
-                .resolved = session.resolved,
-            });
+            var contract = try extractContractOnlyForTest(session, false);
             defer contract.deinit(session.allocator);
             const route = contract.api.routes.items[0];
             try testing.expect(route.responses.items[0].schema == .inline_json);
@@ -4522,35 +4275,25 @@ test "a typed parameter does not change the bytecode annotations" {
     }.run);
 }
 
-const ExistingCheckerEntry = enum { type_session, resolved };
-
-fn extractExistingCheckerForTest(
+fn extractSoundSessionForTest(
     allocator: std.mem.Allocator,
-    entry: ExistingCheckerEntry,
     parsed: ParsedModule,
     options: ExtractContractOptions,
-    checker: *TypeChecker,
-    resolved: *ResolvedModule,
 ) !HandlerContract {
-    return switch (entry) {
-        .type_session => extractContractFromTypeSession(
-            allocator,
-            parsed,
-            "existing-checker.ts",
-            options,
-            checker,
-        ),
-        .resolved => blk: {
-            var selected = options;
-            selected.resolved = resolved;
-            break :blk extractContractFromParsed(
-                allocator,
-                parsed,
-                "existing-checker.ts",
-                selected,
-            );
-        },
-    };
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initSoundExtraction(allocator, parsed, options);
+    defer analysis.deinit();
+    try analysis.complete();
+    return analysis.extractContract("existing-checker.ts");
+}
+
+fn extractContractOnlyForTest(session: Session, expect_refusal: bool) !HandlerContract {
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initContractOnly(session.allocator, session.parsed, .{ .extraction = .{ .strict = false } });
+    defer analysis.deinit();
+    try analysis.complete();
+    try testing.expectEqual(expect_refusal, analysis.standalone_checker.?.refusedExpressionCount() > 0);
+    return analysis.extractContract("probe.ts");
 }
 
 fn expectExistingCheckerFacts(contract: *const HandlerContract, authored: bool) !void {
@@ -4581,7 +4324,7 @@ fn expectExistingCheckerFacts(contract: *const HandlerContract, authored: bool) 
     try testing.expect(saw_effect);
 }
 
-test "existing checker APIs preserve source selection and direct ownership" {
+test "sound extraction sessions preserve source selection and direct ownership" {
     const allocator = testing.allocator;
     const source =
         \\import { sha256 } from "zttp:crypto";
@@ -4607,67 +4350,18 @@ test "existing checker APIs preserve source selection and direct ownership" {
         &direct_parser.type_store,
     );
     const direct_unbound = ParsedModule.fromExisting(direct_view, direct_root, &direct_atoms);
-    var direct_storage: TypeEnvStorage = .{};
-    defer direct_storage.deinit(allocator);
-    try direct_storage.initWithSource(allocator, .{ .direct = .{
-        .store = &direct_parser.type_store,
-        .ir_view = direct_view,
-        .atoms = &direct_atoms,
-    } });
-    var direct_checker = TypeChecker.init(allocator, direct_view, &direct_atoms, direct_storage.envPtr().?);
-    defer direct_checker.deinit();
-    direct_checker.scopes = &direct_parser.scopes;
-    _ = try direct_checker.check(direct_root);
-    var direct_resolved = try resolve(allocator, direct_parsed, .{
-        .type_env = direct_storage.envPtr(),
-        .strict = false,
-    });
-    defer direct_resolved.deinit();
+    var omitted = try extractSoundSessionForTest(allocator, direct_parsed, .{ .source_types = .omitted, .strict = false });
+    defer omitted.deinit(allocator);
+    try expectExistingCheckerFacts(&omitted, false);
 
-    var baseline_json: ?[]u8 = null;
-    defer if (baseline_json) |bytes| allocator.free(bytes);
-    inline for (.{ ExistingCheckerEntry.type_session, .resolved }) |entry| {
-        var omitted = try extractExistingCheckerForTest(
-            allocator,
-            entry,
-            direct_parsed,
-            .{ .source_types = .omitted },
-            &direct_checker,
-            &direct_resolved,
-        );
-        defer omitted.deinit(allocator);
-        try expectExistingCheckerFacts(&omitted, false);
+    var direct = try extractSoundSessionForTest(allocator, direct_parsed, .{ .source_types = .direct, .strict = false });
+    defer direct.deinit(allocator);
+    try expectExistingCheckerFacts(&direct, true);
 
-        var direct = try extractExistingCheckerForTest(
-            allocator,
-            entry,
-            direct_parsed,
-            .{ .source_types = .direct },
-            &direct_checker,
-            &direct_resolved,
-        );
-        defer direct.deinit(allocator);
-        try expectExistingCheckerFacts(&direct, true);
-        const direct_json = try serializeContractForTest(allocator, &direct);
-        defer allocator.free(direct_json);
-        if (baseline_json) |expected| {
-            try testing.expectEqualStrings(expected, direct_json);
-        } else {
-            baseline_json = try allocator.dupe(u8, direct_json);
-        }
-
-        try testing.expectError(
-            error.DirectTypeSyntaxUnavailable,
-            extractExistingCheckerForTest(
-                allocator,
-                entry,
-                direct_unbound,
-                .{ .source_types = .direct },
-                &direct_checker,
-                &direct_resolved,
-            ),
-        );
-    }
+    try testing.expectError(
+        error.DirectTypeSyntaxUnavailable,
+        extractSoundSessionForTest(allocator, direct_unbound, .{ .source_types = .direct, .strict = false }),
+    );
 }
 
 threadlocal var source_selection_graph_reads: usize = 0;
@@ -4928,40 +4622,6 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         3331,
         "90560e2d00b47ba2ed71a1c6ee10c2d9066987a1fca0ac0235e229da1955f980",
     );
-
-    var source_owner: source_frontend_mod.DirectCheckSource = undefined;
-    try source_owner.initInPlace(allocator, allocator, abi_source, "authored-is-dict.ts");
-    defer source_owner.deinit();
-    const accepted = source_owner.acceptedCapabilities() orelse return error.TestUnexpectedResult;
-    const parsed = ParsedModule.fromTypedExisting(accepted.ir_view, accepted.root, accepted.atoms, accepted.type_store);
-    var storage: TypeEnvStorage = .{};
-    defer storage.deinit(allocator);
-    try storage.initWithSource(allocator, .{ .direct = .{
-        .store = accepted.type_store,
-        .ir_view = accepted.ir_view,
-        .atoms = accepted.atoms,
-    } });
-    var checker = TypeChecker.init(allocator, accepted.ir_view, accepted.atoms, storage.envPtr().?);
-    defer checker.deinit();
-    checker.scopes = &source_owner.parser.scopes;
-    _ = try checker.check(accepted.root);
-    var resolved = try resolve(allocator, parsed, .{
-        .type_env = storage.envPtr(),
-        .strict = false,
-    });
-    defer resolved.deinit();
-    var explicit_omitted = try extractExistingCheckerForTest(
-        allocator,
-        .resolved,
-        parsed,
-        .{ .source_types = .omitted },
-        &checker,
-        &resolved,
-    );
-    defer explicit_omitted.deinit(allocator);
-    try testing.expectEqual(type_env_mod.SourceTypeMode.direct, storage.envPtr().?.sourceTypeMode().?);
-    try testing.expectEqual(@as(usize, 1), explicit_omitted.holes.items.len);
-    try testing.expectEqualStrings("unknown", explicit_omitted.holes.items[0].expected_type);
 }
 
 test "an empty parser-owned Store selects direct and remains distinct from omitted" {

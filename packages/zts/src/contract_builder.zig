@@ -3745,3 +3745,25 @@ test "a local whose slot equals an import's atom index does not enter the env li
         try std.testing.expect(!std.mem.eql(u8, name, "LOCAL_ONLY_NAME"));
     }
 }
+
+test "an intent body is written by the shared literal writer and a value JSON cannot carry makes it dynamic" {
+    const Case = struct { body: []const u8, dynamic: bool, expected: ?[]const u8 };
+    const cases = [_]Case{
+        .{ .body = "{ a: 1, b: [true, null] }", .dynamic = false, .expected = "{\"a\": 1, \"b\": [true, null]}" },
+        .{ .body = "{ a: undefined }", .dynamic = true, .expected = null },
+        .{ .body = "{ a: 1, a: 2 }", .dynamic = true, .expected = null },
+    };
+    inline for (cases) |case| {
+        var contract = try buildTestContract(
+            "export const intent = { assertions: [{ name: \"n\", request: { method: \"GET\", path: \"/\" }, expect: { json: " ++ case.body ++ " } }] };\n" ++
+                "function handler(req) { return Response.text(\"ok\"); }\n",
+        );
+        defer contract.deinit(std.testing.allocator);
+        const intent = contract.intent orelse return error.MissingIntent;
+        try std.testing.expectEqual(case.dynamic, intent.dynamic);
+        if (case.expected) |expected| {
+            try std.testing.expectEqual(@as(usize, 1), intent.assertions.items.len);
+            try std.testing.expectEqualStrings(expected, intent.assertions.items[0].expected_body_json.?);
+        }
+    }
+}

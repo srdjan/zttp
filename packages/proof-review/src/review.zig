@@ -31,9 +31,8 @@ const ProvenFacts = zts_cli.deploy_manifest.ProvenFacts;
 /// was never true: the package already imports `zts` and `zts_cli`.
 ///
 /// `classify` derives only `.safe`, `.safe_with_additions`, and `.breaking`
-/// from a `ReviewDelta`. `.needs_review` comes from property regressions and
-/// coverage gaps that only `upgrade_verifier.analyzeUpgrade` computes, so the
-/// deploy card never shows it.
+/// from a `ReviewDelta`. `.needs_review` comes from property regressions that only
+/// `upgrade_verifier.analyzeUpgrade` computes, so the deploy card never shows it.
 pub const Verdict = zts_cli.upgrade_verifier.UpgradeVerdict;
 
 /// Contract-level proof completeness, owned by the engine.

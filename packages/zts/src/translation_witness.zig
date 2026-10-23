@@ -276,14 +276,6 @@ pub const Recorder = struct {
             }
         }
     }
-
-    /// The emission recorded for one parser IR node inside `scope`, if any.
-    pub fn emissionFor(self: *const Recorder, scope_index: usize, node: u32) ?Emission {
-        for (self.scopes.items[scope_index].emissions.items) |emission| {
-            if (emission.node == node) return emission;
-        }
-        return null;
-    }
 };
 
 // ---------------------------------------------------------------------------
@@ -291,6 +283,14 @@ pub const Recorder = struct {
 // ---------------------------------------------------------------------------
 
 const testing = std.testing;
+
+/// The emission recorded for one parser IR node inside `scope`, if any.
+fn testEmissionFor(recorder: *const Recorder, scope_index: usize, node: u32) ?Emission {
+    for (recorder.scopes.items[scope_index].emissions.items) |emission| {
+        if (emission.node == node) return emission;
+    }
+    return null;
+}
 
 const FakeLabels = struct {
     offsets: []const ?u32,
@@ -330,7 +330,7 @@ test "a balanced recording is whole" {
     try testing.expectEqual(@as(u32, 7), recorder.scopes.items[0].jumps.items[0].node);
     try testing.expectEqual(@as(u32, 9), recorder.scopes.items[0].jumps.items[0].target_offset);
 
-    const inner = recorder.emissionFor(0, 8).?;
+    const inner = testEmissionFor(&recorder, 0, 8).?;
     try testing.expectEqual(@as(u32, 5), inner.code_start);
     try testing.expectEqual(@as(u32, 4), inner.code_len);
 }
@@ -355,9 +355,9 @@ test "a nested function's offsets are recorded against its own buffer" {
     try testing.expectEqual(@as(usize, 2), recorder.scopes.items.len);
     try testing.expectEqual(@as(u32, module_scope), recorder.scopes.items[0].node);
     try testing.expectEqual(@as(u32, 1), recorder.scopes.items[1].node);
-    try testing.expectEqual(@as(u32, 0), recorder.emissionFor(1, 2).?.code_start);
-    try testing.expectEqual(@as(u32, 6), recorder.emissionFor(1, 2).?.code_len);
-    try testing.expectEqual(@as(?Emission, null), recorder.emissionFor(0, 2));
+    try testing.expectEqual(@as(u32, 0), testEmissionFor(&recorder, 1, 2).?.code_start);
+    try testing.expectEqual(@as(u32, 6), testEmissionFor(&recorder, 1, 2).?.code_len);
+    try testing.expectEqual(@as(?Emission, null), testEmissionFor(&recorder, 0, 2));
 }
 
 test "an unbalanced recording refuses rather than reporting a short list" {
@@ -424,7 +424,7 @@ test "compaction moves witnesses and jumps by the same mapping" {
     recorder.applyCompaction(FakeRemap{ .shift = 4 }, FakeRemap.map, 8);
     try recorder.check();
 
-    const emission = recorder.emissionFor(0, 1).?;
+    const emission = testEmissionFor(&recorder, 0, 1).?;
     try testing.expectEqual(@as(u32, 0), emission.code_start);
     try testing.expectEqual(@as(u32, 8), emission.code_len);
     try testing.expectEqual(@as(u32, 2), recorder.scopes.items[0].jumps.items[0].instruction_offset);
@@ -444,7 +444,7 @@ test "a node the proof IR does not carry balances without being recorded" {
     try recorder.check();
 
     try testing.expectEqual(@as(usize, 1), recorder.scopes.items[0].emissions.items.len);
-    try testing.expectEqual(@as(?Emission, null), recorder.emissionFor(0, 2));
+    try testing.expectEqual(@as(?Emission, null), testEmissionFor(&recorder, 0, 2));
 }
 
 test "every rewrite kind names itself" {

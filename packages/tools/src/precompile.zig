@@ -3391,15 +3391,11 @@ test "contract construction propagates type-check allocation failure" {
     const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = zts.pipeline.ParsedModule.fromExisting(ir_view, root, &atoms);
 
-    try std.testing.expectError(
-        error.OutOfMemory,
-        zts.pipeline.extractContractFromParsed(
-            allocator,
-            parsed,
-            "<contract-type-oom>",
-            .{ .type_check = failContractTypeCheck },
-        ),
-    );
+    var analysis: zts.pipeline.ModuleAnalysisSession = .{};
+    try analysis.initSoundExtraction(allocator, parsed, .{ .type_check = failContractTypeCheck, .strict = false });
+    defer analysis.deinit();
+    try analysis.complete();
+    try std.testing.expectError(error.OutOfMemory, analysis.extractContract("<contract-type-oom>"));
 }
 
 test "runCheckOnly propagates path analysis allocation failure" {

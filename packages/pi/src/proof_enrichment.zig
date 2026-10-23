@@ -108,7 +108,7 @@ fn computeProveSummary(
             var diff = try contract_diff.diffContractsFromSources(allocator, before_contract, after_contract, before_source, after);
             defer diff.deinit(allocator);
             const classification = diff.classify();
-            const recommendation = try contract_diff.generateRecommendation(allocator, classification, &diff, null);
+            const recommendation = try contract_diff.generateRecommendation(allocator, classification, &diff);
             defer allocator.free(recommendation);
             const laws = try allocator.alloc([]u8, diff.laws_used.items.len);
             errdefer allocator.free(laws);

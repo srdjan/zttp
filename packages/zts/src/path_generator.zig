@@ -800,13 +800,6 @@ pub const PathGenerator = struct {
         }
     }
 
-    /// The import index the generator reads. Callers that scan the imported
-    /// files build their answer from these records, so the records and the
-    /// answer agree on every slot.
-    pub fn importFacts(self: *PathGenerator) error{OutOfMemory}!*const module_facts_mod.ModuleFacts {
-        return self.resolveFacts();
-    }
-
     /// Give the generator the answer for the handler's non-builtin import
     /// records. Call it before `generate`. Borrowed; `entries` must outlive the
     /// generator. Null says the caller has no answer.
@@ -3671,7 +3664,7 @@ fn generateFixtureScanned(
     var entries: std.ArrayList(PathGenerator.ImportScanEntry) = .empty;
     errdefer entries.deinit(allocator);
     if (scans) |given| {
-        const facts = try generator.importFacts();
+        const facts = try generator.resolveFacts();
         for (facts.imports.items) |rec| {
             for (given) |candidate| {
                 if (!std.mem.eql(u8, candidate.specifier, rec.module_specifier)) continue;

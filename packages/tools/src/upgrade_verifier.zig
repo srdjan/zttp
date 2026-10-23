@@ -1,12 +1,12 @@
 //! Upgrade Verifier
 //!
-//! Synthesizes surface diff, behavioral diff, property regression analysis,
-//! and coverage gap detection into a unified upgrade verdict. This is the
-//! top-level analysis layer that answers: "is this handler upgrade safe?"
+//! Synthesizes surface diff, behavioral diff, and property regression analysis
+//! into a unified upgrade verdict. This is the top-level analysis layer
+//! that answers: "is this handler upgrade safe?"
 //!
 //! The verdict goes beyond the existing 3-value Classification (equivalent/
-//! additive/breaking) by incorporating behavioral path comparison, property
-//! regressions with severity, and trace coverage gaps.
+//! additive/breaking) by incorporating behavioral path comparison and property
+//! regressions with severity.
 //!
 //! Called by system_rollout.zig when behavioral data is available.
 
@@ -18,7 +18,6 @@ const HandlerContract = zts.HandlerContract;
 const ContractDiff = contract_diff.ContractDiff;
 const BehaviorDiff = contract_diff.BehaviorDiff;
 const Classification = contract_diff.Classification;
-const ReplaySummary = contract_diff.ReplaySummary;
 const PropertiesChange = contract_diff.PropertiesChange;
 
 // -------------------------------------------------------------------------
@@ -26,13 +25,13 @@ const PropertiesChange = contract_diff.PropertiesChange;
 // -------------------------------------------------------------------------
 
 pub const UpgradeVerdict = enum {
-    /// Contract identical, properties preserved, all traces pass.
+    /// Contract identical, properties preserved, no property regressions.
     safe,
     /// New capabilities added, existing preserved, no regressions.
     safe_with_additions,
-    /// Routes/capabilities removed, traces diverged, or critical property lost.
+    /// Routes/capabilities removed, paths changed, or critical property lost.
     breaking,
-    /// Structurally OK but property regressions or coverage gaps detected.
+    /// Structurally OK but property regressions detected.
     needs_review,
 
     pub fn toString(self: UpgradeVerdict) []const u8 {
@@ -76,20 +75,6 @@ fn propertySeverity(field: []const u8, gained: bool) Severity {
 }
 
 // -------------------------------------------------------------------------
-// Coverage gap
-// -------------------------------------------------------------------------
-
-pub const CoverageGap = struct {
-    total_new_paths: u32,
-    covered_by_traces: u32,
-
-    pub fn uncovered(self: CoverageGap) u32 {
-        if (self.covered_by_traces >= self.total_new_paths) return 0;
-        return self.total_new_paths - self.covered_by_traces;
-    }
-};
-
-// -------------------------------------------------------------------------
 // Upgrade manifest
 // -------------------------------------------------------------------------
 
@@ -106,11 +91,9 @@ pub const UpgradeManifest = struct {
     justification: []const u8, // owned
     classification: Classification,
     surface: SurfaceSummary,
-    replay: ?ReplaySummary,
     behavioral: ?BehavioralSummary,
     property_regressions: std.ArrayList(PropertyRegression),
     property_gains: std.ArrayList(PropertyRegression),
-    coverage_gap: ?CoverageGap,
 
     pub const BehavioralSummary = struct {
         preserved: u32,
@@ -134,8 +117,6 @@ pub fn analyzeUpgrade(
     allocator: std.mem.Allocator,
     diff: *const ContractDiff,
     classification: Classification,
-    replay: ?ReplaySummary,
-    new_contract: *const HandlerContract,
 ) !UpgradeManifest {
     // Surface summary
     var surface = SurfaceSummary{};
@@ -181,31 +162,20 @@ pub fn analyzeUpgrade(
         };
     }
 
-    // Coverage gap (new handler paths vs trace coverage)
-    var coverage_gap: ?CoverageGap = null;
-    if (replay != null and new_contract.behaviors.items.len > 0) {
-        coverage_gap = .{
-            .total_new_paths = @intCast(new_contract.behaviors.items.len),
-            .covered_by_traces = if (replay) |r| r.identical else 0,
-        };
-    }
-
     // Synthesize verdict
-    const verdict = synthesizeVerdict(classification, &regressions, diff.behavior_diff, coverage_gap);
+    const verdict = synthesizeVerdict(classification, &regressions, diff.behavior_diff);
 
     // Generate justification
-    const justification = try generateJustification(allocator, verdict, &surface, behavioral, &regressions, &gains, coverage_gap);
+    const justification = try generateJustification(allocator, verdict, &surface, behavioral, &regressions, &gains);
 
     return .{
         .verdict = verdict,
         .justification = justification,
         .classification = classification,
         .surface = surface,
-        .replay = replay,
         .behavioral = behavioral,
         .property_regressions = regressions,
         .property_gains = gains,
-        .coverage_gap = coverage_gap,
     };
 }
 
@@ -213,7 +183,6 @@ fn synthesizeVerdict(
     classification: Classification,
     regressions: *const std.ArrayList(PropertyRegression),
     behavior_diff: ?BehaviorDiff,
-    coverage_gap: ?CoverageGap,
 ) UpgradeVerdict {
     // Structural breaking is always breaking
     if (classification == .breaking) return .breaking;
@@ -233,13 +202,6 @@ fn synthesizeVerdict(
         if (r.severity == .warning) return .needs_review;
     }
 
-    // Significant coverage gaps need review
-    if (coverage_gap) |cg| {
-        if (cg.total_new_paths > 0 and cg.uncovered() > cg.total_new_paths / 2) {
-            return .needs_review;
-        }
-    }
-
     // Additive changes
     if (classification == .additive) return .safe_with_additions;
     if (behavior_diff) |bd| {
@@ -256,7 +218,6 @@ fn generateJustification(
     behavioral: ?UpgradeManifest.BehavioralSummary,
     regressions: *const std.ArrayList(PropertyRegression),
     gains: *const std.ArrayList(PropertyRegression),
-    coverage_gap: ?CoverageGap,
 ) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(allocator);
@@ -300,13 +261,6 @@ fn generateJustification(
         try writer.print(" Gained {s}.", .{g.field});
     }
 
-    if (coverage_gap) |cg| {
-        const unc = cg.uncovered();
-        if (unc > 0) {
-            try writer.print(" {d}/{d} path(s) uncovered by traces.", .{ unc, cg.total_new_paths });
-        }
-    }
-
     buf = aw.toArrayList();
     return try buf.toOwnedSlice(allocator);
 }
@@ -348,13 +302,7 @@ fn expectIntegratedPropertyLoss(
 
     var diff = try contract_diff.diffContracts(allocator, &old, &new);
     defer diff.deinit(allocator);
-    var manifest = try analyzeUpgrade(
-        allocator,
-        &diff,
-        diff.classify(),
-        null,
-        &new,
-    );
+    var manifest = try analyzeUpgrade(allocator, &diff, diff.classify());
     defer manifest.deinit(allocator);
 
     try std.testing.expectEqual(expected_verdict, manifest.verdict);
@@ -388,7 +336,7 @@ test "integrated property gain remains informational and safe" {
 
     var diff = try contract_diff.diffContracts(allocator, &old, &new);
     defer diff.deinit(allocator);
-    var manifest = try analyzeUpgrade(allocator, &diff, diff.classify(), null, &new);
+    var manifest = try analyzeUpgrade(allocator, &diff, diff.classify());
     defer manifest.deinit(allocator);
 
     try std.testing.expectEqual(UpgradeVerdict.safe, manifest.verdict);

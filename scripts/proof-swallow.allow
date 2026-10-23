@@ -91,9 +91,7 @@ packages/zts/src/contract_builder.zig normalizeEndpoint catch-value
 packages/zts/src/contract_builder.zig getOrPutDuped catch-block
 packages/zts/src/contract_builder.zig appendQueryParamsFromSchema catch-block
 
-# An external severity parse error propagates as InvalidJson. Map insertion
-# failure releases its new key and propagates the allocation error.
-packages/zts/src/fault_coverage.zig parseExternalSeverities catch-multiline
+# Map insertion failure releases its new key and propagates the allocation error.
 packages/zts/src/fault_coverage.zig getOrPutEntry catch-block
 
 # HandlerVerifier checks allocation_failed before it returns a verdict. Its
@@ -193,10 +191,6 @@ packages/zts/src/contract_builder.zig currentPolicyHashRaw catch-trap
 packages/zts/src/handler_verifier.zig scanImports catch-poison@2
 packages/zts/src/handler_verifier.zig walkForResultsAndRefs catch-poison@2
 packages/zts/src/handler_verifier.zig walkForResultsAndRefs catch-poison@3
-
-# Each escaped control byte formats as six ASCII bytes into a six-byte buffer:
-# backslash-u plus four hex digits. bufPrint cannot exhaust that buffer.
-packages/zts/src/intent_extractor.zig writeLiteralAsJson catch-trap
 
 # Each second narrowing allocation failure returns null. The un-narrowed type
 # is wider, so these sites cannot remove a required diagnostic.

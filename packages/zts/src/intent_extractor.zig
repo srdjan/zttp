@@ -32,6 +32,7 @@ const std = @import("std");
 const ir_mod = @import("zts-engine").parser.ir;
 const handler_contract = @import("zts-contracts").handler_contract;
 const object = @import("zts-engine").object;
+const ir_json_literal = @import("ir_json_literal.zig");
 
 const IrView = ir_mod.IrView;
 const NodeIndex = ir_mod.NodeIndex;
@@ -351,92 +352,15 @@ fn parseHeaders(
 // ---------------------------------------------------------------------------
 
 fn jsonSerializeLiteral(deps: Deps, idx: NodeIndex) ParseError![]u8 {
-    var out: std.ArrayList(u8) = .empty;
-    errdefer out.deinit(deps.allocator);
-    try writeLiteralAsJson(deps, idx, &out);
-    return out.toOwnedSlice(deps.allocator);
-}
-
-fn writeLiteralAsJson(deps: Deps, idx: NodeIndex, out: *std.ArrayList(u8)) ParseError!void {
-    const tag = deps.ir_view.getTag(idx) orelse return error.NotLiteral;
-    switch (tag) {
-        .lit_string => {
-            const s = literalString(deps, idx) orelse return error.NotLiteral;
-            try out.append(deps.allocator, '"');
-            for (s) |c| {
-                switch (c) {
-                    '"' => try out.appendSlice(deps.allocator, "\\\""),
-                    '\\' => try out.appendSlice(deps.allocator, "\\\\"),
-                    '\n' => try out.appendSlice(deps.allocator, "\\n"),
-                    '\r' => try out.appendSlice(deps.allocator, "\\r"),
-                    '\t' => try out.appendSlice(deps.allocator, "\\t"),
-                    0x00...0x08, 0x0b...0x0c, 0x0e...0x1f => {
-                        var esc: [6]u8 = undefined;
-                        const written = std.fmt.bufPrint(&esc, "\\u{x:0>4}", .{@as(u16, c)}) catch unreachable;
-                        try out.appendSlice(deps.allocator, written);
-                    },
-                    else => try out.append(deps.allocator, c),
-                }
-            }
-            try out.append(deps.allocator, '"');
-        },
-        .lit_int => {
-            const n = deps.ir_view.getIntValue(idx) orelse return error.NotLiteral;
-            var buf: [16]u8 = undefined;
-            const written = std.fmt.bufPrint(&buf, "{d}", .{n}) catch return error.NotLiteral;
-            try out.appendSlice(deps.allocator, written);
-        },
-        .lit_float => {
-            const f_idx = deps.ir_view.getFloatIdx(idx) orelse return error.NotLiteral;
-            const f = deps.ir_view.getFloat(f_idx) orelse return error.NotLiteral;
-            var buf: [32]u8 = undefined;
-            const written = std.fmt.bufPrint(&buf, "{d}", .{f}) catch return error.NotLiteral;
-            try out.appendSlice(deps.allocator, written);
-        },
-        .lit_bool => {
-            const b = deps.ir_view.getBoolValue(idx) orelse return error.NotLiteral;
-            try out.appendSlice(deps.allocator, if (b) "true" else "false");
-        },
-        .lit_null, .lit_undefined => {
-            try out.appendSlice(deps.allocator, "null");
-        },
-        .array_literal => {
-            const arr = deps.ir_view.getArray(idx) orelse return error.NotLiteral;
-            if (arr.has_spread) return error.NotLiteral;
-            try out.append(deps.allocator, '[');
-            var i: u32 = 0;
-            while (i < arr.elements_count) : (i += 1) {
-                if (i > 0) try out.append(deps.allocator, ',');
-                const e = deps.ir_view.getListIndex(arr.elements_start, @intCast(i));
-                try writeLiteralAsJson(deps, e, out);
-            }
-            try out.append(deps.allocator, ']');
-        },
-        .object_literal => {
-            const obj = deps.ir_view.getObject(idx) orelse return error.NotLiteral;
-            try out.append(deps.allocator, '{');
-            var p: u32 = 0;
-            while (p < obj.properties_count) : (p += 1) {
-                const prop_idx = deps.ir_view.getListIndex(obj.properties_start, @intCast(p));
-                if (deps.ir_view.getTag(prop_idx) != .object_property) return error.NotLiteral;
-                const prop = deps.ir_view.getProperty(prop_idx) orelse return error.NotLiteral;
-                const key = propKeyName(deps, prop.key) orelse return error.NotLiteral;
-                if (p > 0) try out.append(deps.allocator, ',');
-                try out.append(deps.allocator, '"');
-                for (key) |c| {
-                    switch (c) {
-                        '"' => try out.appendSlice(deps.allocator, "\\\""),
-                        '\\' => try out.appendSlice(deps.allocator, "\\\\"),
-                        else => try out.append(deps.allocator, c),
-                    }
-                }
-                try out.appendSlice(deps.allocator, "\":");
-                try writeLiteralAsJson(deps, prop.value, out);
-            }
-            try out.append(deps.allocator, '}');
-        },
-        else => return error.NotLiteral,
-    }
+    // Null means the literal holds a value JSON cannot carry, so the caller marks the intent dynamic.
+    const json = ir_json_literal.serialize(
+        deps.allocator,
+        deps.ir_view,
+        idx,
+        deps.resolver,
+        deps.resolver_ctx,
+    ) catch return error.OutOfMemory; // WriteFailed here is the allocating writer running out of memory
+    return json orelse error.NotLiteral;
 }
 
 fn literalString(deps: Deps, idx: NodeIndex) ?[]const u8 {

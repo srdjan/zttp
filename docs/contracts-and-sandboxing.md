@@ -367,8 +367,7 @@ The upgrade verdict combines these signals:
   behavior preserved
 - **breaking**: paths removed, responses changed, or critical property
   lost
-- **needs_review**: structurally OK but warning-level regressions or
-  significant coverage gaps
+- **needs_review**: structurally OK but warning-level property regressions
 
 ## Proven Live Reload (`--watch --prove`)
 
