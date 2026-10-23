@@ -39,3 +39,10 @@ The seven files total 1,313 lines. A `git grep -F` of each basename outside `doc
 - U6 went beyond the plan in one place. `patternCanMatchType` judged a named member by its tag, so a `match` arm could narrow below the values it can hold. It now resolves the name and keeps a member it cannot judge, which widens an arm type. No probe exposed a wrong result before the change, and no test pins it.
 - The U6 implementer ran `python3 --version` and `python3 -c 1` as no-ops. No Python file or invocation was committed.
 - The implementer commits in the lane worktrees were cherry-picked onto main, so the hashes above are the main hashes.
+
+## Round 3a gate (at `a1bd5f4d`)
+
+| Command | Exit status |
+|---|---|
+| `zig build test` (private cache) | 0 |
+| `bash scripts/verify.sh` (private cache) | 0 |
