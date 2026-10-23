@@ -5,6 +5,7 @@ const zts = @import("zts");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 const property_goals = @import("../property_goals.zig");
+const pi_goal_check = @import("pi_goal_check.zig");
 const counterexample = zts.counterexample;
 const flow_checker = zts.flow_checker;
 const writeJsonString = zts.writeJsonString;
@@ -159,8 +160,13 @@ pub fn planFromSource(
 
     const policy_hash = zts.policyHash();
     try w.writeAll("{\"ok\":");
+    // The bare checker above raises no diagnostic for an unresolved construct
+    // or an unresolvable import, so the verdict also needs the production check.
+    const unproven = try pi_goal_check.unprovenGoals(allocator, source, rel_path, goals.items);
+    defer allocator.free(unproven);
     const has_failures = hasVerifierErrors(verifier.getDiagnostics()) or
-        hasRequestedFlowDiagnostics(checker.getDiagnostics(), goals.items);
+        hasRequestedFlowDiagnostics(checker.getDiagnostics(), goals.items) or
+        unproven.len > 0;
     try w.writeAll(if (has_failures) "false" else "true");
     try w.writeAll(",\"policy_hash\":\"");
     try w.writeAll(&policy_hash);
@@ -585,4 +591,16 @@ test "concreteTemplate uses extracted subject names" {
     defer testing.allocator.free(template);
     try testing.expect(std.mem.indexOf(u8, template, "authResult.ok") != null);
     try testing.expect(std.mem.indexOf(u8, template, "authResult.error") != null);
+}
+
+test "planFromSource is not ok while a requested goal is unproven" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  fetchSync("https://api.example.com", { method: "POST", body: req.body });
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var result = try planFromSource(testing.allocator, source, "handler.ts", &.{"pii_contained"});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
 }

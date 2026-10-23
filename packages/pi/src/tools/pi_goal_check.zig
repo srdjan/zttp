@@ -14,16 +14,20 @@
 //! surface currently supports is checked.
 //!
 //! The output is a JSON object:
-//!   { "ok": bool,                  // true iff no requested goal was violated
+//!   { "ok": bool,                  // true iff every requested goal is proven
 //!     "goals": [property_tag...],  // goals actually checked
-//!     "witnesses": [{ property, origin, sink, summary, request, io_stubs }...] }
+//!     "witnesses": [{ property, origin, sink, summary, request, io_stubs }...],
+//!     "unproven": [property_tag...] }  // requested goals the check does not prove
 //!
-//! `ok` is false as soon as any witness exists for a requested goal. The
-//! agent reads the witness list, repairs the handler to close the concrete
-//! path, then re-invokes this tool until `ok` is true.
+//! The bare single-file FlowChecker only synthesises witnesses. The verdict
+//! comes from the production check (`unprovenGoals`), which resolves imports:
+//! `ok` is false when a requested goal is unproven or the bare checker raised
+//! a diagnostic for it. The agent reads the witness list, repairs the handler
+//! to close the concrete path, then re-invokes this tool until `ok` is true.
 
 const std = @import("std");
 const zts = @import("zts");
+const zts_cli = @import("zts_cli");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 const property_goals = @import("../property_goals.zig");
@@ -244,10 +248,15 @@ fn evaluateSourceWithTags(
     }
     try w.writeAll("],\"witnesses\":[");
 
+    // A diagnostic for a requested goal is a violation whether or not a
+    // witness can be built for it: a missing location or a solver error omits
+    // the witness and keeps the count.
+    var violation_count: usize = 0;
     var witness_count: usize = 0;
     for (checker.getDiagnostics()) |diag| {
         const tag = flow_checker.propertyTagForKind(diag.kind) orelse continue;
         if (!goalRequested(goals, tag)) continue;
+        violation_count += 1;
 
         const loc = ir_view.getLoc(diag.node) orelse continue;
         const span: counterexample.SourceSpan = .{
@@ -269,7 +278,7 @@ fn evaluateSourceWithTags(
             .summary = diag.message,
             .constraints = constraints,
             .io_calls = io_calls,
-        }) catch continue;
+        }) catch continue; // the solver fails only on allocation; the violation is already counted
         defer witness.deinit(allocator);
 
         if (witness_count > 0) try w.writeByte(',');
@@ -303,13 +312,76 @@ fn evaluateSourceWithTags(
         try w.writeAll("]}");
     }
 
-    try w.print("],\"ok\":{s}}}\n", .{if (witness_count == 0) "true" else "false"});
+    const unproven = try unprovenGoals(allocator, source, path, goals);
+    defer allocator.free(unproven);
+    const ok = violation_count == 0 and unproven.len == 0;
+
+    try w.writeAll("],\"unproven\":[");
+    for (unproven, 0..) |g, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.writeByte('"');
+        try w.writeAll(g.asString());
+        try w.writeByte('"');
+    }
+    try w.print("],\"ok\":{s}}}\n", .{if (ok) "true" else "false"});
     const llm_text = try text_buf.toOwnedSlice();
     errdefer allocator.free(llm_text);
 
     return .{
-        .ok = witness_count == 0,
+        .ok = ok,
         .llm_text = llm_text,
+    };
+}
+
+/// The requested goals the production check does not prove for `source`, as an
+/// owned slice. A goal counts as proven only when the check ran with imports
+/// resolved, left no construct unresolved, and holds the goal's property. An
+/// analysis that cannot run proves nothing, so every goal is then unproven.
+/// This is the same check `aggregate_proof` gates edits with; the bare
+/// single-file FlowChecker cannot see imports and cannot fail `input_validated`
+/// or `pii_contained` by its diagnostics alone.
+pub fn unprovenGoals(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    path: []const u8,
+    goals: []const counterexample.PropertyTag,
+) ![]counterexample.PropertyTag {
+    var unproven: std.ArrayList(counterexample.PropertyTag) = .empty;
+    errdefer unproven.deinit(allocator);
+
+    const root = try common.workspaceRoot(allocator);
+    defer allocator.free(root);
+    const absolute = try common.resolveInsideWorkspace(allocator, root, path);
+    defer allocator.free(absolute);
+    var project_paths = try zts_cli.edit_simulate.discoverProjectPaths(allocator, absolute);
+    defer project_paths.deinit(allocator);
+
+    var check = zts_cli.precompile.runCheckOnlyFromSourceWithOptions(allocator, source, absolute, .{
+        .sql_schema_path = project_paths.sqlite,
+        .json_mode = true,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {
+            try unproven.appendSlice(allocator, goals);
+            return unproven.toOwnedSlice(allocator);
+        },
+    };
+    defer check.deinit(allocator);
+
+    for (goals) |goal| {
+        const proven = if (check.properties) |p| check.flow_unresolved == 0 and propertyHolds(p, goal) else false;
+        if (!proven) try unproven.append(allocator, goal);
+    }
+    return unproven.toOwnedSlice(allocator);
+}
+
+fn propertyHolds(p: zts.HandlerProperties, goal: counterexample.PropertyTag) bool {
+    return switch (goal) {
+        .no_secret_leakage => p.no_secret_leakage,
+        .no_credential_leakage => p.no_credential_leakage,
+        .injection_safe => p.injection_safe,
+        .input_validated => p.input_validated,
+        .pii_contained => p.pii_contained,
     };
 }
 
@@ -402,4 +474,87 @@ test "execute emits witness JSON for the secret-leak fixture" {
     try testing.expect(std.mem.indexOf(u8, mut.llm_text, "\"method\":\"GET\"") != null);
     try testing.expect(std.mem.indexOf(u8, mut.llm_text, "\"fn\":\"env\"") != null);
     try testing.expect(std.mem.indexOf(u8, mut.llm_text, "\"module\":\"env\"") != null);
+}
+
+const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
+const cwd_support = @import("../test_support/cwd.zig");
+
+fn goalCheckIn(
+    allocator: std.mem.Allocator,
+    label: []const u8,
+    files: []const [2][]const u8,
+    args_json: []const u8,
+) !registry_mod.ToolResult {
+    var tmp = try IsolatedTmp.init(allocator, label);
+    defer tmp.cleanup(allocator);
+    for (files) |file| try tmp.writeFile(allocator, file[0], file[1]);
+
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    const args = try decodeJson(allocator, args_json);
+    defer {
+        for (args) |a| allocator.free(a);
+        allocator.free(args);
+    }
+    return execute(allocator, args);
+}
+
+test "execute fails pii_contained when user input reaches fetchSync" {
+    var result = try goalCheckIn(testing.allocator, "goal-pii", &.{.{
+        "handler.ts",
+        \\function handler(req: Request): Response {
+        \\  fetchSync("https://api.example.com", { method: "POST", body: req.body });
+        \\  return Response.json({ ok: true });
+        \\}
+        \\
+    }}, "{\"path\":\"handler.ts\",\"goals\":[\"pii_contained\"]}");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"ok\":false") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"unproven\":[\"pii_contained\"]") != null);
+}
+
+test "execute passes a clean goal through a resolvable sibling import" {
+    var result = try goalCheckIn(testing.allocator, "goal-import-ok", &.{
+        .{
+            "handler.ts",
+            \\import { greet } from "./utils.ts";
+            \\
+            \\function handler(req: Request): Response {
+            \\  return Response.json({ message: greet("world") });
+            \\}
+            \\
+        },
+        .{
+            "utils.ts",
+            \\export structural GreetingName = string;
+            \\export structural GreetingText = string;
+            \\
+            \\export function greet(name: GreetingName): GreetingText {
+            \\  return ["Hello, ", name, "!"].join("");
+            \\}
+            \\
+        },
+    }, "{\"path\":\"handler.ts\",\"goals\":[\"no_secret_leakage\"]}");
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"ok\":true") != null);
+}
+
+test "execute fails a goal when an import does not resolve" {
+    var result = try goalCheckIn(testing.allocator, "goal-import-missing", &.{.{
+        "handler.ts",
+        \\import { greet } from "./missing.ts";
+        \\
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ message: greet("world") });
+        \\}
+        \\
+    }}, "{\"path\":\"handler.ts\",\"goals\":[\"no_secret_leakage\"]}");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"ok\":false") != null);
 }

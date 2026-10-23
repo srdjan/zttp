@@ -351,9 +351,9 @@ fn buildPathGoalsJson(
 }
 
 /// Single-pass parse of `pi_goal_check` output: extracts both the `ok`
-/// flag and every counterexample witness body. Tolerant of malformed
-/// witness entries (drops them) so the autoloop keeps making progress
-/// even if one witness payload is corrupt.
+/// flag and every counterexample witness body. A malformed witness is an
+/// error, not a dropped entry: dropping it would let a live witness read as
+/// defeated in the receipt.
 fn parseGoalCheckResult(allocator: std.mem.Allocator, json_text: []const u8) !GoalCheckResult {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, json_text, .{}) catch {
         return error.InvalidToolOutput;
@@ -377,7 +377,7 @@ fn parseGoalCheckResult(allocator: std.mem.Allocator, json_text: []const u8) !Go
     }
 
     for (witnesses_value.array.items) |item| {
-        const body = parseSingleGoalCheckWitness(allocator, item) catch continue;
+        const body = try parseSingleGoalCheckWitness(allocator, item);
         try bodies.append(allocator, body);
     }
 
@@ -1465,9 +1465,9 @@ test "parseGoalCheckResult extracts ok=false and a full witness body" {
     try testing.expectEqualStrings("\"sentinel\"", result.witnesses[0].io_stubs[0].result_json);
 }
 
-test "parseGoalCheckResult skips malformed witness entries instead of failing" {
+test "parseGoalCheckResult refuses a malformed witness instead of dropping it" {
     const allocator = testing.allocator;
-    const input =
+    const malformed =
         \\{"ok":false,"witnesses":[
         \\{"property":"no_secret_leakage"},
         \\{"key":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
@@ -1479,7 +1479,20 @@ test "parseGoalCheckResult skips malformed witness entries instead of failing" {
         \\"io_stubs":[]}
         \\]}
     ;
-    const result = try parseGoalCheckResult(allocator, input);
+    try testing.expectError(error.InvalidToolOutput, parseGoalCheckResult(allocator, malformed));
+
+    const well_formed =
+        \\{"ok":false,"witnesses":[
+        \\{"key":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\"property":"injection_safe",
+        \\"origin":{"line":1,"column":1},
+        \\"sink":{"line":1,"column":1},
+        \\"summary":"x",
+        \\"request":{"method":"POST","url":"/x","has_auth_header":true,"body":"{}"},
+        \\"io_stubs":[]}
+        \\]}
+    ;
+    const result = try parseGoalCheckResult(allocator, well_formed);
     defer ui_payload.freeWitnessBodySlice(allocator, result.witnesses);
 
     try testing.expectEqual(@as(usize, 1), result.witnesses.len);
