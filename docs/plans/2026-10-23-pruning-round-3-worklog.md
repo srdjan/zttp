@@ -62,7 +62,7 @@ Each lane ran its unit gates in its own worktree. The lead then cherry-picked th
 | U11 P8 | `135a2055` | Test-only engine helpers are deleted. `deserializeFunctionBytecode` and `builtin_modules.all` stay, because production code calls them. |
 | H9 | `dd71a59c` | All 7 `legacy_slot` sites now match `module_reference` by binding kind. Two tests pinned the old behavior. The lead read both and confirmed that the new expectations are correct. |
 | H16 | `39846b13` | The fused modulo propagates codegen errors. |
-| H20 (analyzer) | `9c75fc49` | A member or index write on an undeclared global, a module-scope binding, or a one-level alias reports ZTS310. Aliases through calls or member chains are not tracked. The runtime half waits for decision 5. |
+| H20 (analyzer) | `9c75fc49` | A member or index write on an undeclared global, a module-scope binding, or a one-level alias reports ZTS310. Aliases through calls or member chains are not tracked. Decision 5 chose option (b): no runtime change, and `docs/verification.md` states the bound. |
 | U13 | `20246f27` | Severity overrides, the null replay path, test-only extractors, and the third literal writer are deleted (1,083 lines). |
 | H11 | `15718613` | Probe confirmed. `ReviewFacts` carries the dynamic env, egress, and cache facts. The unread `ProvenFacts` fields are deleted. |
 | U10 | `88262525` | The static cache, hosted review leftovers, the WS and AOT seams, and the P8 symbols are deleted. Mutant rows P1-ITSKIP and P1-DIGDOM go with their code. `region` stays, because it is live output. |
@@ -90,3 +90,20 @@ Each lane ran its unit gates in its own worktree. The lead then cherry-picked th
 | `bash scripts/verify.sh` | not run: its `test` route stops at the same floor |
 
 The test count in that summary covers only the steps that ran after the cache was warm. It is not a count of the whole suite. The H24 and H18 repeat runs wait for the floor change.
+
+## Round 3b final gate (at `edb299f2`)
+
+The owner lowered the kernel function floor to 246 in `edb299f2`.
+
+| Command | Exit status |
+|---|---|
+| `zig build test` (private cache), run 1 | 0 |
+| `zig build test` (private cache), run 2 | 0 |
+| `bash scripts/verify.sh` (private cache) | 0 |
+
+Two clean aggregate runs show no recurrence of the H24 install race or the H18 lock collision in this sample.
+
+## Owner decisions
+
+- Decision 5 (H20 runtime half): option (b). The runtime does not freeze builtin objects. `docs/verification.md` states the bound under bounded reuse.
+- H10 default flips: deferred. The six `HandlerProperties` default flips change the model-visible `holes` list and break the replay. They wait for a later round with an owner re-record.

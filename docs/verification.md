@@ -197,6 +197,10 @@ function handler(req: Request): Response {
 
 Fix: use `const` for module-level declarations, or move mutable state to `zttp:cache`.
 
+A member or index write gets the same error when its base is a builtin such as `Math` or `parseInt`, a module-scope binding, or a local initialized from one of them. The check follows one level of alias. It does not follow an alias through a call or a member chain.
+
+The runtime does not freeze builtin objects. A handler with no accepted certificate runs on `.reuse_bounded_by_count`: one runtime serves up to a fixed count of requests. State that such a handler writes, in a module-scope binding or in a builtin object, can cross requests within that count. The check above keeps that handler from proving `state_isolated`, which is the property that allows wider reuse.
+
 The result feeds into `HandlerProperties.state_isolated`. When no module-scope mutations are detected, `state_isolated` is proven true, enabling safe multi-tenant handler sharing. A contract built without `precompile --verify` leaves `state_isolated` false. `false` on any property means unproven, not violated.
 
 ### 8. Author-Declared Proof Discharge
