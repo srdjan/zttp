@@ -107,3 +107,14 @@ Two clean aggregate runs show no recurrence of the H24 install race or the H18 l
 
 - Decision 5 (H20 runtime half): option (b). The runtime does not freeze builtin objects. `docs/verification.md` states the bound under bounded reuse.
 - H10 default flips: deferred. The six `HandlerProperties` default flips change the model-visible `holes` list and break the replay. They wait for a later round with an owner re-record.
+
+## Leftovers after round 3
+
+| Commit | Change |
+|---|---|
+| `d9042ec0` | `CheckResult.state_isolated` starts false. A file with no handler no longer reports it proven. |
+| `5319b229` | `TypePool.invalidateTypeKeys` is deleted. |
+| `cfdcf55c` | `CheckResult.has_handler` is set right after parsing. The aggregate proof sees a lost handler when both sides stop before the contract. |
+| `866cc179` | `isSecretPath` applies the deny list to every path component. |
+
+At `866cc179`, `zig build test` and `bash scripts/verify.sh` (private cache) exited 0.
