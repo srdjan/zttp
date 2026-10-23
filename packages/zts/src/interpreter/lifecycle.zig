@@ -23,7 +23,7 @@ pub fn init(ctx: *context.Context) Interpreter {
         .open_upvalues = null,
         .state_stack = undefined,
         .state_depth = 0,
-        .pic_cache = [_]PolymorphicInlineCache{.{}} ** IC_CACHE_SIZE,
+        .pic_cache = @as([IC_CACHE_SIZE]PolymorphicInlineCache, @splat(.{})),
     };
 }
 
@@ -32,7 +32,7 @@ pub fn resetProfilingCounters(self: *Interpreter) void {
     self.pic_hits = 0;
     self.pic_misses = 0;
     self.mega_recoveries = 0;
-    self.opcode_histogram = [_]u32{0} ** 256;
+    self.opcode_histogram = @as([256]u32, @splat(0));
 }
 
 /// Update a PIC and observe whether it performed a megamorphic recovery,

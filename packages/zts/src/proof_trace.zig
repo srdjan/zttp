@@ -268,13 +268,13 @@ const default_info = PropertyInfo{
 // Every `HandlerProperties` bool field must have a `property_info` row, so
 // adding a property cannot silently fall through to generic text.
 comptime {
-    for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
-        if (field.type != bool) continue;
+    for (@typeInfo(HandlerProperties).@"struct".field_names) |field| {
+        if (@FieldType(HandlerProperties, field) != bool) continue;
         var found = false;
         for (property_info) |p| {
-            if (std.mem.eql(u8, p.name, field.name)) found = true;
+            if (std.mem.eql(u8, p.name, field)) found = true;
         }
-        if (!found) @compileError("proof_trace: HandlerProperties field has no property_info row: " ++ field.name);
+        if (!found) @compileError("proof_trace: HandlerProperties field has no property_info row: " ++ field);
     }
 }
 
@@ -450,9 +450,9 @@ pub fn collect(
 ) ![]ProofTrace {
     var list: std.ArrayListUnmanaged(ProofTrace) = .empty;
     if (contract.properties) |props| {
-        inline for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
-            if (field.type == bool) {
-                const name = field.name;
+        inline for (@typeInfo(HandlerProperties).@"struct".field_names) |field| {
+            if (@FieldType(HandlerProperties, field) == bool) {
+                const name = field;
                 const holds = @field(props, name);
                 try list.append(arena, try buildTrace(
                     arena,
@@ -500,17 +500,9 @@ fn buildTrace(
                     trace.covered_sites = fc.covered;
                     trace.upstream_fallback_sites = fc.upstream_fallback_sites;
                     if (holds) {
-                        trace.summary = try std.fmt.allocPrint(
-                            arena,
-                            "All {d} failable I/O site(s) have an explicit failure path, across {d} enumerated path(s).",
-                            .{ fc.total_failable, paths_enumerated },
-                        );
+                        trace.summary = try arena.print("All {d} failable I/O site(s) have an explicit failure path, across {d} enumerated path(s).", .{ fc.total_failable, paths_enumerated });
                         if (fc.upstream_fallback_sites > 0) {
-                            trace.summary = try std.fmt.allocPrint(
-                                arena,
-                                "{s} {d} upstream site(s) answer a failure with a 2xx status; each is covered and may be an intended fallback.",
-                                .{ trace.summary, fc.upstream_fallback_sites },
-                            );
+                            trace.summary = try arena.print("{s} {d} upstream site(s) answer a failure with a 2xx status; each is covered and may be an intended fallback.", .{ trace.summary, fc.upstream_fallback_sites });
                         }
                     } else if (fc.total_failable == 0) {
                         trace.summary = "No failable I/O sites in this handler yet.";
@@ -522,17 +514,9 @@ fn buildTrace(
                         // emitted is unseen. `analysis_complete` is the
                         // generator's own answer, so this branch also covers
                         // the unresolved dispatch that `paths_exhaustive` misses.
-                        trace.summary = try std.fmt.allocPrint(
-                            arena,
-                            "All {d} counted failable I/O site(s) have a failure path, but the fault analysis is not complete (the enumerated paths are a summary, or a route dispatch did not resolve), so the property is not proven.",
-                            .{fc.total_failable},
-                        );
+                        trace.summary = try arena.print("All {d} counted failable I/O site(s) have a failure path, but the fault analysis is not complete (the enumerated paths are a summary, or a route dispatch did not resolve), so the property is not proven.", .{fc.total_failable});
                     } else {
-                        trace.summary = try std.fmt.allocPrint(
-                            arena,
-                            "{d} of {d} failable I/O site(s) have no explicit failure path.",
-                            .{ fc.total_failable -| fc.covered, fc.total_failable },
-                        );
+                        trace.summary = try arena.print("{d} of {d} failable I/O site(s) have no explicit failure path.", .{ fc.total_failable -| fc.covered, fc.total_failable });
                     }
                     // A failable call on no enumerated path is neither counted
                     // nor covered, so it blocks the property whatever the
@@ -541,19 +525,11 @@ fn buildTrace(
                         const counted: []const u8 = if (fc.total_failable == 0)
                             ""
                         else if (fc.covered == fc.total_failable)
-                            try std.fmt.allocPrint(
-                                arena,
-                                "All {d} counted failable I/O site(s) have a failure path. ",
-                                .{fc.total_failable},
-                            )
+                            try arena.print("All {d} counted failable I/O site(s) have a failure path. ", .{fc.total_failable})
                         else
-                            try std.fmt.allocPrint(arena, "{s} ", .{trace.summary});
+                            try arena.print("{s} ", .{trace.summary});
                         if (contract.property_provenance.causeFor("fault_covered")) |cause| {
-                            trace.summary = try std.fmt.allocPrint(
-                                arena,
-                                "{s}{d} failable call(s) sit on no enumerated path, so no failure path covers them. The first is `{s}`.",
-                                .{ counted, fc.unseen_calls, cause.snippet },
-                            );
+                            trace.summary = try arena.print("{s}{d} failable call(s) sit on no enumerated path, so no failure path covers them. The first is `{s}`.", .{ counted, fc.unseen_calls, cause.snippet });
                             trace.counterexample = .{
                                 .kind = .offending_node,
                                 .line = cause.line,
@@ -562,11 +538,7 @@ fn buildTrace(
                                 .fix = "bind the call to a const in the handler body and branch on its failure before the value is used.",
                             };
                         } else {
-                            trace.summary = try std.fmt.allocPrint(
-                                arena,
-                                "{s}{d} failable call(s) sit on no enumerated path, so no failure path covers them.",
-                                .{ counted, fc.unseen_calls },
-                            );
+                            trace.summary = try arena.print("{s}{d} failable call(s) sit on no enumerated path, so no failure path covers them.", .{ counted, fc.unseen_calls });
                         }
                     }
                 }
@@ -574,11 +546,7 @@ fn buildTrace(
                 if (contract.cost_envelope) |envelope| {
                     if (envelope.total == .unbounded) {
                         const source = envelope.total.unbounded;
-                        trace.summary = try std.fmt.allocPrint(
-                            arena,
-                            "Cost is unbounded because {s} cannot be assigned a finite module-call bound.",
-                            .{source.desc},
-                        );
+                        trace.summary = try arena.print("Cost is unbounded because {s} cannot be assigned a finite module-call bound.", .{source.desc});
                         trace.counterexample = .{
                             .kind = .offending_node,
                             .line = source.line,
@@ -589,25 +557,17 @@ fn buildTrace(
                     }
                 }
             } else if (holds and paths_enumerated > 0) {
-                trace.summary = try std.fmt.allocPrint(
-                    arena,
-                    "{s} Checked across {d} enumerated path(s){s}.",
-                    .{
-                        info.passing,
-                        paths_enumerated,
-                        if (paths_exhaustive) " (exhaustive)" else "",
-                    },
-                );
+                trace.summary = try arena.print("{s} Checked across {d} enumerated path(s){s}.", .{
+                    info.passing,
+                    paths_enumerated,
+                    if (paths_exhaustive) " (exhaustive)" else "",
+                });
             }
         },
         .structural => {
             if (!holds and eql(name, "deterministic")) {
                 if (contract.property_provenance.causeFor("deterministic")) |cause| {
-                    trace.summary = try std.fmt.allocPrint(
-                        arena,
-                        "{s} reads a clock or RNG: two runs of the same request can differ.",
-                        .{cause.snippet},
-                    );
+                    trace.summary = try arena.print("{s} reads a clock or RNG: two runs of the same request can differ.", .{cause.snippet});
                     trace.counterexample = .{
                         .kind = .offending_node,
                         .line = cause.line,
@@ -685,17 +645,9 @@ fn resistedFor(
     switch (dp.safe_form) {
         .validated => {
             const guard = dp.guard_func orelse return null;
-            try chain.append(arena, try std.fmt.allocPrint(arena, "{s} enters the handler", .{source}));
-            try chain.append(arena, try std.fmt.allocPrint(
-                arena,
-                "validated by {s}() at L{d}",
-                .{ guard, dp.guard_line },
-            ));
-            try chain.append(arena, try std.fmt.allocPrint(
-                arena,
-                "reaches {s} at L{d}, already cleared",
-                .{ dp.sink_label, dp.sink_line },
-            ));
+            try chain.append(arena, try arena.print("{s} enters the handler", .{source}));
+            try chain.append(arena, try arena.print("validated by {s}() at L{d}", .{ guard, dp.guard_line }));
+            try chain.append(arena, try arena.print("reaches {s} at L{d}, already cleared", .{ dp.sink_label, dp.sink_line }));
             return .{
                 .attack_input = counterexample.attackInput(tag),
                 .chain = try chain.toOwnedSlice(arena),
@@ -703,7 +655,7 @@ fn resistedFor(
             };
         },
         .never_reached => {
-            try chain.append(arena, try std.fmt.allocPrint(arena, "{s} is read", .{source}));
+            try chain.append(arena, try arena.print("{s} is read", .{source}));
             try chain.append(arena, switch (tag) {
                 .no_secret_leakage, .no_credential_leakage => "it never reaches a response, log, or egress sink",
                 .input_validated, .pii_contained => "it never reaches an external egress sink",
@@ -742,7 +694,7 @@ fn flowCounterexample(
     // path, ending at the sink the diagnostic flagged.
     var flow: std.ArrayListUnmanaged([]const u8) = .empty;
     for (io_calls) |call| {
-        try flow.append(arena, try std.fmt.allocPrint(arena, "{s}() call", .{call.func}));
+        try flow.append(arena, try arena.print("{s}() call", .{call.func}));
     }
     try flow.append(arena, sinkLabel(diag.kind));
 

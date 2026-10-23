@@ -495,15 +495,15 @@ fn enumEntries(
     comptime Kind: type,
     comptime producer: Producer,
     comptime metadataFn: anytype,
-) [@typeInfo(Kind).@"enum".fields.len]Entry {
-    const fields = @typeInfo(Kind).@"enum".fields;
+) [@typeInfo(Kind).@"enum".field_names.len]Entry {
+    const fields = @typeInfo(Kind).@"enum".field_names;
     var result: [fields.len]Entry = undefined;
     for (fields, 0..) |field, index| {
-        const kind: Kind = @enumFromInt(field.value);
+        const kind: Kind = @fromBackingInt(@intCast(@backingInt(@field(Kind, field))));
         const metadata = metadataFn(kind);
         result[index] = .{
             .producer = producer,
-            .kind = field.name,
+            .kind = field,
             .code = metadata.code,
             .family = metadata.family,
             .risk = metadata.risk,
@@ -621,20 +621,20 @@ test "only explicitly shared semantic faults have multiple producers" {
 }
 
 test "lower contract tier spec codes match the compiler catalog" {
-    inline for (@typeInfo(SpecKind).@"enum".fields) |field| {
-        const kind: SpecKind = @enumFromInt(field.value);
+    inline for (@typeInfo(SpecKind).@"enum".field_names) |field| {
+        const kind: SpecKind = @fromBackingInt(@intCast(@backingInt(@field(SpecKind, field))));
         try std.testing.expectEqualStrings(kind.code(), specCode(kind));
     }
 }
 
 test "policy category pairs cover every catalog policy kind exactly once" {
-    var seen = [_]bool{false} ** @typeInfo(PolicyKind).@"enum".fields.len;
-    inline for (@typeInfo(PolicyCategory).@"enum".fields) |category_field| {
-        const category: PolicyCategory = @enumFromInt(category_field.value);
-        inline for (@typeInfo(PolicyViolationKind).@"enum".fields) |violation_field| {
-            const violation: PolicyViolationKind = @enumFromInt(violation_field.value);
+    var seen = @as([(@typeInfo(PolicyKind).@"enum".field_names.len)]bool, @splat(false));
+    inline for (@typeInfo(PolicyCategory).@"enum".field_names) |category_field| {
+        const category: PolicyCategory = @fromBackingInt(@intCast(@backingInt(@field(PolicyCategory, category_field))));
+        inline for (@typeInfo(PolicyViolationKind).@"enum".field_names) |violation_field| {
+            const violation: PolicyViolationKind = @fromBackingInt(@intCast(@backingInt(@field(PolicyViolationKind, violation_field))));
             const kind = policyKind(category, violation);
-            const index: usize = @intFromEnum(kind);
+            const index: usize = @backingInt(kind);
             try std.testing.expect(!seen[index]);
             seen[index] = true;
         }

@@ -191,7 +191,7 @@ pub fn objectHasOwn(ctx: *context.Context, this: value.JSValue, args: []const va
 test "objectHasOwn reports own properties ENG6" {
     // Regression for ENG-6: Object.hasOwn was a stub that always returned false.
     // It must intern the property-name argument and report real ownership.
-    var dbg: std.heap.DebugAllocator(.{}) = .init;
+    var dbg: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     const allocator = dbg.allocator();
     const gc_mod = @import("../gc.zig");
     const heap_mod = @import("../heap.zig");
@@ -221,7 +221,7 @@ test "objectHasOwn reports own properties ENG6" {
 }
 
 test "Object enumeration orders array indexes before string keys" {
-    var dbg: std.heap.DebugAllocator(.{}) = .init;
+    var dbg: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     const allocator = dbg.allocator();
     const gc_mod = @import("../gc.zig");
     const heap_mod = @import("../heap.zig");
@@ -259,7 +259,7 @@ test "Object enumeration orders array indexes before string keys" {
 }
 
 test "Object enumeration includes dense array indexes" {
-    var dbg: std.heap.DebugAllocator(.{}) = .init;
+    var dbg: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     const allocator = dbg.allocator();
     const gc_mod = @import("../gc.zig");
     const heap_mod = @import("../heap.zig");
@@ -292,7 +292,7 @@ test "Object enumeration includes dense array indexes" {
 }
 
 test "Object enumeration skips array holes and length-only slots" {
-    var dbg: std.heap.DebugAllocator(.{}) = .init;
+    var dbg: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     const allocator = dbg.allocator();
     const gc_mod = @import("../gc.zig");
     const heap_mod = @import("../heap.zig");

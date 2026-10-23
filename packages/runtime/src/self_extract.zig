@@ -43,7 +43,7 @@ pub const Payload = struct {
     // Owned string slices backing the policy allow lists
     policy_strings: []const []const u8,
     /// SHA-256 of the exact serialized bytes read from section 4.
-    policy_section_sha256: [32]u8 = [_]u8{0} ** 32,
+    policy_section_sha256: [32]u8 = @as([32]u8, @splat(0)),
     /// Section 4 itself, exactly as read. The acceptance kernel decodes these
     /// bytes with its own code; a digest alone would say only that two sides
     /// hashed the same blob, not that either could read it.
@@ -89,7 +89,7 @@ pub fn detect(allocator: std.mem.Allocator) !?Payload {
     const self_path = try getSelfExePath(allocator);
     defer allocator.free(self_path);
 
-    const self_path_z = try allocator.dupeZ(u8, self_path);
+    const self_path_z = try allocator.dupeSentinel(u8, self_path, 0);
     defer allocator.free(self_path_z);
 
     return detectPath(allocator, self_path_z);
@@ -144,7 +144,7 @@ pub fn detectPath(allocator: std.mem.Allocator, path_z: [:0]const u8) !?Payload 
     }
 
     // Verify checksum
-    const checksum_actual = std.hash.crc.Crc32.hash(payload_data);
+    const checksum_actual = std.hash.crc.@"CRC-32/ISO-HDLC".hash(payload_data);
     if (checksum_actual != checksum_expected) {
         return corruptArtifact("the payload checksum does not match its trailer");
     }
@@ -268,7 +268,7 @@ fn createWithWriter(
     input: PayloadInput,
     writer: ArtifactWriteCapability,
 ) !void {
-    const base_binary_path_z = try allocator.dupeZ(u8, base_binary_path);
+    const base_binary_path_z = try allocator.dupeSentinel(u8, base_binary_path, 0);
     defer allocator.free(base_binary_path_z);
     const base_fd = try std.posix.openatZ(
         std.posix.AT.FDCWD,
@@ -291,7 +291,7 @@ fn createWithWriter(
     // Build trailer
     const payload_offset: u64 = @intCast(clean_size);
     const payload_size: u64 = @intCast(payload.len);
-    const checksum = std.hash.crc.Crc32.hash(payload);
+    const checksum = std.hash.crc.@"CRC-32/ISO-HDLC".hash(payload);
 
     var flags: u16 = 0;
     if (input.contract_json != null) flags |= 1;
@@ -309,13 +309,9 @@ fn createWithWriter(
     // reusable artifact path. A failed write therefore leaves the old binary.
     const output_dir = std.fs.path.dirname(output_path) orelse ".";
     const output_base = std.fs.path.basename(output_path);
-    const tmp_path = try std.fmt.allocPrint(
-        allocator,
-        "{s}/.{s}.tmp.{d}.{d}",
-        .{ output_dir, output_base, std.c.getpid(), @intFromPtr(payload.ptr) },
-    );
+    const tmp_path = try allocator.print("{s}/.{s}.tmp.{d}.{d}", .{ output_dir, output_base, std.c.getpid(), @intFromPtr(payload.ptr) });
     defer allocator.free(tmp_path);
-    const tmp_path_z = try allocator.dupeZ(u8, tmp_path);
+    const tmp_path_z = try allocator.dupeSentinel(u8, tmp_path, 0);
     defer allocator.free(tmp_path_z);
 
     const out_fd = std.posix.openatZ(
@@ -334,7 +330,7 @@ fn createWithWriter(
         if (std.c.fsync(out_fd) != 0) return error.WriteFailure;
     }
 
-    const output_path_z = try allocator.dupeZ(u8, output_path);
+    const output_path_z = try allocator.dupeSentinel(u8, output_path, 0);
     defer allocator.free(output_path_z);
     if (std.c.rename(tmp_path_z, output_path_z) != 0) return error.RenameFailed;
 }
@@ -465,9 +461,9 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
     var certificate: ?[]const u8 = null;
     var policy: zts.RuntimePolicy = .{};
     var policy_section: ?[]const u8 = null;
-    var policy_section_sha256 = [_]u8{0} ** 32;
+    var policy_section_sha256 = @as([32]u8, @splat(0));
     var policy_strings: std.ArrayList([]const u8) = .empty;
-    var seen_sections = [_]bool{false} ** 8;
+    var seen_sections = @as([8]bool, @splat(false));
     errdefer {
         if (bytecode) |b| allocator.free(b);
         if (dep_bytecodes) |deps| {
@@ -499,25 +495,25 @@ pub fn parse(allocator: std.mem.Allocator, data: []const u8) !?Payload {
         seen_sections[section_type] = true;
 
         switch (section_type) {
-            @intFromEnum(Section.bytecode) => {
+            @backingInt(Section.bytecode) => {
                 bytecode = try allocator.dupe(u8, section_data);
             },
-            @intFromEnum(Section.deps) => {
+            @backingInt(Section.deps) => {
                 dep_bytecodes = try parseDeps(allocator, section_data);
             },
-            @intFromEnum(Section.contract) => {
+            @backingInt(Section.contract) => {
                 contract_json = try allocator.dupe(u8, section_data);
             },
-            @intFromEnum(Section.policy) => {
+            @backingInt(Section.policy) => {
                 if (section_data.len > handler_policy.max_policy_bytes) return error.PolicyTooLarge;
                 std.crypto.hash.sha2.Sha256.hash(section_data, &policy_section_sha256, .{});
                 policy_section = try allocator.dupe(u8, section_data);
                 policy = try deserializePolicy(allocator, section_data, &policy_strings);
             },
-            @intFromEnum(Section.attestation) => {
+            @backingInt(Section.attestation) => {
                 attestation_jws = try allocator.dupe(u8, section_data);
             },
-            @intFromEnum(Section.certificate) => {
+            @backingInt(Section.certificate) => {
                 certificate = try allocator.dupe(u8, section_data);
             },
             // No forward-compatibility skip. The payload version is checked for
@@ -849,7 +845,7 @@ fn deserializeAllowList(
 // -- Platform: get own executable path --
 
 pub fn getSelfExePath(allocator: std.mem.Allocator) ![]u8 {
-    if (builtin.os.tag == .macos) {
+    if (builtin.target.os.tag == .macos) {
         var path_buf: [std.c.PATH_MAX + 1]u8 = undefined;
         var buf_size: u32 = @intCast(path_buf.len);
         const rc = std.c._NSGetExecutablePath(&path_buf, &buf_size);
@@ -857,7 +853,7 @@ pub fn getSelfExePath(allocator: std.mem.Allocator) ![]u8 {
         const symlink_path = std.mem.sliceTo(&path_buf, 0);
         // Resolve symlinks to get the actual binary path
         return try resolveRealPath(allocator, symlink_path);
-    } else if (builtin.os.tag == .linux) {
+    } else if (builtin.target.os.tag == .linux) {
         var path_buf: [std.c.PATH_MAX + 1]u8 = undefined;
         const rc = std.c.readlink("/proc/self/exe", &path_buf, path_buf.len);
         if (rc < 0) return error.UnsupportedPlatform;
@@ -868,7 +864,7 @@ pub fn getSelfExePath(allocator: std.mem.Allocator) ![]u8 {
 }
 
 fn resolveRealPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     var resolved_buf: [std.c.PATH_MAX + 1]u8 = undefined;
     const resolved = std.c.realpath(path_z, &resolved_buf) orelse return try allocator.dupe(u8, path);
@@ -916,7 +912,7 @@ fn writeU32(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u32) !
 }
 
 fn writeSection(buf: *std.ArrayList(u8), allocator: std.mem.Allocator, section_type: Section, data: []const u8) !void {
-    try buf.append(allocator, @intFromEnum(section_type));
+    try buf.append(allocator, @backingInt(section_type));
     try writeU32(buf, allocator, @intCast(data.len));
     try buf.appendSlice(allocator, data);
 }
@@ -971,7 +967,7 @@ fn selfExtractTestPath(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, na
 }
 
 test "create preserves the previous artifact when a payload write fails" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1012,7 +1008,7 @@ test "create preserves the previous artifact when a payload write fails" {
 }
 
 test "create streams base runtimes larger than the payload limit" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1021,7 +1017,7 @@ test "create streams base runtimes larger than the payload limit" {
     defer allocator.free(base_path);
     const output_path = try selfExtractTestPath(allocator, tmp, "artifact");
     defer allocator.free(output_path);
-    const base_path_z = try allocator.dupeZ(u8, base_path);
+    const base_path_z = try allocator.dupeSentinel(u8, base_path, 0);
     defer allocator.free(base_path_z);
 
     const base_fd = try std.posix.openatZ(
@@ -1054,7 +1050,7 @@ test "create streams base runtimes larger than the payload limit" {
     defer allocator.free(expected_payload);
     try create(allocator, base_path, output_path, input);
 
-    const output_path_z = try allocator.dupeZ(u8, output_path);
+    const output_path_z = try allocator.dupeSentinel(u8, output_path, 0);
     defer allocator.free(output_path_z);
     const output_fd = try std.posix.openatZ(
         std.posix.AT.FDCWD,
@@ -1101,7 +1097,7 @@ test "create streams base runtimes larger than the payload limit" {
 }
 
 test "create strips an existing payload while streaming" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1143,7 +1139,7 @@ test "create strips an existing payload while streaming" {
 }
 
 test "create produces a runnable mode 0755 artifact" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1160,7 +1156,7 @@ test "create produces a runnable mode 0755 artifact" {
     const policy = zts.RuntimePolicy{};
     try create(allocator, base_path, output_path, .{ .bytecode = "payload", .policy = &policy });
 
-    const output_path_z = try allocator.dupeZ(u8, output_path);
+    const output_path_z = try allocator.dupeSentinel(u8, output_path, 0);
     defer allocator.free(output_path_z);
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, output_path_z, .{ .ACCMODE = .RDONLY }, 0);
     defer std.Io.Threaded.closeFd(fd);
@@ -1183,7 +1179,7 @@ test "create produces a runnable mode 0755 artifact" {
 }
 
 test "create respects umask while keeping the artifact executable" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1200,7 +1196,7 @@ test "create respects umask while keeping the artifact executable" {
     const policy = zts.RuntimePolicy{};
     try create(allocator, base_path, output_path, .{ .bytecode = "payload", .policy = &policy });
 
-    const output_path_z = try allocator.dupeZ(u8, output_path);
+    const output_path_z = try allocator.dupeSentinel(u8, output_path, 0);
     defer allocator.free(output_path_z);
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, output_path_z, .{ .ACCMODE = .RDONLY }, 0);
     defer std.Io.Threaded.closeFd(fd);
@@ -1661,13 +1657,13 @@ fn rewriteDetectFixture(tmp: std.testing.TmpDir, name: []const u8, bytes: []u8, 
         const trailer = bytes[bytes.len - TRAILER_SIZE ..];
         const offset: usize = @intCast(std.mem.readInt(u64, trailer[0..8], .little));
         const size: usize = @intCast(std.mem.readInt(u64, trailer[8..16], .little));
-        std.mem.writeInt(u32, trailer[20..24], std.hash.crc.Crc32.hash(bytes[offset..][0..size]), .little);
+        std.mem.writeInt(u32, trailer[20..24], std.hash.crc.@"CRC-32/ISO-HDLC".hash(bytes[offset..][0..size]), .little);
     }
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = name, .data = bytes });
 }
 
 test "detectPath reads an intact artifact and reports no payload for a plain binary" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1676,7 +1672,7 @@ test "detectPath reads an intact artifact and reports no payload for a plain bin
     const bytes = try writeDetectFixture(allocator, tmp, output_path);
     defer allocator.free(bytes);
 
-    const output_z = try allocator.dupeZ(u8, output_path);
+    const output_z = try allocator.dupeSentinel(u8, output_path, 0);
     defer allocator.free(output_z);
     const payload = (try detectPath(allocator, output_z)) orelse return error.TestExpectedPayload;
     defer payload.deinit(allocator);
@@ -1684,13 +1680,13 @@ test "detectPath reads an intact artifact and reports no payload for a plain bin
 
     const base_path = try selfExtractTestPath(allocator, tmp, "base");
     defer allocator.free(base_path);
-    const base_z = try allocator.dupeZ(u8, base_path);
+    const base_z = try allocator.dupeSentinel(u8, base_path, 0);
     defer allocator.free(base_z);
     try std.testing.expect((try detectPath(allocator, base_z)) == null);
 }
 
 test "detectPath refuses a framed payload with a changed byte instead of reporting no payload" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1704,13 +1700,13 @@ test "detectPath refuses a framed payload with a changed byte instead of reporti
     bytes[at] ^= 0x01;
     try rewriteDetectFixture(tmp, "artifact", bytes, false);
 
-    const output_z = try allocator.dupeZ(u8, output_path);
+    const output_z = try allocator.dupeSentinel(u8, output_path, 0);
     defer allocator.free(output_z);
     try std.testing.expectError(error.CorruptArtifact, detectPath(allocator, output_z));
 }
 
 test "detectPath refuses a framed payload whose checksum holds but whose sections do not parse" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -1726,7 +1722,7 @@ test "detectPath refuses a framed payload whose checksum holds but whose section
     std.mem.writeInt(u16, bytes[offset..][0..2], 0xFFFF, .little);
     try rewriteDetectFixture(tmp, "artifact", bytes, true);
 
-    const output_z = try allocator.dupeZ(u8, output_path);
+    const output_z = try allocator.dupeSentinel(u8, output_path, 0);
     defer allocator.free(output_z);
     try std.testing.expectError(error.CorruptArtifact, detectPath(allocator, output_z));
 }

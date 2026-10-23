@@ -128,7 +128,7 @@ pub fn runModuleSpecRenderCommand(_: std.mem.Allocator, argv: []const []const u8
     }
 
     if (!check_mode) {
-        const line = try std.fmt.allocPrint(allocator, "module-spec-render: wrote {d} artifacts\n", .{written});
+        const line = try allocator.print("module-spec-render: wrote {d} artifacts\n", .{written});
         defer allocator.free(line);
         writeOut(line);
         return;

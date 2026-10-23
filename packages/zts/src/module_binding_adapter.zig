@@ -49,17 +49,17 @@ fn coverageProblem(
         if (!@hasField(Target, entry.name)) return names ++ ": target exclusion names no field: " ++ entry.name;
         if (entry.reason.len == 0) return names ++ ": target exclusion has no reason: " ++ entry.name;
     }
-    for (std.meta.fields(Source)) |field| {
-        if (isExcluded(source_excluded, field.name)) continue;
-        if (!@hasField(Target, field.name) or isExcluded(target_excluded, field.name))
-            return names ++ ": unclassified source field: " ++ field.name;
-        if (@FieldType(Target, field.name) != field.type)
-            return names ++ ": field type differs: " ++ field.name;
+    for (@typeInfo(Source).@"struct".field_names) |field| {
+        if (isExcluded(source_excluded, field)) continue;
+        if (!@hasField(Target, field) or isExcluded(target_excluded, field))
+            return names ++ ": unclassified source field: " ++ field;
+        if (@FieldType(Target, field) != @FieldType(Source, field))
+            return names ++ ": field type differs: " ++ field;
     }
-    for (std.meta.fields(Target)) |field| {
-        if (isExcluded(target_excluded, field.name)) continue;
-        if (!@hasField(Source, field.name) or isExcluded(source_excluded, field.name))
-            return names ++ ": unclassified target field: " ++ field.name;
+    for (@typeInfo(Target).@"struct".field_names) |field| {
+        if (isExcluded(target_excluded, field)) continue;
+        if (!@hasField(Source, field) or isExcluded(source_excluded, field))
+            return names ++ ": unclassified target field: " ++ field;
     }
     return null;
 }
@@ -81,9 +81,9 @@ const label_exclusions = [_]Exclusion{
 fn adaptLabels(comptime labels: sdk.LabelSet) internal.LabelSet {
     comptime requireCoverage(sdk.LabelSet, internal.LabelSet, &label_exclusions, &label_exclusions);
     var out: internal.LabelSet = .{};
-    inline for (std.meta.fields(sdk.LabelSet)) |field| {
-        if (comptime isExcluded(&label_exclusions, field.name)) continue;
-        @field(out, field.name) = @field(labels, field.name);
+    inline for (@typeInfo(sdk.LabelSet).@"struct".field_names) |field| {
+        if (comptime isExcluded(&label_exclusions, field)) continue;
+        @field(out, field) = @field(labels, field);
     }
     return out;
 }
@@ -118,9 +118,9 @@ pub fn adaptModuleBinding(comptime binding: sdk.ModuleBinding) internal.ModuleBi
     const exports = comptime adaptFunctionBindings(binding.specifier, binding.required_capabilities, binding.exports);
     var out: internal.ModuleBinding = undefined;
     out.exports = &exports;
-    inline for (std.meta.fields(sdk.ModuleBinding)) |field| {
-        if (comptime isExcluded(&module_source_exclusions, field.name)) continue;
-        @field(out, field.name) = @field(binding, field.name);
+    inline for (@typeInfo(sdk.ModuleBinding).@"struct".field_names) |field| {
+        if (comptime isExcluded(&module_source_exclusions, field)) continue;
+        @field(out, field) = @field(binding, field);
     }
     return out;
 }
@@ -148,9 +148,9 @@ fn adaptFunctionBinding(
     out.module_func = null;
     out.return_labels = adaptLabels(binding.return_labels);
     out.declassifies = adaptLabels(binding.declassifies);
-    inline for (std.meta.fields(sdk.FunctionBinding)) |field| {
-        if (comptime isExcluded(&function_source_exclusions, field.name)) continue;
-        @field(out, field.name) = @field(binding, field.name);
+    inline for (@typeInfo(sdk.FunctionBinding).@"struct".field_names) |field| {
+        if (comptime isExcluded(&function_source_exclusions, field)) continue;
+        @field(out, field) = @field(binding, field);
     }
     return out;
 }

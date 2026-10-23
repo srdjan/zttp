@@ -143,7 +143,7 @@ pub const Policy = struct {
     /// Which resolved-address scopes an outbound connection may land in.
     scopes: residual.ScopeSet = .{},
     /// SHA-256 of the exact bytes this was decoded from.
-    digest: [32]u8 = [_]u8{0} ** 32,
+    digest: [32]u8 = @as([32]u8, @splat(0)),
 
     pub fn section(self: *const Policy, which: residual.PolicySection) Section {
         @setRuntimeSafety(true);
@@ -391,7 +391,7 @@ test "unsorted, duplicate, empty, and oversized entries reject" {
     empty.byte(0);
     try testing.expectError(error.EntryEmpty, decode(empty.bytes(), empty.digest()));
 
-    const long = [_]u8{'a'} ** (residual.max_identifier_bytes + 1);
+    const long = @as([((residual.max_identifier_bytes + 1))]u8, @splat('a'));
     var oversized = Builder{};
     oversized.section(true, &.{&long});
     oversized.section(true, &.{});
@@ -410,7 +410,7 @@ test "an oversized entry reports its bound before its truncated body" {
 }
 
 test "an endpoint may be longer than an identifier, up to its own bound" {
-    const host = [_]u8{'a'} ** 200;
+    const host = @as([200]u8, @splat('a'));
     const endpoint = "https://" ++ host ++ ":443";
     var b = Builder{};
     b.section(true, &.{});
@@ -451,8 +451,8 @@ test "an over-count, trailing bytes, truncation, and an unknown scope reject" {
 }
 
 test "a policy larger than the bound is refused before it is read" {
-    const big = [_]u8{0} ** (residual.max_policy_bytes + 1);
-    try testing.expectError(error.PolicyTooLarge, decode(&big, [_]u8{0} ** 32));
+    const big = @as([((residual.max_policy_bytes + 1))]u8, @splat(0));
+    try testing.expectError(error.PolicyTooLarge, decode(&big, @as([32]u8, @splat(0))));
 }
 
 test "an SQL flag outside the closed boolean encoding is refused" {

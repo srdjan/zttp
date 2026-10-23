@@ -235,7 +235,7 @@ pub fn validateBaseUrl(url: []const u8) ClientError!void {
         return ClientError.InvalidMlxBaseUrl;
     }
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = uri.getHost(&host_buf) catch return ClientError.InvalidMlxBaseUrl;
+    const host = http_errors.uriHost(uri, &host_buf) catch return ClientError.InvalidMlxBaseUrl;
     const is_ipv6_loopback = std.mem.eql(u8, host.bytes, "::1") or
         std.mem.eql(u8, host.bytes, "[::1]");
     if (!std.ascii.eqlIgnoreCase(host.bytes, "localhost") and
@@ -251,7 +251,7 @@ pub fn validateBaseUrl(url: []const u8) ClientError!void {
 
 fn endpointUrl(arena: std.mem.Allocator, base_url: []const u8) ![]u8 {
     try validateBaseUrl(base_url);
-    return std.fmt.allocPrint(arena, "{s}{s}", .{
+    return arena.print("{s}{s}", .{
         std.mem.trimEnd(u8, base_url, "/"),
         chat_completions_path,
     });
@@ -280,8 +280,8 @@ fn checkReadinessWithGet(
     defer arena.deinit();
     const ta = arena.allocator();
     const root = std.mem.trimEnd(u8, base_url, "/");
-    const health_url = try std.fmt.allocPrint(ta, "{s}/health", .{root});
-    const models_url = try std.fmt.allocPrint(ta, "{s}/v1/models", .{root});
+    const health_url = try ta.print("{s}/health", .{root});
+    const models_url = try ta.print("{s}/v1/models", .{root});
 
     const health = try get_fn(get_context, ta, health_url, false);
     if (health.status != .ok) return ClientError.LocalHealthNotOk;
@@ -318,7 +318,7 @@ fn getReadiness(arena: std.mem.Allocator, url: []const u8, read_body: bool) !Rea
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse return ClientError.InvalidMlxBaseUrl;
     if (protocol != .plain) return ClientError.InvalidMlxBaseUrl;
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = uri.getHost(&host_buf) catch return ClientError.InvalidMlxBaseUrl;
+    const host = http_errors.uriHost(uri, &host_buf) catch return ClientError.InvalidMlxBaseUrl;
     const connection = http_errors.connect(&client, host, uri.port, protocol) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return ClientError.LocalServerUnavailable,
@@ -415,7 +415,7 @@ const SanitizedResponse = struct {
     bytes: []u8,
 };
 
-const max_parser_warnings = std.meta.fields(capture_sink.ParserWarning).len;
+const max_parser_warnings = @typeInfo(capture_sink.ParserWarning).@"enum".field_names.len;
 
 const ResponseInspection = struct {
     finish_reason: ?capture_sink.FinishReason = null,
@@ -1087,7 +1087,7 @@ fn stableCallId(
     var digest: [32]u8 = undefined;
     hasher.final(&digest);
     const hex = std.fmt.bytesToHex(digest, .lower);
-    return std.fmt.allocPrint(arena, "call_local_{s}", .{hex[0..32]});
+    return arena.print("call_local_{s}", .{hex[0..32]});
 }
 
 fn sha256(bytes: []const u8) [32]u8 {
@@ -1108,7 +1108,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse return ClientError.InvalidMlxBaseUrl;
     if (protocol != .plain) return ClientError.InvalidMlxBaseUrl;
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = uri.getHost(&host_buf) catch return ClientError.InvalidMlxBaseUrl;
+    const host = http_errors.uriHost(uri, &host_buf) catch return ClientError.InvalidMlxBaseUrl;
     const connection = http_errors.connectWithin(
         &client,
         host,
@@ -1157,7 +1157,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
         else => return ClientError.LocalServerUnavailable,
     };
     if (response.head.status != .ok) {
-        return http_errors.classify(@intFromEnum(response.head.status), response_body);
+        return http_errors.classify(@backingInt(response.head.status), response_body);
     }
     return response_body;
 }
@@ -1641,7 +1641,7 @@ test "local response rejects malformed raw tool envelopes" {
         "<|tool_call_start|>[alpha(x=unknown)]<|tool_call_end|>",
     };
     for (malformed) |content| {
-        const response = try std.fmt.allocPrint(testing.allocator, "{{\"choices\":[{{\"message\":{{\"content\":{f}}}}}]}}", .{std.json.fmt(content, .{})});
+        const response = try testing.allocator.print("{{\"choices\":[{{\"message\":{{\"content\":{f}}}}}]}}", .{std.json.fmt(content, .{})});
         defer testing.allocator.free(response);
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
@@ -1695,7 +1695,7 @@ test "local response enforces response envelope argument call and depth bounds" 
     @memset(oversized_envelope, 'x');
     try testing.expectError(
         ClientError.MalformedToolEnvelope,
-        parseToolEnvelopes(testing.allocator, [_]u8{0} ** 32, sha256("response"), oversized_envelope),
+        parseToolEnvelopes(testing.allocator, @as([32]u8, @splat(0)), sha256("response"), oversized_envelope),
     );
 
     var too_many = TextBuffer.init(testing.allocator);
@@ -1708,7 +1708,7 @@ test "local response enforces response envelope argument call and depth bounds" 
     try too_many.writer().writeAll("]" ++ tool_call_end);
     try testing.expectError(
         ClientError.TooManyToolCalls,
-        parseToolEnvelopes(testing.allocator, [_]u8{0} ** 32, sha256("response"), too_many.written()),
+        parseToolEnvelopes(testing.allocator, @as([32]u8, @splat(0)), sha256("response"), too_many.written()),
     );
 
     var nested = TextBuffer.init(testing.allocator);
@@ -1720,7 +1720,7 @@ test "local response enforces response envelope argument call and depth bounds" 
     try nested.writer().writeAll(")]" ++ tool_call_end);
     try testing.expectError(
         ClientError.MalformedToolEnvelope,
-        parseToolEnvelopes(testing.allocator, [_]u8{0} ** 32, sha256("response"), nested.written()),
+        parseToolEnvelopes(testing.allocator, @as([32]u8, @splat(0)), sha256("response"), nested.written()),
     );
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

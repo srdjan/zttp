@@ -184,9 +184,9 @@ pub fn schemaHash() [64]u8 {
             spec.deferred_note orelse "",
         );
     }
-    inline for (@typeInfo(ErrorCode).@"enum".fields, 0..) |field, error_index| {
+    inline for (@typeInfo(ErrorCode).@"enum".field_names, 0..) |field, error_index| {
         schemaHashIndex(&hasher, "error-index", error_index);
-        schemaHashField(&hasher, "error-code", field.name);
+        schemaHashField(&hasher, "error-code", field);
     }
     return std.fmt.bytesToHex(hasher.finalResult(), .lower);
 }
@@ -720,14 +720,14 @@ fn checkExpected(
             return ProtocolError{
                 .code = .malformed_request,
                 .message = "expected carries a field this protocol does not bind",
-                .field = try std.fmt.allocPrint(arena, "expected.{s}", .{key}),
+                .field = try arena.print("expected.{s}", .{key}),
             };
 
         if (kv.value_ptr.* != .string) {
             return ProtocolError{
                 .code = .malformed_request,
                 .message = "expected fields must be strings",
-                .field = try std.fmt.allocPrint(arena, "expected.{s}", .{key}),
+                .field = try arena.print("expected.{s}", .{key}),
             };
         }
 
@@ -735,12 +735,8 @@ fn checkExpected(
         if (!std.mem.eql(u8, supplied, actual)) {
             return ProtocolError{
                 .code = .identity_mismatch,
-                .message = try std.fmt.allocPrint(
-                    arena,
-                    "expected.{s} is stale: request said {s}, this compiler reports {s}",
-                    .{ key, supplied, actual },
-                ),
-                .field = try std.fmt.allocPrint(arena, "expected.{s}", .{key}),
+                .message = try arena.print("expected.{s} is stale: request said {s}, this compiler reports {s}", .{ key, supplied, actual }),
+                .field = try arena.print("expected.{s}", .{key}),
             };
         }
     }
@@ -1020,7 +1016,7 @@ fn writeFullMetaPayload(json: *std.json.Stringify) !bool {
 
     try json.objectField("error_codes");
     try json.beginArray();
-    inline for (@typeInfo(ErrorCode).@"enum".fields) |field| try json.write(field.name);
+    inline for (@typeInfo(ErrorCode).@"enum".field_names) |field| try json.write(field);
     try json.endArray();
 
     try json.objectField("idiom_table_hash");
@@ -1037,8 +1033,8 @@ fn writeFullMetaPayload(json: *std.json.Stringify) !bool {
     try json.beginArray();
     // Derived from the stable projection, so the closed wire set stays aligned
     // with every checker without exposing a checker-specific severity type.
-    inline for (@typeInfo(zts.DiagnosticProjection.Severity).@"enum".fields) |field| {
-        const severity: zts.DiagnosticProjection.Severity = @enumFromInt(field.value);
+    inline for (@typeInfo(zts.DiagnosticProjection.Severity).@"enum".field_names) |field| {
+        const severity: zts.DiagnosticProjection.Severity = @fromBackingInt(@intCast(@backingInt(@field(zts.DiagnosticProjection.Severity, field))));
         try json.write(severity.label());
     }
     try json.endArray();
@@ -2144,12 +2140,12 @@ fn writeCheckPayload(
             // reaches the wire without an edit here and cannot be silently
             // dropped.
             try json.beginObject();
-            inline for (@typeInfo(zts.HandlerProperties).@"struct".fields) |field| {
-                try json.objectField(field.name);
-                switch (field.type) {
-                    bool => try json.write(@field(props, field.name)),
-                    ?u32 => if (@field(props, field.name)) |v| try json.write(v) else try json.write(null),
-                    else => @compileError("unhandled HandlerProperties field type: " ++ @typeName(field.type)),
+            inline for (@typeInfo(zts.HandlerProperties).@"struct".field_names) |field| {
+                try json.objectField(field);
+                switch (@FieldType(zts.HandlerProperties, field)) {
+                    bool => try json.write(@field(props, field)),
+                    ?u32 => if (@field(props, field)) |v| try json.write(v) else try json.write(null),
+                    else => @compileError("unhandled HandlerProperties field type: " ++ @typeName(@FieldType(zts.HandlerProperties, field))),
                 }
             }
             try json.endObject();
@@ -2764,7 +2760,7 @@ fn testRepairJson(
     stale_field: TestStaleBindingField,
 ) ![]u8 {
     const stale = "stale";
-    return std.fmt.allocPrint(allocator,
+    return allocator.print(
         \\{{"intent":"{s}","diagnostic_code":"ZTS604","line":{d},"original":{f},"replacement":{f},"bound":{{"source_digest":"{s}","profile_id":"{s}","policy_hash":"{s}","module_graph_hash":"{s}","semantics_hash":"{s}"}}}}
     , .{
         intent,
@@ -2800,7 +2796,7 @@ test "simulate_edit applies repairs to one captured source" {
         .none,
     );
     defer allocator.free(repair);
-    const request = try std.fmt.allocPrint(allocator,
+    const request = try allocator.print(
         \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{s}]}}}}
     , .{ root, repair });
     defer allocator.free(request);
@@ -2834,14 +2830,14 @@ test "simulate_edit applies repairs to one captured source" {
 }
 
 test "the operation table covers the closed operation set exactly once" {
-    inline for (@typeInfo(Operation).@"enum".fields) |field| {
+    inline for (@typeInfo(Operation).@"enum".field_names) |field| {
         var seen: usize = 0;
         for (&operations) |*spec| {
-            if (std.mem.eql(u8, @tagName(spec.op), field.name)) seen += 1;
+            if (std.mem.eql(u8, @tagName(spec.op), field)) seen += 1;
         }
         try testing.expectEqual(@as(usize, 1), seen);
     }
-    try testing.expectEqual(@typeInfo(Operation).@"enum".fields.len, operations.len);
+    try testing.expectEqual(@typeInfo(Operation).@"enum".field_names.len, operations.len);
 }
 
 test "an implemented operation carries no deferred note" {
@@ -2941,10 +2937,10 @@ test "meta payload publishes every operation and its status" {
     const payload = parsed.value.object.get("payload").?.object;
     const ops = payload.get("operations").?.array;
     try testing.expectEqual(operations.len, ops.items.len);
-    inline for (@typeInfo(Operation).@"enum".fields) |field| {
+    inline for (@typeInfo(Operation).@"enum".field_names) |field| {
         var seen: usize = 0;
         for (ops.items) |o| {
-            if (std.mem.eql(u8, o.object.get("id").?.string, field.name)) seen += 1;
+            if (std.mem.eql(u8, o.object.get("id").?.string, field)) seen += 1;
         }
         try testing.expectEqual(@as(usize, 1), seen);
     }
@@ -2970,7 +2966,7 @@ test "every implemented operation emits exactly its declared payload_fields" {
             "{\"file\":\"packages/tools/tests/fixtures/contract/plain_ts.ts\"}"
         else
             "{}";
-        const req = try std.fmt.allocPrint(a,
+        const req = try a.print(
             \\{{"schema_version":2,"operation":"{s}","project_root":".","input":{s}}}
         , .{ @tagName(spec.op), input });
         defer a.free(req);
@@ -3049,7 +3045,7 @@ test "spec 4.8's operation set is closed and every member is served" {
             return error.TestFailed;
         }
     }
-    try testing.expectEqual(@as(usize, @typeInfo(Operation).@"enum".fields.len), operations.len);
+    try testing.expectEqual(@as(usize, @typeInfo(Operation).@"enum".field_names.len), operations.len);
 }
 
 test "malformed input is a protocol error naming the offending field" {
@@ -3116,7 +3112,7 @@ test "a matching expected block passes the guard" {
     const a = testing.allocator;
     const policy = zts.policyHash();
     const graph = module_graph_record.contextFreeHash();
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"meta","project_root":".","input":{{}},
         \\ "expected":{{"profile_id":"zts-model-1","policy_hash":"{s}","module_graph_hash":"{s}"}}}}
     , .{ policy, graph });
@@ -3236,7 +3232,7 @@ test "the guard runs before the operation does any work" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}},
         \\ "expected":{{"policy_hash":"0000000000000000000000000000000000000000000000000000000000000000"}}}}
     , .{root});
@@ -3263,7 +3259,7 @@ test "apply_repair is outside the direct-cut operation vocabulary" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
-    const request = try std.fmt.allocPrint(a,
+    const request = try a.print(
         \\{{"schema_version":2,"operation":"apply_repair","project_root":"{s}","input":{{"file":"h.ts","repairs":[]}}}}
     , .{root});
     defer a.free(request);
@@ -3439,7 +3435,7 @@ test "modules returns the resolved graph and binds one hash in two places" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"handler.ts"}}}}
     , .{root});
     defer a.free(req);
@@ -3490,7 +3486,7 @@ test "module discovery names each parameter and the module use protocol" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"handler.ts"}}}}
     , .{root});
     defer a.free(req);
@@ -3550,7 +3546,7 @@ test "modules describes imports in full and keeps every other module choosable" 
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"handler.ts"}}}}
     , .{root});
     defer a.free(req);
@@ -3626,7 +3622,7 @@ test "module discovery says what each export answers with" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"handler.ts"}}}}
     , .{root});
     defer a.free(req);
@@ -3670,7 +3666,7 @@ test "a file-bound operation binds the graph digest, not the context-free one" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"handler.ts"}}}}
     , .{root});
     defer a.free(req);
@@ -3694,7 +3690,7 @@ test "modules reports a rejected import and stops claiming success" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"handler.ts"}}}}
     , .{root});
     defer a.free(req);
@@ -3726,7 +3722,7 @@ test "check dispatches when graph discovery rejects an imported resolver target"
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = source });
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
     defer allocator.free(root);
-    const request = try std.fmt.allocPrint(allocator,
+    const request = try allocator.print(
         \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer allocator.free(request);
@@ -3765,7 +3761,7 @@ test "modules on a path outside the project root is refused" {
     const base = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, "app", a);
     defer a.free(base);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"../escape.ts"}}}}
     , .{base});
     defer a.free(req);
@@ -3832,7 +3828,7 @@ test "a root read allocation failure reports file_unreadable" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = "export const value = 1;\n" });
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
     defer allocator.free(root);
-    const request = try std.fmt.allocPrint(allocator,
+    const request = try allocator.print(
         \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer allocator.free(request);
@@ -3859,7 +3855,7 @@ test "a missing JavaScript root is unreadable before extension validation" {
     defer tmp.cleanup();
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
     defer allocator.free(root);
-    const request = try std.fmt.allocPrint(allocator,
+    const request = try allocator.print(
         \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"missing.js"}}}}
     , .{root});
     defer allocator.free(request);
@@ -3882,7 +3878,7 @@ test "an oversized JavaScript root is unreadable before extension validation" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.js", .data = oversized });
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
     defer allocator.free(root);
-    const request = try std.fmt.allocPrint(allocator,
+    const request = try allocator.print(
         \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"h.js"}}}}
     , .{root});
     defer allocator.free(request);
@@ -3905,7 +3901,7 @@ test "modules refuses a JavaScript entry extension" {
     });
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"handler.js"}}}}
     , .{root});
     defer a.free(req);
@@ -3932,7 +3928,7 @@ test "a stale module_graph_hash is caught against the real graph" {
 
     // The context-free digest is a real hash, and the wrong one for a file
     // request: the guard must compare against what the operation read.
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"handler.ts"}},
         \\ "expected":{{"module_graph_hash":"{s}"}}}}
     , .{ root, module_graph_record.contextFreeHash() });
@@ -3962,7 +3958,7 @@ test "check on a clean handler succeeds with no diagnostics" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer a.free(req);
@@ -4013,7 +4009,7 @@ test "check ignores content override and retains one captured refusal" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
     defer allocator.free(root);
 
-    const request = try std.fmt.allocPrint(allocator,
+    const request = try allocator.print(
         \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts","content":{f}}}}}
     , .{ root, std.json.fmt(override_source, .{}) });
     defer allocator.free(request);
@@ -4093,7 +4089,7 @@ test "check binds graph digest diagnostics and contract to one captured root sou
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
     defer allocator.free(root);
 
-    const request = try std.fmt.allocPrint(allocator,
+    const request = try allocator.print(
         \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer allocator.free(request);
@@ -4168,7 +4164,7 @@ test "modules binds its root record to one captured source" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = source_a });
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
     defer allocator.free(root);
-    const request = try std.fmt.allocPrint(allocator,
+    const request = try allocator.print(
         \\{{"schema_version":2,"operation":"modules","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer allocator.free(request);
@@ -4211,7 +4207,7 @@ test "canonicalize derives candidates from one captured source" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
     defer allocator.free(root);
-    const request = try std.fmt.allocPrint(allocator,
+    const request = try allocator.print(
         \\{{"schema_version":2,"operation":"canonicalize","project_root":"{s}","input":{{"file":"h.ts","simulate":true}}}}
     , .{root});
     defer allocator.free(request);
@@ -4260,7 +4256,7 @@ test "normalize derives canonical source from one captured source" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
     defer allocator.free(root);
-    const request = try std.fmt.allocPrint(allocator,
+    const request = try allocator.print(
         \\{{"schema_version":2,"operation":"normalize","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer allocator.free(request);
@@ -4306,7 +4302,7 @@ test "verify derives its verdict from one captured source" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = source_a });
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
     defer allocator.free(root);
-    const request = try std.fmt.allocPrint(allocator,
+    const request = try allocator.print(
         \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["canonical"]}}}}
     , .{root});
     defer allocator.free(request);
@@ -4352,7 +4348,7 @@ test "verify uses a refusal override after one captured root read" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
     defer allocator.free(root);
 
-    const request = try std.fmt.allocPrint(allocator,
+    const request = try allocator.print(
         \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","content":{f}}}}}
     , .{ root, std.json.fmt(captured_refusal_source, .{}) });
     defer allocator.free(request);
@@ -4413,7 +4409,7 @@ test "verify uses a refusal override after one captured root read" {
 
 test "check payload reports guarded categories separately from properties" {
     const allocator = testing.allocator;
-    const digest = [_]u8{'0'} ** 64;
+    const digest = @as([64]u8, @splat('0'));
 
     var no_result_output: std.Io.Writer.Allocating = .init(allocator);
     defer no_result_output.deinit();
@@ -4476,11 +4472,11 @@ test "check response is identical for identical projects at different roots" {
     const second_root = try std.Io.Dir.realPathFileAlloc(second.dir, testing.io, ".", allocator);
     defer allocator.free(second_root);
 
-    const first_request = try std.fmt.allocPrint(allocator,
+    const first_request = try allocator.print(
         \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"handler.ts"}}}}
     , .{first_root});
     defer allocator.free(first_request);
-    const second_request = try std.fmt.allocPrint(allocator,
+    const second_request = try allocator.print(
         \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"handler.ts"}}}}
     , .{second_root});
     defer allocator.free(second_request);
@@ -4503,7 +4499,7 @@ test "check publishes a null contract_body when no contract exists" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
     defer allocator.free(root);
 
-    const request = try std.fmt.allocPrint(allocator,
+    const request = try allocator.print(
         \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"module.ts"}}}}
     , .{root});
     defer allocator.free(request);
@@ -4536,7 +4532,7 @@ test "check on a rejected handler binds every diagnostic to the digest" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer a.free(req);
@@ -4612,7 +4608,7 @@ test "repair_available follows the exact diagnostic intent and implemented valid
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer a.free(req);
@@ -4645,7 +4641,7 @@ test "canonicalize publishes the span a repair is keyed on" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"canonicalize","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer a.free(req);
@@ -4679,7 +4675,7 @@ test "a bound canonicalize candidate round-trips unchanged through simulate" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const propose_req = try std.fmt.allocPrint(a,
+    const propose_req = try a.print(
         \\{{"schema_version":2,"operation":"canonicalize","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer a.free(propose_req);
@@ -4702,7 +4698,7 @@ test "a bound canonicalize candidate round-trips unchanged through simulate" {
         bound.get("module_graph_hash").?.string,
     );
 
-    const simulate_req = try std.fmt.allocPrint(a,
+    const simulate_req = try a.print(
         \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{f}]}}}}
     , .{ root, std.json.fmt(candidate, .{}) });
     defer a.free(simulate_req);
@@ -4729,7 +4725,7 @@ test "simulate refuses an unbound repair" {
 
     {
         const operation = "simulate_edit";
-        const req = try std.fmt.allocPrint(a,
+        const req = try a.print(
             \\{{"schema_version":2,"operation":"{s}","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
         , .{ operation, root });
         defer a.free(req);
@@ -4770,7 +4766,7 @@ test "simulate refuses every stale repair binding" {
         defer a.free(repair);
         {
             const operation = "simulate_edit";
-            const req = try std.fmt.allocPrint(a,
+            const req = try a.print(
                 \\{{"schema_version":2,"operation":"{s}","project_root":"{s}","input":{{"file":"h.ts","repairs":[{s}]}}}}
             , .{ operation, root, repair });
             defer a.free(req);
@@ -4817,7 +4813,7 @@ test "simulate refuses a mixed-binding batch atomically" {
 
     {
         const operation = "simulate_edit";
-        const req = try std.fmt.allocPrint(a,
+        const req = try a.print(
             \\{{"schema_version":2,"operation":"{s}","project_root":"{s}","input":{{"file":"h.ts","repairs":[{s},{s}]}}}}
         , .{ operation, root, first, second });
         defer a.free(req);
@@ -4848,7 +4844,7 @@ test "simulate_edit round-trips a canonicalize candidate" {
     // same `original` snapshot, same replacement. That round trip is what the
     // unified vocabulary bought, and the reason this operation was deferred
     // until it existed.
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"world\";","replacement":"    const name = \"world\";"}}]}}}}
     , .{root});
     defer a.free(req);
@@ -4880,7 +4876,7 @@ test "simulate_edit refuses a repair whose snapshot has moved" {
     // `original` is required for exactly this: a client that read the file,
     // thought about it, and sent repairs against bytes that have since moved
     // must not get a splice into a program it never saw.
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"replace_let_with_const","line":6,"original":"    let name = \"mars\";","replacement":"    const name = \"mars\";"}}]}}}}
     , .{root});
     defer a.free(req);
@@ -4908,7 +4904,7 @@ test "simulate_edit refuses a repair outside the vocabulary" {
 
     // The v1 spelling is not the vocabulary. Accepting it here would recreate
     // the second vocabulary inside the protocol that just retired it.
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"canonicalize_let_const","line":6,"original":"x","replacement":"y"}}]}}}}
     , .{root});
     defer a.free(req);
@@ -4933,7 +4929,7 @@ test "an external client completes propose, simulate, verify over the wire" {
     defer a.free(root);
 
     // 1. Propose.
-    const propose_req = try std.fmt.allocPrint(a,
+    const propose_req = try a.print(
         \\{{"schema_version":2,"operation":"canonicalize","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer a.free(propose_req);
@@ -4944,7 +4940,7 @@ test "an external client completes propose, simulate, verify over the wire" {
     const candidate = proposed.value.object.get("payload").?.object.get("candidates").?.array.items[0];
 
     // 2. Simulate, using the candidate's own fields verbatim.
-    const simulate_req = try std.fmt.allocPrint(a,
+    const simulate_req = try a.print(
         \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{f}]}}}}
     , .{ root, std.json.fmt(candidate, .{}) });
     defer a.free(simulate_req);
@@ -4958,7 +4954,7 @@ test "an external client completes propose, simulate, verify over the wire" {
     // 3. Verify the candidate itself. Without the `content` override the client
     // could only ask about the file it has not repaired, and would have to
     // write the candidate to disk merely to ask about it.
-    const verify_req = try std.fmt.allocPrint(a,
+    const verify_req = try a.print(
         \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["state_isolated","canonical"],"content":{f}}}}}
     , .{ root, std.json.fmt(sim_payload.get("proposed_content").?.string, .{}) });
     defer a.free(verify_req);
@@ -4988,7 +4984,7 @@ test "verify binds its digest to the bytes it analyzed" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const file_req = try std.fmt.allocPrint(a,
+    const file_req = try a.print(
         \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["canonical"]}}}}
     , .{root});
     defer a.free(file_req);
@@ -4997,7 +4993,7 @@ test "verify binds its digest to the bytes it analyzed" {
     var from_file = try parse(a, file_out);
     defer from_file.deinit();
 
-    const content_req = try std.fmt.allocPrint(a,
+    const content_req = try a.print(
         \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["canonical"],"content":"export function handler(req: Request): Response {{ return Response.json({{ ok: true }}); }}\\n"}}}}
     , .{root});
     defer a.free(content_req);
@@ -5040,7 +5036,7 @@ test "verify override binds graph identity and stale guards to supplied content"
     defer disk_graph.deinit(allocator);
     try testing.expect(!std.mem.eql(u8, &override_graph.hash, &disk_graph.hash));
 
-    const accepted_request = try std.fmt.allocPrint(allocator,
+    const accepted_request = try allocator.print(
         \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["canonical"],"content":{f}}},"expected":{{"module_graph_hash":"{s}"}}}}
     , .{ root, std.json.fmt(override_source, .{}), override_graph.hash });
     defer allocator.free(accepted_request);
@@ -5059,7 +5055,7 @@ test "verify override binds graph identity and stale guards to supplied content"
         accepted.value.object.get("payload").?.object.get("source_digest").?.string,
     );
 
-    const stale_request = try std.fmt.allocPrint(allocator,
+    const stale_request = try allocator.print(
         \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["canonical"],"content":{f}}},"expected":{{"module_graph_hash":"{s}"}}}}
     , .{ root, std.json.fmt(override_source, .{}), disk_graph.hash });
     defer allocator.free(stale_request);
@@ -5094,7 +5090,7 @@ test "verify ignores non-string content and accepts an empty string override" {
         disk_source,
     );
     defer disk_graph.deinit(allocator);
-    const non_string_request = try std.fmt.allocPrint(allocator,
+    const non_string_request = try allocator.print(
         \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["canonical"],"content":17}}}}
     , .{root});
     defer allocator.free(non_string_request);
@@ -5120,7 +5116,7 @@ test "verify ignores non-string content and accepts an empty string override" {
         "",
     );
     defer empty_graph.deinit(allocator);
-    const empty_request = try std.fmt.allocPrint(allocator,
+    const empty_request = try allocator.print(
         \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["canonical"],"content":""}}}}
     , .{root});
     defer allocator.free(empty_request);
@@ -5145,7 +5141,7 @@ test "verify reads disk before accepting a content override" {
     defer tmp.cleanup();
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
     defer allocator.free(root);
-    const request = try std.fmt.allocPrint(allocator,
+    const request = try allocator.print(
         \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"missing.ts","properties":["canonical"],"content":""}}}}
     , .{root});
     defer allocator.free(request);
@@ -5178,7 +5174,7 @@ test "verify answers only the properties it was asked about" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["no_secret_leakage","deterministic","not_a_property"]}}}}
     , .{root});
     defer a.free(req);
@@ -5222,7 +5218,7 @@ test "verify with no property list answers the whole registry" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer a.free(req);
@@ -5339,7 +5335,7 @@ test "a verifier's published grades are the grades verify can actually answer wi
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"verify","project_root":"{s}","input":{{"file":"h.ts","properties":["not_a_property"]}}}}
     , .{root});
     defer a.free(req);
@@ -5374,7 +5370,7 @@ test "every diagnostic publishes a span, and it is not vacuous" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer a.free(req);
@@ -5405,7 +5401,7 @@ test "every diagnostic publishes a span, and it is not vacuous" {
     try testing.expect(saw_let);
 
     // The section retires in the same change that makes it answerable.
-    const meta_req = try std.fmt.allocPrint(a,
+    const meta_req = try a.print(
         \\{{"schema_version":2,"operation":"meta","project_root":"{s}","input":{{}}}}
     , .{root});
     defer a.free(meta_req);
@@ -5446,7 +5442,7 @@ test "success is exactly no error diagnostic, not no diagnostic" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer a.free(req);
@@ -5490,7 +5486,7 @@ test "check publishes the path-coverage cause, not only a bool" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer a.free(req);
@@ -5527,7 +5523,7 @@ test "canonicalize candidates carry a grade and the original span text" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"canonicalize","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer a.free(req);
@@ -5577,7 +5573,7 @@ test "canonicalize simulates only when asked, and says so either way" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const plain = try std.fmt.allocPrint(a,
+    const plain = try a.print(
         \\{{"schema_version":2,"operation":"canonicalize","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer a.free(plain);
@@ -5589,7 +5585,7 @@ test "canonicalize simulates only when asked, and says so either way" {
     // client never has to tell "not requested" from "field removed".
     try testing.expect(plain_parsed.value.object.get("payload").?.object.get("simulation").? == .null);
 
-    const simulated = try std.fmt.allocPrint(a,
+    const simulated = try a.print(
         \\{{"schema_version":2,"operation":"canonicalize","project_root":"{s}","input":{{"file":"h.ts","simulate":true}}}}
     , .{root});
     defer a.free(simulated);
@@ -5611,7 +5607,7 @@ test "normalize reaches a fixed point and writes nothing to disk" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"normalize","project_root":"{s}","input":{{"file":"h.ts"}}}}
     , .{root});
     defer a.free(req);
@@ -5643,7 +5639,7 @@ test "normalize with write true is refused, not silently ignored" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    const req = try std.fmt.allocPrint(a,
+    const req = try a.print(
         \\{{"schema_version":2,"operation":"normalize","project_root":"{s}","input":{{"file":"h.ts","write":true}}}}
     , .{root});
     defer a.free(req);
@@ -5669,7 +5665,7 @@ test "normalize write refusal precedes the stale identity guard" {
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "h.ts", .data = let_handler });
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
     defer allocator.free(root);
-    const request = try std.fmt.allocPrint(allocator,
+    const request = try allocator.print(
         \\{{"schema_version":2,"operation":"normalize","project_root":"{s}","input":{{"file":"h.ts","write":true}},"expected":{{"module_graph_hash":"{s}"}}}}
     , .{ root, module_graph_record.contextFreeHash() });
     defer allocator.free(request);
@@ -5717,7 +5713,7 @@ test "meta publishes the closed severity set and the rule that decides success" 
     // Derived from the stable projection, so the wire set is what every checker
     // can emit - three since phase 0 added advisory.
     try testing.expectEqual(
-        @typeInfo(zts.DiagnosticProjection.Severity).@"enum".fields.len,
+        @typeInfo(zts.DiagnosticProjection.Severity).@"enum".field_names.len,
         set.items.len,
     );
     var found_advisory = false;
@@ -5830,7 +5826,7 @@ test "check never answers success false with an empty diagnostics array" {
         const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
         defer a.free(root);
 
-        const req = try std.fmt.allocPrint(a,
+        const req = try a.print(
             \\{{"schema_version":2,"operation":"check","project_root":"{s}","input":{{"file":"h.ts"}}}}
         , .{root});
         defer a.free(req);

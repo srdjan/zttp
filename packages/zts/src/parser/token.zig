@@ -239,8 +239,8 @@ pub const Token = struct {
     pub fn isKeyword(self: Token) bool {
         // kw_assert is declared after kw_when, so the upper bound must be
         // kw_assert (the last keyword) or this would wrongly exclude `assert`.
-        return @intFromEnum(self.type) >= @intFromEnum(TokenType.kw_var) and
-            @intFromEnum(self.type) <= @intFromEnum(TokenType.kw_assert);
+        return @backingInt(self.type) >= @backingInt(TokenType.kw_var) and
+            @backingInt(self.type) <= @backingInt(TokenType.kw_assert);
     }
 };
 

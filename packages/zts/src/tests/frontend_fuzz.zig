@@ -413,8 +413,8 @@ fn expectTypedStats(stats: Stats, mode: TypeSyntax.AdmissionMode, syntax_floor: 
     try std.testing.expect(stats.located > 0);
     if (mode == .compile) try std.testing.expectEqual(@as(usize, 0), stats.outcomes.get(.recovered_admission_refused));
     if (syntax_floor) {
-        inline for (@typeInfo(std.meta.Tag(source_frontend.DirectCheckOutcome)).@"enum".fields) |field| {
-            const tag: std.meta.Tag(source_frontend.DirectCheckOutcome) = @enumFromInt(field.value);
+        inline for (@typeInfo(std.meta.Tag(source_frontend.DirectCheckOutcome)).@"enum".field_names) |field| {
+            const tag: std.meta.Tag(source_frontend.DirectCheckOutcome) = @fromBackingInt(@intCast(@backingInt(@field(std.meta.Tag(source_frontend.DirectCheckOutcome), field))));
             if (mode != .compile or tag != .recovered_admission_refused) {
                 try std.testing.expect(stats.outcomes.get(tag) > 0);
             }
@@ -1088,9 +1088,10 @@ fn oomParse(allocator: std.mem.Allocator, src: []const u8) !void {
 /// was made to fail. A success after a failed allocation is the error: it means
 /// the failure was dropped and the stage still claimed a clean result.
 fn sweepAllocationFailures(target: AllocationTarget, src: []const u8) !usize {
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
     var total: usize = 0;
     {
-        var counting = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        var counting = std.testing.FailingAllocator.init(no_resize.allocator(), .{});
         // The unlimited run may refuse the input; only its allocation count matters.
         oomStage(counting.allocator(), target, src) catch |err| switch (err) {
             error.Refused => {},
@@ -1100,7 +1101,7 @@ fn sweepAllocationFailures(target: AllocationTarget, src: []const u8) !usize {
         total = counting.alloc_index;
     }
     for (0..total) |fail_index| {
-        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        var failing = std.testing.FailingAllocator.init(no_resize.allocator(), .{ .fail_index = fail_index });
         if (oomStage(failing.allocator(), target, src)) |_| {
             if (!failing.has_induced_failure) return error.NondeterministicAllocation;
             std.debug.print("allocation {d} of {d} failed and the stage still succeeded:\n", .{ fail_index, total });

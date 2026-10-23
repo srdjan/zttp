@@ -2,7 +2,7 @@
     .name = .zttp_tools,
     .version = "0.0.0",
     .fingerprint = 0xbadc33f7a58d22c8,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .zttp_proof_checker = .{
             .path = "../proof-checker",

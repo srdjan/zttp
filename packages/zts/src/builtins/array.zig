@@ -908,7 +908,7 @@ test "arrayToSorted sorts non-string elements without an allocator mismatch" {
     // A self-managed DebugAllocator catches that mismatch at the point of the bad
     // free. It is deliberately not deinit'd: GC-managed JSObjects are not freed
     // individually in tests, and the resulting leak report is irrelevant here.
-    var dbg: std.heap.DebugAllocator(.{}) = .init;
+    var dbg: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     const allocator = dbg.allocator();
     const gc_mod = @import("../gc.zig");
     const heap_mod = @import("../heap.zig");
@@ -1006,7 +1006,7 @@ test "arrayToSorted ascending numeric comparator ENG5" {
     // Regression for ENG-5: a custom comparator `(a,b) => a-b` must drive the
     // ordering. The default string sort puts [10,2,1,33,4] in [1,10,2,33,4]
     // order; the comparator must instead yield ascending [1,2,4,10,33].
-    var dbg: std.heap.DebugAllocator(.{}) = .init;
+    var dbg: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     const allocator = dbg.allocator();
     const gc_mod = @import("../gc.zig");
     const heap_mod = @import("../heap.zig");

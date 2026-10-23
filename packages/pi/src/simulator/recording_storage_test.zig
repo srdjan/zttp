@@ -58,7 +58,7 @@ const Collected = struct {
 };
 
 fn zeroDigest() artifact.Sha256Hex {
-    return .{ .bytes = [_]u8{'0'} ** 64 };
+    return .{ .bytes = @as([64]u8, @splat('0')) };
 }
 
 fn collected(expected_bytes: []const u8) Collected {
@@ -178,11 +178,7 @@ test "recording storage revalidates replacement and removes the superseded gener
 
     try testing.expect(!first_version.eql(second_version));
     try testing.expect(!std.mem.eql(u8, pointer_before, pointer_after));
-    const old_manifest_path = try std.fmt.allocPrint(
-        testing.allocator,
-        "generations/{s}/manifest.json",
-        .{first_version.slice()},
-    );
+    const old_manifest_path = try testing.allocator.print("generations/{s}/manifest.json", .{first_version.slice()});
     defer testing.allocator.free(old_manifest_path);
     try testing.expect(!try fixture.pathExists(old_manifest_path));
 
@@ -269,11 +265,7 @@ test "post-swap promotion faults report activation and expose only the validated
         );
 
         try expectActiveVersion(&fixture, replacement_version);
-        const old_manifest_path = try std.fmt.allocPrint(
-            testing.allocator,
-            "generations/{s}/manifest.json",
-            .{first_version.slice()},
-        );
+        const old_manifest_path = try testing.allocator.print("generations/{s}/manifest.json", .{first_version.slice()});
         defer testing.allocator.free(old_manifest_path);
         const old_generation_expected = fault != .staging_cleanup;
         try testing.expectEqual(old_generation_expected, try fixture.pathExists(old_manifest_path));

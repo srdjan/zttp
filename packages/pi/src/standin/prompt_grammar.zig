@@ -217,7 +217,7 @@ pub fn generate(allocator: std.mem.Allocator, grammar: Grammar, index: usize) ![
     const tail = grammar.tails[index % tail_n];
     const core = grammar.cores[(index / tail_n) % core_n];
     const lead = grammar.leads[index / (tail_n * core_n)];
-    return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ lead, core, tail });
+    return allocator.print("{s}{s}{s}", .{ lead, core, tail });
 }
 
 pub fn totalIn(grammars: []const Grammar) usize {

@@ -157,7 +157,7 @@ const TestHttpServer = struct {
     }
 
     fn url(self: *const TestHttpServer, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-        return std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}{s}", .{ self.port, path });
+        return allocator.print("http://127.0.0.1:{d}{s}", .{ self.port, path });
     }
 
     fn join(self: *TestHttpServer) !void {
@@ -232,7 +232,8 @@ const TestHttpServer = struct {
         while (true) {
             var chunk: [1024]u8 = undefined;
             var vecs: [1][]u8 = .{chunk[0..]};
-            const n = io.vtable.netRead(io.userdata, stream.socket.handle, &vecs) catch break;
+            const result = stream.readWithControl(io, &vecs, &.{}) catch break;
+            const n = result.data_len;
             if (n == 0) break;
         }
     }
@@ -355,10 +356,11 @@ fn readRawRequestBytes(allocator: std.mem.Allocator, stream: *std.Io.net.Stream,
     while (true) {
         var chunk: [1024]u8 = undefined;
         var vecs: [1][]u8 = .{chunk[0..]};
-        const n = io.vtable.netRead(io.userdata, stream.socket.handle, &vecs) catch |err| switch (err) {
+        const result = stream.readWithControl(io, &vecs, &.{}) catch |err| switch (err) {
             error.ConnectionResetByPeer => break,
             else => return err,
         };
+        const n = result.data_len;
         if (n == 0) break;
         try raw.appendSlice(allocator, chunk[0..n]);
         if (requestMessageLength(raw.items)) |message_len| {
@@ -397,7 +399,7 @@ fn requestMessageLength(raw: []const u8) ?usize {
         if (ascii.eqlIgnoreCase(name, "content-length")) {
             content_length = std.fmt.parseInt(usize, value, 10) catch return null;
         } else if (ascii.eqlIgnoreCase(name, "transfer-encoding")) {
-            chunked = ascii.indexOfIgnoreCase(value, "chunked") != null;
+            chunked = ascii.findIgnoreCase(value, "chunked") != null;
         }
     }
 
@@ -602,7 +604,7 @@ test "standalone initialization unwinds builtin and trace allocation failures" {
     }
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try std.fmt.allocPrint(std.testing.allocator, ".zig-cache/tmp/{s}/trace.jsonl", .{tmp.sub_path});
+    const path = try std.testing.allocator.print(".zig-cache/tmp/{s}/trace.jsonl", .{tmp.sub_path});
     defer std.testing.allocator.free(path);
 
     for (0..2) |after_open| {
@@ -780,7 +782,7 @@ test "soundness incident on a proven path is written to the incident log" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const log_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/incidents.jsonl", .{tmp.sub_path});
+    const log_path = try allocator.print(".zig-cache/tmp/{s}/incidents.jsonl", .{tmp.sub_path});
 
     const fd = try incident_log.open(allocator, log_path);
     defer std.Io.Threaded.closeFd(fd);
@@ -814,7 +816,7 @@ test "exceeding a constant cost ceiling records a soundness incident" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const log_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cost-incidents.jsonl", .{tmp.sub_path});
+    const log_path = try allocator.print(".zig-cache/tmp/{s}/cost-incidents.jsonl", .{tmp.sub_path});
 
     const fd = try incident_log.open(allocator, log_path);
     defer std.Io.Threaded.closeFd(fd);
@@ -860,7 +862,7 @@ test "requests within the ceiling record no incident" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const log_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cost-clean.jsonl", .{tmp.sub_path});
+    const log_path = try allocator.print(".zig-cache/tmp/{s}/cost-clean.jsonl", .{tmp.sub_path});
 
     const fd = try incident_log.open(allocator, log_path);
     defer std.Io.Threaded.closeFd(fd);
@@ -901,7 +903,7 @@ test "cost meter resets between pooled requests" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const log_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/cost-reset.jsonl", .{tmp.sub_path});
+    const log_path = try allocator.print(".zig-cache/tmp/{s}/cost-reset.jsonl", .{tmp.sub_path});
 
     const fd = try incident_log.open(allocator, log_path);
     defer std.Io.Threaded.closeFd(fd);
@@ -1551,7 +1553,7 @@ test "a resolved scope outside policy denies before the socket" {
         .egress_scopes = (zq.endpoint.ScopeSet{}).with(.public),
     };
 
-    const handler_code = try std.fmt.allocPrint(allocator,
+    const handler_code = try allocator.print(
         \\function handler(req) {{
         \\  const res = fetchSync("{s}");
         \\  return Response.json({{ status: res.status, error: res.error }});
@@ -1613,7 +1615,7 @@ test "a denial names the guard, not the request's own bytes" {
         .egress_scopes = (zq.endpoint.ScopeSet{}).with(.public),
     };
 
-    const handler_code = try std.fmt.allocPrint(allocator,
+    const handler_code = try allocator.print(
         \\function handler(req) {{
         \\  return Response.json({{ error: fetchSync("{s}").error }});
         \\}}
@@ -1681,7 +1683,7 @@ test "a policy that names no scope permits no connection" {
     const rt = try HandlerInstance.init(allocator, .{ .outbound_http_enabled = true });
     defer rt.deinit();
 
-    const handler_code = try std.fmt.allocPrint(allocator,
+    const handler_code = try allocator.print(
         \\function handler(req) {{
         \\  const res = fetchSync("{s}");
         \\  return Response.json({{ error: res.error }});
@@ -1841,7 +1843,7 @@ test "a denied cache namespace never creates the store" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const cache_slot = @intFromEnum(zq.module_slots.Slot.cache);
+    const cache_slot = @backingInt(zq.module_slots.Slot.cache);
     const policy = zq.RuntimePolicy{
         .cache = .{ .enabled = true, .values = &[_][]const u8{"allowed"} },
     };
@@ -1883,7 +1885,7 @@ test "a denied cache namespace never creates the store" {
     for (denied_calls) |call| {
         const rt = try HandlerInstance.init(allocator, .{ .dev_capability_policy = policy });
         defer rt.deinit();
-        const code = try std.fmt.allocPrint(allocator,
+        const code = try allocator.print(
             \\import {{ cacheGet, cacheSet, cacheDelete, cacheIncr, cacheStats }} from "zttp:cache";
             \\function handler(req) {{
             \\  return Response.json({{ out: {s} }});
@@ -1935,8 +1937,8 @@ test "a denied sql write never reaches the database" {
 
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const dir = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
-    const db_path = try std.fmt.allocPrint(allocator, "{s}/probe.db", .{dir});
+    const dir = try allocator.print(".zig-cache/tmp/{s}", .{tmp.sub_path});
+    const db_path = try allocator.print("{s}/probe.db", .{dir});
 
     // Writes are allowed by name. `insertDenied` is not one of them, and the
     // row count in the file afterwards is what says whether the guard stopped
@@ -2045,8 +2047,7 @@ test "fetchSync sends request data and exposes response helpers" {
     });
     defer rt.deinit();
 
-    const handler_code = try std.fmt.allocPrint(
-        allocator,
+    const handler_code = try allocator.print(
         \\function handler(req) {{
         \\  const init = {{
         \\    method: "POST",
@@ -2075,9 +2076,7 @@ test "fetchSync sends request data and exposes response helpers" {
         \\    requestRaw: data.raw
         \\  }});
         \\}}
-    ,
-        .{url},
-    );
+    , .{url});
     defer allocator.free(handler_code);
     try rt.loadHandler(handler_code, "<fetchsync-success>");
 
@@ -2287,7 +2286,7 @@ test "a handler exercising every stateful module fills only owned slots" {
     // Floor: each active module that keeps state has filled its slot, so the
     // ownership check below runs against live state rather than an empty array.
     for ([_]Slot{ .sql, .fetch, .cache, .ratelimit, .validate }) |slot| {
-        try std.testing.expect(rt.ctx.module_state[@intFromEnum(slot)] != null);
+        try std.testing.expect(rt.ctx.module_state[@backingInt(slot)] != null);
     }
     // Retired ordinals (ledger, tool, durable, and the rest) have no owner, so
     // no runtime path may write state there.
@@ -2628,8 +2627,7 @@ test "fetchSync enforces response byte limits" {
     });
     defer rt.deinit();
 
-    const handler_code = try std.fmt.allocPrint(
-        allocator,
+    const handler_code = try allocator.print(
         \\function handler(req) {{
         \\  const resp = fetchSync("{s}", {{ max_response_bytes: 8 }});
         \\  const data = resp.json();
@@ -2640,9 +2638,7 @@ test "fetchSync enforces response byte limits" {
         \\    details: data.details
         \\  }});
         \\}}
-    ,
-        .{url},
-    );
+    , .{url});
     defer allocator.free(handler_code);
     try rt.loadHandler(handler_code, "<fetchsync-too-large>");
 
@@ -2694,8 +2690,7 @@ test "fetchSync times out instead of hanging when upstream accepts and goes sile
     });
     defer rt.deinit();
 
-    const handler_code = try std.fmt.allocPrint(
-        allocator,
+    const handler_code = try allocator.print(
         \\function handler(req) {{
         \\  const resp = fetchSync("{s}");
         \\  const data = resp.json();
@@ -2705,9 +2700,7 @@ test "fetchSync times out instead of hanging when upstream accepts and goes sile
         \\    error: data.error
         \\  }});
         \\}}
-    ,
-        .{url},
-    );
+    , .{url});
     defer allocator.free(handler_code);
     try rt.loadHandler(handler_code, "<fetchsync-timeout>");
 
@@ -2775,16 +2768,13 @@ const CeilingFetch = struct {
             .dev_capability_policy = .{ .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback) },
         });
         defer rt.deinit();
-        const handler_code = try std.fmt.allocPrint(
-            allocator,
+        const handler_code = try allocator.print(
             \\function handler(req) {{
             \\  const resp = fetchSync("{s}");
             \\  const data = resp.json();
             \\  return Response.json({{ status: resp.status, error: data.error, details: data.details }});
             \\}}
-        ,
-            .{target_url},
-        );
+        , .{target_url});
         defer allocator.free(handler_code);
         try rt.loadHandler(handler_code, "<fetch-ceiling>");
 
@@ -2830,7 +2820,7 @@ test "a TLS handshake the peer never answers ends at the outbound deadline" {
     var listener = try loopback.listen(io, .{ .reuse_address = true });
     defer listener.deinit(io);
 
-    const target_url = try std.fmt.allocPrint(allocator, "https://127.0.0.1:{d}/", .{listener.socket.address.getPort()});
+    const target_url = try allocator.print("https://127.0.0.1:{d}/", .{listener.socket.address.getPort()});
     defer allocator.free(target_url);
     const result = try CeilingFetch.fetch(allocator, target_url, 200);
     defer allocator.free(result.body);
@@ -2889,7 +2879,7 @@ test "a connect the peer never answers ends at the outbound deadline" {
     };
     try held.append(allocator, probe_fd);
 
-    const target_url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/", .{port});
+    const target_url = try allocator.print("http://127.0.0.1:{d}/", .{port});
     defer allocator.free(target_url);
     const result = try CeilingFetch.fetch(allocator, target_url, 200);
     defer allocator.free(result.body);
@@ -2962,7 +2952,7 @@ test "HandlerInstance rejects malformed cached bytecode before execution" {
     defer rt.deinit();
 
     const code = [_]u8{
-        @intFromEnum(zq.Opcode.ret),
+        @backingInt(zq.Opcode.ret),
     };
     const func = zq.FunctionBytecode{
         .header = .{},
@@ -3020,7 +3010,7 @@ test "HandlerInstance rejects malformed nested cached bytecode before execution"
     defer rt.deinit();
 
     const child_code = [_]u8{
-        @intFromEnum(zq.Opcode.ret),
+        @backingInt(zq.Opcode.ret),
     };
     var child = zq.FunctionBytecode{
         .header = .{},
@@ -3038,7 +3028,7 @@ test "HandlerInstance rejects malformed nested cached bytecode before execution"
         zq.JSValue.fromExternPtr(&child),
     };
     const parent_code = [_]u8{
-        @intFromEnum(zq.Opcode.ret_undefined),
+        @backingInt(zq.Opcode.ret_undefined),
     };
     const parent = zq.FunctionBytecode{
         .header = .{},
@@ -3451,11 +3441,7 @@ test "constant folding matches runtime arithmetic and preserves short circuit ef
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
         const allocator = arena.allocator();
-        const source = try std.fmt.allocPrint(
-            allocator,
-            "function folded() {{ return {s}; }} function baseline() {{ {s} }}",
-            .{ case.expression, case.dynamic },
-        );
+        const source = try allocator.print("function folded() {{ return {s}; }} function baseline() {{ {s} }}", .{ case.expression, case.dynamic });
         const rt = try HandlerInstance.init(allocator, .{});
         defer rt.deinit();
         try rt.loadCodeNoHandler(source, "<bench>");
@@ -3582,8 +3568,10 @@ test "outbound adapters preserve exchange results and failure stages" {
         .{ .silent = true, .fail_send = true, .expected_error = "RequestSendFailed" },
     };
     const FailWrite = struct {
-        fn write(_: ?*anyopaque, _: std.Io.net.Socket.Handle, _: []const u8, _: []const []const u8, _: usize) std.Io.net.Stream.Writer.Error!usize {
-            return error.ConnectionResetByPeer;
+        fn operate(userdata: ?*anyopaque, operation: std.Io.Operation) std.Io.Cancelable!std.Io.Operation.Result {
+            if (operation == .net_write) return .{ .net_write = error.ConnectionResetByPeer };
+            const threaded: *std.Io.Threaded = @ptrCast(@alignCast(userdata));
+            return threaded.io().operate(operation);
         }
     };
 
@@ -3606,16 +3594,16 @@ test "outbound adapters preserve exchange results and failure stages" {
                 .dev_capability_policy = .{ .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback) },
             });
             defer rt.deinit();
-            if (case.fail_send) rt.outbound_io_backend.?.vtable.netWrite = FailWrite.write;
+            if (case.fail_send) rt.outbound_io_backend.?.vtable.operate = FailWrite.operate;
             const source = if (json_adapter)
-                try std.fmt.allocPrint(allocator,
+                try allocator.print(
                     \\function handler(req) {{
                     \\  const result = JSON.parse(httpRequest(JSON.stringify({{ url: "{s}", method: "POST", body: req.body, headers: {{ "X-Test": "borrowed" }} }})));
                     \\  return Response.json({{ status: result.status ?? 599, error: result.error ?? "", details: result.details ?? "", body: result.body ?? "", reason: result.reason ?? "", reply: "" }});
                     \\}}
                 , .{url})
             else
-                try std.fmt.allocPrint(allocator,
+                try allocator.print(
                     \\function handler(req) {{
                     \\  const result = fetchSync("{s}", {{ method: "POST", body: req.body, headers: {{ "X-Test": "borrowed" }} }});
                     \\  const failure = result.status === 599 ? JSON.parse(result.body) : {{ error: "", details: "" }};
@@ -3671,7 +3659,7 @@ test "a POST with no body is sent with an empty body" {
         .dev_capability_policy = .{ .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback) },
     });
     defer rt.deinit();
-    const source = try std.fmt.allocPrint(allocator,
+    const source = try allocator.print(
         \\function handler(req) {{
         \\  const sync = JSON.parse(fetchSync("{s}", {{ method: "POST" }}).body);
         \\  const bridge = JSON.parse(JSON.parse(httpRequest(JSON.stringify({{ url: "{s}", method: "PUT" }}))).body);
@@ -3773,7 +3761,7 @@ test "prepared evaluation keeps typed entry source through imported compilation"
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.ts", .data = "export function message(value: number): string { return \"ok\"; }" });
-    const source = try std.fmt.allocPrint(allocator, "import {{ message }} from \"./.zig-cache/tmp/{s}/dep.ts\"; function handler(req: Request): Response {{ return Response.text(message(\"wrong\")); }}", .{tmp.sub_path});
+    const source = try allocator.print("import {{ message }} from \"./.zig-cache/tmp/{s}/dep.ts\"; function handler(req: Request): Response {{ return Response.text(message(\"wrong\")); }}", .{tmp.sub_path});
     defer allocator.free(source);
     const runtime = try HandlerInstance.init(allocator, .{});
     defer runtime.deinit();

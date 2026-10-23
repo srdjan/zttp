@@ -48,7 +48,7 @@ fn epochMsToComponents(epoch_ms: i64) DateComponents {
 
     return .{
         .year = @intCast(year_day.year),
-        .month = @intFromEnum(month_day.month),
+        .month = @backingInt(month_day.month),
         .day = month_day.day_index + 1,
         .hour = day_secs.getHoursIntoDay(),
         .minute = day_secs.getMinutesIntoHour(),

@@ -793,12 +793,12 @@ pub const Resolver = struct {
 
     fn resolveAtomName(self: *const Resolver, atom_idx: u16) ?[]const u8 {
         if (self.atoms) |table| {
-            const atom: object.Atom = @enumFromInt(atom_idx);
+            const atom: object.Atom = @fromBackingInt(@intCast(atom_idx));
             if (atom.toPredefinedName()) |name| return name;
             return table.getName(atom);
         }
         if (self.ir_view.getString(atom_idx)) |name| return name;
-        const atom: object.Atom = @enumFromInt(atom_idx);
+        const atom: object.Atom = @fromBackingInt(@intCast(atom_idx));
         return atom.toPredefinedName();
     }
 

@@ -4047,7 +4047,7 @@ test "instantiate preserves generic app args wider than old stack buffers" {
 
     const t_param = pool.addGenericParam(allocator, "T");
     const base = pool.addRef(allocator, "Box");
-    var args: [17]TypeIndex = [_]TypeIndex{t_param} ** 17;
+    var args: [17]TypeIndex = @as([17]TypeIndex, @splat(t_param));
 
     const app = pool.addGenericApp(allocator, base, args[0..]);
     const instantiated = pool.instantiate(allocator, app, &.{"T"}, &.{pool.idx_string}, 0);

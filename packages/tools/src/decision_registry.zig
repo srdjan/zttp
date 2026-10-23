@@ -127,13 +127,13 @@ comptime {
     // The enum is the wire vocabulary and the table is what `meta` publishes.
     // A member with no row would be emitted and unpublished; a row whose member
     // was deleted would be published and unemittable.
-    for (@typeInfo(Id).@"enum".fields) |field| {
-        const id: Id = @enumFromInt(field.value);
+    for (@typeInfo(Id).@"enum".field_names) |field| {
+        const id: Id = @fromBackingInt(@intCast(@backingInt(@field(Id, field))));
         var seen = 0;
         for (decisions) |row| {
             if (row.id == id) seen += 1;
         }
-        if (seen != 1) @compileError("decision id must have exactly one row: " ++ field.name);
+        if (seen != 1) @compileError("decision id must have exactly one row: " ++ field);
     }
 }
 

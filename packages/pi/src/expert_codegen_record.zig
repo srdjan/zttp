@@ -68,7 +68,7 @@ pub const ResolvedSteps = struct {
 /// broken generation is a corrupt corpus, and silently treating it as absent
 /// would report a half-written recording as a missing one.
 fn hasFlowArtifact(allocator: std.mem.Allocator, case_root_abs: []const u8) bool {
-    const descriptor = std.fmt.allocPrint(allocator, "{s}/case.json", .{case_root_abs}) catch return false;
+    const descriptor = allocator.print("{s}/case.json", .{case_root_abs}) catch return false;
     defer allocator.free(descriptor);
     const bytes = zts.file_io.readFile(allocator, descriptor, 64 * 1024) catch return false;
     allocator.free(bytes);
@@ -88,11 +88,7 @@ fn resolveCaseSteps(
     provider: agent.Provider,
     name: []const u8,
 ) !ResolvedSteps {
-    const flow_case_root = try std.fmt.allocPrint(
-        allocator,
-        "{s}/{s}/{s}",
-        .{ repo_root, flowRoot(provider), name },
-    );
+    const flow_case_root = try allocator.print("{s}/{s}/{s}", .{ repo_root, flowRoot(provider), name });
     defer allocator.free(flow_case_root);
 
     if (hasFlowArtifact(allocator, flow_case_root)) {
@@ -197,12 +193,8 @@ fn recordingCommand(
         )
     else
         "";
-    return std.fmt.allocPrint(
-        allocator,
-        "ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER={s} {s}" ++
-            "zig build test-expert-app -Dtest-filter=\"record codegen baseline corpus\"",
-        .{ provider.publicName(), timeout },
-    );
+    return allocator.print("ZTTP_CODEGEN_RECORD=1 ZTTP_CODEGEN_PROVIDER={s} {s}" ++
+        "zig build test-expert-app -Dtest-filter=\"record codegen baseline corpus\"", .{ provider.publicName(), timeout });
 }
 
 test "recording remediation preserves the replay provider and requires the full corpus" {
@@ -1874,7 +1866,7 @@ fn deleteTreeAbsolute(io: std.Io, path: []const u8) !void {
 }
 
 fn corpusBackupPath(allocator: std.mem.Allocator, active_root: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}.recording-backup", .{active_root});
+    return allocator.print("{s}.recording-backup", .{active_root});
 }
 
 /// Complete or undo the only two interrupted directory-swap states.
@@ -2069,11 +2061,7 @@ fn recordLiveCase(
     const case_dir = try std.fs.path.join(allocator, &.{ context.stage_root, rc.name });
     try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), context.io, case_dir);
     const case_root_abs = try std.Io.Dir.realPathFileAbsoluteAlloc(context.io, case_dir, allocator);
-    const response_diagnostics_path = try std.fmt.allocPrint(
-        allocator,
-        "{s}/.zig-cache/codegen-record-diagnostics/{s}/{s}.jsonl",
-        .{ context.repo_root, context.diagnostics_run_id, rc.name },
-    );
+    const response_diagnostics_path = try allocator.print("{s}/.zig-cache/codegen-record-diagnostics/{s}/{s}.jsonl", .{ context.repo_root, context.diagnostics_run_id, rc.name });
 
     const workspace_allowlist = try workspaceCaptureAllowlist(allocator, rc.seed_files);
     var live_progress: LiveRecordingProgress = .{
@@ -2305,7 +2293,7 @@ test "record codegen baseline corpus (live, gated)" {
     const has_limit = if (envValue("ZTTP_CODEGEN_LIMIT")) |value| value.len != 0 else false;
     const has_tool_filter = if (envValue("ZTTP_CODEGEN_TOOLS")) |value| value.len != 0 else false;
     const repo_root = try cwdPathAlloc(allocator);
-    const out_dir = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ repo_root, flowRoot(corpus_provider) });
+    const out_dir = try allocator.print("{s}/{s}", .{ repo_root, flowRoot(corpus_provider) });
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
@@ -2338,16 +2326,8 @@ test "record codegen baseline corpus (live, gated)" {
             .{ identity.name, identity.version },
         );
     }
-    const diagnostics_run_id = try std.fmt.allocPrint(
-        allocator,
-        "{d}-{d}",
-        .{ zts.realtimeNowMs() catch 0, std.c.getpid() },
-    );
-    const stage_root = try std.fmt.allocPrint(
-        allocator,
-        "{s}/.zig-cache/codegen-record-staging/{s}-{s}",
-        .{ repo_root, corpus_provider.publicName(), diagnostics_run_id },
-    );
+    const diagnostics_run_id = try allocator.print("{d}-{d}", .{ zts.realtimeNowMs() catch 0, std.c.getpid() });
+    const stage_root = try allocator.print("{s}/.zig-cache/codegen-record-staging/{s}-{s}", .{ repo_root, corpus_provider.publicName(), diagnostics_run_id });
     if (try pathKind(io, stage_root) != null) return error.CorpusStagingPathExists;
     try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, stage_root);
 
@@ -2572,9 +2552,9 @@ test "measured zero coverage requires calibration exact corpus and explicit expe
     try off.put(a, "ZTS056", {});
     try off.put(a, "ZTS203", {});
     try validateCoverageObservation(a, execution, baseline, &tripped, &off);
-    inline for (std.meta.fields(CoverageExecution)) |field| {
+    inline for (@typeInfo(CoverageExecution).@"struct".field_names) |field| {
         var short = execution;
-        @field(short, field.name) = 12;
+        @field(short, field) = 12;
         try testing.expectError(error.CoverageCorpusIncomplete, validateCoverageObservation(a, short, baseline, &tripped, &off));
     }
     try testing.expectError(error.CoverageBaselineEmpty, validateCoverageObservation(a, execution, .{ .minimum_rules = &.{} }, &tripped, &off));
@@ -2776,27 +2756,23 @@ fn compilerEvidenceIdentities(allocator: std.mem.Allocator) !evidence_identity.C
     const builtin_hash = zts.ModuleMetadata.builtinRegistryHash();
     const module_graph_hash = zts_cli.module_graph_record.contextFreeHash();
 
-    const meta_bytes = try std.fmt.allocPrint(
-        allocator,
-        "compiler-version\x00{s}\x00policy-version\x00{s}\x00profile-id\x00{s}" ++
-            "\x00schema\x00{s}\x00policy\x00{s}\x00grammar\x00{s}\x00idioms\x00{s}" ++
-            "\x00restrictions\x00{s}\x00builtins\x00{s}\x00module-graph\x00{s}" ++
-            "\x00semantics\x00{s}\x00diagnostics\x00{s}",
-        .{
-            zts_cli.expert_meta.compiler_version,
-            zts_cli.expert_meta.policy_version,
-            zts_cli.agent_identity.profile_id,
-            schema_hash,
-            policy_hash,
-            grammar_hash,
-            idiom_hash,
-            restriction_hash,
-            builtin_hash,
-            module_graph_hash,
-            semantics_hash,
-            diagnostic_hash,
-        },
-    );
+    const meta_bytes = try allocator.print("compiler-version\x00{s}\x00policy-version\x00{s}\x00profile-id\x00{s}" ++
+        "\x00schema\x00{s}\x00policy\x00{s}\x00grammar\x00{s}\x00idioms\x00{s}" ++
+        "\x00restrictions\x00{s}\x00builtins\x00{s}\x00module-graph\x00{s}" ++
+        "\x00semantics\x00{s}\x00diagnostics\x00{s}", .{
+        zts_cli.expert_meta.compiler_version,
+        zts_cli.expert_meta.policy_version,
+        zts_cli.agent_identity.profile_id,
+        schema_hash,
+        policy_hash,
+        grammar_hash,
+        idiom_hash,
+        restriction_hash,
+        builtin_hash,
+        module_graph_hash,
+        semantics_hash,
+        diagnostic_hash,
+    });
     return .{
         .schema = evidence_identity.schema(&schema_hash),
         .meta = evidence_identity.meta(meta_bytes),
@@ -2910,7 +2886,7 @@ fn assertCoveragePageCurrent(
     version: []const u8,
     tripped_count: usize,
 ) !void {
-    const path = try std.fmt.allocPrint(a, "{s}/docs/coverage.json", .{repo_root});
+    const path = try a.print("{s}/docs/coverage.json", .{repo_root});
     const bytes = zts.file_io.readFile(a, path, 64 * 1024) catch |err| {
         std.debug.print(
             "[proof-coverage] cannot read docs/coverage.json ({s}); regenerate with" ++
@@ -3441,15 +3417,11 @@ test "codegen baseline replays at the committed first-attempt green rate" {
     };
     const manifest_identity = evidence_identity.manifest(cohorts);
     const source = readSourceIdentity(a, repo_root);
-    const run_id = try std.fmt.allocPrint(
-        a,
-        "{s}-{d}-{d}",
-        .{
-            source.revision.commit[0..@min(source.revision.commit.len, 12)],
-            zts.realtimeNowMs() catch 0,
-            std.c.getpid(),
-        },
-    );
+    const run_id = try a.print("{s}-{d}-{d}", .{
+        source.revision.commit[0..@min(source.revision.commit.len, 12)],
+        zts.realtimeNowMs() catch 0,
+        std.c.getpid(),
+    });
     const result_run = evidence_identity.resultRun(.{
         .provider = replay_provider,
         .model = published_model,
@@ -3710,7 +3682,7 @@ test "a broken flow artifact is refused rather than falling back" {
 
     const name = "half-recorded";
     // A descriptor and nothing else: what an interrupted recording leaves.
-    const descriptor = try std.fmt.allocPrint(allocator, "{s}/{s}/case.json", .{ empirical_flow_root, name });
+    const descriptor = try allocator.print("{s}/{s}/case.json", .{ empirical_flow_root, name });
     defer allocator.free(descriptor);
     try tmp.writeFile(
         allocator,

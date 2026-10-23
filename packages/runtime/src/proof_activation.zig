@@ -210,7 +210,7 @@ fn expectContractAuthorityRefused(contract: *const zts.HandlerContract) !void {
         .certificate = null,
         .bytecode = "",
         .contract_section = json.written(),
-        .policy_section_digest = [_]u8{0} ** 32,
+        .policy_section_digest = @as([32]u8, @splat(0)),
     }, pcc.policy.production));
 }
 
@@ -219,7 +219,7 @@ test "an artifact with no certificate is refused, not waved through" {
     const result = try accept(allocator, .{
         .certificate = null,
         .bytecode = "",
-        .policy_section_digest = [_]u8{0} ** 32,
+        .policy_section_digest = @as([32]u8, @splat(0)),
     }, pcc.policy.production);
 
     try testing.expect(!result.accepted());
@@ -261,7 +261,7 @@ test "retired raw contract obligations refuse activation without module facts" {
             .certificate = null,
             .bytecode = "",
             .contract_section = contract,
-            .policy_section_digest = [_]u8{0} ** 32,
+            .policy_section_digest = @as([32]u8, @splat(0)),
         }, pcc.policy.production));
     }
 }
@@ -281,7 +281,7 @@ test "empty retired contract placeholders remain ordinary" {
         .certificate = null,
         .bytecode = "",
         .contract_section = contract,
-        .policy_section_digest = [_]u8{0} ** 32,
+        .policy_section_digest = @as([32]u8, @splat(0)),
     }, pcc.policy.production);
     try testing.expectEqual(pcc.ReasonCode.missing_required_section, result.rejection().?.code);
 }
@@ -291,7 +291,7 @@ test "a malformed contract refuses activation before proof acceptance" {
         .certificate = null,
         .bytecode = "",
         .contract_section = "not a contract",
-        .policy_section_digest = [_]u8{0} ** 32,
+        .policy_section_digest = @as([32]u8, @splat(0)),
     }, pcc.policy.production));
 }
 
@@ -300,7 +300,7 @@ test "a certificate that does not decode is refused at the decode stage" {
     const result = try accept(allocator, .{
         .certificate = "not a certificate",
         .bytecode = "",
-        .policy_section_digest = [_]u8{0} ** 32,
+        .policy_section_digest = @as([32]u8, @splat(0)),
     }, pcc.policy.production);
     try testing.expect(!result.accepted());
     // The graph rebuild runs first and refuses the empty module stream.
@@ -406,7 +406,7 @@ test "the compiler's guard catalog and the kernel's are the same table" {
         try testing.expectEqualStrings(kernel.export_name, producer.export_name);
         try testing.expectEqual(kernel.arg_index, producer.arg_index);
         try testing.expectEqualStrings(kernel.kind.name(), producer.kind.name());
-        try testing.expectEqual(@intFromEnum(kernel.kind), @intFromEnum(producer.kind));
+        try testing.expectEqual(@backingInt(kernel.kind), @backingInt(producer.kind));
         try testing.expectEqualStrings(
             kernel.kind.section().name(),
             sectionKeyRoot(producer.kind.section()),
@@ -436,8 +436,8 @@ test "the kernel's identifier rule and the base-tier one agree" {
         zts.identifier.max_identifier_bytes,
     );
 
-    const longest = [_]u8{'a'} ** zts.identifier.max_identifier_bytes;
-    const one_too_long = [_]u8{'a'} ** (zts.identifier.max_identifier_bytes + 1);
+    const longest = @as([zts.identifier.max_identifier_bytes]u8, @splat('a'));
+    const one_too_long = @as([((zts.identifier.max_identifier_bytes + 1))]u8, @splat('a'));
     const corpus = [_][]const u8{
         "API_KEY",
         "api_key",
@@ -486,9 +486,9 @@ test "the kernel's identifier rule and the base-tier one agree" {
 }
 
 test "the producer and the consumer name address scopes with the same bits" {
-    inline for (@typeInfo(zts.endpoint.AddressScope).@"enum".fields) |field| {
-        const producer: zts.endpoint.AddressScope = @enumFromInt(field.value);
-        const consumer = pcc.residual.AddressScope.fromWire(field.value) orelse
+    inline for (@typeInfo(zts.endpoint.AddressScope).@"enum".field_names) |field| {
+        const producer: zts.endpoint.AddressScope = @fromBackingInt(@intCast(@backingInt(@field(zts.endpoint.AddressScope, field))));
+        const consumer = pcc.residual.AddressScope.fromWire(@backingInt(@field(zts.endpoint.AddressScope, field))) orelse
             return error.TestUnexpectedResult;
         try testing.expectEqualStrings(producer.name(), consumer.name());
         try testing.expectEqual(producer.bit(), consumer.bit());

@@ -179,7 +179,7 @@ pub fn planFromSource(
         if (!first_diag) try w.writeByte(',');
         first_diag = false;
         diag_index += 1;
-        const diag_id = try std.fmt.allocPrint(allocator, "diag_{d:0>3}", .{diag_index});
+        const diag_id = try allocator.print("diag_{d:0>3}", .{diag_index});
         defer allocator.free(diag_id);
         try writeVerifierDiagnostic(w, diag_id, diag, loc.line, loc.column);
     }
@@ -204,7 +204,7 @@ pub fn planFromSource(
         if (!first_witness) try w.writeByte(',');
         first_witness = false;
         witness_index += 1;
-        const witness_id = try std.fmt.allocPrint(allocator, "wit_{d:0>3}", .{witness_index});
+        const witness_id = try allocator.print("wit_{d:0>3}", .{witness_index});
         defer allocator.free(witness_id);
         try writeWitness(w, witness_id, diag, witness);
     }
@@ -319,9 +319,9 @@ fn writePlan(
     closes_index: usize,
     subject_name: ?[]const u8,
 ) !void {
-    const id = try std.fmt.allocPrint(allocator, "rp_{d:0>3}", .{index});
+    const id = try allocator.print("rp_{d:0>3}", .{index});
     defer allocator.free(id);
-    const closes = try std.fmt.allocPrint(allocator, "{s}_{d:0>3}", .{ closes_prefix, closes_index });
+    const closes = try allocator.print("{s}_{d:0>3}", .{ closes_prefix, closes_index });
     defer allocator.free(closes);
     const template = try concreteTemplate(allocator, plan, subject_name);
     defer allocator.free(template);
@@ -364,19 +364,11 @@ pub fn concreteTemplate(
     return switch (plan.kind) {
         .check_result_before_value => {
             const name_text = subject_name orelse "result";
-            return std.fmt.allocPrint(
-                allocator,
-                "if (!{s}.ok) return Response.json({{ error: {s}.error }}, {{ status: 400 }});",
-                .{ name_text, name_text },
-            );
+            return allocator.print("if (!{s}.ok) return Response.json({{ error: {s}.error }}, {{ status: 400 }});", .{ name_text, name_text });
         },
         .narrow_optional_before_use => {
             const name_text = subject_name orelse "value";
-            return std.fmt.allocPrint(
-                allocator,
-                "if ({s} === undefined) return Response.json({{ error: \"missing value\" }}, {{ status: 400 }});",
-                .{name_text},
-            );
+            return allocator.print("if ({s} === undefined) return Response.json({{ error: \"missing value\" }}, {{ status: 400 }});", .{name_text});
         },
         else => allocator.dupe(u8, plan.edit_intent.template),
     };
@@ -416,7 +408,7 @@ fn identifierName(
     const binding = ir_view.getBinding(node) orelse return null;
     // `slot` identifies storage for locals, arguments, and upvalues. The parser
     // keeps the source-level identifier in `name_atom` for every binding kind.
-    return atoms.getName(@enumFromInt(binding.name_atom));
+    return atoms.getName(@fromBackingInt(@intCast(binding.name_atom)));
 }
 
 fn hasRequestedFlowDiagnostics(

@@ -133,7 +133,7 @@ fn writeFileStrict(file_path: []const u8, bytes: []const u8) !void {
     // Write-then-rename for atomicity: a crash mid-write leaves the old file
     // intact rather than a half-written credential.
     var tmp_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const tmp_path = try std.fmt.bufPrintZ(&tmp_buf, "{s}.tmp", .{file_path});
+    const tmp_path = try std.mem.printSentinel(&tmp_buf, "{s}.tmp", .{file_path}, 0);
 
     const fd = try std.posix.openatZ(
         std.posix.AT.FDCWD,
@@ -251,7 +251,7 @@ test "loading a file with permissions wider than 0600 is rejected" {
 
     _ = try loadOrCreateAt(paths[0], paths[1]);
 
-    const path_z = try allocator.dupeZ(u8, paths[1]);
+    const path_z = try allocator.dupeSentinel(u8, paths[1], 0);
     defer allocator.free(path_z);
     _ = std.c.chmod(path_z, 0o644);
 

@@ -428,7 +428,7 @@ fn importedFileDisplay(
         std.mem.startsWith(u8, path, handler_dir) and
         path[handler_dir.len] == std.fs.path.sep)
     {
-        const text = try std.fmt.allocPrint(allocator, "./{s}", .{path[handler_dir.len + 1 ..]});
+        const text = try allocator.print("./{s}", .{path[handler_dir.len + 1 ..]});
         defer allocator.free(text);
         return out.own(allocator, text);
     }

@@ -4,7 +4,7 @@ How to build, how to test, and the conventions a PR must respect before merge. F
 
 ## Prerequisites
 
-Use Zig `0.16.0` stable. The full verifier also requires Python 3, `jq`,
+Use Zig `0.17.0` stable. The full verifier also requires `jq`
 and ripgrep. Ripgrep is part of the recorded expert output, so its in-process
 fallback does not produce the same cassette bytes.
 
@@ -12,7 +12,7 @@ fallback does not produce the same cassette bytes.
 
 ```bash
 zig build                              # debug
-zig build -Doptimize=ReleaseFast       # release
+zig build -Doptimize=fast       # release
 zig build -Dhandler=handler.ts         # precompile a handler
 ```
 

@@ -851,17 +851,14 @@ test "parse manifest captures contractSection when set" {
 test "parse manifest rejects contractSection that collides with a built-in" {
     const reserved = [_][]const u8{ "cache", "functions", "modules", "aot" };
     for (reserved) |section| {
-        const json = try std.fmt.allocPrint(
-            std.testing.allocator,
+        const json = try std.testing.allocator.print(
             \\{{
             \\  "schemaVersion": 1,
             \\  "specifier": "zttp-ext:bad",
             \\  "contractSection": "{s}",
             \\  "exports": [{{ "name": "x" }}]
             \\}}
-        ,
-            .{section},
-        );
+        , .{section});
         defer std.testing.allocator.free(json);
         try std.testing.expectError(error.InvalidContractFlag, parse(std.testing.allocator, json));
     }

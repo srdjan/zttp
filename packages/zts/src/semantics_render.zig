@@ -43,32 +43,32 @@ fn renderDenote(alloc: std.mem.Allocator, terms: []const Term) ![]u8 {
     for (terms) |t| {
         switch (t) {
             .imm => try stack.append(alloc, "imm"),
-            .child => |i| try stack.append(alloc, try std.fmt.allocPrint(alloc, "c{d}", .{i})),
-            .local => |i| try stack.append(alloc, try std.fmt.allocPrint(alloc, "locals[{d}]", .{i})),
-            .call_result => |i| try stack.append(alloc, try std.fmt.allocPrint(alloc, "call{d}()", .{i})),
+            .child => |i| try stack.append(alloc, try alloc.print("c{d}", .{i})),
+            .local => |i| try stack.append(alloc, try alloc.print("locals[{d}]", .{i})),
+            .call_result => |i| try stack.append(alloc, try alloc.print("call{d}()", .{i})),
             .binop => |k| {
                 const b = stack.pop() orelse "?";
                 const a = stack.pop() orelse "?";
-                try stack.append(alloc, try std.fmt.allocPrint(alloc, "({s} {s} {s})", .{ a, binSym(k), b }));
+                try stack.append(alloc, try alloc.print("({s} {s} {s})", .{ a, binSym(k), b }));
             },
             .unop => |k| {
                 const a = stack.pop() orelse "?";
-                try stack.append(alloc, try std.fmt.allocPrint(alloc, "({s}{s})", .{ unSym(k), a }));
+                try stack.append(alloc, try alloc.print("({s}{s})", .{ unSym(k), a }));
             },
             .select => {
                 const e = stack.pop() orelse "?";
                 const th = stack.pop() orelse "?";
                 const c = stack.pop() orelse "?";
-                try stack.append(alloc, try std.fmt.allocPrint(alloc, "({s} ? {s} : {s})", .{ c, th, e }));
+                try stack.append(alloc, try alloc.print("({s} ? {s} : {s})", .{ c, th, e }));
             },
             .binop_self => {
                 const b = stack.pop() orelse "?";
                 const a = stack.pop() orelse "?";
-                try stack.append(alloc, try std.fmt.allocPrint(alloc, "({s} <op> {s})", .{ a, b }));
+                try stack.append(alloc, try alloc.print("({s} <op> {s})", .{ a, b }));
             },
             .unop_self => {
                 const a = stack.pop() orelse "?";
-                try stack.append(alloc, try std.fmt.allocPrint(alloc, "(<op>{s})", .{a}));
+                try stack.append(alloc, try alloc.print("(<op>{s})", .{a}));
             },
         }
     }
@@ -82,9 +82,9 @@ fn renderSteps(alloc: std.mem.Allocator, steps: []const Step) ![]u8 {
         if (i != 0) try buf.appendSlice(alloc, "; ");
         switch (s) {
             .push_imm => try buf.appendSlice(alloc, "imm"),
-            .eval_child => |c| try buf.appendSlice(alloc, try std.fmt.allocPrint(alloc, "eval(c{d})", .{c})),
-            .push_local => |c| try buf.appendSlice(alloc, try std.fmt.allocPrint(alloc, "get_loc[{d}]", .{c})),
-            .call_site => |c| try buf.appendSlice(alloc, try std.fmt.allocPrint(alloc, "call{d}()", .{c})),
+            .eval_child => |c| try buf.appendSlice(alloc, try alloc.print("eval(c{d})", .{c})),
+            .push_local => |c| try buf.appendSlice(alloc, try alloc.print("get_loc[{d}]", .{c})),
+            .call_site => |c| try buf.appendSlice(alloc, try alloc.print("call{d}()", .{c})),
             .op => |o| try buf.appendSlice(alloc, @tagName(o)),
             .op_self => try buf.appendSlice(alloc, "<op>"),
         }
@@ -141,16 +141,16 @@ pub fn renderSpecTs(caller: std.mem.Allocator) ![]u8 {
     // boundary visible in the generated view instead of rendering only the
     // small executable symbolic subset.
     try fmt(allocator, w, "export const nodeAssurance = {{\n", .{});
-    inline for (@typeInfo(semantics.NodeTag).@"enum".fields) |field| {
-        const disposition = semantics.nodeDisposition(@enumFromInt(field.value));
-        try fmt(allocator, w, "  {s}: {{ disposition: \"{s}\", reason: \"{s}\" }},\n", .{ field.name, @tagName(disposition.kind), disposition.reason });
+    inline for (@typeInfo(semantics.NodeTag).@"enum".field_names) |field| {
+        const disposition = semantics.nodeDisposition(@fromBackingInt(@intCast(@backingInt(@field(semantics.NodeTag, field)))));
+        try fmt(allocator, w, "  {s}: {{ disposition: \"{s}\", reason: \"{s}\" }},\n", .{ field, @tagName(disposition.kind), disposition.reason });
     }
     try fmt(allocator, w, "}} as const;\n\n", .{});
 
     try fmt(allocator, w, "export const opcodeAssurance = {{\n", .{});
-    inline for (@typeInfo(semantics.Opcode).@"enum".fields) |field| {
-        const disposition = semantics.opcodeDisposition(@enumFromInt(field.value));
-        try fmt(allocator, w, "  {s}: {{ disposition: \"{s}\", reason: \"{s}\" }},\n", .{ field.name, @tagName(disposition.kind), disposition.reason });
+    inline for (@typeInfo(semantics.Opcode).@"enum".field_names) |field| {
+        const disposition = semantics.opcodeDisposition(@fromBackingInt(@intCast(@backingInt(@field(semantics.Opcode, field)))));
+        try fmt(allocator, w, "  {s}: {{ disposition: \"{s}\", reason: \"{s}\" }},\n", .{ field, @tagName(disposition.kind), disposition.reason });
     }
     try fmt(allocator, w, "}} as const;\n\n", .{});
 
@@ -239,7 +239,7 @@ fn denoteParams(r: semantics.NodeRule) []const u8 {
 }
 
 fn fmt(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), comptime f: []const u8, args: anytype) !void {
-    const s = try std.fmt.allocPrint(allocator, f, args);
+    const s = try allocator.print(f, args);
     defer allocator.free(s);
     try buf.appendSlice(allocator, s);
 }
@@ -256,13 +256,13 @@ test "rendered spec carries every named semantic disposition" {
     const sh = semantics.semanticsHash();
     try std.testing.expect(std.mem.indexOf(u8, ts, &sh) != null);
 
-    inline for (@typeInfo(semantics.NodeTag).@"enum".fields) |field| {
-        const row = try std.fmt.allocPrint(allocator, "  {s}: {{ disposition:", .{field.name});
+    inline for (@typeInfo(semantics.NodeTag).@"enum".field_names) |field| {
+        const row = try allocator.print("  {s}: {{ disposition:", .{field});
         defer allocator.free(row);
         try std.testing.expect(std.mem.indexOf(u8, ts, row) != null);
     }
-    inline for (@typeInfo(semantics.Opcode).@"enum".fields) |field| {
-        const row = try std.fmt.allocPrint(allocator, "  {s}: {{ disposition:", .{field.name});
+    inline for (@typeInfo(semantics.Opcode).@"enum".field_names) |field| {
+        const row = try allocator.print("  {s}: {{ disposition:", .{field});
         defer allocator.free(row);
         try std.testing.expect(std.mem.indexOf(u8, ts, row) != null);
     }

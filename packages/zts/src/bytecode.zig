@@ -629,8 +629,8 @@ pub const PatternDispatchTable = struct {
 };
 
 test "Opcode encoding" {
-    try std.testing.expectEqual(@as(u8, 0x20), @intFromEnum(Opcode.add));
-    try std.testing.expectEqual(@as(u8, 0x50), @intFromEnum(Opcode.goto));
+    try std.testing.expectEqual(@as(u8, 0x20), @backingInt(Opcode.add));
+    try std.testing.expectEqual(@as(u8, 0x50), @backingInt(Opcode.goto));
 }
 
 test "OpcodeInfo lookup" {

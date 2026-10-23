@@ -9,7 +9,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if [ ! -x ./zig-out/bin/zts ]; then
-  echo "error: ./zig-out/bin/zts is missing; run 'zig build -Doptimize=ReleaseFast' first" >&2
+  echo "error: ./zig-out/bin/zts is missing; run 'zig build -Doptimize=fast' first" >&2
   exit 1
 fi
 

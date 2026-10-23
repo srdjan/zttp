@@ -38,7 +38,7 @@ pub fn add(ctx: Context) Result {
     // so without has_side_effects an edited case or golden would not rerun it.
     const check = b.addRunArtifact(gate_exe);
     check.has_side_effects = true;
-    if (b.args) |args| check.addArgs(args);
+    check.addPassthruArgs();
     const corpus_step = b.step("test-diagnostic-corpus", "Check every tests/corpus case against its golden diagnostics");
     corpus_step.dependOn(&check.step);
 
@@ -53,7 +53,7 @@ pub fn add(ctx: Context) Result {
 
     const write = b.addRunArtifact(gate_exe);
     write.addArg("--write");
-    if (b.args) |args| write.addArgs(args);
+    write.addPassthruArgs();
     write.has_side_effects = true;
     const write_step = b.step("diagnostic-corpus-write", "Rewrite the tests/corpus goldens from the current check output");
     write_step.dependOn(&write.step);

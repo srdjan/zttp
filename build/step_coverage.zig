@@ -72,7 +72,7 @@ pub fn add(b: *std.Build, test_step: *std.Build.Step, step_coverage_step: *std.B
     }
 
     if (violations > 0) {
-        const message = std.fmt.allocPrint(b.allocator, "step coverage: {d} problem(s)\n{s}\nRun the step from scripts/verify.sh, scripts/release.sh, or `zig build test`; or add a row to scripts/manual-steps.allow with the reason a human asks for it.", .{ violations, report.items }) catch @panic("OOM");
+        const message = b.allocator.print("step coverage: {d} problem(s)\n{s}\nRun the step from scripts/verify.sh, scripts/release.sh, or `zig build test`; or add a row to scripts/manual-steps.allow with the reason a human asks for it.", .{ violations, report.items }) catch @panic("OOM");
         step_coverage_step.dependOn(&b.addFail(message).step);
     } else {
         const ok = b.addSystemCommand(&.{ "/bin/echo", b.fmt("step coverage: OK ({d} steps, {d} run by hand with a stated reason, {d} run only at release)", .{ step_count, manual_rows, release_only }) });
@@ -89,7 +89,7 @@ fn unrunCount(own: *StepSet, covered: *StepSet, release: bool) usize {
     var it = own.keyIterator();
     while (it.next()) |entry| {
         const dep = entry.*;
-        if (dep.id == .top_level) continue;
+        if (dep.tag == .top_level) continue;
         if (covered.contains(dep)) continue;
         if (runStepScript(dep)) |script| {
             var executed = false;

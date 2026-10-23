@@ -28,8 +28,8 @@ pub const CoreProfile = profile_identity.CoreProfile;
 /// Hashes are raw SHA-256 bytes on the domain type and lowercase hex on wire.
 pub const SourceIdentity = struct {
     core_profile: CoreProfile = profile_identity.core_profile,
-    core_grammar_hash: [32]u8 = [_]u8{0} ** 32,
-    semantics_hash: [32]u8 = [_]u8{0} ** 32,
+    core_grammar_hash: [32]u8 = @as([32]u8, @splat(0)),
+    semantics_hash: [32]u8 = @as([32]u8, @splat(0)),
     pub fn isStamped(self: SourceIdentity) bool {
         return !std.mem.allEqual(u8, &self.core_grammar_hash, 0) and
             !std.mem.allEqual(u8, &self.semantics_hash, 0);
@@ -517,10 +517,10 @@ pub const HandlerProperties = struct {
     /// set should size against `max_proven_specs`.
     pub fn provenSpecNames(self: *const HandlerProperties, out: []?[]const u8) usize {
         var count: usize = 0;
-        inline for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
-            if (field.type == bool and isMonotonicProvenSpec(field.name) and @field(self, field.name)) {
+        inline for (@typeInfo(HandlerProperties).@"struct".field_names) |field| {
+            if (@FieldType(HandlerProperties, field) == bool and isMonotonicProvenSpec(field) and @field(self, field)) {
                 if (count < out.len) {
-                    out[count] = field.name;
+                    out[count] = field;
                     count += 1;
                 }
             }
@@ -533,8 +533,8 @@ pub const HandlerProperties = struct {
     /// against this so `provenSpecNames` never overflows.
     pub const max_proven_specs: usize = blk: {
         var n: usize = 0;
-        for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
-            if (field.type == bool and isMonotonicProvenSpec(field.name)) n += 1;
+        for (@typeInfo(HandlerProperties).@"struct".field_names) |field| {
+            if (@FieldType(HandlerProperties, field) == bool and isMonotonicProvenSpec(field)) n += 1;
         }
         break :blk n;
     };
@@ -543,8 +543,8 @@ pub const HandlerProperties = struct {
     /// safety guarantees are monotonic; inverse facts such as `has_egress`
     /// are deliberately excluded so removing risky behavior cannot regress.
     pub fn isMonotonicProvenSpecName(name: []const u8) bool {
-        inline for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
-            if (field.type == bool and isMonotonicProvenSpec(field.name) and std.mem.eql(u8, field.name, name)) {
+        inline for (@typeInfo(HandlerProperties).@"struct".field_names) |field| {
+            if (@FieldType(HandlerProperties, field) == bool and isMonotonicProvenSpec(field) and std.mem.eql(u8, field, name)) {
                 return true;
             }
         }
@@ -557,9 +557,9 @@ pub const HandlerProperties = struct {
     /// writer's emitted keys and the parser's camel-to-snake lookup. Returns
     /// null for names that are not field names of this struct.
     pub fn camelKeyFor(snake_field_name: []const u8) ?[]const u8 {
-        inline for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
-            if (std.mem.eql(u8, field.name, snake_field_name)) {
-                return comptime snakeToCamel(field.name);
+        inline for (@typeInfo(HandlerProperties).@"struct".field_names) |field| {
+            if (std.mem.eql(u8, field, snake_field_name)) {
+                return comptime snakeToCamel(field);
             }
         }
         return null;
@@ -1008,7 +1008,7 @@ pub const BoundClass = enum(u2) {
     unbounded = 2,
 
     pub fn widerThan(self: BoundClass, other: BoundClass) bool {
-        return @intFromEnum(self) > @intFromEnum(other);
+        return @backingInt(self) > @backingInt(other);
     }
 
     pub fn asString(self: BoundClass) []const u8 {
@@ -1211,7 +1211,7 @@ pub const CostEnvelope = struct {
 pub const CapabilityMatrix = struct {
     items: [module_binding.capability_count]module_binding.ModuleCapability = undefined,
     len: u8 = 0,
-    hash: [32]u8 = [_]u8{0} ** 32,
+    hash: [32]u8 = @as([32]u8, @splat(0)),
 
     pub const empty: CapabilityMatrix = .{};
 
@@ -1504,16 +1504,16 @@ pub const HandlerContract = struct {
     source_identity: SourceIdentity = .{},
     /// SHA-256 of the compiled handler bytecode. Stamped by the build
     /// pipeline after compile and verified at runtime startup.
-    artifact_sha256: [32]u8 = [_]u8{0} ** 32,
+    artifact_sha256: [32]u8 = @as([32]u8, @splat(0)),
     /// SHA-256 of the zts rule registry used to extract this contract.
     /// Populated in `build()`; verified at runtime against the registry the
     /// running binary was linked with.
-    policy_hash: [32]u8 = [_]u8{0} ** 32,
+    policy_hash: [32]u8 = @as([32]u8, @splat(0)),
     /// SHA-256 of the embedded Wasm policy artifact (Phase 2). All-zeros
     /// means no Wasm policy is present; the runtime falls back to the
     /// in-process LocalPolicyChecker. Non-zero values are verified at startup
     /// against the artifact on disk before the WasmPool is populated.
-    wasm_policy_hash: [32]u8 = [_]u8{0} ** 32,
+    wasm_policy_hash: [32]u8 = @as([32]u8, @splat(0)),
 
     pub const FunctionEntry = struct {
         module: []const u8, // owned

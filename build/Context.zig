@@ -9,9 +9,10 @@ const selection = @import("test_selection.zig");
 
 b: *std.Build,
 target: std.Build.ResolvedTarget,
-optimize: std.builtin.OptimizeMode,
+optimize: std.lang.Optimize,
 test_filters: []const []const u8,
 test_selections: *std.ArrayList(selection.Run),
+test_count_paths: *std.AutoHashMap(*std.Build.Step.Compile, std.Build.LazyPath),
 perf_histogram_enabled: bool,
 strip_enabled: bool,
 precompile: PrecompileOptions,
@@ -47,6 +48,8 @@ pub fn init(b: *std.Build) Context {
     const optimize = b.standardOptimizeOption(.{});
     const test_selections = b.allocator.create(std.ArrayList(selection.Run)) catch @panic("OOM");
     test_selections.* = .empty;
+    const test_count_paths = b.allocator.create(std.AutoHashMap(*std.Build.Step.Compile, std.Build.LazyPath)) catch @panic("OOM");
+    test_count_paths.* = .init(b.allocator);
 
     // `-Dtest-filter="<substring>"` runs only the matching tests. Zig takes
     // this at compile time, not as a runtime argument to the test binary, so
@@ -62,7 +65,7 @@ pub fn init(b: *std.Build) Context {
     // `&.{f}` would point at an array in this function's frame, which is gone
     // once `init` returns the Context; copy it into the build allocator.
     const test_filters: []const []const u8 = if (test_filter) |f| b.dupeStrings(&.{f}) else &.{};
-    const bench_optimize: std.builtin.OptimizeMode = .ReleaseFast;
+    const bench_optimize: std.lang.Optimize = .fast;
     const perf_histogram_enabled = b.option(bool, "perf_histogram", "Enable interpreter opcode histogram collection") orelse false;
     const strip_enabled = b.option(bool, "strip", "Strip debug info from the installed zttp/zts/zttp-runtime binaries (release artifacts)") orelse false;
     const zts_dep = b.dependency("zts", .{
@@ -169,6 +172,7 @@ pub fn init(b: *std.Build) Context {
         .optimize = optimize,
         .test_filters = test_filters,
         .test_selections = test_selections,
+        .test_count_paths = test_count_paths,
         .perf_histogram_enabled = perf_histogram_enabled,
         .strip_enabled = strip_enabled,
         .precompile = precompile,
@@ -199,6 +203,7 @@ pub fn proofCheckerMod(ctx: Context) *std.Build.Module {
 /// Developer filters retain the package runner but must collect real tests.
 pub fn addTest(ctx: Context, original: std.Build.TestOptions) *std.Build.Step.Compile {
     var options = original;
+    var count_path: ?std.Build.LazyPath = null;
     // A developer filter replaces any fixed filter. A fixed filter on its own
     // still gets the non-empty runner, so a suite whose filter matches no test
     // fails instead of reporting a pass over zero tests.
@@ -206,7 +211,7 @@ pub fn addTest(ctx: Context, original: std.Build.TestOptions) *std.Build.Step.Co
     if (effective.len != 0) {
         options.filters = effective;
         const selected = original.test_runner orelse std.Build.Step.Compile.TestRunner{
-            .path = .{ .cwd_relative = ctx.b.pathJoin(&.{ ctx.b.graph.zig_lib_directory.path.?, "compiler", "test_runner.zig" }) },
+            .path = std.Build.LazyPath.zig_lib.path(ctx.b, "compiler/test_runner.zig"),
             .mode = .server,
         };
         options.root_module.addImport("selected_test_runner", ctx.b.createModule(.{
@@ -217,17 +222,21 @@ pub fn addTest(ctx: Context, original: std.Build.TestOptions) *std.Build.Step.Co
         const runner_options = ctx.b.addOptions();
         runner_options.addOption(bool, "simple", selected.mode == .simple);
         runner_options.addOption([]const u8, "filter", effective[0]);
+        count_path = std.Build.LazyPath.cache_root.path(ctx.b, ctx.b.fmt("test-selection-{x}-{d}-{t}.txt", .{
+            std.hash.Wyhash.hash(0, effective[0]), ctx.test_count_paths.count(), ctx.optimize,
+        }));
+        runner_options.addOptionPathUntracked("count_path", count_path.?);
         options.root_module.addOptions("selection_runner_options", runner_options);
         options.test_runner = .{ .path = ctx.b.path("tooling/nonempty_test_runner.zig"), .mode = selected.mode };
     }
-    return ctx.b.addTest(options);
+    const compile = ctx.b.addTest(options);
+    if (count_path) |path| ctx.test_count_paths.put(compile, path) catch @panic("OOM");
+    return compile;
 }
 
 pub fn addRunTest(ctx: Context, compile: *std.Build.Step.Compile) *std.Build.Step.Run {
     const run = ctx.b.addRunArtifact(compile);
-    if ((ctx.test_filters.len != 0 or compile.filters.len != 0) and compile.kind == .@"test") {
-        const path = ctx.b.cache_root.join(ctx.b.allocator, &.{ctx.b.fmt("test-selection-{x}.txt", .{@intFromPtr(run)})}) catch @panic("OOM");
-        run.setEnvironmentVariable("ZTTP_TEST_SELECTION_COUNT", path);
+    if (ctx.test_count_paths.get(compile)) |path| {
         run.has_side_effects = true;
         ctx.test_selections.append(ctx.b.allocator, .{ .step = &run.step, .count_path = path }) catch @panic("OOM");
     }

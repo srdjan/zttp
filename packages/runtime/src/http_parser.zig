@@ -585,6 +585,16 @@ fn findCrlfWithin(input: []const u8, max_line_bytes: usize) !?usize {
 
 const testing = std.testing;
 
+test "findHeaderEnd preserves byte offsets across every SIMD lane and tail" {
+    for (4..100) |len| {
+        for (0..len - 3) |offset| {
+            var bytes: [100]u8 = @splat('x');
+            @memcpy(bytes[offset..][0..4], "\r\n\r\n");
+            try std.testing.expectEqual(@as(?usize, offset), findHeaderEnd(bytes[0..len]));
+        }
+    }
+}
+
 test "findHeaderEnd: terminator at start of small buffer" {
     try testing.expectEqual(@as(?usize, 0), findHeaderEnd("\r\n\r\n"));
     try testing.expectEqual(@as(?usize, 0), findHeaderEnd("\r\n\r\nbody"));
@@ -706,7 +716,7 @@ test "parseQueryString: plus is decoded as space" {
 
 test "parseQueryString: rejects queries exceeding max_query_length with QueryTooLong" {
     // 4 KiB query string, 1 KiB limit. Must fail before any allocation.
-    const big = "k=" ++ ("v" ** 4094);
+    const big = "k=" ++ (&@as([4094:0]u8, @splat('v')));
     try testing.expectError(error.QueryTooLong, parseQueryString(testing.allocator, big, 1024));
 }
 
@@ -985,7 +995,7 @@ test "chunkedBodyConsumedResumable resumes mid chunk-size-line without rescannin
     try testing.expectEqual(ChunkedBodyParseState.Phase.chunk_size, state.phase);
     try testing.expectEqual(@as(usize, chunk1.len), state.pos);
 
-    const poison = "Z" ** chunk1.len;
+    const poison = &@as([chunk1.len:0]u8, @splat('Z'));
     const resumed_body = poison ++ chunk2_size_line ++ chunk2_data ++ terminator;
     const result = try chunkedBodyConsumedResumable(resumed_body, 1024, &state);
     try testing.expectEqual(@as(?usize, full_valid_body.len), result);
@@ -1008,7 +1018,7 @@ test "chunkedBodyConsumedResumable resumes mid chunk-data without rescanning" {
     const resume_offset = chunk1.len + chunk2_size_line.len;
     try testing.expectEqual(@as(usize, resume_offset), state.pos);
 
-    const poison = "Z" ** resume_offset;
+    const poison = &@as([resume_offset:0]u8, @splat('Z'));
     const resumed_body = poison ++ chunk2_data_partial ++ chunk2_data_rest ++ terminator;
     const result = try chunkedBodyConsumedResumable(resumed_body, 1024, &state);
     try testing.expectEqual(@as(?usize, full_valid_body.len), result);
@@ -1027,7 +1037,7 @@ test "chunkedBodyConsumedResumable resumes mid chunk-data CRLF without rescannin
     try testing.expectEqual(ChunkedBodyParseState.Phase.chunk_data, state.phase);
     try testing.expectEqual(@as(usize, size_line.len), state.pos);
 
-    const poison = "Z" ** size_line.len;
+    const poison = &@as([size_line.len:0]u8, @splat('Z'));
     const resumed_body = poison ++ chunk_data ++ "\r\n" ++ terminator;
     const result = try chunkedBodyConsumedResumable(resumed_body, 1024, &state);
     try testing.expectEqual(@as(?usize, full_valid_body.len), result);
@@ -1053,7 +1063,7 @@ test "chunkedBodyConsumedResumable resumes mid trailer without rescanning" {
     const resume_offset = trailer_start + trailer1.len;
     try testing.expectEqual(@as(usize, resume_offset), state.pos);
 
-    const poison = "Z" ** resume_offset;
+    const poison = &@as([resume_offset:0]u8, @splat('Z'));
     const resumed_body = poison ++ trailer2_partial ++ trailer2_rest ++ final_crlf;
     const result = try chunkedBodyConsumedResumable(resumed_body, 1024, &state);
     try testing.expectEqual(@as(?usize, full_valid_body.len), result);

@@ -1086,7 +1086,7 @@ pub const AppendedPayload = execution_spec.AppendedPayload;
 /// the evented std writer) on both macOS and Linux, where a per-socket
 /// SO_NOSIGPIPE / per-call MSG_NOSIGNAL would each leave gaps. Idempotent.
 fn ignoreSigpipe() void {
-    if (comptime builtin.os.tag == .windows) return;
+    if (comptime builtin.target.os.tag == .windows) return;
     var act = std.posix.Sigaction{
         .handler = .{ .handler = std.posix.SIG.IGN },
         .mask = std.posix.sigemptyset(),
@@ -1106,7 +1106,7 @@ fn sigShutdownHandler(_: std.c.SIG) callconv(.c) void {
 }
 
 fn installShutdownSignals() void {
-    if (comptime builtin.os.tag == .windows) return;
+    if (comptime builtin.target.os.tag == .windows) return;
     // SA_RESETHAND: the first signal sets the graceful-shutdown flag. The
     // accept-loop wake thread opens a loopback connection so a blocked accept
     // observes it; a second SIGINT/SIGTERM retains the usual hard-stop escape.
@@ -2151,7 +2151,7 @@ pub const Server = struct {
         var listener = self.listener orelse return error.NotStarted;
         var wake_context = AcceptWakeContext{ .server = self };
         var wake_thread: ?std.Thread = null;
-        if (comptime builtin.os.tag != .windows) {
+        if (comptime builtin.target.os.tag != .windows) {
             wake_thread = try std.Thread.spawn(.{}, wakeAcceptOnShutdown, .{&wake_context});
         }
         defer if (wake_thread) |thread| {
@@ -2668,8 +2668,8 @@ test "accessLogRequestId hides missing empty control whitespace and oversized va
     try std.testing.expectEqualStrings("-", accessLogRequestId("abc\ndef"));
     try std.testing.expectEqualStrings("-", accessLogRequestId("abc def"));
 
-    const oversized = "a" ** (max_logged_request_id_len + 1);
-    try std.testing.expectEqualStrings("-", accessLogRequestId(oversized));
+    const oversized = @as([((max_logged_request_id_len + 1))]u8, @splat('a'));
+    try std.testing.expectEqualStrings("-", accessLogRequestId(&oversized));
 }
 
 test "accessLogField percent-escapes unsafe bytes" {
@@ -2682,11 +2682,11 @@ test "accessLogField percent-escapes unsafe bytes" {
 }
 
 test "accessLogField caps oversized values" {
-    const oversized = "a" ** (max_logged_access_field_len + 1);
+    const oversized = @as([((max_logged_access_field_len + 1))]u8, @splat('a'));
     var buf: [max_logged_access_field_bytes]u8 = undefined;
-    const logged = accessLogField(oversized, &buf);
+    const logged = accessLogField(&oversized, &buf);
     try std.testing.expectEqual(@as(usize, max_logged_access_field_len), logged.len);
-    try std.testing.expectEqualStrings("a" ** max_logged_access_field_len, logged);
+    try std.testing.expectEqualStrings(&@as([max_logged_access_field_len:0]u8, @splat('a')), logged);
 }
 
 test "static file cache hit and invalidation" {
@@ -3093,7 +3093,7 @@ test "threaded keep-alive connection serves two sequential requests" {
     };
     server.reload_active = false;
     server.contract = null;
-    server.well_known_doc = .{ .body = "{\"v\":1}", .etag_hex = [_]u8{'0'} ** 64 };
+    server.well_known_doc = .{ .body = "{\"v\":1}", .etag_hex = @splat('0') };
 
     var pool = ConnectionPool{
         .workers = &[_]std.Thread{},
@@ -3183,7 +3183,7 @@ const ShutdownGraceScenario = enum {
 };
 
 fn runShutdownGraceScenario(scenario: ShutdownGraceScenario) !void {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const allocator = std.heap.c_allocator;
     const ErrorInt = @Int(.unsigned, @bitSizeOf(anyerror));
@@ -3333,15 +3333,12 @@ fn runShutdownGraceScenario(scenario: ShutdownGraceScenario) !void {
     defer upstream.deinit();
     try upstream.start();
 
-    const handler = try std.fmt.allocPrint(
-        allocator,
+    const handler = try allocator.print(
         \\function handler(req) {{
         \\  const response = fetchSync("http://127.0.0.1:{d}/hold");
         \\  return Response.text(response.text());
         \\}}
-    ,
-        .{upstream.port},
-    );
+    , .{upstream.port});
     defer allocator.free(handler);
 
     const io = upstream.io_backend.io();
@@ -3662,11 +3659,7 @@ test "parseRequestFromBuffer accepts large header values" {
     const long_value = try allocator.alloc(u8, 9000);
     @memset(long_value, 'a');
 
-    const data = try std.fmt.allocPrint(
-        allocator,
-        "GET / HTTP/1.1\r\nHost: example.com\r\nX-Long: {s}\r\n\r\n",
-        .{long_value},
-    );
+    const data = try allocator.print("GET / HTTP/1.1\r\nHost: example.com\r\nX-Long: {s}\r\n\r\n", .{long_value});
 
     var request = try server.parseRequestFromBuffer(allocator, data);
     defer request.deinit(allocator);
@@ -3713,7 +3706,7 @@ test "parseRequestFromBuffer rejects oversized body" {
 }
 
 test "findHeaderEnd finds terminator across SIMD boundary" {
-    var buf: [64]u8 = [_]u8{'A'} ** 64;
+    var buf: [64]u8 = @as([64]u8, @splat('A'));
     // Place terminator so it crosses a 16-byte boundary (starts at index 15).
     buf[15] = '\r';
     buf[16] = '\n';
@@ -3737,8 +3730,8 @@ test "findHeaderEnd handles short buffers" {
 }
 
 test "attestationClaimsMatchContract rejects JWS describing different bytecode" {
-    const policy_bytes = [_]u8{0x11} ** 32;
-    const artifact_bytes = [_]u8{0x22} ** 32;
+    const policy_bytes = @as([32]u8, @splat(0x11));
+    const artifact_bytes = @as([32]u8, @splat(0x22));
     const policy_hex = std.fmt.bytesToHex(policy_bytes, .lower);
     const artifact_hex = std.fmt.bytesToHex(artifact_bytes, .lower);
     const source_identity = engine.sourceIdentityForPath("handler.ts");
@@ -3758,10 +3751,10 @@ test "attestationClaimsMatchContract rejects JWS describing different bytecode" 
     };
 
     var claims = attest_envelope.Claims{
-        .contract_sha256 = &([_]u8{'0'} ** 64),
+        .contract_sha256 = &@as([64:0]u8, @splat('0')),
         .bytecode_sha256 = &artifact_hex,
         .policy_sha256 = &policy_hex,
-        .capability_hash = &([_]u8{'0'} ** 64),
+        .capability_hash = &@as([64:0]u8, @splat('0')),
         .core_profile_id = source_identity.core_profile.id(),
         .core_grammar_sha256 = &core_grammar_hex,
         .semantics_sha256 = &semantics_hex,
@@ -3776,22 +3769,22 @@ test "attestationClaimsMatchContract rejects JWS describing different bytecode" 
     try std.testing.expect(Server.attestationClaimsMatchContract(claims, &live));
 
     // A validly-signed JWS that describes different bytecode is rejected.
-    const wrong_artifact = std.fmt.bytesToHex([_]u8{0x33} ** 32, .lower);
+    const wrong_artifact = std.fmt.bytesToHex(@as([32]u8, @splat(0x33)), .lower);
     claims.bytecode_sha256 = &wrong_artifact;
     try std.testing.expect(!Server.attestationClaimsMatchContract(claims, &live));
 
     // A different policy hash is rejected.
     claims.bytecode_sha256 = &artifact_hex;
-    const wrong_policy = std.fmt.bytesToHex([_]u8{0x44} ** 32, .lower);
+    const wrong_policy = std.fmt.bytesToHex(@as([32]u8, @splat(0x44)), .lower);
     claims.policy_sha256 = &wrong_policy;
     try std.testing.expect(!Server.attestationClaimsMatchContract(claims, &live));
 
     // An unpinned (all-zero) live hash skips the field instead of rejecting,
     // mirroring contract_runtime's skip-on-zero semantics for live reload.
-    live.policy_hash = [_]u8{0} ** 32;
+    live.policy_hash = @as([32]u8, @splat(0));
     try std.testing.expect(Server.attestationClaimsMatchContract(claims, &live));
 
-    const wrong_grammar = std.fmt.bytesToHex([_]u8{0x55} ** 32, .lower);
+    const wrong_grammar = std.fmt.bytesToHex(@as([32]u8, @splat(0x55)), .lower);
     claims.core_grammar_sha256 = &wrong_grammar;
     try std.testing.expect(!Server.attestationClaimsMatchContract(claims, &live));
 }
@@ -3808,21 +3801,21 @@ test "bytecodeMatchesClaim binds attestation to the running bytecode (fail-close
     // describes what is loaded, so attestation is disabled.
     try std.testing.expect(!Server.bytecodeMatchesClaim("other-bytecode", &hex));
     // An unpinned (all-zero) claim cannot bind a running artifact: fail closed.
-    try std.testing.expect(!Server.bytecodeMatchesClaim(bytecode, &([_]u8{'0'} ** 64)));
+    try std.testing.expect(!Server.bytecodeMatchesClaim(bytecode, &@as([64:0]u8, @splat('0'))));
     // A malformed (non-64-char) claim is rejected.
     try std.testing.expect(!Server.bytecodeMatchesClaim(bytecode, "abc"));
 }
 
 fn runtimePolicyClaimsForTest(runtime_policy_sha256: []const u8) attest_envelope.Claims {
     return .{
-        .contract_sha256 = "0" ** 64,
-        .bytecode_sha256 = "0" ** 64,
-        .policy_sha256 = "0" ** 64,
-        .capability_hash = "0" ** 64,
+        .contract_sha256 = &@as([64:0]u8, @splat('0')),
+        .bytecode_sha256 = &@as([64:0]u8, @splat('0')),
+        .policy_sha256 = &@as([64:0]u8, @splat('0')),
+        .capability_hash = &@as([64:0]u8, @splat('0')),
         .runtime_policy_sha256 = runtime_policy_sha256,
         .core_profile_id = "zts-model-1",
-        .core_grammar_sha256 = "1" ** 64,
-        .semantics_sha256 = "2" ** 64,
+        .core_grammar_sha256 = &@as([64:0]u8, @splat('1')),
+        .semantics_sha256 = &@as([64:0]u8, @splat('2')),
         .compiler_version = "test",
         .signed_at_unix = 0,
         .property_summary = "",
@@ -3897,11 +3890,7 @@ fn stampedContractJsonForTest(allocator: std.mem.Allocator, properties: []const 
     const identity = engine.sourceIdentityForPath("handler.ts");
     const grammar = std.fmt.bytesToHex(identity.core_grammar_hash, .lower);
     const semantics = std.fmt.bytesToHex(identity.semantics_hash, .lower);
-    return std.fmt.allocPrint(
-        allocator,
-        "{{\"version\":18,\"sourceIdentity\":{{\"coreProfileId\":\"{s}\",\"coreGrammarHash\":\"{s}\",\"semanticsHash\":\"{s}\"}}{s}}}",
-        .{ identity.core_profile.id(), grammar, semantics, properties },
-    );
+    return allocator.print("{{\"version\":18,\"sourceIdentity\":{{\"coreProfileId\":\"{s}\",\"coreGrammarHash\":\"{s}\",\"semanticsHash\":\"{s}\"}}{s}}}", .{ identity.core_profile.id(), grammar, semantics, properties });
 }
 
 test "a live swap drops the promotion the replaced artifact earned" {
@@ -3926,7 +3915,7 @@ test "a live swap drops the promotion the replaced artifact earned" {
         .outcome = .{ .accepted = .{ .grade = .translation_validated, .development_only = false } },
         .provenance = .absent,
         .work_spent = 1,
-    }, [_]u8{0} ** 32);
+    }, @as([32]u8, @splat(0)));
     try std.testing.expect(server.proof_checked != null);
 
     // The certificate described the artifact that is being replaced, so the
@@ -3963,7 +3952,7 @@ test "promotion refuses a policy rejection" {
         } },
         .provenance = .absent,
         .work_spent = 1,
-    }, [_]u8{0} ** 32)) == null);
+    }, @as([32]u8, @splat(0)))) == null);
 }
 
 test "self-extract runtime policy binding rejects a widened policy" {
@@ -3977,7 +3966,7 @@ test "self-extract runtime policy binding rejects a widened policy" {
     std.crypto.hash.sha2.Sha256.hash(original_policy_section, &original_digest, .{});
     const original_hex = std.fmt.bytesToHex(original_digest, .lower);
 
-    const key_pair = try attest_envelope.keyPairFromSeed([_]u8{0x42} ** 32);
+    const key_pair = try attest_envelope.keyPairFromSeed(@as([32]u8, @splat(0x42)));
     var receipt = try attest_envelope.sign(
         allocator,
         runtimePolicyClaimsForTest(&original_hex),
@@ -4012,7 +4001,7 @@ test "self-extract runtime policy binding rejects an unpinned receipt" {
     const policy = engine.RuntimePolicy{
         .egress = .{ .enabled = true, .values = &[_][]const u8{"api.allowed.example"} },
     };
-    const key_pair = try attest_envelope.keyPairFromSeed([_]u8{0x24} ** 32);
+    const key_pair = try attest_envelope.keyPairFromSeed(@as([32]u8, @splat(0x24)));
     var receipt = try attest_envelope.sign(
         allocator,
         runtimePolicyClaimsForTest(attest_envelope.unpinned_runtime_policy_sha256),
@@ -4038,10 +4027,10 @@ test "self-extract runtime policy binding rejects an unpinned receipt" {
 
 test "attested appended payload requires a parsed runtime policy hash" {
     const allocator = std.testing.allocator;
-    const key_pair = try attest_envelope.keyPairFromSeed([_]u8{0x18} ** 32);
+    const key_pair = try attest_envelope.keyPairFromSeed(@as([32]u8, @splat(0x18)));
     var receipt = try attest_envelope.sign(
         allocator,
-        runtimePolicyClaimsForTest("a" ** 64),
+        runtimePolicyClaimsForTest(&@as([64:0]u8, @splat('a'))),
         key_pair,
     );
     defer receipt.deinit(allocator);
@@ -4202,8 +4191,8 @@ fn sourceContractForTest(allocator: std.mem.Allocator, route: []const u8, key: [
 
 test "source replacement keeps failed state and retires successful generations together" {
     const allocator = std.testing.allocator;
-    var source_heap: std.heap.DebugAllocator(.{}) = .init;
-    defer std.debug.assert(source_heap.deinit() == .ok);
+    var source_heap: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
+    defer std.debug.assert(source_heap.deinit() == 0);
     const source_allocator = source_heap.allocator();
     const old_code = "function handler(req) { return Response.text('old'); }";
     var tmp = std.testing.tmpDir(.{});
@@ -4231,14 +4220,14 @@ test "source replacement keeps failed state and retires successful generations t
         .provenance = .absent,
         .work_spent = 1,
         .properties = accepted,
-    }, [_]u8{0} ** 32);
+    }, @as([32]u8, @splat(0)));
     const settings = server.servingSettings(&server.proof_checked.?);
     try std.testing.expect(settings.handler_proof.result_safe);
     try std.testing.expect(settings.cache_properties != null);
     _ = server.applyPoolingPolicy();
     server.proof_cache = proof_adapter.ProofCache.init(allocator, settings.cache_properties.?, .{});
     server.attestation_headers = try attest_header_strings.build(allocator, settings.cache_properties.?, "old-signature");
-    server.well_known_doc = .{ .body = try allocator.dupe(u8, "old-document"), .etag_hex = [_]u8{'0'} ** 64 };
+    server.well_known_doc = .{ .body = try allocator.dupe(u8, "old-document"), .etag_hex = @splat('0') };
     var old_lease = try pool.acquireWorkerRuntime();
     defer old_lease.deinit();
     const old_policy = old_lease.runtime.policy_generation.?;

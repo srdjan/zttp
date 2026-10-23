@@ -620,7 +620,7 @@ pub const TypeChecker = struct {
                     if (in_closure and binding.kind == .upvalue) self.killAllNarrowings();
                 }
             }
-            // The target can hold an assignment of its own: `a[(x = 1)] = 2`.
+            // The target can hold an assignment of its own: `a[x = 1] = 2`.
             self.killNarrowingsAssignedIn(asgn.target, depth + 1, in_closure);
             self.killNarrowingsAssignedIn(asgn.value, depth + 1, in_closure);
             return;
@@ -1414,14 +1414,14 @@ pub const TypeChecker = struct {
         if (callee_tag != .member_access) return null;
 
         const member = self.ir_view.getMember(call.callee) orelse return null;
-        if (member.property != @intFromEnum(object.Atom.stringify)) return null;
+        if (member.property != @backingInt(object.Atom.stringify)) return null;
 
         const obj_tag = self.ir_view.getTag(member.object) orelse return null;
         if (obj_tag != .identifier) return null;
 
         const binding = self.ir_view.getBinding(member.object) orelse return null;
         if (binding.kind != .global and binding.kind != .undeclared_global) return null;
-        if (binding.name_atom != @intFromEnum(object.Atom.JSON)) return null;
+        if (binding.name_atom != @backingInt(object.Atom.JSON)) return null;
 
         return self.ir_view.getListIndex(call.args_start, 0);
     }
@@ -3829,7 +3829,7 @@ pub const TypeChecker = struct {
         fallback: []const u8,
         help: ?[]const u8,
     ) void {
-        const msg = std.fmt.allocPrint(self.allocator, fmt, args) catch fallback;
+        const msg = self.allocator.print(fmt, args) catch fallback;
         self.addDiagnostic(.{
             .severity = .err,
             .kind = kind,
@@ -3940,11 +3940,7 @@ pub const TypeChecker = struct {
 
         var buf: [1024]u8 = undefined;
         const bad_str = self.env.pool.formatType(bad, &buf);
-        const msg = std.fmt.allocPrint(
-            self.allocator,
-            "{s} cannot encode this payload: {s} is not a JSON value",
-            .{ site, bad_str },
-        ) catch "this payload is not JSON-encodable";
+        const msg = self.allocator.print("{s} cannot encode this payload: {s} is not a JSON value", .{ site, bad_str }) catch "this payload is not JSON-encodable";
         self.addDiagnostic(.{
             .severity = .err,
             .kind = .unencodable_json_payload,
@@ -4206,11 +4202,7 @@ pub const TypeChecker = struct {
             self.env.nameOfNonContractive(declared) orelse "";
         if (name.len == 0) return;
 
-        const msg = std.fmt.allocPrint(
-            self.allocator,
-            "recursive type alias '{s}' has a cycle no data constructor guards",
-            .{name},
-        ) catch {
+        const msg = self.allocator.print("recursive type alias '{s}' has a cycle no data constructor guards", .{name}) catch {
             self.addDiagnostic(.{
                 .severity = .err,
                 .kind = .non_contractive_alias,
@@ -4269,11 +4261,7 @@ pub const TypeChecker = struct {
     }
 
     fn addReadonlyMutation(self: *TypeChecker, node: NodeIndex, method: []const u8) void {
-        const msg = std.fmt.allocPrint(
-            self.allocator,
-            "`{s}` writes through a readonly array",
-            .{method},
-        ) catch {
+        const msg = self.allocator.print("`{s}` writes through a readonly array", .{method}) catch {
             self.addDiagnostic(.{
                 .severity = .err,
                 .kind = .readonly_mutation,
@@ -4316,11 +4304,7 @@ pub const TypeChecker = struct {
     }
 
     fn addNominalConstructorCall(self: *TypeChecker, node: NodeIndex, name: []const u8) void {
-        const msg = std.fmt.allocPrint(
-            self.allocator,
-            "`{s}` is a nominal type, not a constructor",
-            .{name},
-        ) catch {
+        const msg = self.allocator.print("`{s}` is a nominal type, not a constructor", .{name}) catch {
             self.addDiagnostic(.{
                 .severity = .err,
                 .kind = .nominal_constructor_call,
@@ -4367,7 +4351,7 @@ pub const TypeChecker = struct {
         const expected_str = self.env.pool.formatType(expected, buf[0..128]);
         const got_str = self.env.pool.formatType(got, buf[128..256]);
 
-        const msg = std.fmt.allocPrint(self.allocator, "type '{s}' is not assignable to type '{s}'", .{ got_str, expected_str }) catch {
+        const msg = self.allocator.print("type '{s}' is not assignable to type '{s}'", .{ got_str, expected_str }) catch {
             self.addDiagnostic(.{
                 .severity = .err,
                 .kind = .type_mismatch,
@@ -4393,11 +4377,7 @@ pub const TypeChecker = struct {
     /// The detail rides in `.message` because `deinit` only frees `.message`
     /// when `allocated`; `.help` is never freed, so an owned string there leaks.
     fn addArgCountMismatch(self: *TypeChecker, node: NodeIndex, expected: usize, got: usize) void {
-        const msg = std.fmt.allocPrint(
-            self.allocator,
-            "wrong number of arguments: expected {d}, got {d}",
-            .{ expected, got },
-        ) catch "wrong number of arguments";
+        const msg = self.allocator.print("wrong number of arguments: expected {d}, got {d}", .{ expected, got }) catch "wrong number of arguments";
         self.addDiagnostic(.{
             .severity = .err,
             .kind = .arg_count_mismatch,
@@ -4420,11 +4400,7 @@ pub const TypeChecker = struct {
         var buf: [2048]u8 = undefined;
         const expected_str = self.env.pool.formatType(expected, buf[0..1024]);
         const got_str = self.env.pool.formatType(got, buf[1024..2048]);
-        const msg = std.fmt.allocPrint(
-            self.allocator,
-            "argument type does not match parameter type: expected {s}, got {s}",
-            .{ expected_str, got_str },
-        ) catch "argument type does not match parameter type";
+        const msg = self.allocator.print("argument type does not match parameter type: expected {s}, got {s}", .{ expected_str, got_str }) catch "argument type does not match parameter type";
         self.addDiagnostic(.{
             .severity = .err,
             .kind = .arg_type_mismatch,
@@ -4437,12 +4413,12 @@ pub const TypeChecker = struct {
 
     fn resolveAtomName(self: *const TypeChecker, atom_idx: u16) ?[]const u8 {
         if (self.atoms) |table| {
-            const atom: object.Atom = @enumFromInt(atom_idx);
+            const atom: object.Atom = @fromBackingInt(@intCast(atom_idx));
             if (atom.toPredefinedName()) |name| return name;
             return table.getName(atom);
         }
         if (self.ir_view.getString(atom_idx)) |name| return name;
-        const atom: object.Atom = @enumFromInt(atom_idx);
+        const atom: object.Atom = @fromBackingInt(@intCast(atom_idx));
         return atom.toPredefinedName();
     }
 
@@ -4468,7 +4444,7 @@ pub const TypeChecker = struct {
 /// code. Folding the kind in separates them.
 fn bindingKey(binding: ir.BindingRef) u64 {
     return (@as(u64, binding.scope_id) << 32) |
-        (@as(u64, @intFromEnum(binding.kind)) << 16) |
+        (@as(u64, @backingInt(binding.kind)) << 16) |
         @as(u64, binding.slot);
 }
 
@@ -6137,14 +6113,14 @@ test "TypeChecker import policy compares named kind and slot without scope or lo
                 try std.testing.expect(binding.kind != .local);
                 var import_binding = binding;
                 import_binding.scope_id = 9000;
-                import_binding.name_atom = @intCast(@intFromEnum(try atoms.intern("other")));
+                import_binding.name_atom = @intCast(@backingInt(try atoms.intern("other")));
                 if (!same_kind) import_binding.kind = .local;
                 const loc = view.getLoc(call_node).?;
                 // Append a declaration independently of the source spelling so
                 // the exact import-kind and binding-kind policy is exercised.
                 const spec = try parser.nodes.add(.{ .tag = .import_specifier, .loc = loc, .data = .{ .import_spec = .{
                     .kind = import_kind,
-                    .imported_atom = @intCast(@intFromEnum(try atoms.intern("sha256"))),
+                    .imported_atom = @intCast(@backingInt(try atoms.intern("sha256"))),
                     .local_binding = import_binding,
                 } } });
                 const specs = try parser.nodes.addIndexList(&.{spec});
@@ -6383,7 +6359,7 @@ test "TypeChecker: a readonly array refuses a mutating method" {
     // made the modifier decorative wherever the value never crossed a call
     // boundary.
     for ([_][]const u8{ "push", "pop", "shift", "unshift", "splice" }) |method| {
-        const source = try std.fmt.allocPrint(std.testing.allocator,
+        const source = try std.testing.allocator.print(
             \\function handler(req: Request): Response {{
             \\  const ro: readonly string[] = ["x"];
             \\  ro.{s}();
@@ -6400,7 +6376,7 @@ test "TypeChecker: a mutable array still takes every method" {
     // those calls alone, or the rule is refusing arrays rather than refusing
     // mutation.
     for ([_][]const u8{ "push", "pop", "shift", "unshift", "splice" }) |method| {
-        const source = try std.fmt.allocPrint(std.testing.allocator,
+        const source = try std.testing.allocator.print(
             \\function handler(req: Request): Response {{
             \\  const xs: string[] = ["x"];
             \\  xs.{s}();

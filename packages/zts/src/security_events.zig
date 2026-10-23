@@ -307,7 +307,7 @@ test "Stream drops oldest on overflow and tracks drop count" {
 
 test "SecurityEvent.init truncates over-long strings" {
     const long_module = "zttp:this-is-a-very-long-specifier-name-that-exceeds-the-inline-limit";
-    const long_detail = "a" ** 256;
+    const long_detail = &@as([256:0]u8, @splat('a'));
     const event = SecurityEvent.init(.policy_denied_sql, long_module, long_detail);
     try std.testing.expectEqual(max_module_len, event.moduleSlice().len);
     try std.testing.expectEqual(max_detail_len, event.detailSlice().len);
@@ -360,7 +360,7 @@ test "writeJsonLine emits spec-section-12 shape for policy_denied" {
 }
 
 test "initPolicyDenied truncates over-long fields" {
-    const long = "a" ** 256;
+    const long = &@as([256:0]u8, @splat('a'));
     const event = SecurityEvent.initPolicyDenied("zttp", long, long, long, long, 23);
     try std.testing.expectEqual(max_action_len, event.actionSlice().len);
     try std.testing.expectEqual(max_resource_kind_len, event.resourceKindSlice().len);

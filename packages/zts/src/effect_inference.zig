@@ -38,7 +38,7 @@ fn reachesClockOrRandom(caps: CapabilitySet) bool {
 }
 
 pub const EffectRow = struct {
-    capabilities: CapabilitySet = CapabilitySet.initEmpty(),
+    capabilities: CapabilitySet = CapabilitySet.empty,
     deterministic: bool = true,
     pure: bool = true,
     recursive: bool = false,
@@ -196,7 +196,7 @@ pub const FunctionEffect = struct {
     /// transitive union; `direct_caps` is the subset this function reaches
     /// itself, used to attribute a budget violation (ZTS607) to the helper
     /// that actually performs the call rather than every caller above it.
-    direct_caps: CapabilitySet = CapabilitySet.initEmpty(),
+    direct_caps: CapabilitySet = CapabilitySet.empty,
     /// True when the function declaration sits under an `export`. The
     /// opt-in docs mode asks exported helpers to carry explicit capsules.
     exported: bool = false,
@@ -1514,7 +1514,7 @@ pub const Analyzer = struct {
 
         if (names.items.len == 0) return true; // no capsule: the empty row
 
-        var declared = CapabilitySet.initEmpty();
+        var declared = CapabilitySet.empty;
         for (names.items) |name| {
             const cap = std.meta.stringToEnum(Capability, name) orelse return false;
             declared.insert(cap);
@@ -1674,7 +1674,7 @@ pub const Analyzer = struct {
     ) void {
         _ = self;
         const incomplete = EffectRow{
-            .capabilities = CapabilitySet.initFull(),
+            .capabilities = CapabilitySet.full,
             .pure = false,
             .deterministic = false,
             .writes = true,
@@ -2212,7 +2212,7 @@ pub const Analyzer = struct {
                 return;
             }
         }
-        row.capabilities = CapabilitySet.initFull();
+        row.capabilities = CapabilitySet.full;
     }
 
     fn importEffect(self: *const Analyzer, module: []const u8, name: []const u8) module_binding.EffectClass {
@@ -2366,7 +2366,7 @@ pub const Analyzer = struct {
     }
 
     fn resolveAtomName(self: *const Analyzer, atom_value: u32) ?[]const u8 {
-        const atom: object.Atom = @enumFromInt(atom_value);
+        const atom: object.Atom = @fromBackingInt(@intCast(atom_value));
         if (atom.isPredefined()) return atom.toPredefinedName();
         if (self.atoms) |table| return table.getName(atom);
         return null;
@@ -2749,7 +2749,7 @@ const ContractProjectionBuilder = struct {
     }
 
     fn resolveAtomName(self: *const ContractProjectionBuilder, atom_value: u32) ?[]const u8 {
-        const atom: object.Atom = @enumFromInt(atom_value);
+        const atom: object.Atom = @fromBackingInt(@intCast(atom_value));
         if (atom.isPredefined()) return atom.toPredefinedName();
         if (self.atoms) |table| return table.getName(atom);
         return null;
@@ -3002,7 +3002,7 @@ test "supplied sibling outcomes preserve legacy charges and add completed effect
     try testing.expect(direct.cache_reads);
     try testing.expect(direct.has_egress);
     try testing.expect(!direct.lower_bound);
-    try testing.expectEqual(CapabilitySet.initFull().count(), direct.capabilities.count());
+    try testing.expectEqual(CapabilitySet.full.count(), direct.capabilities.count());
     try testing.expect(!direct.pure);
     try testing.expect(!direct.deterministic);
 
@@ -3026,14 +3026,14 @@ test "supplied sibling outcomes preserve legacy charges and add completed effect
     try testing.expect(missing.writes);
     try testing.expect(missing.has_egress);
     try testing.expect(missing.lower_bound);
-    try testing.expectEqual(CapabilitySet.initFull().count(), missing.capabilities.count());
+    try testing.expectEqual(CapabilitySet.full.count(), missing.capabilities.count());
 
     const pure = analyzer.lookup("pureSibling") orelse return error.FunctionNotFound;
     try testing.expect(pure.readOnly());
     try testing.expect(!pure.lower_bound);
     try testing.expect(!pure.pure);
     try testing.expect(!pure.deterministic);
-    try testing.expectEqual(CapabilitySet.initFull().count(), pure.capabilities.count());
+    try testing.expectEqual(CapabilitySet.full.count(), pure.capabilities.count());
 }
 
 test "incomplete sibling rows include possible writes and egress" {
@@ -3071,7 +3071,7 @@ test "incomplete sibling rows include possible writes and egress" {
         try testing.expect(row.recursive);
         try testing.expect(!row.pure);
         try testing.expect(!row.deterministic);
-        try testing.expectEqual(CapabilitySet.initFull().count(), row.capabilities.count());
+        try testing.expectEqual(CapabilitySet.full.count(), row.capabilities.count());
     }
 }
 
@@ -4234,7 +4234,7 @@ test "a module neither registry resolves fails closed with every capability" {
 
     const use = analyzer.lookup("use") orelse return error.FunctionNotFound;
     try testing.expectEqual(
-        CapabilitySet.initFull().count(),
+        CapabilitySet.full.count(),
         use.capabilities.count(),
     );
 }

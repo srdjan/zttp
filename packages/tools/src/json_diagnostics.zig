@@ -1233,8 +1233,8 @@ test "every diagnostic code names exactly one diagnostic" {
     inline for (mappers) |mapper| {
         const Kind = mapper[0];
         const codeOf = mapper[1];
-        inline for (@typeInfo(Kind).@"enum".fields) |field| {
-            const kind: Kind = @enumFromInt(field.value);
+        inline for (@typeInfo(Kind).@"enum".field_names) |field| {
+            const kind: Kind = @fromBackingInt(@intCast(@backingInt(@field(Kind, field))));
             const code = codeOf(kind);
             if (seen.get(code)) |owner| {
                 var allowed = false;
@@ -1243,17 +1243,17 @@ test "every diagnostic code names exactly one diagnostic" {
                     // Both sides of the pair must match, so a listed code does
                     // not become a hole any future kind can slip through.
                     if (std.mem.eql(u8, shared.kinds[0], owner) and
-                        std.mem.eql(u8, shared.kinds[1], field.name))
+                        std.mem.eql(u8, shared.kinds[1], field))
                     {
                         allowed = true;
                     }
                 }
                 if (!allowed) {
-                    std.debug.print("{s} names both {s} and {s}\n", .{ code, owner, field.name });
+                    std.debug.print("{s} names both {s} and {s}\n", .{ code, owner, field });
                     return error.DuplicateDiagnosticCode;
                 }
             } else {
-                try seen.put(std.testing.allocator, code, field.name);
+                try seen.put(std.testing.allocator, code, field);
             }
         }
     }

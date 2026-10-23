@@ -65,12 +65,12 @@ pub const AssuranceGrade = enum(u8) {
     /// The weaker of two grades. This is the only way a grade is combined.
     pub fn weakest(a: AssuranceGrade, b: AssuranceGrade) AssuranceGrade {
         @setRuntimeSafety(true);
-        return if (@intFromEnum(a) >= @intFromEnum(b)) a else b;
+        return if (@backingInt(a) >= @backingInt(b)) a else b;
     }
 
     pub fn atLeastAsStrongAs(self: AssuranceGrade, floor: AssuranceGrade) bool {
         @setRuntimeSafety(true);
-        return @intFromEnum(self) <= @intFromEnum(floor);
+        return @backingInt(self) <= @backingInt(floor);
     }
 
     /// Wire encoding is one-based so that zero can mean "no grade stated".
@@ -88,7 +88,7 @@ pub const AssuranceGrade = enum(u8) {
 
     pub fn toWire(self: AssuranceGrade) u8 {
         @setRuntimeSafety(true);
-        return @as(u8, @intFromEnum(self)) + 1;
+        return @as(u8, @backingInt(self)) + 1;
     }
 
     pub fn name(self: AssuranceGrade) []const u8 {
@@ -280,17 +280,17 @@ pub const Rejection = struct {
 };
 
 pub const PropertyVerdicts = struct {
-    const count = @typeInfo(proof_system.Property).@"enum".fields.len;
+    const count = @typeInfo(proof_system.Property).@"enum".field_names.len;
     pub const Entry = union(enum) {
         none,
         graded: AssuranceGrade,
         accepted: AssuranceGrade,
     };
-    entries: [count]Entry = [_]Entry{.none} ** count,
+    entries: [count]Entry = @as([count]Entry, @splat(.none)),
 
     fn slot(property: proof_system.Property) usize {
         @setRuntimeSafety(true);
-        return @intFromEnum(property) - 1;
+        return @backingInt(property) - 1;
     }
 
     pub fn gradeFor(self: PropertyVerdicts, property: proof_system.Property) ?AssuranceGrade {
@@ -428,8 +428,8 @@ test "weakest edge dominates" {
     try std.testing.expectEqual(AssuranceGrade.proved, AssuranceGrade.weakest(.proved, .proved));
     try std.testing.expect(AssuranceGrade.proved.atLeastAsStrongAs(.tested));
     try std.testing.expect(!AssuranceGrade.tested.atLeastAsStrongAs(.proved));
-    inline for (@typeInfo(AssuranceGrade).@"enum".fields) |field| {
-        const grade: AssuranceGrade = @enumFromInt(field.value);
+    inline for (@typeInfo(AssuranceGrade).@"enum".field_names) |field| {
+        const grade: AssuranceGrade = @fromBackingInt(@intCast(@backingInt(@field(AssuranceGrade, field))));
         try std.testing.expect(grade.atLeastAsStrongAs(grade));
     }
 }
@@ -464,12 +464,12 @@ test "guard readiness requires exact coverage" {
 
 test "reason codes are unique and stable" {
     @setEvalBranchQuota(20000);
-    const fields = @typeInfo(ReasonCode).@"enum".fields;
+    const fields = @typeInfo(ReasonCode).@"enum".field_names;
     inline for (fields, 0..) |a, i| {
         inline for (fields, 0..) |b, j| {
-            if (i != j) try std.testing.expect(a.value != b.value);
+            if (i != j) try std.testing.expect(@backingInt(@field(ReasonCode, a)) != @backingInt(@field(ReasonCode, b)));
         }
-        try std.testing.expect(a.value >= 1000);
+        try std.testing.expect(@backingInt(@field(ReasonCode, a)) >= 1000);
     }
 }
 
@@ -494,8 +494,8 @@ test "retired stage and reason ordinals remain unused" {
 test "assurance grade wire encoding is one-based and closed" {
     try std.testing.expectEqual(@as(?AssuranceGrade, null), AssuranceGrade.fromWire(0));
     try std.testing.expectEqual(@as(?AssuranceGrade, null), AssuranceGrade.fromWire(6));
-    inline for (@typeInfo(AssuranceGrade).@"enum".fields) |f| {
-        const g: AssuranceGrade = @enumFromInt(f.value);
+    inline for (@typeInfo(AssuranceGrade).@"enum".field_names) |f| {
+        const g: AssuranceGrade = @fromBackingInt(@intCast(@backingInt(@field(AssuranceGrade, f))));
         try std.testing.expectEqual(@as(?AssuranceGrade, g), AssuranceGrade.fromWire(g.toWire()));
     }
 }
@@ -513,7 +513,7 @@ test "every stage and state has its exact stable name" {
         .{ Stage.policy, "policy" },
         .{ Stage.guard_coverage, "guard_coverage" },
     };
-    try std.testing.expectEqual(@typeInfo(Stage).@"enum".fields.len, stages.len);
+    try std.testing.expectEqual(@typeInfo(Stage).@"enum".field_names.len, stages.len);
     inline for (stages) |item| try std.testing.expectEqualStrings(item[1], item[0].name());
 
     const semantic_states = .{
@@ -522,7 +522,7 @@ test "every stage and state has its exact stable name" {
         .{ SemanticState.proof_checked, "proof_checked" },
         .{ SemanticState.policy_accepted, "policy_accepted" },
     };
-    try std.testing.expectEqual(@typeInfo(SemanticState).@"enum".fields.len, semantic_states.len);
+    try std.testing.expectEqual(@typeInfo(SemanticState).@"enum".field_names.len, semantic_states.len);
     inline for (semantic_states) |item| try std.testing.expectEqualStrings(item[1], item[0].name());
 
     const provenance_states = .{
@@ -531,7 +531,7 @@ test "every stage and state has its exact stable name" {
         .{ ProvenanceState.signature_verified, "signature_verified" },
         .{ ProvenanceState.trusted_origin, "trusted_origin" },
     };
-    try std.testing.expectEqual(@typeInfo(ProvenanceState).@"enum".fields.len, provenance_states.len);
+    try std.testing.expectEqual(@typeInfo(ProvenanceState).@"enum".field_names.len, provenance_states.len);
     inline for (provenance_states) |item| try std.testing.expectEqualStrings(item[1], item[0].name());
 
     const assurance_grades = .{
@@ -541,6 +541,6 @@ test "every stage and state has its exact stable name" {
         .{ AssuranceGrade.tested, "tested" },
         .{ AssuranceGrade.trusted, "trusted" },
     };
-    try std.testing.expectEqual(@typeInfo(AssuranceGrade).@"enum".fields.len, assurance_grades.len);
+    try std.testing.expectEqual(@typeInfo(AssuranceGrade).@"enum".field_names.len, assurance_grades.len);
     inline for (assurance_grades) |item| try std.testing.expectEqualStrings(item[1], item[0].name());
 }

@@ -48,7 +48,7 @@ pub const Capsule = struct {
     /// Empty when the helper carries no `Effects<...>` annotation.
     effect_declared: std.ArrayList([]const u8) = .empty,
     /// The capability set effect inference computed for this function.
-    inferred_caps: spec_discharge.CapabilitySet = spec_discharge.CapabilitySet.initEmpty(),
+    inferred_caps: spec_discharge.CapabilitySet = spec_discharge.CapabilitySet.empty,
     /// ZTS503 / ZTS504 / ZTS505 for this function's `Effects<...>` ceiling.
     effect_diagnostics: std.ArrayList(SpecDiagnostic) = .empty,
     /// True when the helper is exported. The opt-in docs mode asks exported

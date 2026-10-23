@@ -138,7 +138,7 @@ fn single(ctx: Context, node: ir.NodeIndex) ?counterexample.WitnessConstraint {
         },
         .member_access => {
             const member = view.getMember(node) orelse return null;
-            if (member.property != @intFromEnum(engine.object.Atom.ok)) return null;
+            if (member.property != @backingInt(engine.object.Atom.ok)) return null;
             const origin = ctx.ioOrigin(ctx.userdata, member.object) orelse return null;
             if (origin.returns != .result and !origin.ok_record) return null;
             return .{ .result_ok = origin };
@@ -186,7 +186,7 @@ fn statusComparison(ctx: Context, binary: ir.Node.BinaryExpr) ?StatusPredicate {
         const shape = status_check.shape(ctx.ir_view, binary, member_left) orelse continue;
         if (ctx.ir_view.getTag(shape.member) != .member_access) continue;
         const member = ctx.ir_view.getMember(shape.member) orelse continue;
-        if (member.property != @intFromEnum(engine.object.Atom.status)) continue;
+        if (member.property != @backingInt(engine.object.Atom.status)) continue;
         const origin = ctx.ioOrigin(ctx.userdata, member.object) orelse continue;
         if (!origin.ok_record) continue;
         const classified = status_check.classify(shape.comparison);
@@ -331,7 +331,7 @@ const Harness = struct {
     }
 
     fn name(self: *Harness, atom: u16) ?[]const u8 {
-        const value: engine.object.Atom = @enumFromInt(atom);
+        const value: engine.object.Atom = @fromBackingInt(@intCast(atom));
         return value.toPredefinedName() orelse self.atoms.getName(value);
     }
 
@@ -347,8 +347,8 @@ const Harness = struct {
         const member = self.view.getMember(node) orelse return null;
         if (!self.identifier(member.object, "req")) return null;
         const property = self.name(member.property) orelse return null;
-        inline for (std.meta.fields(RequestField)) |entry| {
-            if (std.mem.eql(u8, property, entry.name)) return @enumFromInt(entry.value);
+        inline for (@typeInfo(RequestField).@"enum".field_names) |entry| {
+            if (std.mem.eql(u8, property, entry)) return @fromBackingInt(@intCast(@backingInt(@field(RequestField, entry))));
         }
         return null;
     }
@@ -447,7 +447,7 @@ test "flow evidence declines predicates with unsupported or transformed origins"
         "opaque() || req.url === '/'",
     };
     for (conditions) |predicate| {
-        const source = try std.fmt.allocPrint(std.testing.allocator, "function handler(req) {{ if ({s}) {{ return 1; }} return 0; }}", .{predicate});
+        const source = try std.testing.allocator.print("function handler(req) {{ if ({s}) {{ return 1; }} return 0; }}", .{predicate});
         defer std.testing.allocator.free(source);
         var harness: Harness = undefined;
         try harness.init(source);
@@ -533,7 +533,7 @@ test "flow evidence distinguishes request path from URL and retains exact status
         .{ .predicate = "remote.status < 100", .holds = false },
     };
     for (cases) |case| {
-        const source = try std.fmt.allocPrint(allocator, "function handler(req) {{ if ({s}) {{ return 1; }} return 0; }}", .{case.predicate});
+        const source = try allocator.print("function handler(req) {{ if ({s}) {{ return 1; }} return 0; }}", .{case.predicate});
         defer allocator.free(source);
         var harness: Harness = undefined;
         try harness.init(source);

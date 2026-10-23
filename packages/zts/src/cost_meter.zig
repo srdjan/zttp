@@ -57,7 +57,7 @@ pub const Meter = struct {
     counts: [class_count]u32 = @splat(0),
 
     pub inline fn bump(self: *Meter, class: ModuleClass) void {
-        self.counts[@intFromEnum(class)] +|= 1;
+        self.counts[@backingInt(class)] +|= 1;
     }
 
     pub fn reset(self: *Meter) void {
@@ -65,7 +65,7 @@ pub const Meter = struct {
     }
 
     pub inline fn count(self: *const Meter, class: ModuleClass) u32 {
-        return self.counts[@intFromEnum(class)];
+        return self.counts[@backingInt(class)];
     }
 
     pub fn total(self: *const Meter) u32 {

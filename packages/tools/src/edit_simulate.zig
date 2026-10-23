@@ -539,7 +539,7 @@ fn consumeViolationKeyCount(
 }
 
 fn deleteTempFile(allocator: std.mem.Allocator, path: []const u8) void {
-    const path_z = allocator.dupeZ(u8, path) catch return;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return;
     defer allocator.free(path_z);
     _ = std.c.unlink(path_z);
 }
@@ -713,7 +713,7 @@ test "runWithArgs accepts redundant --json flag" {
     ;
     var uniquifier: u8 = undefined;
     const addr = @intFromPtr(&uniquifier);
-    const path = try std.fmt.allocPrint(allocator, "/tmp/zts-edit-sim-json-{x}.ts", .{addr});
+    const path = try allocator.print("/tmp/zts-edit-sim-json-{x}.ts", .{addr});
     defer allocator.free(path);
     try file_io.writeFile(allocator, path, handler);
     defer deleteTempFile(allocator, path);

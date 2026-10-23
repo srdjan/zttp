@@ -232,7 +232,7 @@ pub fn injectStoredProvidersIntoEnv(allocator: std.mem.Allocator) void {
         const file_value = store.get(p.name) orelse continue;
         if (readEnvVar(p.env_var) != null) continue;
 
-        const value_z = allocator.dupeZ(u8, file_value) catch continue;
+        const value_z = allocator.dupeSentinel(u8, file_value, 0) catch continue;
         defer allocator.free(value_z);
         _ = setenv(p.env_var, value_z.ptr, 1);
     }
@@ -418,7 +418,7 @@ fn writeProvidersFile(allocator: std.mem.Allocator, bytes: []const u8) !void {
 
     // Write-then-rename for atomicity: a crash mid-write leaves the old file
     // intact rather than a half-written credential.
-    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{file_path});
+    const tmp_path = try allocator.print("{s}.tmp", .{file_path});
     defer allocator.free(tmp_path);
 
     var tmp_file = try std.Io.Dir.createFileAbsolute(io, tmp_path, .{
@@ -439,9 +439,9 @@ fn writeProvidersFile(allocator: std.mem.Allocator, bytes: []const u8) !void {
         try tmp_file.setPermissions(io, std.Io.File.Permissions.fromMode(0o600));
     }
 
-    const tmp_z = try allocator.dupeZ(u8, tmp_path);
+    const tmp_z = try allocator.dupeSentinel(u8, tmp_path, 0);
     defer allocator.free(tmp_z);
-    const file_z = try allocator.dupeZ(u8, file_path);
+    const file_z = try allocator.dupeSentinel(u8, file_path, 0);
     defer allocator.free(file_z);
     if (std.c.rename(tmp_z, file_z) != 0) {
         _ = std.c.unlink(tmp_z);
@@ -462,14 +462,14 @@ fn readEnvVar(name_z: [:0]const u8) ?[]const u8 {
 }
 
 fn stdinIsTty() bool {
-    return switch (builtin.os.tag) {
+    return switch (builtin.target.os.tag) {
         .windows => false,
         else => std.posix.system.isatty(std.posix.STDIN_FILENO) != 0,
     };
 }
 
 fn readSecretLine(allocator: std.mem.Allocator) ![]u8 {
-    if (builtin.os.tag == .windows) return error.PromptUnsupported;
+    if (builtin.target.os.tag == .windows) return error.PromptUnsupported;
 
     const original = try std.posix.tcgetattr(std.posix.STDIN_FILENO);
     var hidden = original;
@@ -602,7 +602,7 @@ test "Store: save then load roundtrip via tmp HOME" {
 }
 
 test "writeProvidersFile re-tightens a pre-existing loose 0644 file to 0600" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
 
     const allocator = std.testing.allocator;
 

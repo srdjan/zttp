@@ -88,17 +88,17 @@ pub const supported_goal_list = blk: {
 
 pub const bool_property_count: usize = blk: {
     var count: usize = 0;
-    for (@typeInfo(ui_payload.PropertiesSnapshot).@"struct".fields) |field| {
-        if (field.type == bool) count += 1;
+    for (@typeInfo(ui_payload.PropertiesSnapshot).@"struct".field_names) |field| {
+        if (@FieldType(ui_payload.PropertiesSnapshot, field) == bool) count += 1;
     }
     break :blk count;
 };
 
 pub fn boolPropertyIndexOf(name: []const u8) ?usize {
     var current: usize = 0;
-    inline for (@typeInfo(ui_payload.PropertiesSnapshot).@"struct".fields) |field| {
-        if (field.type == bool) {
-            if (std.mem.eql(u8, field.name, name)) return current;
+    inline for (@typeInfo(ui_payload.PropertiesSnapshot).@"struct".field_names) |field| {
+        if (@FieldType(ui_payload.PropertiesSnapshot, field) == bool) {
+            if (std.mem.eql(u8, field, name)) return current;
             current += 1;
         }
     }

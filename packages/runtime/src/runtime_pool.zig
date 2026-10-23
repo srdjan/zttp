@@ -109,7 +109,7 @@ pub const HandlerPool = struct {
             self.released = true;
             self.response.deinit();
             self.pool.releaseForRequest(self.base_rt);
-            if (std.debug.runtime_safety) {
+            if (@import("builtin").mode.runtimeSafety()) {
                 self.response.body = &.{};
                 self.response.body_owner = null;
             }
@@ -410,7 +410,7 @@ pub const HandlerPool = struct {
     }
 
     fn nextRequestId(self: *Self) u64 {
-        return if (builtin.mode == .Debug) self.request_seq.fetchAdd(1, .acq_rel) + 1 else 0;
+        return if (builtin.mode == .debug) self.request_seq.fetchAdd(1, .acq_rel) + 1 else 0;
     }
 
     /// Acquire and pin a runtime to the current worker thread.
@@ -531,7 +531,7 @@ pub const HandlerPool = struct {
 
         // Parallel prewarm for multiple runtimes (production only)
         var contexts: [2]PrewarmCtx = undefined;
-        var threads: [2]?std.Thread = [_]?std.Thread{null} ** 2;
+        var threads: [2]?std.Thread = @as([2]?std.Thread, @splat(null));
 
         // Spawn workers
         for (0..prewarm_count) |i| {
@@ -707,7 +707,7 @@ pub const HandlerPool = struct {
         // forces recycle regardless of policy. The `comptime` guard lets
         // ReleaseFast drop both checks entirely.
         var audit_poisoned = false;
-        if (comptime std.debug.runtime_safety) {
+        if (comptime @import("builtin").mode.runtimeSafety()) {
             rt.assertPersistentStringsOutsideArena() catch {
                 _ = self.persistent_escape_failures.fetchAdd(1, .monotonic);
                 std.log.err("sandbox: persistent string escaped into request arena", .{});
@@ -1119,7 +1119,7 @@ test "reuse_unbounded runtime recycles once its dynamic atom count reaches the t
 
     var i: usize = 0;
     while (i < 3) : (i += 1) {
-        const name = try std.fmt.allocPrint(allocator, "dyn_atom_{d}", .{i});
+        const name = try allocator.print("dyn_atom_{d}", .{i});
         defer allocator.free(name);
         _ = try rt1.ctx.atoms.intern(name);
     }
@@ -1166,7 +1166,7 @@ test "loadHandlerCached embedded path fails cleanly on corrupted bytecode instea
 
     const marker: i32 = 0x11223344;
     var constants = [_]zq.JSValue{zq.JSValue.fromInt(marker)};
-    var code_buf = [_]u8{@intFromEnum(zq.Opcode.ret)};
+    var code_buf = [_]u8{@backingInt(zq.Opcode.ret)};
 
     const func = try allocator.create(zq.FunctionBytecode);
     defer allocator.destroy(func);
@@ -1508,7 +1508,7 @@ test "HandlerPool pooled teardown survives repeated pool lifecycles" {
                 .method = try test_allocator.dupe(u8, "POST"),
                 .url = try test_allocator.dupe(u8, "/"),
                 .headers = .empty,
-                .body = try std.fmt.allocPrint(test_allocator, "first-{d}", .{cycle}),
+                .body = try test_allocator.print("first-{d}", .{cycle}),
             };
             defer first_request.deinit(test_allocator);
 
@@ -1516,7 +1516,7 @@ test "HandlerPool pooled teardown survives repeated pool lifecycles" {
                 .method = try test_allocator.dupe(u8, "POST"),
                 .url = try test_allocator.dupe(u8, "/"),
                 .headers = .empty,
-                .body = try std.fmt.allocPrint(test_allocator, "second-{d}", .{cycle}),
+                .body = try test_allocator.print("second-{d}", .{cycle}),
             };
             defer second_request.deinit(test_allocator);
 
@@ -1592,13 +1592,13 @@ test "HandlerPool does not leak request data across pooled requests" {
         fn tainted(a: std.mem.Allocator, marker: []const u8) !HttpRequestOwned {
             var req = HttpRequestOwned{
                 .method = try a.dupe(u8, "POST"),
-                .url = try std.fmt.allocPrint(a, "/path-{s}", .{marker}),
+                .url = try a.print("/path-{s}", .{marker}),
                 .headers = .empty,
-                .body = try std.fmt.allocPrint(a, "BODY-{s}", .{marker}),
+                .body = try a.print("BODY-{s}", .{marker}),
             };
             try req.headers.append(a, .{
                 .key = try a.dupe(u8, "X-Secret"),
-                .value = try std.fmt.allocPrint(a, "SECRET-{s}", .{marker}),
+                .value = try a.print("SECRET-{s}", .{marker}),
             });
             return req;
         }
@@ -1819,7 +1819,7 @@ test "HandlerPool init under FailingAllocator never leaks" {
 
     const Probe = struct {
         fn run(handler: []const u8, fail_at: usize) !bool {
-            var leak_detector: std.heap.DebugAllocator(.{ .stack_trace_frames = 0 }) = .init;
+            var leak_detector: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{ .stack_trace_frames = 0 });
             const child = leak_detector.allocator();
             var failing = std.testing.FailingAllocator.init(child, .{ .fail_index = fail_at });
 
@@ -1828,14 +1828,14 @@ test "HandlerPool init under FailingAllocator never leaks" {
                 var pool_mut = pool;
                 pool_mut.deinit();
                 const leak_check = leak_detector.deinit();
-                if (leak_check == .leak) std.debug.print("HandlerPool.init leaked on success after fail_at={d}\n", .{fail_at});
-                try std.testing.expectEqual(std.heap.Check.ok, leak_check);
+                if (leak_check != 0) std.debug.print("HandlerPool.init leaked on success after fail_at={d}\n", .{fail_at});
+                try std.testing.expectEqual(@as(usize, 0), leak_check);
                 return true;
             } else |err| {
                 try std.testing.expectEqual(error.OutOfMemory, err);
                 const leak_check = leak_detector.deinit();
-                if (leak_check == .leak) std.debug.print("HandlerPool.init leaked on fail_at={d}\n", .{fail_at});
-                try std.testing.expectEqual(std.heap.Check.ok, leak_check);
+                if (leak_check != 0) std.debug.print("HandlerPool.init leaked on fail_at={d}\n", .{fail_at});
+                try std.testing.expectEqual(@as(usize, 0), leak_check);
                 return false;
             }
         }
@@ -1857,15 +1857,15 @@ test "HandlerPool init under FailingAllocator never leaks" {
     }
 
     {
-        var leak_detector: std.heap.DebugAllocator(.{ .stack_trace_frames = 0 }) = .init;
+        var leak_detector: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{ .stack_trace_frames = 0 });
         const child = leak_detector.allocator();
         var probe = std.testing.FailingAllocator.init(child, .{ .fail_index = std.math.maxInt(usize) });
 
         var pool = try HandlerPool.init(probe.allocator(), .{}, handler_code, "<handler>", 1, 0);
         pool.deinit();
         const leak_check = leak_detector.deinit();
-        if (leak_check == .leak) std.debug.print("HandlerPool.init leaked on success probe\n", .{});
-        try std.testing.expectEqual(std.heap.Check.ok, leak_check);
+        if (leak_check != 0) std.debug.print("HandlerPool.init leaked on success probe\n", .{});
+        try std.testing.expectEqual(@as(usize, 0), leak_check);
     }
 
     if (std.c.getenv("ZTS_RUN_OOM_SWEEP") != null) {

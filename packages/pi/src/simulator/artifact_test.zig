@@ -50,7 +50,7 @@ fn renderJson(allocator: std.mem.Allocator, value: anytype) ![]u8 {
 }
 
 fn zeroDigest() artifact.Sha256Hex {
-    return .{ .bytes = [_]u8{'0'} ** 64 };
+    return .{ .bytes = @as([64]u8, @splat('0')) };
 }
 
 test "draft expectations distinguish raw and compiler-assisted first attempts" {
@@ -240,7 +240,7 @@ fn buildCase(mutation: Mutation) !Fixture {
     try fixtures.append(testing.allocator, .{ .role = .expected_workspace, .path = "expected/handler.ts", .bytes = expected });
     manifest.flow_version = try artifact.computeFlowVersion(testing.allocator, &manifest, fixtures.items);
 
-    const generation = try std.fmt.allocPrint(testing.allocator, "generations/{s}", .{manifest.flow_version.slice()});
+    const generation = try testing.allocator.print("generations/{s}", .{manifest.flow_version.slice()});
     defer testing.allocator.free(generation);
     try tree.mkdir(testing.allocator, generation);
     try writeGeneratedFile(&tree, generation, "manifest.json", try renderJson(testing.allocator, manifest));
@@ -282,7 +282,7 @@ fn buildCase(mutation: Mutation) !Fixture {
 
 fn writeGeneratedFile(tree: *const IsolatedTmp, generation: []const u8, path: []const u8, bytes: []u8) !void {
     defer testing.allocator.free(bytes);
-    const relative = try std.fmt.allocPrint(testing.allocator, "{s}/{s}", .{ generation, path });
+    const relative = try testing.allocator.print("{s}/{s}", .{ generation, path });
     defer testing.allocator.free(relative);
     try tree.writeFile(testing.allocator, relative, bytes);
 }
@@ -468,7 +468,7 @@ test "flow artifact loader rejects strict descriptor and fixture drift" {
 
     var orphan = try buildCase(.none);
     defer orphan.deinit();
-    const path = try std.fmt.allocPrint(testing.allocator, "{s}/orphan.txt", .{orphan.generation});
+    const path = try testing.allocator.print("{s}/orphan.txt", .{orphan.generation});
     defer testing.allocator.free(path);
     try orphan.tree.writeFile(testing.allocator, path, "orphan\n");
     try expectLoadFailure(orphan.case_root_abs, .unexpected_fixture);
@@ -505,7 +505,7 @@ test "flow artifact loader rejects a symlink in the case root" {
     const link_parent = std.fs.path.dirname(fixture.case_root_abs) orelse return error.TestFailed;
     var parent_dir = try std.Io.Dir.openDirAbsolute(io, link_parent, .{});
     defer parent_dir.close(io);
-    const link_name = try std.fmt.allocPrint(testing.allocator, "{s}-link", .{fixture.tree.name});
+    const link_name = try testing.allocator.print("{s}-link", .{fixture.tree.name});
     defer testing.allocator.free(link_name);
     parent_dir.deleteFile(io, link_name) catch {};
     defer parent_dir.deleteFile(io, link_name) catch {};

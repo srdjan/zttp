@@ -947,11 +947,11 @@ test "string length/charAt/slice index by UTF-16 code units ENG-utf16" {
     // Zero-copy SliceString path (>= 16-byte result) with leading non-ASCII:
     // "é" (2 bytes) + 20 ASCII bytes = 21 code units. Slicing from unit 1 must
     // start at the byte after the 2-byte 'é'.
-    const long_input = "é" ++ ("a" ** 20);
+    const long_input = "é" ++ (&@as([20:0]u8, @splat('a')));
     const long = try ctx.createString(long_input);
     try std.testing.expectEqual(@as(i32, 21), stringLength(ctx, long, &noargs).getInt());
     try std.testing.expectEqualStrings(long_input, getStringData(stringSlice(ctx, long, &.{ value.JSValue.fromInt(0), value.JSValue.fromInt(21) })) orelse return error.TestUnexpectedResult);
-    try std.testing.expectEqualStrings("a" ** 20, getStringData(stringSlice(ctx, long, &.{value.JSValue.fromInt(1)})) orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings(&@as([20:0]u8, @splat('a')), getStringData(stringSlice(ctx, long, &.{value.JSValue.fromInt(1)})) orelse return error.TestUnexpectedResult);
 
     // indexOf/lastIndexOf return UTF-16 code-unit indices that agree with slice
     // (the bug: they used to return byte offsets, so slice(indexOf(...)) cut at
@@ -976,7 +976,7 @@ test "stringConstructor converts scalars to strings ENG-String" {
     // forms (previously String() was unregistered and threw NotCallable -> 500).
     // A self-managed DebugAllocator that is intentionally not deinit'd: the
     // ctx-created JSStrings are GC-managed and not freed individually in tests.
-    var dbg: std.heap.DebugAllocator(.{}) = .init;
+    var dbg: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     const allocator = dbg.allocator();
     const gc_mod = @import("../gc.zig");
     const heap_mod = @import("../heap.zig");

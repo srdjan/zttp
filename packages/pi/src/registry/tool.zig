@@ -43,7 +43,7 @@ pub const ToolResult = struct {
     ) !ToolResult {
         return .{
             .ok = false,
-            .llm_text = try std.fmt.allocPrint(allocator, fmt, args),
+            .llm_text = try allocator.print(fmt, args),
         };
     }
 

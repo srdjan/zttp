@@ -73,9 +73,9 @@ pub const Inputs = struct {
 pub const Identity = struct {
     module_specifiers: []const []const u8 = &.{},
     core_profile_id: []const u8 = "",
-    core_grammar_hash: [32]u8 = [_]u8{0} ** 32,
-    semantics_hash: [32]u8 = [_]u8{0} ** 32,
-    capability_hash: [32]u8 = [_]u8{0} ** 32,
+    core_grammar_hash: [32]u8 = @as([32]u8, @splat(0)),
+    semantics_hash: [32]u8 = @as([32]u8, @splat(0)),
+    capability_hash: [32]u8 = @as([32]u8, @splat(0)),
 };
 
 /// Read the identity out of a compile-time handler contract.
@@ -260,7 +260,7 @@ pub const test_support = struct {
         var atoms = zts.AtomTable.init(allocator);
         defer atoms.deinit();
 
-        const nested_code = try allocator.dupe(u8, &[_]u8{ code_seed, @intFromEnum(zts.bytecode.Opcode.ret) });
+        const nested_code = try allocator.dupe(u8, &[_]u8{ code_seed, @backingInt(zts.bytecode.Opcode.ret) });
         const nested_constants = try allocator.alloc(zts.JSValue, 0);
         const nested_upvalues = try allocator.alloc(zts.bytecode.UpvalueInfo, 0);
         const nested = try allocator.create(zts.bytecode.FunctionBytecode);
@@ -286,10 +286,10 @@ pub const test_support = struct {
         }
 
         const top_code = try allocator.dupe(u8, &[_]u8{
-            @intFromEnum(zts.bytecode.Opcode.push_const),
+            @backingInt(zts.bytecode.Opcode.push_const),
             0,
             0,
-            @intFromEnum(zts.bytecode.Opcode.ret),
+            @backingInt(zts.bytecode.Opcode.ret),
         });
         const top_constants = try allocator.alloc(zts.JSValue, 1);
         top_constants[0] = zts.JSValue.fromExternPtr(nested);
@@ -330,11 +330,11 @@ fn sampleInputs(main: []const u8, deps: []const []const u8) Inputs {
         .policy_section_digest = graph.digestBytes("policy-bytes"),
         .module_specifiers = &.{ "zttp:json", "./helper.ts" },
         .core_profile_id = "zts-model-1",
-        .core_grammar_hash = [_]u8{0xA1} ** 32,
-        .semantics_hash = [_]u8{0xB2} ** 32,
-        .capability_hash = [_]u8{0xC3} ** 32,
-        .proof_ir_digest = [_]u8{0xD4} ** 32,
-        .proof_certificate_digest = [_]u8{0xE5} ** 32,
+        .core_grammar_hash = @as([32]u8, @splat(0xA1)),
+        .semantics_hash = @as([32]u8, @splat(0xB2)),
+        .capability_hash = @as([32]u8, @splat(0xC3)),
+        .proof_ir_digest = @as([32]u8, @splat(0xD4)),
+        .proof_certificate_digest = @as([32]u8, @splat(0xE5)),
     };
 }
 
@@ -350,13 +350,13 @@ test "the inventory covers every executable and authority-bearing member" {
     defer allocator.free(out);
     const members = try build(allocator, sampleInputs(main, &deps), out);
 
-    var seen = std.EnumSet(MemberKind).initEmpty();
+    var seen = std.EnumSet(MemberKind).empty;
     for (members) |member| seen.insert(member.kind);
 
     // Every kind a production artifact must commit, plus the ones this fixture
     // exercises.
-    inline for (@typeInfo(MemberKind).@"enum".fields) |field| {
-        const kind: MemberKind = @enumFromInt(field.value);
+    inline for (@typeInfo(MemberKind).@"enum".field_names) |field| {
+        const kind: MemberKind = @fromBackingInt(@intCast(@backingInt(@field(MemberKind, field))));
         // The residual plan is absent until a handler has a guarded operation.
         if (kind == .residual_plan) continue;
         try testing.expect(seen.contains(kind));
@@ -429,17 +429,17 @@ test "mutating any member class moves the root" {
         }.f },
         .{ .name = "core grammar", .apply = struct {
             fn f(i: *Inputs) void {
-                i.core_grammar_hash = [_]u8{0xA2} ** 32;
+                i.core_grammar_hash = @as([32]u8, @splat(0xA2));
             }
         }.f },
         .{ .name = "semantics", .apply = struct {
             fn f(i: *Inputs) void {
-                i.semantics_hash = [_]u8{0xB3} ** 32;
+                i.semantics_hash = @as([32]u8, @splat(0xB3));
             }
         }.f },
         .{ .name = "capabilities", .apply = struct {
             fn f(i: *Inputs) void {
-                i.capability_hash = [_]u8{0xC4} ** 32;
+                i.capability_hash = @as([32]u8, @splat(0xC4));
             }
         }.f },
         .{ .name = "source profile", .apply = struct {
@@ -449,12 +449,12 @@ test "mutating any member class moves the root" {
         }.f },
         .{ .name = "proof ir", .apply = struct {
             fn f(i: *Inputs) void {
-                i.proof_ir_digest = [_]u8{0xD5} ** 32;
+                i.proof_ir_digest = @as([32]u8, @splat(0xD5));
             }
         }.f },
         .{ .name = "proof certificate", .apply = struct {
             fn f(i: *Inputs) void {
-                i.proof_certificate_digest = [_]u8{0xE6} ** 32;
+                i.proof_certificate_digest = @as([32]u8, @splat(0xE6));
             }
         }.f },
     };

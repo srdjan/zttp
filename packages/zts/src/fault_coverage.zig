@@ -323,11 +323,7 @@ pub const FaultCoverageChecker = struct {
         call_site: u64,
         ext_override: ?ExternalSeverity,
     ) !?*CallSiteEntry {
-        const key = try std.fmt.allocPrint(
-            self.allocator,
-            "{d}\x00{s}\x00{s}",
-            .{ call_site, module, func },
-        );
+        const key = try self.allocator.print("{d}\x00{s}\x00{s}", .{ call_site, module, func });
         const gop = seen.getOrPut(self.allocator, key) catch |err| {
             self.allocator.free(key);
             return err;

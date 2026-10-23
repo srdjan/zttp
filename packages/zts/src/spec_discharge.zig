@@ -172,7 +172,7 @@ fn nearestSuggestion(
         }
     }
     if (best_name == null or best_dist > 2) return null;
-    return try std.fmt.allocPrint(allocator, "did you mean `{s}`?", .{best_name.?});
+    return try allocator.print("did you mean `{s}`?", .{best_name.?});
 }
 
 /// ZTS502 suggestion for an unknown handler spec name. Caller frees.
@@ -432,14 +432,10 @@ fn implicitDefaultSuggestion(
     const missing = try std.mem.join(allocator, ", ", undischarged);
     defer allocator.free(missing);
 
-    return std.fmt.allocPrint(
-        allocator,
-        "this handler returns no Proof<T, P> capsule, so the compiler must prove the full " ++
-            "default profile, but it does not hold: {s}. Return a narrow Proof capsule " ++
-            "with only the properties it holds, e.g. " ++
-            "`function handler(req: Request): Proof<Response, {s}>`.",
-        .{ missing, holds.items },
-    );
+    return allocator.print("this handler returns no Proof<T, P> capsule, so the compiler must prove the full " ++
+        "default profile, but it does not hold: {s}. Return a narrow Proof capsule " ++
+        "with only the properties it holds, e.g. " ++
+        "`function handler(req: Request): Proof<Response, {s}>`.", .{ missing, holds.items });
 }
 
 fn lookupV1(name: []const u8) ?V1Spec {
@@ -484,9 +480,9 @@ pub const CapsuleProperty = enum {
 
 /// Capsule property names, derived from the enum so the two cannot drift.
 pub const capsule_property_names = blk: {
-    const fields = @typeInfo(CapsuleProperty).@"enum".fields;
+    const fields = @typeInfo(CapsuleProperty).@"enum".field_names;
     var names: [fields.len][]const u8 = undefined;
-    for (fields, 0..) |f, i| names[i] = f.name;
+    for (fields, 0..) |f, i| names[i] = f;
     break :blk names;
 };
 
@@ -569,13 +565,9 @@ fn escapeSuggestion(
             "every call and `total` cannot be discharged; call helpers by name in that module, " ++
             "or drop `total` from the capsule.",
     );
-    return std.fmt.allocPrint(
-        allocator,
-        "{s} at line {d}, column {d} {s}, so the compiler cannot follow every " ++
-            "call in this module and `total` cannot be discharged for any function in it; " ++
-            "call helpers by name and pass no function as a value, or drop `total` from the capsule.",
-        .{ found.name, found.line, found.column, found.reason() },
-    );
+    return allocator.print("{s} at line {d}, column {d} {s}, so the compiler cannot follow every " ++
+        "call in this module and `total` cannot be discharged for any function in it; " ++
+        "call helpers by name and pass no function as a value, or drop `total` from the capsule.", .{ found.name, found.line, found.column, found.reason() });
 }
 
 /// ZTS502 suggestion for an unknown capsule property name. Caller frees.
@@ -658,9 +650,9 @@ pub fn dischargeCapsule(
 /// Capability vocabulary for `Effects<...>`: the exact `ModuleCapability`
 /// enum field names, derived so the two cannot drift.
 pub const effect_capability_names = blk: {
-    const fields = @typeInfo(module_binding.ModuleCapability).@"enum".fields;
+    const fields = @typeInfo(module_binding.ModuleCapability).@"enum".field_names;
     var names: [fields.len][]const u8 = undefined;
-    for (fields, 0..) |f, i| names[i] = f.name;
+    for (fields, 0..) |f, i| names[i] = f;
     break :blk names;
 };
 
@@ -741,7 +733,7 @@ pub fn dischargeEffects(
 
     // Parse the declared ceiling. An unknown name produces ZTS504 and is
     // dropped from the ceiling so it neither widens nor narrows it.
-    var ceiling = CapabilitySet.initEmpty();
+    var ceiling = CapabilitySet.empty;
     for (declared) |name| {
         const cap = std.meta.stringToEnum(module_binding.ModuleCapability, name) orelse {
             const spec_name = try allocator.dupe(u8, name);
@@ -764,11 +756,7 @@ pub fn dischargeEffects(
         if (ceiling.contains(cap)) continue;
         const spec_name = try allocator.dupe(u8, @tagName(cap));
         errdefer allocator.free(spec_name);
-        const suggestion = try std.fmt.allocPrint(
-            allocator,
-            "add `{s}` to the Effects<...> ceiling, or remove the call that reaches it.",
-            .{@tagName(cap)},
-        );
+        const suggestion = try allocator.print("add `{s}` to the Effects<...> ceiling, or remove the call that reaches it.", .{@tagName(cap)});
         errdefer allocator.free(suggestion);
         try out.append(allocator, .{
             .kind = .effect_undeclared,
@@ -1052,7 +1040,7 @@ test "dischargeSpecs proof-less pure handler collapses to one ZTS500 naming real
 
 test "dischargeEffects ceiling matching the inferred row returns empty" {
     const allocator = std.testing.allocator;
-    var inferred = CapabilitySet.initEmpty();
+    var inferred = CapabilitySet.empty;
     inferred.insert(.env);
     inferred.insert(.clock);
     const declared: [2][]const u8 = .{ "env", "clock" };
@@ -1064,7 +1052,7 @@ test "dischargeEffects ceiling matching the inferred row returns empty" {
 
 test "dischargeEffects reached capability outside ceiling emits ZTS503" {
     const allocator = std.testing.allocator;
-    var inferred = CapabilitySet.initEmpty();
+    var inferred = CapabilitySet.empty;
     inferred.insert(.env);
     inferred.insert(.crypto);
     const declared: [1][]const u8 = .{"env"};
@@ -1078,7 +1066,7 @@ test "dischargeEffects reached capability outside ceiling emits ZTS503" {
 
 test "dischargeEffects unknown capability name emits ZTS504" {
     const allocator = std.testing.allocator;
-    var inferred = CapabilitySet.initEmpty();
+    var inferred = CapabilitySet.empty;
     inferred.insert(.env);
     const declared: [2][]const u8 = .{ "env", "databse" };
 
@@ -1091,7 +1079,7 @@ test "dischargeEffects unknown capability name emits ZTS504" {
 
 test "dischargeEffects an unreadable ceiling emits ZTS511, not silence" {
     const allocator = std.testing.allocator;
-    var inferred = CapabilitySet.initEmpty();
+    var inferred = CapabilitySet.empty;
     inferred.insert(.crypto);
     const declared: [0][]const u8 = .{};
 
@@ -1105,7 +1093,7 @@ test "dischargeEffects an unreadable ceiling emits ZTS511, not silence" {
 
 test "dischargeEffects a lower-bound row cannot discharge a ceiling" {
     const allocator = std.testing.allocator;
-    var inferred = CapabilitySet.initEmpty();
+    var inferred = CapabilitySet.empty;
     inferred.insert(.env);
     const declared: [1][]const u8 = .{"env"};
 
@@ -1121,7 +1109,7 @@ test "dischargeEffects a lower-bound row cannot discharge a ceiling" {
 
 test "dischargeEffects a lower-bound row with no ceiling stays silent" {
     const allocator = std.testing.allocator;
-    var inferred = CapabilitySet.initEmpty();
+    var inferred = CapabilitySet.empty;
     inferred.insert(.env);
     const declared: [0][]const u8 = .{};
 
@@ -1148,7 +1136,7 @@ test "capsule facts from a lower-bound row prove no property" {
 
 test "dischargeEffects no annotation at all stays silent" {
     const allocator = std.testing.allocator;
-    var inferred = CapabilitySet.initEmpty();
+    var inferred = CapabilitySet.empty;
     inferred.insert(.crypto);
     const declared: [0][]const u8 = .{};
 
@@ -1159,7 +1147,7 @@ test "dischargeEffects no annotation at all stays silent" {
 
 test "dischargeEffects over-declared capability emits ZTS505 warning" {
     const allocator = std.testing.allocator;
-    var inferred = CapabilitySet.initEmpty();
+    var inferred = CapabilitySet.empty;
     inferred.insert(.env);
     const declared: [2][]const u8 = .{ "env", "crypto" };
 

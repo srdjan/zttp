@@ -237,7 +237,7 @@ test "selected graph profiles preserve reads bytecode and complete atoms" {
         try std.testing.expectEqual(case.reads, Reader.reads);
         try std.testing.expectEqual(case.atom_names.len, atoms.next_id - object.Atom.FIRST_DYNAMIC);
         for (case.atom_names, object.Atom.FIRST_DYNAMIC..) |name, id| {
-            try std.testing.expectEqualStrings(name, atoms.getName(@enumFromInt(id)).?);
+            try std.testing.expectEqualStrings(name, atoms.getName(@fromBackingInt(@intCast(id))).?);
         }
         try std.testing.expect(graph.execution_order.len > 0);
         try std.testing.expectEqual(graph.execution_order.len, actual.modules.len);

@@ -180,12 +180,12 @@ const collectImportedFailableCalls = imports_mod.collectImportedFailableCalls;
 const resolveCheckImportPath = imports_mod.resolveCheckImportPath;
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var debug_alloc: if (builtin.mode == .Debug) std.heap.DebugAllocator(.{}) else void =
-        if (builtin.mode == .Debug) .init else {};
-    defer if (builtin.mode == .Debug) {
+    var debug_alloc: if (builtin.mode == .debug) std.heap.SafeAllocator else void =
+        if (builtin.mode == .debug) .init(std.heap.page_allocator, .{}) else {};
+    defer if (builtin.mode == .debug) {
         _ = debug_alloc.deinit();
     };
-    const allocator = if (builtin.mode == .Debug) debug_alloc.allocator() else std.heap.smp_allocator;
+    const allocator = if (builtin.mode == .debug) debug_alloc.allocator() else std.heap.smp_allocator;
 
     const argv = try collectArgs(allocator, init.args);
     defer {
@@ -450,11 +450,7 @@ pub fn runCheckOnlyWithOptions(
         // error return below, so the catch arms only need to free state not yet
         // handed to `result`.
         errdefer result.deinit(allocator);
-        const message = std.fmt.allocPrint(
-            allocator,
-            "cannot read handler file '{s}': {s}",
-            .{ handler_path, @errorName(err) },
-        ) catch {
+        const message = allocator.print("cannot read handler file '{s}': {s}", .{ handler_path, @errorName(err) }) catch {
             // Allocation failed: fall back to propagating the original error
             // rather than emitting an empty (and therefore misleading) JSON.
             return err;
@@ -887,16 +883,8 @@ fn runCheckOnParsedSource(
         if (json_mode) {
             if (import_diagnostic) |diagnostic| {
                 const message = switch (diagnostic.kind) {
-                    .unknown_module => try std.fmt.allocPrint(
-                        allocator,
-                        "unknown virtual module '{s}'",
-                        .{diagnostic.module},
-                    ),
-                    .missing_export => try std.fmt.allocPrint(
-                        allocator,
-                        "module '{s}' does not export '{s}'",
-                        .{ diagnostic.module, diagnostic.missing_export.? },
-                    ),
+                    .unknown_module => try allocator.print("unknown virtual module '{s}'", .{diagnostic.module}),
+                    .missing_export => try allocator.print("module '{s}' does not export '{s}'", .{ diagnostic.module, diagnostic.missing_export.? }),
                 };
                 errdefer allocator.free(message);
                 const suggestion = switch (diagnostic.kind) {
@@ -2096,7 +2084,7 @@ fn resolveImportedAtomName(
     atom_value: u32,
     atoms: ?*zts.AtomTable,
 ) ?[]const u8 {
-    const atom: zts.Atom = @enumFromInt(atom_value);
+    const atom: zts.Atom = @fromBackingInt(@intCast(atom_value));
     if (atom.isPredefined()) return atom.toPredefinedName();
     if (atoms) |table| return table.getName(atom);
     return null;
@@ -2743,11 +2731,7 @@ fn appendPolicyDiagnostics(
     for (report.violations.items) |violation| {
         const kind = diagnostic_catalog.policyKind(violation.category, violation.kind);
         const message = switch (violation.kind) {
-            .literal_not_allowed => try std.fmt.allocPrint(
-                allocator,
-                "{s} '{s}' is not in the capability policy allow-list",
-                .{ handler_policy.categoryLiteralLabel(violation.category), violation.value orelse "" },
-            ),
+            .literal_not_allowed => try allocator.print("{s} '{s}' is not in the capability policy allow-list", .{ handler_policy.categoryLiteralLabel(violation.category), violation.value orelse "" }),
         };
         errdefer allocator.free(message);
 
@@ -3447,11 +3431,7 @@ const AllocationImportReader = struct {
         const index = try std.fmt.parseInt(usize, name[3 .. name.len - 3], 10);
         if (index >= self.file_count) return error.FileNotFound;
         if (index + 1 == self.file_count) return allocator.dupe(u8, "export function helper(): string { return 'ok'; }");
-        return std.fmt.allocPrint(
-            allocator,
-            "import {{ helper as next }} from './lib{d}.ts'; export function helper(): string {{ return next(); }}",
-            .{index + 1},
-        );
+        return allocator.print("import {{ helper as next }} from './lib{d}.ts'; export function helper(): string {{ return next(); }}", .{index + 1});
     }
 };
 
@@ -3471,7 +3451,7 @@ fn checkImportAllocationFixture(allocator: std.mem.Allocator, reader: *Allocatio
 fn expectImportAllocationCleanup(file_count: usize) !void {
     var baseline_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer baseline_arena.deinit();
-    var counted = std.testing.FailingAllocator.init(baseline_arena.allocator(), .{});
+    var counted = std.testing.FailingAllocator.init(baseline_arena.allocator(), .{ .resize_fail_index = 0 });
     var reader: AllocationImportReader = .{ .file_count = file_count };
     var baseline = try checkImportAllocationFixture(counted.allocator(), &reader);
     {
@@ -3492,7 +3472,7 @@ fn expectImportAllocationCleanup(file_count: usize) !void {
     for (0..counted.alloc_index) |fail_index| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
         defer arena.deinit();
-        var failing = std.testing.FailingAllocator.init(arena.allocator(), .{ .fail_index = fail_index });
+        var failing = std.testing.FailingAllocator.init(arena.allocator(), .{ .fail_index = fail_index, .resize_fail_index = 0 });
         var failed_reader: AllocationImportReader = .{ .file_count = file_count };
         if (checkImportAllocationFixture(failing.allocator(), &failed_reader)) |value| {
             var result = value;
@@ -4055,7 +4035,7 @@ test "runCheckOnlyWithOptions: json mode emits ZTS000 for an unreadable handler"
     defer result.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
-    try std.testing.expectEqual(StageSet.initEmpty(), result.stages_run);
+    try std.testing.expectEqual(StageSet.empty, result.stages_run);
     try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
     const diagnostic = result.json_diagnostics.items[0];
     try std.testing.expectEqualStrings("ZTS000", diagnostic.code);
@@ -6434,11 +6414,7 @@ test "CHECK applies sibling effects through an alias and a holder" {
     };
 
     for (cases) |case| {
-        const handler = try std.fmt.allocPrint(
-            std.testing.allocator,
-            "import {{ {s} }} from \"./dep.ts\";\nfunction handler(req: Request): Response {{ {s}; return Response.text(\"ok\"); }}\n",
-            .{ case.imported_name, case.call },
-        );
+        const handler = try std.testing.allocator.print("import {{ {s} }} from \"./dep.ts\";\nfunction handler(req: Request): Response {{ {s}; return Response.text(\"ok\"); }}\n", .{ case.imported_name, case.call });
         defer std.testing.allocator.free(handler);
         var fixture = try SiblingFixture.init(handler);
         defer fixture.deinit();
@@ -6531,11 +6507,7 @@ test "CHECK preserves sibling cache reads and egress facts" {
     };
 
     for (cases) |case| {
-        const handler = try std.fmt.allocPrint(
-            std.testing.allocator,
-            "import {{ {s} }} from \"./dep.ts\";\nfunction handler(req: Request): Response {{ return Response.text({s}() ?? \"\"); }}\n",
-            .{ case.name, case.name },
-        );
+        const handler = try std.testing.allocator.print("import {{ {s} }} from \"./dep.ts\";\nfunction handler(req: Request): Response {{ return Response.text({s}() ?? \"\"); }}\n", .{ case.name, case.name });
         defer std.testing.allocator.free(handler);
         var fixture = try SiblingFixture.init(handler);
         defer fixture.deinit();
@@ -6650,20 +6622,12 @@ test "CHECK blocks effects past the sibling import depth limit" {
     );
     defer fixture.deinit();
     for (0..max_import_depth) |index| {
-        const name = try std.fmt.allocPrint(std.testing.allocator, "f{d}.ts", .{index});
+        const name = try std.testing.allocator.print("f{d}.ts", .{index});
         defer std.testing.allocator.free(name);
         const source = if (index + 1 < max_import_depth)
-            try std.fmt.allocPrint(
-                std.testing.allocator,
-                "import {{ f{d} }} from \"./f{d}.ts\";\nexport function f{d}(): undefined {{ return f{d}(); }}\n",
-                .{ index + 1, index + 1, index, index + 1 },
-            )
+            try std.testing.allocator.print("import {{ f{d} }} from \"./f{d}.ts\";\nexport function f{d}(): undefined {{ return f{d}(); }}\n", .{ index + 1, index + 1, index, index + 1 })
         else
-            try std.fmt.allocPrint(
-                std.testing.allocator,
-                "export function f{d}(): undefined {{ return undefined; }}\n",
-                .{index},
-            );
+            try std.testing.allocator.print("export function f{d}(): undefined {{ return undefined; }}\n", .{index});
         defer std.testing.allocator.free(source);
         try fixture.add(name, source);
     }
@@ -6931,22 +6895,14 @@ const RoutedPropertyProbe = struct {
 
 fn routedPropertySource(allocator: std.mem.Allocator, probe: RoutedPropertyProbe, routed: bool) ![]u8 {
     const annotation = if (std.mem.eql(u8, probe.property, "response_total")) "state_isolated" else probe.property;
-    if (!routed) return std.fmt.allocPrint(
-        allocator,
-        "{s}\n{s}\nfunction handler(req: Request): Proof<Response, \"{s}\"> {{ {s} }}\n",
-        .{ probe.imports, probe.globals, annotation, probe.body },
-    );
-    return std.fmt.allocPrint(
-        allocator,
-        "import {{ routerMatch }} from \"zttp:router\";\n{s}\n{s}\n" ++
-            "function route(req: Request): Response {{ {s} }}\n" ++
-            "const routes = {{ \"GET /probe\": route }};\n" ++
-            "function handler(req: Request): Proof<Response, \"{s}\"> {{\n" ++
-            "const found = routerMatch(routes, req);\n" ++
-            "if (found === undefined) return Response.text(\"not found\", {{ status: 404 }});\n" ++
-            "return found.handler(req);\n}}\n",
-        .{ probe.imports, probe.globals, probe.body, annotation },
-    );
+    if (!routed) return allocator.print("{s}\n{s}\nfunction handler(req: Request): Proof<Response, \"{s}\"> {{ {s} }}\n", .{ probe.imports, probe.globals, annotation, probe.body });
+    return allocator.print("import {{ routerMatch }} from \"zttp:router\";\n{s}\n{s}\n" ++
+        "function route(req: Request): Response {{ {s} }}\n" ++
+        "const routes = {{ \"GET /probe\": route }};\n" ++
+        "function handler(req: Request): Proof<Response, \"{s}\"> {{\n" ++
+        "const found = routerMatch(routes, req);\n" ++
+        "if (found === undefined) return Response.text(\"not found\", {{ status: 404 }});\n" ++
+        "return found.handler(req);\n}}\n", .{ probe.imports, probe.globals, probe.body, annotation });
 }
 
 fn routedProbeHolds(comptime property: []const u8, result: CheckResult) !bool {
@@ -6979,8 +6935,8 @@ test "router property census observes direct and routed violations for every obl
         .{ .property = "fault_covered", .imports = "import { jwtVerify } from \"zttp:auth\";", .body = "const result = jwtVerify(req.url, \"secret\"); if (!result.ok) return Response.text(\"accepted failure\", { status: 200 }); return Response.text(\"ok\");" },
         .{ .property = "optional_safe", .imports = "import { env } from \"zttp:env\";", .body = "const value = env(\"HOME\"); return Response.json({ length: value.length });" },
     };
-    var proof_observed = std.enums.EnumSet(pcc.proof_system.Property).initEmpty();
-    var flow_observed = std.enums.EnumSet(zts.counterexample.PropertyTag).initEmpty();
+    var proof_observed = std.enums.EnumSet(pcc.proof_system.Property).empty;
+    var flow_observed = std.enums.EnumSet(zts.counterexample.PropertyTag).empty;
     inline for (probes) |probe| {
         for ([_]bool{ false, true }) |routed| {
             const source = try routedPropertySource(allocator, probe, routed);
@@ -7023,11 +6979,11 @@ test "router property census observes direct and routed violations for every obl
         try std.testing.expect(forbidden_env);
     }
     proof_observed.insert(.capability_bounded);
-    inline for (std.meta.fields(pcc.proof_system.Property)) |field| {
-        try std.testing.expect(proof_observed.contains(@enumFromInt(field.value)));
+    inline for (@typeInfo(pcc.proof_system.Property).@"enum".field_names) |field| {
+        try std.testing.expect(proof_observed.contains(@fromBackingInt(@intCast(@backingInt(@field(pcc.proof_system.Property, field))))));
     }
-    inline for (std.meta.fields(zts.counterexample.PropertyTag)) |field| {
-        try std.testing.expect(flow_observed.contains(@enumFromInt(field.value)));
+    inline for (@typeInfo(zts.counterexample.PropertyTag).@"enum".field_names) |field| {
+        try std.testing.expect(flow_observed.contains(@fromBackingInt(@intCast(@backingInt(@field(zts.counterexample.PropertyTag, field))))));
     }
 }
 
@@ -7129,7 +7085,7 @@ test "parse failure text counts characters on a multi-byte line" {
     defer allocator.free(text);
     // Sixteen characters precede `while`, though the line holds twenty bytes
     // before it.
-    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ " " ** 16 ++ "^^^^^\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ &@as([16:0]u8, @splat(' ')) ++ "^^^^^\n") != null);
 }
 
 // ---------------------------------------------------------------------------
@@ -7984,12 +7940,8 @@ test "precompile refuses every retired module before replacing generated output"
     for (cases) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        const source = try std.fmt.allocPrint(
-            allocator,
-            "import {{ {s} }} from \"{s}\";\n" ++
-                "function handler(req: Request): Response {{ return Response.text(\"ok\"); }}\n",
-            .{ case.symbol, case.specifier },
-        );
+        const source = try allocator.print("import {{ {s} }} from \"{s}\";\n" ++
+            "function handler(req: Request): Response {{ return Response.text(\"ok\"); }}\n", .{ case.symbol, case.specifier });
         defer allocator.free(source);
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data = source });
         try tmp.dir.writeFile(std.testing.io, .{
@@ -8028,7 +7980,7 @@ test "the analyzer refuses every retired module with ZTS206" {
         .{ .module = "zttp:tool", .symbol = "toolInput" },
     };
     for (cases) |case| {
-        const source = try std.fmt.allocPrint(allocator, "import {{ {s} }} from \"{s}\";\n" ++
+        const source = try allocator.print("import {{ {s} }} from \"{s}\";\n" ++
             "function handler(req: Request): Response {{ return Response.text(\"ready\"); }}\n", .{ case.symbol, case.module });
         defer allocator.free(source);
         var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
@@ -8036,7 +7988,7 @@ test "the analyzer refuses every retired module with ZTS206" {
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
         const diagnostic = result.json_diagnostics.items[0];
         try std.testing.expectEqualStrings("ZTS206", diagnostic.code);
-        const message = try std.fmt.allocPrint(allocator, "unknown virtual module '{s}'", .{case.module});
+        const message = try allocator.print("unknown virtual module '{s}'", .{case.module});
         defer allocator.free(message);
         try std.testing.expectEqualStrings(message, diagnostic.message);
         try std.testing.expect(result.contract == null);
@@ -8068,14 +8020,10 @@ const LegacyCompoundDiagnostic = struct {
 };
 
 fn legacyCompoundSource(allocator: std.mem.Allocator, annotation: []const u8) ![]u8 {
-    return std.fmt.allocPrint(
-        allocator,
-        "function handler(req: Request): Response {{\n" ++
-            "  const value: {s} = undefined;\n" ++
-            "  return Response.text(\"ok\");\n" ++
-            "}}\n",
-        .{annotation},
-    );
+    return allocator.print("function handler(req: Request): Response {{\n" ++
+        "  const value: {s} = undefined;\n" ++
+        "  return Response.text(\"ok\");\n" ++
+        "}}\n", .{annotation});
 }
 
 fn expectLegacyCompoundDiagnostic(
@@ -8479,7 +8427,7 @@ test "CHECK preserves legacy preparation diagnostics and recovery boundaries" {
             },
         },
         .{
-            .annotation = "(" ** 513 ++ "number" ++ ")" ** 513 ++ " any",
+            .annotation = &@as([513:0]u8, @splat('(')) ++ "number" ++ &@as([513:0]u8, @splat(')')) ++ " any",
             .diagnostics = &.{.{
                 .code = "ZTS044",
                 .message = "type syntax nests too deeply",
@@ -8694,7 +8642,7 @@ test "CHECK preserves legacy preparation diagnostics and recovery boundaries" {
         },
         .{
             .name = "terminal_template_depth",
-            .source = "function f(): `${" ++ "{" ** 512 ++ " return 1; }\n",
+            .source = "function f(): `${" ++ &@as([512:0]u8, @splat('{')) ++ " return 1; }\n",
             .stage = .strip,
             .parse_errors = 1,
             .diagnostics = &.{.{
@@ -9943,16 +9891,16 @@ test "CHECK preserves lexical diagnostics inside type-only modules" {
         .{ .source = "import type \"open\\\nclosed\";\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = true, .diagnostics = &.{
             .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 4, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." },
         } },
-        .{ .source = "import type `${" ++ ("{" ** 511) ++ "1" ++ ("}" ** 512) ++ "}`;\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = true, .diagnostics = &.{
+        .{ .source = "import type `${" ++ (&@as([511:0]u8, @splat('{'))) ++ "1" ++ (&@as([512:0]u8, @splat('}'))) ++ "}`;\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = true, .diagnostics = &.{
             .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 3, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." },
         } },
-        .{ .source = "import type `${" ++ ("{" ** 512) ++ ";" ++ ("}" ** 513) ++ "}`;\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = false, .diagnostics = &.{
+        .{ .source = "import type `${" ++ (&@as([512:0]u8, @splat('{'))) ++ ";" ++ (&@as([513:0]u8, @splat('}'))) ++ "}`;\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = false, .diagnostics = &.{
             .{ .code = "ZTS044", .message = "type syntax nests too deeply", .line = 1, .column = 527, .suggestion = "simplify or split it (nesting limit is 512)" },
         } },
-        .{ .source = "import type " ++ ("`${" ** 511) ++ "1" ++ ("}`" ** 511) ++ ";\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = true, .diagnostics = &.{
+        .{ .source = "import type " ++ (@as([(511) * ("`${").len]u8, @bitCast(@as([511][("`${").len]u8, @splat(("`${").*))))) ++ "1" ++ (@as([(511) * ("}`").len]u8, @bitCast(@as([511][("}`").len]u8, @splat(("}`").*))))) ++ ";\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = true, .diagnostics = &.{
             .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 3, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." },
         } },
-        .{ .source = "import type " ++ ("`${" ** 513) ++ "1" ++ ("}`" ** 513) ++ ";\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = true, .diagnostics = &.{
+        .{ .source = "import type " ++ (@as([(513) * ("`${").len]u8, @bitCast(@as([513][("`${").len]u8, @splat(("`${").*))))) ++ "1" ++ (@as([(513) * ("}`").len]u8, @bitCast(@as([513][("}`").len]u8, @splat(("}`").*))))) ++ ";\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = true, .diagnostics = &.{
             .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 3, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." },
         } },
         .{ .source = "import type \"open\nimport type { Spec } from \"zttp:types\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = false, .diagnostics = &.{
@@ -9965,7 +9913,7 @@ test "CHECK preserves lexical diagnostics inside type-only modules" {
         .{ .source = "import type \"open\nconst broken = ;\nimport type { Spec } from \"zttp:types\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = false, .diagnostics = &.{
             .{ .code = "ZTS053", .message = "`zttp:types` is not a module in this profile", .line = 3, .column = 1, .suggestion = "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names" },
         } },
-        .{ .source = "import type `${" ++ ("{" ** 511) ++ "`${" ++ ("{" ** 512) ++ ";" ++ ("}" ** 513) ++ "}`" ++ ("}" ** 512) ++ "}`;\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = false, .diagnostics = &.{
+        .{ .source = "import type `${" ++ (&@as([511:0]u8, @splat('{'))) ++ "`${" ++ (&@as([512:0]u8, @splat('{'))) ++ ";" ++ (&@as([513:0]u8, @splat('}'))) ++ "}`" ++ (&@as([512:0]u8, @splat('}'))) ++ "}`;\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .contract = false, .diagnostics = &.{
             .{ .code = "ZTS044", .message = "type syntax nests too deeply", .line = 1, .column = 1041, .suggestion = "simplify or split it (nesting limit is 512)" },
         } },
     };
@@ -10131,7 +10079,7 @@ test "CHECK preserves repeated global declaration bindings" {
             },
         },
     };
-    var seen = std.EnumSet(Case).initEmpty();
+    var seen = std.EnumSet(Case).empty;
     for (cases) |case| {
         var result = try runCheckOnlyFromSourceWithOptions(
             std.testing.allocator,
@@ -10151,7 +10099,7 @@ test "CHECK preserves repeated global declaration bindings" {
         try std.testing.expectEqual(case.has_contract, result.contract != null);
         seen.insert(case.case);
     }
-    try std.testing.expectEqual(std.meta.fields(Case).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(Case).@"enum".field_names.len, seen.count());
 }
 
 test "CHECK preserves nominal generic diagnostic order before scalar refusal" {
@@ -11504,8 +11452,8 @@ test "CHECK observes every admission kind after the measured recovery divergence
         .{ .source = "import type { A } /* ; */ from \"./a\";\n/* unfinished\n", .kind = null, .diagnostics = &.{} },
     };
     try std.testing.expectEqual(@as(usize, 18), cases.len);
-    try std.testing.expectEqual(std.meta.fields(Kind).len + 1, cases.len);
-    var seen = std.EnumSet(Kind).initEmpty();
+    try std.testing.expectEqual(@typeInfo(Kind).@"enum".field_names.len + 1, cases.len);
+    var seen = std.EnumSet(Kind).empty;
     var location_free: usize = 0;
     for (cases) |case| {
         errdefer std.debug.print("recovery producer failed: {any}\n", .{case.kind});

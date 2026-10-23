@@ -36,7 +36,7 @@ var counter: std.atomic.Value(u64) = .init(0);
 
 fn fillRandom(buf: []u8) void {
     var ts: std.posix.timespec = undefined;
-    _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
+    _ = std.c.clock_gettime(@fromBackingInt(@intCast(@backingInt(std.posix.CLOCK.REALTIME))), &ts);
     const salt = counter.fetchAdd(1, .seq_cst);
     var seed: u64 = @as(u64, @bitCast(@as(i64, ts.nsec))) ^ (salt *% 0x9E3779B97F4A7C15);
     for (buf) |*b| {
@@ -47,7 +47,7 @@ fn fillRandom(buf: []u8) void {
 
 fn nowUnixMs() i64 {
     var ts: std.posix.timespec = undefined;
-    _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
+    _ = std.c.clock_gettime(@fromBackingInt(@intCast(@backingInt(std.posix.CLOCK.REALTIME))), &ts);
     return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 

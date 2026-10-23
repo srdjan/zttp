@@ -362,7 +362,7 @@ fn verifySemantics(
                 .core_profile_id = view.source_identity.core_profile.id(),
                 .core_grammar_hash = view.source_identity.core_grammar_hash,
                 .semantics_hash = view.source_identity.semantics_hash,
-                .capability_hash = if (view.capabilities) |caps| caps.hash else [_]u8{0} ** 32,
+                .capability_hash = if (view.capabilities) |caps| caps.hash else @as([32]u8, @splat(0)),
             };
         }
     }
@@ -715,7 +715,7 @@ fn payloadFromBinary(
     const size: usize = @intCast(trailer.payload_size);
     if (start + size > bytes.len) return error.CorruptArtifact;
     const payload_bytes = bytes[start..][0..size];
-    if (std.hash.crc.Crc32.hash(payload_bytes) != trailer.checksum) return error.CorruptArtifact;
+    if (std.hash.crc.@"CRC-32/ISO-HDLC".hash(payload_bytes) != trailer.checksum) return error.CorruptArtifact;
     const payload = self_extract.parse(allocator, payload_bytes) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return error.CorruptArtifact,
@@ -754,7 +754,7 @@ fn rejectSuspiciousPath(path: []const u8) !void {
 }
 
 fn ensureDir(allocator: std.mem.Allocator, path: []const u8) !void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     switch (std.posix.errno(std.posix.system.mkdir(path_z, 0o755))) {
         .SUCCESS, .EXIST => {},
@@ -831,7 +831,7 @@ fn predecessorArtifact(allocator: std.mem.Allocator) ![]u8 {
     std.mem.writeInt(u64, trailer[8..16], payload.len, .little);
     std.mem.writeInt(u16, trailer[16..18], 6, .little);
     std.mem.writeInt(u16, trailer[18..20], 0, .little);
-    std.mem.writeInt(u32, trailer[20..24], std.hash.crc.Crc32.hash(payload), .little);
+    std.mem.writeInt(u32, trailer[20..24], std.hash.crc.@"CRC-32/ISO-HDLC".hash(payload), .little);
     std.mem.writeInt(u64, trailer[24..32], self_extract.MAGIC, .little);
     return artifact;
 }
@@ -1048,11 +1048,7 @@ test "a bundle from the previous format is refused with a rebuild diagnostic" {
     try ensureDir(std.testing.allocator, "bundle");
     try zts.file_io.writeFile(std.testing.allocator, "bundle/handler.contract.json", "{}");
     const contract_sha = sha256Hex("{}");
-    const manifest = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "{{\n  \"toolVersion\": \"zttp-bundle-2\",\n  \"components\": {{\n    \"contract\": {{ \"path\": \"handler.contract.json\", \"sha256\": \"{s}\" }}\n  }}\n}}\n",
-        .{contract_sha},
-    );
+    const manifest = try std.testing.allocator.print("{{\n  \"toolVersion\": \"zttp-bundle-2\",\n  \"components\": {{\n    \"contract\": {{ \"path\": \"handler.contract.json\", \"sha256\": \"{s}\" }}\n  }}\n}}\n", .{contract_sha});
     defer std.testing.allocator.free(manifest);
     try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
 
@@ -1149,11 +1145,7 @@ test "verify rejects an absolute manifest component path" {
 
     try ensureDir(std.testing.allocator, "bundle");
     const secret_sha = sha256Hex("outside-the-bundle");
-    const manifest = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "{{\n  \"toolVersion\": \"" ++ tool_version ++ "\",\n  \"components\": {{\n    \"contract\": {{ \"path\": \"{s}\", \"sha256\": \"{s}\" }}\n  }}\n}}\n",
-        .{ abs_secret, secret_sha },
-    );
+    const manifest = try std.testing.allocator.print("{{\n  \"toolVersion\": \"" ++ tool_version ++ "\",\n  \"components\": {{\n    \"contract\": {{ \"path\": \"{s}\", \"sha256\": \"{s}\" }}\n  }}\n}}\n", .{ abs_secret, secret_sha });
     defer std.testing.allocator.free(manifest);
     try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
 
@@ -1177,11 +1169,7 @@ test "verify rejects a symlink component without hashing its target" {
     try ensureDir(std.testing.allocator, "bundle");
     try tmp.dir.symLink(std.testing.io, "../secret", "bundle/handler.contract.json", .{});
     const secret_sha = sha256Hex("outside-the-bundle");
-    const manifest = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "{{\n  \"toolVersion\": \"" ++ tool_version ++ "\",\n  \"components\": {{\n    \"contract\": {{ \"path\": \"handler.contract.json\", \"sha256\": \"{s}\" }}\n  }}\n}}\n",
-        .{secret_sha},
-    );
+    const manifest = try std.testing.allocator.print("{{\n  \"toolVersion\": \"" ++ tool_version ++ "\",\n  \"components\": {{\n    \"contract\": {{ \"path\": \"handler.contract.json\", \"sha256\": \"{s}\" }}\n  }}\n}}\n", .{secret_sha});
     defer std.testing.allocator.free(manifest);
     try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
 
@@ -1209,11 +1197,7 @@ test "verify rejects an intermediate directory symlink" {
     try tmp.dir.symLink(std.testing.io, "../outside", "bundle/replay", .{ .is_directory = true });
     const secret_sha = sha256Hex("outside-the-bundle");
     const contract_sha = sha256Hex("contract");
-    const manifest = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "{{\n  \"toolVersion\": \"" ++ tool_version ++ "\",\n  \"components\": {{\n    \"contract\": {{ \"path\": \"handler.contract.json\", \"sha256\": \"{s}\" }},\n    \"replay\": {{ \"path\": \"replay/trace.jsonl\", \"sha256\": \"{s}\" }}\n  }}\n}}\n",
-        .{ contract_sha, secret_sha },
-    );
+    const manifest = try std.testing.allocator.print("{{\n  \"toolVersion\": \"" ++ tool_version ++ "\",\n  \"components\": {{\n    \"contract\": {{ \"path\": \"handler.contract.json\", \"sha256\": \"{s}\" }},\n    \"replay\": {{ \"path\": \"replay/trace.jsonl\", \"sha256\": \"{s}\" }}\n  }}\n}}\n", .{ contract_sha, secret_sha });
     defer std.testing.allocator.free(manifest);
     try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
 
@@ -1236,11 +1220,7 @@ test "verify rejects duplicate component paths" {
     try ensureDir(std.testing.allocator, "bundle");
     try zts.file_io.writeFile(std.testing.allocator, "bundle/component", "same-file");
     const sha = sha256Hex("same-file");
-    const manifest = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "{{\"components\":{{\"contract\":{{\"path\":\"component\",\"sha256\":\"{s}\"}},\"binary\":{{\"path\":\"component\",\"sha256\":\"{s}\"}}}}}}",
-        .{ sha, sha },
-    );
+    const manifest = try std.testing.allocator.print("{{\"components\":{{\"contract\":{{\"path\":\"component\",\"sha256\":\"{s}\"}},\"binary\":{{\"path\":\"component\",\"sha256\":\"{s}\"}}}}}}", .{ sha, sha });
     defer std.testing.allocator.free(manifest);
     try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
 
@@ -1262,11 +1242,7 @@ test "verify rejects unsupported manifest components" {
     try ensureDir(std.testing.allocator, "bundle");
     try zts.file_io.writeFile(std.testing.allocator, "bundle/component", "data");
     const sha = sha256Hex("data");
-    const manifest = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "{{\"components\":{{\"extra\":{{\"path\":\"component\",\"sha256\":\"{s}\"}}}}}}",
-        .{sha},
-    );
+    const manifest = try std.testing.allocator.print("{{\"components\":{{\"extra\":{{\"path\":\"component\",\"sha256\":\"{s}\"}}}}}}", .{sha});
     defer std.testing.allocator.free(manifest);
     try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
 
@@ -1287,11 +1263,7 @@ test "verify rejects a supported manifest without a contract" {
     try ensureDir(std.testing.allocator, "bundle");
     try zts.file_io.writeFile(std.testing.allocator, "bundle/trace.jsonl", "valid-replay");
     const sha = sha256Hex("valid-replay");
-    const manifest = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "{{\"components\":{{\"replay\":{{\"path\":\"trace.jsonl\",\"sha256\":\"{s}\"}}}}}}",
-        .{sha},
-    );
+    const manifest = try std.testing.allocator.print("{{\"components\":{{\"replay\":{{\"path\":\"trace.jsonl\",\"sha256\":\"{s}\"}}}}}}", .{sha});
     defer std.testing.allocator.free(manifest);
     try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
 
@@ -1360,11 +1332,7 @@ test "bundle verification refuses every retired module" {
         const json = try zts.file_io.readFile(allocator, "bundle/handler.contract.json", 1024 * 1024);
         defer allocator.free(json);
         const sha = sha256Hex(json);
-        const manifest = try std.fmt.allocPrint(
-            allocator,
-            "{{\"toolVersion\":\"" ++ tool_version ++ "\",\"components\":{{\"contract\":{{\"path\":\"handler.contract.json\",\"sha256\":\"{s}\"}}}}}}",
-            .{sha},
-        );
+        const manifest = try allocator.print("{{\"toolVersion\":\"" ++ tool_version ++ "\",\"components\":{{\"contract\":{{\"path\":\"handler.contract.json\",\"sha256\":\"{s}\"}}}}}}", .{sha});
         defer allocator.free(manifest);
         try zts.file_io.writeFile(allocator, "bundle/bundle.json", manifest);
 
@@ -1390,11 +1358,7 @@ test "bundle verification refuses raw retired contract obligations" {
         try ensureDir(allocator, "bundle");
         try zts.file_io.writeFile(allocator, "bundle/handler.contract.json", contract);
         const sha = sha256Hex(contract);
-        const manifest = try std.fmt.allocPrint(
-            allocator,
-            "{{\"toolVersion\":\"" ++ tool_version ++ "\",\"components\":{{\"contract\":{{\"path\":\"handler.contract.json\",\"sha256\":\"{s}\"}}}}}}",
-            .{sha},
-        );
+        const manifest = try allocator.print("{{\"toolVersion\":\"" ++ tool_version ++ "\",\"components\":{{\"contract\":{{\"path\":\"handler.contract.json\",\"sha256\":\"{s}\"}}}}}}", .{sha});
         defer allocator.free(manifest);
         try zts.file_io.writeFile(allocator, "bundle/bundle.json", manifest);
 

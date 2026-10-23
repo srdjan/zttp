@@ -40,7 +40,7 @@ pub const StageSet = std.EnumSet(Stage);
 pub const CheckResult = struct {
     /// Which stages ran. Internal record for the corpus gate; never part of
     /// the `--json` output.
-    stages_run: StageSet = StageSet.initEmpty(),
+    stages_run: StageSet = StageSet.empty,
     line_count: u32 = 0,
     parse_errors: u32 = 0,
     bool_specializations: u32 = 0,
@@ -591,13 +591,9 @@ fn specDiagnosticMessageAlloc(
     const base = specDiagnosticMessage(diag);
     const subject = specDiagnosticSubject(diag) orelse return allocator.dupe(u8, base);
     if (diag.cause) |cause| {
-        return std.fmt.allocPrint(
-            allocator,
-            "{s}" ++ spec_suffix_with_cause,
-            .{ base, subject, cause.line, cause.column, cause.snippet },
-        );
+        return allocator.print("{s}" ++ spec_suffix_with_cause, .{ base, subject, cause.line, cause.column, cause.snippet });
     }
-    return std.fmt.allocPrint(allocator, "{s}" ++ spec_suffix_plain, .{ base, subject });
+    return allocator.print("{s}" ++ spec_suffix_plain, .{ base, subject });
 }
 
 /// Human-readable message for a spec/Effects diagnostic, mirroring the JSON
@@ -650,7 +646,7 @@ fn hasPolicyDiagnostic(diagnostics: []const json_diag.JsonDiagnostic) bool {
     return false;
 }
 
-const dots = "." ** 32;
+const dots = &@as([32:0]u8, @splat('.'));
 
 fn writeDotted(writer: anytype, label: []const u8, width: usize) void {
     writer.print("  {s} ", .{label}) catch return;
@@ -966,9 +962,9 @@ test "frozen signature corpus: the gate has an input before it has a verdict" {
         const names = [_][]const u8{ "Dict", "Bytes", "FetchOptions", "MessageId" };
         for (names) |name| {
             if (std.mem.indexOf(u8, emitted, name) == null) continue;
-            const declared_type = try std.fmt.allocPrint(allocator, "type {s}", .{name});
+            const declared_type = try allocator.print("type {s}", .{name});
             defer allocator.free(declared_type);
-            const declared_iface = try std.fmt.allocPrint(allocator, "interface {s}", .{name});
+            const declared_iface = try allocator.print("interface {s}", .{name});
             defer allocator.free(declared_iface);
             try std.testing.expect(std.mem.indexOf(u8, emitted, declared_type) != null or
                 std.mem.indexOf(u8, emitted, declared_iface) != null);

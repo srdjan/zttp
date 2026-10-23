@@ -12,6 +12,12 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ### Changed
 
+- **Building from source requires Zig 0.17.0.** The build uses tracked cache
+  outputs and configuration dependencies. Development tools and allocation
+  tests use `SafeAllocator`; release allocator selection stays the same.
+  Local paired best-of-five runs on Apple M4 Pro found `stringOps` about 16–18%
+  slower than the 0.16 baseline binary. The advisory benchmark gate also fails
+  on that baseline binary; its committed baseline and thresholds are unchanged.
 - **The proof gate workflow is an example.** It moved from
   `.github/workflows/proof-gate.yml` to `docs/examples/proof-gate.yml`, and the
   zttp repository no longer runs it. Copy it to `.github/workflows/` in your

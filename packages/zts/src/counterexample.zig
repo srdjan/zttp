@@ -538,8 +538,8 @@ pub fn writeJsonl(writer: anytype, witness: CounterexampleWitness) !void {
 // ---------------------------------------------------------------------------
 
 test "attackInput returns a non-empty literal for every property tag" {
-    inline for (@typeInfo(PropertyTag).@"enum".fields) |field| {
-        const tag = @field(PropertyTag, field.name);
+    inline for (@typeInfo(PropertyTag).@"enum".field_names) |field| {
+        const tag = @field(PropertyTag, field);
         try std.testing.expect(attackInput(tag).len > 0);
     }
     try std.testing.expectEqualStrings("1; DROP TABLE users--", attackInput(.injection_safe));

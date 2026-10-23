@@ -728,14 +728,14 @@ test "SSE failure tag census has a probe for every tag" {
     };
     try std.testing.expect(probes.len > 0);
 
-    const tag_fields = @typeInfo(FailureTag).@"enum".fields;
-    var seen = [_]bool{false} ** tag_fields.len;
+    const tag_fields = @typeInfo(FailureTag).@"enum".field_names;
+    var seen = @as([tag_fields.len]bool, @splat(false));
     for (probes) |probe| {
         try expectFailure(probe.body, probe.bounds, probe.failure);
-        seen[@intFromEnum(probe.failure.tag)] = true;
+        seen[@backingInt(probe.failure.tag)] = true;
     }
     inline for (tag_fields) |field| {
-        try std.testing.expect(seen[field.value]);
+        try std.testing.expect(seen[@backingInt(@field(FailureTag, field))]);
     }
 }
 

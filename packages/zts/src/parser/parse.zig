@@ -104,7 +104,7 @@ const ProgressGuard = struct {
     started: bool = false,
 
     fn iteration(self: *ProgressGuard, parser: *const Parser) void {
-        if (!std.debug.runtime_safety) return;
+        if (!@import("builtin").mode.runtimeSafety()) return;
         if (self.started) std.debug.assert(parser.tokens_advanced != self.seen);
         self.started = true;
         self.seen = parser.tokens_advanced;
@@ -1129,7 +1129,7 @@ pub const Parser = struct {
         self.tokenizer = survivor_tokenizer;
         self.previous = runtime_previous;
         self.current = self.nextTokenStagingAdmissionTrivia();
-        if (std.debug.runtime_safety) self.tokens_advanced +%= 1;
+        if (@import("builtin").mode.runtimeSafety()) self.tokens_advanced +%= 1;
         self.reportNonAscii();
         return true;
     }
@@ -1176,7 +1176,7 @@ pub const Parser = struct {
         self.tokenizer.resumeMalformedStringAt(token_value, lf, runtime_previous);
         self.previous = runtime_previous;
         self.current = self.nextTokenStagingAdmissionTrivia();
-        if (std.debug.runtime_safety) self.tokens_advanced +%= 1;
+        if (@import("builtin").mode.runtimeSafety()) self.tokens_advanced +%= 1;
         self.reportNonAscii();
         return true;
     }
@@ -1206,7 +1206,7 @@ pub const Parser = struct {
         };
         self.tokenizer.resumeAfterRawTemplate(head, raw_end);
         self.current = self.nextTokenStagingAdmissionTrivia();
-        if (std.debug.runtime_safety) self.tokens_advanced +%= 1;
+        if (@import("builtin").mode.runtimeSafety()) self.tokens_advanced +%= 1;
         self.reportNonAscii();
     }
 
@@ -2164,7 +2164,7 @@ pub const Parser = struct {
         self.tokenizer = cursor.tokenizer;
         self.current = cursor.current;
         self.previous = binding_token;
-        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+        if (@import("builtin").mode.runtimeSafety()) self.tokens_advanced +%= cursor.consumed;
         return annotation_index;
     }
 
@@ -2254,7 +2254,7 @@ pub const Parser = struct {
         self.tokenizer = cursor.tokenizer;
         self.current = cursor.current;
         self.previous = previous_token;
-        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+        if (@import("builtin").mode.runtimeSafety()) self.tokens_advanced +%= cursor.consumed;
         return value;
     }
 
@@ -2418,7 +2418,7 @@ pub const Parser = struct {
         self.tokenizer = cursor.tokenizer;
         self.current = cursor.current;
         self.previous = previous;
-        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+        if (@import("builtin").mode.runtimeSafety()) self.tokens_advanced +%= cursor.consumed;
     }
 
     fn tryReserveFunctionGenericOwner(
@@ -3156,7 +3156,7 @@ pub const Parser = struct {
         self.tokenizer = cursor.tokenizer;
         self.current = cursor.current;
         self.previous = previous_token;
-        if (std.debug.runtime_safety) self.tokens_advanced +%= cursor.consumed;
+        if (@import("builtin").mode.runtimeSafety()) self.tokens_advanced +%= cursor.consumed;
         return value;
     }
 
@@ -4902,12 +4902,12 @@ pub const Parser = struct {
             var pending_call: ?type_syntax.PendingExplicitCall = null;
             var prec = self.getInfixPrecedence(self.current.type);
             if (type_syntax.tokenStartsGenericList(self.source, self.current) and
-                @intFromEnum(Precedence.call) > @intFromEnum(min_prec))
+                @backingInt(Precedence.call) > @backingInt(min_prec))
             {
                 pending_call = try self.tryReserveExplicitCall();
                 if (pending_call != null) prec = .call;
             }
-            if (@intFromEnum(prec) <= @intFromEnum(min_prec)) break;
+            if (@backingInt(prec) <= @backingInt(min_prec)) break;
 
             if (@max(chain_depth, self.expression_chain_depth) >= self.recursionLimit()) {
                 if (pending_call) |*pending| self.type_store.cancelExplicitCall(pending);
@@ -5102,7 +5102,7 @@ pub const Parser = struct {
                 }
                 self.advance();
                 const right_prec = if (op_tok.type == .star_star)
-                    @as(Precedence, @enumFromInt(@intFromEnum(prec) - 1)) // Right associative
+                    @as(Precedence, @fromBackingInt(@intCast(@backingInt(prec) - 1))) // Right associative
                 else
                     prec;
                 const right = try self.parseExpression(right_prec);
@@ -5127,7 +5127,7 @@ pub const Parser = struct {
             // Simple assignment only
             .assign => {
                 self.advance();
-                const right = try self.parseExpression(@enumFromInt(@intFromEnum(prec) - 1));
+                const right = try self.parseExpression(@fromBackingInt(@intCast(@backingInt(prec) - 1)));
                 return try self.nodes.add(.{
                     .tag = .assignment,
                     .loc = loc,
@@ -5155,7 +5155,7 @@ pub const Parser = struct {
             => {
                 const binary_op = self.tokenToBinaryOp(op_tok.type);
                 self.advance();
-                const right = try self.parseExpression(@enumFromInt(@intFromEnum(prec) - 1));
+                const right = try self.parseExpression(@fromBackingInt(@intCast(@backingInt(prec) - 1)));
                 return try self.nodes.add(.{
                     .tag = .assignment,
                     .loc = loc,
@@ -5214,7 +5214,7 @@ pub const Parser = struct {
                     if (left_node.tag == .identifier) {
                         const binding = left_node.data.binding;
                         // Check if it's the builtin Object global (undeclared)
-                        if (binding.kind == .undeclared_global and binding.name_atom == @intFromEnum(object.Atom.Object)) {
+                        if (binding.kind == .undeclared_global and binding.name_atom == @backingInt(object.Atom.Object)) {
                             if (std.mem.eql(u8, prop_name, "assign")) {
                                 self.errors.addErrorAt(.unsupported_feature, prop, "'Object.assign' is not supported; use object spread {...obj1, ...obj2} instead");
                                 return error.ParseError;
@@ -6097,7 +6097,7 @@ pub const Parser = struct {
         self.tokenizer.resumeAfterRawErasure(raw_end, runtime_previous);
         self.previous = runtime_previous;
         self.current = self.nextTokenStagingAdmissionTrivia();
-        if (std.debug.runtime_safety) self.tokens_advanced +%= 1;
+        if (@import("builtin").mode.runtimeSafety()) self.tokens_advanced +%= 1;
         self.reportNonAscii();
     }
 
@@ -6147,7 +6147,7 @@ pub const Parser = struct {
 
     fn advance(self: *Parser) void {
         self.advanceAdmissionPresentation();
-        if (std.debug.runtime_safety) self.tokens_advanced +%= 1;
+        if (@import("builtin").mode.runtimeSafety()) self.tokens_advanced +%= 1;
         if (self.admission != null and !self.admissionCoveredByRecovery(self.current.start)) switch (self.current.type) {
             .kw_import => self.admission_in_import = true,
             .semicolon => if (self.admission_in_import) {
@@ -7068,12 +7068,12 @@ pub const Parser = struct {
     fn addAtom(self: *Parser, name: []const u8) !u16 {
         // Check predefined atoms first (e.g., "handler" -> 159)
         if (object.lookupPredefinedAtom(name)) |atom| {
-            return @truncate(@intFromEnum(atom));
+            return @truncate(@backingInt(atom));
         }
         // Intern dynamic atoms if atom table is available
         if (self.atoms) |atoms| {
             const atom = try atoms.intern(name);
-            return @truncate(@intFromEnum(atom));
+            return @truncate(@backingInt(atom));
         }
         // Fall back to string constant pool for dynamic atoms (standalone parser)
         return try self.constants.addString(name);
@@ -7186,7 +7186,7 @@ test "admission parser reaches each syntax-owned refusal producer" {
         .{ .source = "structural Box = void;\n", .kind = .void_type },
     };
     try std.testing.expectEqual(@as(usize, 16), cases.len);
-    var seen = std.EnumSet(type_syntax.AdmissionKind).initEmpty();
+    var seen = std.EnumSet(type_syntax.AdmissionKind).empty;
     for (cases) |case| try expectAdmissionKindFromSource(case.source, case.kind, &seen);
 
     var deep: std.ArrayList(u8) = .empty;
@@ -7195,8 +7195,8 @@ test "admission parser reaches each syntax-owned refusal producer" {
     try deep.appendNTimes(std.testing.allocator, '{', type_syntax.max_type_depth + 1);
     try deep.appendSlice(std.testing.allocator, " string;\n");
     try expectAdmissionKindFromSource(deep.items, .nesting_too_deep, &seen);
-    inline for (@typeInfo(type_syntax.AdmissionKind).@"enum".fields) |field| {
-        const kind: type_syntax.AdmissionKind = @enumFromInt(field.value);
+    inline for (@typeInfo(type_syntax.AdmissionKind).@"enum".field_names) |field| {
+        const kind: type_syntax.AdmissionKind = @fromBackingInt(@intCast(@backingInt(@field(type_syntax.AdmissionKind, field))));
         try std.testing.expect(seen.contains(kind));
     }
 }
@@ -7497,7 +7497,7 @@ test "admission parser preserves observed generic probe outcomes" {
         .{ .case = .rejected_call, .source = "const value = f<`a${\"open\n 1}tail` || T>(x);\n" },
         .{ .case = .unfinished_comment, .source = "function f<T /* unfinished\n" },
     };
-    var seen = std.EnumSet(Cases).initEmpty();
+    var seen = std.EnumSet(Cases).empty;
     for (cases) |case| {
         var parser = try Parser.initAdmission(
             std.testing.allocator,
@@ -7556,7 +7556,7 @@ test "admission parser preserves observed generic probe outcomes" {
         }
         seen.insert(case.case);
     }
-    try std.testing.expectEqual(std.meta.fields(Cases).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(Cases).@"enum".field_names.len, seen.count());
 }
 
 test "admission parser preserves interface body observation order" {
@@ -7897,7 +7897,7 @@ test "admission binding allocation failures retain native out of memory" {
             }
         }
     };
-    var witnessed = std.EnumSet(BindingCase).initEmpty();
+    var witnessed = std.EnumSet(BindingCase).empty;
     for (cases) |case| {
         const marker = std.mem.indexOf(u8, case.source, case.witness) orelse
             return error.TestUnexpectedResult;
@@ -7908,8 +7908,8 @@ test "admission binding allocation failures retain native out of memory" {
             .{ case.case, case.source, case.name, witness_offset, &witnessed },
         );
     }
-    inline for (@typeInfo(BindingCase).@"enum".fields) |field| {
-        try std.testing.expect(witnessed.contains(@enumFromInt(field.value)));
+    inline for (@typeInfo(BindingCase).@"enum".field_names) |field| {
+        try std.testing.expect(witnessed.contains(@fromBackingInt(@intCast(@backingInt(@field(BindingCase, field))))));
     }
 }
 
@@ -8182,7 +8182,7 @@ test "admission header recovery retains later nested block errors" {
 test "admission header recovery propagates allocation failures after refusal" {
     const frame_count = type_syntax.max_type_depth + 1;
     const source = "function f({ x } = `outer${\"open\n" ++
-        ("`nested${" ** frame_count) ++ "value" ++ ("}`" ** frame_count) ++
+        (@as([(frame_count) * ("`nested${").len]u8, @bitCast(@as([frame_count][("`nested${").len]u8, @splat(("`nested${").*))))) ++ "value" ++ (@as([(frame_count) * ("}`").len]u8, @bitCast(@as([frame_count][("}`").len]u8, @splat(("}`").*))))) ++
         "}`, y: any) { return 1; }\n";
     const Sweep = struct {
         fn run(allocator: std.mem.Allocator, post_refusal_failures: *usize) !void {
@@ -11893,7 +11893,7 @@ test "admission declaration names retain the existing keyword vocabulary" {
     const names = [_][]const u8{ "true", "null", "undefined", "function" };
     try std.testing.expectEqual(@as(usize, 4), names.len);
     for (names) |name| {
-        const source = try std.fmt.allocPrint(std.testing.allocator, "structural {s} = number;\nconst live = 1;\n", .{name});
+        const source = try std.testing.allocator.print("structural {s} = number;\nconst live = 1;\n", .{name});
         defer std.testing.allocator.free(source);
         for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
             var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, mode);

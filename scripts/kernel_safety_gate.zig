@@ -14,7 +14,7 @@ fn insideTest(tree: *const std.zig.Ast, token: std.zig.Ast.TokenIndex) bool {
     const tags = tree.nodes.items(.tag);
     for (tags, 0..) |tag, index| {
         if (tag != .test_decl) continue;
-        const node: std.zig.Ast.Node.Index = @enumFromInt(index);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(index));
         const first = tree.tokenStart(tree.firstToken(node));
         const last_token = tree.lastToken(node);
         const last = tree.tokenStart(last_token) + tree.tokenSlice(last_token).len;
@@ -44,7 +44,7 @@ fn checkFunctions(path: []const u8, tree: *const std.zig.Ast) Counts {
     const tags = tree.nodes.items(.tag);
     for (tags, 0..) |tag, index| {
         if (tag != .fn_decl) continue;
-        const node: std.zig.Ast.Node.Index = @enumFromInt(index);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(index));
         const fn_token = tree.nodeMainToken(node);
         if (insideTest(tree, fn_token)) continue;
 
@@ -135,7 +135,7 @@ fn checkFile(
     };
     defer allocator.free(source);
 
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    var tree = try std.zig.Ast.parse(allocator, source, .{});
     defer tree.deinit(allocator);
     if (tree.errors.len != 0) {
         std.debug.print("kernel safety: {s}: Zig parser reported {d} error(s)\n", .{ path, tree.errors.len });
@@ -149,7 +149,7 @@ fn checkFile(
 }
 
 pub fn main(init: std.process.Init) !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
 

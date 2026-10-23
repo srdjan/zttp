@@ -89,8 +89,8 @@ test "budget exhaustion is sticky rather than wrapping" {
 
 test "production limits are non-zero in every field" {
     const l = Limits.production;
-    inline for (@typeInfo(Limits).@"struct".fields) |field| {
-        const value = @field(l, field.name);
+    inline for (@typeInfo(Limits).@"struct".field_names) |field| {
+        const value = @field(l, field);
         try std.testing.expect(value > 0);
     }
 }

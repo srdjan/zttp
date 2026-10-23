@@ -13,11 +13,11 @@ pub const Slot = enum(u4) {
 
 pub fn ownerSpecifier(slot: usize) ?[]const u8 {
     return switch (slot) {
-        @intFromEnum(Slot.sql) => "zttp:sql",
-        @intFromEnum(Slot.validate) => "zttp:validate",
-        @intFromEnum(Slot.cache) => "zttp:cache",
-        @intFromEnum(Slot.ratelimit) => "zttp:ratelimit",
-        @intFromEnum(Slot.fetch) => "zttp:fetch",
+        @backingInt(Slot.sql) => "zttp:sql",
+        @backingInt(Slot.validate) => "zttp:validate",
+        @backingInt(Slot.cache) => "zttp:cache",
+        @backingInt(Slot.ratelimit) => "zttp:ratelimit",
+        @backingInt(Slot.fetch) => "zttp:fetch",
         else => null,
     };
 }
@@ -33,21 +33,21 @@ pub fn isOwnedBySpecifier(slot: usize, specifier: []const u8) bool {
     // (zttp:validate) populated; without this the module-state ownership guard
     // makes setModuleState/getModuleState fail and every schema-based decode
     // returns an "internal error" Result (and schemaCompile silently no-ops).
-    if (slot == @intFromEnum(Slot.validate) and std.mem.eql(u8, specifier, "zttp:decode")) return true;
+    if (slot == @backingInt(Slot.validate) and std.mem.eql(u8, specifier, "zttp:decode")) return true;
     return false;
 }
 
 test "module state slots are owned by one active module specifier" {
     const testing = @import("std").testing;
 
-    try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.sql), "zttp:sql"));
-    try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.sql), "zttp:cache"));
-    try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.validate), "zttp:validate"));
+    try testing.expect(isOwnedBySpecifier(@backingInt(Slot.sql), "zttp:sql"));
+    try testing.expect(!isOwnedBySpecifier(@backingInt(Slot.sql), "zttp:cache"));
+    try testing.expect(isOwnedBySpecifier(@backingInt(Slot.validate), "zttp:validate"));
     // zttp:decode co-owns the validate slot (shared schema registry), but no other.
-    try testing.expect(isOwnedBySpecifier(@intFromEnum(Slot.validate), "zttp:decode"));
-    try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.sql), "zttp:decode"));
-    try testing.expect(!isOwnedBySpecifier(@intFromEnum(Slot.cache), "zttp:decode"));
-    try testing.expect(ownerSpecifier(@intFromEnum(Slot.replay)) == null);
+    try testing.expect(isOwnedBySpecifier(@backingInt(Slot.validate), "zttp:decode"));
+    try testing.expect(!isOwnedBySpecifier(@backingInt(Slot.sql), "zttp:decode"));
+    try testing.expect(!isOwnedBySpecifier(@backingInt(Slot.cache), "zttp:decode"));
+    try testing.expect(ownerSpecifier(@backingInt(Slot.replay)) == null);
     try testing.expect(ownerSpecifier(0) == null);
     try testing.expect(ownerSpecifier(1) == null);
     try testing.expect(ownerSpecifier(6) == null);

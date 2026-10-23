@@ -64,8 +64,8 @@ const Property = enum {
 
 const Set = std.EnumSet(Property);
 
-const all: Set = Set.initFull();
-const none: Set = Set.initEmpty();
+const all: Set = Set.full;
+const none: Set = Set.empty;
 const all_but_secret: Set = Set.initMany(&.{ .no_credential_leakage, .input_validated, .pii_contained, .injection_safe });
 const all_but_secret_credential: Set = Set.initMany(&.{ .input_validated, .pii_contained, .injection_safe });
 const secret_and_credential_only: Set = Set.initMany(&.{ .no_secret_leakage, .no_credential_leakage });
@@ -178,7 +178,7 @@ fn observe(allocator: std.mem.Allocator, entry: Entry) !Set {
         return error.NoHandlerProperties;
     };
 
-    var held = Set.initEmpty();
+    var held = Set.empty;
     if (properties.no_secret_leakage) held.insert(.no_secret_leakage);
     if (properties.no_credential_leakage) held.insert(.no_credential_leakage);
     if (properties.input_validated) held.insert(.input_validated);

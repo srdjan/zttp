@@ -114,8 +114,8 @@ pub const Property = enum(u16) {
     pub fn consumerCheckedCount() usize {
         @setRuntimeSafety(true);
         var count: usize = 0;
-        inline for (@typeInfo(Property).@"enum".fields) |field| {
-            const property: Property = @enumFromInt(field.value);
+        inline for (@typeInfo(Property).@"enum".field_names) |field| {
+            const property: Property = @fromBackingInt(@intCast(@backingInt(@field(Property, field))));
             if (property.consumerChecked()) count += 1;
         }
         return count;
@@ -256,9 +256,9 @@ test "wire decoders refuse values outside the alphabet" {
 
 test "every alphabet member round trips through its wire decoder" {
     inline for (.{ ProofSystem, Property, Rule, NodeTag, TrustReason }) |T| {
-        inline for (@typeInfo(T).@"enum".fields) |field| {
-            const member: T = @enumFromInt(field.value);
-            try std.testing.expectEqual(@as(?T, member), T.fromWire(field.value));
+        inline for (@typeInfo(T).@"enum".field_names) |field| {
+            const member: T = @fromBackingInt(@intCast(@backingInt(@field(T, field))));
+            try std.testing.expectEqual(@as(?T, member), T.fromWire(@backingInt(@field(T, field))));
         }
     }
 }
@@ -266,11 +266,11 @@ test "every alphabet member round trips through its wire decoder" {
 test "the ratchet floor is met and the two halves partition the alphabet" {
     var checked: usize = 0;
     var disclosed: usize = 0;
-    inline for (@typeInfo(Property).@"enum".fields) |field| {
-        const p: Property = @enumFromInt(field.value);
+    inline for (@typeInfo(Property).@"enum".field_names) |field| {
+        const p: Property = @fromBackingInt(@intCast(@backingInt(@field(Property, field))));
         if (p.consumerChecked()) checked += 1 else disclosed += 1;
     }
-    try std.testing.expectEqual(checked + disclosed, @typeInfo(Property).@"enum".fields.len);
+    try std.testing.expectEqual(checked + disclosed, @typeInfo(Property).@"enum".field_names.len);
     try std.testing.expectEqual(checked, Property.consumerCheckedCount());
     // A kernel that re-derives nothing is a kernel that checks nothing. The
     // floor is what stops the ratchet from being turned the wrong way by a
@@ -291,10 +291,10 @@ test "the ratchet floor is met and the two halves partition the alphabet" {
 
 test "every property states its subject and names itself" {
     var entry_function_subjects: usize = 0;
-    inline for (@typeInfo(Property).@"enum".fields) |field| {
-        const p: Property = @enumFromInt(field.value);
+    inline for (@typeInfo(Property).@"enum".field_names) |field| {
+        const p: Property = @fromBackingInt(@intCast(@backingInt(@field(Property, field))));
         if (p.subjectIsEntryFunction()) entry_function_subjects += 1;
-        try std.testing.expectEqualStrings(field.name, p.name());
+        try std.testing.expectEqualStrings(field, p.name());
     }
     // Exactly one property is about a named IR member. If that stops being
     // true, obligation reconstruction has to change with it.

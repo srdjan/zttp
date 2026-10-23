@@ -124,7 +124,7 @@ fn scaffoldPaths(allocator: std.mem.Allocator, name: []const u8, relative_paths:
     var initialized: usize = 0;
     errdefer for (paths[0..initialized]) |path| allocator.free(path);
     for (relative_paths, 0..) |relative_path, i| {
-        paths[i] = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ name, relative_path });
+        paths[i] = try allocator.print("{s}/{s}", .{ name, relative_path });
         initialized += 1;
     }
     return paths;
@@ -185,15 +185,15 @@ pub fn scaffoldProject(allocator: std.mem.Allocator, name: []const u8, template:
 
     const project_dir_created = try createScaffoldDir(io, name);
     errdefer if (project_dir_created) std.Io.Dir.cwd().deleteDir(io, name) catch {};
-    const src_dir = try std.fmt.allocPrint(allocator, "{s}/src", .{name});
+    const src_dir = try allocator.print("{s}/src", .{name});
     defer allocator.free(src_dir);
     const src_dir_created = try createScaffoldDir(io, src_dir);
     errdefer if (src_dir_created) std.Io.Dir.cwd().deleteDir(io, src_dir) catch {};
-    const tests_dir = try std.fmt.allocPrint(allocator, "{s}/tests", .{name});
+    const tests_dir = try allocator.print("{s}/tests", .{name});
     defer allocator.free(tests_dir);
     const tests_dir_created = try createScaffoldDir(io, tests_dir);
     errdefer if (tests_dir_created) std.Io.Dir.cwd().deleteDir(io, tests_dir) catch {};
-    const public_dir = try std.fmt.allocPrint(allocator, "{s}/public", .{name});
+    const public_dir = try allocator.print("{s}/public", .{name});
     defer allocator.free(public_dir);
     const public_dir_created = try createScaffoldDir(io, public_dir);
     errdefer if (public_dir_created) std.Io.Dir.cwd().deleteDir(io, public_dir) catch {};
@@ -244,7 +244,7 @@ fn scaffoldExtension(allocator: std.mem.Allocator, name: []const u8) !void {
 
     const extension_dir_created = try createScaffoldDir(io, name);
     errdefer if (extension_dir_created) std.Io.Dir.cwd().deleteDir(io, name) catch {};
-    const src_dir = try std.fmt.allocPrint(allocator, "{s}/src", .{name});
+    const src_dir = try allocator.print("{s}/src", .{name});
     defer allocator.free(src_dir);
     const src_dir_created = try createScaffoldDir(io, src_dir);
     errdefer if (src_dir_created) std.Io.Dir.cwd().deleteDir(io, src_dir) catch {};
@@ -297,7 +297,7 @@ fn renderExtensionTemplate(
     const package_name = try extensionPackageName(allocator, name);
     defer allocator.free(package_name);
     const fingerprint = extensionPackageFingerprint(io, package_name);
-    const fingerprint_text = try std.fmt.allocPrint(allocator, "0x{x}", .{fingerprint});
+    const fingerprint_text = try allocator.print("0x{x}", .{fingerprint});
     defer allocator.free(fingerprint_text);
 
     const named = try std.mem.replaceOwned(u8, allocator, template, "{{name}}", name);
@@ -330,7 +330,7 @@ fn extensionPackageName(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
     }
 
     var checksum_bytes: [4]u8 = undefined;
-    std.mem.writeInt(u32, &checksum_bytes, std.hash.Crc32.hash(name), .big);
+    std.mem.writeInt(u32, &checksum_bytes, std.hash.crc.@"CRC-32/ISO-HDLC".hash(name), .big);
     const checksum_hex = std.fmt.bytesToHex(checksum_bytes, .lower);
     try out.append(allocator, '_');
     try out.appendSlice(allocator, &checksum_hex);
@@ -350,7 +350,7 @@ fn extensionPackageFingerprint(io: std.Io, package_name: []const u8) u64 {
     var id: u32 = undefined;
     io.randomSecure(std.mem.asBytes(&id)) catch io.random(std.mem.asBytes(&id));
     id = 1 + (id % (std.math.maxInt(u32) - 1));
-    const checksum = std.hash.Crc32.hash(package_name);
+    const checksum = std.hash.crc.@"CRC-32/ISO-HDLC".hash(package_name);
     return (@as(u64, checksum) << 32) | id;
 }
 
@@ -687,7 +687,7 @@ const extension_build_zon_template =
     \\    .name = .{{package_name}},
     \\    .version = "0.0.0",
     \\    .fingerprint = {{fingerprint}}, // Changing this has security and trust implications.
-    \\    .minimum_zig_version = "0.16.0",
+    \\    .minimum_zig_version = "0.17.0",
     \\    .dependencies = .{
     \\        // Replace this placeholder with the version of zttp-sdk you depend on.
     \\        // For monorepo use, set `.path = "../zttp-sdk"`. For external use,
@@ -842,7 +842,7 @@ test "init --extension package fingerprint uses package name checksum" {
 
     try testing.expectEqualStrings("zttp_ext_demo_ext", package_name);
     const fingerprint = extensionPackageFingerprint(io, package_name);
-    try testing.expectEqual(std.hash.Crc32.hash(package_name), @as(u32, @truncate(fingerprint >> 32)));
+    try testing.expectEqual(std.hash.crc.@"CRC-32/ISO-HDLC".hash(package_name), @as(u32, @truncate(fingerprint >> 32)));
     // Zig rejects fingerprint ids 0 and 0xffffffff (checked against the 0.16.0 compiler).
     const id: u32 = @truncate(fingerprint);
     try testing.expect(id != 0 and id != 0xffffffff);

@@ -332,3 +332,11 @@ packages/tools/src/precompile_imports.zig analyzeImportedFunction catch-return@2
 # import cannot read as scanned clean. OutOfMemory propagates at the second.
 packages/tools/src/precompile_imports.zig at catch-return
 packages/tools/src/precompile_imports.zig at catch-switch
+
+# Zig 0.17 removes captured errdefer. The validation catch retains an OOM
+# poison flag and returns the original error. The population catches preserve
+# the former errdefer's retained failure and also return the original error;
+# none can turn a failed analysis into a verdict.
+packages/zts/src/type_env.zig populateSourceTypesImpl catch-block
+packages/zts/src/type_env.zig populateSourceTypesImpl catch-block@2
+packages/zts/src/type_env.zig populateParsedDeclaration catch-block

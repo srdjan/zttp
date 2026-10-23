@@ -121,7 +121,7 @@ pub const BytecodeOptimizer = struct {
                 pos += fused;
             } else {
                 // No fusion, advance past current instruction
-                const op: Opcode = @enumFromInt(code[pos]);
+                const op: Opcode = @fromBackingInt(@intCast(code[pos]));
                 pos += bytecode.getOpcodeInfo(op).size;
             }
         }
@@ -135,7 +135,7 @@ pub const BytecodeOptimizer = struct {
 
         var pos: u32 = 0;
         while (pos < code.len) {
-            const op: Opcode = @enumFromInt(code[pos]);
+            const op: Opcode = @fromBackingInt(@intCast(code[pos]));
             const info = bytecode.getOpcodeInfo(op);
 
             // Check if this is a jump instruction
@@ -191,13 +191,13 @@ pub const BytecodeOptimizer = struct {
         // Don't fuse if current instruction is a jump target
         if (self.isJumpTarget(pos)) return 0;
 
-        const op1: Opcode = @enumFromInt(code[pos]);
+        const op1: Opcode = @fromBackingInt(@intCast(code[pos]));
         const info1 = bytecode.getOpcodeInfo(op1);
         const next_pos = pos + info1.size;
 
         if (next_pos >= code.len) return 0;
 
-        const op2: Opcode = @enumFromInt(code[next_pos]);
+        const op2: Opcode = @fromBackingInt(@intCast(code[next_pos]));
         const info2 = bytecode.getOpcodeInfo(op2);
 
         // Special case: if_false + goto fusion
@@ -217,11 +217,11 @@ pub const BytecodeOptimizer = struct {
                 const fused_size: i32 = bytecode.getOpcodeInfo(.if_false_goto).size;
                 const combined_offset: i16 = @intCast(goto_target - @as(i32, @intCast(pos)) - fused_size);
 
-                code[pos] = @intFromEnum(Opcode.if_false_goto);
+                code[pos] = @backingInt(Opcode.if_false_goto);
                 self.writeU16(code, pos + 1, @bitCast(combined_offset));
-                code[pos + 3] = @intFromEnum(Opcode.nop);
-                code[pos + 4] = @intFromEnum(Opcode.nop);
-                code[pos + 5] = @intFromEnum(Opcode.nop);
+                code[pos + 3] = @backingInt(Opcode.nop);
+                code[pos + 4] = @backingInt(Opcode.nop);
+                code[pos + 5] = @backingInt(Opcode.nop);
 
                 stats.if_false_goto_count += 1;
                 stats.dispatches_saved += 1;
@@ -239,10 +239,10 @@ pub const BytecodeOptimizer = struct {
         // Fused: get_loc_add(2) = 2 bytes, NOP 1 byte
         if (op1 == .get_loc and op2 == .add) {
             const local_idx = code[pos + 1];
-            code[pos] = @intFromEnum(Opcode.get_loc_add);
+            code[pos] = @backingInt(Opcode.get_loc_add);
             code[pos + 1] = local_idx;
             // NOP out the add instruction (position 2)
-            code[pos + 2] = @intFromEnum(Opcode.nop);
+            code[pos + 2] = @backingInt(Opcode.nop);
             stats.get_loc_add_count += 1;
             stats.dispatches_saved += 1;
             self.noteRewrite(.get_loc_add, pos, @intCast(info1.size + info2.size), 2);
@@ -261,7 +261,7 @@ pub const BytecodeOptimizer = struct {
                 else => unreachable,
             };
             // Replace in-place: get_loc_X(1) + add(1) = 2 bytes becomes get_loc_add(2) = 2 bytes
-            code[pos] = @intFromEnum(Opcode.get_loc_add);
+            code[pos] = @backingInt(Opcode.get_loc_add);
             code[pos + 1] = local_idx;
             stats.get_loc_add_count += 1;
             stats.dispatches_saved += 1;
@@ -275,16 +275,16 @@ pub const BytecodeOptimizer = struct {
         if (op1 == .get_loc and op2 == .get_loc) {
             const third_pos = next_pos + info2.size;
             if (third_pos < code.len and !self.isJumpTarget(third_pos)) {
-                const op3: Opcode = @enumFromInt(code[third_pos]);
+                const op3: Opcode = @fromBackingInt(@intCast(code[third_pos]));
                 if (op3 == .add) {
                     const local_n = code[pos + 1];
                     const local_m = code[next_pos + 1];
-                    code[pos] = @intFromEnum(Opcode.get_loc_get_loc_add);
+                    code[pos] = @backingInt(Opcode.get_loc_get_loc_add);
                     code[pos + 1] = local_n;
                     code[pos + 2] = local_m;
                     // NOP out remaining bytes (positions 3 and 4)
-                    code[pos + 3] = @intFromEnum(Opcode.nop);
-                    code[pos + 4] = @intFromEnum(Opcode.nop);
+                    code[pos + 3] = @backingInt(Opcode.nop);
+                    code[pos + 4] = @backingInt(Opcode.nop);
                     stats.get_loc_get_loc_add_count += 1;
                     stats.dispatches_saved += 2;
                     stats.bytes_saved += 2;
@@ -305,11 +305,11 @@ pub const BytecodeOptimizer = struct {
         if (op1 == .push_const and op2 == .call) {
             const const_idx = self.readU16(code, pos + 1);
             const argc = code[next_pos + 1];
-            code[pos] = @intFromEnum(Opcode.push_const_call);
+            code[pos] = @backingInt(Opcode.push_const_call);
             self.writeU16(code, pos + 1, const_idx);
             code[pos + 3] = argc;
             // NOP out remaining byte (position 4)
-            code[pos + 4] = @intFromEnum(Opcode.nop);
+            code[pos + 4] = @backingInt(Opcode.nop);
             stats.push_const_call_count += 1;
             stats.dispatches_saved += 1;
             stats.bytes_saved += 1;
@@ -325,10 +325,10 @@ pub const BytecodeOptimizer = struct {
         if (op1 == .push_const and op2 == .call_ic) {
             const const_idx = self.readU16(code, pos + 1);
             const argc = code[next_pos + 1];
-            code[pos] = @intFromEnum(Opcode.push_const_call);
+            code[pos] = @backingInt(Opcode.push_const_call);
             self.writeU16(code, pos + 1, const_idx);
             code[pos + 3] = argc;
-            @memset(code[pos + 4 .. pos + 7], @intFromEnum(Opcode.nop));
+            @memset(code[pos + 4 .. pos + 7], @backingInt(Opcode.nop));
             stats.push_const_call_count += 1;
             stats.dispatches_saved += 1;
             stats.bytes_saved += 3;
@@ -343,11 +343,11 @@ pub const BytecodeOptimizer = struct {
         if (enable_get_field_call_fusion and op1 == .get_field and op2 == .call_method) {
             const atom_idx = self.readU16(code, pos + 1);
             const argc = code[next_pos + 1];
-            code[pos] = @intFromEnum(Opcode.get_field_call);
+            code[pos] = @backingInt(Opcode.get_field_call);
             self.writeU16(code, pos + 1, atom_idx);
             code[pos + 3] = argc;
             // NOP out remaining byte (position 4)
-            code[pos + 4] = @intFromEnum(Opcode.nop);
+            code[pos + 4] = @backingInt(Opcode.nop);
             stats.get_field_call_count += 1;
             stats.dispatches_saved += 1;
             stats.bytes_saved += 1;
@@ -362,13 +362,13 @@ pub const BytecodeOptimizer = struct {
         if (enable_get_field_call_fusion and op1 == .get_field_ic and op2 == .call_method) {
             const atom_idx = self.readU16(code, pos + 1);
             const argc = code[next_pos + 1];
-            code[pos] = @intFromEnum(Opcode.get_field_call);
+            code[pos] = @backingInt(Opcode.get_field_call);
             self.writeU16(code, pos + 1, atom_idx);
             code[pos + 3] = argc;
             // NOP out remaining bytes (positions 4, 5, 6)
-            code[pos + 4] = @intFromEnum(Opcode.nop);
-            code[pos + 5] = @intFromEnum(Opcode.nop);
-            code[pos + 6] = @intFromEnum(Opcode.nop);
+            code[pos + 4] = @backingInt(Opcode.nop);
+            code[pos + 5] = @backingInt(Opcode.nop);
+            code[pos + 6] = @backingInt(Opcode.nop);
             stats.get_field_call_count += 1;
             stats.dispatches_saved += 1;
             stats.bytes_saved += 3;
@@ -389,9 +389,9 @@ pub const BytecodeOptimizer = struct {
             const fused_size: i32 = bytecode.getOpcodeInfo(.drop_goto).size;
             const combined_offset: i16 = @intCast(goto_target - @as(i32, @intCast(pos)) - fused_size);
 
-            code[pos] = @intFromEnum(Opcode.drop_goto);
+            code[pos] = @backingInt(Opcode.drop_goto);
             self.writeU16(code, pos + 1, @bitCast(combined_offset));
-            code[pos + 3] = @intFromEnum(Opcode.nop);
+            code[pos + 3] = @backingInt(Opcode.nop);
             stats.drop_goto_count += 1;
             stats.dispatches_saved += 1;
             stats.bytes_saved += 1;
@@ -434,7 +434,7 @@ pub const BytecodeOptimizer = struct {
         var write_pos: u32 = 0;
         while (read_pos < code.len) {
             try offset_map.put(self.allocator, read_pos, write_pos);
-            const op: Opcode = @enumFromInt(code[read_pos]);
+            const op: Opcode = @fromBackingInt(@intCast(code[read_pos]));
             const size = bytecode.getOpcodeInfo(op).size;
             if (op != .nop) {
                 write_pos += size;
@@ -461,7 +461,7 @@ pub const BytecodeOptimizer = struct {
         // Second pass: update jump offsets
         read_pos = 0;
         while (read_pos < code.len) {
-            const op: Opcode = @enumFromInt(code[read_pos]);
+            const op: Opcode = @fromBackingInt(@intCast(code[read_pos]));
             const info = bytecode.getOpcodeInfo(op);
 
             switch (op) {
@@ -514,7 +514,7 @@ pub const BytecodeOptimizer = struct {
             var final_len: u32 = 0;
             var scan: u32 = 0;
             while (scan < code.len) {
-                const scan_op: Opcode = @enumFromInt(code[scan]);
+                const scan_op: Opcode = @fromBackingInt(@intCast(code[scan]));
                 const scan_size = bytecode.getOpcodeInfo(scan_op).size;
                 if (scan_op != .nop) final_len += scan_size;
                 scan += scan_size;
@@ -534,7 +534,7 @@ pub const BytecodeOptimizer = struct {
         read_pos = 0;
         write_pos = 0;
         while (read_pos < code.len) {
-            const op: Opcode = @enumFromInt(code[read_pos]);
+            const op: Opcode = @fromBackingInt(@intCast(code[read_pos]));
             const size = bytecode.getOpcodeInfo(op).size;
             if (op != .nop) {
                 if (write_pos != read_pos) {
@@ -594,9 +594,9 @@ test "BytecodeOptimizer: get_loc + add fusion" {
 
     // get_loc 5, add -> get_loc_add 5
     var code = [_]u8{
-        @intFromEnum(Opcode.get_loc), 5, // get_loc 5
-        @intFromEnum(Opcode.add), // add
-        @intFromEnum(Opcode.ret), // ret
+        @backingInt(Opcode.get_loc), 5, // get_loc 5
+        @backingInt(Opcode.add), // add
+        @backingInt(Opcode.ret), // ret
     };
 
     var optimizer = BytecodeOptimizer.init(allocator);
@@ -608,9 +608,9 @@ test "BytecodeOptimizer: get_loc + add fusion" {
     try std.testing.expectEqual(@as(u32, 1), stats.dispatches_saved);
 
     // Verify bytecode was modified
-    try std.testing.expectEqual(@intFromEnum(Opcode.get_loc_add), code[0]);
+    try std.testing.expectEqual(@backingInt(Opcode.get_loc_add), code[0]);
     try std.testing.expectEqual(@as(u8, 5), code[1]);
-    try std.testing.expectEqual(@intFromEnum(Opcode.nop), code[2]);
+    try std.testing.expectEqual(@backingInt(Opcode.nop), code[2]);
 }
 
 test "BytecodeOptimizer: get_loc + get_loc + add fusion" {
@@ -618,10 +618,10 @@ test "BytecodeOptimizer: get_loc + get_loc + add fusion" {
 
     // get_loc 2, get_loc 3, add -> get_loc_get_loc_add 2 3
     var code = [_]u8{
-        @intFromEnum(Opcode.get_loc), 2, // get_loc 2
-        @intFromEnum(Opcode.get_loc), 3, // get_loc 3
-        @intFromEnum(Opcode.add), // add
-        @intFromEnum(Opcode.ret), // ret
+        @backingInt(Opcode.get_loc), 2, // get_loc 2
+        @backingInt(Opcode.get_loc), 3, // get_loc 3
+        @backingInt(Opcode.add), // add
+        @backingInt(Opcode.ret), // ret
     };
 
     var optimizer = BytecodeOptimizer.init(allocator);
@@ -633,7 +633,7 @@ test "BytecodeOptimizer: get_loc + get_loc + add fusion" {
     try std.testing.expectEqual(@as(u32, 2), stats.dispatches_saved);
 
     // Verify bytecode
-    try std.testing.expectEqual(@intFromEnum(Opcode.get_loc_get_loc_add), code[0]);
+    try std.testing.expectEqual(@backingInt(Opcode.get_loc_get_loc_add), code[0]);
     try std.testing.expectEqual(@as(u8, 2), code[1]);
     try std.testing.expectEqual(@as(u8, 3), code[2]);
 }
@@ -643,9 +643,9 @@ test "BytecodeOptimizer: push_const + call fusion" {
 
     // push_const 0x0102, call 3 -> push_const_call 0x0102 3
     var code = [_]u8{
-        @intFromEnum(Opcode.push_const), 0x02, 0x01, // push_const 258 (little-endian)
-        @intFromEnum(Opcode.call), 3, // call with 3 args
-        @intFromEnum(Opcode.ret), // ret
+        @backingInt(Opcode.push_const), 0x02, 0x01, // push_const 258 (little-endian)
+        @backingInt(Opcode.call), 3, // call with 3 args
+        @backingInt(Opcode.ret), // ret
     };
 
     var optimizer = BytecodeOptimizer.init(allocator);
@@ -656,7 +656,7 @@ test "BytecodeOptimizer: push_const + call fusion" {
     try std.testing.expectEqual(@as(u32, 1), stats.push_const_call_count);
 
     // Verify bytecode
-    try std.testing.expectEqual(@intFromEnum(Opcode.push_const_call), code[0]);
+    try std.testing.expectEqual(@backingInt(Opcode.push_const_call), code[0]);
     try std.testing.expectEqual(@as(u8, 0x02), code[1]); // Low byte of const idx
     try std.testing.expectEqual(@as(u8, 0x01), code[2]); // High byte of const idx
     try std.testing.expectEqual(@as(u8, 3), code[3]); // argc
@@ -667,9 +667,9 @@ test "BytecodeOptimizer: push_const + call_ic fusion" {
 
     // push_const 0x0102, call_ic 3 cache=0 -> push_const_call 0x0102 3, NOP NOP NOP
     var code = [_]u8{
-        @intFromEnum(Opcode.push_const), 0x02,                     0x01,
-        @intFromEnum(Opcode.call_ic),    3,                        0x00,
-        0x00,                            @intFromEnum(Opcode.ret),
+        @backingInt(Opcode.push_const), 0x02,                    0x01,
+        @backingInt(Opcode.call_ic),    3,                       0x00,
+        0x00,                           @backingInt(Opcode.ret),
     };
 
     var optimizer = BytecodeOptimizer.init(allocator);
@@ -680,13 +680,13 @@ test "BytecodeOptimizer: push_const + call_ic fusion" {
     try std.testing.expectEqual(@as(u32, 1), stats.push_const_call_count);
     try std.testing.expectEqual(@as(u32, 3), stats.bytes_saved);
 
-    try std.testing.expectEqual(@intFromEnum(Opcode.push_const_call), code[0]);
+    try std.testing.expectEqual(@backingInt(Opcode.push_const_call), code[0]);
     try std.testing.expectEqual(@as(u8, 0x02), code[1]);
     try std.testing.expectEqual(@as(u8, 0x01), code[2]);
     try std.testing.expectEqual(@as(u8, 3), code[3]);
-    try std.testing.expectEqual(@intFromEnum(Opcode.nop), code[4]);
-    try std.testing.expectEqual(@intFromEnum(Opcode.nop), code[5]);
-    try std.testing.expectEqual(@intFromEnum(Opcode.nop), code[6]);
+    try std.testing.expectEqual(@backingInt(Opcode.nop), code[4]);
+    try std.testing.expectEqual(@backingInt(Opcode.nop), code[5]);
+    try std.testing.expectEqual(@backingInt(Opcode.nop), code[6]);
 }
 
 test "BytecodeOptimizer: no fusion across jump target" {
@@ -695,10 +695,10 @@ test "BytecodeOptimizer: no fusion across jump target" {
     // Jump targets should prevent fusion
     // goto +0 (to the get_loc), get_loc 5, add
     var code = [_]u8{
-        @intFromEnum(Opcode.goto), 0x00, 0x00, // goto +0 (jump to next instruction)
-        @intFromEnum(Opcode.get_loc), 5, // get_loc 5 - this is a jump target
-        @intFromEnum(Opcode.add), // add
-        @intFromEnum(Opcode.ret),
+        @backingInt(Opcode.goto), 0x00, 0x00, // goto +0 (jump to next instruction)
+        @backingInt(Opcode.get_loc), 5, // get_loc 5 - this is a jump target
+        @backingInt(Opcode.add), // add
+        @backingInt(Opcode.ret),
     };
 
     var optimizer = BytecodeOptimizer.init(allocator);
@@ -710,18 +710,18 @@ test "BytecodeOptimizer: no fusion across jump target" {
     try std.testing.expectEqual(@as(u32, 0), stats.get_loc_add_count);
 
     // Verify bytecode unchanged (except for our pattern detection, but get_loc should stay)
-    try std.testing.expectEqual(@intFromEnum(Opcode.get_loc), code[3]);
+    try std.testing.expectEqual(@backingInt(Opcode.get_loc), code[3]);
 }
 
 test "BytecodeOptimizer: compact removes NOPs" {
     const allocator = std.testing.allocator;
 
     var code = [_]u8{
-        @intFromEnum(Opcode.push_0), // push_0
-        @intFromEnum(Opcode.nop), // nop (to be removed)
-        @intFromEnum(Opcode.nop), // nop (to be removed)
-        @intFromEnum(Opcode.push_1), // push_1
-        @intFromEnum(Opcode.ret), // ret
+        @backingInt(Opcode.push_0), // push_0
+        @backingInt(Opcode.nop), // nop (to be removed)
+        @backingInt(Opcode.nop), // nop (to be removed)
+        @backingInt(Opcode.push_1), // push_1
+        @backingInt(Opcode.ret), // ret
     };
 
     var optimizer = BytecodeOptimizer.init(allocator);
@@ -730,9 +730,9 @@ test "BytecodeOptimizer: compact removes NOPs" {
     const new_len = try optimizer.compact(&code);
 
     try std.testing.expectEqual(@as(usize, 3), new_len);
-    try std.testing.expectEqual(@intFromEnum(Opcode.push_0), code[0]);
-    try std.testing.expectEqual(@intFromEnum(Opcode.push_1), code[1]);
-    try std.testing.expectEqual(@intFromEnum(Opcode.ret), code[2]);
+    try std.testing.expectEqual(@backingInt(Opcode.push_0), code[0]);
+    try std.testing.expectEqual(@backingInt(Opcode.push_1), code[1]);
+    try std.testing.expectEqual(@backingInt(Opcode.ret), code[2]);
 }
 
 test "BytecodeOptimizer: compactWithLineTable remaps interior offsets to their instruction" {
@@ -741,9 +741,9 @@ test "BytecodeOptimizer: compactWithLineTable remaps interior offsets to their i
     // push_i16 (3 bytes) occupies [0,3); a line entry recorded at offset 1 is
     // interior to it. Two NOPs are removed, shifting later boundaries down.
     var code = [_]u8{
-        @intFromEnum(Opcode.push_i16), 0x00,                     0x00,
-        @intFromEnum(Opcode.nop),      @intFromEnum(Opcode.nop), @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.ret),
+        @backingInt(Opcode.push_i16), 0x00,                    0x00,
+        @backingInt(Opcode.nop),      @backingInt(Opcode.nop), @backingInt(Opcode.push_1),
+        @backingInt(Opcode.ret),
     };
     var line_table = [_]bytecode.LineEntry{
         .{ .offset = 0, .line = 10, .column = 1 }, // instruction boundary
@@ -778,10 +778,10 @@ test "BytecodeOptimizer: compact updates jump offsets" {
     // nop, nop, push_1, ret
     // After compaction: if_false +1 (skip push_1 to ret)
     var code = [_]u8{
-        @intFromEnum(Opcode.push_true),
-        @intFromEnum(Opcode.if_false), 0x03,                     0x00, // if_false, offset +3
-        @intFromEnum(Opcode.nop),      @intFromEnum(Opcode.nop), @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.ret),
+        @backingInt(Opcode.push_true),
+        @backingInt(Opcode.if_false), 0x03,                    0x00, // if_false, offset +3
+        @backingInt(Opcode.nop),      @backingInt(Opcode.nop), @backingInt(Opcode.push_1),
+        @backingInt(Opcode.ret),
     };
 
     var optimizer = BytecodeOptimizer.init(allocator);
@@ -791,8 +791,8 @@ test "BytecodeOptimizer: compact updates jump offsets" {
 
     try std.testing.expectEqual(@as(usize, 6), new_len);
     // After compaction: push_true, if_false +1, push_1, ret
-    try std.testing.expectEqual(@intFromEnum(Opcode.push_true), code[0]);
-    try std.testing.expectEqual(@intFromEnum(Opcode.if_false), code[1]);
+    try std.testing.expectEqual(@backingInt(Opcode.push_true), code[0]);
+    try std.testing.expectEqual(@backingInt(Opcode.if_false), code[1]);
     // Offset should be updated: originally +3 (over nop, nop, push_1)
     // Now should be +1 (over push_1)
     const new_offset: i16 = @bitCast(@as(u16, code[2]) | (@as(u16, code[3]) << 8));
@@ -805,9 +805,9 @@ test "BytecodeOptimizer: full optimize and compact" {
     // get_loc 1, get_loc 2, add, ret
     // Should become: get_loc_get_loc_add 1 2, ret (with NOPs compacted)
     var code = [_]u8{
-        @intFromEnum(Opcode.get_loc), 1,
-        @intFromEnum(Opcode.get_loc), 2,
-        @intFromEnum(Opcode.add),     @intFromEnum(Opcode.ret),
+        @backingInt(Opcode.get_loc), 1,
+        @backingInt(Opcode.get_loc), 2,
+        @backingInt(Opcode.add),     @backingInt(Opcode.ret),
     };
 
     const result = try optimizeBytecode(allocator, &code);
@@ -815,10 +815,10 @@ test "BytecodeOptimizer: full optimize and compact" {
     try std.testing.expectEqual(@as(u32, 1), result.stats.get_loc_get_loc_add_count);
     // After compaction: get_loc_get_loc_add 1 2 (3 bytes) + ret (1 byte) = 4 bytes
     try std.testing.expectEqual(@as(usize, 4), result.len);
-    try std.testing.expectEqual(@intFromEnum(Opcode.get_loc_get_loc_add), code[0]);
+    try std.testing.expectEqual(@backingInt(Opcode.get_loc_get_loc_add), code[0]);
     try std.testing.expectEqual(@as(u8, 1), code[1]);
     try std.testing.expectEqual(@as(u8, 2), code[2]);
-    try std.testing.expectEqual(@intFromEnum(Opcode.ret), code[3]);
+    try std.testing.expectEqual(@backingInt(Opcode.ret), code[3]);
 }
 
 test "BytecodeOptimizer: get_loc_0 + add fusion" {
@@ -828,10 +828,10 @@ test "BytecodeOptimizer: get_loc_0 + add fusion" {
     // Original: get_loc_0(1) + add(1) = 2 bytes
     // Fused: get_loc_add(2) = 2 bytes (same size)
     var code = [_]u8{
-        @intFromEnum(Opcode.push_1), // Push something for the add
-        @intFromEnum(Opcode.get_loc_0), // get_loc_0 (1 byte)
-        @intFromEnum(Opcode.add), // add (1 byte)
-        @intFromEnum(Opcode.ret),
+        @backingInt(Opcode.push_1), // Push something for the add
+        @backingInt(Opcode.get_loc_0), // get_loc_0 (1 byte)
+        @backingInt(Opcode.add), // add (1 byte)
+        @backingInt(Opcode.ret),
     };
 
     var optimizer = BytecodeOptimizer.init(allocator);
@@ -841,9 +841,9 @@ test "BytecodeOptimizer: get_loc_0 + add fusion" {
 
     try std.testing.expectEqual(@as(u32, 1), stats.get_loc_add_count);
     try std.testing.expectEqual(@as(u32, 1), stats.dispatches_saved);
-    try std.testing.expectEqual(@intFromEnum(Opcode.get_loc_add), code[1]);
+    try std.testing.expectEqual(@backingInt(Opcode.get_loc_add), code[1]);
     try std.testing.expectEqual(@as(u8, 0), code[2]);
-    try std.testing.expectEqual(@intFromEnum(Opcode.ret), code[3]);
+    try std.testing.expectEqual(@backingInt(Opcode.ret), code[3]);
 }
 
 test "BytecodeOptimizer: get_loc_3 + add fusion" {
@@ -851,9 +851,9 @@ test "BytecodeOptimizer: get_loc_3 + add fusion" {
 
     // get_loc_3, add -> get_loc_add 3
     var code = [_]u8{
-        @intFromEnum(Opcode.get_loc_3), // get_loc_3 (1 byte)
-        @intFromEnum(Opcode.add), // add (1 byte)
-        @intFromEnum(Opcode.ret),
+        @backingInt(Opcode.get_loc_3), // get_loc_3 (1 byte)
+        @backingInt(Opcode.add), // add (1 byte)
+        @backingInt(Opcode.ret),
     };
 
     var optimizer = BytecodeOptimizer.init(allocator);
@@ -862,9 +862,9 @@ test "BytecodeOptimizer: get_loc_3 + add fusion" {
     const stats = try optimizer.optimize(&code);
 
     try std.testing.expectEqual(@as(u32, 1), stats.get_loc_add_count);
-    try std.testing.expectEqual(@intFromEnum(Opcode.get_loc_add), code[0]);
+    try std.testing.expectEqual(@backingInt(Opcode.get_loc_add), code[0]);
     try std.testing.expectEqual(@as(u8, 3), code[1]);
-    try std.testing.expectEqual(@intFromEnum(Opcode.ret), code[2]);
+    try std.testing.expectEqual(@backingInt(Opcode.ret), code[2]);
 }
 
 test "BytecodeOptimizer: if_false + goto fusion" {
@@ -881,12 +881,12 @@ test "BytecodeOptimizer: if_false + goto fusion" {
     // 8: ret
     // ... (padding to ensure valid jump target)
     var code = [_]u8{
-        @intFromEnum(Opcode.push_true), // 0: condition
-        @intFromEnum(Opcode.if_false), 0x00, 0x00, // 1-3: if_false +0 -> pos 4
-        @intFromEnum(Opcode.goto), 0x02, 0x00, // 4-6: goto +2 -> pos 9
-        @intFromEnum(Opcode.push_1), // 7: true branch
-        @intFromEnum(Opcode.ret), // 8: return
-        @intFromEnum(Opcode.push_0), // 9: false branch target
+        @backingInt(Opcode.push_true), // 0: condition
+        @backingInt(Opcode.if_false), 0x00, 0x00, // 1-3: if_false +0 -> pos 4
+        @backingInt(Opcode.goto), 0x02, 0x00, // 4-6: goto +2 -> pos 9
+        @backingInt(Opcode.push_1), // 7: true branch
+        @backingInt(Opcode.ret), // 8: return
+        @backingInt(Opcode.push_0), // 9: false branch target
     };
 
     var optimizer = BytecodeOptimizer.init(allocator);
@@ -899,15 +899,15 @@ test "BytecodeOptimizer: if_false + goto fusion" {
     try std.testing.expectEqual(@as(u32, 3), stats.bytes_saved);
 
     // Verify bytecode was modified
-    try std.testing.expectEqual(@intFromEnum(Opcode.if_false_goto), code[1]);
+    try std.testing.expectEqual(@backingInt(Opcode.if_false_goto), code[1]);
     // The combined offset should jump from pos 1 to pos 9 (false target)
     // Offset = 9 - 1 - 3 (size of if_false_goto) = 5
     const fused_offset: i16 = @bitCast(@as(u16, code[2]) | (@as(u16, code[3]) << 8));
     try std.testing.expectEqual(@as(i16, 5), fused_offset);
     // NOPs where goto was
-    try std.testing.expectEqual(@intFromEnum(Opcode.nop), code[4]);
-    try std.testing.expectEqual(@intFromEnum(Opcode.nop), code[5]);
-    try std.testing.expectEqual(@intFromEnum(Opcode.nop), code[6]);
+    try std.testing.expectEqual(@backingInt(Opcode.nop), code[4]);
+    try std.testing.expectEqual(@backingInt(Opcode.nop), code[5]);
+    try std.testing.expectEqual(@backingInt(Opcode.nop), code[6]);
 }
 
 test "BytecodeOptimizer: drop + goto fusion" {
@@ -922,15 +922,15 @@ test "BytecodeOptimizer: drop + goto fusion" {
     // 7: nop (padding)
     // 8: push_0 (jump target)
     var code = [_]u8{
-        @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.drop),
-        @intFromEnum(Opcode.goto),
+        @backingInt(Opcode.push_1),
+        @backingInt(Opcode.drop),
+        @backingInt(Opcode.goto),
         0x03,
         0x00,
-        @intFromEnum(Opcode.push_2),
-        @intFromEnum(Opcode.ret),
-        @intFromEnum(Opcode.nop),
-        @intFromEnum(Opcode.push_0),
+        @backingInt(Opcode.push_2),
+        @backingInt(Opcode.ret),
+        @backingInt(Opcode.nop),
+        @backingInt(Opcode.push_0),
     };
 
     var optimizer = BytecodeOptimizer.init(allocator);
@@ -945,10 +945,10 @@ test "BytecodeOptimizer: drop + goto fusion" {
     // drop becomes drop_goto; operand is offset from end of fused instruction.
     // Original goto at pos 2 jumps to 2 + 3 + 3 = 8.
     // Fused drop_goto at pos 1, size 3, must also target 8: offset = 8 - 1 - 3 = 4.
-    try std.testing.expectEqual(@intFromEnum(Opcode.drop_goto), code[1]);
+    try std.testing.expectEqual(@backingInt(Opcode.drop_goto), code[1]);
     const fused_offset: i16 = @bitCast(@as(u16, code[2]) | (@as(u16, code[3]) << 8));
     try std.testing.expectEqual(@as(i16, 4), fused_offset);
-    try std.testing.expectEqual(@intFromEnum(Opcode.nop), code[4]);
+    try std.testing.expectEqual(@backingInt(Opcode.nop), code[4]);
 }
 
 test "BytecodeOptimizer: compact updates drop_goto offsets" {
@@ -963,16 +963,16 @@ test "BytecodeOptimizer: compact updates drop_goto offsets" {
     // 7-8: nop, nop (both compacted away)
     // 9: push_0 (jump target)
     var code = [_]u8{
-        @intFromEnum(Opcode.push_1),
-        @intFromEnum(Opcode.drop),
-        @intFromEnum(Opcode.goto),
+        @backingInt(Opcode.push_1),
+        @backingInt(Opcode.drop),
+        @backingInt(Opcode.goto),
         0x04,
         0x00,
-        @intFromEnum(Opcode.push_2),
-        @intFromEnum(Opcode.ret),
-        @intFromEnum(Opcode.nop),
-        @intFromEnum(Opcode.nop),
-        @intFromEnum(Opcode.push_0),
+        @backingInt(Opcode.push_2),
+        @backingInt(Opcode.ret),
+        @backingInt(Opcode.nop),
+        @backingInt(Opcode.nop),
+        @backingInt(Opcode.push_0),
     };
 
     var optimizer = BytecodeOptimizer.init(allocator);
@@ -982,13 +982,13 @@ test "BytecodeOptimizer: compact updates drop_goto offsets" {
     const new_len = try optimizer.compact(&code);
 
     try std.testing.expectEqual(@as(usize, 7), new_len);
-    try std.testing.expectEqual(@intFromEnum(Opcode.drop_goto), code[1]);
+    try std.testing.expectEqual(@backingInt(Opcode.drop_goto), code[1]);
 
     // After compaction, the old target at pos 9 moves to pos 6.
     // New offset = 6 - 1 - 3 = 2.
     const compacted_offset: i16 = @bitCast(@as(u16, code[2]) | (@as(u16, code[3]) << 8));
     try std.testing.expectEqual(@as(i16, 2), compacted_offset);
-    try std.testing.expectEqual(@intFromEnum(Opcode.push_0), code[6]);
+    try std.testing.expectEqual(@backingInt(Opcode.push_0), code[6]);
 }
 
 test "BytecodeOptimizer: drop + goto no fusion across jump target" {
@@ -1004,15 +1004,15 @@ test "BytecodeOptimizer: drop + goto no fusion across jump target" {
     // 5-7: goto -2 (unimportant; only the fact that pos 5 is a jump target matters)
     // 8: ret
     var code = [_]u8{
-        @intFromEnum(Opcode.push_true),
-        @intFromEnum(Opcode.if_false),
+        @backingInt(Opcode.push_true),
+        @backingInt(Opcode.if_false),
         0x01,
         0x00,
-        @intFromEnum(Opcode.drop),
-        @intFromEnum(Opcode.goto),
+        @backingInt(Opcode.drop),
+        @backingInt(Opcode.goto),
         0xFE,
         0xFF,
-        @intFromEnum(Opcode.ret),
+        @backingInt(Opcode.ret),
     };
 
     var optimizer = BytecodeOptimizer.init(allocator);
@@ -1021,8 +1021,8 @@ test "BytecodeOptimizer: drop + goto no fusion across jump target" {
     const stats = try optimizer.optimize(&code);
 
     try std.testing.expectEqual(@as(u32, 0), stats.drop_goto_count);
-    try std.testing.expectEqual(@intFromEnum(Opcode.drop), code[4]);
-    try std.testing.expectEqual(@intFromEnum(Opcode.goto), code[5]);
+    try std.testing.expectEqual(@backingInt(Opcode.drop), code[4]);
+    try std.testing.expectEqual(@backingInt(Opcode.goto), code[5]);
 }
 
 test "BytecodeOptimizer: if_false + goto no fusion when targets differ" {
@@ -1031,12 +1031,12 @@ test "BytecodeOptimizer: if_false + goto no fusion when targets differ" {
     // if_false jumps to somewhere OTHER than the goto, so no fusion should occur
     // if_false +3 (jumps to push_1, not to goto), goto +2
     var code = [_]u8{
-        @intFromEnum(Opcode.push_true), // 0: condition
-        @intFromEnum(Opcode.if_false), 0x03, 0x00, // 1-3: if_false +3 -> pos 7 (not goto at pos 4)
-        @intFromEnum(Opcode.goto), 0x02, 0x00, // 4-6: goto +2
-        @intFromEnum(Opcode.push_1), // 7: target of if_false
-        @intFromEnum(Opcode.ret), // 8
-        @intFromEnum(Opcode.push_0), // 9: target of goto
+        @backingInt(Opcode.push_true), // 0: condition
+        @backingInt(Opcode.if_false), 0x03, 0x00, // 1-3: if_false +3 -> pos 7 (not goto at pos 4)
+        @backingInt(Opcode.goto), 0x02, 0x00, // 4-6: goto +2
+        @backingInt(Opcode.push_1), // 7: target of if_false
+        @backingInt(Opcode.ret), // 8
+        @backingInt(Opcode.push_0), // 9: target of goto
     };
 
     var optimizer = BytecodeOptimizer.init(allocator);
@@ -1047,6 +1047,6 @@ test "BytecodeOptimizer: if_false + goto no fusion when targets differ" {
     // No fusion should happen
     try std.testing.expectEqual(@as(u32, 0), stats.if_false_goto_count);
     // Original instructions should be unchanged
-    try std.testing.expectEqual(@intFromEnum(Opcode.if_false), code[1]);
-    try std.testing.expectEqual(@intFromEnum(Opcode.goto), code[4]);
+    try std.testing.expectEqual(@backingInt(Opcode.if_false), code[1]);
+    try std.testing.expectEqual(@backingInt(Opcode.goto), code[4]);
 }

@@ -164,7 +164,7 @@ pub const Arena = struct {
         self.freeOverflow();
 
         // Optionally poison memory in debug builds
-        if (std.debug.runtime_safety) {
+        if (@import("builtin").mode.runtimeSafety()) {
             const len = @intFromPtr(self.limit) - @intFromPtr(self.base);
             @memset(self.base[0..len], 0xAA);
         }
@@ -321,7 +321,7 @@ pub const Arena = struct {
 
 fn arenaAlloc(ctx: *anyopaque, len: usize, ptr_align: std.mem.Alignment, _: usize) ?[*]u8 {
     const arena: *Arena = @ptrCast(@alignCast(ctx));
-    const alignment = @as(usize, 1) << @intFromEnum(ptr_align);
+    const alignment = @as(usize, 1) << @backingInt(ptr_align);
     const mem = arena.allocAligned(len, alignment) orelse return null;
     return @ptrCast(mem);
 }
@@ -510,7 +510,7 @@ test "Arena overflow handling" {
 }
 
 test "Arena overflow returns null and stays consistent when backing OOMs" {
-    var leak_detector: std.heap.DebugAllocator(.{ .stack_trace_frames = 0 }) = .init;
+    var leak_detector: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{ .stack_trace_frames = 0 });
     const child = leak_detector.allocator();
     // init does one backing alloc (the bump buffer, index 0); fail the next one
     // so the overflow path's backing.alignedAlloc (index 1) returns OOM.
@@ -528,7 +528,7 @@ test "Arena overflow returns null and stays consistent when backing OOMs" {
     // Arena remains usable and frees cleanly with no leaked overflow node.
     arena.reset();
     arena.deinit();
-    try std.testing.expectEqual(std.heap.Check.ok, leak_detector.deinit());
+    try std.testing.expectEqual(@as(usize, 0), leak_detector.deinit());
 }
 
 test "Arena typed allocation" {

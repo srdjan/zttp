@@ -1624,7 +1624,7 @@ pub const BoolChecker = struct {
     fn resolveAtomName(self: *const BoolChecker, atom_idx: u16) ?[]const u8 {
         if (self.atoms) |table| {
             // With atom table: predefined atoms first, then dynamic table
-            const atom: object.Atom = @enumFromInt(atom_idx);
+            const atom: object.Atom = @fromBackingInt(@intCast(atom_idx));
             if (atom.toPredefinedName()) |name| return name;
             return table.getName(atom);
         }
@@ -1633,7 +1633,7 @@ pub const BoolChecker = struct {
         // because import specifiers (the main use case) go through addString.
         // Predefined atom names are keywords/builtins, never import specifier names.
         if (self.ir_view.getString(atom_idx)) |name| return name;
-        const atom: object.Atom = @enumFromInt(atom_idx);
+        const atom: object.Atom = @fromBackingInt(@intCast(atom_idx));
         return atom.toPredefinedName();
     }
 

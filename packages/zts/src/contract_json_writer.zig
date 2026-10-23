@@ -856,14 +856,14 @@ fn writeBooleanProperties(
     p: contract_types.HandlerProperties,
     writer: anytype,
 ) !void {
-    inline for (@typeInfo(contract_types.HandlerProperties).@"struct".fields) |field| {
-        if (field.type == bool) {
+    inline for (@typeInfo(contract_types.HandlerProperties).@"struct".field_names) |field| {
+        if (@FieldType(contract_types.HandlerProperties, field) == bool) {
             const key = comptime switch (json_version) {
-                .v1 => contract_types.HandlerProperties.camelKeyFor(field.name) orelse
-                    @compileError("missing HandlerProperties camel-case key: " ++ field.name),
-                .v2 => field.name,
+                .v1 => contract_types.HandlerProperties.camelKeyFor(field) orelse
+                    @compileError("missing HandlerProperties camel-case key: " ++ field),
+                .v2 => field,
             };
-            const value = @field(p, field.name);
+            const value = @field(p, field);
             try writer.print("    \"{s}\": {s},\n", .{ key, if (value) "true" else "false" });
         }
     }
@@ -969,8 +969,8 @@ fn populateVersionTwoTestContract(
     contract.handler.line = 7;
     contract.handler.column = 3;
     contract.source_identity = .{
-        .core_grammar_hash = [_]u8{0x11} ** 32,
-        .semantics_hash = [_]u8{0x22} ** 32,
+        .core_grammar_hash = @as([32]u8, @splat(0x11)),
+        .semantics_hash = @as([32]u8, @splat(0x22)),
     };
     {
         const route_pattern = try allocator.dupe(u8, "/orders/:id");

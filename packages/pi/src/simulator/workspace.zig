@@ -132,11 +132,11 @@ fn isSafeRelativePath(path: []const u8) bool {
 }
 
 fn privateFilePermissions() std.Io.File.Permissions {
-    return @enumFromInt(0o600);
+    return @fromBackingInt(@intCast(0o600));
 }
 
 fn privateDirPermissions() std.Io.File.Permissions {
-    return @enumFromInt(0o700);
+    return @fromBackingInt(@intCast(0o700));
 }
 
 const testing = std.testing;
@@ -147,7 +147,7 @@ test "deinit removes the workspace and abandon leaves it for inspection" {
     const io = io_backend.io();
 
     var removed = try Workspace.create(testing.allocator, io);
-    const removed_path = try testing.allocator.dupeZ(u8, removed.abs_path);
+    const removed_path = try testing.allocator.dupeSentinel(u8, removed.abs_path, 0);
     defer testing.allocator.free(removed_path);
     try removed.restoreFile("handler.ts", "export default 1;\n");
     try removed.deinit();

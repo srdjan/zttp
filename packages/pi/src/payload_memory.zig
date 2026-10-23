@@ -50,7 +50,7 @@ fn cloneValue(comptime T: type, value: T, allocator: Allocator) Allocator.Error!
             if (info.size != .slice) {
                 @compileError("payload field of pointer type " ++ @typeName(T) ++ " is not clonable");
             }
-            if (info.is_const) {
+            if (info.attrs.@"const") {
                 @compileError("payload field " ++ @typeName(T) ++
                     " is borrowed (const slice); a generic walk must not own it - " ++
                     "make it a mutable slice if the payload owns it, or clone it by hand");
@@ -75,20 +75,20 @@ fn cloneValue(comptime T: type, value: T, allocator: Allocator) Allocator.Error!
 }
 
 fn cloneStruct(comptime T: type, value: T, allocator: Allocator) Allocator.Error!T {
-    const fields = @typeInfo(T).@"struct".fields;
+    const fields = @typeInfo(T).@"struct".field_names;
     var out: T = undefined;
     var done: usize = 0;
     errdefer freeStructPrefix(T, &out, allocator, done);
     inline for (fields, 0..) |field, index| {
-        @field(out, field.name) = try cloneValue(field.type, @field(value, field.name), allocator);
+        @field(out, field) = try cloneValue(@FieldType(T, field), @field(value, field), allocator);
         done = index + 1;
     }
     return out;
 }
 
 fn freeStructPrefix(comptime T: type, value: *T, allocator: Allocator, count: usize) void {
-    inline for (@typeInfo(T).@"struct".fields, 0..) |field, index| {
-        if (index < count) freeValue(field.type, &@field(value, field.name), allocator);
+    inline for (@typeInfo(T).@"struct".field_names, 0..) |field, index| {
+        if (index < count) freeValue(@FieldType(T, field), &@field(value, field), allocator);
     }
 }
 
@@ -102,14 +102,14 @@ fn freeValue(comptime T: type, value: *T, allocator: Allocator) void {
             }
         },
         .pointer => |info| {
-            if (info.size != .slice or info.is_const) return;
+            if (info.size != .slice or info.attrs.@"const") return;
             if (info.child != u8) {
                 for (value.*) |*element| freeValue(info.child, element, allocator);
             }
             allocator.free(value.*);
             value.* = &.{};
         },
-        .@"struct" => freeStructPrefix(T, value, allocator, @typeInfo(T).@"struct".fields.len),
+        .@"struct" => freeStructPrefix(T, value, allocator, @typeInfo(T).@"struct".field_names.len),
         else => {},
     }
 }

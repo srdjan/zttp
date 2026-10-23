@@ -536,7 +536,7 @@ test "stand-in gate: out-of-range asks have zero false fires through the real lo
     try testing.expect(range.negative_corpus.len >= 4);
     var false_fires: usize = 0;
     for (range.negative_corpus, 0..) |negative, index| {
-        const label = try std.fmt.allocPrint(allocator, "standin-negative-{d}", .{index});
+        const label = try allocator.print("standin-negative-{d}", .{index});
         var tmp = try IsolatedTmp.init(allocator, label);
         defer tmp.cleanup(allocator);
         const original = "function handler(req: Request): Response {\n    return Response.json({ ok: true });\n}\n";
@@ -860,7 +860,7 @@ test "stand-in violation fix returns a miss for an already guarded source" {
 }
 
 fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
-    const label = try std.fmt.allocPrint(allocator, "standin-range-{s}", .{entry.id});
+    const label = try allocator.print("standin-range-{s}", .{entry.id});
     var tmp = try IsolatedTmp.init(allocator, label);
     defer tmp.cleanup(allocator);
 

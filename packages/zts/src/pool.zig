@@ -279,11 +279,11 @@ pub const LockFreePool = struct {
         pub const PersistentStringEscapeError = error{PersistentStringEscapedIntoArena};
 
         /// Verify no persistent string has drifted into the request arena.
-        /// No-op in ReleaseFast (gated on `std.debug.runtime_safety`).
+        /// No-op in ReleaseFast (gated on `@import("builtin").mode.runtimeSafety()`).
         pub fn assertPersistentStringsOutsideArena(
             self: *const Runtime,
         ) PersistentStringEscapeError!void {
-            if (!std.debug.runtime_safety) return;
+            if (!@import("builtin").mode.runtimeSafety()) return;
             const arena = self.request_arena orelse return;
             for (self.strings.strings.items) |str| {
                 if (arena.contains(str)) {
@@ -332,7 +332,7 @@ pub const LockFreePool = struct {
             // checks: a duplicate publication is a safety-checked invariant, so a
             // release-build pool (esp. a large `-n N`) need not pay N^2/2 atomic
             // loads on every shutdown for a guard whose precondition is unchecked.
-            if (std.debug.runtime_safety) {
+            if (@import("builtin").mode.runtimeSafety()) {
                 for (self.slots[idx + 1 ..]) |*later| {
                     if (later.load(.acquire) == runtime) {
                         later.store(null, .release);
@@ -391,7 +391,7 @@ pub const LockFreePool = struct {
     /// Used by higher-level recycle paths (e.g. contract-derived pooling
     /// policies) that want a fresh runtime for the next request.
     pub fn dropRuntime(self: *LockFreePool, runtime: *Runtime) void {
-        if (std.debug.runtime_safety) {
+        if (@import("builtin").mode.runtimeSafety()) {
             for (self.slots) |*slot| {
                 if (slot.load(.acquire) == runtime) {
                     std.debug.panic("runtime dropped while still pooled: 0x{x}", .{@intFromPtr(runtime)});
@@ -405,7 +405,7 @@ pub const LockFreePool = struct {
 
     /// Release a runtime back to pool
     pub fn release(self: *LockFreePool, runtime: *Runtime) void {
-        if (std.debug.runtime_safety) {
+        if (@import("builtin").mode.runtimeSafety()) {
             for (self.slots) |*slot| {
                 if (slot.load(.acquire) == runtime) {
                     std.debug.panic("runtime released twice: 0x{x}", .{@intFromPtr(runtime)});
@@ -664,7 +664,7 @@ test "Runtime.create errdefer ladder closes every failure path" {
     var fail_at: usize = 0;
     const max_steps: usize = 4096;
     while (fail_at < max_steps) : (fail_at += 1) {
-        var leak_detector: std.heap.DebugAllocator(.{ .stack_trace_frames = 0 }) = .init;
+        var leak_detector: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{ .stack_trace_frames = 0 });
         const child = leak_detector.allocator();
         var failing = std.testing.FailingAllocator.init(child, .{ .fail_index = fail_at });
         const result = LockFreePool.Runtime.create(failing.allocator(), .{});
@@ -673,8 +673,8 @@ test "Runtime.create errdefer ladder closes every failure path" {
             // destroy and stop walking.
             rt.destroy(failing.allocator());
             const leak_check = leak_detector.deinit();
-            if (leak_check == .leak) std.debug.print("Runtime.create leaked on success after fail_at={d}\n", .{fail_at});
-            try std.testing.expectEqual(std.heap.Check.ok, leak_check);
+            if (leak_check != 0) std.debug.print("Runtime.create leaked on success after fail_at={d}\n", .{fail_at});
+            try std.testing.expectEqual(@as(usize, 0), leak_check);
             break;
         } else |err| {
             // Any non-OOM error means our injected failure is being masked
@@ -682,8 +682,8 @@ test "Runtime.create errdefer ladder closes every failure path" {
             // exercising what it claims to.
             try std.testing.expectEqual(error.OutOfMemory, err);
             const leak_check = leak_detector.deinit();
-            if (leak_check == .leak) std.debug.print("Runtime.create leaked on fail_at={d}\n", .{fail_at});
-            try std.testing.expectEqual(std.heap.Check.ok, leak_check);
+            if (leak_check != 0) std.debug.print("Runtime.create leaked on fail_at={d}\n", .{fail_at});
+            try std.testing.expectEqual(@as(usize, 0), leak_check);
         }
     } else {
         // Ran the loop to completion without ever succeeding. Either the

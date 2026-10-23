@@ -198,16 +198,16 @@ test "unknown tool fails on findByName and invoke" {
 }
 
 test "context policy and model exposure have no defaults" {
-    const fields = @typeInfo(ToolDef).@"struct".fields;
+    const info = @typeInfo(ToolDef).@"struct";
     var found_context = false;
     var found_exposure = false;
-    inline for (fields) |field| {
-        if (comptime std.mem.eql(u8, field.name, "context_policy")) {
-            try testing.expect(field.default_value_ptr == null);
+    inline for (info.field_names, info.field_attrs) |field, attrs| {
+        if (comptime std.mem.eql(u8, field, "context_policy")) {
+            try testing.expect(attrs.default_value_ptr == null);
             found_context = true;
         }
-        if (comptime std.mem.eql(u8, field.name, "model_exposure")) {
-            try testing.expect(field.default_value_ptr == null);
+        if (comptime std.mem.eql(u8, field, "model_exposure")) {
+            try testing.expect(attrs.default_value_ptr == null);
             found_exposure = true;
         }
     }

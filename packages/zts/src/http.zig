@@ -646,7 +646,7 @@ fn renderAttributes(ctx: *context.Context, props: value.JSValue, writer: anytype
 
     for (names, offsets) |prop_name, prop_offset| {
         // Skip reserved slots (used by native functions)
-        const atom_int = @intFromEnum(prop_name);
+        const atom_int = @backingInt(prop_name);
         if (atom_int >= 0xFFFE) continue;
 
         // Get the property name string

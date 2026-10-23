@@ -12,7 +12,7 @@ pub const PerfStats = struct {
     mega_recoveries: u32 = 0,
     opcode_histogram_enabled: bool = enable_opcode_histogram,
     opcode_histogram_nonzero: u32 = 0,
-    opcode_histogram: [256]u32 = [_]u32{0} ** 256,
+    opcode_histogram: [256]u32 = @as([256]u32, @splat(0)),
 };
 
 pub fn countNonZeroHistogramEntries(histogram: []const u32) u32 {

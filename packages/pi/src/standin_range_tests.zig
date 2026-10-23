@@ -726,8 +726,8 @@ test "stand-in gate: every enabled guard family has rejection and property-prese
         }
         const literal_properties = literal.properties orelse return error.LiteralSeedHasNoProperties;
         const guarded_properties = guarded.properties orelse return error.GuardedSeedHasNoProperties;
-        var literal_names: [zts.HandlerProperties.max_proven_specs]?[]const u8 = .{null} ** zts.HandlerProperties.max_proven_specs;
-        var guarded_names: [zts.HandlerProperties.max_proven_specs]?[]const u8 = .{null} ** zts.HandlerProperties.max_proven_specs;
+        var literal_names: [zts.HandlerProperties.max_proven_specs]?[]const u8 = @splat(null);
+        var guarded_names: [zts.HandlerProperties.max_proven_specs]?[]const u8 = @splat(null);
         const literal_count = literal_properties.provenSpecNames(&literal_names);
         const guarded_count = guarded_properties.provenSpecNames(&guarded_names);
         if (guarded_count != literal_count) {
@@ -765,20 +765,20 @@ test "stand-in gate: every enabled guard family has rejection and property-prese
         return error.CapabilitySeedsMissing;
     }
 
-    inline for (@typeInfo(zts.guard_catalog.Family).@"enum".fields) |field| {
-        const family: zts.guard_catalog.Family = @enumFromInt(field.value);
+    inline for (@typeInfo(zts.guard_catalog.Family).@"enum".field_names) |field| {
+        const family: zts.guard_catalog.Family = @fromBackingInt(@intCast(@backingInt(@field(zts.guard_catalog.Family, field))));
         const enabled = zts.guard_catalog.enabled_families.contains(family);
         if (enabled and !covered.contains(family)) {
             std.debug.print(
                 "[standin-gate] guard family {s} is enabled with no seed the compiler rejects\n",
-                .{field.name},
+                .{field},
             );
             return error.EnabledFamilyHasNoSeed;
         }
         if (enabled and !admitted.contains(family)) {
             std.debug.print(
                 "[standin-gate] guard family {s} is enabled with no positive guarded evidence\n",
-                .{field.name},
+                .{field},
             );
             return error.EnabledFamilyHasNoGuardedEvidence;
         }

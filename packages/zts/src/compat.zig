@@ -5,7 +5,7 @@ pub const ClockError = error{ClockGettimeFailed};
 fn clockGetTime(clock_id: std.posix.CLOCK) ClockError!std.posix.timespec {
     var ts: std.posix.timespec = undefined;
     const rc = std.c.clock_gettime(
-        @as(std.c.clockid_t, @enumFromInt(@intFromEnum(clock_id))),
+        @as(std.c.clockid_t, @fromBackingInt(@intCast(@backingInt(clock_id)))),
         &ts,
     );
     if (rc != 0) return error.ClockGettimeFailed;

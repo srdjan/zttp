@@ -110,11 +110,7 @@ fn executeAtRoot(
     const preexisting_count = protocolCount(preexisting_count_value) orelse return error.MalformedProtocolResponse;
     const total = std.math.add(u32, new_count, preexisting_count) catch return error.MalformedProtocolResponse;
 
-    const summary = try std.fmt.allocPrint(
-        allocator,
-        "{d} new, {d} preexisting",
-        .{ new_count, preexisting_count },
-    );
+    const summary = try allocator.print("{d} new, {d} preexisting", .{ new_count, preexisting_count });
     defer allocator.free(summary);
     var ui: ui_payload.UiPayload = .{ .protocol_repair = try ui_payload.ProtocolRepairPayload.init(
         allocator,
@@ -278,11 +274,7 @@ pub fn executeSemanticPlan(
 
     const llm_text = try text_buf.toOwnedSlice();
     errdefer allocator.free(llm_text);
-    const verification_summary = try std.fmt.allocPrint(
-        allocator,
-        "{d} total, {d} new, {d} preexisting",
-        .{ result.total, result.new_count, result.preexisting_count },
-    );
+    const verification_summary = try allocator.print("{d} total, {d} new, {d} preexisting", .{ result.total, result.new_count, result.preexisting_count });
     defer allocator.free(verification_summary);
     var payload: ui_payload.UiPayload = .{ .repair_candidate = try ui_payload.RepairCandidatePayload.init(
         allocator,

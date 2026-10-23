@@ -310,7 +310,7 @@ pub fn replayBundleInWorkspace(
         .kind = .success,
         .change_set_index = bundle.change_sets.len,
         .file = try allocator.dupe(u8, ""),
-        .detail = try std.fmt.allocPrint(allocator, "replayed {d} change set(s)", .{bundle.change_sets.len}),
+        .detail = try allocator.print("replayed {d} change set(s)", .{bundle.change_sets.len}),
     };
 }
 
@@ -385,7 +385,7 @@ pub fn replayLedgerOntoRef(
     const root = try tools_common.workspaceRoot(allocator);
     defer allocator.free(root);
 
-    const worktree_dir = try std.fmt.allocPrint(allocator, "/tmp/zts-ledger-replay-{d}", .{nowUnixMs()});
+    const worktree_dir = try allocator.print("/tmp/zts-ledger-replay-{d}", .{nowUnixMs()});
     defer allocator.free(worktree_dir);
 
     const add_argv = [_][]const u8{ "git", "worktree", "add", "--detach", worktree_dir, onto_ref };
@@ -694,12 +694,12 @@ fn getInteger(obj: std.json.ObjectMap, key: []const u8) ?i64 {
 
 fn nowUnixMs() i64 {
     var ts: std.posix.timespec = undefined;
-    _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
+    _ = std.c.clock_gettime(@fromBackingInt(@intCast(@backingInt(std.posix.CLOCK.REALTIME))), &ts);
     return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 
 fn printReplayResult(result: ReplayResult) void {
-    const line = std.fmt.allocPrint(std.heap.smp_allocator, "{s}: change set {d} {s} - {s}\n", .{
+    const line = std.heap.smp_allocator.print("{s}: change set {d} {s} - {s}\n", .{
         @tagName(result.kind),
         result.change_set_index,
         result.file,
@@ -756,8 +756,8 @@ test "collectSessionLedger exports empty ledger when events file is missing" {
         .workspace_realpath = tmp.abs_path,
         .created_at_unix_ms = 1,
         .parent_id = null,
-        .policy_hash = "a" ** 64,
-        .protocol_hash = "b" ** 64,
+        .policy_hash = &@as([64:0]u8, @splat('a')),
+        .protocol_hash = &@as([64:0]u8, @splat('b')),
     });
 
     var bundle = try collectSessionLedger(testing.allocator, "sess-fresh");
@@ -803,14 +803,14 @@ fn testLedgerReceipt(
     const diagnostics_hash = zts.diagnosticCatalogHash();
     const source = ui_payload.VerifiedChangeSetPayload{
         .proof_schema_version = @constCast(aggregate_proof.proof_schema_version),
-        .transaction_id = @constCast("a" ** 64),
+        .transaction_id = @constCast(&@as([64:0]u8, @splat('a'))),
         .compiler_version = @constCast(zts.version.string),
         .profile_id = @constCast(zts.GrammarCatalog.profile_id),
         .policy_hash = @constCast(policy_hash),
         .grammar_hash = @constCast(&grammar_hash),
         .semantics_hash = @constCast(&semantics_hash),
         .diagnostic_catalog_hash = @constCast(&diagnostics_hash),
-        .read_set_digest = @constCast("b" ** 64),
+        .read_set_digest = @constCast(&@as([64:0]u8, @splat('b'))),
         .applied_at_unix_ms = 42,
         .system_proven = false,
         .proof_roots = &roots,
@@ -837,14 +837,14 @@ test "readLedgerFile round-trips exported verified change-set payload" {
     const path = try tmp.childPath(testing.allocator, "ledger.ndjson");
     defer testing.allocator.free(path);
 
-    const receipt = try testLedgerReceipt(testing.allocator, null, "after", "a" ** 64);
+    const receipt = try testLedgerReceipt(testing.allocator, null, "after", &@as([64:0]u8, @splat('a')));
     defer {
         var owned = receipt;
         owned.deinit(testing.allocator);
     }
 
     const meta = ExportMeta{
-        .workspace_hash = try testing.allocator.dupe(u8, "h" ** 64),
+        .workspace_hash = try testing.allocator.dupe(u8, &@as([64:0]u8, @splat('h'))),
         .session_id = try testing.allocator.dupe(u8, "sess-1"),
         .parent_session_id = null,
         .exported_at_unix_ms = 99,
@@ -868,7 +868,7 @@ test "readLedgerFile round-trips exported verified change-set payload" {
     try testing.expectEqualStrings("sess-1", bundle.meta.session_id);
     try testing.expectEqual(@as(usize, 1), bundle.change_sets.len);
     try testing.expectEqualStrings("handler.ts", bundle.change_sets[0].payload.changes[0].file);
-    try testing.expectEqualStrings("a" ** 64, bundle.change_sets[0].payload.transaction_id);
+    try testing.expectEqualStrings(&@as([64:0]u8, @splat('a')), bundle.change_sets[0].payload.transaction_id);
 }
 
 test "replayBundleInWorkspace detects policy drift" {
@@ -884,11 +884,11 @@ test "replayBundleInWorkspace detects policy drift" {
         testing.allocator,
         "function handler(req: Request): Response { return Response.json({ ok: true }); }",
         "function handler(req: Request): Response { return Response.json({ ok: false }); }",
-        "b" ** 64,
+        &@as([64:0]u8, @splat('b')),
     );
     var bundle = ExportBundle{
         .meta = .{
-            .workspace_hash = try testing.allocator.dupe(u8, "h" ** 64),
+            .workspace_hash = try testing.allocator.dupe(u8, &@as([64:0]u8, @splat('h'))),
             .session_id = try testing.allocator.dupe(u8, "sess-1"),
             .parent_session_id = null,
             .exported_at_unix_ms = 1,

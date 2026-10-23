@@ -7,7 +7,7 @@ const execution_spec = @import("execution_spec.zig");
 /// True when stderr is attached to a real terminal. Used to gate ANSI escape
 /// codes so piped output and CI logs stay clean.
 pub fn stderrIsTty() bool {
-    return switch (builtin.os.tag) {
+    return switch (builtin.target.os.tag) {
         .windows => false,
         else => std.posix.system.isatty(std.posix.STDERR_FILENO) != 0,
     };

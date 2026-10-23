@@ -61,11 +61,11 @@ pub fn formatProveSummary(
 // fails, add the missing field to ui_payload.PropertiesSnapshot (the mapper
 // below copies it automatically) and teach the persona about the new property.
 comptime {
-    for (@typeInfo(HandlerProperties).@"struct".fields) |field| {
-        if (field.type != bool) continue;
-        if (!@hasField(ui_payload.PropertiesSnapshot, field.name)) {
+    for (@typeInfo(HandlerProperties).@"struct".field_names) |field| {
+        if (@FieldType(HandlerProperties, field) != bool) continue;
+        if (!@hasField(ui_payload.PropertiesSnapshot, field)) {
             @compileError("pi PropertiesSnapshot is missing engine handler property '" ++
-                field.name ++ "'; add it to ui_payload.PropertiesSnapshot so the expert surfaces it");
+                field ++ "'; add it to ui_payload.PropertiesSnapshot so the expert surfaces it");
         }
     }
 }
@@ -77,8 +77,8 @@ comptime {
 /// by the drift gate above.
 pub fn propertiesSnapshot(properties: HandlerProperties) ui_payload.PropertiesSnapshot {
     var snap: ui_payload.PropertiesSnapshot = undefined;
-    inline for (@typeInfo(ui_payload.PropertiesSnapshot).@"struct".fields) |field| {
-        @field(snap, field.name) = @field(properties, field.name);
+    inline for (@typeInfo(ui_payload.PropertiesSnapshot).@"struct".field_names) |field| {
+        @field(snap, field) = @field(properties, field);
     }
     return snap;
 }

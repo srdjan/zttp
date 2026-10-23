@@ -15,7 +15,7 @@ pub const ActiveModuleScope = struct {
     required_capabilities: []const ModuleCapability,
 };
 
-pub const capability_count: usize = @typeInfo(ModuleCapability).@"enum".fields.len;
+pub const capability_count: usize = @typeInfo(ModuleCapability).@"enum".field_names.len;
 
 /// SHA-256 over a canonical capability list. Tag names are hashed in the
 /// order given, newline-separated, so equal sets produce equal digests.

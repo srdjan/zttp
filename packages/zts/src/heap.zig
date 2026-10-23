@@ -86,7 +86,7 @@ pub const SizeClass = enum(u4) {
     }
 
     pub fn index(self: SizeClass) usize {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 };
 
@@ -151,8 +151,8 @@ pub const Heap = struct {
         return .{
             .config = config,
             .allocator = allocator,
-            .free_lists = [_]?*FreeNode{null} ** SizeClass.COUNT,
-            .pages = [_]?*PageHeader{null} ** SizeClass.COUNT,
+            .free_lists = @as([SizeClass.COUNT]?*FreeNode, @splat(null)),
+            .pages = @as([SizeClass.COUNT]?*PageHeader, @splat(null)),
             .large_allocs = null,
             .stats = .{},
         };

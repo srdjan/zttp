@@ -33,7 +33,7 @@ pub fn add(ctx: Context) Result {
     // so has_side_effects keeps the census running on every invocation.
     const check = b.addRunArtifact(gate_exe);
     check.has_side_effects = true;
-    if (b.args) |args| check.addArgs(args);
+    check.addPassthruArgs();
     const census_step = b.step("test-flow-census", "Check the flow checker's leak verdicts over the generated probe census");
     census_step.dependOn(&check.step);
 

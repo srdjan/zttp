@@ -44,7 +44,7 @@ const LabelSet = mb.LabelSet;
 
 const packBindingKey = bool_checker_mod.packBindingKey;
 
-const tag_count = @typeInfo(NodeTag).@"enum".fields.len;
+const tag_count = @typeInfo(NodeTag).@"enum".field_names.len;
 
 /// The default for `FlowInterp.max_steps`.
 const default_max_steps: u32 = 100_000;
@@ -119,7 +119,7 @@ pub const SiteKey = struct {
     call: NodeIndex = 0,
 
     fn order(a: SiteKey, b: SiteKey) std.math.Order {
-        const by_kind = std.math.order(@intFromEnum(a.kind), @intFromEnum(b.kind));
+        const by_kind = std.math.order(@backingInt(a.kind), @backingInt(b.kind));
         if (by_kind != .eq) return by_kind;
         const by_node = std.math.order(a.node, b.node);
         if (by_node != .eq) return by_node;
@@ -570,7 +570,7 @@ fn joinCells(arena: std.mem.Allocator, a: Cells, b: Cells) Error!Cells {
 /// content may still be live and a write never removes a label.
 fn weakWriteCells(arena: std.mem.Allocator, cells: Cells, name: ?u16, v: Value) Error!Cells {
     const preserved: u3 = if (name) |n|
-        if (n == @intFromEnum(object.Atom.method)) 6 else if (n == @intFromEnum(object.Atom.url)) 5 else if (n == @intFromEnum(object.Atom.path)) 3 else 7
+        if (n == @backingInt(object.Atom.method)) 6 else if (n == @backingInt(object.Atom.url)) 5 else if (n == @backingInt(object.Atom.path)) 3 else 7
     else
         0;
     if (name) |n| {
@@ -1747,12 +1747,12 @@ pub const FlowInterp = struct {
             try self.record(0, .identifier, .module_graph_gap);
             return 0;
         };
-        return @intCast(@intFromEnum(try self.modules[0].atoms.intern(name)));
+        return @intCast(@backingInt(try self.modules[0].atoms.intern(name)));
     }
 
     fn heapName(self: *const FlowInterp, canonical: u16) ?[]const u8 {
         if (self.modules.len == 0) return self.nameOfAtom(canonical);
-        return self.modules[0].atoms.getName(@enumFromInt(canonical));
+        return self.modules[0].atoms.getName(@fromBackingInt(@intCast(canonical)));
     }
 
     fn localHeapAtom(self: *FlowInterp, canonical: u16) Error!u16 {
@@ -1763,9 +1763,9 @@ pub const FlowInterp = struct {
     fn knownHeapAtom(self: *const FlowInterp, local: u16) ?u16 {
         if (self.modules.len == 0 or self.active_module == 0) return local;
         const name = self.nameOfAtom(local) orelse return null;
-        if (object.lookupPredefinedAtom(name)) |atom| return @intCast(@intFromEnum(atom));
+        if (object.lookupPredefinedAtom(name)) |atom| return @intCast(@backingInt(atom));
         const atom = self.modules[0].atoms.strings.get(name) orelse return null;
-        return @intCast(@intFromEnum(atom));
+        return @intCast(@backingInt(atom));
     }
 
     const EvidenceLookup = struct {
@@ -1846,7 +1846,7 @@ pub const FlowInterp = struct {
     }
 
     fn noteVisited(self: *FlowInterp, tag: NodeTag) void {
-        self.visits[@intFromEnum(tag)] +|= 1;
+        self.visits[@backingInt(tag)] +|= 1;
     }
 
     /// Analyze one function body with its parameters bound to `params`
@@ -2106,9 +2106,9 @@ pub const FlowInterp = struct {
         const input = Value.labelled(.{ .user_input = true });
         var request_cells: Cells = .{ .summary = input };
         var headers_cells: Cells = .{ .summary = input };
-        try request_cells.named.put(arena, @intFromEnum(object.Atom.headers), headers);
-        try request_cells.named.put(arena, @intFromEnum(object.Atom.query), query);
-        try headers_cells.named.put(arena, @intFromEnum(object.Atom.authorization), Value.labelled(.{ .user_input = true, .credential = true }));
+        try request_cells.named.put(arena, @backingInt(object.Atom.headers), headers);
+        try request_cells.named.put(arena, @backingInt(object.Atom.query), query);
+        try headers_cells.named.put(arena, @backingInt(object.Atom.authorization), Value.labelled(.{ .user_input = true, .credential = true }));
         try entry.heap.put(arena, request_site, try joinCells(arena, entry.heap.get(request_site) orelse .{}, request_cells));
         try entry.heap.put(arena, headers_site, try joinCells(arena, entry.heap.get(headers_site) orelse .{}, headers_cells));
         try entry.heap.put(arena, query_site, try joinCells(arena, entry.heap.get(query_site) orelse .{}, .{ .summary = input }));
@@ -2258,7 +2258,7 @@ pub const FlowInterp = struct {
             .{ object.Atom.body, InputSink.egress_body },
             .{ object.Atom.headers, InputSink.egress_headers },
         }) |field| {
-            const held = try self.storedRead(st, options, .{ .name = @intFromEnum(field[0]) });
+            const held = try self.storedRead(st, options, .{ .name = @backingInt(field[0]) });
             try self.observeSink(node, st, field[1], try self.deepFlow(st, &.{held}));
         }
     }
@@ -2276,22 +2276,22 @@ pub const FlowInterp = struct {
         if (std.mem.eql(u8, row.name, "json")) body_flow = DefenseEdge.drop_html.apply(body_flow);
         const redirect = std.mem.eql(u8, row.name, "redirect");
         const body = if (redirect) Value.clean else Value.flowing(body_flow);
-        try self.weakWriteSite(st, site, @intFromEnum(object.Atom.body), body);
+        try self.weakWriteSite(st, site, @backingInt(object.Atom.body), body);
         const status = if (redirect)
             argAt(args, 1)
         else if (args.len < 2)
             Value.clean
         else
-            try self.storedRead(st, argAt(args, 1), .{ .name = @intFromEnum(object.Atom.status) });
+            try self.storedRead(st, argAt(args, 1), .{ .name = @backingInt(object.Atom.status) });
         const status_value = Value.flowing(try self.deepFlow(st, &.{status}));
-        try self.weakWriteSite(st, site, @intFromEnum(object.Atom.status), status_value);
+        try self.weakWriteSite(st, site, @backingInt(object.Atom.status), status_value);
         try self.weakWriteSite(st, site, try self.atomOf("statusText", 0), status_value);
-        try self.weakWriteSite(st, site, @intFromEnum(object.Atom.ok), status_value);
-        try self.weakWriteSite(st, site, @intFromEnum(object.Atom.headers), headers);
+        try self.weakWriteSite(st, site, @backingInt(object.Atom.ok), status_value);
+        try self.weakWriteSite(st, site, @backingInt(object.Atom.headers), headers);
         if (redirect) {
             try self.weakWriteSite(st, header_site, try self.atomOf("Location", 0), Value.flowing(body_flow));
         } else {
-            try self.weakWriteSite(st, header_site, @intFromEnum(object.Atom.@"content-type"), .{ .html_type = std.mem.eql(u8, row.name, "html") });
+            try self.weakWriteSite(st, header_site, @backingInt(object.Atom.@"content-type"), .{ .html_type = std.mem.eql(u8, row.name, "html") });
         }
         // Helper init.headers is discarded by the runtime. Only status is
         // consumed; copied response-header fields remain mutable afterwards.
@@ -2310,11 +2310,11 @@ pub const FlowInterp = struct {
         var cells = st.heap.get(site) orelse Cells{};
         cells.html_possible = true;
         try st.heap.put(self.mem(), site, cells);
-        try self.weakWriteSite(st, site, @intFromEnum(object.Atom.body), source);
-        try self.weakWriteSite(st, site, @intFromEnum(object.Atom.status), source);
-        try self.weakWriteSite(st, site, @intFromEnum(object.Atom.ok), source);
+        try self.weakWriteSite(st, site, @backingInt(object.Atom.body), source);
+        try self.weakWriteSite(st, site, @backingInt(object.Atom.status), source);
+        try self.weakWriteSite(st, site, @backingInt(object.Atom.ok), source);
         try self.weakWriteSite(st, site, try self.atomOf("statusText", 0), source);
-        try self.weakWriteSite(st, site, @intFromEnum(object.Atom.headers), headers);
+        try self.weakWriteSite(st, site, @backingInt(object.Atom.headers), headers);
         try self.weakWriteSite(st, header_site, null, source);
         return response;
     }
@@ -2343,18 +2343,18 @@ pub const FlowInterp = struct {
             if (unknown_shape) try self.observeSink(node, st, .response_html, reached);
             return;
         }
-        const body = try self.storedRead(st, returned, .{ .name = @intFromEnum(object.Atom.body) });
-        const status = try self.storedRead(st, returned, .{ .name = @intFromEnum(object.Atom.status) });
-        const headers = try self.storedRead(st, returned, .{ .name = @intFromEnum(object.Atom.headers) });
+        const body = try self.storedRead(st, returned, .{ .name = @backingInt(object.Atom.body) });
+        const status = try self.storedRead(st, returned, .{ .name = @backingInt(object.Atom.status) });
+        const headers = try self.storedRead(st, returned, .{ .name = @backingInt(object.Atom.headers) });
         try self.observeSink(node, st, .response_other, try self.deepFlow(st, &.{ body, status, headers }));
         // A structural response's header values can choose HTML. Without a
         // known format we check its current body against the HTML requirement.
-        if (structural and (try self.visible(st, returned, @intFromEnum(object.Atom.headers))) != null) {
-            const content_type = try self.readHeader(st, headers, .{ .name = @intFromEnum(object.Atom.@"content-type") });
+        if (structural and (try self.visible(st, returned, @backingInt(object.Atom.headers))) != null) {
+            const content_type = try self.readHeader(st, headers, .{ .name = @backingInt(object.Atom.@"content-type") });
             html = html or content_type.html_type != false;
         }
-        if (st.top_cell.summary != null or st.top_cell.named.contains(@intFromEnum(object.Atom.headers)) or
-            st.top_cell.named.contains(@intFromEnum(object.Atom.@"content-type"))) html = true;
+        if (st.top_cell.summary != null or st.top_cell.named.contains(@backingInt(object.Atom.headers)) or
+            st.top_cell.named.contains(@backingInt(object.Atom.@"content-type"))) html = true;
         if (html) try self.observeSink(node, st, .response_html, try self.deepFlow(st, &.{body}));
     }
 
@@ -2402,9 +2402,9 @@ pub const FlowInterp = struct {
         };
         var defended: std.ArrayList(report_types.DefendedPath) = .empty;
         if (!result.cleared) {
-            inline for (std.meta.fields(InputProperty)) |field| {
-                const property: InputProperty = @enumFromInt(field.value);
-                if (@field(properties, field.name)) {
+            inline for (@typeInfo(InputProperty).@"enum".field_names) |field| {
+                const property: InputProperty = @fromBackingInt(@intCast(@backingInt(@field(InputProperty, field))));
+                if (@field(properties, field)) {
                     var exposed = false;
                     for (self.sink_events.items) |event| {
                         if (!event.reached.exposed()) continue;
@@ -2422,7 +2422,7 @@ pub const FlowInterp = struct {
                                 const guard_loc = self.sourceView(guard.module).getLoc(guard.node);
                                 const sink_loc = self.sourceView(event.module).getLoc(event.source_node);
                                 try defended.append(self.mem(), .{
-                                    .property = @field(counterexample.PropertyTag, field.name),
+                                    .property = @field(counterexample.PropertyTag, field),
                                     .safe_form = .validated,
                                     .guard_func = guard.func,
                                     .guard_line = if (guard_loc) |loc| loc.line else 0,
@@ -2432,7 +2432,7 @@ pub const FlowInterp = struct {
                             },
                         }
                     }
-                    if (!exposed and self.observed_sources.user_input) try defended.append(self.mem(), .{ .property = @field(counterexample.PropertyTag, field.name), .safe_form = .never_reached });
+                    if (!exposed and self.observed_sources.user_input) try defended.append(self.mem(), .{ .property = @field(counterexample.PropertyTag, field), .safe_form = .never_reached });
                 }
             }
             if (properties.no_secret_leakage and self.observed_sources.secret) try defended.append(self.mem(), .{ .property = .no_secret_leakage, .safe_form = .never_reached });
@@ -2477,10 +2477,10 @@ pub const FlowInterp = struct {
         const source_view = self.sourceView(event.module);
         const loc = source_view.getLoc(event.source_node);
         if (event.module != 0 and event.module < self.modules.len) {
-            diagnostic.help = try std.fmt.allocPrint(self.mem(), "{s} (in {s}:{d}:{d})", .{ diagnostic.help orelse "", self.modules[event.module].path, if (loc) |at| at.line else 0, if (loc) |at| at.column else 0 });
+            diagnostic.help = try self.mem().print("{s} (in {s}:{d}:{d})", .{ diagnostic.help orelse "", self.modules[event.module].path, if (loc) |at| at.line else 0, if (loc) |at| at.column else 0 });
         }
         if (event.callsite) |callsite| if (self.sourceView(0).getLoc(callsite)) |at| {
-            diagnostic.help = try std.fmt.allocPrint(self.mem(), "{s} (reached through the call at line {d}, column {d})", .{ diagnostic.help orelse "", at.line, at.column });
+            diagnostic.help = try self.mem().print("{s} (reached through the call at line {d}, column {d})", .{ diagnostic.help orelse "", at.line, at.column });
         };
         if (!cleared and event.path.complete and event.reached.witness_complete and !event.reached.labels.unknown) {
             const property = report_types.propertyTagForKind(diagnostic.kind) orelse return diagnostic;
@@ -2860,7 +2860,7 @@ pub const FlowInterp = struct {
 
     /// The name behind an atom: a predefined one, or one the table interned.
     fn nameOfAtom(self: *const FlowInterp, atom: u16) ?[]const u8 {
-        const named: object.Atom = @enumFromInt(atom);
+        const named: object.Atom = @fromBackingInt(@intCast(atom));
         if (named.toPredefinedName()) |name| return name;
         const table = self.atoms orelse return null;
         return table.getName(named);
@@ -3037,15 +3037,15 @@ pub const FlowInterp = struct {
         if ((self.ir_view.getTag(m.object) orelse return false) != .identifier) return false;
         const binding = self.ir_view.getBinding(m.object) orelse return false;
         if (binding.kind != .global and binding.kind != .undeclared_global) return false;
-        if (binding.name_atom != @intFromEnum(object.Atom.Math)) return false;
+        if (binding.name_atom != @backingInt(object.Atom.Math)) return false;
         if (args_count == 1) {
-            return m.property == @intFromEnum(object.Atom.floor) or
-                m.property == @intFromEnum(object.Atom.ceil) or
-                m.property == @intFromEnum(object.Atom.round) or
-                m.property == @intFromEnum(object.Atom.abs);
+            return m.property == @backingInt(object.Atom.floor) or
+                m.property == @backingInt(object.Atom.ceil) or
+                m.property == @backingInt(object.Atom.round) or
+                m.property == @backingInt(object.Atom.abs);
         }
         if (args_count == 2) {
-            return m.property == @intFromEnum(object.Atom.min) or m.property == @intFromEnum(object.Atom.max);
+            return m.property == @backingInt(object.Atom.min) or m.property == @backingInt(object.Atom.max);
         }
         return false;
     }
@@ -3382,7 +3382,7 @@ pub const FlowInterp = struct {
             },
             .request_text, .request_json => {
                 const request = if (std.mem.eql(u8, row.scope, "global")) argAt(args, 0) else r;
-                const body = try self.storedRead(st, request, .{ .name = @intFromEnum(object.Atom.body) });
+                const body = try self.storedRead(st, request, .{ .name = @backingInt(object.Atom.body) });
                 const body_flow = row.defense.apply((try self.deepFlow(st, &.{body})));
                 if (row.rule == .request_text) return Value.flowing(body_flow);
                 return self.allocate(st, .allocated_any, node, &.{Value.flowing(body_flow)}, body_flow);
@@ -3538,8 +3538,8 @@ pub const FlowInterp = struct {
                 const result_site: SiteKey = .{ .kind = .allocated_any, .node = node, .context = self.active_module, .call = self.allocation_context };
                 try self.weakWriteSite(st, dict_site, null, read);
                 const dict = try self.siteValue(dict_site, null);
-                try self.weakWriteSite(st, result_site, @intFromEnum(object.Atom.value), dict);
-                try self.weakWriteSite(st, result_site, @intFromEnum(object.Atom.ok), Value.flowing(read.flow()));
+                try self.weakWriteSite(st, result_site, @backingInt(object.Atom.value), dict);
+                try self.weakWriteSite(st, result_site, @backingInt(object.Atom.ok), Value.flowing(read.flow()));
                 try self.weakWriteSite(st, result_site, try self.atomOf("error", 0), Value.flowing(read.flow()));
                 return self.siteValue(result_site, null);
             }
@@ -3550,9 +3550,9 @@ pub const FlowInterp = struct {
             payload.schema_view = try self.watchSchema(st, payload);
             if (payload.schema_view) |*view| view.guard = .{ .module = self.active_module, .node = node, .func = resolved.func.name };
             const site: SiteKey = .{ .kind = .allocated_any, .node = node, .context = self.active_module, .call = self.allocation_context };
-            try self.weakWriteSite(st, site, @intFromEnum(object.Atom.value), payload);
+            try self.weakWriteSite(st, site, @backingInt(object.Atom.value), payload);
             const flow = try self.deepFlow(st, &.{argAt(args.values, 1)});
-            try self.weakWriteSite(st, site, @intFromEnum(object.Atom.ok), Value.flowing(.{ .labels = flow.labels }));
+            try self.weakWriteSite(st, site, @backingInt(object.Atom.ok), Value.flowing(.{ .labels = flow.labels }));
             try self.weakWriteSite(st, site, try self.atomOf("error", 0), Value.flowing(.{ .labels = flow.labels }));
             return self.siteValue(site, null);
         }
@@ -4024,8 +4024,8 @@ pub const FlowInterp = struct {
     /// uses (`resolveKeyAtom`), so a literal key and a `.name` access meet in
     /// the same cell.
     fn atomOf(self: *FlowInterp, name: []const u8, string_idx: u16) Error!u16 {
-        if (object.lookupPredefinedAtom(name)) |atom| return @truncate(@intFromEnum(atom));
-        if (self.atoms) |table| return @truncate(@intFromEnum(try table.intern(name)));
+        if (object.lookupPredefinedAtom(name)) |atom| return @truncate(@backingInt(atom));
+        if (self.atoms) |table| return @truncate(@backingInt(try table.intern(name)));
         return @truncate(object.Atom.FIRST_DYNAMIC + @as(u32, string_idx));
     }
 
@@ -4157,8 +4157,8 @@ pub const FlowInterp = struct {
                     pristine_source = false;
                     break;
                 };
-                const request_field = site.kind == .request and (key.name == @intFromEnum(object.Atom.url) or key.name == @intFromEnum(object.Atom.path) or key.name == @intFromEnum(object.Atom.method) or key.name == @intFromEnum(object.Atom.body) or key.name == @intFromEnum(object.Atom.headers) or key.name == @intFromEnum(object.Atom.query));
-                const authorization = site.kind == .headers and key.name == @intFromEnum(object.Atom.authorization);
+                const request_field = site.kind == .request and (key.name == @backingInt(object.Atom.url) or key.name == @backingInt(object.Atom.path) or key.name == @backingInt(object.Atom.method) or key.name == @backingInt(object.Atom.body) or key.name == @backingInt(object.Atom.headers) or key.name == @backingInt(object.Atom.query));
+                const authorization = site.kind == .headers and key.name == @backingInt(object.Atom.authorization);
                 pristine_source = pristine_source and !cells.written and (request_field or authorization);
             }
             if (pristine_source) read.witness_complete = o.witness_complete;
@@ -4172,8 +4172,8 @@ pub const FlowInterp = struct {
 
     fn exactRequestField(st: *const State, receiver: Value, name: u16) ?flow_evidence.RequestField {
         if (receiver.origins_top or receiver.origins.len == 0) return null;
-        const field: flow_evidence.RequestField = if (name == @intFromEnum(object.Atom.method)) .method else if (name == @intFromEnum(object.Atom.url)) .url else if (name == @intFromEnum(object.Atom.path)) .path else return null;
-        const mask: u3 = @as(u3, 1) << @intCast(@intFromEnum(field));
+        const field: flow_evidence.RequestField = if (name == @backingInt(object.Atom.method)) .method else if (name == @backingInt(object.Atom.url)) .url else if (name == @backingInt(object.Atom.path)) .path else return null;
+        const mask: u3 = @as(u3, 1) << @intCast(@backingInt(field));
         if (st.top_cell.request_fields & mask == 0) return null;
         for (receiver.origins) |site| {
             if (site.kind != .request) return null;
@@ -4304,7 +4304,7 @@ pub const FlowInterp = struct {
     /// The stored content of a read, with the native function that the runtime
     /// may find under the key (`implicitNative`).
     fn readValue(self: *FlowInterp, st: *const State, o: Value, key: Key) Error!Value {
-        if (key == .name and key.name == @intFromEnum(object.Atom.length) and !o.origins_top and o.origins.len > 0) {
+        if (key == .name and key.name == @backingInt(object.Atom.length) and !o.origins_top and o.origins.len > 0) {
             var arrays = true;
             for (o.origins) |site| arrays = arrays and (site.kind == .allocated_array or (site.kind == .literal and self.sourceView(site.context).getTag(site.node) == .array_literal));
             if (arrays) {
@@ -4359,7 +4359,7 @@ pub const FlowInterp = struct {
             var parent = site;
             const may_change = switch (site.kind) {
                 .response => switch (key) {
-                    .name => |name| name == @intFromEnum(object.Atom.headers),
+                    .name => |name| name == @backingInt(object.Atom.headers),
                     .index, .dynamic => true,
                 },
                 .response_headers => blk: {
@@ -5306,7 +5306,7 @@ const Harness = struct {
     }
 
     fn nameOf(h: *Harness, atom_idx: u16) ?[]const u8 {
-        const atom: object.Atom = @enumFromInt(atom_idx);
+        const atom: object.Atom = @fromBackingInt(@intCast(atom_idx));
         if (atom.toPredefinedName()) |name| return name;
         return h.atoms.getName(atom);
     }
@@ -8519,8 +8519,9 @@ test "census C1: the rows that remove a defense are exactly the twelve" {
 
     // The field has no default, so every `rowsOf` call and every literal row
     // names its edge.
-    inline for (@typeInfo(OperationRow).@"struct".fields) |field| {
-        if (std.mem.eql(u8, field.name, "defense")) try testing.expect(field.defaultValue() == null);
+    const info = @typeInfo(OperationRow).@"struct";
+    inline for (info.field_names, info.field_attrs) |field, attrs| {
+        if (std.mem.eql(u8, field, "defense")) try testing.expect(attrs.default_value_ptr == null);
     }
 }
 
@@ -8690,7 +8691,7 @@ const Census = struct {
     fn absorb(census: *Census, interp: *const FlowInterp, result: ?FunctionResult) void {
         for (interp.visits, 0..) |count, i| census.visits[i] +|= count;
         const res = result orelse return;
-        for (res.unresolved) |entry| census.unresolved[@intFromEnum(entry.tag)] += 1;
+        for (res.unresolved) |entry| census.unresolved[@backingInt(entry.tag)] += 1;
     }
 };
 
@@ -8754,10 +8755,10 @@ test "tagPlan agrees with eval and exec for every tag" {
 
     // A tag the corpora did not record as unresolved is probed with a node
     // that holds no payload. The rule for such a tag must not read one.
-    inline for (@typeInfo(NodeTag).@"enum".fields) |field| {
-        const tag: NodeTag = @enumFromInt(field.value);
+    inline for (@typeInfo(NodeTag).@"enum".field_names) |field| {
+        const tag: NodeTag = @fromBackingInt(@intCast(@backingInt(@field(NodeTag, field))));
         const plan = tagPlan(tag);
-        const index = @intFromEnum(tag);
+        const index = @backingInt(tag);
         if (plan != .handled and census.unresolved[index] == 0) {
             var store = ir.IRStore.init(testing.allocator);
             defer store.deinit();
@@ -8781,16 +8782,16 @@ test "tagPlan agrees with eval and exec for every tag" {
     var refused: usize = 0;
     var refused_strict: usize = 0;
     var not_produced: usize = 0;
-    inline for (@typeInfo(NodeTag).@"enum".fields) |field| {
-        const tag: NodeTag = @enumFromInt(field.value);
-        const index = @intFromEnum(tag);
+    inline for (@typeInfo(NodeTag).@"enum".field_names) |field| {
+        const tag: NodeTag = @fromBackingInt(@intCast(@backingInt(@field(NodeTag, field))));
+        const index = @backingInt(tag);
         switch (tagPlan(tag)) {
             .handled => {
                 handled += 1;
                 // The corpus reached the tag and no corpus source left it
                 // unresolved.
                 if (census.visits[index] == 0) {
-                    std.debug.print("handled tag never reached by the corpus: {s}\n", .{field.name});
+                    std.debug.print("handled tag never reached by the corpus: {s}\n", .{field});
                     return error.HandledTagNotReached;
                 }
             },
@@ -8848,7 +8849,7 @@ test "handler request cells distinguish authorization from ordinary fields" {
     try expectHandlerInput("function handler(req) { return req.headers.authorization; }", true);
     try expectHandlerInput("function handler(req) { return req.headers[\"authorization\"]; }", true);
     for ([_][]const u8{ "url", "path", "method", "body", "query" }) |name| {
-        const source = try std.fmt.allocPrint(testing.allocator, "function handler(req) {{ return req.{s}; }}", .{name});
+        const source = try testing.allocator.print("function handler(req) {{ return req.{s}; }}", .{name});
         defer testing.allocator.free(source);
         try expectHandlerInput(source, false);
     }
@@ -8907,7 +8908,7 @@ test "query contents retain writes through static and dynamic aliases" {
         "function handler(req) { const q = req.query; q[req.url] = env(\"SECRET_KEY\"); return req.query.value; }",
         "function handler(req) { req.query.value = env(\"SECRET_KEY\"); return JSON.stringify(req); }",
     }) |body| {
-        const source = try std.fmt.allocPrint(testing.allocator, "import {{ env }} from \"zttp:env\"; {s}", .{body});
+        const source = try testing.allocator.print("import {{ env }} from \"zttp:env\"; {s}", .{body});
         defer testing.allocator.free(source);
         const p = try probeHandler(source);
         try testing.expect(!p.cleared);
@@ -8964,7 +8965,7 @@ test "request and headers prototype methods have explicit read and write edges" 
         "function handler(req) { req.body = env(\"SECRET_KEY\"); return req.text(); }",
         "function handler(req) { req.body = env(\"SECRET_KEY\"); return req.json().value; }",
     }) |body| {
-        const source = try std.fmt.allocPrint(testing.allocator, "import {{ env }} from \"zttp:env\"; {s}", .{body});
+        const source = try testing.allocator.print("import {{ env }} from \"zttp:env\"; {s}", .{body});
         defer testing.allocator.free(source);
         const p = try probeHandler(source);
         try testing.expect(!p.cleared);
@@ -9050,7 +9051,7 @@ test "global request readers inspect the body without authorization provenance" 
     try expectHandlerInput("function handler(req) { return requestText(req).value; }", false);
     try expectHandlerInput("function handler(req) { return requestJson(req).value; }", false);
     for ([_][]const u8{ "requestBody", "requestText", "requestJson" }) |reader| {
-        const source = try std.fmt.allocPrint(testing.allocator, "import {{ env }} from \"zttp:env\"; function handler(req) {{ req.body = env(\"SECRET_KEY\"); return {s}(req); }}", .{reader});
+        const source = try testing.allocator.print("import {{ env }} from \"zttp:env\"; function handler(req) {{ req.body = env(\"SECRET_KEY\"); return {s}(req); }}", .{reader});
         defer testing.allocator.free(source);
         const p = try probeHandler(source);
         try testing.expect(!p.cleared);
@@ -9146,7 +9147,7 @@ test "egress observations use field-specific defenses and current heap contents"
 test "unknown calls clear the complete shadow report and clock values affect response only" {
     const unknown = try probeReport("function handler(req) { return missing(req); }");
     try testing.expect(unknown.cleared);
-    inline for (@typeInfo(report_types.FlowProperties).@"struct".fields) |field| try testing.expect(!@field(unknown.properties, field.name));
+    inline for (@typeInfo(report_types.FlowProperties).@"struct".field_names) |field| try testing.expect(!@field(unknown.properties, field));
     const response = try probeReport("function handler(req) { return Date.now(); }");
     try testing.expect(!response.cleared);
     try testing.expect(!response.properties.deterministic);
@@ -9174,7 +9175,7 @@ test "response HTML checks read mutable body and current possible format" {
         "function handler(req) { const r = Response.text(escapeHtml(req.url)); r.headers.set(\"content-type\", \"text/html\"); return r; }",
         "function handler(req) { return { body: escapeHtml(req.url), status: 200, headers: { \"content-type\": \"text/html\" } }; }",
     }) |body| {
-        const source = try std.fmt.allocPrint(testing.allocator, "{s}{s}", .{ text_import, body });
+        const source = try testing.allocator.print("{s}{s}", .{ text_import, body });
         defer testing.allocator.free(source);
         const p = try probeReport(source);
         try testing.expect(!p.cleared);
@@ -9193,7 +9194,7 @@ test "helper responses transmit status and ignore init header fields" {
         "function handler(req) { const r = Response.text(\"public\", { status: 200 + env(\"SECRET_KEY\").length }); return r.statusText; }",
         "function handler(req) { const r = Response.text(\"public\", { status: 200 + env(\"SECRET_KEY\").length }); return r.ok; }",
     }) |body| {
-        const source = try std.fmt.allocPrint(testing.allocator, "import {{ env }} from \"zttp:env\"; {s}", .{body});
+        const source = try testing.allocator.print("import {{ env }} from \"zttp:env\"; {s}", .{body});
         defer testing.allocator.free(source);
         const p = try probeReport(source);
         try testing.expect(!p.cleared);
@@ -9352,7 +9353,7 @@ test "imported bindings copy current shared globals and returned closures retain
 test "routerMatch keeps handler identity and passes the original request explicitly" {
     const clean = try probeReport("import { routerMatch } from \"zttp:router\"; function publicRoute(req) { return Response.text(\"public\"); } const routes = { \"GET /\": publicRoute }; function handler(req) { const found = routerMatch(routes, req); if (found) { req.params = found.params; return found.handler(req); } return Response.text(\"missing\"); }");
     try testing.expect(!clean.cleared);
-    inline for (@typeInfo(report_types.FlowProperties).@"struct".fields) |field| try testing.expect(@field(clean.properties, field.name));
+    inline for (@typeInfo(report_types.FlowProperties).@"struct".field_names) |field| try testing.expect(@field(clean.properties, field));
     const leaked = try probeReport("import { routerMatch } from \"zttp:router\"; function privateRoute(req) { return req.headers.authorization; } const routes = { \"GET /\": privateRoute }; function handler(req) { const found = routerMatch(routes, req); if (found) return found.handler(req); return \"missing\"; }");
     try testing.expect(!leaked.cleared);
     try testing.expect(!leaked.properties.no_credential_leakage);
@@ -9377,7 +9378,7 @@ test "object validation guards one view and alias writes invalidate that view" {
         "raw[req.url] = req.url;",
         "const alias = checked.value; alias.city = req.url;",
     }) |write| {
-        const source = try std.fmt.allocPrint(testing.allocator, "{s} function handler(req) {{ const raw = {{ city: req.query.city }}; const checked = validateObject(\"city\", raw); {s} fetch(\"https://example.com\", {{ body: checked.value }}); return \"public\"; }}", .{ prefix, write });
+        const source = try testing.allocator.print("{s} function handler(req) {{ const raw = {{ city: req.query.city }}; const checked = validateObject(\"city\", raw); {s} fetch(\"https://example.com\", {{ body: checked.value }}); return \"public\"; }}", .{ prefix, write });
         defer testing.allocator.free(source);
         const changed = try probeReport(source);
         try testing.expect(!changed.cleared);
@@ -9549,7 +9550,7 @@ test "ambiguous callable selection never witnesses an unselected internal sink" 
         "[() => { console.log(env(\"API_TOKEN\")); return \"bad\"; }, () => \"public\"]",
         "[() => { console.log(env(\"API_TOKEN\")); return \"bad\"; }, undefined]",
     }) |options| {
-        const source = try std.fmt.allocPrint(testing.allocator, "import {{ env }} from \"zttp:env\"; function handler(req) {{ const options = {s}; const f = options[1]; f(); return \"public\"; }}", .{options});
+        const source = try testing.allocator.print("import {{ env }} from \"zttp:env\"; function handler(req) {{ const options = {s}; const f = options[1]; f(); return \"public\"; }}", .{options});
         defer testing.allocator.free(source);
         const h = try Harness.create(testing.allocator, source);
         defer h.destroy();

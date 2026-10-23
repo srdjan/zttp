@@ -55,7 +55,7 @@ const Case = struct {
 };
 
 fn op(comptime o: O) u8 {
-    return @intFromEnum(o);
+    return @backingInt(o);
 }
 
 // push_i8 takes a single signed-byte operand; push_const takes a big-endian u16

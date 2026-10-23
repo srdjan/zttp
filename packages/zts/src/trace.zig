@@ -19,7 +19,7 @@ const util = @import("modules/internal/util.zig");
 const module_slots = @import("zts-base").module_slots;
 const json_utils = @import("zts-base").json_utils;
 
-pub const TRACE_STATE_SLOT = @intFromEnum(module_slots.Slot.trace);
+pub const TRACE_STATE_SLOT = @backingInt(module_slots.Slot.trace);
 
 /// Mutex wrapper compatible with Zig 0.16's Io.Mutex.
 pub const TraceMutex = struct {
@@ -667,7 +667,7 @@ fn findMatchingBrace(json: []const u8, start: usize, open: u8, close: u8) ?[]con
 // Replay Support - Stub Functions
 // ============================================================================
 
-pub const REPLAY_STATE_SLOT = @intFromEnum(module_slots.Slot.replay);
+pub const REPLAY_STATE_SLOT = @backingInt(module_slots.Slot.replay);
 
 /// Per-request replay state. Holds the recorded I/O entries and a cursor
 /// tracking which entry to return next.
@@ -1264,10 +1264,10 @@ test "findJsonStringValue" {
 }
 
 test "provider trace phase is a closed optional transport marker" {
-    inline for (std.meta.fields(ProviderPhase)) |field| {
-        const line = "{\"type\":\"io\",\"module\":\"fetch\",\"fn\":\"fetch\",\"result\":{\"error\":\"InternalError\"},\"provider_phase\":\"" ++ field.name ++ "\"}";
+    inline for (@typeInfo(ProviderPhase).@"enum".field_names) |field| {
+        const line = "{\"type\":\"io\",\"module\":\"fetch\",\"fn\":\"fetch\",\"result\":{\"error\":\"InternalError\"},\"provider_phase\":\"" ++ field ++ "\"}";
         const parsed = (try parseTraceLine(line)).io;
-        try std.testing.expectEqual(@as(ProviderPhase, @enumFromInt(field.value)), parsed.provider_phase.?);
+        try std.testing.expectEqual(@as(ProviderPhase, @fromBackingInt(@intCast(@backingInt(@field(ProviderPhase, field))))), parsed.provider_phase.?);
     }
     const absent = (try parseTraceLine("{\"type\":\"io\",\"result\":{\"provider_phase\":\"completed\"}}")).io;
     try std.testing.expect(absent.provider_phase == null);

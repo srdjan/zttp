@@ -204,7 +204,7 @@ const status_stubs = blk: {
     var table: [count][]const u8 = undefined;
     for (&table, 0..) |*slot, i| {
         const status: u16 = min_status + @as(u16, @intCast(i));
-        const phrase = std.http.Status.phrase(@enumFromInt(status)) orelse "Unknown";
+        const phrase = std.http.Status.phrase(@fromBackingInt(@intCast(status))) orelse "Unknown";
         const body = if (isOkStatus(status)) "{\\\"id\\\":\\\"1\\\"}" else "{}";
         slot.* = std.fmt.comptimePrint(
             "{{\"status\":{d},\"statusText\":\"{s}\",\"ok\":{s},\"headers\":{{}},\"body\":\"{s}\"}}",

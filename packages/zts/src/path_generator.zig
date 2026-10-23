@@ -431,9 +431,9 @@ pub const PathGenerator = struct {
         pub fn describe(self: UnseenCall, allocator: std.mem.Allocator) error{OutOfMemory}!struct { text: []const u8, owned: bool } {
             const cause = self.imported orelse return .{ .text = self.func, .owned = false };
             const text = if (cause.blocked) |reason|
-                try std.fmt.allocPrint(allocator, "{s} ({s})", .{ cause.file, reason.text() })
+                try allocator.print("{s} ({s})", .{ cause.file, reason.text() })
             else
-                try std.fmt.allocPrint(allocator, "{s} in {s}", .{ self.func, cause.file });
+                try allocator.print("{s} in {s}", .{ self.func, cause.file });
             return .{ .text = text, .owned = true };
         }
     };
@@ -1090,11 +1090,7 @@ pub const PathGenerator = struct {
             // can be called with no edge to show it. Spec 5.6, as above.
             const site = self.function_value_escape_site;
             const escape_desc = if (site) |found|
-                try std.fmt.allocPrint(
-                    allocator,
-                    "{s} at line {d}, column {d} {s}, so a call through it is not followed",
-                    .{ found.name, found.line, found.column, found.reason() },
-                )
+                try allocator.print("{s} at line {d}, column {d} {s}, so a call through it is not followed", .{ found.name, found.line, found.column, found.reason() })
             else
                 try allocator.dupe(
                     u8,
@@ -2730,12 +2726,12 @@ pub const PathGenerator = struct {
 
     fn resolveAtomName(self: *const PathGenerator, atom_idx: u16) ?[]const u8 {
         if (self.atoms) |table| {
-            const atom: object.Atom = @enumFromInt(atom_idx);
+            const atom: object.Atom = @fromBackingInt(@intCast(atom_idx));
             if (atom.toPredefinedName()) |name| return name;
             return table.getName(atom);
         }
         if (self.ir_view.getString(atom_idx)) |name| return name;
-        const atom: object.Atom = @enumFromInt(atom_idx);
+        const atom: object.Atom = @fromBackingInt(@intCast(atom_idx));
         return atom.toPredefinedName();
     }
 
@@ -2756,7 +2752,7 @@ pub const PathGenerator = struct {
     }
 
     fn allocLoopDesc(self: *PathGenerator, comptime fmt: []const u8, args: anytype, fallback: []const u8) []const u8 {
-        return std.fmt.allocPrint(self.allocator, fmt, args) catch
+        return self.allocator.print(fmt, args) catch
             self.allocator.dupe(u8, fallback) catch "";
     }
 
@@ -4503,7 +4499,7 @@ test "a failable answer and every blocked answer each count and name their cause
         try std.testing.expect(!fixture.generator.faultAnalysisComplete());
         const described = try unseen[0].describe(allocator);
         defer if (described.owned) allocator.free(described.text);
-        const expected = try std.fmt.allocPrint(allocator, "./deep.ts ({s})", .{reason.text()});
+        const expected = try allocator.print("./deep.ts ({s})", .{reason.text()});
         defer allocator.free(expected);
         try std.testing.expectEqualStrings(expected, described.text);
     }
@@ -4961,11 +4957,7 @@ test "short-circuit enumeration that passes MAX_PATHS reports truncation" {
     defer source_buf.deinit(allocator);
     try source_buf.appendSlice(allocator, "import { jwtVerify } from \"zttp:auth\";\nfunction handler(req) {\n");
     for (0..12) |i| {
-        const guard = try std.fmt.allocPrint(
-            allocator,
-            "  const a{d} = jwtVerify(\"t\", \"secret\");\n  if (!a{d}.ok && req.headers[\"x\"] === \"y\") return Response.text(\"no\", {{ status: 401 }});\n",
-            .{ i, i },
-        );
+        const guard = try allocator.print("  const a{d} = jwtVerify(\"t\", \"secret\");\n  if (!a{d}.ok && req.headers[\"x\"] === \"y\") return Response.text(\"no\", {{ status: 401 }});\n", .{ i, i });
         defer allocator.free(guard);
         try source_buf.appendSlice(allocator, guard);
     }

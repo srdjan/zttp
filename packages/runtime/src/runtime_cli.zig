@@ -20,12 +20,12 @@ const runtime_config_mod = @import("runtime_config.zig");
 const embedded_handler = @import("embedded_handler");
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var debug_alloc: if (builtin.mode == .Debug) std.heap.DebugAllocator(.{}) else void =
-        if (builtin.mode == .Debug) .init else {};
-    defer if (builtin.mode == .Debug) {
+    var debug_alloc: if (builtin.mode == .debug) std.heap.SafeAllocator else void =
+        if (builtin.mode == .debug) .init(std.heap.page_allocator, .{}) else {};
+    defer if (builtin.mode == .debug) {
         _ = debug_alloc.deinit();
     };
-    const allocator = if (builtin.mode == .Debug) debug_alloc.allocator() else std.heap.smp_allocator;
+    const allocator = if (builtin.mode == .debug) debug_alloc.allocator() else std.heap.smp_allocator;
 
     // Check for self-extracting binary payload before anything else. A payload
     // this runtime cannot read is not the same as no payload: swallowing it
@@ -164,7 +164,7 @@ fn attestPayload(allocator: std.mem.Allocator, payload: *const self_extract.Payl
     const cap_hex = if (contract.capabilities) |caps|
         std.fmt.bytesToHex(caps.hash, .lower)
     else
-        [_]u8{'0'} ** 64;
+        @as([64]u8, @splat('0'));
 
     var buf: [1024]u8 = undefined;
     const line = try std.fmt.bufPrint(
@@ -225,7 +225,7 @@ pub fn serveCommandWithEnviron(
 /// flag because the panic hook is not compiled in. The mode is a parameter so
 /// a Debug test binary can exercise the refusal.
 fn parseDebugPanicPathFlag(
-    comptime mode: std.builtin.OptimizeMode,
+    comptime mode: std.lang.Optimize,
     config: *ServerConfig,
     i: *usize,
     argv: []const []const u8,
@@ -908,7 +908,7 @@ test "appendedServerConfig wires the embedded capability policy for enforcement"
         .contract_json = null,
         .policy = .{ .egress = .{ .enabled = true, .values = &[_][]const u8{"https://api.allowed.example:443"} } },
         .policy_strings = &.{},
-        .policy_section_sha256 = [_]u8{0x5a} ** 32,
+        .policy_section_sha256 = @as([32]u8, @splat(0x5a)),
         .attestation_jws = null,
     };
     const config = appendedServerConfig(&payload);
@@ -952,7 +952,7 @@ test "parseServeArgs parses internal debug panic path flag" {
 test "debug panic path flag is refused in ReleaseFast and ReleaseSmall configurations" {
     var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
     const argv = [_][]const u8{ "--_debug-panic-path", "/x" };
-    inline for (.{ std.builtin.OptimizeMode.ReleaseFast, std.builtin.OptimizeMode.ReleaseSmall }) |mode| {
+    inline for (.{ std.lang.Optimize.fast, std.lang.Optimize.small }) |mode| {
         var i: usize = 0;
         try std.testing.expectError(
             error.DebugPanicPathNeedsDebugOrSafeBuild,
@@ -961,7 +961,7 @@ test "debug panic path flag is refused in ReleaseFast and ReleaseSmall configura
         try std.testing.expect(config.runtime_config.debug_panic_path == null);
     }
     var i: usize = 0;
-    try parseDebugPanicPathFlag(.ReleaseSafe, &config, &i, &argv);
+    try parseDebugPanicPathFlag(.safe, &config, &i, &argv);
     try std.testing.expectEqualStrings("/x", config.runtime_config.debug_panic_path.?);
 }
 
@@ -990,12 +990,8 @@ test "every retired module refuses supported startup modes" {
         .{ .specifier = "zttp:tool", .symbol = "toolInput" },
     };
     for (cases) |case| {
-        const source = try std.fmt.allocPrint(
-            allocator,
-            "import {{ {s} }} from \"{s}\";\n" ++
-                "function handler(req) {{ return Response.text(\"ok\"); }}\n",
-            .{ case.symbol, case.specifier },
-        );
+        const source = try allocator.print("import {{ {s} }} from \"{s}\";\n" ++
+            "function handler(req) {{ return Response.text(\"ok\"); }}\n", .{ case.symbol, case.specifier });
         defer allocator.free(source);
         const modes = [_][]const []const u8{
             &.{ "--pool", "3" },
@@ -1034,11 +1030,7 @@ test "source startup refuses retired authority in a local dependency" {
     for (cases) |case| {
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
-        const helper = try std.fmt.allocPrint(
-            allocator,
-            "import {{ {s} }} from \"{s}\";\nexport function retired() {{ return 1; }}\n",
-            .{ case.symbol, case.specifier },
-        );
+        const helper = try allocator.print("import {{ {s} }} from \"{s}\";\nexport function retired() {{ return 1; }}\n", .{ case.symbol, case.specifier });
         defer allocator.free(helper);
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.ts", .data = helper });
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data =

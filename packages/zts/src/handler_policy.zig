@@ -857,8 +857,8 @@ test "the retired egress key names its replacement" {
     try std.testing.expect(std.mem.indexOf(u8, policyErrorHelp(error.InvalidEgressEndpoint), "scheme://host") != null);
     // The help for an unknown scope lists every scope the enum accepts.
     const scope_help = policyErrorHelp(error.UnknownAddressScope);
-    inline for (@typeInfo(endpoint.AddressScope).@"enum".fields) |field| {
-        const scope: endpoint.AddressScope = @enumFromInt(field.value);
+    inline for (@typeInfo(endpoint.AddressScope).@"enum".field_names) |field| {
+        const scope: endpoint.AddressScope = @fromBackingInt(@intCast(@backingInt(@field(endpoint.AddressScope, field))));
         try std.testing.expect(std.mem.indexOf(u8, scope_help, scope.name()) != null);
     }
     // An error with nothing extra to say says nothing rather than something
@@ -902,8 +902,8 @@ test "an egress section with no address scope permits no connection" {
     // address may be connected to, because the section granted no scope.
     try std.testing.expect(policy.egress.?.values.items.len == 1);
     try std.testing.expect(policy.egress_scopes.isEmpty());
-    inline for (@typeInfo(endpoint.AddressScope).@"enum".fields) |field| {
-        const scope: endpoint.AddressScope = @enumFromInt(field.value);
+    inline for (@typeInfo(endpoint.AddressScope).@"enum".field_names) |field| {
+        const scope: endpoint.AddressScope = @fromBackingInt(@intCast(@backingInt(@field(endpoint.AddressScope, field))));
         try std.testing.expect(!policy.egress_scopes.contains(scope));
     }
 }

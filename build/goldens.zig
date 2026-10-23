@@ -212,7 +212,9 @@ fn addExpertMetaGolden(
     exe: *std.Build.Step.Compile,
     golden_rel: []const u8,
 ) void {
-    const golden = b.build_root.handle.readFileAlloc(b.graph.io, golden_rel, b.allocator, .unlimited) catch |err| {
+    b.dependOnFileContents(b.path(golden_rel));
+    const golden_path = b.root.joinString(b.allocator, golden_rel) catch @panic("OOM");
+    const golden = std.Io.Dir.cwd().readFileAlloc(b.graph.io, golden_path, b.allocator, .unlimited) catch |err| {
         std.debug.panic("missing expert golden fixture {s}: {s}", .{ golden_rel, @errorName(err) });
     };
     const marker = ",\"policy_version\":";
@@ -260,7 +262,8 @@ fn addExpertRun(
     for (args) |arg| {
         if (!std.mem.endsWith(u8, arg, ".ts") and !std.mem.endsWith(u8, arg, ".tsx")) continue;
         if (std.fs.path.isAbsolute(arg)) continue;
-        b.build_root.handle.access(b.graph.io, arg, .{}) catch continue;
+        b.dependOnDirectoryContents(b.path(std.fs.path.dirname(arg) orelse "."));
+        b.root.access(b.graph.io, arg, .{}) catch continue;
         run.addFileInput(b.path(arg));
     }
     run.expectExitCode(expected_exit);
@@ -271,12 +274,7 @@ fn addExpertRun(
         run.expectStdErrMatch("");
     }
     if (golden_rel) |rel| {
-        const expected = b.build_root.handle.readFileAlloc(b.graph.io, rel, b.allocator, .unlimited) catch |err| {
-            std.debug.panic("missing expert golden fixture {s}: {s}", .{ rel, @errorName(err) });
-        };
-        // The golden text is embedded in the step, so editing a golden
-        // invalidates the cache. The handler source is declared above.
-        run.expectStdOutEqual(expected);
+        run.addCheck(.{ .expect_stdout_snapshot = b.path(rel) });
     }
     step.dependOn(&run.step);
 }

@@ -43,13 +43,13 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
     const kernel_safety_probe_mod = b.createModule(.{
         .root_source_file = b.path("build/kernel_safety_release_probe.zig"),
         .target = b.graph.host,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
     });
     kernel_safety_probe_mod.addImport("zttp_proof_checker", ctx.proofCheckerMod());
     kernel_safety_probe_mod.addImport("kernel_safety_probe_dep", b.createModule(.{
         .root_source_file = b.path("build/kernel_safety_probe_dep.zig"),
         .target = b.graph.host,
-        .optimize = .ReleaseFast,
+        .optimize = .fast,
     }));
     const kernel_safety_probe = b.addExecutable(.{
         .name = "kernel-safety-release-probe",

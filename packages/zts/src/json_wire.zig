@@ -127,8 +127,8 @@ fn parseStructInto(
     merge_existing: bool,
 ) !void {
     if (try source.next() != .object_begin) return error.UnexpectedToken;
-    const fields = std.meta.fields(T);
-    var seen = [_]bool{false} ** fields.len;
+    const fields = @typeInfo(T).@"struct".field_names;
+    var seen = @as([fields.len]bool, @splat(false));
     while (try source.peekNextTokenType() != .object_end) {
         const key = try String.jsonParse(allocator, source, options);
         if (!try parseKnownField(T, allocator, source, options, key.bytes, value, &seen, merge_existing)) {
@@ -145,11 +145,11 @@ fn parseKnownField(
     options: std.json.ParseOptions,
     key: []const u8,
     value: *T,
-    seen: *[std.meta.fields(T).len]bool,
+    seen: *[@typeInfo(T).@"struct".field_names.len]bool,
     merge_existing: bool,
 ) !bool {
-    inline for (std.meta.fields(T), 0..) |field, field_index| {
-        if (std.mem.eql(u8, key, field.name)) {
+    inline for (@typeInfo(T).@"struct".field_names, 0..) |field, field_index| {
+        if (std.mem.eql(u8, key, field)) {
             if (seen[field_index]) switch (options.duplicate_field_behavior) {
                 .use_first => {
                     try source.skipValue();
@@ -159,16 +159,16 @@ fn parseKnownField(
                 .use_last => {},
             };
 
-            const Field = field.type;
+            const Field = @FieldType(T, field);
             if ((seen[field_index] or merge_existing) and comptime hasMergeParser(Field)) {
-                try Field.jsonParseInto(allocator, source, options, &@field(value, field.name));
+                try Field.jsonParseInto(allocator, source, options, &@field(value, field));
             } else if ((seen[field_index] or merge_existing) and comptime isRepeatedSlice(Field)) {
                 const next = try parseValue(Field, allocator, source, options);
-                @field(value, field.name) = try appendRepeatedSlice(Field, allocator, @field(value, field.name), next);
+                @field(value, field) = try appendRepeatedSlice(Field, allocator, @field(value, field), next);
             } else if ((seen[field_index] or merge_existing) and comptime isRawStruct(Field)) {
-                try parseStructInto(Field, allocator, source, options, &@field(value, field.name), true);
+                try parseStructInto(Field, allocator, source, options, &@field(value, field), true);
             } else {
-                @field(value, field.name) = try parseValue(Field, allocator, source, options);
+                @field(value, field) = try parseValue(Field, allocator, source, options);
             }
             seen[field_index] = true;
             return true;

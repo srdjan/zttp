@@ -97,7 +97,7 @@ pub const TenuredHeap = struct {
             .objects = .empty,
             .object_index = std.AutoHashMap(*anyopaque, usize).init(allocator),
             .free_indices = .empty,
-            .free_lists = [_]?*FreeBlock{null} ** 16,
+            .free_lists = @as([16]?*FreeBlock, @splat(null)),
             .allocated = 0,
             .last_sweep_freed_bytes = 0,
             .allocator = allocator,
@@ -1216,7 +1216,7 @@ pub const GC = struct {
     ///
     /// No-op outside Debug and in test builds, per the project assert-gating rule.
     fn debugAssertNoUnrecordedYoungEdges(self: *GC) void {
-        if (builtin.mode != .Debug or builtin.is_test) return;
+        if (builtin.mode != .debug or builtin.is_test) return;
         for (self.tenured.objects.items) |maybe_ptr| {
             const ptr = maybe_ptr orelse continue; // freed slots are nulled by sweep
             const header: *heap.MemBlockHeader = @ptrCast(@alignCast(ptr));
@@ -1622,7 +1622,7 @@ test "TenuredHeap registration is OOM-safe under FailingAllocator" {
     // internal allocations and we assert the error propagates without leaking.
     const Probe = struct {
         fn run(fail_at: usize) !bool {
-            var leak_detector: std.heap.DebugAllocator(.{ .stack_trace_frames = 0 }) = .init;
+            var leak_detector: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{ .stack_trace_frames = 0 });
             const child = leak_detector.allocator();
             var failing = std.testing.FailingAllocator.init(child, .{ .fail_index = fail_at });
 
@@ -1658,8 +1658,8 @@ test "TenuredHeap registration is OOM-safe under FailingAllocator" {
             }
 
             const leak_check = leak_detector.deinit();
-            if (leak_check == .leak) std.debug.print("TenuredHeap leaked on fail_at={d}\n", .{fail_at});
-            try std.testing.expectEqual(std.heap.Check.ok, leak_check);
+            if (leak_check != 0) std.debug.print("TenuredHeap leaked on fail_at={d}\n", .{fail_at});
+            try std.testing.expectEqual(@as(usize, 0), leak_check);
             return ok;
         }
     };

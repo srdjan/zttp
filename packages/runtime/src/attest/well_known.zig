@@ -82,14 +82,10 @@ pub fn build(
     var pubkey_b64_buf: [b64.Encoder.calcSize(Ed25519.PublicKey.encoded_length)]u8 = undefined;
     _ = b64.Encoder.encode(pubkey_b64_buf[0..pubkey_b64_len], &public_key);
 
-    const body = try std.fmt.allocPrint(
-        allocator,
-        "{{\"v\":\"" ++ envelope.version_tag ++ "\"," ++
-            "\"attest\":\"{s}\"," ++
-            "\"contract\":{s}," ++
-            "\"publicKey\":{{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"{s}\",\"kid\":\"{s}\"}}}}",
-        .{ attestation_jws, contract_json, pubkey_b64_buf[0..pubkey_b64_len], fingerprint },
-    );
+    const body = try allocator.print("{{\"v\":\"" ++ envelope.version_tag ++ "\"," ++
+        "\"attest\":\"{s}\"," ++
+        "\"contract\":{s}," ++
+        "\"publicKey\":{{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"{s}\",\"kid\":\"{s}\"}}}}", .{ attestation_jws, contract_json, pubkey_b64_buf[0..pubkey_b64_len], fingerprint });
     errdefer allocator.free(body);
 
     var digest: [32]u8 = undefined;
@@ -111,7 +107,7 @@ const sample_contract = "{\"version\":14,\"routes\":[],\"properties\":{\"pure\":
 const sample_jws = "eyJh.eyJ2.signature";
 
 fn samplePubKey() [32]u8 {
-    return .{ 0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60 } ++ [_]u8{0} ** 24;
+    return .{ 0x9d, 0x61, 0xb1, 0x9d, 0xef, 0xfd, 0x5a, 0x60 } ++ @as([24]u8, @splat(0));
 }
 
 fn sampleSha() [64]u8 {
@@ -181,10 +177,10 @@ test "build fails closed when the contract does not match the signed hash" {
         sample_contract,
         sample_jws,
         samplePubKey(),
-        &([_]u8{'a'} ** 64), // wrong hash
+        &(@as([64]u8, @splat('a'))), // wrong hash
     ));
     // An all-zero (unpinned) claim skips the binding check.
-    var doc = try build(testing.allocator, sample_contract, sample_jws, samplePubKey(), &([_]u8{'0'} ** 64));
+    var doc = try build(testing.allocator, sample_contract, sample_jws, samplePubKey(), &(@as([64]u8, @splat('0'))));
     doc.deinit(testing.allocator);
 }
 

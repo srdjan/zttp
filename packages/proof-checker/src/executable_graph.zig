@@ -104,8 +104,8 @@ pub const Member = struct {
 
     pub fn order(a: Member, b: Member) std.math.Order {
         @setRuntimeSafety(true);
-        const ka = @intFromEnum(a.kind);
-        const kb = @intFromEnum(b.kind);
+        const ka = @backingInt(a.kind);
+        const kb = @backingInt(b.kind);
         if (ka != kb) return std.math.order(ka, kb);
         return std.math.order(a.ordinal, b.ordinal);
     }
@@ -137,7 +137,7 @@ pub fn digestBytes(bytes: []const u8) [32]u8 {
 pub const RootHasher = struct {
     hasher: Sha256,
     previous: ?Member = null,
-    seen_kinds: std.EnumSet(MemberKind) = std.EnumSet(MemberKind).initEmpty(),
+    seen_kinds: std.EnumSet(MemberKind) = std.EnumSet(MemberKind).empty,
     remaining: u32,
 
     pub fn init(count: u32) InitError!RootHasher {
@@ -166,7 +166,7 @@ pub const RootHasher = struct {
         self.remaining -= 1;
 
         var kind_le: [2]u8 = undefined;
-        std.mem.writeInt(u16, &kind_le, @intFromEnum(member.kind), .little);
+        std.mem.writeInt(u16, &kind_le, @backingInt(member.kind), .little);
         var ordinal_le: [4]u8 = undefined;
         std.mem.writeInt(u32, &ordinal_le, member.ordinal, .little);
 
@@ -178,8 +178,8 @@ pub const RootHasher = struct {
     /// Every kind a production artifact must commit was pushed.
     pub fn checkRequiredKinds(self: RootHasher) RequiredKindsError!void {
         @setRuntimeSafety(true);
-        inline for (@typeInfo(MemberKind).@"enum".fields) |field| {
-            const kind: MemberKind = @enumFromInt(field.value);
+        inline for (@typeInfo(MemberKind).@"enum".field_names) |field| {
+            const kind: MemberKind = @fromBackingInt(@intCast(@backingInt(@field(MemberKind, field))));
             if (kind.required() and !self.seen_kinds.contains(kind)) return error.MissingRequiredKind;
         }
     }
@@ -402,9 +402,9 @@ test "member kind wire decoding is closed" {
         try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(retired_kind));
     }
     try testing.expectEqual(@as(?MemberKind, null), MemberKind.fromWire(21));
-    inline for (@typeInfo(MemberKind).@"enum".fields) |field| {
-        const kind: MemberKind = @enumFromInt(field.value);
-        try testing.expectEqual(@as(?MemberKind, kind), MemberKind.fromWire(field.value));
+    inline for (@typeInfo(MemberKind).@"enum".field_names) |field| {
+        const kind: MemberKind = @fromBackingInt(@intCast(@backingInt(@field(MemberKind, field))));
+        try testing.expectEqual(@as(?MemberKind, kind), MemberKind.fromWire(@backingInt(@field(MemberKind, field))));
     }
 }
 

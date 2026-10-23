@@ -122,7 +122,7 @@ const usage =
 ;
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
+    var debug_alloc: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_alloc.deinit();
     const allocator = debug_alloc.allocator();
 
@@ -485,7 +485,7 @@ fn recordBaseline(allocator: std.mem.Allocator, io: std.Io, opts: RecordOptions)
     defer allocator.free(zig_version);
     const os_release = commandOutput(allocator, io, &.{ "uname", "-r" }) catch try allocator.dupe(u8, "unknown");
     defer allocator.free(os_release);
-    const processor = if (builtin.os.tag == .macos)
+    const processor = if (builtin.target.os.tag == .macos)
         commandOutput(allocator, io, &.{ "sysctl", "-n", "machdep.cpu.brand_string" }) catch try allocator.dupe(u8, "unknown")
     else
         try allocator.dupe(u8, "unknown");
@@ -578,11 +578,11 @@ fn renderBaseline(allocator: std.mem.Allocator, report: Report, provenance: Prov
     try json.objectField("host");
     try json.beginObject();
     try json.objectField("os");
-    try json.write(if (builtin.os.tag == .macos) "Darwin" else @tagName(builtin.os.tag));
+    try json.write(if (builtin.target.os.tag == .macos) "Darwin" else @tagName(builtin.target.os.tag));
     try json.objectField("os_release");
     try json.write(provenance.os_release);
     try json.objectField("architecture");
-    try json.write(if (builtin.cpu.arch == .aarch64) "arm64" else @tagName(builtin.cpu.arch));
+    try json.write(if (builtin.target.cpu.arch == .aarch64) "arm64" else @tagName(builtin.target.cpu.arch));
     try json.objectField("processor");
     try json.write(provenance.processor);
     try json.endObject();
@@ -625,13 +625,13 @@ fn runTestCommand(allocator: std.mem.Allocator, io: std.Io, argv: []const []cons
 
 fn makeTestExecutable(allocator: std.mem.Allocator, path: []const u8, data: []const u8) !void {
     try zts.file_io.writeFile(allocator, path, data);
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     if (std.c.chmod(path_z, 0o755) != 0) return error.ChmodFailed;
 }
 
 test "recording writes five-run provenance and refuses dirty source" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const allocator = std.testing.allocator;
     const io = std.testing.io;
     var tmp = std.testing.tmpDir(.{});
@@ -701,7 +701,7 @@ test "recording writes five-run provenance and refuses dirty source" {
     defer allocator.free(actual_commit);
     try std.testing.expectEqualStrings(actual_commit, source_commit);
 
-    const baseline_z = try allocator.dupeZ(u8, baseline_path);
+    const baseline_z = try allocator.dupeSentinel(u8, baseline_path, 0);
     defer allocator.free(baseline_z);
     const baseline_fd = try std.posix.openatZ(std.posix.AT.FDCWD, baseline_z, .{ .ACCMODE = .RDONLY }, 0);
     defer std.Io.Threaded.closeFd(baseline_fd);

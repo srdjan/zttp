@@ -15,7 +15,7 @@ pub fn add(ctx: Context) void {
     smoke_v1.run.has_side_effects = true;
 
     const panic_isolation_cmd = b.addSystemCommand(&.{ "/bin/bash", "scripts/test-panic-isolation.sh", "--skip-build", "--zttp" });
-    panic_isolation_cmd.addArg(b.getInstallPath(.bin, "zttp"));
+    panic_isolation_cmd.addFileArg2(b.graph.path(.install_bin, "zttp"), .{ .make_absolute = true });
     panic_isolation_cmd.has_side_effects = true;
     panic_isolation_cmd.step.dependOn(b.getInstallStep());
 
@@ -26,6 +26,7 @@ pub fn add(ctx: Context) void {
         .link_libc = true,
     });
     module_scope_panic_probe_mod.addImport("zts", ctx.zts_host_mod);
+    module_scope_panic_probe_mod.addImport("setjmp-c", ctx.runtime_dep.module("setjmp-c"));
     const module_scope_panic_probe = b.addExecutable(.{
         .name = "module-scope-panic-probe",
         .root_module = module_scope_panic_probe_mod,

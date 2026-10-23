@@ -11,10 +11,10 @@ const cost_meter = zq.CostMeter;
 
 /// True when `mode` keeps the internal debug panic hook. ReleaseFast and
 /// ReleaseSmall builds compile the hook out.
-pub fn debugHooksEnabledIn(mode: std.builtin.OptimizeMode) bool {
+pub fn debugHooksEnabledIn(mode: std.lang.Optimize) bool {
     return switch (mode) {
-        .Debug, .ReleaseSafe => true,
-        .ReleaseFast, .ReleaseSmall => false,
+        .debug, .safe => true,
+        .fast, .small => false,
     };
 }
 
@@ -28,7 +28,7 @@ pub const CostCeilings = struct {
     total_is_constant: bool = false,
 
     pub inline fn classLimit(self: *const CostCeilings, class: cost_meter.ModuleClass) ?u64 {
-        return self.per_class[@intFromEnum(class)];
+        return self.per_class[@backingInt(class)];
     }
 };
 

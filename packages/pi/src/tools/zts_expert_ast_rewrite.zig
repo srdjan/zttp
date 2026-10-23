@@ -281,11 +281,7 @@ fn buildResult(
     const llm_text = try text_buf.toOwnedSlice();
     errdefer allocator.free(llm_text);
 
-    const summary = try std.fmt.allocPrint(
-        allocator,
-        "{d} total, {d} new, {d} preexisting",
-        .{ args.verdict.total, args.verdict.new_count, args.verdict.preexisting_count },
-    );
+    const summary = try allocator.print("{d} total, {d} new, {d} preexisting", .{ args.verdict.total, args.verdict.new_count, args.verdict.preexisting_count });
     defer allocator.free(summary);
     var payload: ui_payload.UiPayload = .{ .repair_candidate = try ui_payload.RepairCandidatePayload.init(
         allocator,
@@ -370,7 +366,7 @@ fn failureFormatted(
     comptime fmt: []const u8,
     fmt_args: anytype,
 ) !registry_mod.ToolResult {
-    const message = try std.fmt.allocPrint(allocator, fmt, fmt_args);
+    const message = try allocator.print(fmt, fmt_args);
     defer allocator.free(message);
     return failureJson(allocator, plan_id, intent_str, reason, message);
 }
@@ -408,7 +404,7 @@ const testing = std.testing;
 /// AST tool's `resolveInsideWorkspace` accepts the path. Caller frees the
 /// returned absolute path. Pair with `tmp.cleanup()` on the testing tmpDir.
 fn writeFixture(tmp_sub_path: anytype, source: []const u8) ![]u8 {
-    const root = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}", .{tmp_sub_path});
+    const root = try testing.allocator.print(".zig-cache/tmp/{s}", .{tmp_sub_path});
     defer testing.allocator.free(root);
     const rel_path = try std.fs.path.join(testing.allocator, &.{ root, "handler.ts" });
     defer testing.allocator.free(rel_path);
@@ -443,11 +439,7 @@ test "ast rewrite: replace_let_with_const clears veto on a local let" {
     const path = try writeFixture(tmp.sub_path, source);
     defer testing.allocator.free(path);
 
-    const input = try std.fmt.allocPrint(
-        testing.allocator,
-        "{{\"path\":\"{s}\",\"line\":2,\"intent\":\"replace_let_with_const\",\"plan_id\":\"rp_g_let\"}}",
-        .{path},
-    );
+    const input = try testing.allocator.print("{{\"path\":\"{s}\",\"line\":2,\"intent\":\"replace_let_with_const\",\"plan_id\":\"rp_g_let\"}}", .{path});
     defer testing.allocator.free(input);
     var result = try runExecute(testing.allocator, input);
     defer result.deinit(testing.allocator);
@@ -471,11 +463,7 @@ test "ast rewrite: replace_compound_assign_with_explicit clears veto on a compou
     const path = try writeFixture(tmp.sub_path, source);
     defer testing.allocator.free(path);
 
-    const input = try std.fmt.allocPrint(
-        testing.allocator,
-        "{{\"path\":\"{s}\",\"line\":3,\"intent\":\"replace_compound_assign_with_explicit\",\"plan_id\":\"rp_ca\"}}",
-        .{path},
-    );
+    const input = try testing.allocator.print("{{\"path\":\"{s}\",\"line\":3,\"intent\":\"replace_compound_assign_with_explicit\",\"plan_id\":\"rp_ca\"}}", .{path});
     defer testing.allocator.free(input);
     var result = try runExecute(testing.allocator, input);
     defer result.deinit(testing.allocator);
@@ -501,11 +489,7 @@ test "ast rewrite: canonicalize_for_of_const clears veto on a for-of let" {
     const path = try writeFixture(tmp.sub_path, source);
     defer testing.allocator.free(path);
 
-    const input = try std.fmt.allocPrint(
-        testing.allocator,
-        "{{\"path\":\"{s}\",\"line\":3,\"intent\":\"canonicalize_for_of_const\"}}",
-        .{path},
-    );
+    const input = try testing.allocator.print("{{\"path\":\"{s}\",\"line\":3,\"intent\":\"canonicalize_for_of_const\"}}", .{path});
     defer testing.allocator.free(input);
     var result = try runExecute(testing.allocator, input);
     defer result.deinit(testing.allocator);
@@ -529,11 +513,7 @@ test "ast rewrite: replace_arrow_with_function clears veto on reused arrow helpe
     const path = try writeFixture(tmp.sub_path, source);
     defer testing.allocator.free(path);
 
-    const input = try std.fmt.allocPrint(
-        testing.allocator,
-        "{{\"path\":\"{s}\",\"line\":1,\"intent\":\"replace_arrow_with_function\"}}",
-        .{path},
-    );
+    const input = try testing.allocator.print("{{\"path\":\"{s}\",\"line\":1,\"intent\":\"replace_arrow_with_function\"}}", .{path});
     defer testing.allocator.free(input);
     var result = try runExecute(testing.allocator, input);
     defer result.deinit(testing.allocator);
@@ -565,11 +545,7 @@ test "ast rewrite: replace_export_arrow_with_function clears veto" {
 
     // Line 2: the alias declaration takes line 1, and the intent is located by
     // line.
-    const input = try std.fmt.allocPrint(
-        testing.allocator,
-        "{{\"path\":\"{s}\",\"line\":2,\"intent\":\"replace_export_arrow_with_function\"}}",
-        .{path},
-    );
+    const input = try testing.allocator.print("{{\"path\":\"{s}\",\"line\":2,\"intent\":\"replace_export_arrow_with_function\"}}", .{path});
     defer testing.allocator.free(input);
     var result = try runExecute(testing.allocator, input);
     defer result.deinit(testing.allocator);
@@ -608,11 +584,7 @@ test "ast rewrite: canonicalize_capability_key_alias rewrites the alias line" {
     const path = try writeFixture(tmp.sub_path, source);
     defer testing.allocator.free(path);
 
-    const input = try std.fmt.allocPrint(
-        testing.allocator,
-        "{{\"path\":\"{s}\",\"line\":3,\"intent\":\"canonicalize_capability_key_alias\"}}",
-        .{path},
-    );
+    const input = try testing.allocator.print("{{\"path\":\"{s}\",\"line\":3,\"intent\":\"canonicalize_capability_key_alias\"}}", .{path});
     defer testing.allocator.free(input);
     var result = try runExecute(testing.allocator, input);
     defer result.deinit(testing.allocator);
@@ -648,11 +620,7 @@ test "ast rewrite: replace_chained_ternary_with_match lifts a chained ternary" {
     const path = try writeFixture(tmp.sub_path, source);
     defer testing.allocator.free(path);
 
-    const input = try std.fmt.allocPrint(
-        testing.allocator,
-        "{{\"path\":\"{s}\",\"line\":2,\"intent\":\"replace_chained_ternary_with_match\",\"plan_id\":\"rp_g_tern\"}}",
-        .{path},
-    );
+    const input = try testing.allocator.print("{{\"path\":\"{s}\",\"line\":2,\"intent\":\"replace_chained_ternary_with_match\",\"plan_id\":\"rp_g_tern\"}}", .{path});
     defer testing.allocator.free(input);
     var result = try runExecute(testing.allocator, input);
     defer result.deinit(testing.allocator);
@@ -678,11 +646,7 @@ test "ast rewrite: a span-keyed intent refuses a source override" {
     const path = try writeFixture(tmp.sub_path, source);
     defer testing.allocator.free(path);
 
-    const input = try std.fmt.allocPrint(
-        testing.allocator,
-        "{{\"path\":\"{s}\",\"line\":2,\"intent\":\"replace_chained_ternary_with_match\",\"source\":\"function handler() {{}}\"}}",
-        .{path},
-    );
+    const input = try testing.allocator.print("{{\"path\":\"{s}\",\"line\":2,\"intent\":\"replace_chained_ternary_with_match\",\"source\":\"function handler() {{}}\"}}", .{path});
     defer testing.allocator.free(input);
     var result = try runExecute(testing.allocator, input);
     defer result.deinit(testing.allocator);
@@ -766,11 +730,7 @@ test "ast rewrite: end-to-end ZTS608 → repair_intent → AST primitive → vet
     // (`replace_arrow_with_function`) and invokes the matching AST
     // primitive. Use the diagnostic's reported line so the dispatch
     // mirrors what the autoloop would do.
-    const input = try std.fmt.allocPrint(
-        testing.allocator,
-        "{{\"path\":\"{s}\",\"line\":{d},\"intent\":\"{s}\"}}",
-        .{ path, arrow_line, RepairIntent.replace_arrow_with_function.asString() },
-    );
+    const input = try testing.allocator.print("{{\"path\":\"{s}\",\"line\":{d},\"intent\":\"{s}\"}}", .{ path, arrow_line, RepairIntent.replace_arrow_with_function.asString() });
     defer testing.allocator.free(input);
     var result = try runExecute(testing.allocator, input);
     defer result.deinit(testing.allocator);

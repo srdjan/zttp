@@ -23,7 +23,7 @@ pub fn add(ctx: Context, gates: repo_gates.Result) Binaries {
         .root_module = b.createModule(.{
             .root_source_file = ctx.tools_dep.path("src/precompile.zig"),
             .target = b.graph.host,
-            .optimize = .ReleaseFast,
+            .optimize = .fast,
         }),
     });
     precompile_exe.root_module.addImport("zts", ctx.zts_host_mod);
@@ -39,7 +39,7 @@ pub fn add(ctx: Context, gates: repo_gates.Result) Binaries {
         .root_module = runtime_dep.module("runtime_main"),
     });
 
-    var embedded_handler_step: ?*std.Build.Step = null;
+    var embedded_handler: ?std.Build.LazyPath = null;
 
     // If handler is specified, precompile it and add as dependency
     if (ctx.precompile.handler_path) |path| {
@@ -47,19 +47,15 @@ pub fn add(ctx: Context, gates: repo_gates.Result) Binaries {
         const run_precompile = b.addRunArtifact(precompile_exe);
         addPrecompileArgs(run_precompile, ctx.precompile);
         run_precompile.addArg(path);
-        run_precompile.addArg("packages/runtime/generated/embedded_handler.zig");
-
-        // Create the generated directories if they don't exist
-        const mkdir_step = b.addSystemCommand(&.{ "/bin/mkdir", "-p", "packages/runtime/generated" });
-        run_precompile.step.dependOn(&mkdir_step.step);
-        embedded_handler_step = &run_precompile.step;
-
-        // Runtime and user-facing CLI both depend on precompile completing.
-        runtime_exe.step.dependOn(&run_precompile.step);
+        run_precompile.addFileInput(if (std.fs.path.isAbsolute(path)) b.graph.cwdRelativePath(path) else b.path(path));
+        embedded_handler = run_precompile.addOutputFileArg2("embedded_handler.zig", .{});
+        // CHECK reads imported files through its revision reader; rerun so
+        // transitive edits cannot reuse a stale precompiled artifact.
+        run_precompile.has_side_effects = true;
 
         // Add the generated module (with zts dependency for transpiled handlers)
         runtime_exe.root_module.addAnonymousImport("embedded_handler", .{
-            .root_source_file = b.path("packages/runtime/generated/embedded_handler.zig"),
+            .root_source_file = embedded_handler.?,
             .imports = &.{
                 .{ .name = "zts", .module = zts_mod },
             },
@@ -79,10 +75,9 @@ pub fn add(ctx: Context, gates: repo_gates.Result) Binaries {
         .name = "zttp",
         .root_module = runtime_dep.module("cli_main"),
     });
-    if (embedded_handler_step) |step| {
-        cli_exe.step.dependOn(step);
+    if (embedded_handler) |source| {
         cli_exe.root_module.addAnonymousImport("embedded_handler", .{
-            .root_source_file = b.path("packages/runtime/generated/embedded_handler.zig"),
+            .root_source_file = source,
             .imports = &.{
                 .{ .name = "zts", .module = zts_mod },
             },
@@ -171,17 +166,13 @@ fn addPrecompileArgs(
 pub fn addRunSteps(ctx: Context, bins: Binaries) void {
     const b = ctx.b;
     const run_cmd = b.addRunArtifact(bins.runtime_exe);
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
+    run_cmd.addPassthruArgs();
     const run_step = b.step("run", "Run the server");
     run_step.dependOn(&run_cmd.step);
 
     // Dev CLI run command for convenience: `zig build cli -- expert`
     const cli_run_cmd = b.addRunArtifact(bins.cli_exe);
-    if (b.args) |args| {
-        cli_run_cmd.addArgs(args);
-    }
+    cli_run_cmd.addPassthruArgs();
     const cli_run_step = b.step("cli", "Run the zttp CLI");
     cli_run_step.dependOn(&cli_run_cmd.step);
 }

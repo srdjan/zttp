@@ -673,7 +673,7 @@ pub const ContractBuilder = struct {
 
         // Capsule properties the handler's Spec demands: the intersection of
         // the declared spec set with the v1 capsule property set.
-        var handler_demands = std.EnumSet(spec_discharge.CapsuleProperty).initEmpty();
+        var handler_demands = std.EnumSet(spec_discharge.CapsuleProperty).empty;
         for (contract.declared_specs.items) |name| {
             if (spec_discharge.CapsuleProperty.fromName(name)) |p| handler_demands.insert(p);
         }
@@ -785,7 +785,7 @@ pub const ContractBuilder = struct {
         // Remaining budget: what the declared budget still allows that the
         // handler's inferred row has not already spent. A property of the
         // handler, not of an individual hole, so it is computed once.
-        var remaining = effect_inference.CapabilitySet.initEmpty();
+        var remaining = effect_inference.CapabilitySet.empty;
         const budget_declared = contract.capability_budget.len > 0;
         if (budget_declared) {
             for (contract.capability_budget.slice()) |c| remaining.insert(c);
@@ -1092,11 +1092,7 @@ pub const ContractBuilder = struct {
         errdefer allocator.free(spec_name);
         const owned_func = try allocator.dupe(u8, func);
         errdefer allocator.free(owned_func);
-        const suggestion = try std.fmt.allocPrint(
-            allocator,
-            "annotate `{s}` with `Proof<T, \"{s}\">` and satisfy it, or inline the helper into the handler.",
-            .{ func, property },
-        );
+        const suggestion = try allocator.print("annotate `{s}` with `Proof<T, \"{s}\">` and satisfy it, or inline the helper into the handler.", .{ func, property });
         return .{
             .kind = .missing_capsule,
             .spec_name = spec_name,
@@ -1153,7 +1149,7 @@ pub const ContractBuilder = struct {
 
         // Parse the budget. An unknown name is the handler-level analogue of
         // ZTS504; it is reported and dropped from the budget set.
-        var budget = effect_inference.CapabilitySet.initEmpty();
+        var budget = effect_inference.CapabilitySet.empty;
         for (raw.items) |name| {
             if (std.meta.stringToEnum(module_binding.ModuleCapability, name)) |cap| {
                 budget.insert(cap);
@@ -1253,11 +1249,7 @@ pub const ContractBuilder = struct {
     ) !contract_types.SpecDiagnostic {
         const spec_name = try allocator.dupe(u8, capability);
         errdefer allocator.free(spec_name);
-        const suggestion = try std.fmt.allocPrint(
-            allocator,
-            "add `{s}` to the handler's `Effects<...>` budget, or remove the call that reaches it.",
-            .{capability},
-        );
+        const suggestion = try allocator.print("add `{s}` to the handler's `Effects<...>` budget, or remove the call that reaches it.", .{capability});
         return .{
             .kind = .budget_exceeded,
             .spec_name = spec_name,
@@ -1276,11 +1268,7 @@ pub const ContractBuilder = struct {
         errdefer allocator.free(spec_name);
         const owned_func = try allocator.dupe(u8, func);
         errdefer allocator.free(owned_func);
-        const suggestion = try std.fmt.allocPrint(
-            allocator,
-            "helper `{s}` reaches `{s}`; add it to the handler's `Effects<...>` budget, or remove the call.",
-            .{ func, capability },
-        );
+        const suggestion = try allocator.print("helper `{s}` reaches `{s}`; add it to the handler's `Effects<...>` budget, or remove the call.", .{ func, capability });
         return .{
             .kind = .helper_budget_exceeded,
             .spec_name = spec_name,
@@ -1592,7 +1580,7 @@ pub const ContractBuilder = struct {
 
     fn resolveAtomName(self: *const ContractBuilder, atom_idx: u16) ?[]const u8 {
         // Try predefined atoms first
-        const atom: object.Atom = @enumFromInt(atom_idx);
+        const atom: object.Atom = @fromBackingInt(@intCast(atom_idx));
         if (atom.toPredefinedName()) |name| return name;
 
         // Try dynamic atom table
@@ -1636,11 +1624,11 @@ pub const ContractBuilder = struct {
                 if (!std.mem.eql(u8, read.name, schema.name)) continue;
                 read_any = true;
                 const line = if (self.ir_view.getLoc(read.node)) |loc| loc.line else 0;
-                const suggestion = try std.fmt.allocPrint(self.allocator, "{s} (line {d}) names schema \"{s}\", which zttp:validate cannot compile: it does not support the keyword \"{s}\", so the call fails on every input", .{ read.func, line, schema.name, keyword });
+                const suggestion = try self.allocator.print("{s} (line {d}) names schema \"{s}\", which zttp:validate cannot compile: it does not support the keyword \"{s}\", so the call fails on every input", .{ read.func, line, schema.name, keyword });
                 try self.appendSchemaDiagnostic(contract, schema.name, suggestion);
             }
             if (read_any) continue;
-            const suggestion = try std.fmt.allocPrint(self.allocator, "schemaCompile registers \"{s}\", which zttp:validate cannot compile: it does not support the keyword \"{s}\", so schemaCompile returns false at runtime", .{ schema.name, keyword });
+            const suggestion = try self.allocator.print("schemaCompile registers \"{s}\", which zttp:validate cannot compile: it does not support the keyword \"{s}\", so schemaCompile returns false at runtime", .{ schema.name, keyword });
             try self.appendSchemaDiagnostic(contract, schema.name, suggestion);
         }
     }
@@ -1744,14 +1732,14 @@ pub const ContractBuilder = struct {
         if (callee_tag != .member_access) return null;
 
         const member = self.ir_view.getMember(call.callee) orelse return null;
-        if (member.property != @intFromEnum(object.Atom.stringify)) return null;
+        if (member.property != @backingInt(object.Atom.stringify)) return null;
 
         const obj_tag = self.ir_view.getTag(member.object) orelse return null;
         if (obj_tag != .identifier) return null;
 
         const binding = self.ir_view.getBinding(member.object) orelse return null;
         if (binding.kind != .global and binding.kind != .undeclared_global) return null;
-        if (binding.name_atom != @intFromEnum(object.Atom.JSON)) return null;
+        if (binding.name_atom != @backingInt(object.Atom.JSON)) return null;
 
         return self.ir_view.getListIndex(call.args_start, 0);
     }
@@ -2193,12 +2181,12 @@ pub const ContractBuilder = struct {
 
         const binding = self.ir_view.getBinding(member.object) orelse return null;
         if (binding.kind != .global and binding.kind != .undeclared_global) return null;
-        if (binding.name_atom != @intFromEnum(object.Atom.Response)) return null;
+        if (binding.name_atom != @backingInt(object.Atom.Response)) return null;
 
         var candidate = ResponseSchemaCandidate{};
         errdefer candidate.deinit(self.allocator);
 
-        switch (@as(object.Atom, @enumFromInt(member.property))) {
+        switch (@as(object.Atom, @fromBackingInt(@intCast(member.property)))) {
             .json => {
                 candidate.status = 200;
                 candidate.content_type = "application/json";
@@ -2958,7 +2946,7 @@ fn findTestFunctionNode(view: IrView, atoms: *atom_table.AtomTable, name: []cons
 }
 
 fn resolveTestAtomName(atoms: *atom_table.AtomTable, atom_idx: u16) ?[]const u8 {
-    const atom: object.Atom = @enumFromInt(atom_idx);
+    const atom: object.Atom = @fromBackingInt(@intCast(atom_idx));
     if (atom.isPredefined()) return atom.toPredefinedName();
     return atoms.getName(atom);
 }

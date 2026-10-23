@@ -103,7 +103,7 @@ pub fn writeWorkspacePointer(
     const pointer_path = try std.fs.path.join(allocator, &.{ session_dir_path, "workspace.txt" });
     defer allocator.free(pointer_path);
 
-    const body = try std.fmt.allocPrint(allocator, "{s}\n", .{realpath});
+    const body = try allocator.print("{s}\n", .{realpath});
     defer allocator.free(body);
 
     try file_io.writeFile(allocator, pointer_path, body);
@@ -328,8 +328,8 @@ fn writeMetaAt(
         .workspace_realpath = "/workspace/test",
         .created_at_unix_ms = created_at_unix_ms,
         .parent_id = parent_id,
-        .policy_hash = "a" ** 64,
-        .protocol_hash = "b" ** 64,
+        .policy_hash = &@as([64:0]u8, @splat('a')),
+        .protocol_hash = &@as([64:0]u8, @splat('b')),
     });
 }
 

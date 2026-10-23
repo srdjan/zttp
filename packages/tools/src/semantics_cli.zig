@@ -8,7 +8,7 @@ fn isHelpToken(arg: []const u8) bool {
 }
 
 fn appendFmt(allocator: std.mem.Allocator, buf: *std.ArrayList(u8), comptime fmt: []const u8, args: anytype) !void {
-    const s = try std.fmt.allocPrint(allocator, fmt, args);
+    const s = try allocator.print(fmt, args);
     defer allocator.free(s);
     try buf.appendSlice(allocator, s);
 }
@@ -25,7 +25,7 @@ pub fn runSpecHashCommand(_: std.mem.Allocator, argv: []const []const u8) !void 
     const hash = zts.semantics.semanticsHash();
     if (json_mode) {
         const allocator = std.heap.smp_allocator;
-        const line = try std.fmt.allocPrint(allocator, "{{\"semanticsHash\":\"{s}\"}}\n", .{hash});
+        const line = try allocator.print("{{\"semanticsHash\":\"{s}\"}}\n", .{hash});
         defer allocator.free(line);
         _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
     } else {

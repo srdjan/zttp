@@ -259,13 +259,13 @@ pub fn describeFunction(comptime binding: anytype) FunctionDescriptor {
         &.{"module_func"};
     comptime requireCoverage(@TypeOf(binding), FunctionDescriptor, callbacks);
     var result: FunctionDescriptor = undefined;
-    inline for (std.meta.fields(FunctionDescriptor)) |field| {
-        if (comptime std.mem.eql(u8, field.name, "return_labels") or
-            std.mem.eql(u8, field.name, "declassifies"))
+    inline for (@typeInfo(FunctionDescriptor).@"struct".field_names) |field| {
+        if (comptime std.mem.eql(u8, field, "return_labels") or
+            std.mem.eql(u8, field, "declassifies"))
         {
-            @field(result, field.name) = projectLabels(@field(binding, field.name));
+            @field(result, field) = projectLabels(@field(binding, field));
         } else {
-            @field(result, field.name) = @field(binding, field.name);
+            @field(result, field) = @field(binding, field);
         }
     }
     return result;
@@ -282,11 +282,11 @@ pub fn describeModule(comptime binding: anytype) ModuleDescriptor {
     comptime requireCoverage(@TypeOf(binding), ModuleDescriptor, &.{ "state_init", "state_deinit" });
     const exports = comptime describeFunctions(binding.exports);
     var result: ModuleDescriptor = undefined;
-    inline for (std.meta.fields(ModuleDescriptor)) |field| {
-        if (comptime std.mem.eql(u8, field.name, "exports")) {
-            @field(result, field.name) = &exports;
+    inline for (@typeInfo(ModuleDescriptor).@"struct".field_names) |field| {
+        if (comptime std.mem.eql(u8, field, "exports")) {
+            @field(result, field) = &exports;
         } else {
-            @field(result, field.name) = @field(binding, field.name);
+            @field(result, field) = @field(binding, field);
         }
     }
     return result;
@@ -302,7 +302,7 @@ pub fn describeModules(comptime bindings: anytype) [bindings.len]ModuleDescripto
 fn projectLabels(comptime labels: anytype) LabelSet {
     comptime requireCoverage(@TypeOf(labels), LabelSet, &.{});
     var result: LabelSet = undefined;
-    inline for (std.meta.fields(LabelSet)) |field| @field(result, field.name) = @field(labels, field.name);
+    inline for (@typeInfo(LabelSet).@"struct".field_names) |field| @field(result, field) = @field(labels, field);
     return result;
 }
 
@@ -311,16 +311,16 @@ fn requireCoverage(comptime Source: type, comptime Target: type, comptime exclud
 }
 
 fn coverageProblem(comptime Source: type, comptime Target: type, comptime excluded: []const []const u8) ?[]const u8 {
-    for (std.meta.fields(Source)) |field| {
-        if (@hasField(Target, field.name)) continue;
+    for (@typeInfo(Source).@"struct".field_names) |field| {
+        if (@hasField(Target, field)) continue;
         var classified = false;
         for (excluded) |name| {
-            if (std.mem.eql(u8, name, field.name)) classified = true;
+            if (std.mem.eql(u8, name, field)) classified = true;
         }
-        if (!classified) return "unclassified descriptor source field: " ++ field.name;
+        if (!classified) return "unclassified descriptor source field: " ++ field;
     }
-    for (std.meta.fields(Target)) |field| {
-        if (!@hasField(Source, field.name)) return "descriptor field has no source: " ++ field.name;
+    for (@typeInfo(Target).@"struct".field_names) |field| {
+        if (!@hasField(Source, field)) return "descriptor field has no source: " ++ field;
     }
     for (excluded) |name| {
         if (!@hasField(Source, name)) return "descriptor exclusion has no source: " ++ name;

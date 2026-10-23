@@ -258,7 +258,7 @@ test "writeDiagnostic keeps the underline aligned on a multi-byte line" {
     });
     defer std.testing.allocator.free(text);
     // 21 characters precede `oops`.
-    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ " " ** 21 ++ "^^^^\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ &@as([21:0]u8, @splat(' ')) ++ "^^^^\n") != null);
 }
 
 test "writeDiagnostic counts a multi-byte span in characters" {
@@ -273,7 +273,7 @@ test "writeDiagnostic counts a multi-byte span in characters" {
         .end_offset = @intCast(start + 9),
     });
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ " " ** 5 ++ "^^^\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ &@as([5:0]u8, @splat(' ')) ++ "^^^\n") != null);
 }
 
 test "writeDiagnostic clamps a span that crosses a line end" {
@@ -287,7 +287,7 @@ test "writeDiagnostic clamps a span that crosses a line end" {
         .end_offset = 11,
     });
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ " " ** 3 ++ "^^^\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ &@as([3:0]u8, @splat(' ')) ++ "^^^\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "^^^^") == null);
 }
 
@@ -302,7 +302,7 @@ test "writeDiagnostic draws one caret for a zero-width span" {
         .end_offset = 2,
     });
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ " " ** 2 ++ "^\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ &@as([2:0]u8, @splat(' ')) ++ "^\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, text, "^^") == null);
 }
 
@@ -314,7 +314,7 @@ test "writeDiagnostic draws a caret for a position past the line end" {
         .column = 40,
     });
     defer std.testing.allocator.free(text);
-    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ " " ** 2 ++ "^\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "   | " ++ &@as([2:0]u8, @splat(' ')) ++ "^\n") != null);
 }
 
 test "writeDiagnostic with no source line still names the position" {

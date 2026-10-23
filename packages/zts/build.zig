@@ -101,6 +101,12 @@ pub fn build(b: *std.Build) void {
         .flags = &.{ "-D_GNU_SOURCE", "-DHAVE_MREMAP=0", "-DSQLITE_THREADSAFE=2", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },
     });
     engine_mod.addIncludePath(b.path("deps/sqlite"));
+    const sqlite_c = b.addTranslateC(.{
+        .root_source_file = b.path("deps/sqlite/sqlite3.h"),
+        .target = target,
+        .optimize = optimize,
+    });
+    engine_mod.addImport("sqlite-c", sqlite_c.addModule("sqlite-c"));
     // The virtual module bindings are analyzed in the engine module.
     engine_mod.addImport("zttp-sdk", sdk_dep.module("zttp-sdk"));
     engine_mod.addImport("zttp-modules", modules_dep.module("zttp-modules"));

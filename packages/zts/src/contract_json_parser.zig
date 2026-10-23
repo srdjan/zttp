@@ -408,16 +408,16 @@ const PropertiesWire = struct {
 // the counts must match, so the two field sets are equal. A mismatch fails the
 // build, so a new property cannot be dropped silently when a contract is read.
 comptime {
-    const type_fields = @typeInfo(contract_types.HandlerProperties).@"struct".fields;
-    const wire_fields = @typeInfo(PropertiesWire).@"struct".fields;
+    const type_fields = @typeInfo(contract_types.HandlerProperties).@"struct".field_names;
+    const wire_fields = @typeInfo(PropertiesWire).@"struct".field_names;
     if (type_fields.len != wire_fields.len) {
         @compileError("PropertiesWire and HandlerProperties differ in field count");
     }
     for (type_fields) |field| {
-        const camel = contract_types.HandlerProperties.camelKeyFor(field.name) orelse
-            @compileError("camelKeyFor has no entry for HandlerProperties." ++ field.name);
+        const camel = contract_types.HandlerProperties.camelKeyFor(field) orelse
+            @compileError("camelKeyFor has no entry for HandlerProperties." ++ field);
         if (!@hasField(PropertiesWire, camel)) {
-            @compileError("PropertiesWire lacks `" ++ camel ++ "` for HandlerProperties." ++ field.name);
+            @compileError("PropertiesWire lacks `" ++ camel ++ "` for HandlerProperties." ++ field);
         }
     }
 }
@@ -672,20 +672,20 @@ fn parseV2StructInto(
     value: *T,
 ) anyerror!void {
     if (try source.next() != .object_begin) return error.UnexpectedToken;
-    const fields = std.meta.fields(T);
-    var seen = [_]bool{false} ** fields.len;
+    const fields = @typeInfo(T).@"struct".field_names;
+    var seen = @as([fields.len]bool, @splat(false));
     while (try source.peekNextTokenType() != .object_end) {
         const key = try WireString.jsonParse(allocator, source, options);
         var matched = false;
         inline for (fields, 0..) |field, field_index| {
-            if (!matched and v2KeyMatches(field.name, key.bytes)) {
+            if (!matched and v2KeyMatches(field, key.bytes)) {
                 if (seen[field_index] and options.duplicate_field_behavior == .use_first) {
                     try source.skipValue();
                 } else {
                     if (seen[field_index] and options.duplicate_field_behavior == .@"error") {
                         return error.DuplicateField;
                     }
-                    @field(value, field.name) = try parseV2Value(field.type, allocator, source, options);
+                    @field(value, field) = try parseV2Value(@FieldType(T, field), allocator, source, options);
                 }
                 seen[field_index] = true;
                 matched = true;
@@ -1411,15 +1411,15 @@ fn projectSandbox(
 }
 
 fn capabilityMatrixFromWire(names: []const WireString) CapabilityMatrix {
-    var seen = [_]bool{false} ** capability_count;
+    var seen = @as([capability_count]bool, @splat(false));
     for (names) |name| {
         const capability = std.meta.stringToEnum(ModuleCapability, name.bytes) orelse continue;
-        seen[@intFromEnum(capability)] = true;
+        seen[@backingInt(capability)] = true;
     }
 
     var matrix: CapabilityMatrix = .{};
     for (std.enums.values(ModuleCapability)) |capability| {
-        if (seen[@intFromEnum(capability)]) {
+        if (seen[@backingInt(capability)]) {
             matrix.items[matrix.len] = capability;
             matrix.len += 1;
         }
@@ -1674,17 +1674,17 @@ fn parseOwnedStaticOperation(value: []const u8) []const u8 {
 }
 
 fn specDiagnosticKindFromString(value: []const u8) ?SpecDiagnostic.Kind {
-    inline for (std.meta.fields(SpecDiagnostic.Kind)) |field| {
-        if (std.mem.eql(u8, value, field.name)) {
-            return @field(SpecDiagnostic.Kind, field.name);
+    inline for (@typeInfo(SpecDiagnostic.Kind).@"enum".field_names) |field| {
+        if (std.mem.eql(u8, value, field)) {
+            return @field(SpecDiagnostic.Kind, field);
         }
     }
     return null;
 }
 
 fn specDiagnosticKindFromCode(value: []const u8) ?SpecDiagnostic.Kind {
-    inline for (std.meta.fields(SpecDiagnostic.Kind)) |field| {
-        const kind = @field(SpecDiagnostic.Kind, field.name);
+    inline for (@typeInfo(SpecDiagnostic.Kind).@"enum".field_names) |field| {
+        const kind = @field(SpecDiagnostic.Kind, field);
         if (std.mem.eql(u8, value, kind.code())) return kind;
     }
     return null;

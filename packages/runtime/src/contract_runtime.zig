@@ -189,7 +189,7 @@ fn promotedForTest(validated: *const ValidatedRuntimeContract) ProofCheckedContr
         .grade = .translation_validated,
         .development_only = false,
         .guards = .{},
-        .runtime_policy_digest = [_]u8{0} ** 32,
+        .runtime_policy_digest = @as([32]u8, @splat(0)),
         ._proof = validation_proof,
     };
 }
@@ -219,10 +219,10 @@ pub const RuntimeContract = struct {
     source_identity: zq.SourceIdentity = .{},
     /// SHA-256 of the bytecode blob, stamped at build time. All-zero means
     /// the contract did not carry a sandbox block.
-    artifact_sha256: [32]u8 = [_]u8{0} ** 32,
+    artifact_sha256: [32]u8 = @as([32]u8, @splat(0)),
     /// SHA-256 of the zts rule registry used to extract this contract.
     /// All-zero means the contract did not carry a sandbox block.
-    policy_hash: [32]u8 = [_]u8{0} ** 32,
+    policy_hash: [32]u8 = @as([32]u8, @splat(0)),
     modules: []const []const u8 = &.{},
     cost_envelope: ?CostEnvelope = null,
     allocator: std.mem.Allocator,
@@ -420,7 +420,7 @@ pub fn validateEnvVars(allocator: std.mem.Allocator, contract: *const ValidatedR
     errdefer missing.deinit(allocator);
 
     for (contract.view().env_vars) |name| {
-        const name_z = try allocator.dupeZ(u8, name);
+        const name_z = try allocator.dupeSentinel(u8, name, 0);
         defer allocator.free(name_z);
         if (std.c.getenv(name_z) == null) {
             try missing.append(allocator, name);
@@ -463,17 +463,17 @@ fn projectionProblem(
         if (!@hasField(Target, entry.name)) return names ++ ": target exclusion names no field: " ++ entry.name;
         if (entry.reason.len == 0) return names ++ ": target exclusion has no reason: " ++ entry.name;
     }
-    for (std.meta.fields(Source)) |field| {
-        if (isExcluded(source_excluded, field.name)) continue;
-        if (!@hasField(Target, field.name) or isExcluded(target_excluded, field.name))
-            return names ++ ": unclassified source field: " ++ field.name;
-        if (@FieldType(Target, field.name) != field.type)
-            return names ++ ": field type differs: " ++ field.name;
+    for (@typeInfo(Source).@"struct".field_names) |field| {
+        if (isExcluded(source_excluded, field)) continue;
+        if (!@hasField(Target, field) or isExcluded(target_excluded, field))
+            return names ++ ": unclassified source field: " ++ field;
+        if (@FieldType(Target, field) != @FieldType(Source, field))
+            return names ++ ": field type differs: " ++ field;
     }
-    for (std.meta.fields(Target)) |field| {
-        if (isExcluded(target_excluded, field.name)) continue;
-        if (!@hasField(Source, field.name) or isExcluded(source_excluded, field.name))
-            return names ++ ": unclassified target field: " ++ field.name;
+    for (@typeInfo(Target).@"struct".field_names) |field| {
+        if (isExcluded(target_excluded, field)) continue;
+        if (!@hasField(Source, field) or isExcluded(source_excluded, field))
+            return names ++ ": unclassified target field: " ++ field;
     }
     return null;
 }
@@ -1038,8 +1038,8 @@ test "fromHandlerContract copies every HandlerProperties field that Properties c
         var hc = zq.handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
         defer hc.deinit(allocator);
         var source = std.mem.zeroes(HandlerProperties);
-        inline for (std.meta.fields(HandlerProperties)) |field| {
-            if (field.type == bool) @field(source, field.name) = flag;
+        inline for (@typeInfo(HandlerProperties).@"struct".field_names) |field| {
+            if (@FieldType(HandlerProperties, field) == bool) @field(source, field) = flag;
         }
         source.max_io_depth = if (flag) 7 else null;
         hc.properties = source;
@@ -1049,9 +1049,9 @@ test "fromHandlerContract copies every HandlerProperties field that Properties c
         const projected = raw.inner.properties;
 
         var compared: usize = 0;
-        inline for (std.meta.fields(HandlerProperties)) |field| {
-            if (comptime !isExcluded(&properties_source_exclusions, field.name)) {
-                try std.testing.expectEqual(@field(source, field.name), @field(projected, field.name));
+        inline for (@typeInfo(HandlerProperties).@"struct".field_names) |field| {
+            if (comptime !isExcluded(&properties_source_exclusions, field)) {
+                try std.testing.expectEqual(@field(source, field), @field(projected, field));
                 compared += 1;
             }
         }
@@ -1220,7 +1220,7 @@ test "validate rejects artifact-hash drift" {
     ;
     var raw = try parseContractJson(allocator, source);
     raw.inner.source_identity = zq.sourceIdentityForPath("handler.ts");
-    raw.inner.artifact_sha256 = [_]u8{0xAB} ** 32;
+    raw.inner.artifact_sha256 = @as([32]u8, @splat(0xAB));
     try std.testing.expectError(
         error.ArtifactHashMismatch,
         validate(raw, .{ .bytecode = "totally different" }),
@@ -1296,7 +1296,7 @@ test "verifyCapabilityMatrix detects drift" {
             items[0] = .crypto;
             break :blk items;
         },
-        .hash = [_]u8{0xAA} ** 32,
+        .hash = @as([32]u8, @splat(0xAA)),
     };
 
     try std.testing.expectError(
@@ -1391,7 +1391,7 @@ test "verifyPolicyHash rejects drift" {
         .routes = &.{},
         .routes_dynamic = false,
         .properties = .{},
-        .policy_hash = [_]u8{0xAB} ** 32,
+        .policy_hash = @as([32]u8, @splat(0xAB)),
         .allocator = std.testing.allocator,
     };
     try std.testing.expectError(error.PolicyHashMismatch, verifyPolicyHash(&contract));
@@ -1432,7 +1432,7 @@ test "verifyArtifactHash rejects tampered bytecode" {
         .routes = &.{},
         .routes_dynamic = false,
         .properties = .{},
-        .artifact_sha256 = [_]u8{0xFF} ** 32,
+        .artifact_sha256 = @as([32]u8, @splat(0xFF)),
         .allocator = std.testing.allocator,
     };
     try std.testing.expectError(error.ArtifactHashMismatch, verifyArtifactHash(&contract, "anything"));
@@ -1521,7 +1521,7 @@ test "promotion exposes only properties that cleared the policy" {
         .properties = property_verdicts,
     };
 
-    const digest = [_]u8{0xab} ** 32;
+    const digest = @as([32]u8, @splat(0xab));
     const promoted = promote(&validated, assessment, digest) orelse return error.TestUnexpectedResult;
     try std.testing.expect(promoted.properties.no_secret_leakage);
     try std.testing.expect(promoted.properties.result_safe);
@@ -1554,8 +1554,8 @@ test "ValidationProof argument type is a file-private opaque" {
     try std.testing.expect(fn_ptr_info == .pointer);
     const child_info = @typeInfo(fn_ptr_info.pointer.child);
     try std.testing.expect(child_info == .@"fn");
-    try std.testing.expectEqual(@as(usize, 1), child_info.@"fn".params.len);
-    const param = child_info.@"fn".params[0].type.?;
+    try std.testing.expectEqual(@as(usize, 1), child_info.@"fn".param_types.len);
+    const param = child_info.@"fn".param_types[0].?;
     const param_info = @typeInfo(param);
     try std.testing.expect(param_info == .pointer);
     const opaque_info = @typeInfo(param_info.pointer.child);

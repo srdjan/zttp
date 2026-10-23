@@ -169,7 +169,7 @@ test "write appends one line per incident to an O_APPEND fd" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
-    const path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/inc.jsonl", .{tmp.sub_path});
+    const path = try allocator.print(".zig-cache/tmp/{s}/inc.jsonl", .{tmp.sub_path});
     defer allocator.free(path);
 
     const fd = try open(allocator, path);

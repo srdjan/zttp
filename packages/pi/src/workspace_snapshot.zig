@@ -148,13 +148,9 @@ pub const Snapshot = struct {
         overlay: ?*const change_set.PreparedChangeSet,
     ) !Materialized {
         var now: std.posix.timespec = undefined;
-        _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &now);
+        _ = std.c.clock_gettime(@fromBackingInt(@intCast(@backingInt(std.posix.CLOCK.REALTIME))), &now);
         const sequence = scratch_counter.fetchAdd(1, .seq_cst);
-        const name = try std.fmt.allocPrint(
-            allocator,
-            "zttp-proof-{d}-{d}-{d}",
-            .{ @as(u64, @intCast(now.sec)), @as(u64, @intCast(now.nsec)), sequence },
-        );
+        const name = try allocator.print("zttp-proof-{d}-{d}-{d}", .{ @as(u64, @intCast(now.sec)), @as(u64, @intCast(now.nsec)), sequence });
         errdefer allocator.free(name);
         const root = try std.fs.path.resolve(allocator, &.{ "/tmp", name });
         errdefer allocator.free(root);

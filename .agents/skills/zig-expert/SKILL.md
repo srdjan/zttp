@@ -7,7 +7,7 @@ description: Write idiomatic Zig code following the Zen of Zig philosophy. Use f
 
 Expert guidance for writing idiomatic Zig code that embodies the Zen of Zig: explicit intent, no hidden control flow, and compile-time over runtime.
 
-> Prefer Zig 0.16.0 idioms: `std.Io` with explicit `io`, `main(init: std.process.Init|Minimal)` for args/env, destructuring, labeled switch, `@branchHint` on hot paths, `.empty` for std containers, `DebugAllocator` in debug builds, and explicit backing integers for packed types.
+> Prefer Zig 0.17.0 idioms: `std.Io` with explicit `io`, `main(init: std.process.Init|Minimal)` for args/env, destructuring, labeled switch, `@branchHint` on hot paths, `.empty` for std containers, `SafeAllocator` in debug builds, and explicit backing integers for packed types.
 
 ## Zen of Zig
 
@@ -30,7 +30,7 @@ Expert guidance for writing idiomatic Zig code that embodies the Zen of Zig: exp
 5. **Need OS interaction?** Pass `std.Io` explicitly; keep side effects at the boundary.
 6. **Need environment variables or args?** Read them in `main(init)` and pass explicit config downward.
 7. **Need generic code?** Use `comptime` parameters and exhaustive `switch`.
-8. **Need C interop?** `@cImport` still works, but prefer build-system-managed translate-c for new code when practical.
+8. **Need C interop?** Translate headers in the build graph and import the generated module; `@cImport` is removed.
 9. **Need hot-path tuning?** Measure first, then use layout/data changes and targeted `@branchHint`.
 
 ## Essential Patterns
@@ -72,7 +72,7 @@ fn processData(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
 }
 
 pub fn main() !void {
-    var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
+    var debug_alloc: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_alloc.deinit();
     const allocator = debug_alloc.allocator();
 
@@ -139,7 +139,7 @@ const n = try canFail();
 const sum, const overflow = @addWithOverflow(a, b);
 
 // std containers prefer .empty
-var list: std.ArrayListUnmanaged(u8) = .empty;
+var list: std.ArrayList(u8) = .empty;
 var map: std.AutoHashMapUnmanaged(u32, u32) = .empty;
 
 // type info uses quoted identifiers
@@ -151,7 +151,7 @@ switch (@typeInfo(T)) {
 
 // std.Io at the boundary
 pub fn main(init: std.process.Init.Minimal) !void {
-    var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
+    var debug_alloc: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_alloc.deinit();
     const allocator = debug_alloc.allocator();
 
@@ -162,7 +162,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 }
 ```
 
-## Zig 0.16.0 Notes
+## Zig 0.17.0 Notes
 
 ### `std.Io` Is the Default
 
@@ -204,7 +204,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 - `@Union(...)`
 - `@Enum(...)`
 
-There is no `@Array` builtin in 0.16.0; use normal array syntax. There is no `@Opaque`; write `opaque {}` directly.
+There is no `@Array` builtin in 0.17.0; use normal array syntax. There is no `@Opaque`; write `opaque {}` directly.
 
 ### Packed Types Need Explicit Backing Integers
 
@@ -221,11 +221,23 @@ Use the same explicitness for packed unions when representation matters.
 ### Allocator Defaults
 
 - `GeneralPurposeAllocator` is gone.
-- Prefer `DebugAllocator` in debug-heavy development workflows.
+- Prefer `SafeAllocator` in debug-heavy development workflows.
 - Prefer `std.heap.smp_allocator` or another deliberate allocator choice in release/runtime code.
-- `ArenaAllocator` is thread-safe in 0.16.0, but still use it for lifetime grouping, not as a universal default.
+- `ArenaAllocator` is thread-safe in 0.17.0, but still use it for lifetime grouping, not as a universal default.
 
-### Small but Useful 0.16 Changes
+### Zig 0.17 Migration
+
+- Use `std.lang.Optimize` and `.debug`, `.safe`, `.fast`, and `.small`.
+- Read platform fields through `@import("builtin").target`.
+- Use `@backingInt` and `@fromBackingInt` for integer-backed values.
+- Iterate reflection's `field_names`, `field_types`, and `field_attrs` arrays.
+- Replace array repetition with `@splat`; retain pointers and sentinels for string data.
+- Replace captured `errdefer` with explicit error handling at the same boundary.
+- Allocate formatted strings with `allocator.print` and `printSentinel`.
+- `SafeAllocator.deinit()` returns a leak count; zero means no leaks.
+- Use lazy paths and `addPassthruArgs` in builds, and declare configuration file dependencies.
+
+### Other Established Idioms
 
 - Prefer `.empty` over old `init()` patterns for unmanaged std containers.
 - Prefer `std.mem.find*` names over old `indexOf*` names in new code.
@@ -238,7 +250,7 @@ Use the same explicitness for packed unions when representation matters.
 | Global allocator / hidden malloc | Pass `Allocator` explicitly |
 | Hidden environment or args lookups deep in the stack | Read in `main(init)` and pass config explicitly |
 | `@Type(...)` or made-up `@StructType`/`@IntType` names | Use `@Struct`, `@Int`, `@Enum`, `@Pointer`, etc. |
-| `GeneralPurposeAllocator` | Use `DebugAllocator`, `smp_allocator`, arena, or another deliberate choice |
+| `GeneralPurposeAllocator` | Use `SafeAllocator`, `smp_allocator`, arena, or another deliberate choice |
 | `std.fs`-style examples without `io` in 0.16-only code | Use `std.Io` APIs with explicit `io` |
 | `packed struct` or `packed union` without backing int when layout matters | Spell the backing integer explicitly |
 | Blindly enabling `Io.Evented` in production guidance | Treat it as experimental until validated |

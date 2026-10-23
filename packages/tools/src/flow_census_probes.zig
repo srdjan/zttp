@@ -106,21 +106,21 @@ pub const Probe = struct {
 
 /// The number of columns: one per (label, sink) pair, and one for the hand-
 /// written probes.
-pub const label_count = std.meta.fields(Label).len;
-pub const sink_count = std.meta.fields(Sink).len;
+pub const label_count = @typeInfo(Label).@"enum".field_names.len;
+pub const sink_count = @typeInfo(Sink).@"enum".field_names.len;
 pub const column_count = label_count * sink_count + 1;
 pub const hand_column = column_count - 1;
 
 pub fn columnOf(probe: Probe) usize {
     const label = probe.label orelse return hand_column;
     const sink = probe.sink orelse return hand_column;
-    return @as(usize, @intFromEnum(label)) * sink_count + @intFromEnum(sink);
+    return @as(usize, @backingInt(label)) * sink_count + @backingInt(sink);
 }
 
 pub fn columnName(buf: []u8, column: usize) []const u8 {
     if (column == hand_column) return "hand_written";
-    const label: Label = @enumFromInt(column / sink_count);
-    const sink: Sink = @enumFromInt(column % sink_count);
+    const label: Label = @fromBackingInt(@intCast(column / sink_count));
+    const sink: Sink = @fromBackingInt(@intCast(column % sink_count));
     return std.fmt.bufPrint(buf, "{s}/{s}", .{ @tagName(label), @tagName(sink) }) catch "?";
 }
 
@@ -285,15 +285,15 @@ fn isNameChar(c: u8) bool {
 
 fn lookup(vars: Vars, name: []const u8, a: std.mem.Allocator) !?[]const u8 {
     if (std.mem.eql(u8, name, "PRE")) {
-        return try std.fmt.allocPrint(a, "{s}\nstructural Claim<T> = Proof<T, | {s}>;", .{ header, vars.claim });
+        return try a.print("{s}\nstructural Claim<T> = Proof<T, | {s}>;", .{ header, vars.claim });
     }
     if (std.mem.eql(u8, name, "SRC")) return vars.src;
     if (std.mem.eql(u8, name, "STMT")) return vars.stmt;
     if (std.mem.eql(u8, name, "RT")) return vars.rt;
-    if (std.mem.eql(u8, name, "BODY")) return try std.fmt.allocPrint(a, "{s} return {s};", .{ vars.stmt, vars.ret });
+    if (std.mem.eql(u8, name, "BODY")) return try a.print("{s} return {s};", .{ vars.stmt, vars.ret });
     if (std.mem.eql(u8, name, "TAIL")) {
         return if (vars.is_response)
-            try std.fmt.allocPrint(a, "return {s};", .{vars.ret})
+            try a.print("return {s};", .{vars.ret})
         else
             "return Response.json({ ok: 1 });";
     }
@@ -783,9 +783,9 @@ fn contains(comptime T: type, haystack: []const T, needle: T) bool {
 }
 
 fn buildMatrixProbe(a: std.mem.Allocator, spec: Spec, label: Label, sink: Sink) !Probe {
-    const stem = try std.fmt.allocPrint(a, "{s}__{s}__{s}", .{ @tagName(label), @tagName(sink), spec.name });
-    const liba = try std.fmt.allocPrint(a, "lib__{s}__{s}__{s}__a.ts", .{ @tagName(label), @tagName(sink), spec.name });
-    const libb = try std.fmt.allocPrint(a, "lib__{s}__{s}__{s}__b.ts", .{ @tagName(label), @tagName(sink), spec.name });
+    const stem = try a.print("{s}__{s}__{s}", .{ @tagName(label), @tagName(sink), spec.name });
+    const liba = try a.print("lib__{s}__{s}__{s}__a.ts", .{ @tagName(label), @tagName(sink), spec.name });
+    const libb = try a.print("lib__{s}__{s}__{s}__b.ts", .{ @tagName(label), @tagName(sink), spec.name });
     const concise = conciseExprOf(sink);
     const vars: Vars = .{
         .src = srcOf(label),
@@ -809,7 +809,7 @@ fn buildMatrixProbe(a: std.mem.Allocator, spec: Spec, label: Label, sink: Sink) 
         }
     }
     var files: std.ArrayList(SourceFile) = .empty;
-    try files.append(a, .{ .name = try std.fmt.allocPrint(a, "{s}.ts", .{stem}), .text = try renderWithHeader(a, template, vars) });
+    try files.append(a, .{ .name = try a.print("{s}.ts", .{stem}), .text = try renderWithHeader(a, template, vars) });
     for (spec.libs) |lib| {
         const lib_name = if (std.mem.eql(u8, lib.suffix, "a")) liba else libb;
         try files.append(a, .{ .name = lib_name, .text = try renderWithHeader(a, lib.template, vars) });
@@ -1261,10 +1261,10 @@ pub fn generate(a: std.mem.Allocator) ![]Probe {
             .crt = "",
             .effects = "",
         };
-        const claim_line = try std.fmt.allocPrint(a, "structural Claim<T> = Proof<T, | {s}>;", .{vars.claim});
-        const text = try std.fmt.allocPrint(a, "{s}\n{s}\n{s}\n", .{ hand_header, claim_line, hand.body });
+        const claim_line = try a.print("structural Claim<T> = Proof<T, | {s}>;", .{vars.claim});
+        const text = try a.print("{s}\n{s}\n{s}\n", .{ hand_header, claim_line, hand.body });
         const files = try a.alloc(SourceFile, 1);
-        files[0] = .{ .name = try std.fmt.allocPrint(a, "{s}.ts", .{hand.name}), .text = text };
+        files[0] = .{ .name = try a.print("{s}.ts", .{hand.name}), .text = text };
         try probes.append(a, .{
             .name = hand.name,
             .group = .hand,

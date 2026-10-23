@@ -101,7 +101,7 @@ fn buildJwsWithKey(
     // same defect this repo has recorded twice under a different name; see
     // docs/solutions/logic-errors/empty-baseline-made-a-file-destroying-edit-prove-clean.md.
     const capability_hash_hex = std.fmt.bytesToHex(
-        if (contract.capabilities) |caps| caps.hash else [_]u8{0} ** 32,
+        if (contract.capabilities) |caps| caps.hash else @as([32]u8, @splat(0)),
         .lower,
     );
     const core_grammar_hex = std.fmt.bytesToHex(contract.source_identity.core_grammar_hash, .lower);
@@ -183,7 +183,7 @@ test "build receipt refuses unstamped contracts and signs core source identity" 
     const allocator = std.testing.allocator;
     var contract = zts.handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
     defer contract.deinit(allocator);
-    const key_pair = try envelope.keyPairFromSeed([_]u8{0x41} ** Ed25519.KeyPair.seed_length);
+    const key_pair = try envelope.keyPairFromSeed(@as([Ed25519.KeyPair.seed_length]u8, @splat(0x41)));
 
     try std.testing.expectError(error.SourceIdentityMissing, buildJwsWithKey(
         allocator,
@@ -191,7 +191,7 @@ test "build receipt refuses unstamped contracts and signs core source identity" 
         "bytecode",
         &contract,
         envelope.unpinned_runtime_policy_sha256,
-        "9" ** 64,
+        &@as([64:0]u8, @splat('9')),
         key_pair,
     ));
 
@@ -202,7 +202,7 @@ test "build receipt refuses unstamped contracts and signs core source identity" 
         "bytecode",
         &contract,
         envelope.unpinned_runtime_policy_sha256,
-        "9" ** 64,
+        &@as([64:0]u8, @splat('9')),
         key_pair,
     );
     defer allocator.free(jws);
@@ -217,7 +217,7 @@ test "build receipt refuses unstamped contracts and signs core source identity" 
     try std.testing.expectEqualStrings("", verified.claims.guarded_categories);
     // The receipt carries the executable-graph root it was handed, not a
     // recomputation of its own: the signer commits, the consumer checks.
-    try std.testing.expectEqualStrings("9" ** 64, verified.claims.executable_root_sha256);
+    try std.testing.expectEqualStrings(&@as([64:0]u8, @splat('9')), verified.claims.executable_root_sha256);
 }
 
 test "build receipt signs dynamic capability categories in stable order" {
@@ -229,7 +229,7 @@ test "build receipt signs dynamic capability categories in stable order" {
     contract.egress.dynamic = true;
     contract.cache.dynamic = true;
     contract.sql.dynamic = true;
-    const key_pair = try envelope.keyPairFromSeed([_]u8{0x43} ** Ed25519.KeyPair.seed_length);
+    const key_pair = try envelope.keyPairFromSeed(@as([Ed25519.KeyPair.seed_length]u8, @splat(0x43)));
 
     const jws = try buildJwsWithKey(
         allocator,
@@ -237,7 +237,7 @@ test "build receipt signs dynamic capability categories in stable order" {
         "bytecode",
         &contract,
         envelope.unpinned_runtime_policy_sha256,
-        "9" ** 64,
+        &@as([64:0]u8, @splat('9')),
         key_pair,
     );
     defer allocator.free(jws);
@@ -252,7 +252,7 @@ test "a dev receipt states that it commits to no executable graph" {
     var contract = zts.handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
     defer contract.deinit(allocator);
     contract.source_identity = zts.sourceIdentityForPath(contract.handler.path);
-    const key_pair = try envelope.keyPairFromSeed([_]u8{0x42} ** Ed25519.KeyPair.seed_length);
+    const key_pair = try envelope.keyPairFromSeed(@as([Ed25519.KeyPair.seed_length]u8, @splat(0x42)));
 
     const jws = try buildJwsWithKey(
         allocator,

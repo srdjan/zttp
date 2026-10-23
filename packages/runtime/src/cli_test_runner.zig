@@ -69,7 +69,10 @@ pub fn main(init: std.process.Init.Minimal) !void {
     for (test_fns, 0..) |test_fn, index| {
         beginTest(test_fn.name, index, test_fns.len);
 
-        testing.allocator_instance = .{};
+        testing.allocator_instance = .init(std.heap.page_allocator, .{
+            .canary = 0xc3a701ba,
+            .check_write_after_free = true,
+        });
         testing.io_instance = .init(testing.allocator, .{
             .argv0 = .init(init.args),
             .environ = init.environ,
@@ -92,8 +95,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         };
 
         testing.io_instance.deinit();
-        const test_leaks = testing.allocator_instance.detectLeaks();
-        testing.allocator_instance.deinitWithoutLeakChecks();
+        const test_leaks = testing.allocator_instance.deinit();
         const test_log_errors = log_err_count;
 
         switch (status) {
@@ -236,10 +238,10 @@ pub fn log(
     args: anytype,
 ) void {
     @disableInstrumentation();
-    if (@intFromEnum(message_level) <= @intFromEnum(std.log.Level.err)) {
+    if (@backingInt(message_level) <= @backingInt(std.log.Level.err)) {
         log_err_count +|= 1;
     }
-    if (@intFromEnum(message_level) <= @intFromEnum(testing.log_level)) {
+    if (@backingInt(message_level) <= @backingInt(testing.log_level)) {
         std.debug.print(
             "[" ++ @tagName(scope) ++ "] (" ++ @tagName(message_level) ++ "): " ++ format ++ "\n",
             args,

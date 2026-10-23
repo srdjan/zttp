@@ -555,28 +555,34 @@ pub const TypeEnv = struct {
                 self.source_selection = .omitted;
             },
             .direct => |direct| {
-                var application_bases = validation: {
-                    errdefer |err| switch (err) {
-                        error.OutOfMemory => self.markAllocationFailure(),
-                        // exhaustive: other validation errors refuse eligibility before environment mutation.
-                        else => {},
-                    };
-                    break :validation try direct.store.planApplicationBasesWithIr(
-                        self.allocator,
-                        direct.ir_view,
-                    );
+                var application_bases = direct.store.planApplicationBasesWithIr(
+                    self.allocator,
+                    direct.ir_view,
+                ) catch |err| {
+                    return self.retainDirectValidationFailure(err);
                 };
                 defer application_bases.deinit();
                 try validateDirectSourceOrder(direct.store);
 
                 self.source_selection = .direct;
                 self.direct_annotation_count = direct.store.annotations.items.len;
-                errdefer |err| self.retainDirectPopulationFailure(err);
-                try self.populateDirectSourceTypes(direct, &application_bases, observer);
-                try self.pool.ensureHealthy();
-                try self.ensureHealthy();
+                self.populateSelectedDirectSourceTypes(direct, &application_bases, observer) catch |err| {
+                    self.retainDirectPopulationFailure(err);
+                    return err;
+                };
             },
         }
+    }
+
+    fn populateSelectedDirectSourceTypes(
+        self: *TypeEnv,
+        direct: DirectSyntaxInput,
+        application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
+        observer: ?DirectReplayObserver,
+    ) !void {
+        try self.populateDirectSourceTypes(direct, application_bases, observer);
+        try self.pool.ensureHealthy();
+        try self.ensureHealthy();
     }
 
     fn retainDirectPopulationFailure(self: *TypeEnv, err: anyerror) void {
@@ -584,6 +590,11 @@ pub const TypeEnv = struct {
             error.TypePoolCapacityExceeded => {}, // The pool retains this failure.
             else => self.markAllocationFailure(),
         }
+    }
+
+    fn retainDirectValidationFailure(self: *TypeEnv, err: anyerror) anyerror {
+        if (err == error.OutOfMemory) self.markAllocationFailure();
+        return err;
     }
 
     pub fn sourceTypeMode(self: *const TypeEnv) ?SourceTypeMode {
@@ -1358,7 +1369,21 @@ pub const TypeEnv = struct {
             },
             .present => |body| body,
         };
-        errdefer |err| self.retainDirectPopulationFailure(err);
+        self.populateParsedDeclarationBody(store, application_bases, lowered, declaration, structural_parameters, present) catch |err| {
+            self.retainDirectPopulationFailure(err);
+            return err;
+        };
+    }
+
+    fn populateParsedDeclarationBody(
+        self: *TypeEnv,
+        store: *const TypeSyntax.Store,
+        application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
+        lowered: []TypeIndex,
+        declaration: TypeSyntax.Declaration,
+        structural_parameters: ?[]const TypeSyntax.ProjectedGenericParameter,
+        present: @FieldType(TypeSyntax.DeclarationBody, "present"),
+    ) !void {
         if (structural_parameters) |projected| {
             var inputs: [MAX_TYPE_PARAMS]ParsedGenericInput = undefined;
             for (projected, 0..) |parameter, index| {
@@ -1552,7 +1577,7 @@ pub const TypeEnv = struct {
     }
 
     fn runtimeAtomName(atoms: *AtomTable, value: u16) ?[]const u8 {
-        const atom: Atom = @enumFromInt(value);
+        const atom: Atom = @fromBackingInt(@intCast(value));
         if (atom.toPredefinedName()) |name| return name;
         return atoms.getName(atom);
     }
@@ -2624,7 +2649,7 @@ const ParsedGenericApiCase = enum {
 };
 
 test "parsed generic API census observes every case" {
-    var seen = std.EnumSet(ParsedGenericApiCase).initEmpty();
+    var seen = std.EnumSet(ParsedGenericApiCase).empty;
     inline for (std.meta.tags(ParsedGenericApiCase)) |case| {
         try std.testing.expect(!seen.contains(case));
         switch (case) {
@@ -2798,7 +2823,7 @@ test "parsed generic API census observes every case" {
         }
         seen.insert(case);
     }
-    try std.testing.expectEqual(std.meta.fields(ParsedGenericApiCase).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(ParsedGenericApiCase).@"enum".field_names.len, seen.count());
 }
 
 test "direct call arguments retain eight entries under allocation failure" {
@@ -4191,12 +4216,16 @@ const GrowthCountingAllocator = struct {
     }
 
     fn allocator(self: *GrowthCountingAllocator) std.mem.Allocator {
-        return .{ .ptr = self, .vtable = &.{
-            .alloc = countAlloc,
-            .resize = countResize,
-            .remap = countRemap,
-            .free = countFree,
-        } };
+        return .{
+            .ptr = self,
+            .vtable = &.{
+                .alloc = countAlloc,
+                // In-place growth depends on SafeAllocator's preceding allocations.
+                .resize = std.mem.Allocator.noResize,
+                .remap = std.mem.Allocator.noRemap,
+                .free = countFree,
+            },
+        };
     }
 
     /// Successful allocations, resizes, remaps, frees, and remaining bytes.
@@ -4209,34 +4238,6 @@ const GrowthCountingAllocator = struct {
         const result = self.backing.rawAlloc(len, alignment, ra) orelse return null;
         self.alloc_calls += 1;
         self.live_bytes += len;
-        return result;
-    }
-
-    fn countResize(
-        context: *anyopaque,
-        memory: []u8,
-        alignment: std.mem.Alignment,
-        new_len: usize,
-        ra: usize,
-    ) bool {
-        const self: *GrowthCountingAllocator = @ptrCast(@alignCast(context));
-        if (!self.backing.rawResize(memory, alignment, new_len, ra)) return false;
-        self.resize_calls += 1;
-        self.live_bytes = self.live_bytes - memory.len + new_len;
-        return true;
-    }
-
-    fn countRemap(
-        context: *anyopaque,
-        memory: []u8,
-        alignment: std.mem.Alignment,
-        new_len: usize,
-        ra: usize,
-    ) ?[*]u8 {
-        const self: *GrowthCountingAllocator = @ptrCast(@alignCast(context));
-        const result = self.backing.rawRemap(memory, alignment, new_len, ra) orelse return null;
-        self.remap_calls += 1;
-        self.live_bytes = self.live_bytes - memory.len + new_len;
         return result;
     }
 
@@ -4652,8 +4653,8 @@ fn growthExpectTraceCase(case: GrowthCase) ![2]usize {
         // Parser scratch now retains one allocation through the parser's
         // lifetime. Signature replay's capacity/order assertions below remain
         // independent of this deliberately changed parser allocation shape.
-        .plain, .same_line => .{ 55, 0, 0, 10, 16097 },
-        .reordered => .{ 55, 0, 0, 10, 16081 },
+        .plain, .same_line => .{ 55, 0, 0, 10, 15649 },
+        .reordered => .{ 55, 0, 0, 10, 15633 },
     };
     try std.testing.expectEqual(allocation_shape, direct_count.shape());
     const direct_view = growthParserView(&direct_parser);
@@ -4731,7 +4732,7 @@ test "direct signature replay retains exact nested generic arrow and same-line o
     direct_parser.setAtomTable(&direct_atoms);
     const direct_root = try direct_parser.parse();
     try growthExpectRuntime(&direct_parser, direct_root);
-    try std.testing.expectEqual([5]usize{ 20, 0, 0, 1, 4675 }, direct_count.shape());
+    try std.testing.expectEqual([5]usize{ 21, 0, 0, 2, 4963 }, direct_count.shape());
     const direct_view = growthParserView(&direct_parser);
     var direct_pool = TypePool.init(allocator);
     defer direct_pool.deinit(allocator);
@@ -4842,10 +4843,10 @@ fn growthExpectSignatureKind(
     const direct_root = try direct_parser.parse();
     try growthExpectRuntime(&direct_parser, direct_root);
     const allocation_shape: [5]usize = switch (case) {
-        .parameter, .arrow => .{ 13, 0, 0, 0, 3256 },
-        .return_value => .{ 12, 0, 0, 0, 3045 },
-        .guard => .{ 13, 0, 0, 0, 3257 },
-        .generic_only => .{ 13, 0, 0, 0, 3260 },
+        .parameter, .arrow => .{ 13, 0, 0, 0, 3224 },
+        .return_value => .{ 13, 0, 0, 1, 3253 },
+        .guard => .{ 14, 0, 0, 1, 3465 },
+        .generic_only => .{ 14, 0, 0, 1, 3468 },
     };
     try std.testing.expectEqual(allocation_shape, direct_count.shape());
     const direct_view = growthParserView(&direct_parser);
@@ -4918,7 +4919,7 @@ test "direct signature replay covers parameter return guard generic-only and ato
     const named_owner = function_owner orelse return error.TestUnexpectedResult;
     const anonymous_owner = arrow_owner orelse return error.TestUnexpectedResult;
     const function_extra = parser.nodes.data.items[@intCast(named_owner)].a;
-    parser.nodes.extra.items[@as(usize, function_extra) + 1] = @intFromEnum(Atom.null);
+    parser.nodes.extra.items[@as(usize, function_extra) + 1] = @backingInt(Atom.null);
     try parser.type_store.validateRuntimeOwners(allocator, view);
     try std.testing.expectEqual(@as(u16, 0), view.getFunction(named_owner).?.name_atom);
     try std.testing.expectEqual(@as(u16, 0), view.getFunction(anonymous_owner).?.name_atom);

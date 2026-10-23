@@ -220,7 +220,7 @@ pub const Runner = struct {
             try self.validateTurn(expected, result, transcript, transcript_start);
             if (turn_position + 1 < self.flow_case.manifest.turns.len) {
                 const checkpoint = self.flow_case.manifest.turn_workspaces[turn_position];
-                const prefix = try std.fmt.allocPrint(self.allocator, "turns/{d}/", .{checkpoint.turn_index});
+                const prefix = try self.allocator.print("turns/{d}/", .{checkpoint.turn_index});
                 defer self.allocator.free(prefix);
                 try self.validateWorkspaceSnapshot(
                     workspace.abs_path,

@@ -45,7 +45,7 @@ pub const Server = struct {
     }
 
     pub fn url(self: *const Server, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-        return std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}{s}", .{ self.port, path });
+        return allocator.print("http://127.0.0.1:{d}{s}", .{ self.port, path });
     }
 
     pub fn serve(self: *Server) !void {
@@ -206,7 +206,7 @@ fn readRequest(arena: std.mem.Allocator, stream: *std.Io.net.Stream, io: std.Io)
 
         var chunk: [4096]u8 = undefined;
         var vecs: [1][]u8 = .{chunk[0..]};
-        const count = try io.vtable.netRead(io.userdata, stream.socket.handle, &vecs);
+        const count = (try stream.readWithControl(io, &vecs, &.{})).data_len;
         if (count == 0) return error.UnexpectedEof;
         try bytes.appendSlice(arena, chunk[0..count]);
         if (bytes.items.len > max_request_bytes) return error.RequestTooLarge;
@@ -251,11 +251,7 @@ fn parseHttpRequest(bytes: []const u8) !HttpRequest {
 
 fn dispatch(allocator: std.mem.Allocator, incoming: HttpRequest) !HttpResponse {
     if (std.mem.eql(u8, incoming.method, "GET") and std.mem.eql(u8, incoming.path, "/_health")) {
-        const body = try std.fmt.allocPrint(
-            allocator,
-            "{{\"protocol\":\"{s}\",\"version\":\"{s}\"}}\n",
-            .{ playbook.protocol, playbook.version },
-        );
+        const body = try allocator.print("{{\"protocol\":\"{s}\",\"version\":\"{s}\"}}\n", .{ playbook.protocol, playbook.version });
         errdefer allocator.free(body);
         return .{ .status = 200, .reason = "OK", .content_type = "application/json", .body = body };
     }

@@ -5,7 +5,7 @@
 const std = @import("std");
 
 pub fn writeFilePosix(path: []const u8, data: []const u8, allocator: std.mem.Allocator) !void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     const fd = try std.posix.openatZ(

@@ -144,7 +144,7 @@ fn execute(
         );
     };
 
-    const proposed = try std.fmt.allocPrint(allocator, "{s}{s}{s}", .{
+    const proposed = try allocator.print("{s}{s}{s}", .{
         source[0..offset],
         expression,
         source[offset + hole_call.len ..],
@@ -235,14 +235,10 @@ fn buildResult(allocator: std.mem.Allocator, args: BuildArgs) !registry_mod.Tool
         );
     }
 
-    const summary = try std.fmt.allocPrint(
-        allocator,
-        "{d} total, {d} new, {d} preexisting",
-        .{ args.verdict.total, args.verdict.new_count, args.verdict.preexisting_count },
-    );
+    const summary = try allocator.print("{d} total, {d} new, {d} preexisting", .{ args.verdict.total, args.verdict.new_count, args.verdict.preexisting_count });
     defer allocator.free(summary);
 
-    const plan_id = try std.fmt.allocPrint(allocator, "hole_{d}_{d}", .{ args.line, args.column });
+    const plan_id = try allocator.print("hole_{d}_{d}", .{ args.line, args.column });
     defer allocator.free(plan_id);
 
     var payload: ui_payload.UiPayload = .{ .repair_candidate = try ui_payload.RepairCandidatePayload.init(
@@ -345,11 +341,7 @@ test "execute fills the named hole and leaves the rest of the file alone" {
     defer testing.allocator.free(path);
 
     // `  return hole();` - column 10.
-    const input = try std.fmt.allocPrint(
-        testing.allocator,
-        "{{\"path\":\"{s}\",\"line\":2,\"column\":10,\"expression\":\"s\"}}",
-        .{path},
-    );
+    const input = try testing.allocator.print("{{\"path\":\"{s}\",\"line\":2,\"column\":10,\"expression\":\"s\"}}", .{path});
     defer testing.allocator.free(input);
     var result = try execute(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
@@ -376,11 +368,7 @@ test "execute refuses a coordinate that no longer names a hole" {
     const path = try writeFixture(tmp.sub_path, source);
     defer testing.allocator.free(path);
 
-    const input = try std.fmt.allocPrint(
-        testing.allocator,
-        "{{\"path\":\"{s}\",\"line\":2,\"column\":10,\"expression\":\"s\"}}",
-        .{path},
-    );
+    const input = try testing.allocator.print("{{\"path\":\"{s}\",\"line\":2,\"column\":10,\"expression\":\"s\"}}", .{path});
     defer testing.allocator.free(input);
     var result = try execute(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
@@ -395,11 +383,7 @@ test "execute refuses an empty expression" {
     const path = try writeFixture(tmp.sub_path, "function handler(req: Request): Response { return hole(); }");
     defer testing.allocator.free(path);
 
-    const input = try std.fmt.allocPrint(
-        testing.allocator,
-        "{{\"path\":\"{s}\",\"line\":1,\"column\":50,\"expression\":\"   \"}}",
-        .{path},
-    );
+    const input = try testing.allocator.print("{{\"path\":\"{s}\",\"line\":1,\"column\":50,\"expression\":\"   \"}}", .{path});
     defer testing.allocator.free(input);
     var result = try execute(testing.allocator, &.{input});
     defer result.deinit(testing.allocator);
@@ -409,7 +393,7 @@ test "execute refuses an empty expression" {
 }
 
 fn writeFixture(tmp_sub_path: anytype, source: []const u8) ![]u8 {
-    const root = try std.fmt.allocPrint(testing.allocator, ".zig-cache/tmp/{s}", .{tmp_sub_path});
+    const root = try testing.allocator.print(".zig-cache/tmp/{s}", .{tmp_sub_path});
     defer testing.allocator.free(root);
     const rel_path = try std.fs.path.join(testing.allocator, &.{ root, "handler.ts" });
     defer testing.allocator.free(rel_path);

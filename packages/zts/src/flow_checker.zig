@@ -230,7 +230,8 @@ test "FlowChecker fails closed when diagnostic storage cannot allocate" {
     };
     // Every allocation on a real diagnostic-producing path must propagate
     // failure, including the storage that publishes the diagnostic itself.
-    try std.testing.checkAllAllocationFailures(allocator, Probe.run, .{ leaking_view, leaking_handler, &leaking_atoms, &leaking.scopes });
+    var no_resize = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), Probe.run, .{ leaking_view, leaking_handler, &leaking_atoms, &leaking.scopes });
 }
 
 test "FlowChecker captures witness constraints on secret-in-response" {
@@ -789,7 +790,7 @@ test "a leak on a status test that does not fork gets a status that takes the br
         .{ .cond = "404 === res.status", .status = "\"status\":404,\"statusText\":\"Not Found\"" },
     };
     for (rows) |row| {
-        const source = try std.fmt.allocPrint(std.testing.allocator,
+        const source = try std.testing.allocator.print(
             \\{s}
             \\function handler(req) {{
             \\  const secret = env("API_SECRET");
@@ -1241,7 +1242,7 @@ test "value combinations cannot borrow validation from another contributor" {
         "dictGet(dictSet(dictSet(dictEmpty(), \"raw\", a), \"safe\", b), \"raw\")",
     };
     for (expressions) |expression| {
-        const source = try std.fmt.allocPrint(std.testing.allocator,
+        const source = try std.testing.allocator.print(
             \\import {{ escapeHtml }} from "zttp:text";
             \\import {{ dictEmpty, dictSet, dictGet }} from "zttp:collections";
             \\function choose(raw, safe) {{
@@ -1273,7 +1274,7 @@ test "member writes and array mutations cannot validate raw siblings" {
         "const parts = { safe: b }; parts.raw = a; return Response.html(parts.raw);",
     };
     for (bodies) |body| {
-        const source = try std.fmt.allocPrint(std.testing.allocator,
+        const source = try std.testing.allocator.print(
             \\import {{ escapeHtml }} from "zttp:text";
             \\function handler(req) {{
             \\  const a = req.url;
@@ -1296,7 +1297,7 @@ test "egress assembly and spread cannot borrow sibling validation" {
         "{ ...{ extra: b }, ...{ body: a } }",
     };
     for (options) |init| {
-        const source = try std.fmt.allocPrint(std.testing.allocator,
+        const source = try std.testing.allocator.print(
             \\import {{ escapeHtml }} from "zttp:text";
             \\import {{ fetch }} from "zttp:fetch";
             \\function handler(req) {{
@@ -1325,7 +1326,7 @@ test "escaped assembly with static markup still proves injection_safe" {
         "match (a) { when \"\": b, default: escapeHtml(a) }",
     };
     for (expressions) |expression| {
-        const source = try std.fmt.allocPrint(std.testing.allocator,
+        const source = try std.testing.allocator.print(
             \\import {{ escapeHtml }} from "zttp:text";
             \\function handler(req) {{
             \\  const a = req.url;
@@ -1348,7 +1349,7 @@ test "literal match arms preserve escaped content validation" {
         "match (req.url) { when \"\": \"\", when \"/\": escapeHtml(req.url), default: \"static\" }",
     };
     for (expressions) |expression| {
-        const source = try std.fmt.allocPrint(std.testing.allocator,
+        const source = try std.testing.allocator.print(
             \\import {{ escapeHtml }} from "zttp:text";
             \\function handler(req) {{ return Response.html({s}); }}
         , .{expression});
@@ -1376,7 +1377,7 @@ test "selection predicates and bounds contribute their own defenses" {
         .{ .expression = "[escapeHtml(req.url)].slice(0).join(\"\")", .safe = true },
     };
     for (cases) |case| {
-        const source = try std.fmt.allocPrint(std.testing.allocator,
+        const source = try std.testing.allocator.print(
             \\import {{ escapeHtml }} from "zttp:text";
             \\function handler(req) {{ return Response.html({s}); }}
         , .{case.expression});
@@ -1405,7 +1406,7 @@ test "selection callbacks carry writes into selected elements" {
         .{ .setup = "const other = {};", .callback = "(v) => { other.raw = req.url; return true; }", .safe = true },
     };
     for (cases) |case| {
-        const source = try std.fmt.allocPrint(std.testing.allocator,
+        const source = try std.testing.allocator.print(
             \\import {{ escapeHtml }} from "zttp:text";
             \\function handler(req) {{
             \\  const parts = [escapeHtml(req.url), escapeHtml(req.url)];
@@ -1433,7 +1434,7 @@ test "map callbacks see values written into later elements" {
         .{ .callback = "(v) => { parts[1] = req.url; return \"static\"; }", .safe = true },
     };
     for (cases) |case| {
-        const source = try std.fmt.allocPrint(std.testing.allocator,
+        const source = try std.testing.allocator.print(
             \\import {{ escapeHtml }} from "zttp:text";
             \\function handler(req) {{
             \\  const parts = [escapeHtml(req.url), escapeHtml(req.url)];
@@ -1610,7 +1611,7 @@ test "environment names refine secret provenance" {
         .{ .name = "DATABASE_URL", .secret = false },
     };
     for (cases) |case| {
-        const source = try std.fmt.allocPrint(std.testing.allocator,
+        const source = try std.testing.allocator.print(
             \\import {{ env }} from "zttp:env";
             \\function handler(req) {{ return Response.text(env("{s}")); }}
         , .{case.name});
@@ -1681,13 +1682,13 @@ test "propertyTagForKind: every DiagnosticKind variant maps to a non-null Proper
     // stay green while the new variant silently disappears from the
     // proven-property surface (callers like proof_trace and
     // pi_repair_plan all use `orelse continue`).
-    inline for (@typeInfo(DiagnosticKind).@"enum".fields) |field| {
-        const kind: DiagnosticKind = @enumFromInt(field.value);
+    inline for (@typeInfo(DiagnosticKind).@"enum".field_names) |field| {
+        const kind: DiagnosticKind = @fromBackingInt(@intCast(@backingInt(@field(DiagnosticKind, field))));
         const tag = propertyTagForKind(kind);
         std.testing.expect(tag != null) catch |err| {
             std.log.err(
                 "DiagnosticKind.{s} has no PropertyTag mapping; add an arm to propertyTagForKind",
-                .{field.name},
+                .{field},
             );
             return err;
         };
@@ -2428,9 +2429,9 @@ test "FlowChecker checks each flow property inside routerMatch route functions" 
         },
     };
 
-    try std.testing.expectEqual(std.meta.fields(FlowProperties).len, cases.len);
-    inline for (std.meta.fields(FlowProperties), cases) |field, case| {
-        try std.testing.expectEqualStrings(field.name, @tagName(case.property));
+    try std.testing.expectEqual(@typeInfo(FlowProperties).@"struct".field_names.len, cases.len);
+    inline for (@typeInfo(FlowProperties).@"struct".field_names, cases) |field, case| {
+        try std.testing.expectEqualStrings(field, @tagName(case.property));
     }
     for (cases) |case| {
         const direct = try runFlowProperties(std.testing.allocator, case.direct);
@@ -5441,14 +5442,14 @@ test "no flow diagnostic offers a repair a guard cannot perform" {
     // intent. `kindsTrippedByProbeCorpus` runs the checker instead, and its
     // coverage floor below fails when a kind stops being reachable - a corpus
     // that trips nothing must not read as a pass.
-    var seen = std.EnumSet(DiagnosticKind).initEmpty();
+    var seen = std.EnumSet(DiagnosticKind).empty;
     for (repair_intent_probe_corpus) |source| {
         try collectFlowDiagnosticKinds(std.testing.allocator, source, &seen);
     }
-    inline for (@typeInfo(DiagnosticKind).@"enum".fields) |field| {
-        const kind = @field(DiagnosticKind, field.name);
+    inline for (@typeInfo(DiagnosticKind).@"enum".field_names) |field| {
+        const kind = @field(DiagnosticKind, field);
         if (!seen.contains(kind)) {
-            std.debug.print("no probe source trips flow kind '{s}'\n", .{field.name});
+            std.debug.print("no probe source trips flow kind '{s}'\n", .{field});
             return error.FlowProbeCorpusMissesKind;
         }
     }
@@ -5565,7 +5566,7 @@ test "FlowChecker reports every property unproven before check runs" {
     var checker = FlowChecker.init(std.testing.allocator, ir_view, &atoms);
     defer checker.deinit();
     const properties = checker.getProperties();
-    inline for (@typeInfo(FlowProperties).@"struct".fields) |field| {
-        try std.testing.expect(!@field(properties, field.name));
+    inline for (@typeInfo(FlowProperties).@"struct".field_names) |field| {
+        try std.testing.expect(!@field(properties, field));
     }
 }

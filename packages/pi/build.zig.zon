@@ -2,7 +2,7 @@
     .name = .zttp_pi,
     .version = "0.0.0",
     .fingerprint = 0x5e1b30d8fc5a7e75,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .zts = .{
             .path = "../zts",

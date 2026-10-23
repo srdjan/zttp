@@ -172,8 +172,8 @@ fn contractJson(allocator: std.mem.Allocator, contract: *const zts.HandlerContra
 }
 
 /// The edge each property was answered with, in property order.
-fn edgeProfile(built: *const proof_certificate.Built) ![@typeInfo(ps.Property).@"enum".fields.len]?cert.EdgeKind {
-    var profile = [_]?cert.EdgeKind{null} ** @typeInfo(ps.Property).@"enum".fields.len;
+fn edgeProfile(built: *const proof_certificate.Built) ![@typeInfo(ps.Property).@"enum".field_names.len]?cert.EdgeKind {
+    var profile = @as([(@typeInfo(ps.Property).@"enum".field_names.len)]?cert.EdgeKind, @splat(null));
     var budget = pcc.limits.Budget.init(.{});
     const decoded = try cert.decode(built.bytes, .{}, &budget);
 
@@ -181,7 +181,7 @@ fn edgeProfile(built: *const proof_certificate.Built) ![@typeInfo(ps.Property).@
     while (index < decoded.evidence.len()) : (index += 1) {
         const entry = try decoded.evidence.get(index);
         const obligation = try decoded.obligations.get(entry.obligation_index);
-        const slot = @intFromEnum(obligation.property) - 1;
+        const slot = @backingInt(obligation.property) - 1;
         // Keep the weakest answer seen: that is what the grade is folded from.
         if (profile[slot]) |existing| {
             const existing_grade = existing.grade() orelse continue;
@@ -189,7 +189,7 @@ fn edgeProfile(built: *const proof_certificate.Built) ![@typeInfo(ps.Property).@
                 profile[slot] = entry.edge;
                 continue;
             };
-            if (@intFromEnum(grade) > @intFromEnum(existing_grade)) profile[slot] = entry.edge;
+            if (@backingInt(grade) > @backingInt(existing_grade)) profile[slot] = entry.edge;
         } else {
             profile[slot] = entry.edge;
         }
@@ -242,16 +242,16 @@ test "the disclosed boundary is exactly what the kernel does not re-derive" {
 
     // Totality is re-derived by the consumer: its answer is a rule the kernel
     // ran, capped by the translation edge it also ran.
-    const totality = profile[@intFromEnum(ps.Property.response_total) - 1].?;
+    const totality = profile[@backingInt(ps.Property.response_total) - 1].?;
     try testing.expect(totality == .proved or totality == .translation_validated);
 
     // Everything else is a disclosure or an explicit refusal. Neither is a
     // consumer-checked edge, and the ratchet is the statement that this is
     // still true.
-    inline for (@typeInfo(ps.Property).@"enum".fields) |field| {
-        const property: ps.Property = @enumFromInt(field.value);
+    inline for (@typeInfo(ps.Property).@"enum".field_names) |field| {
+        const property: ps.Property = @fromBackingInt(@intCast(@backingInt(@field(ps.Property, field))));
         if (comptime !property.consumerChecked()) {
-            const edge = profile[field.value - 1] orelse return error.TestUnexpectedResult;
+            const edge = profile[@backingInt(@field(ps.Property, field)) - 1] orelse return error.TestUnexpectedResult;
             testing.expect(edge == .tested or edge == .not_established) catch |err| {
                 std.debug.print(
                     "ratchet: '{s}' was answered with a consumer-checked edge but is published as disclosed\n",
@@ -296,7 +296,7 @@ test "a certificate that only discloses totality is refused by the production fl
 
 test "each corpus family exercises a different totality rule" {
     const allocator = testing.allocator;
-    var seen_rules = std.EnumSet(ps.Rule).initEmpty();
+    var seen_rules = std.EnumSet(ps.Rule).empty;
 
     for (corpus) |case| {
         var certified = try certify(allocator, case.source);

@@ -84,7 +84,7 @@ test "fillRandom surfaces a clean error when the bridge cannot fill the buffer" 
     defer test_shim.allowRandom();
 
     const fake_handle: *sdk.ModuleHandle = @ptrFromInt(8);
-    var buf: [16]u8 = .{0xAA} ** 16;
+    var buf: [16]u8 = @splat(0xAA);
 
     // Happy path: capability allowed and the bridge succeeds -> no error.
     try sdk.fillRandom(fake_handle, &buf);

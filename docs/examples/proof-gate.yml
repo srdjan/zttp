@@ -24,7 +24,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  ZIG_VERSION: '0.16.0'
+  ZIG_VERSION: '0.17.0'
 
 jobs:
   proof-gate:
@@ -43,7 +43,7 @@ jobs:
           version: ${{ env.ZIG_VERSION }}
 
       - name: Build zttp
-        run: zig build -Doptimize=ReleaseFast
+        run: zig build -Doptimize=fast
 
       - name: Run proof gate
         id: gate

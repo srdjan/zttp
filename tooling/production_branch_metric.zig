@@ -39,7 +39,7 @@ const Package = enum {
     }
 };
 
-const package_count = @typeInfo(Package).@"enum".fields.len;
+const package_count = @typeInfo(Package).@"enum".field_names.len;
 const required_packages = [_]Package{
     .modules,
     .pi,
@@ -71,18 +71,18 @@ const Counts = struct {
 
 const Report = struct {
     totals: Counts = .{},
-    packages: [package_count]Counts = [_]Counts{.{}} ** package_count,
+    packages: [package_count]Counts = @as([package_count]Counts, @splat(.{})),
     parse_failures: usize = 0,
 
     fn add(self: *Report, package: Package, counts: Counts) void {
         self.totals.add(counts);
-        self.packages[@intFromEnum(package)].add(counts);
+        self.packages[@backingInt(package)].add(counts);
     }
 };
 
 fn missingRequiredPackage(report: Report) ?Package {
     for (required_packages) |package| {
-        if (report.packages[@intFromEnum(package)].files == 0) return package;
+        if (report.packages[@backingInt(package)].files == 0) return package;
     }
     return null;
 }
@@ -162,7 +162,7 @@ fn countTree(allocator: std.mem.Allocator, tree: std.zig.Ast) !Counts {
     defer branch_ranges.deinit(allocator);
 
     for (tags, 0..) |tag, raw_index| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_index);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_index));
         switch (tag) {
             .test_decl => {
                 const body = tree.nodeData(node).opt_token_and_node[1];
@@ -205,7 +205,7 @@ fn countTree(allocator: std.mem.Allocator, tree: std.zig.Ast) !Counts {
 
     var counts: Counts = .{ .files = 1 };
     for (tags, 0..) |tag, raw_index| {
-        const node: std.zig.Ast.Node.Index = @enumFromInt(raw_index);
+        const node: std.zig.Ast.Node.Index = @fromBackingInt(@intCast(raw_index));
         const token = tree.nodeMainToken(node);
         const in_test = tokenInRanges(token, test_ranges.items);
         var branches: usize = 0;
@@ -246,7 +246,7 @@ fn countTree(allocator: std.mem.Allocator, tree: std.zig.Ast) !Counts {
 }
 
 fn countSource(allocator: std.mem.Allocator, source: [:0]const u8) !Counts {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    var tree = try std.zig.Ast.parse(allocator, source, .{});
     defer tree.deinit(allocator);
     if (tree.errors.len != 0) return error.ParseFailed;
     return countTree(allocator, tree);
@@ -314,7 +314,7 @@ fn writeText(writer: *std.Io.Writer, report: Report) !void {
         },
     );
     for (std.enums.values(Package)) |package| {
-        const counts = report.packages[@intFromEnum(package)];
+        const counts = report.packages[@backingInt(package)];
         if (counts.files == 0) continue;
         try writer.print(
             "package={s} files={d} production_branches={d} production_functions={d} cyclomatic_sum={d}\n",
@@ -337,7 +337,7 @@ fn writeJson(writer: *std.Io.Writer, report: Report) !void {
     );
     var emitted: usize = 0;
     for (std.enums.values(Package)) |package| {
-        const counts = report.packages[@intFromEnum(package)];
+        const counts = report.packages[@backingInt(package)];
         if (counts.files == 0) continue;
         if (emitted != 0) try writer.writeAll(",");
         try writer.print(
@@ -480,11 +480,11 @@ test "metric collection rejects an unknown package before reading it" {
 test "metric rejects a missing required package" {
     var report: Report = .{};
     for (required_packages) |package| {
-        report.packages[@intFromEnum(package)].files = 1;
+        report.packages[@backingInt(package)].files = 1;
     }
     try std.testing.expectEqual(@as(?Package, null), missingRequiredPackage(report));
 
-    report.packages[@intFromEnum(Package.runtime)].files = 0;
+    report.packages[@backingInt(Package.runtime)].files = 0;
     try std.testing.expectEqual(Package.runtime, missingRequiredPackage(report).?);
 }
 

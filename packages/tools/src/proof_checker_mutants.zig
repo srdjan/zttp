@@ -160,7 +160,7 @@ fn createPrivateTemp(
     const stamp: u64 = @intCast(std.Io.Clock.real.now(io).toNanoseconds());
     var attempt: usize = 0;
     while (attempt < 100) : (attempt += 1) {
-        const name = try std.fmt.allocPrint(allocator, "zttp-proof-checker-mutants-{x}-{d}", .{ stamp, attempt });
+        const name = try allocator.print("zttp-proof-checker-mutants-{x}-{d}", .{ stamp, attempt });
         defer allocator.free(name);
         const path = try std.fs.path.join(allocator, &.{ temp_root, name });
         std.Io.Dir.cwd().createDir(io, path, std.Io.File.Permissions.fromMode(0o700)) catch |err| switch (err) {
@@ -333,14 +333,14 @@ fn worker(work: *Work) void {
         if (index >= mutants.len) return;
         work.results[index] = runMutant(work, index) catch |err| .{
             .outcome = .harness_error,
-            .output = std.fmt.allocPrint(work.allocator, "{s}", .{@errorName(err)}) catch &.{},
+            .output = work.allocator.print("{s}", .{@errorName(err)}) catch &.{},
         };
     }
 }
 
 fn runMutant(work: *const Work, index: usize) !Result {
     const mutant = mutants[index];
-    const row_name = try std.fmt.allocPrint(work.allocator, "row-{d}-{s}", .{ index, mutant.id });
+    const row_name = try work.allocator.print("row-{d}-{s}", .{ index, mutant.id });
     defer work.allocator.free(row_name);
     const copy_path = try std.fs.path.join(work.allocator, &.{ work.temp_path, row_name });
     defer work.allocator.free(copy_path);
@@ -362,7 +362,7 @@ fn runMutant(work: *const Work, index: usize) !Result {
     defer std.Io.Dir.cwd().deleteTree(work.io, cache_path) catch {};
     const test_binary = try std.fs.path.join(work.allocator, &.{ copy_path, "mutant-test" });
     defer work.allocator.free(test_binary);
-    const emit_arg = try std.fmt.allocPrint(work.allocator, "-femit-bin={s}", .{test_binary});
+    const emit_arg = try work.allocator.print("-femit-bin={s}", .{test_binary});
     defer work.allocator.free(emit_arg);
 
     const compile = std.process.run(work.allocator, work.io, .{
@@ -375,7 +375,7 @@ fn runMutant(work: *const Work, index: usize) !Result {
         error.Timeout => return .{ .outcome = .timeout },
         else => return .{
             .outcome = .harness_error,
-            .output = try std.fmt.allocPrint(work.allocator, "compiler invocation: {s}", .{@errorName(err)}),
+            .output = try work.allocator.print("compiler invocation: {s}", .{@errorName(err)}),
         },
     };
     defer work.allocator.free(compile.stdout);
@@ -397,7 +397,7 @@ fn runMutant(work: *const Work, index: usize) !Result {
         error.Timeout => return .{ .outcome = .timeout },
         else => return .{
             .outcome = .harness_error,
-            .output = try std.fmt.allocPrint(work.allocator, "test invocation: {s}", .{@errorName(err)}),
+            .output = try work.allocator.print("test invocation: {s}", .{@errorName(err)}),
         },
     };
     defer work.allocator.free(execution.stdout);
@@ -413,7 +413,7 @@ fn termSucceeded(term: std.process.Child.Term) bool {
 }
 
 fn combineOutput(allocator: std.mem.Allocator, stdout: []const u8, stderr: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}{s}", .{ stdout, stderr });
+    return allocator.print("{s}{s}", .{ stdout, stderr });
 }
 
 fn copyPackage(allocator: std.mem.Allocator, io: std.Io, source_path: []const u8, dest_path: []const u8) !void {
@@ -566,9 +566,9 @@ fn loadList(arena: std.mem.Allocator, io: std.Io, path: []const u8) ![]const Mut
         std.debug.print("proof-checker mutants: cannot read {s}: {s}\n", .{ path, @errorName(err) });
         return err;
     };
-    var diag: std.zon.parse.Diagnostics = .{};
-    return std.zon.parse.fromSliceAlloc([]const Mutant, arena, source, &diag, .{ .free_on_error = false }) catch |err| {
-        std.debug.print("proof-checker mutants: {s} is not a valid mutant list:\n{f}", .{ path, diag });
+    var diag: std.zon.parse.Diagnostics = undefined;
+    return std.zon.parse.fromSlice([]const Mutant, .{ .gpa = arena, .arena = arena, .source = source, .diagnostics = &diag }) catch |err| {
+        if (err == error.ParseZon) std.debug.print("proof-checker mutants: {s} is not a valid mutant list:\n{f}", .{ path, diag.fmt(path) });
         return err;
     };
 }

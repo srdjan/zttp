@@ -19,7 +19,7 @@ pub const EnvOverride = struct {
         const previous = try capturePrevious(allocator, name_z);
         errdefer if (previous) |p| allocator.free(p);
 
-        const value_z = try allocator.dupeZ(u8, value);
+        const value_z = try allocator.dupeSentinel(u8, value, 0);
         defer allocator.free(value_z);
         _ = setenv(name_z.ptr, value_z.ptr, 1);
 
@@ -37,7 +37,7 @@ pub const EnvOverride = struct {
 
     pub fn restore(self: *EnvOverride, allocator: std.mem.Allocator) void {
         if (self.previous) |prev| {
-            const prev_z = allocator.dupeZ(u8, prev) catch {
+            const prev_z = allocator.dupeSentinel(u8, prev, 0) catch {
                 allocator.free(prev);
                 self.previous = null;
                 return;

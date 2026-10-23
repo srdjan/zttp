@@ -215,7 +215,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         return rejectAt(.parsed, inputs.provenance, certificate.identity.development, budget, limits, .{
             .stage = .proof_system_identity,
             .code = .unsupported_proof_system,
-            .actual = .{ .scalar = @intFromEnum(certificate.proof_system) },
+            .actual = .{ .scalar = @backingInt(certificate.proof_system) },
             .recertifiable = true,
         });
     }
@@ -416,7 +416,7 @@ const Session = struct {
             if (member.kind != .residual_plan) continue;
             if (!std.mem.eql(u8, &member.digest, &plan_digest)) {
                 return .{ .rejected = reject(.guard_coverage, .residual_plan_digest_mismatch, .{
-                    .graph_member = .{ .kind = @intFromEnum(member.kind), .ordinal = member.ordinal },
+                    .graph_member = .{ .kind = @backingInt(member.kind), .ordinal = member.ordinal },
                 }) };
             }
         }
@@ -459,7 +459,7 @@ const Session = struct {
                 .operation_id = node.id,
             };
             verdicts.required += 1;
-            verdicts.kinds |= @as(u8, 1) << @intCast(@intFromEnum(entry.kind) - 1);
+            verdicts.kinds |= @as(u8, 1) << @intCast(@backingInt(entry.kind) - 1);
 
             if (supplied_index >= self.certificate.residual.len()) {
                 return .{ .rejected = reject(.guard_coverage, .guard_member_missing, .{ .ir_node = node.id }) };
@@ -604,7 +604,7 @@ const Session = struct {
     /// have shrunk.
     fn checkObligationSet(self: *Session, entry: u32) SessionError!?Outcome {
         @setRuntimeSafety(true);
-        const expected_count = @typeInfo(ps.Property).@"enum".fields.len;
+        const expected_count = @typeInfo(ps.Property).@"enum".field_names.len;
         if (self.certificate.obligations.len() != expected_count) {
             return reject(
                 .obligation_reconstruction,
@@ -890,9 +890,9 @@ const Session = struct {
 
     fn checkEvidence(self: *Session, entry_function: u32) SessionError!Outcome {
         @setRuntimeSafety(true);
-        var grades = [_]?verdict.AssuranceGrade{null} ** (@typeInfo(ps.Property).@"enum".fields.len);
-        var answered = [_]bool{false} ** grades.len;
-        var refused = [_]bool{false} ** grades.len;
+        var grades = @as([((@typeInfo(ps.Property).@"enum".field_names.len))]?verdict.AssuranceGrade, @splat(null));
+        var answered = @as([grades.len]bool, @splat(false));
+        var refused = @as([grades.len]bool, @splat(false));
 
         var index: u32 = 0;
         while (index < self.certificate.evidence.len()) : (index += 1) {
@@ -902,7 +902,7 @@ const Session = struct {
                 return reject(.evidence_check, .obligation_missing, .none);
             }
             const obligation = try self.certificate.obligations.get(entry.obligation_index);
-            const slot = @intFromEnum(obligation.property) - 1;
+            const slot = @backingInt(obligation.property) - 1;
             answered[slot] = true;
 
             switch (try self.checkEvidenceEntry(entry, obligation.property)) {
@@ -923,7 +923,7 @@ const Session = struct {
         // The trusted inventory names theorem-chain dependencies, not inert
         // annotations. Every current trusted family supports totality, so its
         // declared grade caps that property before policy evaluation.
-        const totality_slot = @intFromEnum(ps.Property.response_total) - 1;
+        const totality_slot = @backingInt(ps.Property.response_total) - 1;
         var has_opcode_dependency = false;
         var trusted_index: u32 = 0;
         while (trusted_index < self.certificate.trusted.len()) : (trusted_index += 1) {
@@ -971,7 +971,7 @@ const Session = struct {
         var index2: usize = 0;
         while (index2 < answered.len) : (index2 += 1) {
             if (!answered[index2]) {
-                const property: ps.Property = @enumFromInt(index2 + 1);
+                const property: ps.Property = @fromBackingInt(@intCast(index2 + 1));
                 return reject(.evidence_check, .obligation_without_evidence, .{ .property = property });
             }
         }
@@ -985,14 +985,14 @@ const Session = struct {
     ) SessionError!Outcome {
         @setRuntimeSafety(true);
         var property_verdicts: verdict.PropertyVerdicts = .{};
-        inline for (@typeInfo(ps.Property).@"enum".fields) |field| {
-            const property: ps.Property = @enumFromInt(field.value);
-            const slot = @intFromEnum(property) - 1;
+        inline for (@typeInfo(ps.Property).@"enum".field_names) |field| {
+            const property: ps.Property = @fromBackingInt(@intCast(@backingInt(@field(ps.Property, field))));
+            const slot = @backingInt(property) - 1;
             if (grades[slot]) |grade| property_verdicts.recordGrade(property, grade);
         }
         var weakest: ?verdict.AssuranceGrade = null;
         for (self.policy.required) |requirement| {
-            const slot = @intFromEnum(requirement.property) - 1;
+            const slot = @backingInt(requirement.property) - 1;
             if (refused[slot] or grades[slot] == null) {
                 return .{
                     .state = .proof_checked,
@@ -1127,7 +1127,7 @@ fn bindingRejection(code: verdict.ReasonCode, subject: verdict.Subject) Rejectio
 
 fn memberSubject(member: graph.Member) verdict.Subject {
     @setRuntimeSafety(true);
-    return .{ .graph_member = .{ .kind = @intFromEnum(member.kind), .ordinal = member.ordinal } };
+    return .{ .graph_member = .{ .kind = @backingInt(member.kind), .ordinal = member.ordinal } };
 }
 
 /// Recompute the root over the certificate's inventory, compare that inventory
@@ -1160,7 +1160,7 @@ fn bindExecutableGraph(
         };
 
         const claimed = certificate.graph.get(index) catch {
-            return bindingRejection(.graph_member_missing, .{ .section = @intFromEnum(cert_mod.SectionTag.graph) });
+            return bindingRejection(.graph_member_missing, .{ .section = @backingInt(cert_mod.SectionTag.graph) });
         };
 
         hasher.push(claimed) catch |err| return bindingRejection(switch (err) {
@@ -1268,10 +1268,10 @@ fn encodeBoundTestParts(buffer: []u8, source: cert_mod.Parts, members: []graph.M
     }.lt);
     var parts = source;
     for (members) |*member| {
-        if (member.kind == .proof_certificate) member.digest = [_]u8{0} ** 32;
+        if (member.kind == .proof_certificate) member.digest = @as([32]u8, @splat(0));
     }
     parts.graph = members;
-    parts.identity.executable_root = [_]u8{0} ** 32;
+    parts.identity.executable_root = @as([32]u8, @splat(0));
     const provisional = try cert_mod.encode(parts, buffer);
     var budget = Budget.init(.{});
     const decoded = try cert_mod.decode(provisional, .{}, &budget);
@@ -1360,9 +1360,9 @@ pub const test_support = struct {
             @setRuntimeSafety(true);
             var built = certificate_parts;
             for (&self.members) |*member| {
-                if (member.kind == .proof_certificate) member.digest = [_]u8{0} ** 32;
+                if (member.kind == .proof_certificate) member.digest = @as([32]u8, @splat(0));
             }
-            built.identity.executable_root = [_]u8{0} ** 32;
+            built.identity.executable_root = @as([32]u8, @splat(0));
             const provisional = try cert_mod.encode(built, &self.buffer);
             var budget = Budget.init(.{});
             const decoded = try cert_mod.decode(provisional, .{}, &budget);
@@ -1478,7 +1478,7 @@ pub const test_support = struct {
             @setRuntimeSafety(true);
             return .{
                 .identity = .{
-                    .executable_root = [_]u8{0} ** 32,
+                    .executable_root = @as([32]u8, @splat(0)),
                     .ir_root = cert_mod.irRootFromNodes(&self.ir),
                     .contract_digest = digest(2),
                     .residual_plan_digest = cert_mod.residualPlanDigest(&self.residual_plan),
@@ -1508,7 +1508,7 @@ pub const test_support = struct {
                     .proof_ir => member.digest = built.identity.ir_root,
                     .residual_plan => member.digest = built.identity.residual_plan_digest,
                     .runtime_policy_bytes => member.digest = built.identity.runtime_policy_digest,
-                    .proof_certificate => member.digest = [_]u8{0} ** 32,
+                    .proof_certificate => member.digest = @as([32]u8, @splat(0)),
                     // exhaustive: the arms above are the members whose digest
                     // this rebuild owns - each is a fold over bytes just
                     // recomputed here. Every other kind carries a digest taken
@@ -1517,7 +1517,7 @@ pub const test_support = struct {
                     else => {},
                 }
             }
-            built.identity.executable_root = [_]u8{0} ** 32;
+            built.identity.executable_root = @as([32]u8, @splat(0));
             built.graph = &self.members;
             const provisional = try cert_mod.encode(built, &self.buffer);
             var budget = Budget.init(.{});
@@ -1709,8 +1709,8 @@ test "a guarded artifact is accepted, and its guards are counted apart from its 
     // trusted by the opcode edge, so the overall grade is trusted and the
     // other seven properties stay tested.
     try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.grade());
-    inline for (@typeInfo(ps.Property).@"enum".fields) |field| {
-        const property: ps.Property = @enumFromInt(field.value);
+    inline for (@typeInfo(ps.Property).@"enum".field_names) |field| {
+        const property: ps.Property = @fromBackingInt(@intCast(@backingInt(@field(ps.Property, field))));
         const expected: verdict.AssuranceGrade = if (property == .response_total) .trusted else .tested;
         try testing.expectEqual(@as(?verdict.AssuranceGrade, expected), result.properties.gradeFor(property));
     }
@@ -2062,10 +2062,10 @@ fn encodeGuardedParts(
     @setRuntimeSafety(true);
     var built = certificate_parts;
     for (&fixture.members) |*member| {
-        if (member.kind == .proof_certificate) member.digest = [_]u8{0} ** 32;
+        if (member.kind == .proof_certificate) member.digest = @as([32]u8, @splat(0));
     }
     built.graph = &fixture.members;
-    built.identity.executable_root = [_]u8{0} ** 32;
+    built.identity.executable_root = @as([32]u8, @splat(0));
     const provisional = try cert_mod.encode(built, &fixture.buffer);
     var budget = Budget.init(.{});
     const decoded = try cert_mod.decode(provisional, .{}, &budget);
@@ -2271,7 +2271,7 @@ test "a root different from the committed graph root rejects" {
 test "a zero executable commitment rejects" {
     var fixture = try test_support.build();
     var parts = fixture.parts();
-    parts.identity.executable_root = [_]u8{0} ** 32;
+    parts.identity.executable_root = @as([32]u8, @splat(0));
     fixture.len = (try cert_mod.encode(parts, &fixture.buffer)).len;
     try expectAt(check(fixture.inputs(), policy_mod.production), .artifact_binding, .zero_commitment);
 }
@@ -3222,7 +3222,7 @@ fn runReasonProbe(probe: ReasonProbe) !Assessment {
         },
         .zero_root => {
             var parts = fixture.parts();
-            parts.identity.executable_root = [_]u8{0} ** 32;
+            parts.identity.executable_root = @as([32]u8, @splat(0));
             fixture.len = (try cert_mod.encode(parts, &fixture.buffer)).len;
             return check(fixture.inputs(), policy_mod.production);
         },
@@ -3331,14 +3331,14 @@ test "every reason code has a public-check probe or an explained producer" {
         .{ .code = .obligation_without_evidence, .stage = .evidence_check, .input = .missing_evidence },
         .{ .code = .fabricated_property, .stage = .evidence_check, .input = .fabricated_totality },
     };
-    var probed = std.EnumSet(verdict.ReasonCode).initEmpty();
+    var probed = std.EnumSet(verdict.ReasonCode).empty;
     for (probes) |probe| {
         try testing.expect(!probed.contains(probe.code));
         try expectAt(try runReasonProbe(probe.input), probe.stage, probe.code);
         probed.insert(probe.code);
     }
-    inline for (std.meta.fields(verdict.ReasonCode)) |field| {
-        const code: verdict.ReasonCode = @enumFromInt(field.value);
+    inline for (@typeInfo(verdict.ReasonCode).@"enum".field_names) |field| {
+        const code: verdict.ReasonCode = @fromBackingInt(@intCast(@backingInt(@field(verdict.ReasonCode, field))));
         if (reasonAllowlist(code)) |mechanism| {
             try testing.expect(mechanism.len > 0);
             try testing.expect(!probed.contains(code));

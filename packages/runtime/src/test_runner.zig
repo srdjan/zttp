@@ -168,7 +168,7 @@ fn runLoadedHandlerTest(
     var failures: std.ArrayList([]const u8) = .empty;
 
     const request = test_case.request orelse {
-        const msg = std.fmt.allocPrint(allocator, "no request defined", .{}) catch
+        const msg = allocator.print("no request defined", .{}) catch
             return .{ .pass = false, .name = test_case.name, .failures = failures, .err = error.OutOfMemory };
         failures.append(allocator, msg) catch {
             allocator.free(msg);
@@ -301,7 +301,7 @@ fn checkAssertions(
 ) error{OutOfMemory}!void {
     if (assertions.status) |expected_status| {
         if (response.status != expected_status) {
-            const msg = try std.fmt.allocPrint(allocator, "expected status: {d}, actual status: {d}", .{
+            const msg = try allocator.print("expected status: {d}, actual status: {d}", .{
                 expected_status, response.status,
             });
             errdefer allocator.free(msg);
@@ -314,7 +314,7 @@ fn checkAssertions(
         defer if (unescaped.ptr != expected_body.ptr) allocator.free(unescaped);
 
         if (!std.mem.eql(u8, response.body, unescaped)) {
-            const msg = try std.fmt.allocPrint(allocator, "body mismatch:\n        expected: {s}\n        actual:   {s}", .{
+            const msg = try allocator.print("body mismatch:\n        expected: {s}\n        actual:   {s}", .{
                 truncate(unescaped, 200), truncate(response.body, 200),
             });
             errdefer allocator.free(msg);
@@ -327,7 +327,7 @@ fn checkAssertions(
         defer if (unescaped.ptr != needle.ptr) allocator.free(unescaped);
 
         if (std.mem.indexOf(u8, response.body, unescaped) == null) {
-            const msg = try std.fmt.allocPrint(allocator, "body does not contain: {s}\n        actual body: {s}", .{
+            const msg = try allocator.print("body does not contain: {s}\n        actual body: {s}", .{
                 truncate(unescaped, 100), truncate(response.body, 200),
             });
             errdefer allocator.free(msg);
@@ -352,7 +352,7 @@ fn checkAssertions(
                 }
             }
             if (!found) {
-                const msg = try std.fmt.allocPrint(allocator, "missing header: {s}: {s}", .{
+                const msg = try allocator.print("missing header: {s}: {s}", .{
                     expected.key, expected.value,
                 });
                 errdefer allocator.free(msg);
@@ -712,7 +712,7 @@ test "handler tests retain the prepared source case" {
         \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
         \\{"type":"expect","status":200,"body":"ok"}
     });
-    const test_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/suite.jsonl", .{tmp.sub_path});
+    const test_path = try allocator.print(".zig-cache/tmp/{s}/suite.jsonl", .{tmp.sub_path});
     defer allocator.free(test_path);
     try run(allocator, .{
         .handler = .{ .prepared_eval = .{ .code = "function handler(req: Request): Response { const value: number = \"ok\"; return Response.text(value); }" } },

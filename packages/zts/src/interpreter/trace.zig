@@ -125,7 +125,7 @@ pub fn traceNotCallable(self: *Interpreter, func_val: value.JSValue, this_val: v
         std.debug.print(
             "[call] not-callable object class={} callable={} generator={} async={}\n",
             .{
-                @intFromEnum(obj.class_id),
+                @backingInt(obj.class_id),
                 @intFromBool(obj.flags.is_callable),
                 @intFromBool(obj.flags.is_generator),
                 @intFromBool(obj.flags.is_async),
@@ -148,7 +148,7 @@ pub fn traceBytecodeWindow(self: *Interpreter, center_off: usize) void {
     const end = if (full) code.len else @min(code.len, center_off + window);
     var pos: usize = start;
     while (pos < end) {
-        const op: bytecode.Opcode = @enumFromInt(code[pos]);
+        const op: bytecode.Opcode = @fromBackingInt(@intCast(code[pos]));
         const info = bytecode.getOpcodeInfo(op);
         std.debug.print("[bytecode] +{} {s}\n", .{ pos, @tagName(op) });
         if (info.size == 0) break;

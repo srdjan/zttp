@@ -111,12 +111,12 @@ pub fn build(b: *std.Build) void {
     const test_selection = @import("build/test_selection.zig");
     if (ctx.test_filters.len == 0) {
         // A fixed filter such as the stand-in suite's must also select a test.
-        test_selection.attach(b, ctx.test_selections.items, false);
+        test_selection.attach(b, tools.repo_gate_exe, ctx.test_selections.items, false);
     } else {
         // An aggregate with filtered roots cannot establish its advertised
         // invariants. Retain useful filtering only on explicitly named suites.
         test_step.dependencies.clearRetainingCapacity();
         test_step.dependOn(&b.addFail("test rejects -Dtest-filter; use a named test suite for developer selection").step);
-        test_selection.attach(b, ctx.test_selections.items, true);
+        test_selection.attach(b, tools.repo_gate_exe, ctx.test_selections.items, true);
     }
 }

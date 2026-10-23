@@ -59,7 +59,7 @@ pub const Tokenizer = struct {
             .line_start = 0,
             .can_be_regex = true,
             .template_depth = 0,
-            .subst_brace_depths = [_]u16{0} ** 16,
+            .subst_brace_depths = @as([16]u16, @splat(0)),
             .current = undefined,
             .has_current = false,
         };

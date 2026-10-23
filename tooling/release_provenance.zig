@@ -36,7 +36,7 @@ pub const Report = struct {
         comptime format: []const u8,
         args: anytype,
     ) !void {
-        const message = try std.fmt.allocPrint(allocator, format, args);
+        const message = try allocator.print(format, args);
         errdefer allocator.free(message);
         try self.errors.append(allocator, message);
     }
@@ -166,7 +166,7 @@ fn validateEvidenceFile(
     const source_commit = source_value.string;
     try report.addCommit(allocator, source_commit);
 
-    const commit_spec = try std.fmt.allocPrint(allocator, "{s}^{{commit}}", .{source_commit});
+    const commit_spec = try allocator.print("{s}^{{commit}}", .{source_commit});
     defer allocator.free(commit_spec);
     var exists = try runGit(allocator, io, root, &.{ "git", "cat-file", "-e", commit_spec });
     defer exists.deinit(allocator);
@@ -195,7 +195,7 @@ fn validateEvidenceFile(
         return;
     }
 
-    const range = try std.fmt.allocPrint(allocator, "{s}..HEAD", .{source_commit});
+    const range = try allocator.print("{s}..HEAD", .{source_commit});
     defer allocator.free(range);
     var changed = try runGit(
         allocator,
@@ -243,7 +243,7 @@ pub fn passes(allocator: std.mem.Allocator, io: std.Io, root: []const u8) bool {
 }
 
 pub fn main(_: std.process.Init.Minimal) !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
@@ -330,11 +330,7 @@ fn writeEvidence(
     source_commit: []const u8,
     options: EvidenceOptions,
 ) !void {
-    const payload = try std.fmt.allocPrint(
-        std.testing.allocator,
-        "{{\"complete\":{},\"publishable\":true,\"publicationMode\":true,\"sourceCommit\":\"{s}\",\"sourceDirty\":{}}}\n",
-        .{ options.complete, source_commit, options.source_dirty },
-    );
+    const payload = try std.testing.allocator.print("{{\"complete\":{},\"publishable\":true,\"publicationMode\":true,\"sourceCommit\":\"{s}\",\"sourceDirty\":{}}}\n", .{ options.complete, source_commit, options.source_dirty });
     defer std.testing.allocator.free(payload);
     for (evidence_files) |path| {
         try tmp.dir.writeFile(std.testing.io, .{ .sub_path = path, .data = payload });

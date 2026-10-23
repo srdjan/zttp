@@ -13,12 +13,12 @@ curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
 zttp --help
 ```
 
-Build from source with Zig `0.16.0`:
+Build from source with Zig `0.17.0`:
 
 ```bash
 git clone https://github.com/srdjan/zigttp.git
 cd zigttp
-zig build -Doptimize=ReleaseFast
+zig build -Doptimize=fast
 ./zig-out/bin/zttp --help
 ```
 

@@ -59,8 +59,8 @@ fn populateFullContract(allocator: std.mem.Allocator, contract: *HandlerContract
     contract.handler.line = 12;
     contract.handler.column = 5;
     contract.source_identity = .{
-        .core_grammar_hash = [_]u8{0x11} ** 32,
-        .semantics_hash = [_]u8{0x22} ** 32,
+        .core_grammar_hash = @as([32]u8, @splat(0x11)),
+        .semantics_hash = @as([32]u8, @splat(0x22)),
     };
 
     try contract.routes.append(allocator, .{
@@ -207,8 +207,8 @@ fn populateFullContract(allocator: std.mem.Allocator, contract: *HandlerContract
     contract.rate_limiting = .{ .namespace = "limits", .dynamic = true };
 
     var properties = std.mem.zeroes(contract_types.HandlerProperties);
-    inline for (std.meta.fields(contract_types.HandlerProperties)) |field| {
-        if (field.type == bool) @field(properties, field.name) = true;
+    inline for (@typeInfo(contract_types.HandlerProperties).@"struct".field_names) |field| {
+        if (@FieldType(contract_types.HandlerProperties, field) == bool) @field(properties, field) = true;
     }
     properties.max_io_depth = 3;
     contract.properties = properties;
@@ -324,9 +324,9 @@ fn populateFullContract(allocator: std.mem.Allocator, contract: *HandlerContract
         budget.len = 1;
         contract.capability_budget = budget;
     }
-    contract.artifact_sha256 = [_]u8{0x33} ** 32;
-    contract.policy_hash = [_]u8{0x44} ** 32;
-    contract.wasm_policy_hash = [_]u8{0x55} ** 32;
+    contract.artifact_sha256 = @as([32]u8, @splat(0x33));
+    contract.policy_hash = @as([32]u8, @splat(0x44));
+    contract.wasm_policy_hash = @as([32]u8, @splat(0x55));
 }
 
 fn writeBytes(
@@ -470,13 +470,13 @@ fn record(arena: std.mem.Allocator, tally: *Tally, path: []const u8, value: std.
                 const child = if (path.len == 0)
                     try arena.dupe(u8, field.key_ptr.*)
                 else
-                    try std.fmt.allocPrint(arena, "{s}.{s}", .{ path, field.key_ptr.* });
+                    try arena.print("{s}.{s}", .{ path, field.key_ptr.* });
                 try record(arena, tally, child, field.value_ptr.*);
             }
         },
         .array => |items| {
             if (items.items.len == 0) tally.leaves += 1;
-            const child = try std.fmt.allocPrint(arena, "{s}[]", .{path});
+            const child = try arena.print("{s}[]", .{path});
             for (items.items) |item| try record(arena, tally, child, item);
         },
         else => tally.leaves += 1,
@@ -516,7 +516,7 @@ fn checkPopulation(
     try record(arena, &tally, "", parsed.value);
 
     var failures: usize = 0;
-    var matched = [_]bool{false} ** population_allowlist.len;
+    var matched = @as([population_allowlist.len]bool, @splat(false));
     var iterator = tally.paths.iterator();
     while (iterator.next()) |entry| {
         const path = entry.key_ptr.*;
@@ -705,11 +705,7 @@ fn retiredDocument(
         .v1 => key,
         .v2 => try snakePath(arena, key),
     };
-    return std.fmt.allocPrint(
-        arena,
-        "{{\"version\":{d},\"handler\":{{\"path\":\"h.ts\",\"line\":1,\"column\":0}},\"{s}\":{s}}}",
-        .{ version, spelled, value },
-    );
+    return arena.print("{{\"version\":{d},\"handler\":{{\"path\":\"h.ts\",\"line\":1,\"column\":0}},\"{s}\":{s}}}", .{ version, spelled, value });
 }
 
 test "every retired wire field has a case and the parser refuses it in both versions" {

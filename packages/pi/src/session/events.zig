@@ -316,9 +316,9 @@ pub const JournalWriter = struct {
         events_path: []const u8,
         create: bool,
     ) !JournalWriter {
-        const lock_path = try std.fmt.allocPrint(allocator, "{s}.lock", .{events_path});
+        const lock_path = try allocator.print("{s}.lock", .{events_path});
         defer allocator.free(lock_path);
-        const lock_path_z = try allocator.dupeZ(u8, lock_path);
+        const lock_path_z = try allocator.dupeSentinel(u8, lock_path, 0);
         defer allocator.free(lock_path_z);
         const lock_fd = try std.posix.openatZ(
             std.posix.AT.FDCWD,
@@ -331,7 +331,7 @@ pub const JournalWriter = struct {
         errdefer _ = std.c.flock(lock_fd, std.posix.LOCK.UN);
 
         try recoverTail(allocator, events_path);
-        const events_path_z = try allocator.dupeZ(u8, events_path);
+        const events_path_z = try allocator.dupeSentinel(u8, events_path, 0);
         defer allocator.free(events_path_z);
         const events_fd = if (create)
             try std.posix.openatZ(
@@ -520,7 +520,7 @@ pub const Reader = struct {
     size: u64,
 
     pub fn open(allocator: std.mem.Allocator, path: []const u8) !Reader {
-        const path_z = try allocator.dupeZ(u8, path);
+        const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
         const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
         errdefer std.Io.Threaded.closeFd(fd);
@@ -604,7 +604,7 @@ fn recoverTail(
     events_path: []const u8,
 ) !void {
     if (!zts.file_io.fileExists(allocator, events_path)) return;
-    const path_z = try allocator.dupeZ(u8, events_path);
+    const path_z = try allocator.dupeSentinel(u8, events_path, 0);
     defer allocator.free(path_z);
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDWR }, 0);
     defer std.Io.Threaded.closeFd(fd);
@@ -926,9 +926,9 @@ pub fn copyJournalClaimed(
     source_path: []const u8,
     destination_path: []const u8,
 ) !void {
-    const source_z = try allocator.dupeZ(u8, source_path);
+    const source_z = try allocator.dupeSentinel(u8, source_path, 0);
     defer allocator.free(source_z);
-    const destination_z = try allocator.dupeZ(u8, destination_path);
+    const destination_z = try allocator.dupeSentinel(u8, destination_path, 0);
     defer allocator.free(destination_z);
     const source_fd = try std.posix.openatZ(std.posix.AT.FDCWD, source_z, .{ .ACCMODE = .RDONLY }, 0);
     defer std.Io.Threaded.closeFd(source_fd);
@@ -1249,13 +1249,13 @@ pub fn writeMeta(allocator: std.mem.Allocator, meta_path: []const u8, meta: Meta
     try stream.endObject();
     try buf.writer().writeByte('\n');
 
-    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{meta_path});
+    const tmp_path = try allocator.print("{s}.tmp", .{meta_path});
     defer allocator.free(tmp_path);
     try zts.file_io.writeFile(allocator, tmp_path, buf.written());
 
-    const old_z = try allocator.dupeZ(u8, tmp_path);
+    const old_z = try allocator.dupeSentinel(u8, tmp_path, 0);
     defer allocator.free(old_z);
-    const new_z = try allocator.dupeZ(u8, meta_path);
+    const new_z = try allocator.dupeSentinel(u8, meta_path, 0);
     defer allocator.free(new_z);
     if (std.c.rename(old_z, new_z) != 0) return error.WriteFailure;
 }
@@ -1382,7 +1382,7 @@ fn expectEventContractKind(
     tmp: *const IsolatedTmp,
     tag: EventTag,
 ) !void {
-    const filename = try std.fmt.allocPrint(allocator, "{s}.events", .{@tagName(tag)});
+    const filename = try allocator.print("{s}.events", .{@tagName(tag)});
     defer allocator.free(filename);
     const path = try tmp.childPath(allocator, filename);
     defer allocator.free(path);
@@ -1433,7 +1433,7 @@ fn expectPartIdentityRejected(
     tmp: *const IsolatedTmp,
     tag: EventTag,
 ) !void {
-    const filename = try std.fmt.allocPrint(allocator, "part-{s}.events", .{@tagName(tag)});
+    const filename = try allocator.print("part-{s}.events", .{@tagName(tag)});
     defer allocator.free(filename);
     const path = try tmp.childPath(allocator, filename);
     defer allocator.free(path);
@@ -1480,7 +1480,7 @@ fn expectInvalidSequenceRejected(
     tmp: *const IsolatedTmp,
     fixture: InvalidSequenceFixture,
 ) !void {
-    const filename = try std.fmt.allocPrint(allocator, "sequence-{s}.events", .{@tagName(fixture)});
+    const filename = try allocator.print("sequence-{s}.events", .{@tagName(fixture)});
     defer allocator.free(filename);
     const path = try tmp.childPath(allocator, filename);
     defer allocator.free(path);
@@ -1665,8 +1665,8 @@ test "writeMeta/readMeta round-trip current schema" {
         .workspace_realpath = "/tmp/ws",
         .created_at_unix_ms = 123,
         .parent_id = "parent",
-        .policy_hash = "a" ** 64,
-        .protocol_hash = "b" ** 64,
+        .policy_hash = &@as([64:0]u8, @splat('a')),
+        .protocol_hash = &@as([64:0]u8, @splat('b')),
         .provider = "local",
         .model = "LiquidAI/LFM2.5-2.6B-MLX-8bit",
     });
@@ -1679,7 +1679,7 @@ test "writeMeta/readMeta round-trip current schema" {
     try testing.expectEqualStrings("/tmp/ws", meta.workspace_realpath);
     try testing.expectEqual(@as(i64, 123), meta.created_at_unix_ms);
     try testing.expectEqualStrings("parent", meta.parent_id.?);
-    try testing.expectEqualStrings("b" ** 64, meta.protocol_hash);
+    try testing.expectEqualStrings(&@as([64:0]u8, @splat('b')), meta.protocol_hash);
     try testing.expectEqualStrings("local", meta.provider.?);
     try testing.expectEqualStrings("LiquidAI/LFM2.5-2.6B-MLX-8bit", meta.model.?);
 }
@@ -1703,15 +1703,15 @@ test "current metadata requires canonical policy and protocol identities" {
         .session_id = "sid",
         .workspace_realpath = "/tmp/ws",
         .created_at_unix_ms = 123,
-        .policy_hash = "a" ** 64,
+        .policy_hash = &@as([64:0]u8, @splat('a')),
         .protocol_hash = "NOT-A-DIGEST",
     }));
     try testing.expectError(error.InvalidPolicyHash, writeMeta(allocator, path, .{
         .session_id = "sid",
         .workspace_realpath = "/tmp/ws",
         .created_at_unix_ms = 123,
-        .policy_hash = "A" ** 64,
-        .protocol_hash = "b" ** 64,
+        .policy_hash = &@as([64:0]u8, @splat('A')),
+        .protocol_hash = &@as([64:0]u8, @splat('b')),
     }));
 }
 
@@ -1851,7 +1851,7 @@ test "appendEvent rolls back a partially written payload before appending" {
 
     try appendEvent(allocator, path, .{ .turn_end = .{ .reason = .approved } });
     try appendEvent(allocator, path, .{ .turn_end = .{ .reason = .budget_roundtrips } });
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     {
         const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDWR }, 0);
@@ -1883,7 +1883,7 @@ test "appendEvent rejects a complete checksum-corrupt predecessor" {
     const original = try readWhole(allocator, path);
     defer allocator.free(original);
     const corrupt_at = std.mem.indexOf(u8, original, "approved") orelse return error.TestExpectedPayload;
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     {
         const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDWR }, 0);
@@ -1992,7 +1992,7 @@ test "appendEvent rejects corruption in a complete non-final frame" {
     const original = try readWhole(allocator, path);
     defer allocator.free(original);
     const corrupt_at = std.mem.indexOf(u8, original, "approved") orelse return error.TestExpectedPayload;
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     {
         const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDWR }, 0);

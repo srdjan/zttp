@@ -203,7 +203,7 @@ fn applyCanonicalFunction(
         else => return e,
     };
     defer allocator.free(inner);
-    const replacement = try std.fmt.allocPrint(allocator, "{s}{s}", .{ indent, inner });
+    const replacement = try allocator.print("{s}{s}", .{ indent, inner });
     defer allocator.free(replacement);
     return replaceLine(allocator, source, line, replacement);
 }
@@ -256,7 +256,7 @@ fn insertTemplateBeforeLastClosingBrace(
         if (source[scan] != '}') continue;
         const line_start = lineStartBeforeOffset(source, scan);
         const indent = leadingWhitespace(source[line_start..scan]);
-        const inner_indent = try std.fmt.allocPrint(allocator, "{s}  ", .{indent});
+        const inner_indent = try allocator.print("{s}  ", .{indent});
         defer allocator.free(inner_indent);
         return spliceLine(allocator, source, line_start, inner_indent, template);
     }

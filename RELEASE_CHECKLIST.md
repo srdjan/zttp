@@ -62,12 +62,12 @@ GitHub. It runs these steps in order and stops at the first failure:
       block the release if the rerun also misses.
 - [ ] `zig build release-check -- --json`.
 - [ ] The same `bash scripts/verify.sh --release` on Linux arm64, inside the
-      `zttp-release-linux:0.16.0-arm64` image. Note the duration the script
+      `zttp-release-linux:0.17.0-arm64` image. Note the duration the script
       prints. The gate cannot run under Rosetta: Rosetta refuses the
       `translate-c` helper that Zig builds with its x86_64 backend. No full
       x86_64 test run occurs, so only the tarball smoke test checks x86_64 Linux.
 - [ ] Cross-compile `x86_64-linux-gnu`, `aarch64-linux-gnu`, and
-      `aarch64-macos-none` with `-Doptimize=ReleaseFast -Dstrip`. SQLite is
+      `aarch64-macos-none` with `-Doptimize=fast -Dstrip`. SQLite is
       vendored as a static amalgamation, so no container is needed to build.
       zttp publishes no Intel macOS binary.
 - [ ] Package the three tarballs, their `.sha256` files, and

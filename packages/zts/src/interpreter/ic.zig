@@ -53,7 +53,7 @@ pub const PolymorphicInlineCache = struct {
     /// Cached entries (only first `count` are valid)
     /// Initialize all entries with invalid hidden class to prevent JIT false matches
     /// on uninitialized memory (JIT checks first PIC_CHECK_COUNT entries inline)
-    entries: [PIC_ENTRIES]PICEntry = [_]PICEntry{.{ .hidden_class_idx = .none, .slot_offset = 0 }} ** PIC_ENTRIES,
+    entries: [PIC_ENTRIES]PICEntry = @as([PIC_ENTRIES]PICEntry, @splat(.{ .hidden_class_idx = .none, .slot_offset = 0 })),
     /// Number of valid entries (0..effective_pic_cap)
     count: u8 = 0,
     /// Index of most recently hit entry

@@ -2,7 +2,7 @@ const std = @import("std");
 const sdk = @import("zttp-sdk");
 
 var test_allocator = std.testing.allocator;
-var module_states = [_]?*anyopaque{null} ** 128;
+var module_states = @as([128]?*anyopaque, @splat(null));
 
 const sqlite_error = "sqlite unavailable in sdk test shim";
 
@@ -18,12 +18,12 @@ const sqlite_error = "sqlite unavailable in sdk test shim";
 var denied_capabilities_mask: u64 = 0;
 
 pub fn denyCapability(capability: sdk.ModuleCapability) void {
-    const tag: u6 = @intCast(@intFromEnum(capability));
+    const tag: u6 = @intCast(@backingInt(capability));
     denied_capabilities_mask |= (@as(u64, 1) << tag);
 }
 
 pub fn allowCapability(capability: sdk.ModuleCapability) void {
-    const tag: u6 = @intCast(@intFromEnum(capability));
+    const tag: u6 = @intCast(@backingInt(capability));
     denied_capabilities_mask &= ~(@as(u64, 1) << tag);
 }
 

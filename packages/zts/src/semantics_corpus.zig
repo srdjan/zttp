@@ -102,7 +102,7 @@ const Recovered = struct {
 fn containsOpcode(code: []const u8, wanted: Opcode) bool {
     var pc: usize = 0;
     while (pc < code.len) {
-        const op: Opcode = @enumFromInt(code[pc]);
+        const op: Opcode = @fromBackingInt(@intCast(code[pc]));
         if (op == wanted) return true;
         const info = bytecode.getOpcodeInfo(op);
         if (info.size == 0) break;
@@ -149,7 +149,7 @@ fn recover(scratch: std.mem.Allocator, code: []const u8) !Recovered {
 
     var pc: usize = 0;
     while (pc < code.len) {
-        const op: Opcode = @enumFromInt(code[pc]);
+        const op: Opcode = @fromBackingInt(@intCast(code[pc]));
         const info = bytecode.getOpcodeInfo(op);
         if (info.size == 0) break;
 
@@ -287,7 +287,7 @@ fn termsToString(alloc: std.mem.Allocator, terms: []const Term) ![]u8 {
         switch (t) {
             .imm => try buf.appendSlice(alloc, "opnd"),
             .binop => |k| try buf.appendSlice(alloc, @tagName(k)),
-            .unop => |k| try buf.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{s}u", .{@tagName(k)})),
+            .unop => |k| try buf.appendSlice(alloc, try alloc.print("{s}u", .{@tagName(k)})),
             .select => try buf.appendSlice(alloc, "?:"),
             else => try buf.appendSlice(alloc, "?"),
         }
@@ -314,12 +314,12 @@ pub fn runCorpus(backing: std.mem.Allocator) !CorpusResult {
         const scratch = scratch_arena.allocator();
 
         const func = compiler.compile(scratch, c.source) catch |e| {
-            try result.fail(where, try std.fmt.allocPrint(ra, "compile failed: {s}", .{@errorName(e)}));
+            try result.fail(where, try ra.print("compile failed: {s}", .{@errorName(e)}));
             continue;
         };
         if (c.required_opcode) |required| {
             if (!containsOpcode(func.code, required)) {
-                try result.fail(where, try std.fmt.allocPrint(ra, "real codegen did not emit required opcode: {s}", .{@tagName(required)}));
+                try result.fail(where, try ra.print("real codegen did not emit required opcode: {s}", .{@tagName(required)}));
                 continue;
             }
         }
@@ -329,7 +329,7 @@ pub fn runCorpus(backing: std.mem.Allocator) !CorpusResult {
             continue;
         };
         if (rec.unhandled) |op| {
-            try result.fail(where, try std.fmt.allocPrint(ra, "real codegen used an unmodeled opcode: {s}", .{@tagName(op)}));
+            try result.fail(where, try ra.print("real codegen used an unmodeled opcode: {s}", .{@tagName(op)}));
             continue;
         }
 
@@ -338,7 +338,7 @@ pub fn runCorpus(backing: std.mem.Allocator) !CorpusResult {
         // lowers to zero or several drops is not one the corpus can read, so fail
         // loud instead of silently checking the last drop.
         if (rec.drop_count != 1) {
-            try result.fail(where, try std.fmt.allocPrint(ra, "expected exactly one dropped expression value, saw {d}", .{rec.drop_count}));
+            try result.fail(where, try ra.print("expected exactly one dropped expression value, saw {d}", .{rec.drop_count}));
             continue;
         }
 
@@ -350,7 +350,7 @@ pub fn runCorpus(backing: std.mem.Allocator) !CorpusResult {
                 if (!semantics.termsEql(got, want)) {
                     const w = try termsToString(ra, want);
                     const g = try termsToString(ra, got);
-                    try result.fail(where, try std.fmt.allocPrint(ra, "registry denote=[{s}] but real codegen=>[{s}]", .{ w, g }));
+                    try result.fail(where, try ra.print("registry denote=[{s}] but real codegen=>[{s}]", .{ w, g }));
                     continue;
                 }
             },
@@ -369,7 +369,7 @@ pub fn runCorpus(backing: std.mem.Allocator) !CorpusResult {
                 if (!semantics.termsEql(got, want)) {
                     const w = try termsToString(ra, want);
                     const g = try termsToString(ra, got);
-                    try result.fail(where, try std.fmt.allocPrint(ra, "registry denote=[{s}] but real branch codegen=>[{s}]", .{ w, g }));
+                    try result.fail(where, try ra.print("registry denote=[{s}] but real branch codegen=>[{s}]", .{ w, g }));
                     continue;
                 }
             },
@@ -418,9 +418,9 @@ test "recover counts every drop so the single-expression invariant is enforceabl
     // push_3; drop; push_3; drop; ret_undefined -> two dropped values, which the
     // corpus guard rejects rather than silently checking only the last.
     const code = [_]u8{
-        @intFromEnum(Opcode.push_3),        @intFromEnum(Opcode.drop),
-        @intFromEnum(Opcode.push_3),        @intFromEnum(Opcode.drop),
-        @intFromEnum(Opcode.ret_undefined),
+        @backingInt(Opcode.push_3),        @backingInt(Opcode.drop),
+        @backingInt(Opcode.push_3),        @backingInt(Opcode.drop),
+        @backingInt(Opcode.ret_undefined),
     };
     const rec = try recover(scratch.allocator(), &code);
     try std.testing.expect(rec.unhandled == null);
@@ -452,9 +452,9 @@ test "literal corpus cases require exact literal opcodes" {
     try std.testing.expect(containsOpcode(int_func.code, .push_i8));
 
     const wrong_true = [_]u8{
-        @intFromEnum(Opcode.push_false),
-        @intFromEnum(Opcode.drop),
-        @intFromEnum(Opcode.ret_undefined),
+        @backingInt(Opcode.push_false),
+        @backingInt(Opcode.drop),
+        @backingInt(Opcode.ret_undefined),
     };
     try std.testing.expect(!containsOpcode(&wrong_true, .push_true));
 }

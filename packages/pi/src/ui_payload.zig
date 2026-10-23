@@ -270,14 +270,14 @@ pub const PropertiesSnapshot = struct {
         visitor: Visitor,
     ) !void {
         const before = before_opt orelse return;
-        inline for (@typeInfo(PropertiesSnapshot).@"struct".fields) |field| {
-            if (field.type != bool) continue;
-            const after_val = @field(after, field.name);
-            const before_val = @field(before, field.name);
+        inline for (@typeInfo(PropertiesSnapshot).@"struct".field_names) |field| {
+            if (@FieldType(PropertiesSnapshot, field) != bool) continue;
+            const after_val = @field(after, field);
+            const before_val = @field(before, field);
             if (after_val and !before_val) {
-                try visitor.visit(.{ .name = field.name, .kind = .promoted });
+                try visitor.visit(.{ .name = field, .kind = .promoted });
             } else if (!after_val and before_val) {
-                try visitor.visit(.{ .name = field.name, .kind = .demoted });
+                try visitor.visit(.{ .name = field, .kind = .demoted });
             }
         }
     }
@@ -296,11 +296,11 @@ pub const PropertiesSnapshot = struct {
     pub fn guaranteeCounts(self: PropertiesSnapshot) GuaranteeCounts {
         var proven: u32 = 0;
         var tracked: u32 = 0;
-        inline for (@typeInfo(PropertiesSnapshot).@"struct".fields) |field| {
-            if (field.type != bool) continue;
-            if (comptime std.mem.eql(u8, field.name, "has_egress")) continue;
+        inline for (@typeInfo(PropertiesSnapshot).@"struct".field_names) |field| {
+            if (@FieldType(PropertiesSnapshot, field) != bool) continue;
+            if (comptime std.mem.eql(u8, field, "has_egress")) continue;
             tracked += 1;
-            if (@field(self, field.name)) proven += 1;
+            if (@field(self, field)) proven += 1;
         }
         return .{ .proven = proven, .tracked = tracked };
     }
@@ -1146,11 +1146,7 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
         } };
     }
 
-    return .{ .plain_text = try std.fmt.allocPrint(
-        allocator,
-        "Unsupported UI payload kind: {s}",
-        .{kind_val.string},
-    ) };
+    return .{ .plain_text = try allocator.print("Unsupported UI payload kind: {s}", .{kind_val.string}) };
 }
 
 fn parseVerifiedChanges(allocator: std.mem.Allocator, values: []const std.json.Value) ![]VerifiedChange {
@@ -1313,15 +1309,15 @@ fn writeOptionalWitnessBodyArray(
 fn writePropertiesSnapshot(writer: *std.Io.Writer, snapshot: ?PropertiesSnapshot) !void {
     if (snapshot) |value| {
         try writer.writeByte('{');
-        inline for (@typeInfo(PropertiesSnapshot).@"struct".fields, 0..) |field, i| {
+        inline for (@typeInfo(PropertiesSnapshot).@"struct".field_names, 0..) |field, i| {
             if (i > 0) try writer.writeByte(',');
             try writer.writeByte('"');
-            try writer.writeAll(field.name);
+            try writer.writeAll(field);
             try writer.writeAll("\":");
-            switch (@typeInfo(field.type)) {
-                .bool => try writer.writeAll(if (@field(value, field.name)) "true" else "false"),
+            switch (@typeInfo(@FieldType(PropertiesSnapshot, field))) {
+                .bool => try writer.writeAll(if (@field(value, field)) "true" else "false"),
                 .optional => {
-                    if (@field(value, field.name)) |number| {
+                    if (@field(value, field)) |number| {
                         try writer.print("{d}", .{number});
                     } else {
                         try writer.writeAll("null");

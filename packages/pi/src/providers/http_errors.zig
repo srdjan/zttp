@@ -8,6 +8,14 @@
 
 const std = @import("std");
 
+pub fn uriHost(uri: std.Uri, buffer: *[std.Io.net.HostName.max_len]u8) std.Io.net.HostName.FromUriError!std.Io.net.HostName {
+    const component = uri.host orelse return error.UriMissingHost;
+    const bytes = component.toRaw(buffer) catch return error.NameTooLong;
+    // The local provider accepts IPv6 loopback as well as DNS names.
+    if (std.Io.net.IpAddress.parseLiteral(bytes)) |_| return .{ .bytes = bytes } else |_| {}
+    return std.Io.net.HostName.fromUri(uri, buffer);
+}
+
 /// Map an HTTP error status (and, for ambiguous 4xx, the error body) to a typed
 /// provider error. The body substrings cover the conventions the providers use:
 /// a 400 "credit balance is too low", a 429 "insufficient_quota", and a 400
@@ -144,6 +152,17 @@ pub fn readBody(reader: anytype, arena: std.mem.Allocator, limit_bytes: usize) !
 }
 
 const testing = std.testing;
+
+test "URI hosts preserve IPv6 loopback and reject missing and oversized names" {
+    var buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    const loopback = try std.Uri.parse("http://[::1]:8080/");
+    try testing.expectEqualStrings("[::1]", (try uriHost(loopback, &buffer)).bytes);
+    const missing = try std.Uri.parse("file:///tmp/x");
+    try testing.expectError(error.UriMissingHost, uriHost(missing, &buffer));
+    const name: [300]u8 = @splat('a');
+    const overlong: std.Uri = .{ .scheme = "https", .host = .{ .percent_encoded = &name } };
+    try testing.expectError(error.NameTooLong, uriHost(overlong, &buffer));
+}
 
 test "classify maps common provider statuses to typed errors" {
     try testing.expectEqual(error.AuthFailed, classify(401, ""));

@@ -255,7 +255,7 @@ pub const LocalHttpServer = struct {
     }
 
     pub fn url(self: *const LocalHttpServer, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-        return std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}{s}", .{ self.port, path });
+        return allocator.print("http://127.0.0.1:{d}{s}", .{ self.port, path });
     }
 
     pub fn join(self: *LocalHttpServer) !void {
@@ -311,10 +311,11 @@ fn drainRequestHead(allocator: std.mem.Allocator, stream: *std.Io.net.Stream, io
     while (true) {
         var chunk: [1024]u8 = undefined;
         var vecs: [1][]u8 = .{chunk[0..]};
-        const n = io.vtable.netRead(io.userdata, stream.socket.handle, &vecs) catch |err| switch (err) {
+        const result = stream.readWithControl(io, &vecs, &.{}) catch |err| switch (err) {
             error.ConnectionResetByPeer => return,
             else => return err,
         };
+        const n = result.data_len;
         if (n == 0) return;
         try buf.appendSlice(allocator, chunk[0..n]);
         if (std.mem.indexOf(u8, buf.items, "\r\n\r\n") == null) continue;

@@ -13,13 +13,9 @@ pub const IsolatedTmp = struct {
 
     pub fn init(allocator: std.mem.Allocator, label: []const u8) !IsolatedTmp {
         var ts: std.posix.timespec = undefined;
-        _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
+        _ = std.c.clock_gettime(@fromBackingInt(@intCast(@backingInt(std.posix.CLOCK.REALTIME))), &ts);
         const counter = tmp_counter.fetchAdd(1, .seq_cst);
-        const name = try std.fmt.allocPrint(
-            allocator,
-            "zttp-{s}-test-{d}-{d}-{d}",
-            .{ label, @as(u64, @intCast(ts.sec)), @as(u64, @intCast(ts.nsec)), counter },
-        );
+        const name = try allocator.print("zttp-{s}-test-{d}-{d}-{d}", .{ label, @as(u64, @intCast(ts.sec)), @as(u64, @intCast(ts.nsec)), counter });
         errdefer allocator.free(name);
 
         var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });

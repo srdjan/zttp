@@ -371,7 +371,7 @@ teardown instability that keeps the zruntime root standalone.
 
 ## Source Coverage Is Unavailable
 
-The repository uses Zig 0.16.0. Its normal `zig test` path does not
+The repository uses Zig 0.17.0. Its normal `zig test` path does not
 provide source line or branch coverage instrumentation. `zig test --help`
 exposes PC instrumentation only through `-ffuzz`, which measures fuzzing
 inputs rather than ordinary test execution. The local LLVM report tools cannot
@@ -399,7 +399,7 @@ verdict you intend to cite from an unfiltered run of the named step, as
 `AGENTS.md` requires.
 
 ```bash
-zig build test -Dtest-filter="runtime init and deinit"
+zig build test-zts -Dtest-filter="runtime init and deinit"
 ```
 
 The filter applies to the test name in the `test "..."` block. Tests live

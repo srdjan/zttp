@@ -21,7 +21,7 @@ echo "Zig version: $(zig version)"
 echo
 
 echo "Building zttp..."
-zig build -Doptimize=ReleaseFast
+zig build -Doptimize=fast
 
 echo
 echo "=== Setup Complete ==="

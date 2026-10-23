@@ -205,9 +205,9 @@ pub fn propertyLossSeverity(field: []const u8) ?Severity {
 }
 
 comptime {
-    for (@typeInfo(handler_contract.HandlerProperties).@"struct".fields) |field| {
-        if (field.type == bool and propertyLossSeverity(field.name) == null) {
-            @compileError("propertyLossSeverity has no entry for HandlerProperties." ++ field.name);
+    for (@typeInfo(handler_contract.HandlerProperties).@"struct".field_names) |field| {
+        if (@FieldType(handler_contract.HandlerProperties, field) == bool and propertyLossSeverity(field) == null) {
+            @compileError("propertyLossSeverity has no entry for HandlerProperties." ++ field);
         }
     }
 }
@@ -492,11 +492,7 @@ pub const ContractDiff = struct {
             }
 
             if (!found) {
-                const msg = try std.fmt.allocPrint(
-                    allocator,
-                    "{s} {s} -> no canonically-equivalent new path (old response {d})",
-                    .{ old_path.route_method, old_path.route_pattern, old_path.response_status },
-                );
+                const msg = try allocator.print("{s} {s} -> no canonically-equivalent new path (old response {d})", .{ old_path.route_method, old_path.route_pattern, old_path.response_status });
                 defer allocator.free(msg);
                 try self.setCounterexample(allocator, msg);
                 return;
@@ -512,7 +508,7 @@ pub const ContractDiff = struct {
             seen_end += 1;
         }
         for (fired.items[0..seen_end]) |law| {
-            const id = try std.fmt.allocPrint(allocator, "{s}.{s}.{s}", .{
+            const id = try allocator.print("{s}.{s}.{s}", .{
                 law.module,
                 law.func,
                 @tagName(law.kind),
@@ -753,13 +749,13 @@ pub fn diffContractsWithOptions(
     if (old.properties != null and new.properties != null) {
         const op = old.properties.?;
         const np = new.properties.?;
-        inline for (@typeInfo(handler_contract.HandlerProperties).@"struct".fields) |field| {
-            if (field.type == bool and handler_contract.HandlerProperties.isMonotonicProvenSpecName(field.name)) {
-                const old_value = @field(op, field.name);
-                const new_value = @field(np, field.name);
+        inline for (@typeInfo(handler_contract.HandlerProperties).@"struct".field_names) |field| {
+            if (@FieldType(handler_contract.HandlerProperties, field) == bool and handler_contract.HandlerProperties.isMonotonicProvenSpecName(field)) {
+                const old_value = @field(op, field);
+                const new_value = @field(np, field);
                 if (old_value != new_value) {
                     try effect_changes.append(allocator, .{
-                        .field = field.name,
+                        .field = field,
                         .old_value = old_value,
                         .new_value = new_value,
                     });
@@ -1693,9 +1689,9 @@ fn testProperties(value: bool) handler_contract.HandlerProperties {
         .deterministic = value,
         .has_egress = false,
     };
-    inline for (@typeInfo(handler_contract.HandlerProperties).@"struct".fields) |field| {
-        if (field.type == bool and handler_contract.HandlerProperties.isMonotonicProvenSpecName(field.name)) {
-            @field(properties, field.name) = value;
+    inline for (@typeInfo(handler_contract.HandlerProperties).@"struct".field_names) |field| {
+        if (@FieldType(handler_contract.HandlerProperties, field) == bool and handler_contract.HandlerProperties.isMonotonicProvenSpecName(field)) {
+            @field(properties, field) = value;
         }
     }
     return properties;
@@ -1719,12 +1715,12 @@ fn expectExhaustiveMonotonicPropertyChanges(old_value: bool, new_value: bool) !v
         handler_contract.HandlerProperties.max_proven_specs,
         diff.effect_changes.items.len,
     );
-    inline for (@typeInfo(handler_contract.HandlerProperties).@"struct".fields) |field| {
-        if (field.type != bool) continue;
-        const monotonic = handler_contract.HandlerProperties.isMonotonicProvenSpecName(field.name);
+    inline for (@typeInfo(handler_contract.HandlerProperties).@"struct".field_names) |field| {
+        if (@FieldType(handler_contract.HandlerProperties, field) != bool) continue;
+        const monotonic = handler_contract.HandlerProperties.isMonotonicProvenSpecName(field);
         var matches: usize = 0;
         for (diff.effect_changes.items) |change| {
-            if (std.mem.eql(u8, change.field, field.name)) {
+            if (std.mem.eql(u8, change.field, field)) {
                 matches += 1;
                 try std.testing.expectEqual(old_value, change.old_value);
                 try std.testing.expectEqual(new_value, change.new_value);

@@ -743,8 +743,8 @@ fn isWordToken(t: TokenType) bool {
         .null_lit,
         .undefined_lit,
         => true,
-        else => @intFromEnum(t) >= @intFromEnum(TokenType.kw_var) and
-            @intFromEnum(t) <= @intFromEnum(TokenType.kw_assert),
+        else => @backingInt(t) >= @backingInt(TokenType.kw_var) and
+            @backingInt(t) <= @backingInt(TokenType.kw_assert),
     };
 }
 
@@ -2074,15 +2074,16 @@ test "source printer maps preparation allocation failures and propagates output 
             allocator.free(output);
         }
     };
+    var no_resize = testing.FailingAllocator.init(testing.allocator, .{ .resize_fail_index = 0 });
     var preparation_failures: usize = 0;
-    try testing.checkAllAllocationFailures(testing.allocator, Context.run, .{&preparation_failures});
+    try testing.checkAllAllocationFailures(no_resize.allocator(), Context.run, .{&preparation_failures});
     try testing.expect(preparation_failures > 0);
 
-    var baseline = testing.FailingAllocator.init(testing.allocator, .{});
+    var baseline = testing.FailingAllocator.init(no_resize.allocator(), .{});
     const output = try print(baseline.allocator(), source, .{});
     baseline.allocator().free(output);
     try testing.expect(baseline.alloc_index > 0);
-    var faulted = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = baseline.alloc_index - 1 });
+    var faulted = testing.FailingAllocator.init(no_resize.allocator(), .{ .fail_index = baseline.alloc_index - 1 });
     var reason: Refusal = .self_check;
     try testing.expectError(error.OutOfMemory, print(faulted.allocator(), source, .{ .reason_out = &reason }));
     try testing.expect(faulted.has_induced_failure);

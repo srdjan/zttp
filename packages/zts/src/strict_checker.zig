@@ -380,11 +380,7 @@ pub const StrictChecker = struct {
             }
         }
 
-        const message = std.fmt.allocPrint(
-            self.allocator,
-            "unpublished ambient global '{s}'",
-            .{name},
-        ) catch {
+        const message = self.allocator.print("unpublished ambient global '{s}'", .{name}) catch {
             self.markAllocationFailure();
             return;
         };
@@ -1088,11 +1084,7 @@ pub const StrictChecker = struct {
         raw: []const u8,
     ) void {
         const displayed_annotation = std.mem.trim(u8, annotation, " \t\r\n");
-        const message = std.fmt.allocPrint(
-            self.allocator,
-            "exported function {s} type `{s}` exposes raw `{s}`",
-            .{ position, displayed_annotation, raw },
-        ) catch {
+        const message = self.allocator.print("exported function {s} type `{s}` exposes raw `{s}`", .{ position, displayed_annotation, raw }) catch {
             self.markAllocationFailure();
             return;
         };
@@ -1990,7 +1982,7 @@ pub const StrictChecker = struct {
     }
 
     fn resolveAtomName(self: *const StrictChecker, atom_value: u32) ?[]const u8 {
-        const atom: object.Atom = @enumFromInt(atom_value);
+        const atom: object.Atom = @fromBackingInt(@intCast(atom_value));
         if (atom.isPredefined()) return atom.toPredefinedName();
         if (self.atoms) |table| return table.getName(atom);
         return null;

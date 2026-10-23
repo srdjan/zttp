@@ -8,7 +8,7 @@
 #
 # Build (release.sh does this when the image is missing):
 #   container build --arch arm64 -f scripts/release-linux.Containerfile \
-#     -t zttp-release-linux:0.16.0-arm64 scripts/
+#     -t zttp-release-linux:0.17.0-arm64 scripts/
 
 FROM ubuntu:24.04
 
@@ -17,11 +17,11 @@ RUN apt-get update \
         git ripgrep jq curl xz-utils ca-certificates procps \
     && rm -rf /var/lib/apt/lists/*
 
-# Zig 0.16.0, pinned by checksum. Keep it equal to minimum_zig_version in
+# Zig 0.17.0, pinned by checksum. Keep it equal to minimum_zig_version in
 # build.zig.zon.
 RUN curl -fsSL -o /tmp/zig.tar.xz \
-        https://ziglang.org/download/0.16.0/zig-aarch64-linux-0.16.0.tar.xz \
-    && echo "ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17  /tmp/zig.tar.xz" | sha256sum -c - \
+        https://ziglang.org/download/0.17.0/zig-aarch64-linux-0.17.0.tar.xz \
+    && echo "9e8d11661d4ae3bd57702a3832781e23ad151dde5798e16a5ccd503f65234ff8  /tmp/zig.tar.xz" | sha256sum -c - \
     && mkdir /opt/zig \
     && tar -xJf /tmp/zig.tar.xz -C /opt/zig --strip-components=1 \
     && rm /tmp/zig.tar.xz

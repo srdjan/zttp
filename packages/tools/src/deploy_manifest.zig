@@ -336,10 +336,11 @@ test "extractProvenFacts keeps a proven property when properties is set" {
 // fails the build instead of reading as proven. A field with no default is
 // allowed: the producer must then state it.
 comptime {
-    for (std.meta.fields(ProvenFacts)) |field| {
-        if (field.type == bool) {
-            if (field.defaultValue()) |default| {
-                if (default) @compileError("ProvenFacts." ++ field.name ++ " must default to false");
+    const info = @typeInfo(ProvenFacts).@"struct";
+    for (info.field_names, info.field_attrs) |field, attrs| {
+        if (@FieldType(ProvenFacts, field) == bool) {
+            if (attrs.defaultValue(bool)) |default| {
+                if (default) @compileError("ProvenFacts." ++ field ++ " must default to false");
             }
         }
     }
@@ -382,17 +383,17 @@ fn projectionProblem(
         if (!@hasField(Target, entry.name)) return names ++ ": target exclusion names no field: " ++ entry.name;
         if (entry.reason.len == 0) return names ++ ": target exclusion has no reason: " ++ entry.name;
     }
-    for (std.meta.fields(Source)) |field| {
-        if (isExcluded(source_excluded, field.name)) continue;
-        if (!@hasField(Target, field.name) or isExcluded(target_excluded, field.name))
-            return names ++ ": unclassified source field: " ++ field.name;
-        if (@FieldType(Target, field.name) != field.type)
-            return names ++ ": field type differs: " ++ field.name;
+    for (@typeInfo(Source).@"struct".field_names) |field| {
+        if (isExcluded(source_excluded, field)) continue;
+        if (!@hasField(Target, field) or isExcluded(target_excluded, field))
+            return names ++ ": unclassified source field: " ++ field;
+        if (@FieldType(Target, field) != @FieldType(Source, field))
+            return names ++ ": field type differs: " ++ field;
     }
-    for (std.meta.fields(Target)) |field| {
-        if (isExcluded(target_excluded, field.name)) continue;
-        if (!@hasField(Source, field.name) or isExcluded(source_excluded, field.name))
-            return names ++ ": unclassified target field: " ++ field.name;
+    for (@typeInfo(Target).@"struct".field_names) |field| {
+        if (isExcluded(target_excluded, field)) continue;
+        if (!@hasField(Source, field) or isExcluded(source_excluded, field))
+            return names ++ ": unclassified target field: " ++ field;
     }
     return null;
 }
@@ -441,8 +442,8 @@ test "extractProvenFacts copies every HandlerProperties field that ProvenFacts c
         var contract = try makeTestContract(allocator);
         defer contract.deinit(allocator);
         var source = std.mem.zeroes(zts.HandlerProperties);
-        inline for (std.meta.fields(zts.HandlerProperties)) |field| {
-            if (field.type == bool) @field(source, field.name) = flag;
+        inline for (@typeInfo(zts.HandlerProperties).@"struct".field_names) |field| {
+            if (@FieldType(zts.HandlerProperties, field) == bool) @field(source, field) = flag;
         }
         source.max_io_depth = if (flag) 7 else null;
         contract.properties = source;
@@ -452,9 +453,9 @@ test "extractProvenFacts copies every HandlerProperties field that ProvenFacts c
         defer allocator.free(result.routes_buf);
 
         var compared: usize = 0;
-        inline for (std.meta.fields(zts.HandlerProperties)) |field| {
-            if (comptime !isExcluded(&facts_source_exclusions, field.name)) {
-                try std.testing.expectEqual(@field(source, field.name), @field(result.facts, field.name));
+        inline for (@typeInfo(zts.HandlerProperties).@"struct".field_names) |field| {
+            if (comptime !isExcluded(&facts_source_exclusions, field)) {
+                try std.testing.expectEqual(@field(source, field), @field(result.facts, field));
                 compared += 1;
             }
         }

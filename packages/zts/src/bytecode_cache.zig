@@ -65,34 +65,34 @@ pub const SerializeError = error{
 fn serializeConstant(val: value.JSValue, writer: anytype, allocator: std.mem.Allocator) SerializeError!void {
     // Check special values first (no pointer dereference)
     if (val.isNull()) {
-        try writer.writeByte(@intFromEnum(ConstantTag.special));
-        try writer.writeByte(@intFromEnum(SpecialCode.null_val));
+        try writer.writeByte(@backingInt(ConstantTag.special));
+        try writer.writeByte(@backingInt(SpecialCode.null_val));
         return;
     }
     if (val.isUndefined()) {
-        try writer.writeByte(@intFromEnum(ConstantTag.special));
-        try writer.writeByte(@intFromEnum(SpecialCode.undefined_val));
+        try writer.writeByte(@backingInt(ConstantTag.special));
+        try writer.writeByte(@backingInt(SpecialCode.undefined_val));
         return;
     }
     if (val.isTrue()) {
-        try writer.writeByte(@intFromEnum(ConstantTag.special));
-        try writer.writeByte(@intFromEnum(SpecialCode.true_val));
+        try writer.writeByte(@backingInt(ConstantTag.special));
+        try writer.writeByte(@backingInt(SpecialCode.true_val));
         return;
     }
     if (val.isFalse()) {
-        try writer.writeByte(@intFromEnum(ConstantTag.special));
-        try writer.writeByte(@intFromEnum(SpecialCode.false_val));
+        try writer.writeByte(@backingInt(ConstantTag.special));
+        try writer.writeByte(@backingInt(SpecialCode.false_val));
         return;
     }
     if (val.isException()) {
-        try writer.writeByte(@intFromEnum(ConstantTag.special));
-        try writer.writeByte(@intFromEnum(SpecialCode.exception_val));
+        try writer.writeByte(@backingInt(ConstantTag.special));
+        try writer.writeByte(@backingInt(SpecialCode.exception_val));
         return;
     }
 
     // Check inline integer (31-bit signed)
     if (val.isInt()) {
-        try writer.writeByte(@intFromEnum(ConstantTag.int));
+        try writer.writeByte(@backingInt(ConstantTag.int));
         try writer.writeInt(i32, val.getInt(), .little);
         return;
     }
@@ -100,7 +100,7 @@ fn serializeConstant(val: value.JSValue, writer: anytype, allocator: std.mem.All
     // Pointer-based values - check type via JSValue methods
     if (val.isFloat64()) {
         const f = val.toNumber() orelse 0.0;
-        try writer.writeByte(@intFromEnum(ConstantTag.float));
+        try writer.writeByte(@backingInt(ConstantTag.float));
         try writer.writeInt(u64, @bitCast(f), .little);
         return;
     }
@@ -114,7 +114,7 @@ fn serializeConstant(val: value.JSValue, writer: anytype, allocator: std.mem.All
         // Fail with a catchable error so callers fall back to recompilation
         // instead of caching, rather than crashing the worker.
         if (str_data.len > std.math.maxInt(u16)) return error.OutOfMemory;
-        try writer.writeByte(@intFromEnum(ConstantTag.string));
+        try writer.writeByte(@backingInt(ConstantTag.string));
         try writer.writeInt(u16, @intCast(str_data.len), .little);
         try writer.writeAll(str_data);
         return;
@@ -127,7 +127,7 @@ fn serializeConstant(val: value.JSValue, writer: anytype, allocator: std.mem.All
         if (ptr.* == bytecode.MAGIC) {
             // This is a FunctionBytecode - magic matches
             const func = val.toExternPtr(bytecode.FunctionBytecode);
-            try writer.writeByte(@intFromEnum(ConstantTag.nested_function));
+            try writer.writeByte(@backingInt(ConstantTag.nested_function));
             try serializeFunctionBytecode(func, writer, allocator);
             return;
         }
@@ -188,9 +188,9 @@ fn serializePatternDispatch(dispatch: ?*bytecode.PatternDispatchTable, writer: a
         try writer.writeInt(u16, @intCast(d.patterns.len), .little);
         for (d.patterns) |pattern| {
             // Pattern type
-            try writer.writeByte(@intFromEnum(pattern.pattern_type));
+            try writer.writeByte(@backingInt(pattern.pattern_type));
             // Route source atom (`url` or `path`)
-            const route_atom_code: u16 = @intCast(@intFromEnum(pattern.url_atom));
+            const route_atom_code: u16 = @intCast(@backingInt(pattern.url_atom));
             try writer.writeInt(u16, route_atom_code, .little);
             // URL bytes
             try writer.writeInt(u16, @intCast(pattern.url_bytes.len), .little);
@@ -512,7 +512,7 @@ fn deserializePatternDispatch(reader: anytype, allocator: std.mem.Allocator) Des
         // non-exhaustive enum (trailing `_,`), so @enumFromInt here cannot
         // panic/UB and is out of scope for the bounds-checked decode helper.
         const url_atom_raw = try reader.readInt(u16, .little);
-        pattern.url_atom = @enumFromInt(url_atom_raw);
+        pattern.url_atom = @fromBackingInt(@intCast(url_atom_raw));
 
         // URL bytes
         const url_len = try reader.readInt(u16, .little);
@@ -729,8 +729,8 @@ test "BytecodeCache identity changes invalidate the same source" {
     const source = "function handler() { return true; }";
     const base = BytecodeCache.SourceIdentity{
         .core_profile_id = "zts-model-1",
-        .core_grammar_hash = [_]u8{0x11} ** 32,
-        .semantics_hash = [_]u8{0x22} ** 32,
+        .core_grammar_hash = @as([32]u8, @splat(0x11)),
+        .semantics_hash = @as([32]u8, @splat(0x22)),
     };
     const key = BytecodeCache.cacheKeyWithIdentity(source, base);
 
@@ -810,7 +810,7 @@ pub const SliceWriter = struct {
         self.pos += 1;
     }
 
-    pub fn writeInt(self: *SliceWriter, comptime T: type, val: T, _: std.builtin.Endian) !void {
+    pub fn writeInt(self: *SliceWriter, comptime T: type, val: T, _: std.lang.Endian) !void {
         const bytes = std.mem.asBytes(&val);
         try self.writeAll(bytes);
     }
@@ -832,7 +832,7 @@ pub const SliceReader = struct {
         return byte;
     }
 
-    pub fn readInt(self: *SliceReader, comptime T: type, _: std.builtin.Endian) !T {
+    pub fn readInt(self: *SliceReader, comptime T: type, _: std.lang.Endian) !T {
         const size = @sizeOf(T);
         if (self.pos + size > self.data.len) return error.EndOfStream;
         const result: T = @bitCast(self.data[self.pos..][0..size].*);
@@ -884,7 +884,7 @@ test "deserializeConstant rejects out-of-range SpecialCode byte" {
 
     // ConstantTag.special (3) followed by an out-of-range SpecialCode byte.
     // SpecialCode is exhaustive with values 0-4; 0xFF is out of range.
-    var reader = SliceReader{ .data = &.{ @intFromEnum(ConstantTag.special), 0xFF } };
+    var reader = SliceReader{ .data = &.{ @backingInt(ConstantTag.special), 0xFF } };
     const result = deserializeConstant(&reader, allocator, null, 0);
     try std.testing.expectError(error.InvalidTag, result);
 }
@@ -936,7 +936,7 @@ fn serializeFunctionWithPatternDispatch(
         return error.MissingPatternDispatch;
     defer destroyPatternDispatch(allocator, dispatch);
 
-    const code = [_]u8{@intFromEnum(bytecode.Opcode.ret_undefined)};
+    const code = [_]u8{@backingInt(bytecode.Opcode.ret_undefined)};
     const func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
@@ -1004,7 +1004,7 @@ fn serializeOwnedConstantsFixture(allocator: std.mem.Allocator, buffer: []u8) ![
     };
     const js_string = try string.createString(allocator, "owned");
     defer string.freeString(allocator, js_string);
-    const nested_code = [_]u8{@intFromEnum(bytecode.Opcode.ret_undefined)};
+    const nested_code = [_]u8{@backingInt(bytecode.Opcode.ret_undefined)};
     const nested = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
@@ -1368,7 +1368,7 @@ pub fn collectAtoms(func: *const bytecode.FunctionBytecode, allocator: std.mem.A
     // Scan bytecode for atom references
     var pc: usize = 0;
     while (pc < func.code.len) {
-        const op: bytecode.Opcode = @enumFromInt(func.code[pc]);
+        const op: bytecode.Opcode = @fromBackingInt(@intCast(func.code[pc]));
         const info = bytecode.getOpcodeInfo(op);
         pc += 1;
 
@@ -1444,7 +1444,7 @@ pub fn serializeAtoms(
     try writer.writeInt(u16, @intCast(atoms.len), .little);
 
     for (atoms) |atom_id| {
-        const atom: object.Atom = @enumFromInt(atom_id);
+        const atom: object.Atom = @fromBackingInt(@intCast(atom_id));
 
         if (atom.isPredefined()) {
             // Predefined atom: just store the ID
@@ -1495,7 +1495,7 @@ pub fn deserializeAtoms(
             if (read_count != len) return error.IncompleteRead;
 
             const target_atom = try target_atoms.intern(name_buf);
-            try remap.put(source_id, @intFromEnum(target_atom));
+            try remap.put(source_id, @backingInt(target_atom));
         }
     }
 
@@ -1523,7 +1523,7 @@ pub fn remapBytecodeAtoms(func: *bytecode.FunctionBytecode, remap: *const AtomRe
     // Remap atoms in bytecode
     var pc: usize = 0;
     while (pc < code_mutable.len) {
-        const op: bytecode.Opcode = @enumFromInt(code_mutable[pc]);
+        const op: bytecode.Opcode = @fromBackingInt(@intCast(code_mutable[pc]));
         const info = bytecode.getOpcodeInfo(op);
         pc += 1;
 
@@ -1581,7 +1581,7 @@ pub fn serializeShapes(
     for (shapes) |shape| {
         try writer.writeInt(u16, @intCast(shape.len), .little);
         for (shape) |atom| {
-            try writer.writeInt(u32, @intFromEnum(atom), .little);
+            try writer.writeInt(u32, @backingInt(atom), .little);
         }
     }
 }
@@ -1615,7 +1615,7 @@ pub fn deserializeShapes(
         for (0..prop_count) |j| {
             const old_atom = try reader.readInt(u32, .little);
             const new_atom = remap.get(old_atom);
-            shapes[i][j] = @enumFromInt(new_atom);
+            shapes[i][j] = @fromBackingInt(@intCast(new_atom));
         }
         initialized_count += 1;
     }
@@ -1646,7 +1646,7 @@ pub fn serializeBytecodeWithAtomsAndShapes(
     // Atoms from shapes
     for (shapes) |shape| {
         for (shape) |atom| {
-            try all_atoms.put(allocator, @intFromEnum(atom), {});
+            try all_atoms.put(allocator, @backingInt(atom), {});
         }
     }
 
@@ -1778,14 +1778,14 @@ const SpanWalker = struct {
         while (i < count) : (i += 1) {
             const tag = try self.u8At();
             switch (tag) {
-                @intFromEnum(ConstantTag.int) => _ = try self.take(4),
-                @intFromEnum(ConstantTag.float) => _ = try self.take(8),
-                @intFromEnum(ConstantTag.string) => {
+                @backingInt(ConstantTag.int) => _ = try self.take(4),
+                @backingInt(ConstantTag.float) => _ = try self.take(8),
+                @backingInt(ConstantTag.string) => {
                     const len = try self.u16At();
                     _ = try self.take(len);
                 },
-                @intFromEnum(ConstantTag.special) => _ = try self.take(1),
-                @intFromEnum(ConstantTag.nested_function) => try self.walkFunction(),
+                @backingInt(ConstantTag.special) => _ = try self.take(1),
+                @backingInt(ConstantTag.nested_function) => try self.walkFunction(),
                 else => return error.MalformedBytecodeStream,
             }
         }
@@ -1904,8 +1904,8 @@ test "atom collection - basic" {
     // get_global atom_42 -> push value from global "myVar"
     // ret
     const code = [_]u8{
-        @intFromEnum(bytecode.Opcode.get_global), 0x2A, 0x00, // atom 42
-        @intFromEnum(bytecode.Opcode.ret),
+        @backingInt(bytecode.Opcode.get_global), 0x2A, 0x00, // atom 42
+        @backingInt(bytecode.Opcode.ret),
     };
 
     const func = bytecode.FunctionBytecode{
@@ -1976,8 +1976,8 @@ test "atom serialization roundtrip - dynamic atoms" {
 
     // Atoms to serialize
     const atoms = [_]u32{
-        @intFromEnum(src_atom1),
-        @intFromEnum(src_atom2),
+        @backingInt(src_atom1),
+        @backingInt(src_atom2),
     };
 
     // Serialize
@@ -1995,8 +1995,8 @@ test "atom serialization roundtrip - dynamic atoms" {
     const tgt_atom2 = try target_atoms.intern("anotherProp");
 
     // Source atoms should map to target atoms
-    try std.testing.expectEqual(@intFromEnum(tgt_atom1), remap.get(@intFromEnum(src_atom1)));
-    try std.testing.expectEqual(@intFromEnum(tgt_atom2), remap.get(@intFromEnum(src_atom2)));
+    try std.testing.expectEqual(@backingInt(tgt_atom1), remap.get(@backingInt(src_atom1)));
+    try std.testing.expectEqual(@backingInt(tgt_atom2), remap.get(@backingInt(src_atom2)));
 }
 
 test "atom remapping in bytecode" {
@@ -2004,9 +2004,9 @@ test "atom remapping in bytecode" {
 
     // Create bytecode with atom references that need remapping
     var code = [_]u8{
-        @intFromEnum(bytecode.Opcode.get_global), 0xE0, 0x00, // atom 224 (dynamic)
-        @intFromEnum(bytecode.Opcode.put_field), 0xE1, 0x00, // atom 225 (dynamic)
-        @intFromEnum(bytecode.Opcode.ret),
+        @backingInt(bytecode.Opcode.get_global), 0xE0, 0x00, // atom 224 (dynamic)
+        @backingInt(bytecode.Opcode.put_field), 0xE1, 0x00, // atom 225 (dynamic)
+        @backingInt(bytecode.Opcode.ret),
     };
 
     const constants = try allocator.alloc(value.JSValue, 0);
@@ -2058,8 +2058,8 @@ test "executable span walk covers every function in a module blob" {
 
     // A nested function, carried as a constant of the top-level function.
     const nested_code = try allocator.dupe(u8, &[_]u8{
-        @intFromEnum(bytecode.Opcode.push_undefined),
-        @intFromEnum(bytecode.Opcode.ret),
+        @backingInt(bytecode.Opcode.push_undefined),
+        @backingInt(bytecode.Opcode.ret),
     });
     const nested_constants = try allocator.alloc(value.JSValue, 0);
     const nested_upvalues = try allocator.alloc(bytecode.UpvalueInfo, 0);
@@ -2086,10 +2086,10 @@ test "executable span walk covers every function in a module blob" {
     }
 
     const top_code = try allocator.dupe(u8, &[_]u8{
-        @intFromEnum(bytecode.Opcode.push_const),
+        @backingInt(bytecode.Opcode.push_const),
         0,
         0,
-        @intFromEnum(bytecode.Opcode.ret),
+        @backingInt(bytecode.Opcode.ret),
     });
     const top_constants = try allocator.alloc(value.JSValue, 1);
     top_constants[0] = value.JSValue.fromExternPtr(nested);
@@ -2161,7 +2161,7 @@ test "executable span walk refuses a truncated or overlong blob" {
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
 
-    const code = try allocator.dupe(u8, &[_]u8{@intFromEnum(bytecode.Opcode.ret)});
+    const code = try allocator.dupe(u8, &[_]u8{@backingInt(bytecode.Opcode.ret)});
     const constants = try allocator.alloc(value.JSValue, 0);
     const upvalues = try allocator.alloc(bytecode.UpvalueInfo, 0);
     const func = try allocator.create(bytecode.FunctionBytecode);
@@ -2413,14 +2413,14 @@ fn serializeSweepFixture(allocator: std.mem.Allocator, buffer: []u8) ![]const u8
     defer source_atoms.deinit();
     const alpha = try source_atoms.intern("sweepAlpha");
     const beta = try source_atoms.intern("sweepBeta");
-    const alpha_id: u16 = @intCast(@intFromEnum(alpha));
+    const alpha_id: u16 = @intCast(@backingInt(alpha));
 
     // Nested function: reads one dynamic global, has one upvalue, two lines.
     const nested_code = [_]u8{
-        @intFromEnum(bytecode.Opcode.get_global),
+        @backingInt(bytecode.Opcode.get_global),
         @truncate(alpha_id),
         @truncate(alpha_id >> 8),
-        @intFromEnum(bytecode.Opcode.ret),
+        @backingInt(bytecode.Opcode.ret),
     };
     const nested_upvalues = [_]bytecode.UpvalueInfo{.{ .is_local = true, .index = 0 }};
     const nested_lines = [_]bytecode.LineEntry{
@@ -2430,7 +2430,7 @@ fn serializeSweepFixture(allocator: std.mem.Allocator, buffer: []u8) ![]const u8
     const nested_constants = [_]value.JSValue{value.JSValue.fromInt(7)};
     const nested = bytecode.FunctionBytecode{
         .header = .{},
-        .name_atom = @intFromEnum(beta),
+        .name_atom = @backingInt(beta),
         .arg_count = 1,
         .local_count = 1,
         .stack_size = 2,
@@ -2469,10 +2469,10 @@ fn serializeSweepFixture(allocator: std.mem.Allocator, buffer: []u8) ![]const u8
     defer destroyPatternDispatch(allocator, dispatch);
 
     const top_code = [_]u8{
-        @intFromEnum(bytecode.Opcode.push_const),
+        @backingInt(bytecode.Opcode.push_const),
         0,
         0,
-        @intFromEnum(bytecode.Opcode.ret),
+        @backingInt(bytecode.Opcode.ret),
     };
     const top = bytecode.FunctionBytecode{
         .header = .{},
@@ -2586,7 +2586,7 @@ const Craft = struct {
         try self.byte(0); // flags
         try self.byte(0); // upvalue count
         try self.dword(code_len);
-        for (0..code_bytes) |_| try self.byte(@intFromEnum(bytecode.Opcode.ret_undefined));
+        for (0..code_bytes) |_| try self.byte(@backingInt(bytecode.Opcode.ret_undefined));
     }
 
     /// A function with no lines, up to and including its constant count.
@@ -2618,7 +2618,7 @@ fn craftNestedModule(allocator: std.mem.Allocator, depth: usize) !std.ArrayList(
     for (0..depth) |level| {
         const is_innermost = level + 1 == depth;
         try craft.functionToConstants(if (is_innermost) 0 else 1);
-        if (!is_innermost) try craft.byte(@intFromEnum(ConstantTag.nested_function));
+        if (!is_innermost) try craft.byte(@backingInt(ConstantTag.nested_function));
     }
     for (0..depth) |_| try craft.functionTail();
     try craft.word(0); // shape count
@@ -2691,7 +2691,7 @@ test "decoder crafted: a string length the input cannot hold" {
     defer craft.deinit();
     try craft.word(0); // atom count
     try craft.functionToConstants(1);
-    try craft.byte(@intFromEnum(ConstantTag.string));
+    try craft.byte(@backingInt(ConstantTag.string));
     try craft.word(std.math.maxInt(u16));
     try expectDecodeFails(error.InvalidLength, craft.bytes.items);
 }
@@ -2775,8 +2775,8 @@ test "decoder crafted: an atom name length the input cannot hold" {
 test "decoder crafted: remapBytecodeAtoms refuses a target atom above u16" {
     const allocator = std.testing.allocator;
     const code = try allocator.dupe(u8, &[_]u8{
-        @intFromEnum(bytecode.Opcode.get_global), 0xE0, 0x00,
-        @intFromEnum(bytecode.Opcode.ret),
+        @backingInt(bytecode.Opcode.get_global), 0xE0, 0x00,
+        @backingInt(bytecode.Opcode.ret),
     });
     defer allocator.free(code);
     var func = bytecode.FunctionBytecode{

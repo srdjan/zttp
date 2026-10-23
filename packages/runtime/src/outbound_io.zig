@@ -96,19 +96,19 @@ pub const OutboundIo = struct {
 
     /// Joins an armed watchdog before its fd closes. std closes the fd itself
     /// when the TLS handshake fails, before the caller can disarm.
-    fn netClose(userdata: ?*anyopaque, handles: []const net.Socket.Handle) void {
+    fn netClose(userdata: ?*anyopaque, sockets: []const net.Socket) void {
         const self = fromUserdata(userdata);
         if (self.fetch) |deadline| {
             if (deadline.isArmed()) {
-                for (handles) |handle| {
-                    if (handle == deadline.stream.socket.handle) {
+                for (sockets) |socket| {
+                    if (socket.handle == deadline.stream.socket.handle) {
                         deadline.disarm();
                         break;
                     }
                 }
             }
         }
-        self.base.netClose(userdata, handles);
+        self.base.netClose(userdata, sockets);
     }
 };
 
@@ -179,7 +179,7 @@ fn waitConnected(fd: posix.fd_t, deadline: *const FetchDeadline) ConnectError!vo
         .SUCCESS => {},
         else => return error.Unexpected,
     }
-    if (so_error != 0) return mapConnectErrno(@enumFromInt(so_error));
+    if (so_error != 0) return mapConnectErrno(@fromBackingInt(@intCast(so_error)));
 }
 
 /// The same mapping Threaded's own connect uses, less the arms that report a

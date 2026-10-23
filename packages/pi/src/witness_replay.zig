@@ -140,7 +140,7 @@ test "writeWitnessJsonl emits a parseable trace pair" {
         },
     };
     const body = ui_payload.WitnessBody{
-        .key = @constCast("a" ** 64),
+        .key = @constCast(&@as([64:0]u8, @splat('a'))),
         .property = @constCast("no_secret_leakage"),
         .summary = @constCast("test"),
         .origin_line = 1,

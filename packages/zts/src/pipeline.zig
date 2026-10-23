@@ -511,7 +511,7 @@ pub fn flowExportedFunctionNode(view: IrView, atoms: *AtomTable, name: []const u
         const tag = view.getTag(exported.declaration) orelse continue;
         if (tag != .function_decl and tag != .var_decl) continue;
         const declaration = view.getVarDecl(exported.declaration) orelse continue;
-        const atom: @import("zts-engine").object.Atom = @enumFromInt(declaration.binding.name_atom);
+        const atom: @import("zts-engine").object.Atom = @fromBackingInt(@intCast(declaration.binding.name_atom));
         const declared_name = atom.toPredefinedName() orelse atoms.getName(atom) orelse continue;
         if (!std.mem.eql(u8, declared_name, name)) continue;
         const function_tag = view.getTag(declaration.init) orelse continue;
@@ -1832,7 +1832,7 @@ pub fn formatIsoTimestamp(buf: *[24]u8, seconds_since_epoch: i64) []const u8 {
     const month_day = year_day.calculateMonthDay();
     return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
         @as(u16, @intCast(year_day.year)),
-        @as(u4, @intFromEnum(month_day.month)),
+        @as(u4, @backingInt(month_day.month)),
         @as(u5, month_day.day_index + 1),
         day_seconds.getHoursIntoDay(),
         day_seconds.getMinutesIntoHour(),
@@ -3575,7 +3575,7 @@ test "extractContract merges capabilities from relative imports" {
     const dir_len = try tmp.dir.realPath(io, &dir_buf);
     const dir = dir_buf[0..dir_len];
 
-    const dependency_path = try std.fmt.allocPrint(allocator, "{s}/dependency.ts", .{dir});
+    const dependency_path = try allocator.print("{s}/dependency.ts", .{dir});
     defer allocator.free(dependency_path);
     try file_io.writeFile(
         allocator,
@@ -3583,7 +3583,7 @@ test "extractContract merges capabilities from relative imports" {
         "export function request() { return fetchSync('http://localhost:1'); }",
     );
 
-    const entry_path = try std.fmt.allocPrint(allocator, "{s}/entry.ts", .{dir});
+    const entry_path = try allocator.print("{s}/entry.ts", .{dir});
     defer allocator.free(entry_path);
     const source =
         "import { request } from './dependency.ts'; function handler(req) { return request(req, undefined); }";
@@ -5515,7 +5515,8 @@ test "serialization failure preserves a completed direct extraction" {
         analysis.extractContract("serialization.ts"),
     );
 
-    var counting = std.testing.FailingAllocator.init(allocator, .{
+    var no_resize = std.testing.FailingAllocator.init(allocator, .{ .resize_fail_index = 0 });
+    var counting = std.testing.FailingAllocator.init(no_resize.allocator(), .{
         .fail_index = std.math.maxInt(usize),
     });
     const counted = try serializeContractForTest(counting.allocator(), &contract);
@@ -5525,7 +5526,7 @@ test "serialization failure preserves a completed direct extraction" {
     var failures: usize = 0;
     var failures_after_progress: usize = 0;
     for (0..counting.alloc_index) |fail_index| {
-        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var failing = std.testing.FailingAllocator.init(no_resize.allocator(), .{ .fail_index = fail_index });
         const attempted = serializeContractForTest(failing.allocator(), &contract);
         if (attempted) |bytes| {
             defer failing.allocator().free(bytes);

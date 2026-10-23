@@ -2,7 +2,7 @@
     .name = .zttp_proof_review,
     .version = "0.0.0",
     .fingerprint = 0xf63f9a8e2fff072f,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .zts = .{
             .path = "../zts",

@@ -103,8 +103,8 @@ pub fn getAllocator(handle: *ModuleHandle) std.mem.Allocator {
 /// so every declared bridge symbol is emitted.
 pub const sdk_bridge = struct {
     pub export fn zttpSdkHasCapability(handle: *ModuleHandle, capability_tag: u8) bool {
-        if (capability_tag > @intFromEnum(ModuleCapability.policy_check)) return false;
-        const capability: ModuleCapability = @enumFromInt(capability_tag);
+        if (capability_tag > @backingInt(ModuleCapability.policy_check)) return false;
+        const capability: ModuleCapability = @fromBackingInt(@intCast(capability_tag));
         return hasCapability(handle, capability);
     }
 

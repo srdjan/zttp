@@ -27,7 +27,7 @@ pub fn main(init: std.process.Init) !void {
         if (argv.items.len > 0 and std.mem.eql(u8, argv.items[0], "zig")) argv.items[0] = args[1];
         // Pool-heavy test roots must remain separate processes. Limit the
         // aggregate's scheduling on macOS to preserve teardown isolation.
-        if (@import("builtin").os.tag == .macos and std.mem.eql(u8, route.argv[route.argv.len - 1], "test"))
+        if (@import("builtin").target.os.tag == .macos and std.mem.eql(u8, route.argv[route.argv.len - 1], "test"))
             try argv.append(init.arena.allocator(), "-j1");
         std.debug.print("\n>> {s}\n", .{route.label});
         var child = try std.process.spawn(init.io, .{ .argv = argv.items });

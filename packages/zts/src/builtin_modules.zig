@@ -344,16 +344,16 @@ test "governance entries stay aligned with public built-ins" {
 /// registry) are silently skipped.
 pub fn computeCapabilityMatrix(specifiers: []const []const u8) contract_types.CapabilityMatrix {
     var matrix: contract_types.CapabilityMatrix = .{};
-    var seen = [_]bool{false} ** module_authorization.capability_count;
+    var seen = @as([module_authorization.capability_count]bool, @splat(false));
     for (specifiers) |spec| {
         const binding = fromSpecifier(spec) orelse continue;
         for (binding.required_capabilities) |c| {
-            seen[@intFromEnum(c)] = true;
+            seen[@backingInt(c)] = true;
         }
     }
     var n: u8 = 0;
     for (std.enums.values(module_authorization.ModuleCapability)) |c| {
-        if (seen[@intFromEnum(c)]) {
+        if (seen[@backingInt(c)]) {
             matrix.items[n] = c;
             n += 1;
         }
@@ -427,21 +427,21 @@ test "semantic descriptors preserve every builtin payload and registration order
     try std.testing.expectEqual(@as(usize, 21), metadata.len);
     try std.testing.expectEqual(all.len, metadata.len);
     for (all, metadata) |binding, descriptor| {
-        inline for (std.meta.fields(descriptors.ModuleDescriptor)) |field| {
-            if (comptime !std.mem.eql(u8, field.name, "exports")) {
-                try std.testing.expectEqualDeep(@field(binding, field.name), @field(descriptor, field.name));
+        inline for (@typeInfo(descriptors.ModuleDescriptor).@"struct".field_names) |field| {
+            if (comptime !std.mem.eql(u8, field, "exports")) {
+                try std.testing.expectEqualDeep(@field(binding, field), @field(descriptor, field));
             }
         }
         try std.testing.expect(binding.exports.len > 0);
         try std.testing.expectEqual(binding.exports.len, descriptor.exports.len);
         for (binding.exports, descriptor.exports) |function, semantic| {
-            inline for (std.meta.fields(descriptors.FunctionDescriptor)) |field| {
-                if (comptime std.mem.eql(u8, field.name, "return_labels") or std.mem.eql(u8, field.name, "declassifies")) {
-                    inline for (std.meta.fields(descriptors.LabelSet)) |label| {
-                        try std.testing.expectEqual(@field(@field(function, field.name), label.name), @field(@field(semantic, field.name), label.name));
+            inline for (@typeInfo(descriptors.FunctionDescriptor).@"struct".field_names) |field| {
+                if (comptime std.mem.eql(u8, field, "return_labels") or std.mem.eql(u8, field, "declassifies")) {
+                    inline for (@typeInfo(descriptors.LabelSet).@"struct".field_names) |label| {
+                        try std.testing.expectEqual(@field(@field(function, field), label), @field(@field(semantic, field), label));
                     }
                 } else {
-                    try std.testing.expectEqualDeep(@field(function, field.name), @field(semantic, field.name));
+                    try std.testing.expectEqualDeep(@field(function, field), @field(semantic, field));
                 }
             }
             const found = findDescriptor(binding.specifier, function.name).?;

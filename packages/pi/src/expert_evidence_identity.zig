@@ -62,18 +62,18 @@ comptime {
     //
     // This reads the identities back out of the file by shape, so a new one
     // needs no edit here.
-    const decls = @typeInfo(@This()).@"struct".decls;
+    const decls = @typeInfo(@This()).@"struct".decl_names;
     var identities: [decls.len]type = undefined;
     var found: usize = 0;
     for (decls) |decl| {
-        const Candidate = @field(@This(), decl.name);
+        const Candidate = @field(@This(), decl);
         if (@TypeOf(Candidate) != type) continue;
         const info = @typeInfo(Candidate);
         if (info != .@"struct") continue;
-        const fields = info.@"struct".fields;
+        const fields = info.@"struct".field_names;
         if (fields.len != 1) continue;
-        if (!std.mem.eql(u8, fields[0].name, "bytes")) continue;
-        if (fields[0].type != [64]u8) continue;
+        if (!std.mem.eql(u8, fields[0], "bytes")) continue;
+        if (@FieldType(Candidate, fields[0]) != [64]u8) continue;
         identities[found] = Candidate;
         found += 1;
     }
@@ -537,7 +537,7 @@ pub fn resultRun(input: ResultRunInput) ResultRunIdentity {
 }
 
 fn testDigest(byte: u8) ContentDigest {
-    return .{ .bytes = [_]u8{byte} ** 64 };
+    return .{ .bytes = @as([64]u8, @splat(byte)) };
 }
 
 fn expectChanged(before: anytype, after: @TypeOf(before)) !void {
@@ -867,10 +867,10 @@ test "result run identity binds every report provenance class" {
             .policy = policy("policy bytes"),
         },
         .cohorts = .{
-            .headline_input = .{ .bytes = [_]u8{'1'} ** 64 },
-            .intent_suite = .{ .bytes = [_]u8{'2'} ** 64 },
-            .security_probes = .{ .bytes = [_]u8{'3'} ** 64 },
-            .thresholds = .{ .bytes = [_]u8{'4'} ** 64 },
+            .headline_input = .{ .bytes = @as([64]u8, @splat('1')) },
+            .intent_suite = .{ .bytes = @as([64]u8, @splat('2')) },
+            .security_probes = .{ .bytes = @as([64]u8, @splat('3')) },
+            .thresholds = .{ .bytes = @as([64]u8, @splat('4')) },
         },
         .source_revision = .{ .commit = "0123456789abcdef", .dirty = false },
         .run_id = "run-1",

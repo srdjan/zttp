@@ -116,15 +116,15 @@ fn promoteWithHooks(
     var stage = try root.openDir(io, stage_name, .{ .iterate = true, .follow_symlinks = false });
     defer stage.close(io);
 
-    const generation_rel = try std.fmt.allocPrint(scratch, "generations/{s}", .{flow_version.slice()});
+    const generation_rel = try scratch.print("generations/{s}", .{flow_version.slice()});
     try stage.createDirPath(io, generation_rel);
     try hooks.reach(.stage_write);
-    const manifest_path = try std.fmt.allocPrint(scratch, "{s}/manifest.json", .{generation_rel});
+    const manifest_path = try scratch.print("{s}/manifest.json", .{generation_rel});
     try writeExclusive(stage, io, manifest_path, manifest_bytes);
-    const trace_path = try std.fmt.allocPrint(scratch, "{s}/{s}", .{ generation_rel, prepared.manifest.trace.path });
+    const trace_path = try scratch.print("{s}/{s}", .{ generation_rel, prepared.manifest.trace.path });
     try writeExclusiveWithParents(stage, io, trace_path, trace_bytes);
     for (input.fixtures) |fixture| {
-        const path = try std.fmt.allocPrint(scratch, "{s}/{s}", .{ generation_rel, fixture.path });
+        const path = try scratch.print("{s}/{s}", .{ generation_rel, fixture.path });
         try writeExclusiveWithParents(stage, io, path, fixture.bytes);
     }
     try writeExclusive(stage, io, "case.json", descriptor_bytes);
@@ -161,7 +161,7 @@ fn promoteWithHooks(
     const generations_stat = try root.statFile(io, "generations", .{ .follow_symlinks = false });
     if (generations_stat.kind != .directory) return error.RecoveryRequired;
 
-    const staged_generation = try std.fmt.allocPrint(scratch, "{s}/{s}", .{ stage_name, generation_rel });
+    const staged_generation = try scratch.print("{s}/{s}", .{ stage_name, generation_rel });
     // The exclusively-created staging directory is also the promotion lock.
     // Once held, an existing destination can only be stale recovery state.
     try requireAbsent(root, io, generation_rel);
@@ -184,7 +184,7 @@ fn promoteWithHooks(
 
     if (previous_generation) |previous| {
         hooks.reach(.superseded_cleanup) catch return error.ActivatedRecoveryRequired;
-        const previous_rel = std.fmt.allocPrint(scratch, "generations/{s}", .{previous.slice()}) catch
+        const previous_rel = scratch.print("generations/{s}", .{previous.slice()}) catch
             return error.ActivatedRecoveryRequired;
         root.deleteTree(io, previous_rel) catch return error.ActivatedRecoveryRequired;
         syncNamedDirectory(root, io, "generations") catch return error.ActivatedRecoveryRequired;
@@ -269,27 +269,23 @@ fn prepareManifest(
         response.sha256 = try digestFixture(fixtures, used, .response, response.path);
     }
     for (initial) |*workspace_file| {
-        const path = try std.fmt.allocPrint(allocator, "initial/{s}", .{workspace_file.path});
+        const path = try allocator.print("initial/{s}", .{workspace_file.path});
         workspace_file.sha256 = try digestFixture(fixtures, used, .initial_workspace, path);
     }
     for (turn_workspaces) |*checkpoint| {
         for (@constCast(checkpoint.files)) |*workspace_file| {
-            const path = try std.fmt.allocPrint(
-                allocator,
-                "turns/{d}/{s}",
-                .{ checkpoint.turn_index, workspace_file.path },
-            );
+            const path = try allocator.print("turns/{d}/{s}", .{ checkpoint.turn_index, workspace_file.path });
             workspace_file.sha256 = try digestFixture(fixtures, used, .turn_workspace, path);
         }
     }
     for (expected) |*workspace_file| {
-        const path = try std.fmt.allocPrint(allocator, "expected/{s}", .{workspace_file.path});
+        const path = try allocator.print("expected/{s}", .{workspace_file.path});
         workspace_file.sha256 = try digestFixture(fixtures, used, .expected_workspace, path);
     }
     for (used) |was_used| if (!was_used) return error.InvalidArtifact;
 
     var manifest = source.*;
-    manifest.flow_version = .{ .bytes = [_]u8{'0'} ** 64 };
+    manifest.flow_version = .{ .bytes = @as([64]u8, @splat('0')) };
     manifest.model_responses = responses;
     manifest.initial_workspace = initial;
     manifest.turn_workspaces = turn_workspaces;
@@ -394,9 +390,9 @@ fn syncDir(dir: std.Io.Dir) !void {
 }
 
 fn privateFilePermissions() std.Io.File.Permissions {
-    return @enumFromInt(0o600);
+    return @fromBackingInt(@intCast(0o600));
 }
 
 fn privateDirPermissions() std.Io.File.Permissions {
-    return @enumFromInt(0o700);
+    return @fromBackingInt(@intCast(0o700));
 }

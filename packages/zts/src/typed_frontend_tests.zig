@@ -2182,11 +2182,11 @@ test "recovered erased block removes nested syntax and retains progress" {
         return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(
         "inner_after",
-        atoms.getName(@enumFromInt(inner_after.binding.name_atom)) orelse return error.TestUnexpectedResult,
+        atoms.getName(@fromBackingInt(@intCast(inner_after.binding.name_atom))) orelse return error.TestUnexpectedResult,
     );
     try std.testing.expectEqualStrings(
         "after",
-        atoms.getName(@enumFromInt(after.binding.name_atom)) orelse return error.TestUnexpectedResult,
+        atoms.getName(@fromBackingInt(@intCast(after.binding.name_atom))) orelse return error.TestUnexpectedResult,
     );
     try std.testing.expect(std.meta.eql(after.binding, parser.type_store.annotations.items[1].binding));
     try std.testing.expectEqualStrings(
@@ -2552,7 +2552,7 @@ test "type-only module rich source retains declarations and live binding" {
     const wrapper = handler_declaration orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(engine.parser.NodeTag.function_decl, view.getTag(wrapper).?);
     const handler = view.getVarDecl(wrapper) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings("handler", atoms.getName(@enumFromInt(handler.binding.name_atom)).?);
+    try std.testing.expectEqualStrings("handler", atoms.getName(@fromBackingInt(@intCast(handler.binding.name_atom))).?);
     const signature = parser.type_store.function_signatures.items[0];
     try std.testing.expectEqual(handler.init, signature.owner);
     try std.testing.expectEqual(engine.parser.NodeTag.function_expr, view.getTag(signature.owner).?);
@@ -2563,7 +2563,7 @@ test "type-only module rich source retains declarations and live binding" {
     try std.testing.expectEqual(@as(u32, 1), signature.parameters.count);
     try std.testing.expectEqual(parameter.owner.pattern, view.getListIndex(function.params_start, 0));
     try std.testing.expect(std.meta.eql(parameter.owner.binding, view.paramBinding(parameter.owner.pattern).?));
-    try std.testing.expectEqualStrings("req", atoms.getName(@enumFromInt(parameter.owner.binding.name_atom)).?);
+    try std.testing.expectEqualStrings("req", atoms.getName(@fromBackingInt(@intCast(parameter.owner.binding.name_atom))).?);
     try std.testing.expectEqualStrings("Request", parameter.value.raw_span.text(source));
     const parameter_root = switch (parameter.value.root) {
         .present => |index| parser.type_store.nodes.items[index],
@@ -3708,7 +3708,7 @@ test "function signature validation rejects reassigned parameter owners" {
 
 fn expectDirectAbsentPrefix(annotation: []const u8, expected_prefix: []const u8) !void {
     const allocator = std.testing.allocator;
-    const source = try std.fmt.allocPrint(allocator, "{s} = value;", .{annotation});
+    const source = try allocator.print("{s} = value;", .{annotation});
     defer allocator.free(source);
     var store = TypeSyntax.Store.init(allocator, source);
     defer store.deinit();
@@ -4588,7 +4588,7 @@ fn assertGenericProjectionProperty(case: GenericProjectionCase, source: []const 
 }
 
 fn assertGenericFragmentProperty(case: GenericFragmentCase, source: []const u8) !void {
-    const owned_source = try std.fmt.allocPrint(std.testing.allocator, "<{s}>(", .{source});
+    const owned_source = try std.testing.allocator.print("<{s}>(", .{source});
     defer std.testing.allocator.free(owned_source);
     var store = TypeSyntax.Store.init(std.testing.allocator, owned_source);
     defer store.deinit();
@@ -4951,8 +4951,8 @@ fn assertRetainedRuntimeFunction(
 }
 
 test "generic application semantic census observes every case" {
-    try std.testing.expectEqual(std.meta.fields(ApplicationCase).len, application_fixtures.len);
-    var seen = std.EnumSet(ApplicationCase).initEmpty();
+    try std.testing.expectEqual(@typeInfo(ApplicationCase).@"enum".field_names.len, application_fixtures.len);
+    var seen = std.EnumSet(ApplicationCase).empty;
     for (application_fixtures) |fixture| {
         try std.testing.expect(fixture.source.len > 0);
         try std.testing.expect(!seen.contains(fixture.case));
@@ -4960,12 +4960,12 @@ test "generic application semantic census observes every case" {
         try expectDirectAccepted(fixture.source);
         seen.insert(fixture.case);
     }
-    try std.testing.expectEqual(std.meta.fields(ApplicationCase).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(ApplicationCase).@"enum".field_names.len, seen.count());
 }
 
 test "structural generic alias census observes every case" {
-    try std.testing.expectEqual(std.meta.fields(GenericAliasCase).len, generic_alias_fixtures.len);
-    var seen = std.EnumSet(GenericAliasCase).initEmpty();
+    try std.testing.expectEqual(@typeInfo(GenericAliasCase).@"enum".field_names.len, generic_alias_fixtures.len);
+    var seen = std.EnumSet(GenericAliasCase).empty;
     for (generic_alias_fixtures) |fixture| {
         errdefer std.debug.print(
             "structural generic alias case failed: {s}\n{s}\n",
@@ -4976,12 +4976,12 @@ test "structural generic alias census observes every case" {
         try expectDirectAccepted(fixture.source);
         seen.insert(fixture.case);
     }
-    try std.testing.expectEqual(std.meta.fields(GenericAliasCase).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(GenericAliasCase).@"enum".field_names.len, seen.count());
 }
 
 test "generic parameter projection census observes every case" {
-    try std.testing.expectEqual(std.meta.fields(GenericProjectionCase).len, generic_projection_fixtures.len);
-    var seen = std.EnumSet(GenericProjectionCase).initEmpty();
+    try std.testing.expectEqual(@typeInfo(GenericProjectionCase).@"enum".field_names.len, generic_projection_fixtures.len);
+    var seen = std.EnumSet(GenericProjectionCase).empty;
     for (generic_projection_fixtures) |fixture| {
         errdefer std.debug.print(
             "generic parameter projection case failed: {s}\n{s}\n",
@@ -4992,7 +4992,7 @@ test "generic parameter projection census observes every case" {
         try expectDirectAccepted(fixture.source);
         seen.insert(fixture.case);
     }
-    try std.testing.expectEqual(std.meta.fields(GenericProjectionCase).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(GenericProjectionCase).@"enum".field_names.len, seen.count());
 }
 
 test "untyped generic function declaration retains its owner before runtime equivalence" {
@@ -6329,10 +6329,10 @@ const generic_runtime_fixtures = [_]struct {
 
 test "generic runtime syntax census observes every case" {
     try std.testing.expectEqual(
-        std.meta.fields(GenericRuntimeCase).len,
+        @typeInfo(GenericRuntimeCase).@"enum".field_names.len,
         generic_runtime_fixtures.len,
     );
-    var seen = std.EnumSet(GenericRuntimeCase).initEmpty();
+    var seen = std.EnumSet(GenericRuntimeCase).empty;
     for (generic_runtime_fixtures) |fixture| {
         errdefer std.debug.print(
             "generic runtime syntax case failed: {s}\n{s}\n",
@@ -6521,7 +6521,7 @@ test "generic runtime syntax census observes every case" {
         }
         seen.insert(fixture.case);
     }
-    try std.testing.expectEqual(std.meta.fields(GenericRuntimeCase).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(GenericRuntimeCase).@"enum".field_names.len, seen.count());
 }
 
 test "compound assignment uses the dedicated generic arrow window" {
@@ -7847,19 +7847,19 @@ test "generic parameter projection retains legacy u32 depth arithmetic" {
 }
 
 test "generic semantic fragment census observes every case" {
-    try std.testing.expectEqual(std.meta.fields(GenericFragmentCase).len, generic_fragment_fixtures.len);
-    var seen = std.EnumSet(GenericFragmentCase).initEmpty();
+    try std.testing.expectEqual(@typeInfo(GenericFragmentCase).@"enum".field_names.len, generic_fragment_fixtures.len);
+    var seen = std.EnumSet(GenericFragmentCase).empty;
     for (generic_fragment_fixtures) |fixture| {
         try std.testing.expect(!seen.contains(fixture.case));
         try assertGenericFragmentProperty(fixture.case, fixture.source);
         seen.insert(fixture.case);
     }
-    try std.testing.expectEqual(std.meta.fields(GenericFragmentCase).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(GenericFragmentCase).@"enum".field_names.len, seen.count());
 }
 
 test "declaration semantic census observes every case" {
-    try std.testing.expectEqual(std.meta.fields(DeclarationCase).len, declaration_fixtures.len);
-    var seen = std.EnumSet(DeclarationCase).initEmpty();
+    try std.testing.expectEqual(@typeInfo(DeclarationCase).@"enum".field_names.len, declaration_fixtures.len);
+    var seen = std.EnumSet(DeclarationCase).empty;
     for (declaration_fixtures) |fixture| {
         try std.testing.expect(fixture.source.len > 0);
         try std.testing.expect(!seen.contains(fixture.case));
@@ -7946,7 +7946,7 @@ test "declaration semantic census observes every case" {
         }
         seen.insert(fixture.case);
     }
-    try std.testing.expectEqual(std.meta.fields(DeclarationCase).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(DeclarationCase).@"enum".field_names.len, seen.count());
 }
 
 test "declaration bodies admit numeric leading and blank-line continuations" {
@@ -8064,11 +8064,7 @@ test "unterminated trailing declaration comment is refused directly" {
 test "declaration names admit identifier-shaped keyword tokens" {
     const names = [_][]const u8{ "true", "null", "undefined", "function" };
     for (names) |name| {
-        const source = try std.fmt.allocPrint(
-            std.testing.allocator,
-            "structural {s} = number;\nconst value: {s} = 1;",
-            .{ name, name },
-        );
+        const source = try std.testing.allocator.print("structural {s} = number;\nconst value: {s} = 1;", .{ name, name });
         defer std.testing.allocator.free(source);
         try expectDirectAccepted(source);
     }
@@ -8106,6 +8102,7 @@ test "nominal declaration admission preserves direct diagnostic order and spans"
 }
 
 test "direct declaration lowering closes every allocation failure" {
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
     const Context = struct {
         fn run(allocator: std.mem.Allocator) !void {
             const source =
@@ -8115,7 +8112,7 @@ test "direct declaration lowering closes every allocation failure" {
             try expectDirectSourceWithAllocator(allocator, source);
         }
     };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), Context.run, .{});
 }
 
 test "direct primitive and grouped annotations lower to exact builtins" {
@@ -8132,20 +8129,12 @@ test "direct primitive and grouped annotations lower to exact builtins" {
     for (primitives) |primitive| {
         for ([_][]const u8{ "", "(((" }) |opening| {
             const closing: []const u8 = if (opening.len == 0) "" else ")))";
-            const source = try std.fmt.allocPrint(
-                std.testing.allocator,
-                "const value: {s}{s}{s} = seed;",
-                .{ opening, primitive, closing },
-            );
+            const source = try std.testing.allocator.print("const value: {s}{s}{s} = seed;", .{ opening, primitive, closing });
             defer std.testing.allocator.free(source);
             try expectDirectAccepted(source);
             var pool = TypePool.init(std.testing.allocator);
             defer pool.deinit(std.testing.allocator);
-            const authored = try std.fmt.allocPrint(
-                std.testing.allocator,
-                "{s}{s}{s}",
-                .{ opening, primitive, closing },
-            );
+            const authored = try std.testing.allocator.print("{s}{s}{s}", .{ opening, primitive, closing });
             defer std.testing.allocator.free(authored);
             const lowered = try parseDirectAnnotation(&pool, authored);
             const expected = if (std.mem.eql(u8, primitive, "unknown")) pool.idx_unknown else if (std.mem.eql(u8, primitive, "never")) pool.idx_never else if (std.mem.eql(u8, primitive, "undefined")) pool.idx_undefined else if (std.mem.eql(u8, primitive, "null")) pool.idx_null else if (std.mem.eql(u8, primitive, "boolean")) pool.idx_boolean else if (std.mem.eql(u8, primitive, "number")) pool.idx_number else if (std.mem.eql(u8, primitive, "string")) pool.idx_string else pool.idx_bytes;
@@ -8295,12 +8284,12 @@ test "direct compound families and semantic quirks match ordered legacy types" {
         .{ .annotation = "\"GET\"", .family = .literal, .quirk = .literal_values },
     };
     try std.testing.expectEqual(
-        @as(usize, @typeInfo(SemanticQuirk).@"enum".fields.len),
+        @as(usize, @typeInfo(SemanticQuirk).@"enum".field_names.len),
         fixtures.len,
     );
 
-    var families = std.EnumSet(CompoundFamily).initEmpty();
-    var quirks = std.EnumSet(SemanticQuirk).initEmpty();
+    var families = std.EnumSet(CompoundFamily).empty;
+    var quirks = std.EnumSet(SemanticQuirk).empty;
     for (fixtures) |fixture| {
         const source = try directAnnotationSource(std.testing.allocator, fixture.annotation);
         defer std.testing.allocator.free(source);
@@ -8308,11 +8297,11 @@ test "direct compound families and semantic quirks match ordered legacy types" {
         quirks.insert(fixture.quirk);
         if (fixture.family) |family| families.insert(family);
     }
-    inline for (@typeInfo(CompoundFamily).@"enum".fields) |field| {
-        try std.testing.expect(families.contains(@enumFromInt(field.value)));
+    inline for (@typeInfo(CompoundFamily).@"enum".field_names) |field| {
+        try std.testing.expect(families.contains(@fromBackingInt(@intCast(@backingInt(@field(CompoundFamily, field))))));
     }
-    inline for (@typeInfo(SemanticQuirk).@"enum".fields) |field| {
-        try std.testing.expect(quirks.contains(@enumFromInt(field.value)));
+    inline for (@typeInfo(SemanticQuirk).@"enum".field_names) |field| {
+        try std.testing.expect(quirks.contains(@fromBackingInt(@intCast(@backingInt(@field(SemanticQuirk, field))))));
     }
 
     for ([_][]const u8{
@@ -8343,7 +8332,7 @@ test "direct compound boundaries preserve legacy structure before key comparison
     try expectDirectAccepted(function.items);
 
     inline for (.{ 63, 64 }) |layers| {
-        const source = "const value: number" ++ "[]" ** layers ++ " = undefined;";
+        const source = "const value: number" ++ @as([(layers) * ("[]").len]u8, @bitCast(@as([layers][("[]").len]u8, @splat(("[]").*)))) ++ " = undefined;";
         try expectDirectAccepted(source);
     }
 
@@ -8804,7 +8793,7 @@ test "direct primitive slice binds a grouped and suffixed annotation" {
     _ = try parser.parse();
 
     const annotation = parser.type_store.annotations.items[0];
-    try std.testing.expectEqual(@as(u16, @intCast(@intFromEnum(try atoms.intern("text")))), annotation.binding.name_atom);
+    try std.testing.expectEqual(@as(u16, @intCast(@backingInt(try atoms.intern("text")))), annotation.binding.name_atom);
     try std.testing.expectEqual(@as(u16, 0), annotation.binding.scope_id);
 }
 
@@ -8887,9 +8876,9 @@ test "runtime any and quoted names are admitted while unary void is refused" {
     const value = view.getVarDecl(try runtimeNodeAt(&parser, .var_decl, @intCast(value_offset))) orelse return error.TestUnexpectedResult;
     const text_offset = std.mem.indexOf(u8, accepted, "const text") orelse return error.TestUnexpectedResult;
     const text = view.getVarDecl(try runtimeNodeAt(&parser, .var_decl, @intCast(text_offset))) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u16, @intCast(@intFromEnum(try atoms.intern("any")))), first.binding.name_atom);
-    try std.testing.expectEqual(@as(u16, @intCast(@intFromEnum(try atoms.intern("value")))), value.binding.name_atom);
-    try std.testing.expectEqual(@as(u16, @intCast(@intFromEnum(try atoms.intern("text")))), text.binding.name_atom);
+    try std.testing.expectEqual(@as(u16, @intCast(@backingInt(try atoms.intern("any")))), first.binding.name_atom);
+    try std.testing.expectEqual(@as(u16, @intCast(@backingInt(try atoms.intern("value")))), value.binding.name_atom);
+    try std.testing.expectEqual(@as(u16, @intCast(@backingInt(try atoms.intern("text")))), text.binding.name_atom);
     try std.testing.expectEqual(engine.parser.NodeTag.lit_string, view.getTag(first.init).?);
     try std.testing.expectEqual(engine.parser.NodeTag.identifier, view.getTag(value.init).?);
     try std.testing.expectEqual(engine.parser.NodeTag.lit_string, view.getTag(text.init).?);
@@ -9295,7 +9284,7 @@ test "direct admission preserves optional parameter and record any refusal conte
 }
 
 fn directAnnotationSource(allocator: std.mem.Allocator, annotation: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "const value: {s} = undefined;", .{annotation});
+    return allocator.print("const value: {s} = undefined;", .{annotation});
 }
 
 fn expectDirectTypeText(annotation: []const u8) !void {
@@ -9393,8 +9382,8 @@ test "direct compound family and semantic quirk census is exhaustive" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
-    var families = std.EnumSet(CompoundFamily).initEmpty();
-    var quirks = std.EnumSet(SemanticQuirk).initEmpty();
+    var families = std.EnumSet(CompoundFamily).empty;
+    var quirks = std.EnumSet(SemanticQuirk).empty;
 
     const quoted = try parseDirectAnnotation(&pool, "{ \"x\": number }");
     try expectTag(&pool, quoted, .t_record);
@@ -9668,14 +9657,14 @@ test "direct compound family and semantic quirk census is exhaustive" {
     quirks.insert(.literal_values);
 
     try pool.ensureHealthy();
-    try std.testing.expectEqual(@as(usize, 8), @typeInfo(CompoundFamily).@"enum".fields.len);
-    try std.testing.expectEqual(@as(usize, 31), @typeInfo(SemanticQuirk).@"enum".fields.len);
-    inline for (@typeInfo(CompoundFamily).@"enum".fields) |field| {
-        const family: CompoundFamily = @enumFromInt(field.value);
+    try std.testing.expectEqual(@as(usize, 8), @typeInfo(CompoundFamily).@"enum".field_names.len);
+    try std.testing.expectEqual(@as(usize, 31), @typeInfo(SemanticQuirk).@"enum".field_names.len);
+    inline for (@typeInfo(CompoundFamily).@"enum".field_names) |field| {
+        const family: CompoundFamily = @fromBackingInt(@intCast(@backingInt(@field(CompoundFamily, field))));
         try std.testing.expect(families.contains(family));
     }
-    inline for (@typeInfo(SemanticQuirk).@"enum".fields) |field| {
-        const quirk: SemanticQuirk = @enumFromInt(field.value);
+    inline for (@typeInfo(SemanticQuirk).@"enum".field_names) |field| {
+        const quirk: SemanticQuirk = @fromBackingInt(@intCast(@backingInt(@field(SemanticQuirk, field))));
         try std.testing.expect(quirks.contains(quirk));
     }
 }
@@ -9715,7 +9704,7 @@ test "direct function annotations preserve the packed parameter boundary" {
             }
             try std.testing.expectEqual(pool.idx_string, info.ret);
             try std.testing.expectEqualStrings(
-                "F15" ++ ".n" ** 15 ++ "->s",
+                "F15" ++ @as([(15) * (".n").len]u8, @bitCast(@as([15][(".n").len]u8, @splat((".n").*)))) ++ "->s",
                 try type_key.typeKey(&pool, allocator, idx),
             );
         }
@@ -9725,7 +9714,7 @@ test "direct function annotations preserve the packed parameter boundary" {
 test "direct deep arrays separate admission and canonical key depth" {
     const allocator = std.testing.allocator;
     inline for (.{ 63, 64 }) |layers| {
-        const annotation = "number" ++ "[]" ** layers;
+        const annotation = "number" ++ @as([(layers) * ("[]").len]u8, @bitCast(@as([layers][("[]").len]u8, @splat(("[]").*))));
         var pool = TypePool.init(allocator);
         defer pool.deinit(allocator);
         const idx = try parseDirectAnnotation(&pool, annotation);
@@ -9741,7 +9730,7 @@ test "direct deep arrays separate admission and canonical key depth" {
             try std.testing.expectError(error.TypeKeyTooDeep, type_key.typeKey(&pool, allocator, idx));
         } else {
             const key = try type_key.typeKey(&pool, allocator, idx);
-            try std.testing.expectEqualStrings("Am" ** layers ++ "n", key);
+            try std.testing.expectEqualStrings(@as([(layers) * ("Am").len]u8, @bitCast(@as([layers][("Am").len]u8, @splat(("Am").*)))) ++ "n", key);
         }
     }
 }
@@ -10066,7 +10055,7 @@ test "annotation owner census covers current syntax kinds" {
     for (parser.nodes.tags.items, 0..) |tag, index| switch (tag) {
         .var_decl => {
             const declaration = view.getVarDecl(@intCast(index)) orelse return error.TestUnexpectedResult;
-            const name = atoms.getName(@enumFromInt(declaration.binding.name_atom)) orelse return error.TestUnexpectedResult;
+            const name = atoms.getName(@fromBackingInt(@intCast(declaration.binding.name_atom))) orelse return error.TestUnexpectedResult;
             if (std.mem.eql(u8, name, "seed") or std.mem.eql(u8, name, "label")) {
                 const annotation = store.annotations.items[variable_count];
                 try std.testing.expect(std.meta.eql(declaration.binding, annotation.binding));
@@ -10147,7 +10136,7 @@ test "shadowed bindings and closure parameters retain their actual owners" {
     for (parser.nodes.tags.items, 0..) |tag, index| {
         if (tag != .var_decl) continue;
         const declaration = view.getVarDecl(@intCast(index)) orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqualStrings("shared", atoms.getName(@enumFromInt(declaration.binding.name_atom)).?);
+        try std.testing.expectEqualStrings("shared", atoms.getName(@fromBackingInt(@intCast(declaration.binding.name_atom))).?);
         const annotation = store.annotations.items[variables];
         try std.testing.expect(std.meta.eql(declaration.binding, annotation.binding));
         try std.testing.expectEqualStrings(if (variables == 0) "number" else "string", annotation.raw_span.text(source));
@@ -10157,12 +10146,12 @@ test "shadowed bindings and closure parameters retain their actual owners" {
     for (store.function_signatures.items, 0..) |signature, index| {
         try std.testing.expectEqual(engine.parser.NodeTag.function_expr, view.getTag(signature.owner).?);
         const function = view.getFunction(signature.owner) orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqualStrings(if (index == 0) "outer" else "inner", atoms.getName(@enumFromInt(function.name_atom)).?);
+        try std.testing.expectEqualStrings(if (index == 0) "outer" else "inner", atoms.getName(@fromBackingInt(@intCast(function.name_atom))).?);
         try std.testing.expectEqual(@as(u8, 1), function.params_count);
         const parameter = store.parameter_annotations.items[index];
         try std.testing.expectEqual(parameter.owner.pattern, view.getListIndex(function.params_start, 0));
         try std.testing.expect(std.meta.eql(parameter.owner.binding, view.paramBinding(parameter.owner.pattern).?));
-        try std.testing.expectEqualStrings("value", atoms.getName(@enumFromInt(parameter.owner.binding.name_atom)).?);
+        try std.testing.expectEqualStrings("value", atoms.getName(@fromBackingInt(@intCast(parameter.owner.binding.name_atom))).?);
         try std.testing.expectEqualStrings(if (index == 0) "string" else "number", parameter.value.raw_span.text(source));
     }
     const inner = view.getFunction(store.function_signatures.items[1].owner) orelse
@@ -10538,14 +10527,14 @@ test "direct phase two consumer matrix preserves generics and headers" {
             .case = .empty_prefix,
         },
     };
-    try std.testing.expectEqual(std.meta.fields(DirectGenericConsumerCase).len, cases.len);
-    var seen = std.EnumSet(DirectGenericConsumerCase).initEmpty();
+    try std.testing.expectEqual(@typeInfo(DirectGenericConsumerCase).@"enum".field_names.len, cases.len);
+    var seen = std.EnumSet(DirectGenericConsumerCase).empty;
     for (cases) |case| {
         try std.testing.expect(!seen.contains(case.case));
         try expectDirectGenericConsumer(case.source, case.case);
         seen.insert(case.case);
     }
-    try std.testing.expectEqual(std.meta.fields(DirectGenericConsumerCase).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(DirectGenericConsumerCase).@"enum".field_names.len, seen.count());
 }
 
 fn compatibilityCallOwner(owner: TypeSyntax.GenericOwner) ?NodeIndex {
@@ -10800,12 +10789,12 @@ test "direct phase three preserves actual and compatibility call construction" {
             .case = .arrow_compatibility,
         },
     };
-    var seen = std.EnumSet(DirectCallConsumerCase).initEmpty();
+    var seen = std.EnumSet(DirectCallConsumerCase).empty;
     for (cases) |case| {
         try expectDirectCallConsumer(case.source, case.case);
         seen.insert(case.case);
     }
-    try std.testing.expectEqual(std.meta.fields(DirectCallConsumerCase).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(DirectCallConsumerCase).@"enum".field_names.len, seen.count());
 }
 
 const DirectCallOrderMutation = enum {
@@ -10933,12 +10922,12 @@ test "direct phase three refuses malformed call order before selection" {
             .mutation = .reversed_compatibility,
         },
     };
-    var seen = std.EnumSet(DirectCallOrderMutation).initEmpty();
+    var seen = std.EnumSet(DirectCallOrderMutation).empty;
     for (cases) |case| {
         try expectDirectCallOrderRefusal(case.source, case.mutation);
         seen.insert(case.mutation);
     }
-    try std.testing.expectEqual(std.meta.fields(DirectCallOrderMutation).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(DirectCallOrderMutation).@"enum".field_names.len, seen.count());
 }
 
 const DirectCallAllocationObservations = struct {
@@ -11094,10 +11083,18 @@ fn expectDirectPredicateConsumer(
     expected_predicate: ExpectedPredicate,
     expected_return_spelling: ?[]const u8,
 ) !void {
-    errdefer |err| std.debug.print(
-        "direct predicate case {s} failed with {s}\nsource: {s}\n",
-        .{ @tagName(case), @errorName(err), source },
-    );
+    expectDirectPredicateConsumerInner(source, case, expected_predicate, expected_return_spelling) catch |err| {
+        std.debug.print("direct predicate case {s} failed with {s}\nsource: {s}\n", .{ @tagName(case), @errorName(err), source });
+        return err;
+    };
+}
+
+fn expectDirectPredicateConsumerInner(
+    source: []const u8,
+    case: DirectPredicateCase,
+    expected_predicate: ExpectedPredicate,
+    expected_return_spelling: ?[]const u8,
+) !void {
     var direct_count = CountingAllocator.init(std.testing.allocator);
     var type_count = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
@@ -11446,7 +11443,7 @@ test "direct predicates preserve construction and checker behavior" {
         .{ .case = .quoted_marker_space, .source = "function guard(candidate: unknown): candidate is \"a is b\" { return true; }\n", .predicate = .{ .literal = "a is b" }, .return_spelling = null },
         .{ .case = .quoted_marker_tab, .source = "function guard(candidate: unknown): candidate\tis \"a is b\" { return true; }\n", .predicate = .absent, .return_spelling = null },
     };
-    var seen = std.EnumSet(DirectPredicateCase).initEmpty();
+    var seen = std.EnumSet(DirectPredicateCase).empty;
     for (cases) |case| {
         try expectDirectPredicateConsumer(
             case.source,
@@ -11456,7 +11453,7 @@ test "direct predicates preserve construction and checker behavior" {
         );
         seen.insert(case.case);
     }
-    try std.testing.expectEqual(std.meta.fields(DirectPredicateCase).len, cases.len);
+    try std.testing.expectEqual(@typeInfo(DirectPredicateCase).@"enum".field_names.len, cases.len);
     try std.testing.expectEqual(cases.len, seen.count());
 }
 
@@ -11587,13 +11584,13 @@ test "bounded erased prefixes preserve direct consumer admission" {
         .{ .case = .operator_parameter, .source = "const value = <T | U>(1);" },
     };
     const modes = [_]TypeSyntax.AdmissionMode{ .collect, .compile };
-    var seen = std.EnumSet(Case).initEmpty();
+    var seen = std.EnumSet(Case).empty;
     for (cases) |case| {
         for (modes) |mode| try expectDirectAdmission(std.testing.allocator, case.source, mode, .accepted, &.{}, null);
         try expectDirectDeclarationConsumer(case.source, &.{}, "", false);
         seen.insert(case.case);
     }
-    try std.testing.expectEqual(std.meta.fields(Case).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(Case).@"enum".field_names.len, seen.count());
     try std.testing.expectEqual(@as(usize, 2), modes.len);
 
     const refused = "const value = <T extends void>(1);";
@@ -12472,12 +12469,12 @@ test "direct declaration consumer preserves repeated global bindings" {
             },
         },
     };
-    var seen = std.EnumSet(RepeatedGlobalBindingCase).initEmpty();
+    var seen = std.EnumSet(RepeatedGlobalBindingCase).empty;
     for (cases) |case| {
         try expectDirectDeclarationConsumer(case.source, case.diagnostics, "", false);
         seen.insert(case.case);
     }
-    try std.testing.expectEqual(std.meta.fields(RepeatedGlobalBindingCase).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(RepeatedGlobalBindingCase).@"enum".field_names.len, seen.count());
 }
 
 const GenericDeclarationFactCase = enum {
@@ -12573,13 +12570,13 @@ test "direct generic declarations preserve aliases and empty distinctions" {
             .case = .empty_parameters,
         },
     };
-    var seen = std.EnumSet(GenericDeclarationFactCase).initEmpty();
+    var seen = std.EnumSet(GenericDeclarationFactCase).empty;
     for (cases) |case| {
         try expectDirectDeclarationConsumer(case.source, &.{}, "", false);
         try expectDirectGenericDeclarationFacts(case.source, case.case);
         seen.insert(case.case);
     }
-    try std.testing.expectEqual(std.meta.fields(GenericDeclarationFactCase).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(GenericDeclarationFactCase).@"enum".field_names.len, seen.count());
 }
 
 test "parsed declaration helper retains operational failure and checks absent health" {
@@ -13353,8 +13350,8 @@ test "direct consumers preserve measured lookup winners shadows and captures" {
             .strict_diagnostics = &.{},
         },
     };
-    try std.testing.expectEqual(std.meta.fields(LookupConsumerCase).len, cases.len);
-    var seen = std.EnumSet(LookupConsumerCase).initEmpty();
+    try std.testing.expectEqual(@typeInfo(LookupConsumerCase).@"enum".field_names.len, cases.len);
+    var seen = std.EnumSet(LookupConsumerCase).empty;
     for (cases) |case| {
         try std.testing.expect(!seen.contains(case.case));
         try expectDirectConsumerMatrixCase(
@@ -13364,7 +13361,7 @@ test "direct consumers preserve measured lookup winners shadows and captures" {
         );
         seen.insert(case.case);
     }
-    try std.testing.expectEqual(std.meta.fields(LookupConsumerCase).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(LookupConsumerCase).@"enum".field_names.len, seen.count());
 }
 
 const ConsumerSemanticCase = enum {
@@ -13437,8 +13434,8 @@ test "direct consumers preserve generic calls compact arity and strict signature
             .strict_diagnostics = &.{},
         },
     };
-    try std.testing.expectEqual(std.meta.fields(ConsumerSemanticCase).len, cases.len);
-    var seen = std.EnumSet(ConsumerSemanticCase).initEmpty();
+    try std.testing.expectEqual(@typeInfo(ConsumerSemanticCase).@"enum".field_names.len, cases.len);
+    var seen = std.EnumSet(ConsumerSemanticCase).empty;
     for (cases) |case| {
         try std.testing.expect(!seen.contains(case.case));
         try expectDirectConsumerMatrixCase(
@@ -13448,7 +13445,7 @@ test "direct consumers preserve generic calls compact arity and strict signature
         );
         seen.insert(case.case);
     }
-    try std.testing.expectEqual(std.meta.fields(ConsumerSemanticCase).len, seen.count());
+    try std.testing.expectEqual(@typeInfo(ConsumerSemanticCase).@"enum".field_names.len, seen.count());
 }
 
 fn expectDirectPrimitiveFacts(source: []const u8) !void {
@@ -13910,12 +13907,12 @@ test "direct single-module full and sound extraction preserve contract bytes" {
         .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n", .json_hash = 0x8e03c3151292dcc9 },
         .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0xfed0833da1e6d12c },
     };
-    const fields = @typeInfo(ContractConsumerCase).@"enum".fields;
+    const fields = @typeInfo(ContractConsumerCase).@"enum".field_names;
     try std.testing.expectEqual(@as(usize, 9), fixtures.len);
     try std.testing.expectEqual(fields.len, fixtures.len);
     var seen: [fields.len]bool = @splat(false);
     for (fixtures) |fixture| {
-        const index = @intFromEnum(fixture.kind);
+        const index = @backingInt(fixture.kind);
         try std.testing.expect(!seen[index]);
         seen[index] = true;
         const full = try expectDirectSingleModuleContract(.full, fixture.kind, fixture.source, fixture.json_hash);

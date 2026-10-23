@@ -1,8 +1,6 @@
 const std = @import("std");
 
-pub const c = @cImport({
-    @cInclude("sqlite3.h");
-});
+pub const c = @import("sqlite-c");
 
 pub const Error = error{
     SqliteOpenFailed,
@@ -37,7 +35,7 @@ pub const Db = struct {
     }
 
     pub fn exec(self: *Db, allocator: std.mem.Allocator, sql: []const u8) !void {
-        const sql_z = try allocator.dupeZ(u8, sql);
+        const sql_z = try allocator.dupeSentinel(u8, sql, 0);
         defer allocator.free(sql_z);
 
         var err_msg: [*c]u8 = null;
@@ -114,7 +112,7 @@ pub fn normalizeParamName(raw: ?[*:0]const u8) ?[]const u8 {
 }
 
 fn openPath(allocator: std.mem.Allocator, path: []const u8, flags: c_int) !Db {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     var handle: ?*c.sqlite3 = null;

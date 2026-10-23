@@ -324,9 +324,9 @@ fn testProperties(value: bool) handler_contract.HandlerProperties {
         .deterministic = value,
         .has_egress = false,
     };
-    inline for (@typeInfo(handler_contract.HandlerProperties).@"struct".fields) |field| {
-        if (field.type == bool and handler_contract.HandlerProperties.isMonotonicProvenSpecName(field.name)) {
-            @field(properties, field.name) = value;
+    inline for (@typeInfo(handler_contract.HandlerProperties).@"struct".field_names) |field| {
+        if (@FieldType(handler_contract.HandlerProperties, field) == bool and handler_contract.HandlerProperties.isMonotonicProvenSpecName(field)) {
+            @field(properties, field) = value;
         }
     }
     return properties;

@@ -17,12 +17,12 @@ const Sha256 = std.crypto.hash.sha2.Sha256;
 const b64 = std.base64.url_safe_no_pad;
 
 pub const version_tag: []const u8 = "zttp-attest-v4";
-pub const unpinned_runtime_policy_sha256: []const u8 = "0" ** 64;
+pub const unpinned_runtime_policy_sha256: []const u8 = &@as([64:0]u8, @splat('0'));
 /// A receipt for something that is not a self-extracting artifact - a dev
 /// server, a live-reload swap - has no executable graph to commit to. It says
 /// so with this sentinel rather than by omitting the field, so a verifier can
 /// tell "no graph" from "a graph whose root happens to be missing".
-pub const unpinned_executable_root: []const u8 = "0" ** 64;
+pub const unpinned_executable_root: []const u8 = &@as([64:0]u8, @splat('0'));
 
 /// Forty-byte payload caller assembles; sign() embeds it into the JWS.
 /// Hex fields are 64-character lowercase strings (the form `bytesToHex`
@@ -267,11 +267,7 @@ fn buildHeaderJson(
     fingerprint: [64]u8,
     pubkey_b64: []const u8,
 ) ![]u8 {
-    return std.fmt.allocPrint(
-        allocator,
-        "{{\"alg\":\"EdDSA\",\"typ\":\"zttp-attest+jws\",\"kid\":\"{s}\",\"jwk\":{{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"{s}\"}}}}",
-        .{ fingerprint, pubkey_b64 },
-    );
+    return allocator.print("{{\"alg\":\"EdDSA\",\"typ\":\"zttp-attest+jws\",\"kid\":\"{s}\",\"jwk\":{{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"x\":\"{s}\"}}}}", .{ fingerprint, pubkey_b64 });
 }
 
 /// Single source of truth for JSON keys on the wire. Writer and parser both
@@ -527,15 +523,15 @@ const test_seed: [Ed25519.KeyPair.seed_length]u8 = .{
 
 fn testClaims() Claims {
     return .{
-        .contract_sha256 = "a" ** 64,
-        .bytecode_sha256 = "b" ** 64,
-        .policy_sha256 = "c" ** 64,
-        .capability_hash = "d" ** 64,
-        .runtime_policy_sha256 = "e" ** 64,
-        .executable_root_sha256 = "f" ** 64,
+        .contract_sha256 = &@as([64:0]u8, @splat('a')),
+        .bytecode_sha256 = &@as([64:0]u8, @splat('b')),
+        .policy_sha256 = &@as([64:0]u8, @splat('c')),
+        .capability_hash = &@as([64:0]u8, @splat('d')),
+        .runtime_policy_sha256 = &@as([64:0]u8, @splat('e')),
+        .executable_root_sha256 = &@as([64:0]u8, @splat('f')),
         .core_profile_id = "zts-model-1",
-        .core_grammar_sha256 = "1" ** 64,
-        .semantics_sha256 = "2" ** 64,
+        .core_grammar_sha256 = &@as([64:0]u8, @splat('1')),
+        .semantics_sha256 = &@as([64:0]u8, @splat('2')),
         .compiler_version = "0.0.0-test",
         .signed_at_unix = 1_700_000_000,
         .property_summary = "pure,read_only,injection_safe",
@@ -553,14 +549,14 @@ test "sign then verify recovers the same claims" {
     var result = try verify(allocator, env.jws_compact);
     defer result.deinit();
 
-    try std.testing.expectEqualStrings("a" ** 64, result.claims.contract_sha256);
-    try std.testing.expectEqualStrings("b" ** 64, result.claims.bytecode_sha256);
-    try std.testing.expectEqualStrings("c" ** 64, result.claims.policy_sha256);
-    try std.testing.expectEqualStrings("d" ** 64, result.claims.capability_hash);
-    try std.testing.expectEqualStrings("e" ** 64, result.claims.runtime_policy_sha256);
+    try std.testing.expectEqualStrings(&@as([64:0]u8, @splat('a')), result.claims.contract_sha256);
+    try std.testing.expectEqualStrings(&@as([64:0]u8, @splat('b')), result.claims.bytecode_sha256);
+    try std.testing.expectEqualStrings(&@as([64:0]u8, @splat('c')), result.claims.policy_sha256);
+    try std.testing.expectEqualStrings(&@as([64:0]u8, @splat('d')), result.claims.capability_hash);
+    try std.testing.expectEqualStrings(&@as([64:0]u8, @splat('e')), result.claims.runtime_policy_sha256);
     try std.testing.expectEqualStrings("zts-model-1", result.claims.core_profile_id);
-    try std.testing.expectEqualStrings("1" ** 64, result.claims.core_grammar_sha256);
-    try std.testing.expectEqualStrings("2" ** 64, result.claims.semantics_sha256);
+    try std.testing.expectEqualStrings(&@as([64:0]u8, @splat('1')), result.claims.core_grammar_sha256);
+    try std.testing.expectEqualStrings(&@as([64:0]u8, @splat('2')), result.claims.semantics_sha256);
     try std.testing.expectEqualStrings("0.0.0-test", result.claims.compiler_version);
     try std.testing.expectEqualStrings("pure,read_only,injection_safe", result.claims.property_summary);
     try std.testing.expectEqualStrings("env,cache", result.claims.guarded_categories);
@@ -631,10 +627,10 @@ test "verify refuses a legacy receipt without source identity" {
     const allocator = std.testing.allocator;
     const payload =
         "{\"v\":\"zttp-attest-v1\"," ++
-        "\"contractSha256\":\"" ++ "a" ** 64 ++ "\"," ++
-        "\"bytecodeSha256\":\"" ++ "b" ** 64 ++ "\"," ++
-        "\"policySha256\":\"" ++ "c" ** 64 ++ "\"," ++
-        "\"capabilityHash\":\"" ++ "d" ** 64 ++ "\"," ++
+        "\"contractSha256\":\"" ++ &@as([64:0]u8, @splat('a')) ++ "\"," ++
+        "\"bytecodeSha256\":\"" ++ &@as([64:0]u8, @splat('b')) ++ "\"," ++
+        "\"policySha256\":\"" ++ &@as([64:0]u8, @splat('c')) ++ "\"," ++
+        "\"capabilityHash\":\"" ++ &@as([64:0]u8, @splat('d')) ++ "\"," ++
         "\"compilerVersion\":\"0.0.0-test\"," ++
         "\"signedAt\":1700000000," ++
         "\"propertySummary\":\"pure\"," ++
@@ -653,15 +649,15 @@ test "a receipt from the previous attestation version is refused, not reinterpre
     // fault is naming the immediate predecessor format.
     const payload =
         "{\"v\":\"zttp-attest-v3\"," ++
-        "\"contractSha256\":\"" ++ "a" ** 64 ++ "\"," ++
-        "\"bytecodeSha256\":\"" ++ "b" ** 64 ++ "\"," ++
-        "\"policySha256\":\"" ++ "c" ** 64 ++ "\"," ++
-        "\"capabilityHash\":\"" ++ "d" ** 64 ++ "\"," ++
-        "\"runtimePolicySha256\":\"" ++ "e" ** 64 ++ "\"," ++
-        "\"executableRootSha256\":\"" ++ "f" ** 64 ++ "\"," ++
+        "\"contractSha256\":\"" ++ &@as([64:0]u8, @splat('a')) ++ "\"," ++
+        "\"bytecodeSha256\":\"" ++ &@as([64:0]u8, @splat('b')) ++ "\"," ++
+        "\"policySha256\":\"" ++ &@as([64:0]u8, @splat('c')) ++ "\"," ++
+        "\"capabilityHash\":\"" ++ &@as([64:0]u8, @splat('d')) ++ "\"," ++
+        "\"runtimePolicySha256\":\"" ++ &@as([64:0]u8, @splat('e')) ++ "\"," ++
+        "\"executableRootSha256\":\"" ++ &@as([64:0]u8, @splat('f')) ++ "\"," ++
         "\"coreProfileId\":\"zts-model-1\"," ++
-        "\"coreGrammarSha256\":\"" ++ "1" ** 64 ++ "\"," ++
-        "\"semanticsSha256\":\"" ++ "2" ** 64 ++ "\"," ++
+        "\"coreGrammarSha256\":\"" ++ &@as([64:0]u8, @splat('1')) ++ "\"," ++
+        "\"semanticsSha256\":\"" ++ &@as([64:0]u8, @splat('2')) ++ "\"," ++
         "\"frontendProfileId\":null," ++
         "\"frontendGrammarSha256\":null," ++
         "\"compilerVersion\":\"0.0.0-test\"," ++
@@ -681,14 +677,14 @@ test "a current receipt without the executable root is refused" {
     const allocator = std.testing.allocator;
     const payload =
         "{\"v\":\"" ++ version_tag ++ "\"," ++
-        "\"contractSha256\":\"" ++ "a" ** 64 ++ "\"," ++
-        "\"bytecodeSha256\":\"" ++ "b" ** 64 ++ "\"," ++
-        "\"policySha256\":\"" ++ "c" ** 64 ++ "\"," ++
-        "\"capabilityHash\":\"" ++ "d" ** 64 ++ "\"," ++
-        "\"runtimePolicySha256\":\"" ++ "e" ** 64 ++ "\"," ++
+        "\"contractSha256\":\"" ++ &@as([64:0]u8, @splat('a')) ++ "\"," ++
+        "\"bytecodeSha256\":\"" ++ &@as([64:0]u8, @splat('b')) ++ "\"," ++
+        "\"policySha256\":\"" ++ &@as([64:0]u8, @splat('c')) ++ "\"," ++
+        "\"capabilityHash\":\"" ++ &@as([64:0]u8, @splat('d')) ++ "\"," ++
+        "\"runtimePolicySha256\":\"" ++ &@as([64:0]u8, @splat('e')) ++ "\"," ++
         "\"coreProfileId\":\"zts-model-1\"," ++
-        "\"coreGrammarSha256\":\"" ++ "1" ** 64 ++ "\"," ++
-        "\"semanticsSha256\":\"" ++ "2" ** 64 ++ "\"," ++
+        "\"coreGrammarSha256\":\"" ++ &@as([64:0]u8, @splat('1')) ++ "\"," ++
+        "\"semanticsSha256\":\"" ++ &@as([64:0]u8, @splat('2')) ++ "\"," ++
         "\"frontendProfileId\":null," ++
         "\"frontendGrammarSha256\":null," ++
         "\"compilerVersion\":\"0.0.0-test\"," ++
@@ -707,14 +703,14 @@ test "the executable root claim survives a sign and verify round trip" {
     const allocator = std.testing.allocator;
     const key_pair = try keyPairFromSeed(test_seed);
     var claims = testClaims();
-    claims.executable_root_sha256 = "9" ** 64;
+    claims.executable_root_sha256 = &@as([64:0]u8, @splat('9'));
 
     var env = try sign(allocator, claims, key_pair);
     defer env.deinit(allocator);
 
     var result = try verify(allocator, env.jws_compact);
     defer result.deinit();
-    try std.testing.expectEqualStrings("9" ** 64, result.claims.executable_root_sha256);
+    try std.testing.expectEqualStrings(&@as([64:0]u8, @splat('9')), result.claims.executable_root_sha256);
 }
 
 test "an executable root that is not a hex digest is refused at signing" {
@@ -729,15 +725,15 @@ test "parseClaims accepts retired claim placeholders" {
     const allocator = std.testing.allocator;
     const payload =
         "{\"v\":\"" ++ version_tag ++ "\"," ++
-        "\"contractSha256\":\"" ++ "a" ** 64 ++ "\"," ++
-        "\"bytecodeSha256\":\"" ++ "b" ** 64 ++ "\"," ++
-        "\"policySha256\":\"" ++ "c" ** 64 ++ "\"," ++
-        "\"capabilityHash\":\"" ++ "d" ** 64 ++ "\"," ++
-        "\"runtimePolicySha256\":\"" ++ "e" ** 64 ++ "\"," ++
-        "\"executableRootSha256\":\"" ++ "f" ** 64 ++ "\"," ++
+        "\"contractSha256\":\"" ++ &@as([64:0]u8, @splat('a')) ++ "\"," ++
+        "\"bytecodeSha256\":\"" ++ &@as([64:0]u8, @splat('b')) ++ "\"," ++
+        "\"policySha256\":\"" ++ &@as([64:0]u8, @splat('c')) ++ "\"," ++
+        "\"capabilityHash\":\"" ++ &@as([64:0]u8, @splat('d')) ++ "\"," ++
+        "\"runtimePolicySha256\":\"" ++ &@as([64:0]u8, @splat('e')) ++ "\"," ++
+        "\"executableRootSha256\":\"" ++ &@as([64:0]u8, @splat('f')) ++ "\"," ++
         "\"coreProfileId\":\"zts-model-1\"," ++
-        "\"coreGrammarSha256\":\"" ++ "1" ** 64 ++ "\"," ++
-        "\"semanticsSha256\":\"" ++ "2" ** 64 ++ "\"," ++
+        "\"coreGrammarSha256\":\"" ++ &@as([64:0]u8, @splat('1')) ++ "\"," ++
+        "\"semanticsSha256\":\"" ++ &@as([64:0]u8, @splat('2')) ++ "\"," ++
         "\"frontendProfileId\":null," ++
         "\"frontendGrammarSha256\":null," ++
         "\"compilerVersion\":\"0.0.0-test\"," ++
@@ -763,7 +759,7 @@ test "parseClaims accepts retired claim placeholders" {
     }
 
     try std.testing.expectEqualStrings("", claims.guarded_categories);
-    try std.testing.expectEqualStrings("e" ** 64, claims.runtime_policy_sha256);
+    try std.testing.expectEqualStrings(&@as([64:0]u8, @splat('e')), claims.runtime_policy_sha256);
     try std.testing.expectEqualStrings("zts-model-1", claims.core_profile_id);
 }
 
@@ -771,15 +767,15 @@ test "parseClaims requires guardedCategories in v4" {
     const allocator = std.testing.allocator;
     const payload =
         "{\"v\":\"" ++ version_tag ++ "\"," ++
-        "\"contractSha256\":\"" ++ "a" ** 64 ++ "\"," ++
-        "\"bytecodeSha256\":\"" ++ "b" ** 64 ++ "\"," ++
-        "\"policySha256\":\"" ++ "c" ** 64 ++ "\"," ++
-        "\"capabilityHash\":\"" ++ "d" ** 64 ++ "\"," ++
-        "\"runtimePolicySha256\":\"" ++ "e" ** 64 ++ "\"," ++
-        "\"executableRootSha256\":\"" ++ "f" ** 64 ++ "\"," ++
+        "\"contractSha256\":\"" ++ &@as([64:0]u8, @splat('a')) ++ "\"," ++
+        "\"bytecodeSha256\":\"" ++ &@as([64:0]u8, @splat('b')) ++ "\"," ++
+        "\"policySha256\":\"" ++ &@as([64:0]u8, @splat('c')) ++ "\"," ++
+        "\"capabilityHash\":\"" ++ &@as([64:0]u8, @splat('d')) ++ "\"," ++
+        "\"runtimePolicySha256\":\"" ++ &@as([64:0]u8, @splat('e')) ++ "\"," ++
+        "\"executableRootSha256\":\"" ++ &@as([64:0]u8, @splat('f')) ++ "\"," ++
         "\"coreProfileId\":\"zts-model-1\"," ++
-        "\"coreGrammarSha256\":\"" ++ "1" ** 64 ++ "\"," ++
-        "\"semanticsSha256\":\"" ++ "2" ** 64 ++ "\"," ++
+        "\"coreGrammarSha256\":\"" ++ &@as([64:0]u8, @splat('1')) ++ "\"," ++
+        "\"semanticsSha256\":\"" ++ &@as([64:0]u8, @splat('2')) ++ "\"," ++
         "\"frontendProfileId\":null," ++
         "\"frontendGrammarSha256\":null," ++
         "\"compilerVersion\":\"0.0.0-test\"," ++
@@ -873,7 +869,7 @@ test "rejects malformed core source identity claims" {
     const kp = try keyPairFromSeed(test_seed);
 
     var bad_hex = testClaims();
-    bad_hex.core_grammar_sha256 = "g" ** 64;
+    bad_hex.core_grammar_sha256 = &@as([64:0]u8, @splat('g'));
     try std.testing.expectError(error.InvalidHexEncoding, sign(allocator, bad_hex, kp));
 }
 

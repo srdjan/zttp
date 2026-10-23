@@ -461,9 +461,9 @@ fn jsonToF64(v: std.json.Value) ?f64 {
 
 fn jsonValueToString(allocator: std.mem.Allocator, val: std.json.Value) ![]const u8 {
     return switch (val) {
-        .string => |s| try std.fmt.allocPrint(allocator, "\"{s}\"", .{s}),
-        .integer => |i| try std.fmt.allocPrint(allocator, "{d}", .{i}),
-        .float => |f| try std.fmt.allocPrint(allocator, "{d}", .{f}),
+        .string => |s| try allocator.print("\"{s}\"", .{s}),
+        .integer => |i| try allocator.print("{d}", .{i}),
+        .float => |f| try allocator.print("{d}", .{f}),
         .bool => |b| try allocator.dupe(u8, if (b) "true" else "false"),
         .null => try allocator.dupe(u8, "null"),
         // Objects/arrays are not valid scalar enum members.
@@ -762,20 +762,20 @@ fn isWholeNumber(f: f64) bool {
 
 fn buildPath(allocator: std.mem.Allocator, prefix: []const u8, field: []const u8) ![]const u8 {
     if (prefix.len == 0) return try allocator.dupe(u8, field);
-    return try std.fmt.allocPrint(allocator, "{s}.{s}", .{ prefix, field });
+    return try allocator.print("{s}.{s}", .{ prefix, field });
 }
 
 fn buildIndexPath(allocator: std.mem.Allocator, prefix: []const u8, index: usize) ![]const u8 {
-    if (prefix.len == 0) return try std.fmt.allocPrint(allocator, "[{d}]", .{index});
-    return try std.fmt.allocPrint(allocator, "{s}[{d}]", .{ prefix, index });
+    if (prefix.len == 0) return try allocator.print("[{d}]", .{index});
+    return try allocator.print("{s}[{d}]", .{ prefix, index });
 }
 
 fn jsValueToEnumString(allocator: std.mem.Allocator, val: sdk.JSValue) ![]const u8 {
     if (val.isNull()) return try allocator.dupe(u8, "null");
     if (val.isBool()) return try allocator.dupe(u8, if (val.isTrue()) "true" else "false");
-    if (val.isInt()) return try std.fmt.allocPrint(allocator, "{d}", .{val.getInt()});
-    if (sdk.extractFloat(val)) |f| return try std.fmt.allocPrint(allocator, "{d}", .{f});
-    if (sdk.extractString(val)) |str| return try std.fmt.allocPrint(allocator, "\"{s}\"", .{str});
+    if (val.isInt()) return try allocator.print("{d}", .{val.getInt()});
+    if (sdk.extractFloat(val)) |f| return try allocator.print("{d}", .{f});
+    if (sdk.extractString(val)) |str| return try allocator.print("\"{s}\"", .{str});
     return error.UnsupportedEnumValue;
 }
 

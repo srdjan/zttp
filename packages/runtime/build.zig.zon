@@ -1,8 +1,8 @@
 .{
     .name = .zttp_runtime,
-    .version = "0.23.0",
+    .version = "0.24.0",
     .fingerprint = 0x309e5ad3f606ff57,
-    .minimum_zig_version = "0.16.0",
+    .minimum_zig_version = "0.17.0",
     .dependencies = .{
         .zts = .{
             .path = "../zts",

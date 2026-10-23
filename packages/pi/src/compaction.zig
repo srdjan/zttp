@@ -764,8 +764,8 @@ test "prepare returns no change for empty and small active history" {
 test "prepare prefers a whole external-user turn boundary" {
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(testing.allocator);
-    try addText(&tr, .user, "first " ** 100);
-    try addText(&tr, .assistant, "answer " ** 100);
+    try addText(&tr, .user, &@as([(100) * ("first ").len]u8, @bitCast(@as([100][("first ").len]u8, @splat(("first ").*)))));
+    try addText(&tr, .assistant, &@as([(100) * ("answer ").len]u8, @bitCast(@as([100][("answer ").len]u8, @splat(("answer ").*)))));
     try addText(&tr, .user, "second");
     try addText(&tr, .assistant, "kept");
     // Wide enough for the whole two-entry turn and far short of the 700-byte
@@ -780,14 +780,14 @@ test "prepare splits an oversized turn only at an assistant boundary" {
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(testing.allocator);
     try addText(&tr, .user, "large request");
-    try addText(&tr, .assistant, "early " ** 100);
+    try addText(&tr, .assistant, &@as([(100) * ("early ").len]u8, @bitCast(@as([100][("early ").len]u8, @splat(("early ").*)))));
     const calls = [_]turn.ToolCall{.{ .id = "call_1", .name = "workspace_read_file", .args_json = "{\"path\":\"a.ts\"}" }};
     try tr.append(testing.allocator, .{ .assistant_tool_use = &calls });
     try tr.append(testing.allocator, .{ .tool_result = .{
         .tool_use_id = "call_1",
         .tool_name = "workspace_read_file",
         .ok = true,
-        .llm_text = "result " ** 100,
+        .llm_text = &@as([(100) * ("result ").len]u8, @bitCast(@as([100][("result ").len]u8, @splat(("result ").*)))),
     } });
     try addText(&tr, .assistant, "late answer");
     const ready = (try prepare(testing.allocator, &tr, 30)).ready;
@@ -801,8 +801,8 @@ test "prepare repeatedly compacts an active split-turn suffix without its user e
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(testing.allocator);
     try addText(&tr, .user, "original request");
-    try addText(&tr, .assistant, "early " ** 100);
-    try addText(&tr, .assistant, "middle " ** 100);
+    try addText(&tr, .assistant, &@as([(100) * ("early ").len]u8, @bitCast(@as([100][("early ").len]u8, @splat(("early ").*)))));
+    try addText(&tr, .assistant, &@as([(100) * ("middle ").len]u8, @bitCast(@as([100][("middle ").len]u8, @splat(("middle ").*)))));
     try addText(&tr, .assistant, "retained answer");
     try tr.replaceProjection(testing.allocator, "validated prior split summary", 2);
 
@@ -824,7 +824,7 @@ test "prepare protects unresolved pairs and an oversized single user ask" {
 
     var oversized: transcript_mod.Transcript = .{};
     defer oversized.deinit(testing.allocator);
-    try addText(&oversized, .user, "x" ** 1000);
+    try addText(&oversized, .user, &@as([1000:0]u8, @splat('x')));
     const user_result = try prepare(testing.allocator, &oversized, 1);
     try testing.expectEqual(NotCompactableReason.oversized_current_user, user_result.not_compactable);
 }
@@ -945,7 +945,7 @@ test "serializeSpan uses explicit labels exact args and a UTF-8-safe 2000-byte t
         .tool_use_id = "call_1",
         .tool_name = "workspace_read_file",
         .ok = true,
-        .llm_text = "é" ** 1200,
+        .llm_text = &@as([(1200) * ("é").len]u8, @bitCast(@as([1200][("é").len]u8, @splat(("é").*)))),
     } });
     const serialized = try serializeSpan(testing.allocator, &tr, 0, tr.len());
     defer testing.allocator.free(serialized);
@@ -999,8 +999,8 @@ test "extractFileOps is cumulative unique and deterministic" {
     var changes = [_]ui_payload_mod.VerifiedChange{.{
         .file = @constCast("m.ts"),
         .baseline_state = @constCast("absent"),
-        .baseline_sha256 = @constCast("a" ** 64),
-        .candidate_sha256 = @constCast("b" ** 64),
+        .baseline_sha256 = @constCast(&@as([64:0]u8, @splat('a'))),
+        .candidate_sha256 = @constCast(&@as([64:0]u8, @splat('b'))),
         .before = null,
         .after = @constCast("x"),
         .unified_diff = @constCast(""),
@@ -1009,18 +1009,18 @@ test "extractFileOps is cumulative unique and deterministic" {
     var proof_inputs = [_]ui_payload_mod.VerifiedProofInput{.{
         .path = @constCast("m.ts"),
         .state = @constCast("absent"),
-        .sha256 = @constCast("a" ** 64),
+        .sha256 = @constCast(&@as([64:0]u8, @splat('a'))),
     }};
     const receipt_source: ui_payload_mod.UiPayload = .{ .verified_change_set = .{
         .proof_schema_version = @constCast("test-proof-v1"),
-        .transaction_id = @constCast("c" ** 64),
+        .transaction_id = @constCast(&@as([64:0]u8, @splat('c'))),
         .compiler_version = @constCast("test"),
         .profile_id = @constCast("test"),
-        .policy_hash = @constCast("d" ** 64),
-        .grammar_hash = @constCast("e" ** 64),
-        .semantics_hash = @constCast("f" ** 64),
-        .diagnostic_catalog_hash = @constCast("1" ** 64),
-        .read_set_digest = @constCast("2" ** 64),
+        .policy_hash = @constCast(&@as([64:0]u8, @splat('d'))),
+        .grammar_hash = @constCast(&@as([64:0]u8, @splat('e'))),
+        .semantics_hash = @constCast(&@as([64:0]u8, @splat('f'))),
+        .diagnostic_catalog_hash = @constCast(&@as([64:0]u8, @splat('1'))),
+        .read_set_digest = @constCast(&@as([64:0]u8, @splat('2'))),
         .applied_at_unix_ms = 1,
         .system_proven = false,
         .proof_roots = &roots,

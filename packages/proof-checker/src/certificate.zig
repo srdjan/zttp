@@ -111,11 +111,11 @@ pub const Identity = struct {
     contract_digest: [32]u8,
     /// Digest of the canonical residual guard plan. All zero when the handler
     /// has no guarded operations, which is a statement and not an omission.
-    residual_plan_digest: [32]u8 = [_]u8{0} ** 32,
+    residual_plan_digest: [32]u8 = @as([32]u8, @splat(0)),
     /// Digest of the exact serialized runtime capability policy this artifact
     /// was built against. The checker recomputes it from the bytes it is given,
     /// so this is what ties a guard plan to one policy rather than to any.
-    runtime_policy_digest: [32]u8 = [_]u8{0} ** 32,
+    runtime_policy_digest: [32]u8 = @as([32]u8, @splat(0)),
     /// The artifact was built with an ephemeral identity or an unpinned runtime
     /// policy. It can be checked; it can never satisfy production acceptance.
     development: bool,
@@ -145,11 +145,11 @@ pub const Obligation = struct {
     /// Canonical obligation order: property, then subject kind, then subject id.
     pub fn order(a: Obligation, b: Obligation) std.math.Order {
         @setRuntimeSafety(true);
-        const pa = @intFromEnum(a.property);
-        const pb = @intFromEnum(b.property);
+        const pa = @backingInt(a.property);
+        const pb = @backingInt(b.property);
         if (pa != pb) return std.math.order(pa, pb);
-        const ka = @intFromEnum(a.subject_kind);
-        const kb = @intFromEnum(b.subject_kind);
+        const ka = @backingInt(a.subject_kind);
+        const kb = @backingInt(b.subject_kind);
         if (ka != kb) return std.math.order(ka, kb);
         return std.math.order(a.subject_id, b.subject_id);
     }
@@ -272,8 +272,8 @@ pub const Witness = struct {
     pub fn order(a: Witness, b: Witness) std.math.Order {
         @setRuntimeSafety(true);
         if (a.scope_ir_node != b.scope_ir_node) return std.math.order(a.scope_ir_node, b.scope_ir_node);
-        const a_kind = @intFromEnum(a.kind);
-        const b_kind = @intFromEnum(b.kind);
+        const a_kind = @backingInt(a.kind);
+        const b_kind = @backingInt(b.kind);
         if (a_kind != b_kind) return std.math.order(a_kind, b_kind);
         if (a.code_start != b.code_start) return std.math.order(a.code_start, b.code_start);
         if (a.code_len != b.code_len) return std.math.order(b.code_len, a.code_len);
@@ -648,7 +648,7 @@ pub fn decodeAccepting(
         .evidence = .{},
     };
 
-    var seen = std.EnumSet(SectionTag).initEmpty();
+    var seen = std.EnumSet(SectionTag).empty;
     var previous_tag: u16 = 0;
     var cursor: usize = header_size;
 
@@ -676,8 +676,8 @@ pub fn decodeAccepting(
 
     if (cursor != bytes.len) return error.TrailingData;
 
-    inline for (@typeInfo(SectionTag).@"enum".fields) |field| {
-        const tag: SectionTag = @enumFromInt(field.value);
+    inline for (@typeInfo(SectionTag).@"enum".field_names) |field| {
+        const tag: SectionTag = @fromBackingInt(@intCast(@backingInt(@field(SectionTag, field))));
         if (tag.required() and !seen.contains(tag)) return error.MissingRequiredSection;
     }
 
@@ -736,10 +736,10 @@ pub const residual_plan_domain = "zttp-residual-plan-v1";
 fn foldResidual(hasher: *std.crypto.hash.sha2.Sha256, obligation: ResidualObligation) void {
     @setRuntimeSafety(true);
     hasher.update(&[_]u8{
-        @intFromEnum(obligation.kind),
-        @intFromEnum(obligation.normalization),
-        @intFromEnum(obligation.sink),
-        @intFromEnum(obligation.section),
+        @backingInt(obligation.kind),
+        @backingInt(obligation.normalization),
+        @backingInt(obligation.sink),
+        @backingInt(obligation.section),
     });
     var scratch: [4]u8 = undefined;
     std.mem.writeInt(u32, &scratch, obligation.impl_id, .little);
@@ -755,7 +755,7 @@ fn foldResidual(hasher: *std.crypto.hash.sha2.Sha256, obligation: ResidualObliga
 /// of a hash they would have to know to compare against.
 pub fn residualPlanDigest(obligations: []const ResidualObligation) [32]u8 {
     @setRuntimeSafety(true);
-    if (obligations.len == 0) return [_]u8{0} ** 32;
+    if (obligations.len == 0) return @as([32]u8, @splat(0));
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(residual_plan_domain);
     var count_le: [4]u8 = undefined;
@@ -768,7 +768,7 @@ pub fn residualPlanDigest(obligations: []const ResidualObligation) [32]u8 {
 /// The same fold over a decoded table.
 pub fn residualPlanDigestFromTable(table: ResidualTable) DecodeError![32]u8 {
     @setRuntimeSafety(true);
-    if (table.len() == 0) return [_]u8{0} ** 32;
+    if (table.len() == 0) return @as([32]u8, @splat(0));
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(residual_plan_domain);
     var count_le: [4]u8 = undefined;
@@ -790,7 +790,7 @@ fn foldIrNode(hasher: *std.crypto.hash.sha2.Sha256, node: IrNode) void {
     std.mem.writeInt(u32, &scratch, node.id, .little);
     hasher.update(&scratch);
     var tag_le: [2]u8 = undefined;
-    std.mem.writeInt(u16, &tag_le, @intFromEnum(node.tag), .little);
+    std.mem.writeInt(u16, &tag_le, @backingInt(node.tag), .little);
     hasher.update(&tag_le);
     hasher.update(&[_]u8{@intFromBool(node.is_handler)});
     std.mem.writeInt(u32, &scratch, node.parent, .little);
@@ -851,7 +851,7 @@ pub fn commitmentDigest(bytes: []const u8, certificate: Certificate) DecodeError
     hasher.update(commitment_domain);
 
     const identity_root_offset = header_size + section_header_size;
-    const zero_digest = [_]u8{0} ** 32;
+    const zero_digest = @as([32]u8, @splat(0));
     hasher.update(bytes[0..identity_root_offset]);
     hasher.update(&zero_digest);
     var cursor = identity_root_offset + zero_digest.len;
@@ -902,8 +902,8 @@ pub const EncodeError = error{BufferTooSmall};
 pub fn encodedSize(parts: Parts) usize {
     @setRuntimeSafety(true);
     var total: usize = header_size;
-    inline for (@typeInfo(SectionTag).@"enum".fields) |field| {
-        const tag: SectionTag = @enumFromInt(field.value);
+    inline for (@typeInfo(SectionTag).@"enum".field_names) |field| {
+        const tag: SectionTag = @fromBackingInt(@intCast(@backingInt(@field(SectionTag, field))));
         if (tag == .identity) {
             total += section_header_size + identity_size;
         } else {
@@ -965,8 +965,8 @@ const Cursor = struct {
 fn sectionCount(parts: Parts) u16 {
     @setRuntimeSafety(true);
     var count: u16 = 0;
-    inline for (@typeInfo(SectionTag).@"enum".fields) |field| {
-        const tag: SectionTag = @enumFromInt(field.value);
+    inline for (@typeInfo(SectionTag).@"enum".field_names) |field| {
+        const tag: SectionTag = @fromBackingInt(@intCast(@backingInt(@field(SectionTag, field))));
         if (tag == .identity) {
             count += 1;
         } else if (tag.required() or @field(parts, slot(tag).part_field).len > 0) {
@@ -984,12 +984,12 @@ pub fn encode(parts: Parts, out: []u8) EncodeError![]u8 {
     var cursor = Cursor{ .buf = out };
     try cursor.u64At(magic);
     try cursor.u16At(parts.schema_version);
-    try cursor.u16At(@intFromEnum(parts.proof_system));
+    try cursor.u16At(@backingInt(parts.proof_system));
     try cursor.u32At(parts.semantics_epoch);
     try cursor.u16At(sectionCount(parts));
 
-    inline for (@typeInfo(SectionTag).@"enum".fields) |field| {
-        try encodeSection(@enumFromInt(field.value), parts, &cursor);
+    inline for (@typeInfo(SectionTag).@"enum".field_names) |field| {
+        try encodeSection(@fromBackingInt(@intCast(@backingInt(@field(SectionTag, field)))), parts, &cursor);
     }
     return out[0..cursor.at];
 }
@@ -1001,7 +1001,7 @@ fn encodeSection(comptime tag: SectionTag, parts: Parts, cursor: *Cursor) Encode
     }
     switch (tag) {
         .identity => {
-            try cursor.u16At(@intFromEnum(tag));
+            try cursor.u16At(@backingInt(tag));
             try cursor.u32At(@intCast(slot(tag).record_size));
             try cursor.raw(&parts.identity.executable_root);
             try cursor.raw(&parts.identity.ir_root);
@@ -1014,7 +1014,7 @@ fn encodeSection(comptime tag: SectionTag, parts: Parts, cursor: *Cursor) Encode
             const records = @field(parts, slot(tag).part_field);
             try writeTable(cursor, tag, records.len, slot(tag).record_size);
             for (records) |member| {
-                try cursor.u16At(@intFromEnum(member.kind));
+                try cursor.u16At(@backingInt(member.kind));
                 try cursor.u32At(member.ordinal);
                 try cursor.raw(&member.digest);
             }
@@ -1023,8 +1023,8 @@ fn encodeSection(comptime tag: SectionTag, parts: Parts, cursor: *Cursor) Encode
             const records = @field(parts, slot(tag).part_field);
             try writeTable(cursor, tag, records.len, slot(tag).record_size);
             for (records) |obligation| {
-                try cursor.u16At(@intFromEnum(obligation.property));
-                try cursor.u8At(@intFromEnum(obligation.subject_kind));
+                try cursor.u16At(@backingInt(obligation.property));
+                try cursor.u8At(@backingInt(obligation.subject_kind));
                 try cursor.zeros(1);
                 try cursor.u32At(obligation.subject_id);
             }
@@ -1034,7 +1034,7 @@ fn encodeSection(comptime tag: SectionTag, parts: Parts, cursor: *Cursor) Encode
             try writeTable(cursor, tag, records.len, slot(tag).record_size);
             for (records) |node| {
                 try cursor.u32At(node.id);
-                try cursor.u16At(@intFromEnum(node.tag));
+                try cursor.u16At(@backingInt(node.tag));
                 try cursor.u8At(@intFromBool(node.is_handler));
                 try cursor.zeros(1);
                 try cursor.u32At(node.parent);
@@ -1049,9 +1049,9 @@ fn encodeSection(comptime tag: SectionTag, parts: Parts, cursor: *Cursor) Encode
             try writeTable(cursor, tag, records.len, slot(tag).record_size);
             for (records) |entry| {
                 try cursor.u32At(entry.obligation_index);
-                try cursor.u8At(@intFromEnum(entry.edge));
+                try cursor.u8At(@backingInt(entry.edge));
                 try cursor.zeros(1);
-                try cursor.u16At(if (entry.rule) |rule| @intFromEnum(rule) else 0);
+                try cursor.u16At(if (entry.rule) |rule| @backingInt(rule) else 0);
                 try cursor.u32At(entry.node_id);
                 try cursor.u32At(entry.aux);
             }
@@ -1066,7 +1066,7 @@ fn encodeSection(comptime tag: SectionTag, parts: Parts, cursor: *Cursor) Encode
                 try cursor.u32At(witness.target_ir);
                 try cursor.u32At(witness.target_offset);
                 try cursor.u32At(witness.scope_ir_node);
-                try cursor.u8At(@intFromEnum(witness.kind));
+                try cursor.u8At(@backingInt(witness.kind));
                 try cursor.zeros(3);
             }
         },
@@ -1074,7 +1074,7 @@ fn encodeSection(comptime tag: SectionTag, parts: Parts, cursor: *Cursor) Encode
             const records = @field(parts, slot(tag).part_field);
             try writeTable(cursor, tag, records.len, slot(tag).record_size);
             for (records) |rewrite| {
-                try cursor.u16At(@intFromEnum(rewrite.rule));
+                try cursor.u16At(@backingInt(rewrite.rule));
                 try cursor.zeros(2);
                 try cursor.u32At(rewrite.before_offset);
                 try cursor.u32At(rewrite.before_len);
@@ -1087,10 +1087,10 @@ fn encodeSection(comptime tag: SectionTag, parts: Parts, cursor: *Cursor) Encode
             const records = @field(parts, slot(tag).part_field);
             try writeTable(cursor, tag, records.len, slot(tag).record_size);
             for (records) |edge| {
-                try cursor.u8At(@intFromEnum(edge.family));
+                try cursor.u8At(@backingInt(edge.family));
                 try cursor.u8At(edge.grade.toWire());
                 try cursor.u16At(edge.member_id);
-                try cursor.u16At(@intFromEnum(edge.reason));
+                try cursor.u16At(@backingInt(edge.reason));
                 try cursor.zeros(2);
             }
         },
@@ -1099,7 +1099,7 @@ fn encodeSection(comptime tag: SectionTag, parts: Parts, cursor: *Cursor) Encode
             try writeTable(cursor, tag, records.len, slot(tag).record_size);
             for (records) |query| {
                 try cursor.u32At(query.obligation_index);
-                try cursor.u16At(@intFromEnum(query.query_kind));
+                try cursor.u16At(@backingInt(query.query_kind));
                 try cursor.zeros(2);
             }
         },
@@ -1107,10 +1107,10 @@ fn encodeSection(comptime tag: SectionTag, parts: Parts, cursor: *Cursor) Encode
             const records = @field(parts, slot(tag).part_field);
             try writeTable(cursor, tag, records.len, slot(tag).record_size);
             for (records) |obligation| {
-                try cursor.u8At(@intFromEnum(obligation.kind));
-                try cursor.u8At(@intFromEnum(obligation.normalization));
-                try cursor.u8At(@intFromEnum(obligation.sink));
-                try cursor.u8At(@intFromEnum(obligation.section));
+                try cursor.u8At(@backingInt(obligation.kind));
+                try cursor.u8At(@backingInt(obligation.normalization));
+                try cursor.u8At(@backingInt(obligation.sink));
+                try cursor.u8At(@backingInt(obligation.section));
                 try cursor.u32At(obligation.impl_id);
                 try cursor.u32At(obligation.operation_id);
                 try cursor.zeros(4);
@@ -1121,7 +1121,7 @@ fn encodeSection(comptime tag: SectionTag, parts: Parts, cursor: *Cursor) Encode
 
 fn writeTable(cursor: *Cursor, tag: SectionTag, count: usize, record_size: usize) EncodeError!void {
     @setRuntimeSafety(true);
-    try cursor.u16At(@intFromEnum(tag));
+    try cursor.u16At(@backingInt(tag));
     try cursor.u32At(@intCast(4 + count * record_size));
     try cursor.u32At(@intCast(count));
 }
@@ -1383,7 +1383,7 @@ fn testSection(bytes: []const u8, tag: SectionTag) TestSection {
     var at: usize = header_size;
     while (at < bytes.len) {
         const length = u32At(bytes, at + 2);
-        if (u16At(bytes, at) == @intFromEnum(tag)) {
+        if (u16At(bytes, at) == @backingInt(tag)) {
             return .{ .start = at, .payload = at + section_header_size, .length = length };
         }
         at += section_header_size + length;
@@ -1488,8 +1488,8 @@ test "certificate record reserved sites and closed wire fields refuse nonzero by
         var budget = Budget.init(.{});
         try testing.expectError(site.expected, decode(changed[0..bytes.len], .{}, &budget));
     }
-    inline for (@typeInfo(CertificateDecodeSite).@"enum".fields) |field| {
-        const site: CertificateDecodeSite = @enumFromInt(field.value);
+    inline for (@typeInfo(CertificateDecodeSite).@"enum".field_names) |field| {
+        const site: CertificateDecodeSite = @fromBackingInt(@intCast(@backingInt(@field(CertificateDecodeSite, field))));
         var driven = false;
         for (sites) |probe| {
             if (probe.site == site) driven = true;
@@ -1586,7 +1586,7 @@ fn probeDecodeError(comptime expected: DecodeError) !void {
             std.mem.writeInt(
                 u16,
                 mutated[obligations_header..][0..2],
-                @intFromEnum(SectionTag.graph),
+                @backingInt(SectionTag.graph),
                 .little,
             );
             try testing.expectError(expected, decode(mutated[0..bytes.len], .{}, &budget));
@@ -1646,8 +1646,8 @@ fn probeDecodeError(comptime expected: DecodeError) !void {
 }
 
 test "every decode error is observed through the public decoder" {
-    inline for (@typeInfo(DecodeError).error_set.?) |member| {
-        try probeDecodeError(@field(DecodeError, member.name));
+    inline for (@typeInfo(DecodeError).error_set.error_names.?) |member| {
+        try probeDecodeError(@field(DecodeError, member));
     }
 }
 
@@ -1676,9 +1676,9 @@ fn expectStructurallyValid(input: []const u8, cert: Certificate) !void {
     try testing.expectEqual(ps.schema_version, cert.schema_version);
     const input_start = @intFromPtr(input.ptr);
     const input_end = input_start + input.len;
-    inline for (@typeInfo(Certificate).@"struct".fields) |field| {
-        if (comptime isRecordTable(field.type)) {
-            const table = @field(cert, field.name);
+    inline for (@typeInfo(Certificate).@"struct".field_names) |field| {
+        if (comptime isRecordTable(@FieldType(Certificate, field))) {
+            const table = @field(cert, field);
             if (table.count == 0) {
                 try testing.expectEqual(@as(usize, 0), table.bytes.len);
             } else {
@@ -1772,12 +1772,12 @@ test "a byte-mutation sweep of a valid certificate yields a typed error or a str
 }
 
 test "every decode error maps to a distinct stable reason code" {
-    const errors = @typeInfo(DecodeError).error_set.?;
+    const errors = @typeInfo(DecodeError).error_set.error_names.?;
     inline for (errors, 0..) |a_member, i| {
         inline for (errors, 0..) |b_member, j| {
             if (i == j) continue;
-            const a = @field(DecodeError, a_member.name);
-            const b = @field(DecodeError, b_member.name);
+            const a = @field(DecodeError, a_member);
+            const b = @field(DecodeError, b_member);
             try testing.expect(reasonFor(a) != reasonFor(b));
         }
     }
@@ -1803,7 +1803,7 @@ test "every decode error maps to its exact reason code" {
         .{ .err = error.ReservedFieldNonZero, .code = .reserved_field_nonzero },
         .{ .err = error.WorkBudgetExhausted, .code = .work_budget_exhausted },
     };
-    try testing.expectEqual(@typeInfo(DecodeError).error_set.?.len, pairs.len);
+    try testing.expectEqual(@typeInfo(DecodeError).error_set.error_names.?.len, pairs.len);
     for (pairs) |pair| try testing.expectEqual(pair.code, reasonFor(pair.err));
 }
 

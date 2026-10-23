@@ -70,7 +70,7 @@ dist="$work/dist"
 manifest="$work/manifest"
 notes="$work/release-notes.md"
 
-linux_image="zttp-release-linux:0.16.0-arm64"
+linux_image="zttp-release-linux:0.17.0-arm64"
 linux_cpus=10
 # bash 3.2 has no associative arrays and fails on an empty array under set -u.
 # Container names hold no spaces, so a plain string is a safe list.
@@ -346,7 +346,7 @@ targets=(
 )
 for entry in "${targets[@]}"; do
   target="${entry%%:*}"
-  zig build -Doptimize=ReleaseFast "-Dtarget=$target" -Dstrip --prefix "$work/out/$target"
+  zig build -Doptimize=fast "-Dtarget=$target" -Dstrip --prefix "$work/out/$target"
 done
 
 step "package tarballs"

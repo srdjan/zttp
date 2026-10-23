@@ -290,7 +290,7 @@ pub const Recorder = struct {
         }
         const turn_index: u32 = @intCast(self.turn_workspaces.items.len);
         var files: std.ArrayList(artifact.WorkspaceFixture) = .empty;
-        const prefix = try std.fmt.allocPrint(self.allocator(), "turns/{d}/", .{turn_index});
+        const prefix = try self.allocator().print("turns/{d}/", .{turn_index});
         try self.captureWorkspace(root_abs, .turn_workspace, prefix, &files);
         try self.turn_workspaces.append(self.allocator(), .{
             .turn_index = turn_index,
@@ -313,7 +313,7 @@ pub const Recorder = struct {
         if (!self.captured_initial or !self.captured_expected or self.pending_turn != null) {
             return error.InvalidRecorderState;
         }
-        const zero = artifact.Sha256Hex{ .bytes = [_]u8{'0'} ** 64 };
+        const zero = artifact.Sha256Hex{ .bytes = @as([64]u8, @splat('0')) };
         const manifest = artifact.FlowManifest{
             .schema_version = artifact.schema_version,
             .flow_version = zero,
@@ -457,11 +457,7 @@ pub const Recorder = struct {
             self.compaction_bridge_anchor = null;
         }
         try self.reserveFixtureBytes(response_bytes.len, artifact.Limits.trace_or_response_bytes);
-        const response_path = try std.fmt.allocPrint(
-            self.allocator(),
-            "responses/{d}.jsonl",
-            .{global_call_index},
-        );
+        const response_path = try self.allocator().print("responses/{d}.jsonl", .{global_call_index});
         const index: u32 = @intCast(global_call_index);
         try self.responses.append(self.allocator(), .{
             .index = index,
@@ -613,11 +609,7 @@ pub const Recorder = struct {
         if (body.len > artifact.Limits.trace_or_response_bytes) return error.FlowLimitExceeded;
         const parent = std.fs.path.dirname(diagnostics_path) orelse
             return error.InvalidDiagnosticsPath;
-        const quarantine_path = try std.fmt.allocPrint(
-            self.allocator(),
-            "{s}/{s}.rejected-call-{d}.json",
-            .{ parent, self.options.case_name, global_call_index },
-        );
+        const quarantine_path = try self.allocator().print("{s}/{s}.rejected-call-{d}.json", .{ parent, self.options.case_name, global_call_index });
         defer self.allocator().free(quarantine_path);
 
         var buffer = TextBuffer.init(self.allocator());
@@ -714,7 +706,7 @@ pub const Recorder = struct {
             const absolute = try std.fs.path.join(self.allocator(), &.{ root_abs, path });
             const bytes = try zts.file_io.readFile(self.allocator(), absolute, artifact.Limits.workspace_file_bytes);
             try self.reserveFixtureBytes(bytes.len, artifact.Limits.workspace_file_bytes);
-            const fixture_path = try std.fmt.allocPrint(self.allocator(), "{s}{s}", .{ fixture_prefix, path });
+            const fixture_path = try self.allocator().print("{s}{s}", .{ fixture_prefix, path });
             try inventory.append(self.allocator(), .{
                 .path = path,
                 .sha256 = artifact.Sha256Hex.fromBytes(bytes),
@@ -1119,11 +1111,7 @@ test "the capture keeps the body of the proposal it refused" {
 
     // The envelope is self-contained: shape, error, call index and bytes
     // together, so it needs no other file to be read against.
-    const quarantine_path = try std.fmt.allocPrint(
-        allocator,
-        "{s}/refused-case.rejected-call-0.json",
-        .{workspace_root},
-    );
+    const quarantine_path = try allocator.print("{s}/refused-case.rejected-call-0.json", .{workspace_root});
     defer allocator.free(quarantine_path);
     const written = try zts.file_io.readFile(allocator, quarantine_path, 64 * 1024);
     defer allocator.free(written);

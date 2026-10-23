@@ -281,7 +281,7 @@ pub const Atom = enum(u32) {
 
     /// Check if atom is a predefined (static) atom
     pub fn isPredefined(self: Atom) bool {
-        return @intFromEnum(self) < FIRST_DYNAMIC;
+        return @backingInt(self) < FIRST_DYNAMIC;
     }
 
     /// Get the string name for a predefined atom
@@ -919,11 +919,11 @@ pub const HiddenClassIndex = enum(u32) {
     }
 
     pub fn toInt(self: HiddenClassIndex) u32 {
-        return @intFromEnum(self);
+        return @backingInt(self);
     }
 
     pub fn fromInt(val: u32) HiddenClassIndex {
-        return @enumFromInt(val);
+        return @fromBackingInt(@intCast(val));
     }
 };
 
@@ -980,7 +980,7 @@ pub const HiddenClassPool = struct {
 
         pool.* = .{
             .allocator = allocator,
-            .json_shape_cache = [_]JSONShapeCacheEntry{.{}} ** JSON_SHAPE_CACHE_SIZE,
+            .json_shape_cache = @as([JSON_SHAPE_CACHE_SIZE]JSONShapeCacheEntry, @splat(.{})),
             .property_counts = .empty,
             .properties_starts = .empty,
             .prototype_indices = .empty,
@@ -1025,7 +1025,7 @@ pub const HiddenClassPool = struct {
     fn hashJsonShape(atoms: []const Atom) u64 {
         var hash: u64 = 0xcbf29ce484222325;
         for (atoms) |atom| {
-            hash ^= @intFromEnum(atom);
+            hash ^= @backingInt(atom);
             hash *%= 0x100000001b3;
         }
         return hash;
@@ -1107,10 +1107,10 @@ pub const HiddenClassPool = struct {
                 const offsets = self.sorted_property_offsets.items[sorted_start..][0..prop_count];
                 var lo: usize = 0;
                 var hi: usize = names.len;
-                const target = @intFromEnum(name);
+                const target = @backingInt(name);
                 while (lo < hi) {
                     const mid = (lo + hi) / 2;
-                    const mid_val = @intFromEnum(names[mid]);
+                    const mid_val = @backingInt(names[mid]);
                     if (mid_val == target) return offsets[mid];
                     if (mid_val < target) {
                         lo = mid + 1;
@@ -1142,7 +1142,7 @@ pub const HiddenClassPool = struct {
         const from = from_idx.toInt();
 
         // O(1) lookup for existing transition using hash map
-        const key: u64 = (@as(u64, from) << 32) | @intFromEnum(name);
+        const key: u64 = (@as(u64, from) << 32) | @backingInt(name);
         if (self.transition_map.get(key)) |to_idx| {
             return to_idx;
         }
@@ -1207,7 +1207,7 @@ pub const HiddenClassPool = struct {
 
         std.mem.sort(Entry, entries, {}, struct {
             fn lessThan(_: void, a: Entry, b: Entry) bool {
-                return @intFromEnum(a.name) < @intFromEnum(b.name);
+                return @backingInt(a.name) < @backingInt(b.name);
             }
         }.lessThan);
 
@@ -1273,10 +1273,10 @@ pub const HiddenClassPool = struct {
         const from = from_idx.toInt();
 
         // Use special atoms for function class transition
-        const reserved0: Atom = @enumFromInt(0xFFFE);
-        const reserved1: Atom = @enumFromInt(0xFFFF);
+        const reserved0: Atom = @fromBackingInt(@intCast(0xFFFE));
+        const reserved1: Atom = @fromBackingInt(@intCast(0xFFFF));
 
-        const key: u64 = (@as(u64, from) << 32) | @intFromEnum(reserved0);
+        const key: u64 = (@as(u64, from) << 32) | @backingInt(reserved0);
         if (self.transition_map.get(key)) |to_idx| {
             return to_idx;
         }
@@ -1430,7 +1430,7 @@ pub const JSObject = extern struct {
             .prototype = prototype,
             .class_id = .object,
             .flags = .{},
-            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
             .overflow_slots = null,
             .overflow_capacity = 0,
             .arena_ptr = null,
@@ -1455,7 +1455,7 @@ pub const JSObject = extern struct {
             .prototype = prototype,
             .class_id = .object,
             .flags = .{ .is_arena = true },
-            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
             .overflow_slots = null,
             .overflow_capacity = 0,
             .arena_ptr = arena,
@@ -1486,7 +1486,7 @@ pub const JSObject = extern struct {
             .prototype = null,
             .class_id = .array,
             .flags = .{ .is_exotic = true, .has_small_array = true, .is_arena = true },
-            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
             .overflow_slots = null,
             .overflow_capacity = 0,
             .arena_ptr = arena,
@@ -1505,7 +1505,7 @@ pub const JSObject = extern struct {
             .prototype = null,
             .class_id = .dict,
             .flags = .{ .is_exotic = true, .is_arena = true },
-            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
             .overflow_slots = null,
             .overflow_capacity = 0,
             .arena_ptr = arena,
@@ -1526,7 +1526,7 @@ pub const JSObject = extern struct {
             .prototype = null,
             .class_id = .bytes,
             .flags = .{ .is_exotic = true, .is_arena = true },
-            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
             .overflow_slots = null,
             .overflow_capacity = 0,
             .arena_ptr = arena,
@@ -1727,7 +1727,7 @@ pub const JSObject = extern struct {
             .prototype = null,
             .class_id = .function,
             .flags = .{ .is_callable = true },
-            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
             .overflow_slots = null,
             .overflow_capacity = 0,
             .arena_ptr = null,
@@ -1770,7 +1770,7 @@ pub const JSObject = extern struct {
                 .is_generator = bytecode_ptr.flags.is_generator,
                 .is_async = bytecode_ptr.flags.is_async,
             },
-            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
             .overflow_slots = null,
             .overflow_capacity = 0,
             .arena_ptr = null,
@@ -1784,7 +1784,7 @@ pub const JSObject = extern struct {
     /// Get bytecode function data (if this is a bytecode function)
     pub fn getBytecodeFunctionData(self: *const JSObject) ?*BytecodeFunctionData {
         if (self.class_id != .function or !self.flags.is_callable) {
-            std.log.debug("getBytecodeFunc fail: class_id={} is_callable={}", .{ @intFromEnum(self.class_id), self.flags.is_callable });
+            std.log.debug("getBytecodeFunc fail: class_id={} is_callable={}", .{ @backingInt(self.class_id), self.flags.is_callable });
             return null;
         }
         const slot = self.inline_slots[Slots.FUNC_DATA];
@@ -1830,7 +1830,7 @@ pub const JSObject = extern struct {
                 .is_generator = bytecode_ptr.flags.is_generator,
                 .is_async = bytecode_ptr.flags.is_async,
             },
-            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
             .overflow_slots = null,
             .overflow_capacity = 0,
             .arena_ptr = null,
@@ -2092,7 +2092,7 @@ pub const JSObject = extern struct {
     pub fn resultErrorFieldAtom(self: *const JSObject) ?Atom {
         const slot = self.inline_slots[Slots.RESULT_ERROR_FIELD];
         if (!slot.isInt()) return null;
-        return @enumFromInt(@as(u16, @intCast(slot.getInt())));
+        return @fromBackingInt(@intCast(@as(u16, @intCast(slot.getInt()))));
     }
 
     fn getResultCoreProperty(self: *const JSObject, name: Atom) ?value.JSValue {
@@ -2129,7 +2129,7 @@ pub const JSObject = extern struct {
             .prototype = null,
             .class_id = .array,
             .flags = .{ .is_exotic = true, .has_small_array = true },
-            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
             .overflow_slots = null,
             .overflow_capacity = 0,
             .arena_ptr = null,
@@ -2151,7 +2151,7 @@ pub const JSObject = extern struct {
             .prototype = null,
             .class_id = .dict,
             .flags = .{ .is_exotic = true },
-            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
             .overflow_slots = null,
             .overflow_capacity = 0,
             .arena_ptr = null,
@@ -2171,7 +2171,7 @@ pub const JSObject = extern struct {
             .prototype = null,
             .class_id = .bytes,
             .flags = .{ .is_exotic = true },
-            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
             .overflow_slots = null,
             .overflow_capacity = 0,
             .arena_ptr = null,
@@ -2251,7 +2251,7 @@ pub const JSObject = extern struct {
             .prototype = null,
             .class_id = .range_iterator,
             .flags = .{ .is_exotic = true },
-            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
             .overflow_slots = null,
             .overflow_capacity = 0,
             .arena_ptr = null,
@@ -2275,7 +2275,7 @@ pub const JSObject = extern struct {
             .prototype = null,
             .class_id = .range_iterator,
             .flags = .{ .is_exotic = true, .is_arena = true },
-            .inline_slots = [_]value.JSValue{value.JSValue.undefined_val} ** INLINE_SLOT_COUNT,
+            .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
             .overflow_slots = null,
             .overflow_capacity = 0,
             .arena_ptr = arena,
@@ -2503,7 +2503,7 @@ pub const InlineCache = struct {
 test "Atom predefined check" {
     try std.testing.expect(Atom.length.isPredefined());
     try std.testing.expect(Atom.prototype.isPredefined());
-    try std.testing.expect(!(@as(Atom, @enumFromInt(Atom.FIRST_DYNAMIC)).isPredefined()));
+    try std.testing.expect(!(@as(Atom, @fromBackingInt(@intCast(Atom.FIRST_DYNAMIC))).isPredefined()));
 }
 
 test "InlineCache hit tracking" {

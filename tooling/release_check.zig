@@ -209,7 +209,7 @@ const usage =
 ;
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var debug_alloc: std.heap.DebugAllocator(.{}) = .init;
+    var debug_alloc: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_alloc.deinit();
     const allocator = debug_alloc.allocator();
 
@@ -1026,7 +1026,7 @@ fn writeReleaseDoctorFixture(io: std.Io, tmp: *std.testing.TmpDir, opts: Release
         "Numbers: 3ms runtime init. 1.2MB binary. 4MB memory baseline.\n"
     else
         "Numbers: cold-start floor 3.5 ms, typical 7-15 ms, RSS 13 MB, throughput 112k req/s. These numbers are pending receipt-backed measurement.\n";
-    const readme_data = try std.fmt.allocPrint(std.testing.allocator, "{s}\n\n{s}", .{ readme_heading, readme_body });
+    const readme_data = try std.testing.allocator.print("{s}\n\n{s}", .{ readme_heading, readme_body });
     defer std.testing.allocator.free(readme_data);
     try tmp.dir.writeFile(io, .{
         .sub_path = "README.md",

@@ -73,7 +73,7 @@ pub const Kind = enum { good, bad };
 /// The stages a `good` case must run. `policy` runs only when the caller
 /// supplies a policy, and the gate supplies none.
 const good_stages: precompile.StageSet = blk: {
-    var set = precompile.StageSet.initFull();
+    var set = precompile.StageSet.full;
     set.remove(.policy);
     break :blk set;
 };
@@ -270,7 +270,7 @@ pub const Report = struct {
         try self.failures.append(a, .{
             .kind = kind,
             .path = try a.dupe(u8, path),
-            .detail = try std.fmt.allocPrint(a, fmt, args),
+            .detail = try a.print(fmt, args),
         });
     }
 };
@@ -330,7 +330,7 @@ fn discover(
         if (is_golden) {
             try goldens.append(a, .{ .family = family.?, .kind = kind.?, .name = name, .path = owned_path });
         } else {
-            const golden_path = try std.fmt.allocPrint(a, "{s}/{s}/{s}.diag", .{ parts[0], parts[1], name });
+            const golden_path = try a.print("{s}/{s}/{s}.diag", .{ parts[0], parts[1], name });
             try cases.append(a, .{
                 .family = family.?,
                 .kind = kind.?,
@@ -380,19 +380,15 @@ fn firstDifference(arena: std.mem.Allocator, expected: []const u8, actual: []con
         const g = act_lines.next();
         if (e == null and g == null) break;
         if (e != null and g != null and std.mem.eql(u8, e.?, g.?)) continue;
-        return std.fmt.allocPrint(
-            arena,
-            "first difference at line {d}\n  golden: {s}\n  actual: {s}\n--- golden ---\n{s}--- actual ---\n{s}",
-            .{ line, e orelse "(end of file)", g orelse "(end of file)", expected, actual },
-        );
+        return arena.print("first difference at line {d}\n  golden: {s}\n  actual: {s}\n--- golden ---\n{s}--- actual ---\n{s}", .{ line, e orelse "(end of file)", g orelse "(end of file)", expected, actual });
     }
-    return std.fmt.allocPrint(arena, "texts differ\n--- golden ---\n{s}--- actual ---\n{s}", .{ expected, actual });
+    return arena.print("texts differ\n--- golden ---\n{s}--- actual ---\n{s}", .{ expected, actual });
 }
 
 fn latestStageIndex(stages: precompile.StageSet) ?usize {
     var latest: ?usize = null;
     var it = stages.iterator();
-    while (it.next()) |stage| latest = @intFromEnum(stage);
+    while (it.next()) |stage| latest = @backingInt(stage);
     return latest;
 }
 
@@ -483,12 +479,12 @@ fn runCase(
             }
         },
     }
-    const import_index = @intFromEnum(precompile.Stage.imports);
+    const import_index = @backingInt(precompile.Stage.imports);
     const latest = latestStageIndex(result.stages_run);
     switch (case.family) {
         .parse => if (case.kind == .bad) {
             if (latest != null and latest.? > import_index) {
-                try report.add(.misfiled, case.source_path, "a parse case stops at or before the import check, but this one ran stage {s}; move it to check/", .{@tagName(@as(precompile.Stage, @enumFromInt(latest.?)))});
+                try report.add(.misfiled, case.source_path, "a parse case stops at or before the import check, but this one ran stage {s}; move it to check/", .{@tagName(@as(precompile.Stage, @fromBackingInt(@intCast(latest.?))))});
             }
         },
         .check => if (case.kind == .bad) {
@@ -653,14 +649,14 @@ pub fn runCorpus(gpa: std.mem.Allocator, io: std.Io, root: std.Io.Dir, options: 
     if (cases.items.len < options.floor) {
         try report.add(.below_floor, corpus_root, "found {d} case(s), the floor is {d}; a deleted case must be restored, and a new case raises the floor", .{ cases.items.len, options.floor });
     }
-    inline for (std.meta.fields(Family)) |family_field| {
-        inline for (std.meta.fields(Kind)) |kind_field| {
+    inline for (@typeInfo(Family).@"enum".field_names) |family_field| {
+        inline for (@typeInfo(Kind).@"enum".field_names) |kind_field| {
             var n: usize = 0;
             for (cases.items) |case| {
-                if (case.family == @field(Family, family_field.name) and case.kind == @field(Kind, kind_field.name)) n += 1;
+                if (case.family == @field(Family, family_field) and case.kind == @field(Kind, kind_field)) n += 1;
             }
             if (n == 0) {
-                try report.add(.empty_family, family_field.name ++ "/" ++ kind_field.name, "no case in this family", .{});
+                try report.add(.empty_family, family_field ++ "/" ++ kind_field, "no case in this family", .{});
             }
         }
     }
@@ -1183,9 +1179,9 @@ fn probeVerdict(verdict: RatchetVerdict) !void {
 }
 
 test "every ratchet verdict is probed" {
-    inline for (std.meta.fields(RatchetVerdict)) |field| {
-        probeVerdict(@field(RatchetVerdict, field.name)) catch |err| {
-            std.debug.print("ratchet probe for {s} failed: {s}\n", .{ field.name, @errorName(err) });
+    inline for (@typeInfo(RatchetVerdict).@"enum".field_names) |field| {
+        probeVerdict(@field(RatchetVerdict, field)) catch |err| {
+            std.debug.print("ratchet probe for {s} failed: {s}\n", .{ field, @errorName(err) });
             return err;
         };
     }
@@ -1194,9 +1190,9 @@ test "every ratchet verdict is probed" {
 test "a ratchet verdict that fails the gate is a failure kind" {
     // A verdict name that is not a FailureKind would be a verdict that no
     // probe in `probe` could reach. `@field` does not compile for such a name.
-    inline for (std.meta.fields(RatchetVerdict)) |field| {
-        if (comptime std.mem.eql(u8, field.name, "covered_by_case") or std.mem.eql(u8, field.name, "allowlisted")) continue;
-        _ = @field(FailureKind, field.name);
+    inline for (@typeInfo(RatchetVerdict).@"enum".field_names) |field| {
+        if (comptime std.mem.eql(u8, field, "covered_by_case") or std.mem.eql(u8, field, "allowlisted")) continue;
+        _ = @field(FailureKind, field);
     }
 }
 
@@ -1273,9 +1269,9 @@ test "allowlist rows parse code and reason" {
 }
 
 test "every failure kind is probed and rejected" {
-    inline for (std.meta.fields(FailureKind)) |field| {
-        probe(@field(FailureKind, field.name)) catch |err| {
-            std.debug.print("probe for {s} failed: {s}\n", .{ field.name, @errorName(err) });
+    inline for (@typeInfo(FailureKind).@"enum".field_names) |field| {
+        probe(@field(FailureKind, field)) catch |err| {
+            std.debug.print("probe for {s} failed: {s}\n", .{ field, @errorName(err) });
             return err;
         };
     }

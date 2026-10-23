@@ -448,9 +448,9 @@ test "a node the proof IR does not carry balances without being recorded" {
 }
 
 test "every rewrite kind names itself" {
-    inline for (@typeInfo(RewriteKind).@"enum".fields) |field| {
-        const kind: RewriteKind = @enumFromInt(field.value);
+    inline for (@typeInfo(RewriteKind).@"enum".field_names) |field| {
+        const kind: RewriteKind = @fromBackingInt(@intCast(@backingInt(@field(RewriteKind, field))));
         try testing.expect(kind.name().len > 0);
-        try testing.expectEqualStrings(field.name, kind.name());
+        try testing.expectEqualStrings(field, kind.name());
     }
 }

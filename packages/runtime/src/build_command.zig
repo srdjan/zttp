@@ -795,7 +795,7 @@ fn writeArtifactTail(
             .contract_digest = if (contract_json) |json|
                 artifact_graph.digestOf(json)
             else
-                [_]u8{0} ** 32,
+                @as([32]u8, @splat(0)),
             // The same digest the graph member carries, over the same bytes.
             // A guard plan is only ever checked against one policy, so the
             // certificate names which one rather than leaving the consumer to
@@ -965,7 +965,7 @@ pub const BuildReceipt = struct {
     ledger_recorded: bool,
     /// SHA-256 of the handler source, as embedded in the ledger row. All zero
     /// when no ledger row was written.
-    handler_sha256: [std.crypto.hash.sha2.Sha256.digest_length]u8 = [_]u8{0} ** std.crypto.hash.sha2.Sha256.digest_length,
+    handler_sha256: [std.crypto.hash.sha2.Sha256.digest_length]u8 = @as([std.crypto.hash.sha2.Sha256.digest_length]u8, @splat(0)),
 };
 
 /// Everything `runBuild` reaches outside its own arguments: the filesystem, the
@@ -1019,7 +1019,7 @@ fn writeTailCapability(_: ?*anyopaque, allocator: std.mem.Allocator, input: Arti
 }
 
 fn codesignCapability(_: ?*anyopaque, allocator: std.mem.Allocator, path: []const u8) void {
-    if (builtin.os.tag == .macos) codesignAdHoc(allocator, path);
+    if (builtin.target.os.tag == .macos) codesignAdHoc(allocator, path);
 }
 
 fn appendLedgerCapability(
@@ -1162,7 +1162,7 @@ fn runBuild(
 }
 
 fn codesignAdHoc(allocator: std.mem.Allocator, path: []const u8) void {
-    const path_z = allocator.dupeZ(u8, path) catch return;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return;
     defer allocator.free(path_z);
 
     const pid = std.c.fork();
@@ -1614,7 +1614,7 @@ test "the certificate names the exact policy the artifact carries" {
         // producer had in hand.
         const hex = std.fmt.bytesToHex(digest, .lower);
         try std.testing.expectEqualSlices(u8, &hex, &probe.created_runtime_policy_sha256.?);
-        try std.testing.expect(!std.mem.eql(u8, &digest, &[_]u8{0} ** 32));
+        try std.testing.expect(!std.mem.eql(u8, &digest, &@as([32]u8, @splat(0))));
         bound[index] = digest;
     }
 
@@ -1693,7 +1693,7 @@ test "a real compile produces a certificate that binds its own IR and artifact" 
 
     // Every property in the alphabet is answered exactly once.
     try std.testing.expectEqual(
-        @as(u32, @typeInfo(pcc.proof_system.Property).@"enum".fields.len),
+        @as(u32, @typeInfo(pcc.proof_system.Property).@"enum".field_names.len),
         decoded.obligations.len(),
     );
     var index: u32 = 0;
@@ -1926,8 +1926,8 @@ test "real guarded artifacts reach consumer acceptance in expression positions" 
         try std.testing.expectEqual(@as(u32, 1), result.guards.required);
         try std.testing.expectEqual(@as(u32, 1), result.guards.covered);
         try std.testing.expectEqual(@as(u8, 1), result.guards.kinds);
-        inline for (@typeInfo(pcc.proof_system.Property).@"enum".fields) |field| {
-            const property: pcc.proof_system.Property = @enumFromInt(field.value);
+        inline for (@typeInfo(pcc.proof_system.Property).@"enum".field_names) |field| {
+            const property: pcc.proof_system.Property = @fromBackingInt(@intCast(@backingInt(@field(pcc.proof_system.Property, field))));
             try std.testing.expectEqual(
                 static_result.properties.accepted(property),
                 result.properties.accepted(property),
@@ -1987,7 +1987,7 @@ test "proofs verify accepts a bundled guarded artifact by handing acceptance its
     // the policy bytes, accepts it and counts one covered guard. Without this
     // the verify assertions below could pass or fail for another reason.
     {
-        const path_z = try allocator.dupeZ(u8, "handler.bin");
+        const path_z = try allocator.dupeSentinel(u8, "handler.bin", 0);
         defer allocator.free(path_z);
         var loaded = blk: {
             var payload = (try self_extract.detectPath(allocator, path_z)) orelse return error.TestUnexpectedResult;
@@ -2106,7 +2106,7 @@ test "the signed root and the startup rebuild are the same fold" {
         evidence_offset +
             @as(usize, evidence_index) * pcc.certificate.evidence_record_size + 4
     ] =
-        @intFromEnum(pcc.certificate.EdgeKind.not_established);
+        @backingInt(pcc.certificate.EdgeKind.not_established);
     const mutated_root = (try proof_activation.observedRoot(allocator, .{
         .certificate = mutated_certificate,
         .bytecode = compiled.bytecode,
@@ -2206,7 +2206,7 @@ const LoadedArtifact = struct {
                 .core_profile_id = view.source_identity.core_profile.id(),
                 .core_grammar_hash = view.source_identity.core_grammar_hash,
                 .semantics_hash = view.source_identity.semantics_hash,
-                .capability_hash = if (view.capabilities) |caps| caps.hash else [_]u8{0} ** 32,
+                .capability_hash = if (view.capabilities) |caps| caps.hash else @as([32]u8, @splat(0)),
             },
         };
     }

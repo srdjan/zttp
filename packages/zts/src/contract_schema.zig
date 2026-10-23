@@ -348,8 +348,8 @@ pub fn schemaProblem(
                 return type_name ++ ": a diff reason must start with `design: ` or `gap: `: " ++ entry.field,
         }
     }
-    for (std.meta.fields(Contract)) |field| {
-        if (entryFor(table, field.name) == null) return type_name ++ ": field has no entry: " ++ field.name;
+    for (@typeInfo(Contract).@"struct".field_names) |field| {
+        if (entryFor(table, field) == null) return type_name ++ ": field has no entry: " ++ field;
     }
 
     for (wire, 0..) |entry, index| {
@@ -389,12 +389,12 @@ pub fn schemaProblem(
 /// Return the first difference between the names of `Wire` fields and `wire`, or null.
 pub fn wireMirrorProblem(comptime Wire_: type, comptime wire: []const WireEntry) ?[]const u8 {
     @setEvalBranchQuota(200_000);
-    for (std.meta.fields(Wire_)) |field| {
+    for (@typeInfo(Wire_).@"struct".field_names) |field| {
         var found = false;
         for (wire) |entry| {
-            if (std.mem.eql(u8, entry.wire_field, field.name)) found = true;
+            if (std.mem.eql(u8, entry.wire_field, field)) found = true;
         }
-        if (!found) return @typeName(Wire_) ++ ": field has no wire entry: " ++ field.name;
+        if (!found) return @typeName(Wire_) ++ ": field has no wire entry: " ++ field;
     }
     for (wire) |entry| {
         if (!@hasField(Wire_, entry.wire_field)) return @typeName(Wire_) ++ ": wire entry names no field: " ++ entry.wire_field;
@@ -423,7 +423,7 @@ pub fn diffGaps() []const []const u8 {
 }
 
 test "the census covers every HandlerContract field exactly once" {
-    try std.testing.expectEqual(std.meta.fields(contract_types.HandlerContract).len, entries.len);
+    try std.testing.expectEqual(@typeInfo(contract_types.HandlerContract).@"struct".field_names.len, entries.len);
     var serialized: usize = 0;
     var not_serialized: usize = 0;
     for (entries) |entry| switch (entry.wire) {

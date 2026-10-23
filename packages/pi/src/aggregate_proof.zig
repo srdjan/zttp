@@ -541,7 +541,7 @@ fn rejectedFmt(
     errdefer allocator.free(owned_code);
     return .{ .rejected = .{
         .code = owned_code,
-        .message = try std.fmt.allocPrint(allocator, format, args),
+        .message = try allocator.print(format, args),
     } };
 }
 

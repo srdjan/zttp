@@ -394,11 +394,7 @@ test "loadCassetteFromBytes rejects path-like sidecars" {
         var arena = std.heap.ArenaAllocator.init(testing.allocator);
         defer arena.deinit();
 
-        const raw = try std.fmt.allocPrint(
-            arena.allocator(),
-            "{s}\n",
-            .{header_line},
-        );
+        const raw = try arena.allocator().print("{s}\n", .{header_line});
         try testing.expectError(
             CassetteError.InvalidSidecarPath,
             loadCassetteFromBytes(arena.allocator(), raw, "."),

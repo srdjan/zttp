@@ -92,7 +92,7 @@ const WorkspaceLock = struct {
 
         const path = try std.fs.path.resolve(allocator, &.{ state_dir, "change-set.lock" });
         errdefer allocator.free(path);
-        const path_z = try allocator.dupeZ(u8, path);
+        const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
         const fd = try std.posix.openatZ(
             std.posix.AT.FDCWD,
@@ -817,7 +817,7 @@ fn stageCandidates(
     for (prepared.changes, 0..) |change, index| {
         const parent = std.fs.path.dirname(change.resolved_path) orelse return error.InvalidTargetPath;
         const base = std.fs.path.basename(change.resolved_path);
-        const stage = try std.fmt.allocPrint(allocator, "{s}/.{s}.zttp-{s}.stage", .{ parent, base, proof_id[0..16] });
+        const stage = try allocator.print("{s}/.{s}.zttp-{s}.stage", .{ parent, base, proof_id[0..16] });
         errdefer allocator.free(stage);
         if (try pathExists(allocator, stage)) return error.StaleStageFile;
         switch (fault) {
@@ -863,7 +863,7 @@ fn durableWriteWithDigest(allocator: std.mem.Allocator, path: []const u8, bytes:
     var digest: [32]u8 = undefined;
     std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
     const digest_hex = std.fmt.bytesToHex(digest, .lower);
-    const digest_path = try std.fmt.allocPrint(allocator, "{s}.sha256", .{path});
+    const digest_path = try allocator.print("{s}.sha256", .{path});
     defer allocator.free(digest_path);
     try durableWrite(allocator, digest_path, &digest_hex);
 }
@@ -875,7 +875,7 @@ fn readVerifiedFile(
 ) ![]u8 {
     const bytes = try zts.file_io.readFile(allocator, path, max_bytes);
     errdefer allocator.free(bytes);
-    const digest_path = try std.fmt.allocPrint(allocator, "{s}.sha256", .{path});
+    const digest_path = try allocator.print("{s}.sha256", .{path});
     defer allocator.free(digest_path);
     const digest_bytes = try zts.file_io.readFile(allocator, digest_path, 64);
     defer allocator.free(digest_bytes);
@@ -887,7 +887,7 @@ fn readVerifiedFile(
 }
 
 fn syncFile(allocator: std.mem.Allocator, path: []const u8) !void {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
     defer std.Io.Threaded.closeFd(fd);
@@ -907,9 +907,9 @@ fn syncDirectory(allocator: std.mem.Allocator, path: []const u8) !void {
 }
 
 fn renameAndSync(allocator: std.mem.Allocator, source: []const u8, target: []const u8) !void {
-    const source_z = try allocator.dupeZ(u8, source);
+    const source_z = try allocator.dupeSentinel(u8, source, 0);
     defer allocator.free(source_z);
-    const target_z = try allocator.dupeZ(u8, target);
+    const target_z = try allocator.dupeSentinel(u8, target, 0);
     defer allocator.free(target_z);
     if (std.c.rename(source_z, target_z) != 0) return error.RenameFailure;
     try syncDirectory(allocator, std.fs.path.dirname(target) orelse return error.InvalidTargetPath);
@@ -934,7 +934,7 @@ fn markerPresent(allocator: std.mem.Allocator, transaction_dir: []const u8, name
 }
 
 fn writeProgressMarker(allocator: std.mem.Allocator, transaction_dir: []const u8, index: usize) !void {
-    const name = try std.fmt.allocPrint(allocator, "applied-{d}", .{index});
+    const name = try allocator.print("applied-{d}", .{index});
     defer allocator.free(name);
     try writeMarker(allocator, transaction_dir, name);
 }
@@ -949,7 +949,7 @@ fn imagePath(
     index: usize,
     suffix: []const u8,
 ) ![]u8 {
-    const filename = try std.fmt.allocPrint(allocator, "{d}.{s}", .{ index, suffix });
+    const filename = try allocator.print("{d}.{s}", .{ index, suffix });
     defer allocator.free(filename);
     return std.fs.path.resolve(allocator, &.{ transaction_dir, "images", filename });
 }
@@ -2367,7 +2367,7 @@ test "recovered workspace binds canonical roots before checking proof inputs" {
     defer second_tmp.cleanup();
     var second = try Fixture.init(testing.allocator, &second_tmp);
     defer second.deinit(testing.allocator);
-    const alias = try std.fmt.allocPrint(testing.allocator, "{s}/src/..", .{first.root});
+    const alias = try testing.allocator.print("{s}/src/..", .{first.root});
     defer testing.allocator.free(alias);
     var workspace = try RecoveredWorkspace.acquire(testing.allocator, alias);
     defer workspace.deinit();

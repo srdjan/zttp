@@ -153,7 +153,7 @@ const Context = struct {
 };
 
 pub fn main(init: std.process.Init) !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
 
@@ -172,7 +172,7 @@ pub fn main(init: std.process.Init) !void {
                 "       agent-spine brief [--root REPO] [path ...]\n",
         );
         try stderr.interface.flush();
-        std.process.exit(@intFromEnum(ExitCode.usage_failure));
+        std.process.exit(@backingInt(ExitCode.usage_failure));
     };
     const code = execute(allocator, init.io, command, &stdout.interface, &stderr.interface) catch |err| blk: {
         try stderr.interface.print("spine: configuration or I/O failure: {s}\n", .{@errorName(err)});
@@ -180,7 +180,7 @@ pub fn main(init: std.process.Init) !void {
     };
     try stdout.interface.flush();
     try stderr.interface.flush();
-    if (code != .clean) std.process.exit(@intFromEnum(code));
+    if (code != .clean) std.process.exit(@backingInt(code));
 }
 
 pub fn execute(
@@ -713,7 +713,7 @@ fn loadSolutions(
     diagnostics: *std.Io.Writer,
 ) ![]const Solution {
     var solutions: std.ArrayList(Solution) = .empty;
-    const prefix = try std.fmt.allocPrint(allocator, "{s}/", .{normalizePath(spine.docs.solutions)});
+    const prefix = try allocator.print("{s}/", .{normalizePath(spine.docs.solutions)});
     for (tracked) |path| {
         if (!std.mem.startsWith(u8, path, prefix) or !std.mem.endsWith(u8, path, ".md")) continue;
         const source = readFile(dir, io, allocator, path) catch |err| {
@@ -761,7 +761,7 @@ fn checkAll(ctx: *Context, write: bool, failures: *std.ArrayList(Failure)) !void
 }
 
 fn addFailure(ctx: *Context, failures: *std.ArrayList(Failure), kind: FailureKind, comptime format: []const u8, args: anytype) !void {
-    try failures.append(ctx.allocator, .{ .kind = kind, .message = try std.fmt.allocPrint(ctx.a(), format, args) });
+    try failures.append(ctx.allocator, .{ .kind = kind, .message = try ctx.a().print(format, args) });
 }
 
 fn checkFloors(ctx: *Context, failures: *std.ArrayList(Failure)) !void {
@@ -825,7 +825,7 @@ fn checkAreas(ctx: *Context, failures: *std.ArrayList(Failure)) !void {
         if (area.owns.len == 0) try addFailure(ctx, failures, .area_contract, "{s} has no opening ownership paragraph; state what the area owns", .{area.file});
         if (area.boundary.len == 0) try addFailure(ctx, failures, .area_contract, "{s} has no second boundary paragraph; state what may cross the boundary", .{area.file});
         if (area.boundary.len != 0 and std.mem.indexOf(u8, area.boundary, ctx.spine.runner) == null and
-            std.ascii.indexOfIgnoreCase(area.boundary, "no import boundary") == null and std.mem.indexOf(u8, area.boundary, "D-") == null)
+            std.ascii.findIgnoreCase(area.boundary, "no import boundary") == null and std.mem.indexOf(u8, area.boundary, "D-") == null)
         {
             try addFailure(ctx, failures, .area_contract, "{s}'s boundary names no enforcing task, no decision, and no explicit absence; state which condition applies", .{area.file});
         }
@@ -861,7 +861,7 @@ fn checkLedger(ctx: *Context, failures: *std.ArrayList(Failure)) !void {
         if (decision.gate.len == 0) {
             try addFailure(ctx, failures, .decision_ledger, "{s}: {s} has no Gate field; name a task or explicitly use none", .{ ctx.spine.docs.decisions, decision.id });
         } else if (!std.mem.eql(u8, decision.gate, "none")) {
-            const prefix = try std.fmt.allocPrint(ctx.a(), "{s} ", .{ctx.spine.runner});
+            const prefix = try ctx.a().print("{s} ", .{ctx.spine.runner});
             if (!std.mem.startsWith(u8, decision.gate, prefix) or !containsString(ctx.tasks, decision.gate[prefix.len..])) try addFailure(ctx, failures, .decision_ledger, "{s}: {s} names gate {s}, which is not a task; use {s} <task> or none", .{ ctx.spine.docs.decisions, decision.id, decision.gate, ctx.spine.runner });
         }
         if (std.mem.eql(u8, decision.status, "standing") and !decisionIsLive(ctx, decision)) {
@@ -902,7 +902,7 @@ fn checkSolutions(ctx: *Context, failures: *std.ArrayList(Failure)) !void {
             }
         }
         if (solution.proves.len != 0) {
-            const prefix = try std.fmt.allocPrint(ctx.a(), "{s} ", .{ctx.spine.runner});
+            const prefix = try ctx.a().print("{s} ", .{ctx.spine.runner});
             if (!std.mem.startsWith(u8, solution.proves, prefix) or !containsString(ctx.tasks, solution.proves[prefix.len..])) try addFailure(ctx, failures, .solution_binding, "{s} proves {s}, which is not a task; name a current {s} task", .{ solution.file, solution.proves, ctx.spine.runner });
         }
     }
@@ -1001,9 +1001,9 @@ fn declaresSymbol(allocator: std.mem.Allocator, path: []const u8, source: []cons
 }
 
 fn declaresZigSymbol(allocator: std.mem.Allocator, source: []const u8, symbol: []const u8) !bool {
-    const source_z = try allocator.dupeZ(u8, source);
+    const source_z = try allocator.dupeSentinel(u8, source, 0);
     defer allocator.free(source_z);
-    var tree = try std.zig.Ast.parse(allocator, source_z, .zig);
+    var tree = try std.zig.Ast.parse(allocator, source_z, .{});
     defer tree.deinit(allocator);
     if (tree.errors.len != 0) return error.InvalidZigSource;
     for (tree.rootDecls()) |node| {
@@ -1149,7 +1149,7 @@ fn checkDocsPolicy(ctx: *Context, failures: *std.ArrayList(Failure)) !void {
     if (ctx.spine.docsPolicy != .strict) return;
     for (ctx.tracked) |path| {
         if (!std.mem.endsWith(u8, path, ".md") or isVendored(ctx.spine, path)) continue;
-        const solutions_prefix = try std.fmt.allocPrint(ctx.a(), "{s}/", .{normalizePath(ctx.spine.docs.solutions)});
+        const solutions_prefix = try ctx.a().print("{s}/", .{normalizePath(ctx.spine.docs.solutions)});
         if (containsString(ctx.spine.authorities, path) or std.mem.eql(u8, path, ctx.spine.docs.decisions) or
             (ctx.spine.docs.concepts != null and std.mem.eql(u8, path, ctx.spine.docs.concepts.?)) or
             std.mem.startsWith(u8, path, solutions_prefix)) continue;
@@ -1235,7 +1235,7 @@ fn renderGates(ctx: *Context) ![]const u8 {
 fn replaceBlock(allocator: std.mem.Allocator, source: []const u8, open: []const u8, close: []const u8, body: []const u8) ![]const u8 {
     const start = std.mem.indexOf(u8, source, open).?;
     const end = std.mem.indexOfPos(u8, source, start + open.len, close).?;
-    return std.fmt.allocPrint(allocator, "{s}{s}\n\n{s}\n{s}", .{ source[0..start], open, std.mem.trimEnd(u8, body, "\n"), source[end..] });
+    return allocator.print("{s}{s}\n\n{s}\n{s}", .{ source[0..start], open, std.mem.trimEnd(u8, body, "\n"), source[end..] });
 }
 
 fn normalizeGenerated(allocator: std.mem.Allocator, source: []const u8) ![]const u8 {
@@ -1328,11 +1328,11 @@ fn writePathBrief(ctx: *Context, path: []const u8, writer: *std.Io.Writer) !void
     for (ctx.decisions) |decision| {
         if (!std.mem.eql(u8, decision.status, "standing")) continue;
         if (!bindingMatchesAny(&.{path}, decision.binds) and !(if (area) |found| containsString(found.decisions, decision.id) else false)) continue;
-        const prefix = try std.fmt.allocPrint(ctx.a(), "{s} ", .{ctx.spine.runner});
+        const prefix = try ctx.a().print("{s} ", .{ctx.spine.runner});
         if (std.mem.startsWith(u8, decision.gate, prefix) and !containsString(gate_names.items, decision.gate[prefix.len..])) try gate_names.append(ctx.allocator, decision.gate[prefix.len..]);
     }
     for (ctx.solutions) |solution| if (bindingMatchesAny(&.{path}, solution.binds)) {
-        const prefix = try std.fmt.allocPrint(ctx.a(), "{s} ", .{ctx.spine.runner});
+        const prefix = try ctx.a().print("{s} ", .{ctx.spine.runner});
         if (std.mem.startsWith(u8, solution.proves, prefix) and !containsString(gate_names.items, solution.proves[prefix.len..])) try gate_names.append(ctx.allocator, solution.proves[prefix.len..]);
     };
     for (ctx.spine.commands) |command| if (command.always orelse false) {
@@ -1605,11 +1605,11 @@ const rejection_scenarios = [_]RejectionScenario{
 };
 
 comptime {
-    var seen = std.EnumSet(FailureKind).initEmpty();
+    var seen = std.EnumSet(FailureKind).empty;
     for (rejection_scenarios) |scenario| if (scenario.kind) |kind| seen.insert(kind);
-    for (@typeInfo(FailureKind).@"enum".fields) |field| {
-        const kind: FailureKind = @enumFromInt(field.value);
-        if (!seen.contains(kind)) @compileError("rejection_scenarios misses " ++ field.name);
+    for (@typeInfo(FailureKind).@"enum".field_names) |field| {
+        const kind: FailureKind = @fromBackingInt(@intCast(@backingInt(@field(FailureKind, field))));
+        if (!seen.contains(kind)) @compileError("rejection_scenarios misses " ++ field);
     }
 }
 
@@ -1662,8 +1662,8 @@ fn runRejectionScenarios(scenarios: []const RejectionScenario) !void {
     const generated_root = try tmp.dir.readFileAlloc(testing.io, "AGENTS.md", testing.allocator, .limited(64 * 1024));
     defer testing.allocator.free(generated_root);
 
-    var expected = std.EnumSet(FailureKind).initEmpty();
-    var observed = std.EnumSet(FailureKind).initEmpty();
+    var expected = std.EnumSet(FailureKind).empty;
+    var observed = std.EnumSet(FailureKind).empty;
     for (scenarios) |scenario| {
         stdout.clearRetainingCapacity();
         stderr.clearRetainingCapacity();

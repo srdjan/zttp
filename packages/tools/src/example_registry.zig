@@ -606,7 +606,7 @@ test "module examples have unique names and explicit whole-handler evidence" {
             try testing.expect(!std.mem.eql(u8, entry.name, other.name));
         }
         for (entry.modules) |specifier| {
-            const quoted = try std.fmt.allocPrint(testing.allocator, "\"{s}\"", .{specifier});
+            const quoted = try testing.allocator.print("\"{s}\"", .{specifier});
             defer testing.allocator.free(quoted);
             try testing.expect(std.mem.indexOf(u8, entry.source, quoted) != null);
         }

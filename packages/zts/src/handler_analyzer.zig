@@ -148,7 +148,7 @@ pub const HandlerAnalyzer = struct {
                 const decl = self.ir.getVarDecl(stmt_idx) orelse continue;
                 if (decl.init == null_node) continue;
                 const member = self.getMemberAccess(decl.init) orelse continue;
-                if (member.property != @intFromEnum(object.Atom.body)) continue;
+                if (member.property != @backingInt(object.Atom.body)) continue;
 
                 // Body binding must come from request.body.
                 if (!self.matchesOptionalSlot(member.object, self.request_binding_slot)) continue;
@@ -185,8 +185,8 @@ pub const HandlerAnalyzer = struct {
             const member = self.getMemberAccess(decl.init) orelse return;
 
             // Check if property is request.url or request.path
-            if (member.property == @intFromEnum(object.Atom.url) or
-                member.property == @intFromEnum(object.Atom.path))
+            if (member.property == @backingInt(object.Atom.url) or
+                member.property == @backingInt(object.Atom.path))
             {
                 // Route binding must come from request.url/path.
                 if (!self.matchesOptionalSlot(member.object, self.request_binding_slot)) return;
@@ -195,7 +195,7 @@ pub const HandlerAnalyzer = struct {
                 // Store the binding slot
                 const slot = bindingSlotIfBindable(decl.binding) orelse return;
                 self.route_binding_slot = slot;
-                self.route_atom = @enumFromInt(member.property);
+                self.route_atom = @fromBackingInt(@intCast(member.property));
             }
         }
     }
@@ -391,7 +391,7 @@ pub const HandlerAnalyzer = struct {
 
         const binding = self.ir.getBinding(node) orelse return false;
         if (binding.kind != .global and binding.kind != .undeclared_global) return false;
-        return binding.name_atom == @intFromEnum(atom);
+        return binding.name_atom == @backingInt(atom);
     }
 
     /// Analyze condition for URL matching pattern
@@ -469,7 +469,7 @@ pub const HandlerAnalyzer = struct {
         const member = self.getMemberAccess(call.callee) orelse return null;
 
         // Property should be 'indexOf'
-        if (member.property != @intFromEnum(object.Atom.indexOf)) return null;
+        if (member.property != @backingInt(object.Atom.indexOf)) return null;
 
         // Object should be the url identifier
         if (!self.matchesSlot(member.object, self.route_binding_slot.?)) return null;
@@ -558,13 +558,13 @@ pub const HandlerAnalyzer = struct {
         const member = self.getMemberAccess(call.callee) orelse return null;
         if (!self.isGlobalIdentifier(member.object, object.Atom.Response)) return null;
 
-        const response_kind: ResponseKind = if (member.property == @intFromEnum(object.Atom.json))
+        const response_kind: ResponseKind = if (member.property == @backingInt(object.Atom.json))
             .json_obj
-        else if (member.property == @intFromEnum(object.Atom.rawJson))
+        else if (member.property == @backingInt(object.Atom.rawJson))
             .raw_json
-        else if (member.property == @intFromEnum(object.Atom.text))
+        else if (member.property == @backingInt(object.Atom.text))
             .text
-        else if (member.property == @intFromEnum(object.Atom.html))
+        else if (member.property == @backingInt(object.Atom.html))
             .html
         else
             return null;
@@ -647,7 +647,7 @@ pub const HandlerAnalyzer = struct {
         if (call.args_count != 1) return false;
 
         const member = self.getMemberAccess(call.callee) orelse return false;
-        if (member.property != @intFromEnum(object.Atom.parse)) return false;
+        if (member.property != @backingInt(object.Atom.parse)) return false;
 
         // Must be JSON.parse(...)
         if (!self.isGlobalIdentifier(member.object, object.Atom.JSON)) return false;
@@ -663,7 +663,7 @@ pub const HandlerAnalyzer = struct {
         }
 
         const member = self.getMemberAccess(node) orelse return false;
-        if (member.property != @intFromEnum(object.Atom.body)) return false;
+        if (member.property != @backingInt(object.Atom.body)) return false;
         return self.matchesOptionalSlot(member.object, self.request_binding_slot);
     }
 
@@ -878,7 +878,7 @@ fn findHandlerFunctionForTest(ir_view: IrView, root: NodeIndex) ?NodeIndex {
 
         const decl = ir_view.getVarDecl(stmt_idx) orelse continue;
         if (decl.binding.kind != .global) continue;
-        if (decl.binding.name_atom != @intFromEnum(object.Atom.handler)) continue;
+        if (decl.binding.name_atom != @backingInt(object.Atom.handler)) continue;
 
         const init_tag = ir_view.getTag(decl.init) orelse continue;
         if (init_tag == .function_expr or init_tag == .arrow_function) {

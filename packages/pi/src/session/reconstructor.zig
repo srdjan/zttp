@@ -485,7 +485,7 @@ test "reconstructTranscript applies all event kinds with stable identities" {
     defer allocator.free(path);
     try populateAllKindsJournal(allocator, path);
 
-    var seen = std.EnumSet(JournalEventTag).initEmpty();
+    var seen = std.EnumSet(JournalEventTag).empty;
     var frame_count: usize = 0;
     var reader = try events.Reader.open(allocator, path);
     defer reader.deinit();
@@ -1085,7 +1085,7 @@ test "reconstructTranscript reports the line number of the first corrupt record"
     const raw = try zts.file_io.readFile(allocator, path, 1024 * 1024);
     defer allocator.free(raw);
     const corrupt_at = std.mem.indexOf(u8, raw, "two") orelse return error.TestExpectedPayload;
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDWR }, 0);
     defer std.Io.Threaded.closeFd(fd);

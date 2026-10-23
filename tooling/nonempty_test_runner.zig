@@ -10,8 +10,7 @@ pub fn main(init: std.process.Init.Minimal) @typeInfo(@TypeOf(selected.main)).@"
     for (@import("builtin").test_functions) |test_fn| {
         if (std.mem.find(u8, test_fn.name, @import("selection_runner_options").filter) != null) count += 1;
     }
-    const path = init.environ.getPosix("ZTTP_TEST_SELECTION_COUNT") orelse
-        std.process.fatal("missing test selection count path", .{});
+    const path = @import("selection_runner_options").count_path;
     var buffer: [64]u8 = undefined;
     const bytes = std.fmt.bufPrint(&buffer, "{d}", .{count}) catch unreachable;
     std.Io.Dir.cwd().writeFile(std.Io.Threaded.global_single_threaded.io(), .{ .sub_path = path, .data = bytes }) catch |err|

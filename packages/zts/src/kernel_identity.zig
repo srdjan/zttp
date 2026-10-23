@@ -177,7 +177,7 @@ const Lowerer = struct {
             .identifier => {
                 frame(hasher, "identifier");
                 const binding = self.view.getBinding(node) orelse return error.Unsupported;
-                const atom: object.Atom = @enumFromInt(binding.name_atom);
+                const atom: object.Atom = @fromBackingInt(@intCast(binding.name_atom));
                 frame(hasher, self.atoms.getName(atom) orelse return error.Unsupported);
             },
             .binary_op => {
@@ -207,7 +207,7 @@ const Lowerer = struct {
                 const member = self.view.getMember(node) orelse return error.Unsupported;
                 frame(hasher, if (member.is_optional) "optional-member" else "member");
                 try self.encodeNode(hasher, member.object, depth + 1);
-                const atom: object.Atom = @enumFromInt(member.property);
+                const atom: object.Atom = @fromBackingInt(@intCast(member.property));
                 frame(hasher, self.atoms.getName(atom) orelse return error.Unsupported);
             },
             .computed_access => {

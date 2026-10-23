@@ -88,7 +88,7 @@ pub fn createResult(
     result_obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK] = value.JSValue.fromBool(is_ok);
     result_obj.inline_slots[object.JSObject.Slots.RESULT_VALUE] = payload;
     result_obj.inline_slots[object.JSObject.Slots.RESULT_ERROR_FIELD] = if (error_field) |atom|
-        value.JSValue.fromInt(@intCast(@intFromEnum(atom)))
+        value.JSValue.fromInt(@intCast(@backingInt(atom)))
     else
         value.JSValue.undefined_val;
     return result_obj.toValue();

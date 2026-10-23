@@ -93,9 +93,9 @@ pub const Component = enum {
 pub const Diagnostic = struct {
     kind: FailureKind,
     component: Component,
-    case_name: [Limits.diagnostic_bytes]u8 = [_]u8{0} ** Limits.diagnostic_bytes,
+    case_name: [Limits.diagnostic_bytes]u8 = @as([Limits.diagnostic_bytes]u8, @splat(0)),
     case_name_len: u16 = 0,
-    path: [Limits.diagnostic_bytes]u8 = [_]u8{0} ** Limits.diagnostic_bytes,
+    path: [Limits.diagnostic_bytes]u8 = @as([Limits.diagnostic_bytes]u8, @splat(0)),
     path_len: u16 = 0,
     turn_index: ?u32 = null,
     call_index: ?u32 = null,
@@ -322,12 +322,8 @@ fn loadCaseImpl(loader: *Loader, arena: *std.heap.ArenaAllocator) LoadInternalEr
     }
     setBounded(&loader.diagnostic.case_name, &loader.diagnostic.case_name_len, descriptor.case_name);
 
-    const generation = try std.fmt.allocPrint(
-        loader.allocator,
-        "generations/{s}",
-        .{descriptor.active_generation.slice()},
-    );
-    const manifest_path = try std.fmt.allocPrint(loader.allocator, "{s}/manifest.json", .{generation});
+    const generation = try loader.allocator.print("generations/{s}", .{descriptor.active_generation.slice()});
+    const manifest_path = try loader.allocator.print("{s}/manifest.json", .{generation});
     const manifest_bytes = try loader.readFile(manifest_path, Limits.manifest_bytes, .manifest);
     const manifest = try parseStrict(FlowManifest, loader, manifest_bytes, .manifest, manifest_path);
     if (manifest.schema_version != schema_version) {
@@ -364,7 +360,7 @@ fn loadCaseImpl(loader: *Loader, arena: *std.heap.ArenaAllocator) LoadInternalEr
         try fixtures.append(loader.allocator, .{ .role = .response, .path = response.path, .bytes = bytes });
     }
     for (manifest.initial_workspace) |workspace_file| {
-        const fixture_path = try std.fmt.allocPrint(loader.allocator, "initial/{s}", .{workspace_file.path});
+        const fixture_path = try loader.allocator.print("initial/{s}", .{workspace_file.path});
         const path = try generationFixturePath(loader.allocator, generation, fixture_path);
         const bytes = try loader.readFile(path, Limits.workspace_file_bytes, .initial_workspace);
         try expectDigest(loader, bytes, workspace_file.sha256, .initial_workspace, fixture_path);
@@ -372,11 +368,7 @@ fn loadCaseImpl(loader: *Loader, arena: *std.heap.ArenaAllocator) LoadInternalEr
     }
     for (manifest.turn_workspaces) |checkpoint| {
         for (checkpoint.files) |workspace_file| {
-            const fixture_path = try std.fmt.allocPrint(
-                loader.allocator,
-                "turns/{d}/{s}",
-                .{ checkpoint.turn_index, workspace_file.path },
-            );
+            const fixture_path = try loader.allocator.print("turns/{d}/{s}", .{ checkpoint.turn_index, workspace_file.path });
             const path = try generationFixturePath(loader.allocator, generation, fixture_path);
             const bytes = try loader.readFile(path, Limits.workspace_file_bytes, .turn_workspace);
             try expectDigest(loader, bytes, workspace_file.sha256, .turn_workspace, fixture_path);
@@ -384,7 +376,7 @@ fn loadCaseImpl(loader: *Loader, arena: *std.heap.ArenaAllocator) LoadInternalEr
         }
     }
     for (manifest.expected_workspace) |workspace_file| {
-        const fixture_path = try std.fmt.allocPrint(loader.allocator, "expected/{s}", .{workspace_file.path});
+        const fixture_path = try loader.allocator.print("expected/{s}", .{workspace_file.path});
         const path = try generationFixturePath(loader.allocator, generation, fixture_path);
         const bytes = try loader.readFile(path, Limits.workspace_file_bytes, .expected_workspace);
         try expectDigest(loader, bytes, workspace_file.sha256, .expected_workspace, fixture_path);
@@ -564,7 +556,7 @@ fn validateTrace(
 }
 
 fn validateModelIndexes(loader: *Loader, entries: anytype, turn_count: usize, component: Component) LoadInternalError!void {
-    var per_turn = [_]u32{0} ** Limits.turns;
+    var per_turn = @as([Limits.turns]u32, @splat(0));
     var previous_turn: u32 = 0;
     for (entries, 0..) |entry, i| {
         if (entry.index != i or entry.turn_index >= turn_count or
@@ -581,7 +573,7 @@ fn validateModelIndexes(loader: *Loader, entries: anytype, turn_count: usize, co
 }
 
 fn validateApprovalIndexes(loader: *Loader, entries: anytype, turn_count: usize, component: Component) LoadInternalError!void {
-    var per_turn = [_]u32{0} ** Limits.turns;
+    var per_turn = @as([Limits.turns]u32, @splat(0));
     var previous_turn: u32 = 0;
     for (entries, 0..) |entry, i| {
         if (entry.index != i or entry.turn_index >= turn_count or
@@ -763,7 +755,7 @@ pub fn validCaseName(name: []const u8) bool {
 }
 
 fn generationFixturePath(allocator: std.mem.Allocator, generation: []const u8, fixture_path: []const u8) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}/{s}", .{ generation, fixture_path });
+    return allocator.print("{s}/{s}", .{ generation, fixture_path });
 }
 
 fn expectDigest(

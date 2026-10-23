@@ -109,8 +109,8 @@ pub const Options = struct {
     list: bool = false,
 };
 
-const outcome_count = std.meta.fields(Outcome).len;
-const group_count = std.meta.fields(Group).len;
+const outcome_count = @typeInfo(Outcome).@"enum".field_names.len;
+const group_count = @typeInfo(Group).@"enum".field_names.len;
 
 pub const Record = struct {
     probe: usize,
@@ -157,7 +157,7 @@ pub const Report = struct {
         try self.failures.append(a, .{
             .kind = kind,
             .path = try a.dupe(u8, path),
-            .detail = try std.fmt.allocPrint(a, fmt, args),
+            .detail = try a.print(fmt, args),
         });
     }
 };
@@ -230,9 +230,9 @@ pub fn classify(a: std.mem.Allocator, result: *const precompile.CheckResult, pro
             // The claim failure names the property it could not discharge.
             if (std.mem.find(u8, diag.message, @tagName(property)) != null) claim_failures += 1;
         } else if (is_error) {
-            return .{ .observed = .no_verdict, .detail = try std.fmt.allocPrint(a, "an error outside the flow codes: {s} {s}", .{ diag.code, diag.message }) };
+            return .{ .observed = .no_verdict, .detail = try a.print("an error outside the flow codes: {s} {s}", .{ diag.code, diag.message }) };
         } else if (!(is_warning and isBenignWarning(diag.code))) {
-            return .{ .observed = .no_verdict, .detail = try std.fmt.allocPrint(a, "an unexpected {s}: {s} {s}", .{ diag.severity, diag.code, diag.message }) };
+            return .{ .observed = .no_verdict, .detail = try a.print("an unexpected {s}: {s} {s}", .{ diag.severity, diag.code, diag.message }) };
         }
         if (codes.items.len != 0) try codes.append(a, ',');
         try codes.appendSlice(a, diag.code);
@@ -300,16 +300,16 @@ pub fn runCensus(
     report.probes_total = probes.len;
     for (probes) |probe| {
         report.column_probes[probes_mod.columnOf(probe)] += 1;
-        report.group_probes[@intFromEnum(probe.group)] += 1;
+        report.group_probes[@backingInt(probe.group)] += 1;
     }
     if (probes.len < options.floors.total) {
         try report.add(.below_floor, "census", "{d} probe(s), the floor is {d}", .{ probes.len, options.floors.total });
     }
     const group_floors = [group_count]usize{ options.floors.matrix, options.floors.extended, options.floors.hand };
-    inline for (std.meta.fields(Group)) |field| {
-        const index = @intFromEnum(@field(Group, field.name));
+    inline for (@typeInfo(Group).@"enum".field_names) |field| {
+        const index = @backingInt(@field(Group, field));
         if (report.group_probes[index] < group_floors[index]) {
-            try report.add(.group_below_floor, field.name, "{d} probe(s) in group {s}, the floor is {d}", .{ report.group_probes[index], field.name, group_floors[index] });
+            try report.add(.group_below_floor, field, "{d} probe(s) in group {s}, the floor is {d}", .{ report.group_probes[index], field, group_floors[index] });
         }
     }
     for (0..probes_mod.hand_column) |column| {
@@ -345,13 +345,13 @@ pub fn runCensus(
         const verdict = try classify(a, &result, probe.property);
         const outcome = outcomeOf(probe.expect, verdict.observed);
         try report.records.append(a, .{ .probe = i, .observed = verdict.observed, .outcome = outcome, .detail = verdict.detail });
-        report.column_outcomes[probes_mod.columnOf(probe)][@intFromEnum(outcome)] += 1;
-        report.group_outcomes[@intFromEnum(probe.group)][@intFromEnum(outcome)] += 1;
-        report.total_outcomes[@intFromEnum(outcome)] += 1;
+        report.column_outcomes[probes_mod.columnOf(probe)][@backingInt(outcome)] += 1;
+        report.group_outcomes[@backingInt(probe.group)][@backingInt(outcome)] += 1;
+        report.total_outcomes[@backingInt(outcome)] += 1;
         if (outcome == .match) {
             switch (probe.expect) {
-                .refuse, .refuse_or_unprove => report.matched_refuse[@intFromEnum(probe.group)] += 1,
-                .hold, .hold_or_unprove => report.matched_hold[@intFromEnum(probe.group)] += 1,
+                .refuse, .refuse_or_unprove => report.matched_refuse[@backingInt(probe.group)] += 1,
+                .hold, .hold_or_unprove => report.matched_hold[@backingInt(probe.group)] += 1,
             }
         }
     }
@@ -399,27 +399,27 @@ fn printReport(report: *const Report, probes: []const Probe, options: Options) v
         std.debug.print("  {s:<28} {d:>4}: {d:>3} / {d:>3} / {d:>3} / {d:>3} / {d:>3}\n", .{
             probes_mod.columnName(&buf, column),
             report.column_probes[column],
-            o[@intFromEnum(Outcome.match)],
-            o[@intFromEnum(Outcome.fail_open)],
-            o[@intFromEnum(Outcome.over_refusal)],
-            o[@intFromEnum(Outcome.weak)],
-            o[@intFromEnum(Outcome.no_verdict)],
+            o[@backingInt(Outcome.match)],
+            o[@backingInt(Outcome.fail_open)],
+            o[@backingInt(Outcome.over_refusal)],
+            o[@backingInt(Outcome.weak)],
+            o[@backingInt(Outcome.no_verdict)],
         });
     }
-    inline for (std.meta.fields(Group)) |field| {
-        const g = @intFromEnum(@field(Group, field.name));
+    inline for (@typeInfo(Group).@"enum".field_names) |field| {
+        const g = @backingInt(@field(Group, field));
         const o = report.group_outcomes[g];
         std.debug.print(
             "flow census: group {s}: {d} probe(s): refused as expected {d}, fail-open {d}, held as expected {d}, over-refusal {d}, weak {d}, no verdict {d}\n",
             .{
-                field.name,
+                field,
                 report.group_probes[g],
                 report.matched_refuse[g],
-                o[@intFromEnum(Outcome.fail_open)],
+                o[@backingInt(Outcome.fail_open)],
                 report.matched_hold[g],
-                o[@intFromEnum(Outcome.over_refusal)],
-                o[@intFromEnum(Outcome.weak)],
-                o[@intFromEnum(Outcome.no_verdict)],
+                o[@backingInt(Outcome.over_refusal)],
+                o[@backingInt(Outcome.weak)],
+                o[@backingInt(Outcome.no_verdict)],
             },
         );
     }
@@ -428,11 +428,11 @@ fn printReport(report: *const Report, probes: []const Probe, options: Options) v
         "flow census: total {d} probe(s): {d} match, {d} fail-open, {d} over-refusal, {d} weak, {d} no verdict; floor {d}\n",
         .{
             report.probes_total,
-            t[@intFromEnum(Outcome.match)],
-            t[@intFromEnum(Outcome.fail_open)],
-            t[@intFromEnum(Outcome.over_refusal)],
-            t[@intFromEnum(Outcome.weak)],
-            t[@intFromEnum(Outcome.no_verdict)],
+            t[@backingInt(Outcome.match)],
+            t[@backingInt(Outcome.fail_open)],
+            t[@backingInt(Outcome.over_refusal)],
+            t[@backingInt(Outcome.weak)],
+            t[@backingInt(Outcome.no_verdict)],
             options.floors.total,
         },
     );
@@ -574,8 +574,8 @@ const Tiny = struct {
 fn tinyProbe(a: std.mem.Allocator, t: Tiny) !Probe {
     const files = try a.alloc(probes_mod.SourceFile, 1);
     files[0] = .{
-        .name = try std.fmt.allocPrint(a, "{s}.ts", .{t.name}),
-        .text = try std.fmt.allocPrint(a, "{s}\n", .{t.marker}),
+        .name = try a.print("{s}.ts", .{t.name}),
+        .text = try a.print("{s}\n", .{t.marker}),
     };
     return .{
         .name = t.name,
@@ -733,9 +733,9 @@ fn mutate(kind: FailureKind) !void {
 }
 
 test "every failure kind is probed and rejected" {
-    inline for (std.meta.fields(FailureKind)) |field| {
-        mutate(@field(FailureKind, field.name)) catch |err| {
-            std.debug.print("probe for {s} failed: {s}\n", .{ field.name, @errorName(err) });
+    inline for (@typeInfo(FailureKind).@"enum".field_names) |field| {
+        mutate(@field(FailureKind, field)) catch |err| {
+            std.debug.print("probe for {s} failed: {s}\n", .{ field, @errorName(err) });
             return err;
         };
     }
@@ -761,7 +761,7 @@ test "the outcome of every expected and observed pair is the one written here" {
         .{ .hold_or_unprove, .held, .match },
         .{ .hold_or_unprove, .no_verdict, .no_verdict },
     };
-    try testing.expectEqual(std.meta.fields(Expect).len * std.meta.fields(Observed).len, table.len);
+    try testing.expectEqual(@typeInfo(Expect).@"enum".field_names.len * @typeInfo(Observed).@"enum".field_names.len, table.len);
     for (table) |row| try testing.expectEqual(row[2], outcomeOf(row[0], row[1]));
 }
 
@@ -778,11 +778,11 @@ test "a synthetic census produces every outcome and every observed class" {
     };
     var report = try env.run(&probes, tinyOptions());
     defer report.deinit();
-    try testing.expectEqual(@as(usize, 1), report.total_outcomes[@intFromEnum(Outcome.match)]);
-    try testing.expectEqual(@as(usize, 1), report.total_outcomes[@intFromEnum(Outcome.weak)]);
-    try testing.expectEqual(@as(usize, 1), report.total_outcomes[@intFromEnum(Outcome.fail_open)]);
-    try testing.expectEqual(@as(usize, 1), report.total_outcomes[@intFromEnum(Outcome.over_refusal)]);
-    try testing.expectEqual(@as(usize, 1), report.total_outcomes[@intFromEnum(Outcome.no_verdict)]);
+    try testing.expectEqual(@as(usize, 1), report.total_outcomes[@backingInt(Outcome.match)]);
+    try testing.expectEqual(@as(usize, 1), report.total_outcomes[@backingInt(Outcome.weak)]);
+    try testing.expectEqual(@as(usize, 1), report.total_outcomes[@backingInt(Outcome.fail_open)]);
+    try testing.expectEqual(@as(usize, 1), report.total_outcomes[@backingInt(Outcome.over_refusal)]);
+    try testing.expectEqual(@as(usize, 1), report.total_outcomes[@backingInt(Outcome.no_verdict)]);
     // Three mismatches and one probe with no verdict each fail.
     try testing.expectEqual(@as(usize, 4), report.failures.items.len);
     try testing.expect(report.has(.no_verdict));
@@ -829,7 +829,7 @@ test "classify gives no verdict when the property and its claim failure disagree
     // A result with no flow stage, and one with no contract.
     var no_flow = try fakeResult(testing.allocator, true, true, true, &.{});
     defer no_flow.deinit(testing.allocator);
-    no_flow.stages_run = precompile.StageSet.initEmpty();
+    no_flow.stages_run = precompile.StageSet.empty;
     try testing.expectEqual(Observed.no_verdict, (try classify(arena.allocator(), &no_flow, .no_secret_leakage)).observed);
     var no_contract = try fakeResult(testing.allocator, true, true, true, &.{});
     defer no_contract.deinit(testing.allocator);
@@ -885,12 +885,12 @@ test "the committed census clears its floors and every expectation states a reas
     var by_column: [probes_mod.column_count]usize = @splat(0);
     for (probes) |p| {
         try testing.expect(p.reason.len != 0);
-        by_group[@intFromEnum(p.group)] += 1;
+        by_group[@backingInt(p.group)] += 1;
         by_column[probes_mod.columnOf(p)] += 1;
     }
     try testing.expect(probes.len >= committed_floors.total);
-    try testing.expect(by_group[@intFromEnum(Group.matrix)] >= committed_floors.matrix);
-    try testing.expect(by_group[@intFromEnum(Group.extended)] >= committed_floors.extended);
-    try testing.expect(by_group[@intFromEnum(Group.hand)] >= committed_floors.hand);
+    try testing.expect(by_group[@backingInt(Group.matrix)] >= committed_floors.matrix);
+    try testing.expect(by_group[@backingInt(Group.extended)] >= committed_floors.extended);
+    try testing.expect(by_group[@backingInt(Group.hand)] >= committed_floors.hand);
     for (by_column[0..probes_mod.hand_column]) |n| try testing.expect(n >= committed_floors.per_column);
 }

@@ -11,7 +11,7 @@ extern fn zttpSdkFillRandom(handle: *ModuleHandle, buf_ptr: [*]u8, len: usize) b
 extern fn zttpSdkWriteStderr(handle: *ModuleHandle, buf_ptr: [*]const u8, len: usize) bool;
 
 pub fn hasCapability(handle: *ModuleHandle, capability: ModuleCapability) bool {
-    return zttpSdkHasCapability(handle, @intFromEnum(capability));
+    return zttpSdkHasCapability(handle, @backingInt(capability));
 }
 
 pub fn requireCapability(handle: *ModuleHandle, capability: ModuleCapability) ModuleCapabilityError!void {

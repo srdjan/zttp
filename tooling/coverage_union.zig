@@ -216,7 +216,7 @@ fn publishedSets(
     var sets: std.ArrayList(RecordedSet) = .empty;
     var commits = std.mem.tokenizeAny(u8, log.stdout, " \t\r\n");
     while (commits.next()) |commit| {
-        const spec = try std.fmt.allocPrint(arena, "{s}:docs/coverage.json", .{commit});
+        const spec = try arena.print("{s}:docs/coverage.json", .{commit});
         const blob = try runGit(arena, io, root, &.{ "git", "show", spec });
         if (!blob.ok) {
             unreadable.* += 1;
@@ -411,7 +411,7 @@ fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]c
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
@@ -763,8 +763,8 @@ test "every refusal carries a message and each reachable one is probed" {
     // A census rather than a sample: iterating the error set means a refusal
     // added later cannot ship without a message. The tests in this file probe
     // every member the library path can reach.
-    inline for (@typeInfo(Failure).error_set.?) |member| {
-        try testing.expect(failureMessage(@field(Failure, member.name)).len != 0);
+    inline for (@typeInfo(Failure).error_set.error_names.?) |member| {
+        try testing.expect(failureMessage(@field(Failure, member)).len != 0);
     }
 
     var fixture = try Fixture.init(io);

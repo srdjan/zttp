@@ -203,7 +203,7 @@ pub fn setHeaderValue(
         .append => blk: {
             if (getHeaderValueCaseInsensitive(ctx, headers_obj, pool, name)) |existing_val| {
                 if (getStringDataCtx(existing_val, ctx)) |existing_str| {
-                    const combined = try std.fmt.allocPrint(ctx.allocator, "{s}, {s}", .{ existing_str, value });
+                    const combined = try ctx.allocator.print("{s}, {s}", .{ existing_str, value });
                     defer ctx.allocator.free(combined);
                     break :blk try ctx.createString(combined);
                 }

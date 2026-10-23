@@ -73,7 +73,7 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
         const raw_op = code[pc];
 
         // Check opcode validity
-        const op: Opcode = @enumFromInt(raw_op);
+        const op: Opcode = @fromBackingInt(@intCast(raw_op));
         const info = bytecode.getOpcodeInfo(op);
 
         // Unknown opcode (caught by the _ arm returning "unknown" name)
@@ -273,7 +273,7 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
     // Phase 2 continued: validate jump targets
     pc = 0;
     while (pc < code.len) {
-        const op: Opcode = @enumFromInt(code[pc]);
+        const op: Opcode = @fromBackingInt(@intCast(code[pc]));
         const info = bytecode.getOpcodeInfo(op);
 
         switch (op) {
@@ -406,7 +406,7 @@ pub fn verify(func: *const FunctionBytecode) VerifyResult {
         pc = worklist[worklist_len];
         queued[pc] = false;
         const stack_height = stack_heights[pc];
-        const op: Opcode = @enumFromInt(code[pc]);
+        const op: Opcode = @fromBackingInt(@intCast(code[pc]));
         const info = bytecode.getOpcodeInfo(op);
 
         const effect = stackEffect(code, pc, op, info);
@@ -555,7 +555,7 @@ fn isInstructionBoundary(code: []const u8, target: usize) bool {
     var pc: usize = 0;
     while (pc < code.len) {
         if (pc == target) return true;
-        const info = bytecode.getOpcodeInfo(@enumFromInt(code[pc]));
+        const info = bytecode.getOpcodeInfo(@fromBackingInt(@intCast(code[pc])));
         if (std.mem.eql(u8, info.name, "unknown") or pc + info.size > code.len) return false;
         pc += info.size;
     }
@@ -603,7 +603,7 @@ test "verify: simple ret_undefined passes" {
         .local_count = 0,
         .stack_size = 256,
         .flags = .{},
-        .code = &.{@intFromEnum(Opcode.ret_undefined)},
+        .code = &.{@backingInt(Opcode.ret_undefined)},
         .constants = &.{},
         .source_map = null,
         .line_table = null,
@@ -621,8 +621,8 @@ test "verify: push_true + ret passes" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.push_true),
-            @intFromEnum(Opcode.ret),
+            @backingInt(Opcode.push_true),
+            @backingInt(Opcode.ret),
         },
         .constants = &.{},
         .source_map = null,
@@ -642,7 +642,7 @@ test "verify: truncated operand rejected" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.push_const),
+            @backingInt(Opcode.push_const),
             0x00, // missing second byte of u16
         },
         .constants = &.{},
@@ -663,9 +663,9 @@ test "verify: constant index out of bounds rejected" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.push_const),
-            0x05,                     0x00, // index 5, but constants is empty
-            @intFromEnum(Opcode.ret),
+            @backingInt(Opcode.push_const),
+            0x05,                    0x00, // index 5, but constants is empty
+            @backingInt(Opcode.ret),
         },
         .constants = &.{},
         .source_map = null,
@@ -689,7 +689,7 @@ test "verify: make_closure rejects declared upvalues beyond child metadata" {
         .flags = .{},
         .upvalue_count = 1,
         .upvalue_info = &child_upvalues,
-        .code = &.{@intFromEnum(Opcode.ret_undefined)},
+        .code = &.{@backingInt(Opcode.ret_undefined)},
         .constants = &.{},
         .source_map = null,
         .line_table = null,
@@ -703,11 +703,11 @@ test "verify: make_closure rejects declared upvalues beyond child metadata" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.make_closure),
+            @backingInt(Opcode.make_closure),
             0x00, 0x00, // child function constant index 0
             0x02, // declares 2 upvalues, child has 1 descriptor
-            @intFromEnum(Opcode.drop),
-            @intFromEnum(Opcode.ret_undefined),
+            @backingInt(Opcode.drop),
+            @backingInt(Opcode.ret_undefined),
         },
         .constants = &constants,
         .source_map = null,
@@ -731,7 +731,7 @@ test "verify: make_closure rejects child local descriptor outside parent locals"
         .flags = .{},
         .upvalue_count = 1,
         .upvalue_info = &child_upvalues,
-        .code = &.{@intFromEnum(Opcode.ret_undefined)},
+        .code = &.{@backingInt(Opcode.ret_undefined)},
         .constants = &.{},
         .source_map = null,
         .line_table = null,
@@ -745,10 +745,10 @@ test "verify: make_closure rejects child local descriptor outside parent locals"
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.make_closure),
-            0x00,                               0x00, // child function constant index 0
-            0x01,                               @intFromEnum(Opcode.drop),
-            @intFromEnum(Opcode.ret_undefined),
+            @backingInt(Opcode.make_closure),
+            0x00,                              0x00, // child function constant index 0
+            0x01,                              @backingInt(Opcode.drop),
+            @backingInt(Opcode.ret_undefined),
         },
         .constants = &constants,
         .source_map = null,
@@ -772,7 +772,7 @@ test "verify: make_closure rejects child upvalue descriptor outside parent upval
         .flags = .{},
         .upvalue_count = 1,
         .upvalue_info = &child_upvalues,
-        .code = &.{@intFromEnum(Opcode.ret_undefined)},
+        .code = &.{@backingInt(Opcode.ret_undefined)},
         .constants = &.{},
         .source_map = null,
         .line_table = null,
@@ -787,10 +787,10 @@ test "verify: make_closure rejects child upvalue descriptor outside parent upval
         .flags = .{},
         .upvalue_count = 1,
         .code = &.{
-            @intFromEnum(Opcode.make_closure),
-            0x00,                               0x00, // child function constant index 0
-            0x01,                               @intFromEnum(Opcode.drop),
-            @intFromEnum(Opcode.ret_undefined),
+            @backingInt(Opcode.make_closure),
+            0x00,                              0x00, // child function constant index 0
+            0x01,                              @backingInt(Opcode.drop),
+            @backingInt(Opcode.ret_undefined),
         },
         .constants = &constants,
         .source_map = null,
@@ -811,7 +811,7 @@ test "verify: stack underflow rejected" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.ret), // pops value, but nothing was pushed
+            @backingInt(Opcode.ret), // pops value, but nothing was pushed
         },
         .constants = &.{},
         .source_map = null,
@@ -831,11 +831,11 @@ test "verify: taken conditional branch underflow rejected" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.push_true), // offset 0
-            @intFromEnum(Opcode.if_true), // offset 1
+            @backingInt(Opcode.push_true), // offset 0
+            @backingInt(Opcode.if_true), // offset 1
             0x01, 0x00, // target = offset 5
-            @intFromEnum(Opcode.push_0), // offset 4, skipped by taken branch
-            @intFromEnum(Opcode.ret), // offset 5
+            @backingInt(Opcode.push_0), // offset 4, skipped by taken branch
+            @backingInt(Opcode.ret), // offset 5
         },
         .constants = &.{},
         .source_map = null,
@@ -855,14 +855,14 @@ test "verify: balanced forward conditional branch passes" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.push_true), // offset 0
-            @intFromEnum(Opcode.if_true), // offset 1
+            @backingInt(Opcode.push_true), // offset 0
+            @backingInt(Opcode.if_true), // offset 1
             0x04, 0x00, // true path target = offset 8
-            @intFromEnum(Opcode.push_0), // offset 4, false path value
-            @intFromEnum(Opcode.goto), // offset 5
+            @backingInt(Opcode.push_0), // offset 4, false path value
+            @backingInt(Opcode.goto), // offset 5
             0x01, 0x00, // target = offset 9
-            @intFromEnum(Opcode.push_1), // offset 8, true path value
-            @intFromEnum(Opcode.ret), // offset 9
+            @backingInt(Opcode.push_1), // offset 8, true path value
+            @backingInt(Opcode.ret), // offset 9
         },
         .constants = &.{},
         .source_map = null,
@@ -881,9 +881,9 @@ test "verify: local index out of bounds rejected" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.get_loc),
+            @backingInt(Opcode.get_loc),
             5, // local index 5 is out of bounds
-            @intFromEnum(Opcode.ret),
+            @backingInt(Opcode.ret),
         },
         .constants = &.{},
         .source_map = null,
@@ -903,10 +903,10 @@ test "verify: inline-cache index out of bounds rejected" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.get_field_ic),
+            @backingInt(Opcode.get_field_ic),
             0, 0, // atom index 0
-            0x58,                               0x02, // cache_idx = 600, >= IC_CACHE_SIZE (512)
-            @intFromEnum(Opcode.ret_undefined),
+            0x58,                              0x02, // cache_idx = 600, >= IC_CACHE_SIZE (512)
+            @backingInt(Opcode.ret_undefined),
         },
         .constants = &.{},
         .source_map = null,
@@ -926,8 +926,8 @@ test "verify: valid local access passes" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.get_loc_0), // local 0, ok with local_count=4
-            @intFromEnum(Opcode.ret),
+            @backingInt(Opcode.get_loc_0), // local 0, ok with local_count=4
+            @backingInt(Opcode.ret),
         },
         .constants = &.{},
         .source_map = null,
@@ -946,11 +946,11 @@ test "verify: jump within bounds passes" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.push_true), // offset 0
-            @intFromEnum(Opcode.if_true), // offset 1
+            @backingInt(Opcode.push_true), // offset 0
+            @backingInt(Opcode.if_true), // offset 1
             0x01, 0x00, // jump +1 byte (past ret_undefined to second ret_undefined)
-            @intFromEnum(Opcode.ret_undefined), // offset 4
-            @intFromEnum(Opcode.ret_undefined), // offset 5 (jump target)
+            @backingInt(Opcode.ret_undefined), // offset 4
+            @backingInt(Opcode.ret_undefined), // offset 5 (jump target)
         },
         .constants = &.{},
         .source_map = null,
@@ -969,7 +969,7 @@ test "verify: jump to end of bytecode is rejected" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.goto),
+            @backingInt(Opcode.goto),
             0x00, 0x00, // target = code.len
         },
         .constants = &.{},
@@ -990,8 +990,8 @@ test "verify: conditional jump to end of bytecode is rejected" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.push_false),
-            @intFromEnum(Opcode.if_false),
+            @backingInt(Opcode.push_false),
+            @backingInt(Opcode.if_false),
             0x00, 0x00, // target = code.len
         },
         .constants = &.{},
@@ -1012,8 +1012,8 @@ test "verify: drop_goto jump to end of bytecode is rejected" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.push_0),
-            @intFromEnum(Opcode.drop_goto),
+            @backingInt(Opcode.push_0),
+            @backingInt(Opcode.drop_goto),
             0x00, 0x00, // target = code.len
         },
         .constants = &.{},
@@ -1034,9 +1034,9 @@ test "verify: jump target inside an operand is rejected" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.goto),
-            0xff,                               0xff, // target = 2, inside this instruction
-            @intFromEnum(Opcode.ret_undefined),
+            @backingInt(Opcode.goto),
+            0xff,                              0xff, // target = 2, inside this instruction
+            @backingInt(Opcode.ret_undefined),
         },
         .constants = &.{},
         .source_map = null,
@@ -1052,8 +1052,8 @@ test "verify: large bytecode receives full jump validation" {
     const len = 65_537;
     const code = try allocator.alloc(u8, len);
     defer allocator.free(code);
-    @memset(code, @intFromEnum(Opcode.nop));
-    code[len - 3] = @intFromEnum(Opcode.goto);
+    @memset(code, @backingInt(Opcode.nop));
+    code[len - 3] = @backingInt(Opcode.goto);
     code[len - 2] = 0x00;
     code[len - 1] = 0x00;
 
@@ -1083,12 +1083,12 @@ test "verify: push_const_call accounts for fused argument" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.get_loc_0),
-            @intFromEnum(Opcode.push_const_call),
+            @backingInt(Opcode.get_loc_0),
+            @backingInt(Opcode.push_const_call),
             0x00, 0x00, // const index 0
             0x01, // argc = 1
-            @intFromEnum(Opcode.drop),
-            @intFromEnum(Opcode.ret_undefined),
+            @backingInt(Opcode.drop),
+            @backingInt(Opcode.ret_undefined),
         },
         .constants = &.{value.JSValue.fromInt(1)},
         .source_map = null,
@@ -1110,11 +1110,11 @@ test "verify: call_method underflow on the this receiver rejected" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.push_true), // offset 0 -> height 1
-            @intFromEnum(Opcode.push_true), // offset 1 -> height 2
-            @intFromEnum(Opcode.call_method), // offset 2, pops argc+2 = 3
+            @backingInt(Opcode.push_true), // offset 0 -> height 1
+            @backingInt(Opcode.push_true), // offset 1 -> height 2
+            @backingInt(Opcode.call_method), // offset 2, pops argc+2 = 3
             0x01, // argc = 1
-            @intFromEnum(Opcode.ret),
+            @backingInt(Opcode.ret),
         },
         .constants = &.{},
         .source_map = null,
@@ -1136,8 +1136,8 @@ test "verify: dup on an empty stack rejected" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.dup), // reads stack[sp-1] at height 0
-            @intFromEnum(Opcode.ret),
+            @backingInt(Opcode.dup), // reads stack[sp-1] at height 0
+            @backingInt(Opcode.ret),
         },
         .constants = &.{},
         .source_map = null,
@@ -1158,9 +1158,9 @@ test "verify: dup2 below its read floor rejected" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.push_true), // height 1
-            @intFromEnum(Opcode.dup2), // reads stack[sp-1] and stack[sp-2] at height 1
-            @intFromEnum(Opcode.ret),
+            @backingInt(Opcode.push_true), // height 1
+            @backingInt(Opcode.dup2), // reads stack[sp-1] and stack[sp-2] at height 1
+            @backingInt(Opcode.ret),
         },
         .constants = &.{},
         .source_map = null,
@@ -1181,10 +1181,10 @@ test "verify: valid dup passes" {
         .stack_size = 256,
         .flags = .{},
         .code = &.{
-            @intFromEnum(Opcode.push_true),
-            @intFromEnum(Opcode.dup),
-            @intFromEnum(Opcode.drop),
-            @intFromEnum(Opcode.ret),
+            @backingInt(Opcode.push_true),
+            @backingInt(Opcode.dup),
+            @backingInt(Opcode.drop),
+            @backingInt(Opcode.ret),
         },
         .constants = &.{},
         .source_map = null,

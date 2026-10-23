@@ -333,7 +333,7 @@ pub fn canonicalFunctionReplacement(allocator: std.mem.Allocator, line: []const 
     if (std.mem.startsWith(u8, signature, "<")) return error.UnsupportedRefactor;
     const needs_param_parens = !std.mem.startsWith(u8, signature, "(");
     const function_signature = if (needs_param_parens)
-        try std.fmt.allocPrint(allocator, "({s})", .{signature})
+        try allocator.print("({s})", .{signature})
     else
         signature;
     defer if (needs_param_parens) allocator.free(function_signature);
@@ -342,7 +342,7 @@ pub fn canonicalFunctionReplacement(allocator: std.mem.Allocator, line: []const 
 
     const export_prefix: []const u8 = if (is_export) "export " else "";
     if (std.mem.startsWith(u8, body, "{")) {
-        return std.fmt.allocPrint(allocator, "{s}function {s}{s} {s}", .{
+        return allocator.print("{s}function {s}{s} {s}", .{
             export_prefix,
             raw_name,
             function_signature,
@@ -350,7 +350,7 @@ pub fn canonicalFunctionReplacement(allocator: std.mem.Allocator, line: []const 
         });
     }
 
-    return std.fmt.allocPrint(allocator, "{s}function {s}{s} {{ return {s}; }}", .{
+    return allocator.print("{s}function {s}{s} {{ return {s}; }}", .{
         export_prefix,
         raw_name,
         function_signature,
@@ -363,7 +363,7 @@ pub fn avoidableLetReplacement(allocator: std.mem.Allocator, line: []const u8) !
     const indent_len = line.len - trimmed_left.len;
     const indent = line[0..indent_len];
     if (std.mem.startsWith(u8, trimmed_left, "let ")) {
-        return std.fmt.allocPrint(allocator, "{s}const {s}", .{
+        return allocator.print("{s}const {s}", .{
             indent,
             trimmed_left["let ".len..],
         });
@@ -371,7 +371,7 @@ pub fn avoidableLetReplacement(allocator: std.mem.Allocator, line: []const u8) !
 
     const needle = "for (let ";
     const at = std.mem.indexOf(u8, line, needle) orelse return error.UnsupportedRefactor;
-    return std.fmt.allocPrint(allocator, "{s}for (const {s}", .{
+    return allocator.print("{s}for (const {s}", .{
         line[0..at],
         line[at + needle.len ..],
     });
@@ -426,12 +426,12 @@ pub fn compoundAssignReplacement(allocator: std.mem.Allocator, line: []const u8)
         // tax)`, not `total = total - fee + tax` which reassociates to
         // `(total - fee) + tax` and silently changes the result.
         if (isAtomicRhs(expr)) {
-            return std.fmt.allocPrint(allocator, "{s}{s} = {s} {c} {s}{s}", .{
+            return allocator.print("{s}{s} = {s} {c} {s}{s}", .{
                 indent, lhs, lhs, op_char, expr, trailer,
             });
         }
         if (!delimitersBalanced(expr)) return error.UnsupportedRefactor;
-        return std.fmt.allocPrint(allocator, "{s}{s} = {s} {c} ({s}){s}", .{
+        return allocator.print("{s}{s} = {s} {c} ({s}){s}", .{
             indent, lhs, lhs, op_char, expr, trailer,
         });
     }
@@ -509,10 +509,10 @@ pub fn redundantBoolCompareReplacement(
     const replacement_core = if (positive)
         try allocator.dupe(u8, value)
     else
-        try std.fmt.allocPrint(allocator, "!{s}", .{value});
+        try allocator.print("!{s}", .{value});
     defer allocator.free(replacement_core);
 
-    return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{
+    return allocator.print("{s}{s}{s}", .{
         line[0..left_start],
         replacement_core,
         line[right_end..],
@@ -1116,11 +1116,7 @@ fn ternaryToMatchRewrite(
     // relational/equality operators a condition usually ends in, so `!!a === b`
     // would mis-parse as `(!!a) === b`. `!!(a === b)` coerces the whole
     // condition to a strict boolean, reproducing the ternary's truthiness test.
-    const replacement = try std.fmt.allocPrint(
-        allocator,
-        "match (!!({s})) {{ when true: {s}, default: {s} }}",
-        .{ cond, then_branch, else_branch },
-    );
+    const replacement = try allocator.print("match (!!({s})) {{ when true: {s}, default: {s} }}", .{ cond, then_branch, else_branch });
     errdefer allocator.free(replacement);
     const original = try allocator.dupe(u8, source[real_start..else_end]);
     errdefer allocator.free(original);
@@ -2894,17 +2890,14 @@ test "collect output can clear canonical diagnostic through edit simulation" {
     try std.testing.expectEqual(@as(usize, 1), preview.repairs.items.len);
     try std.testing.expectEqual(RepairIntent.replace_arrow_with_function, preview.repairs.items[0].intent);
 
-    const proposed = try std.fmt.allocPrint(
-        std.testing.allocator,
+    const proposed = try std.testing.allocator.print(
         \\{s}
         \\function handler(req: Request): Response {{
         \\  const a = parse(1);
         \\  const b = parse(2);
         \\  return Response.json({{ a, b }});
         \\}}
-    ,
-        .{preview.repairs.items[0].replacement},
-    );
+    , .{preview.repairs.items[0].replacement});
     defer std.testing.allocator.free(proposed);
 
     // Applying the refactor clears the canonical diagnostic: re-collecting on

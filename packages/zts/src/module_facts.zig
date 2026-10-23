@@ -475,7 +475,7 @@ fn resolutionMatches(
 fn resolveAtomName(ir_view: IrView, atoms: ?*context.AtomTable, atom_idx: u16) ?[]const u8 {
     if (atoms) |table| {
         // With atom table: predefined atoms first, then the dynamic table.
-        const atom: object.Atom = @enumFromInt(atom_idx);
+        const atom: object.Atom = @fromBackingInt(@intCast(atom_idx));
         if (atom.toPredefinedName()) |name| return name;
         return table.getName(atom);
     }
@@ -491,7 +491,7 @@ fn resolveAtomName(ir_view: IrView, atoms: ?*context.AtomTable, atom_idx: u16) ?
     // tests failed. Copied verbatim from `bool_checker.resolveAtomName` rather
     // than reinvented, so the two cannot drift.
     if (ir_view.getString(atom_idx)) |name| return name;
-    const atom: object.Atom = @enumFromInt(atom_idx);
+    const atom: object.Atom = @fromBackingInt(@intCast(atom_idx));
     return atom.toPredefinedName();
 }
 

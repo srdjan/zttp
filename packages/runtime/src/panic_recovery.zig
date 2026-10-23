@@ -21,7 +21,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 
-pub const c = @cImport(@cInclude("setjmp.h"));
+pub const c = @import("setjmp-c");
 
 const linux = struct {
     extern fn _setjmp(e: *c.jmp_buf) c_int;
@@ -30,13 +30,13 @@ const linux = struct {
 
 // OS-agnostic setjmp/longjmp entry points.
 // On macOS setjmp/longjmp are real libc functions; on glibc they are macros
-// that @cImport may not expose as callable symbols. `setjmpFn` must be a
+// that translated headers may not expose as callable symbols. `setjmpFn` must be a
 // direct alias, not a Zig wrapper: longjmp must resume in callHandlerGuarded's
 // frame, not in a helper frame that returned before the panic.
-pub const setjmpFn = if (builtin.os.tag == .linux) linux._setjmp else c.setjmp;
+pub const setjmpFn = if (builtin.target.os.tag == .linux) linux._setjmp else c.setjmp;
 
 pub fn longjmpFn(env: *c.jmp_buf, val: c_int) noreturn {
-    if (comptime builtin.os.tag == .linux) {
+    if (comptime builtin.target.os.tag == .linux) {
         linux._longjmp(env, val);
     } else {
         c.longjmp(env, val);

@@ -143,11 +143,7 @@ fn ignoredRefusal(
                 const line_end = std.mem.indexOfScalar(u8, outcome.stdout, '\n') orelse outcome.stdout.len;
                 const line = outcome.stdout[0..line_end];
                 const match = line[0 .. std.mem.indexOfScalar(u8, line, '\t') orelse line.len];
-                return try std.fmt.allocPrint(
-                    allocator,
-                    name ++ ": path is ignored by git and is not readable (source:line:pattern {s})\n",
-                    .{match},
-                );
+                return try allocator.print(name ++ ": path is ignored by git and is not readable (source:line:pattern {s})\n", .{match});
             }
         }
     }

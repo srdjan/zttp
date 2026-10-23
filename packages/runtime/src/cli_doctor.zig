@@ -246,8 +246,8 @@ fn printDoctorExpertProvider(allocator: std.mem.Allocator) void {
 }
 
 fn printDoctorPlatform() void {
-    const os = builtin.os.tag;
-    const arch = builtin.cpu.arch;
+    const os = builtin.target.os.tag;
+    const arch = builtin.target.cpu.arch;
     const supported = (os == .macos or os == .linux) and
         (arch == .x86_64 or arch == .aarch64);
     if (supported) {

@@ -550,7 +550,7 @@ pub fn synthesizeEnvFeature(
         return .conflicting_env_import;
     }
 
-    const read_marker = try std.fmt.allocPrint(allocator, "env(\"{s}\")", .{variable});
+    const read_marker = try allocator.print("env(\"{s}\")", .{variable});
     defer allocator.free(read_marker);
     if (std.mem.indexOf(u8, source, read_marker) != null) return .existing_read;
 
@@ -614,12 +614,8 @@ fn renderUnreadableSource(allocator: std.mem.Allocator, playbook_name: []const u
 }
 
 fn renderSourceMiss(allocator: std.mem.Allocator, playbook_name: []const u8, reason: []const u8) ![]u8 {
-    const text = try std.fmt.allocPrint(
-        allocator,
-        "[standin-miss] The deterministic {s} playbook did not apply an edit: {s}. " ++
-            "Use a hosted model, or point ZTTP_MLX_BASE_URL at a real local model.",
-        .{ playbook_name, reason },
-    );
+    const text = try allocator.print("[standin-miss] The deterministic {s} playbook did not apply an edit: {s}. " ++
+        "Use a hosted model, or point ZTTP_MLX_BASE_URL at a real local model.", .{ playbook_name, reason });
     defer allocator.free(text);
     return renderText(allocator, text);
 }
@@ -775,13 +771,13 @@ pub fn parseRouteIntent(allocator: std.mem.Allocator, ask: []const u8) !RouteSpe
     const path = findPath(ask) orelse "/";
     const status = findKeyValue(ask, "status") orelse "200";
 
-    const file_arg = try std.fmt.allocPrint(allocator, "file={s}", .{file});
+    const file_arg = try allocator.print("file={s}", .{file});
     defer allocator.free(file_arg);
-    const method_arg = try std.fmt.allocPrint(allocator, "method={s}", .{method});
+    const method_arg = try allocator.print("method={s}", .{method});
     defer allocator.free(method_arg);
-    const path_arg = try std.fmt.allocPrint(allocator, "path={s}", .{path});
+    const path_arg = try allocator.print("path={s}", .{path});
     defer allocator.free(path_arg);
-    const status_arg = try std.fmt.allocPrint(allocator, "status={s}", .{status});
+    const status_arg = try allocator.print("status={s}", .{status});
     defer allocator.free(status_arg);
 
     return parseRouteSpecArgs(allocator, &.{ "route", file_arg, method_arg, path_arg, status_arg });

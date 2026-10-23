@@ -129,11 +129,7 @@ fn writeCounterexampleHeadline(
     widths: ColumnWidths,
     cx: *const review.CounterexamplePreview,
 ) !void {
-    const line = try std.fmt.allocPrint(
-        allocator,
-        "Counterexample: -{s} at {s}:{d}: {s}",
-        .{ cx.label, cx.handler_path, cx.line, cx.snippet },
-    );
+    const line = try allocator.print("Counterexample: -{s} at {s}:{d}: {s}", .{ cx.label, cx.handler_path, cx.line, cx.snippet });
     defer allocator.free(line);
     try writeFullRow(writer, widths, line);
 }
@@ -144,7 +140,7 @@ fn writeWhyRow(
     widths: ColumnWidths,
     hint: []const u8,
 ) !void {
-    const line = try std.fmt.allocPrint(allocator, "  why: {s}", .{hint});
+    const line = try allocator.print("  why: {s}", .{hint});
     defer allocator.free(line);
     try writeFullRow(writer, widths, line);
 }
@@ -156,11 +152,7 @@ fn writeReplaySection(
     req: review.CounterexamplePreview.FailingRequest,
     cx: *const review.CounterexamplePreview,
 ) !void {
-    const req_line = try std.fmt.allocPrint(
-        allocator,
-        "  request: {s} {s}",
-        .{ req.method, req.url },
-    );
+    const req_line = try allocator.print("  request: {s} {s}", .{ req.method, req.url });
     defer allocator.free(req_line);
     try writeFullRow(writer, widths, req_line);
 
@@ -182,9 +174,9 @@ fn formatReplayLine(
     r: review.CounterexamplePreview.ReplayResponse,
 ) ![]u8 {
     if (r.error_text) |err| {
-        return std.fmt.allocPrint(allocator, "{s}: crashed - {s}", .{ prefix, err });
+        return allocator.print("{s}: crashed - {s}", .{ prefix, err });
     }
-    return std.fmt.allocPrint(allocator, "{s}: {d}  {s}", .{ prefix, r.status, r.body });
+    return allocator.print("{s}: {d}  {s}", .{ prefix, r.status, r.body });
 }
 
 /// Build the Why-on-regression row content for the live HUD: when a property
@@ -202,11 +194,7 @@ fn buildWhyRow(
     for (card.delta.demoted_properties) |demoted| {
         for (card.property_causes) |cause| {
             if (std.mem.eql(u8, cause.field, demoted.name)) {
-                return try std.fmt.allocPrint(
-                    allocator,
-                    "Why: -{s} at {s}:{d}: {s}",
-                    .{ demoted.label, card.handler_path, cause.line, cause.snippet },
-                );
+                return try allocator.print("Why: -{s} at {s}:{d}: {s}", .{ demoted.label, card.handler_path, cause.line, cause.snippet });
             }
         }
     }
@@ -280,7 +268,7 @@ fn writeProofTraceBlock(
                     wrote_title = true;
                 }
                 const summary = strField(fields, "summary") orelse "";
-                const line = try std.fmt.allocPrint(allocator, "  -{s}: {s}", .{ meta.label, summary });
+                const line = try allocator.print("  -{s}: {s}", .{ meta.label, summary });
                 defer allocator.free(line);
                 try writeFullRow(writer, widths, line);
             }
@@ -309,24 +297,24 @@ fn writeResistedBlock(
                     try writeFullRow(writer, widths, "Resisted: the attack each proof defeats");
                     wrote_title = true;
                 }
-                const header = try std.fmt.allocPrint(allocator, "  +{s}", .{meta.label});
+                const header = try allocator.print("  +{s}", .{meta.label});
                 defer allocator.free(header);
                 try writeFullRow(writer, widths, header);
 
                 if (strField(rf, "attackInput")) |s| {
-                    const line = try std.fmt.allocPrint(allocator, "    tried: {s}", .{s});
+                    const line = try allocator.print("    tried: {s}", .{s});
                     defer allocator.free(line);
                     try writeFullRow(writer, widths, line);
                 }
                 if (arrField(rf, "chain")) |steps| {
                     for (steps.items) |step| if (jsonString(step)) |s| {
-                        const line = try std.fmt.allocPrint(allocator, "    -> {s}", .{s});
+                        const line = try allocator.print("    -> {s}", .{s});
                         defer allocator.free(line);
                         try writeFullRow(writer, widths, line);
                     };
                 }
                 if (strField(rf, "conclusion")) |s| {
-                    const line = try std.fmt.allocPrint(allocator, "    {s}", .{s});
+                    const line = try allocator.print("    {s}", .{s});
                     defer allocator.free(line);
                     try writeFullRow(writer, widths, line);
                 }
@@ -388,15 +376,11 @@ fn buildPropertiesPane(
     inline for (review.property_metas) |meta| {
         const proven = @field(card.current.properties, meta.field);
         const glyph: []const u8 = if (proven) "[+]" else "[-]";
-        const line = try std.fmt.allocPrint(allocator, "{s} {s}", .{ glyph, meta.label });
+        const line = try allocator.print("{s} {s}", .{ glyph, meta.label });
         try lines.append(allocator, line);
     }
 
-    const proof_line = try std.fmt.allocPrint(
-        allocator,
-        "proof: {s}",
-        .{card.current.proof_level.toString()},
-    );
+    const proof_line = try allocator.print("proof: {s}", .{card.current.proof_level.toString()});
     try lines.append(allocator, proof_line);
 
     // Active specs render directly under the inferred properties. Failing
@@ -407,7 +391,7 @@ fn buildPropertiesPane(
         try lines.append(allocator, try allocator.dupe(u8, "Specs (active)"));
         for (card.current.declared_specs) |s| {
             const glyph: []const u8 = if (s.discharged) "[*]" else "[-]";
-            const line = try std.fmt.allocPrint(allocator, "{s} spec {s}", .{ glyph, s.name });
+            const line = try allocator.print("{s} spec {s}", .{ glyph, s.name });
             try lines.append(allocator, line);
         }
     }
@@ -425,7 +409,7 @@ fn buildSurfacePane(
     try appendCountedHeading(allocator, &lines, "routes", card.current.routes.len);
     for (card.current.routes) |r| {
         const suffix: []const u8 = if (r.is_prefix) " (prefix)" else "";
-        const line = try std.fmt.allocPrint(allocator, "  {s}{s}", .{ r.pattern, suffix });
+        const line = try allocator.print("  {s}{s}", .{ r.pattern, suffix });
         try lines.append(allocator, line);
     }
 
@@ -445,7 +429,7 @@ fn appendStringSection(
 ) !void {
     try appendCountedHeading(allocator, lines, name, items.len);
     for (items) |item| {
-        const line = try std.fmt.allocPrint(allocator, "  {s}", .{item});
+        const line = try allocator.print("  {s}", .{item});
         try lines.append(allocator, line);
     }
 }
@@ -456,7 +440,7 @@ fn appendCountedHeading(
     name: []const u8,
     count: usize,
 ) !void {
-    const line = try std.fmt.allocPrint(allocator, "{s} ({d})", .{ name, count });
+    const line = try allocator.print("{s} ({d})", .{ name, count });
     try lines.append(allocator, line);
 }
 

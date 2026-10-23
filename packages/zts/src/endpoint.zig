@@ -151,8 +151,8 @@ pub const AddressScope = enum(u8) {
 
     /// The name this scope carries in a policy file.
     pub fn fromText(text: []const u8) ?AddressScope {
-        inline for (@typeInfo(AddressScope).@"enum".fields) |field| {
-            const scope: AddressScope = @enumFromInt(field.value);
+        inline for (@typeInfo(AddressScope).@"enum".field_names) |field| {
+            const scope: AddressScope = @fromBackingInt(@intCast(@backingInt(@field(AddressScope, field))));
             if (std.mem.eql(u8, text, scope.name())) return scope;
         }
         return null;
@@ -163,7 +163,7 @@ pub const AddressScope = enum(u8) {
     }
 
     pub fn bit(self: AddressScope) u8 {
-        return @as(u8, 1) << @intCast(@intFromEnum(self) - 1);
+        return @as(u8, 1) << @intCast(@backingInt(self) - 1);
     }
 };
 
@@ -186,8 +186,8 @@ pub const ScopeSet = struct {
     /// cannot be read as "some scope we do not model, allow it".
     pub fn fromWire(bits: u8) ?ScopeSet {
         var known: u8 = 0;
-        inline for (@typeInfo(AddressScope).@"enum".fields) |field| {
-            const scope: AddressScope = @enumFromInt(field.value);
+        inline for (@typeInfo(AddressScope).@"enum".field_names) |field| {
+            const scope: AddressScope = @fromBackingInt(@intCast(@backingInt(@field(AddressScope, field))));
             known |= scope.bit();
         }
         if (bits & ~known != 0) return null;
@@ -230,14 +230,14 @@ fn scopeOfIpv4(octets: [4]u8) AddressScope {
 }
 
 fn scopeOfIpv6(bytes: [16]u8) AddressScope {
-    const unspecified = [_]u8{0} ** 16;
+    const unspecified = @as([16]u8, @splat(0));
     if (std.mem.eql(u8, &bytes, &unspecified)) return .unspecified;
-    var loopback = [_]u8{0} ** 16;
+    var loopback = @as([16]u8, @splat(0));
     loopback[15] = 1;
     if (std.mem.eql(u8, &bytes, &loopback)) return .loopback;
     // An IPv4-mapped address is the IPv4 address it carries, not a public IPv6
     // one: ::ffff:127.0.0.1 reaches loopback.
-    const v4_mapped_prefix = [_]u8{0} ** 10 ++ [_]u8{ 0xFF, 0xFF };
+    const v4_mapped_prefix = @as([10]u8, @splat(0)) ++ [_]u8{ 0xFF, 0xFF };
     if (std.mem.eql(u8, bytes[0..12], &v4_mapped_prefix)) {
         return scopeOfIpv4(.{ bytes[12], bytes[13], bytes[14], bytes[15] });
     }
@@ -397,8 +397,8 @@ test "an address scope names where a resolved address sits" {
 test "an empty scope set permits nothing and an unknown bit is refused" {
     const empty = ScopeSet{};
     try testing.expect(empty.isEmpty());
-    inline for (@typeInfo(AddressScope).@"enum".fields) |field| {
-        const scope: AddressScope = @enumFromInt(field.value);
+    inline for (@typeInfo(AddressScope).@"enum".field_names) |field| {
+        const scope: AddressScope = @fromBackingInt(@intCast(@backingInt(@field(AddressScope, field))));
         try testing.expect(!empty.contains(scope));
     }
 

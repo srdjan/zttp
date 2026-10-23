@@ -280,7 +280,7 @@ pub fn validateBaseUrl(url: []const u8) ClientError!void {
         return ClientError.InvalidDeepSeekBaseUrl;
     }
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = uri.getHost(&host_buf) catch return ClientError.InvalidDeepSeekBaseUrl;
+    const host = http_errors.uriHost(uri, &host_buf) catch return ClientError.InvalidDeepSeekBaseUrl;
     if (host.bytes.len == 0) return ClientError.InvalidDeepSeekBaseUrl;
     var path_buf: [1024]u8 = undefined;
     const path = uri.path.toRaw(&path_buf) catch return ClientError.InvalidDeepSeekBaseUrl;
@@ -294,7 +294,7 @@ pub fn validateBaseUrl(url: []const u8) ClientError!void {
 
 fn endpointUrl(arena: std.mem.Allocator, base_url: []const u8) ![]u8 {
     try validateBaseUrl(base_url);
-    return std.fmt.allocPrint(arena, "{s}{s}", .{
+    return arena.print("{s}{s}", .{
         std.mem.trimEnd(u8, base_url, "/"),
         chat_completions_path,
     });
@@ -362,7 +362,7 @@ const SanitizedResponse = struct {
     bytes: []u8,
 };
 
-const max_parser_warnings = std.meta.fields(capture_sink.ParserWarning).len;
+const max_parser_warnings = @typeInfo(capture_sink.ParserWarning).@"enum".field_names.len;
 
 const ResponseInspection = struct {
     finish_reason: ?capture_sink.FinishReason = null,
@@ -734,7 +734,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
     const protocol = std.http.Client.Protocol.fromUri(uri) orelse return ClientError.InvalidDeepSeekBaseUrl;
     if (protocol != .tls) return ClientError.InvalidDeepSeekBaseUrl;
     var host_buf: [std.Io.net.HostName.max_len]u8 = undefined;
-    const host = uri.getHost(&host_buf) catch return ClientError.InvalidDeepSeekBaseUrl;
+    const host = http_errors.uriHost(uri, &host_buf) catch return ClientError.InvalidDeepSeekBaseUrl;
     const connection = http_errors.connectWithin(
         &client,
         host,
@@ -765,7 +765,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
         connection.stream_reader.stream.socket.handle,
         @intCast(socket_read_timeout_ms),
     );
-    const authorization = try std.fmt.allocPrint(arena, "Bearer {s}", .{config.api_key});
+    const authorization = try arena.print("Bearer {s}", .{config.api_key});
     const headers = [_]std.http.Header{
         .{ .name = "content-type", .value = "application/json" },
         .{ .name = "accept", .value = "application/json" },
@@ -822,7 +822,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
     };
     if (response.head.status != .ok) {
         return .{ .http_error = .{
-            .status_code = @intFromEnum(response.head.status),
+            .status_code = @backingInt(response.head.status),
             .body = response_body,
         } };
     }

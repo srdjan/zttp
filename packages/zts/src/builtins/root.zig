@@ -137,7 +137,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethod(ctx, allocator, pool, math_obj, root_class_idx, .random, wrap(math.mathRandom), 0);
 
     // Add Math constants as properties (NaN-boxing: no allocation needed)
-    try ctx.setPropertyChecked(math_obj, @enumFromInt(ctx.atoms.next_id), value.JSValue.fromFloat(math.math_constants.PI));
+    try ctx.setPropertyChecked(math_obj, @fromBackingInt(@intCast(ctx.atoms.next_id)), value.JSValue.fromFloat(math.math_constants.PI));
     try ctx.setGlobal(.Math, math_obj.toValue());
 
     // Create JSON object - parse and stringify are hot builtins with fast dispatch

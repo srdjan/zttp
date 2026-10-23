@@ -419,13 +419,13 @@ fn expectNegativeCase(allocator: std.mem.Allocator, case: NegativeCase) !void {
 fn runFixtureCases(allocator: std.mem.Allocator) !void {
     try validateReleaseScript(allocator, positive_fixture);
     for (negative_cases) |case| try expectNegativeCase(allocator, case);
-    inline for (@typeInfo(ReleaseFailure).error_set.?) |member| {
+    inline for (@typeInfo(ReleaseFailure).error_set.error_names.?) |member| {
         var covered = false;
         for (negative_cases) |case| {
-            if (std.mem.eql(u8, @errorName(case.expected), member.name)) covered = true;
+            if (std.mem.eql(u8, @errorName(case.expected), member)) covered = true;
         }
         if (!covered) {
-            std.debug.print("release workflow: rule {s} has no negative case\n", .{member.name});
+            std.debug.print("release workflow: rule {s} has no negative case\n", .{member});
             return error.UncoveredReleaseRule;
         }
     }
@@ -453,14 +453,14 @@ fn writeStdout(io: std.Io, bytes: []const u8) !void {
 
 fn usage() noreturn {
     std.debug.print(
-        "usage: repo-gate <agent-envelope|meta-drift|release-workflow> ...\n",
+        "usage: repo-gate <agent-envelope|meta-drift|release-workflow|test-selection-count> ...\n",
         .{},
     );
     std.process.exit(2);
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = init.environ });
@@ -472,6 +472,17 @@ pub fn main(init: std.process.Init.Minimal) !void {
         allocator.free(args);
     }
     if (args.len < 2) usage();
+
+    if (std.mem.eql(u8, args[1], "test-selection-count")) {
+        var count: usize = 0;
+        for (args[2..]) |path| {
+            const bytes = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64));
+            defer allocator.free(bytes);
+            count = try addSelectionCount(count, bytes);
+        }
+        if (count == 0) std.process.fatal("test filter selected zero tests in this named suite", .{});
+        return;
+    }
 
     if (std.mem.eql(u8, args[1], "script-reachability")) {
         if (args.len != 5) usage();
@@ -529,6 +540,23 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     usage();
+}
+
+fn addSelectionCount(total: usize, bytes: []const u8) !usize {
+    if (bytes.len == 0) return error.InvalidCharacter;
+    for (bytes) |byte| if (!std.ascii.isDigit(byte)) return error.InvalidCharacter;
+    const count = try std.fmt.parseInt(usize, bytes, 10);
+    return std.math.add(usize, total, count);
+}
+
+test "selection counts reject malformed input and overflow" {
+    try std.testing.expectEqual(@as(usize, 0), try addSelectionCount(0, "0"));
+    try std.testing.expectEqual(@as(usize, 7), try addSelectionCount(2, "5"));
+    try std.testing.expectError(error.InvalidCharacter, addSelectionCount(0, ""));
+    try std.testing.expectError(error.InvalidCharacter, addSelectionCount(0, "-1"));
+    try std.testing.expectError(error.InvalidCharacter, addSelectionCount(0, "invalid"));
+    try std.testing.expectError(error.InvalidCharacter, addSelectionCount(0, "1_0"));
+    try std.testing.expectError(error.Overflow, addSelectionCount(std.math.maxInt(usize), "1"));
 }
 
 test "script route rejection probes are collected" {

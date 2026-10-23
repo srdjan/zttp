@@ -133,13 +133,13 @@ pub const LabelSet = packed struct(u16) {
     pub fn mergeConditional(a: LabelSet, b: LabelSet) LabelSet {
         const ai: u16 = @bitCast(a);
         const bi: u16 = @bitCast(b);
-        const validated_mask: u16 = @as(u16, 1) << @intFromEnum(DataLabel.validated);
+        const validated_mask: u16 = @as(u16, 1) << @backingInt(DataLabel.validated);
         return @bitCast(((ai | bi) & ~validated_mask) | ((ai & bi) & validated_mask));
     }
 
     /// Check if a specific label is present.
     pub fn has(self: LabelSet, label: DataLabel) bool {
-        const mask: u16 = @as(u16, 1) << @intFromEnum(label);
+        const mask: u16 = @as(u16, 1) << @backingInt(label);
         const raw: u16 = @bitCast(self);
         return (raw & mask) != 0;
     }
@@ -163,7 +163,7 @@ pub const LabelSet = packed struct(u16) {
 
     /// Create a LabelSet from a single label.
     pub fn fromLabel(label: DataLabel) LabelSet {
-        const mask: u16 = @as(u16, 1) << @intFromEnum(label);
+        const mask: u16 = @as(u16, 1) << @backingInt(label);
         return @bitCast(mask);
     }
 };

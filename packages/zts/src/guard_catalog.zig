@@ -105,7 +105,7 @@ pub const Family = enum(u3) {
     sql = 3,
 
     pub fn bit(self: Family) u8 {
-        return @as(u8, 1) << @intFromEnum(self);
+        return @as(u8, 1) << @backingInt(self);
     }
 };
 
@@ -150,11 +150,11 @@ pub const SectionSet = struct {
     bits: u8 = 0,
 
     pub fn with(self: SectionSet, section: Section) SectionSet {
-        return .{ .bits = self.bits | (@as(u8, 1) << @intFromEnum(section)) };
+        return .{ .bits = self.bits | (@as(u8, 1) << @backingInt(section)) };
     }
 
     pub fn contains(self: SectionSet, section: Section) bool {
-        return self.bits & (@as(u8, 1) << @intFromEnum(section)) != 0;
+        return self.bits & (@as(u8, 1) << @backingInt(section)) != 0;
     }
 };
 

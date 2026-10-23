@@ -20,17 +20,17 @@ pub const GuardVerdicts = pcc.verdict.GuardVerdicts;
 /// longest possible result is known at compile time and no input can grow it.
 pub const max_kinds_bytes: usize = blk: {
     var total: usize = 0;
-    for (@typeInfo(pcc.residual.GuardKind).@"enum".fields) |field| {
-        total += field.name.len + 1;
+    for (@typeInfo(pcc.residual.GuardKind).@"enum".field_names) |field| {
+        total += field.len + 1;
     }
     break :blk total;
 };
 
 pub fn writeKinds(writer: *std.Io.Writer, kinds: u8) std.Io.Writer.Error!void {
     var wrote_any = false;
-    inline for (@typeInfo(pcc.residual.GuardKind).@"enum".fields) |field| {
-        const kind: pcc.residual.GuardKind = @enumFromInt(field.value);
-        if (kinds & (@as(u8, 1) << @intCast(field.value - 1)) != 0) {
+    inline for (@typeInfo(pcc.residual.GuardKind).@"enum".field_names) |field| {
+        const kind: pcc.residual.GuardKind = @fromBackingInt(@intCast(@backingInt(@field(pcc.residual.GuardKind, field))));
+        if (kinds & (@as(u8, 1) << @intCast(@backingInt(@field(pcc.residual.GuardKind, field)) - 1)) != 0) {
             if (wrote_any) try writer.writeAll(", ");
             try writer.writeAll(kind.name());
             wrote_any = true;

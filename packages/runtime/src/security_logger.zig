@@ -106,7 +106,7 @@ test "SecurityLogger flushes events to file" {
     var tmp_buf: [128]u8 = undefined;
     const path = try std.fmt.bufPrint(&tmp_buf, "/tmp/zttp-secevt-test-{d}.jsonl", .{seed});
 
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     const logger = try SecurityLogger.start(allocator, path);

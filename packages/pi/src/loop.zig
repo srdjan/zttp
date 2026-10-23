@@ -433,11 +433,7 @@ fn projectToolResult(
         else
             .{
                 .ok = false,
-                .llm_text = try std.fmt.allocPrint(
-                    arena,
-                    "{{\"ok\":false,\"error\":\"{s} violated its bounded context policy\",\"result_bytes\":{d},\"maximum_bytes\":{d}}}\n",
-                    .{ tool_name, body.len, tools_common.max_projected_tool_result_bytes },
-                ),
+                .llm_text = try arena.print("{{\"ok\":false,\"error\":\"{s} violated its bounded context policy\",\"result_bytes\":{d},\"maximum_bytes\":{d}}}\n", .{ tool_name, body.len, tools_common.max_projected_tool_result_bytes }),
             },
     };
 }
@@ -597,13 +593,9 @@ fn runTurnBody(
                 // runs a tool before re-drafting. Only a short framing nudge
                 // rides in the transient prompt; losing it is harmless because
                 // the substantive repair context is persisted, not re-sent.
-                const prompt = try std.fmt.allocPrint(
-                    ta,
-                    veto_retry_prefix ++ " (attempt {d}/{d}). " ++
-                        "Emit a new, complete edit that fixes every flagged violation " ++
-                        "without re-introducing one you already fixed in an earlier attempt.",
-                    .{ payload.attempt, payload.max_attempts },
-                );
+                const prompt = try ta.print(veto_retry_prefix ++ " (attempt {d}/{d}). " ++
+                    "Emit a new, complete edit that fixes every flagged violation " ++
+                    "without re-introducing one you already fixed in an earlier attempt.", .{ payload.attempt, payload.max_attempts });
                 const result = try callModel(allocator, ta, client, transcript, prompt);
                 turn_usage.add(result.usage);
                 next_event = .{ .model_replied = result.reply };
@@ -637,21 +629,13 @@ fn runTurnBody(
                         .execution_ok = null,
                     });
                 }
-                const call_id = try std.fmt.allocPrint(ta, "propose_change_set-{d}", .{transcript.len()});
+                const call_id = try ta.print("propose_change_set-{d}", .{transcript.len()});
                 var acquisition_phase: change_transaction.AcquisitionPhase = .locking;
                 var workspace = change_transaction.RecoveredWorkspace.acquireReporting(ta, options.workspace_root, &acquisition_phase) catch |err| {
                     if (err == error.OutOfMemory) return err;
                     const message = switch (acquisition_phase) {
-                        .locking => try std.fmt.allocPrint(
-                            ta,
-                            "change set rejected before proof: workspace transaction lock failed ({s}); no source was written.",
-                            .{@errorName(err)},
-                        ),
-                        .recovering => try std.fmt.allocPrint(
-                            ta,
-                            "change set rejected before proof: workspace recovery failed ({s}); resolve the recorded transaction conflict before retrying.",
-                            .{@errorName(err)},
-                        ),
+                        .locking => try ta.print("change set rejected before proof: workspace transaction lock failed ({s}); no source was written.", .{@errorName(err)}),
+                        .recovering => try ta.print("change set rejected before proof: workspace recovery failed ({s}); resolve the recorded transaction conflict before retrying.", .{@errorName(err)}),
                     };
                     try appendChangeSetToolUse(allocator, ta, transcript, call_id, proposal, null);
                     try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = message } });
@@ -664,11 +648,7 @@ fn runTurnBody(
 
                 var prepared = change_set.prepare(ta, workspace.root(), proposal) catch |err| {
                     if (err == error.OutOfMemory) return err;
-                    const message = try std.fmt.allocPrint(
-                        ta,
-                        "change set rejected: the host could not establish authoritative source baselines ({s}); no source was written.",
-                        .{@errorName(err)},
-                    );
+                    const message = try ta.print("change set rejected: the host could not establish authoritative source baselines ({s}); no source was written.", .{@errorName(err)});
                     try appendChangeSetToolUse(allocator, ta, transcript, call_id, proposal, null);
                     try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = message } });
                     try appendEditToolResult(allocator, transcript, call_id, false, message);
@@ -680,11 +660,7 @@ fn runTurnBody(
 
                 var snapshot = workspace_snapshot.Snapshot.capture(ta, &prepared) catch |err| {
                     if (err == error.OutOfMemory) return err;
-                    const message = try std.fmt.allocPrint(
-                        ta,
-                        "change set rejected: proof input capture failed closed ({s}); no source was written.",
-                        .{@errorName(err)},
-                    );
+                    const message = try ta.print("change set rejected: proof input capture failed closed ({s}); no source was written.", .{@errorName(err)});
                     try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = message } });
                     try appendEditToolResult(allocator, transcript, call_id, false, message);
                     next_event = .{ .change_set_verified = .{ .ok = false, .llm_text = message } };
@@ -699,11 +675,7 @@ fn runTurnBody(
                 switch (proof_result) {
                     .rejected => |rejection| {
                         gate.calls.items[gate_call_index].execution_ok = false;
-                        const body = try std.fmt.allocPrint(
-                            ta,
-                            veto_reject_preamble ++ " Fix every flagged violation below:\n\n{s}: {s}",
-                            .{ rejection.code, rejection.message },
-                        );
+                        const body = try ta.print(veto_reject_preamble ++ " Fix every flagged violation below:\n\n{s}: {s}", .{ rejection.code, rejection.message });
                         if (!options.replay_mode and prepared.changes.len == 1) repair: {
                             var candidate = pi_goal_candidate.candidateFromSource(
                                 ta,
@@ -738,11 +710,7 @@ fn runTurnBody(
                                 .rejected => break :repair,
                                 .accepted => |*repaired_proof| {
                                     try appendEditToolResult(allocator, transcript, call_id, false, body);
-                                    const repair_note = try std.fmt.allocPrint(
-                                        ta,
-                                        compiler_repair_prefix ++ ": applied {d} compiler-validated repair{s} through a fresh aggregate proof.",
-                                        .{ candidate.plan_ids.len, if (candidate.plan_ids.len == 1) "" else "s" },
-                                    );
+                                    const repair_note = try ta.print(compiler_repair_prefix ++ ": applied {d} compiler-validated repair{s} through a fresh aggregate proof.", .{ candidate.plan_ids.len, if (candidate.plan_ids.len == 1) "" else "s" });
                                     try transcript.append(allocator, .{ .system_note = repair_note });
                                     const state = try applyVerifiedChangeSet(
                                         allocator,
@@ -771,11 +739,7 @@ fn runTurnBody(
                             }
 
                             if (auto_repair.buildRetryBlock(ta, candidate.plans_json) catch null) |block| {
-                                const note = try std.fmt.allocPrint(
-                                    ta,
-                                    compiler_repair_prefix ++ ". Apply these changes verbatim, then fix any remaining flagged violations:\n\n{s}",
-                                    .{block},
-                                );
+                                const note = try ta.print(compiler_repair_prefix ++ ". Apply these changes verbatim, then fix any remaining flagged violations:\n\n{s}", .{block});
                                 try transcript.append(allocator, .{ .system_note = note });
                             }
                         }
@@ -819,11 +783,7 @@ fn runTurnBody(
                         }
                         next_event = .{ .change_set_verified = .{
                             .ok = true,
-                            .llm_text = try std.fmt.allocPrint(
-                                ta,
-                                "aggregate proof passed for {d} source file{s}",
-                                .{ prepared.changes.len, if (prepared.changes.len == 1) "" else "s" },
-                            ),
+                            .llm_text = try ta.print("aggregate proof passed for {d} source file{s}", .{ prepared.changes.len, if (prepared.changes.len == 1) "" else "s" }),
                         } };
                     },
                 }
@@ -926,7 +886,7 @@ fn runTurnBody(
                 // structured diagnostic surface is unchanged.
                 const entry: turn.Message = switch (msg) {
                     .diagnostic_box => |box| .{ .diagnostic_box = .{
-                        .llm_text = try std.fmt.allocPrint(ta, "{s}\n\n{s}", .{ box.llm_text, veto_exhausted_next_step }),
+                        .llm_text = try ta.print("{s}\n\n{s}", .{ box.llm_text, veto_exhausted_next_step }),
                         .ui_payload = box.ui_payload,
                     } },
                     else => msg,
@@ -949,13 +909,9 @@ fn runTurnBody(
             },
             .prompt_user => |question| {
                 const text = if (hit_timeout_budget)
-                    try std.fmt.allocPrint(
-                        ta,
-                        "{s}\nTurn time limit reached ({d}s). Run /compact or narrow the task and retry.",
-                        .{ question, options.turn_timeout_ms / 1000 },
-                    )
+                    try ta.print("{s}\nTurn time limit reached ({d}s). Run /compact or narrow the task and retry.", .{ question, options.turn_timeout_ms / 1000 })
                 else if (hit_roundtrip_budget)
-                    try std.fmt.allocPrint(ta, "{s}\n{s}", .{ question, budget_exhausted_next_step })
+                    try ta.print("{s}\n{s}", .{ question, budget_exhausted_next_step })
                 else
                     question;
                 try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = text } });
@@ -1135,15 +1091,11 @@ fn applyVerifiedChangeSet(
     };
     defer committed.deinit(arena);
 
-    const summary = try std.fmt.allocPrint(
-        allocator,
-        "verified change set: {d} source file{s} ({s})",
-        .{
-            prepared.changes.len,
-            if (prepared.changes.len == 1) "" else "s",
-            proof.proof_id,
-        },
-    );
+    const summary = try allocator.print("verified change set: {d} source file{s} ({s})", .{
+        prepared.changes.len,
+        if (prepared.changes.len == 1) "" else "s",
+        proof.proof_id,
+    });
     errdefer allocator.free(summary);
     try transcript.entries.append(allocator, .{ .verified_change_set = .{
         .llm_text = summary,
@@ -1250,7 +1202,7 @@ const stub_tool: registry_mod.ToolDef = .{
 // land inside the real tmp dir.
 fn tmpWorkspacePath(allocator: std.mem.Allocator, tmp: *const std.testing.TmpDir) ![]u8 {
     try tmp.dir.createDirPath(testing.io, "src");
-    return std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}", .{tmp.sub_path});
+    return allocator.print(".zig-cache/tmp/{s}", .{tmp.sub_path});
 }
 
 const bad_handler =
@@ -1347,7 +1299,7 @@ test "veto failure triggers model-free compiler-authored apply" {
     defer tmp.cleanup();
     const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
     defer testing.allocator.free(workspace_root);
-    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/src/handler.ts", .{workspace_root});
+    const written_path = try testing.allocator.print("{s}/src/handler.ts", .{workspace_root});
     defer testing.allocator.free(written_path);
 
     var client: RetryCaptureClient = .{ .replies = &.{
@@ -1461,7 +1413,7 @@ test "retry loop is information-complete: failed draft + diagnostic survive a mi
     defer tmp.cleanup();
     const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
     defer testing.allocator.free(workspace_root);
-    const handler_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{workspace_root});
+    const handler_path = try testing.allocator.print("{s}/handler.ts", .{workspace_root});
     defer testing.allocator.free(handler_path);
     try file_io.writeFile(testing.allocator, handler_path, clean_handler);
 
@@ -1605,7 +1557,7 @@ test "clean edit path: veto passes and writes file" {
     defer tmp.cleanup();
     const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
     defer testing.allocator.free(workspace_root);
-    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/src/handler.ts", .{workspace_root});
+    const written_path = try testing.allocator.print("{s}/src/handler.ts", .{workspace_root});
     defer testing.allocator.free(written_path);
 
     var canned: CannedClient = .{ .reply = .{
@@ -1965,7 +1917,7 @@ test "retry: one bad draft then one good draft lands a proof card" {
     defer tmp.cleanup();
     const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
     defer testing.allocator.free(workspace_root);
-    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{workspace_root});
+    const written_path = try testing.allocator.print("{s}/handler.ts", .{workspace_root});
     defer testing.allocator.free(written_path);
 
     const replies = [_]turn.AssistantReply{
@@ -2005,7 +1957,7 @@ test "approval callback can block an otherwise verified edit from being written"
     defer tmp.cleanup();
     const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
     defer testing.allocator.free(workspace_root);
-    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{workspace_root});
+    const written_path = try testing.allocator.print("{s}/handler.ts", .{workspace_root});
     defer testing.allocator.free(written_path);
 
     var canned: CannedClient = .{ .reply = .{
@@ -2053,7 +2005,7 @@ test "workspace change during approval fails closed without overwriting concurre
     defer tmp.cleanup();
     const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
     defer testing.allocator.free(workspace_root);
-    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{workspace_root});
+    const written_path = try testing.allocator.print("{s}/handler.ts", .{workspace_root});
     defer testing.allocator.free(written_path);
 
     const original = "const original = true;\n";
@@ -2224,11 +2176,11 @@ test "autoReject returns false for any preview" {
 }
 
 test "ApprovalPolicy enum is exported" {
-    const fields = std.meta.fields(ApprovalPolicy);
+    const fields = @typeInfo(ApprovalPolicy).@"enum".field_names;
     try testing.expectEqual(@as(usize, 3), fields.len);
-    try testing.expectEqualStrings("ask", fields[0].name);
-    try testing.expectEqualStrings("auto_approve", fields[1].name);
-    try testing.expectEqualStrings("auto_reject", fields[2].name);
+    try testing.expectEqualStrings("ask", fields[0]);
+    try testing.expectEqualStrings("auto_approve", fields[1]);
+    try testing.expectEqualStrings("auto_reject", fields[2]);
 }
 
 test "replay_mode skips filesystem writes for a verified edit" {
@@ -2236,7 +2188,7 @@ test "replay_mode skips filesystem writes for a verified edit" {
     defer tmp.cleanup();
     const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
     defer testing.allocator.free(workspace_root);
-    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/src/handler.ts", .{workspace_root});
+    const written_path = try testing.allocator.print("{s}/src/handler.ts", .{workspace_root});
     defer testing.allocator.free(written_path);
 
     var canned: CannedClient = .{ .reply = .{
@@ -2272,7 +2224,7 @@ test "replay_mode skips the approval callback" {
     defer tmp.cleanup();
     const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
     defer testing.allocator.free(workspace_root);
-    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{workspace_root});
+    const written_path = try testing.allocator.print("{s}/handler.ts", .{workspace_root});
     defer testing.allocator.free(written_path);
 
     var canned: CannedClient = .{ .reply = .{
@@ -2311,7 +2263,7 @@ test "replay_mode off preserves existing write behavior" {
     defer tmp.cleanup();
     const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
     defer testing.allocator.free(workspace_root);
-    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/src/handler.ts", .{workspace_root});
+    const written_path = try testing.allocator.print("{s}/src/handler.ts", .{workspace_root});
     defer testing.allocator.free(written_path);
 
     var canned: CannedClient = .{ .reply = .{
@@ -2423,7 +2375,7 @@ test "legal first draft lands in one attempt and disk equals the aggregate recei
     defer tmp.cleanup();
     const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
     defer testing.allocator.free(workspace_root);
-    const written_path = try std.fmt.allocPrint(testing.allocator, "{s}/handler.ts", .{workspace_root});
+    const written_path = try testing.allocator.print("{s}/handler.ts", .{workspace_root});
     defer testing.allocator.free(written_path);
 
     var canned: CannedClient = .{ .reply = .{

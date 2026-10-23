@@ -20,7 +20,7 @@ fn catalogImplNames(
     source: [:0]const u8,
     expected_count: usize,
 ) ![][]const u8 {
-    var tree = try std.zig.Ast.parse(allocator, source, .zig);
+    var tree = try std.zig.Ast.parse(allocator, source, .{});
     defer tree.deinit(allocator);
     if (tree.errors.len != 0) return error.InvalidZigSource;
 
@@ -143,7 +143,7 @@ fn extract(
 }
 
 pub fn main(init: std.process.Init) !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
 

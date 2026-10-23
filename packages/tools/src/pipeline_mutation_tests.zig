@@ -123,7 +123,7 @@ const Kind = enum {
     truncate,
 };
 
-const kind_count = @typeInfo(Kind).@"enum".fields.len;
+const kind_count = @typeInfo(Kind).@"enum".field_names.len;
 
 /// Bytes that end a token, open or close a group, start a string or comment,
 /// break a line, or fall outside ASCII, which the tokenizer must still accept.
@@ -304,7 +304,7 @@ fn discoverSources(gpa: std.mem.Allocator, io: std.Io, dir_path: []const u8) ![]
     defer walker.deinit();
     while (try walker.next(io)) |entry| {
         if (entry.kind != .file or !isSourcePath(entry.path)) continue;
-        const full = try std.fmt.allocPrint(gpa, "{s}/{s}", .{ dir_path, entry.path });
+        const full = try gpa.print("{s}/{s}", .{ dir_path, entry.path });
         errdefer gpa.free(full);
         try paths.append(gpa, full);
     }
@@ -458,10 +458,10 @@ fn mutateFile(
     var mutant: std.ArrayList(u8) = .empty;
     defer mutant.deinit(gpa);
     for (0..per_input) |index| {
-        const kind: Kind = @enumFromInt(stats.mutants % kind_count);
+        const kind: Kind = @fromBackingInt(@intCast(stats.mutants % kind_count));
         try applyMutation(gpa, random, kind, source, &mutant);
         stats.mutants += 1;
-        stats.by_kind[@intFromEnum(kind)] += 1;
+        stats.by_kind[@backingInt(kind)] += 1;
         try checkMutant(gpa, stats, path, index, kind, mutant.items);
     }
 }
@@ -602,7 +602,7 @@ test "pipeline mutation: every kind changes a sample source and repeats from its
     var second: std.ArrayList(u8) = .empty;
     defer second.deinit(gpa);
     for (0..kind_count) |k| {
-        const kind: Kind = @enumFromInt(k);
+        const kind: Kind = @fromBackingInt(@intCast(k));
         var changed = false;
         // Some single draws are no-ops (a swap of equal tokens), so look at a few.
         for (0..8) |draw| {
@@ -623,10 +623,10 @@ test "pipeline mutation: mutation of an empty source does not index past it" {
     defer out.deinit(gpa);
     var prng: std.Random.DefaultPrng = .init(1);
     for (0..kind_count) |k| {
-        try applyMutation(gpa, prng.random(), @enumFromInt(k), "", &out);
+        try applyMutation(gpa, prng.random(), @fromBackingInt(@intCast(k)), "", &out);
     }
     for (0..kind_count) |k| {
-        try applyMutation(gpa, prng.random(), @enumFromInt(k), "x", &out);
+        try applyMutation(gpa, prng.random(), @fromBackingInt(@intCast(k)), "x", &out);
     }
 }
 

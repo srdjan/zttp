@@ -407,7 +407,9 @@ test "module graph: typed preparation closes every allocation failure" {
             );
         }
     };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
+    // Force growth through allocations so SafeAllocator remapping cannot skip a fault index.
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), Context.run, .{});
 }
 
 test "graph source selection bounds every hard admission producer" {
@@ -430,8 +432,8 @@ test "graph source selection bounds every hard admission producer" {
         .{ .kind = .void_type, .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = void;\n" },
         .{ .kind = .nesting_too_deep, .source = "import type { A } /* ; */ from \"./a\";\nconst value: {{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{ string;\n" },
     };
-    try std.testing.expectEqual(std.meta.fields(zts_parser.type_syntax.AdmissionKind).len, cases.len);
-    var seen = std.EnumSet(zts_parser.type_syntax.AdmissionKind).initEmpty();
+    try std.testing.expectEqual(@typeInfo(zts_parser.type_syntax.AdmissionKind).@"enum".field_names.len, cases.len);
+    var seen = std.EnumSet(zts_parser.type_syntax.AdmissionKind).empty;
     const Reader = struct {
         fn read(_: std.mem.Allocator, _: []const u8) ReadFileError![]const u8 {
             return error.FileNotFound;

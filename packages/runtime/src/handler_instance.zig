@@ -1249,7 +1249,7 @@ pub const HandlerInstance = struct {
         const handler_obj = self.cached_handler_obj orelse return error.NoHandler;
 
         var tracked = false;
-        if (builtin.mode == .Debug and request_id != 0) {
+        if (builtin.mode == .debug and request_id != 0) {
             const prev = self.active_request_id.swap(request_id, .acq_rel);
             if (prev != 0) {
                 std.log.err(
@@ -1370,9 +1370,9 @@ pub const HandlerInstance = struct {
             // Append the source line when the trap resolved one (feature A). A
             // JS-thrown exception often has none, so this is best-effort.
             const body_owned = if (self.interpreter.last_error_location) |loc|
-                try std.fmt.allocPrint(self.allocator, "{s} ({s}) at {d}:{d}", .{ explained, exc_msg, loc.line, loc.column })
+                try self.allocator.print("{s} ({s}) at {d}:{d}", .{ explained, exc_msg, loc.line, loc.column })
             else
-                try std.fmt.allocPrint(self.allocator, "{s} ({s})", .{ explained, exc_msg });
+                try self.allocator.print("{s} ({s})", .{ explained, exc_msg });
             err_response.setBodyOwned(body_owned);
             try err_response.putHeader("Content-Type", "text/plain; charset=utf-8");
             if (diag.verdict == .soundness_incident) {

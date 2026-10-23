@@ -86,11 +86,7 @@ fn buildDiagnosticsPayload(allocator: std.mem.Allocator, llm_text: []const u8) !
     }
 
     return .{ .diagnostics = .{
-        .summary = try std.fmt.allocPrint(
-            allocator,
-            "checked {s}: {d} diagnostic(s)",
-            .{ file.string, items.len },
-        ),
+        .summary = try allocator.print("checked {s}: {d} diagnostic(s)", .{ file.string, items.len }),
         .items = items,
     } };
 }

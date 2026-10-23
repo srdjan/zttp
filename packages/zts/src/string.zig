@@ -1370,6 +1370,21 @@ test "SIMD countByte" {
     try std.testing.expectEqual(@as(usize, 0), countByte(long, 'b'));
 }
 
+test "SIMD searches preserve every lane and scalar tail offset" {
+    var bytes: [65]u8 = @splat('_');
+    try std.testing.expectEqual(@as(?usize, null), findByte(&bytes, 'x'));
+    try std.testing.expectEqual(@as(?u32, null), simdIndexOf(&bytes, "x"));
+    for (0..bytes.len) |offset| {
+        bytes[offset] = 'x';
+        try std.testing.expectEqual(@as(?usize, offset), findByte(&bytes, 'x'));
+        try std.testing.expectEqual(@as(?u32, @intCast(offset)), simdIndexOf(&bytes, "x"));
+        try std.testing.expectEqual(@as(usize, 1), countByte(&bytes, 'x'));
+        bytes[offset] = '_';
+    }
+    @memset(&bytes, 'x');
+    try std.testing.expectEqual(bytes.len, countByte(&bytes, 'x'));
+}
+
 test "string hashing" {
     const hash1 = hashString("hello");
     const hash2 = hashString("hello");

@@ -481,11 +481,7 @@ fn probeSource(
         .optional_absent, .undefined_sentinel => "if (r === undefined) return Response.text(\"failed\", { status: 502 });",
         .boolean_falsy => "if (!r) return Response.text(\"failed\", { status: 502 });",
     };
-    return std.fmt.allocPrint(
-        allocator,
-        "import {{ {s} }} from \"{s}\";\nfunction handler(req) {{\n  const r = {s}(\"a\");\n  {s}\n  return Response.text(\"ok\");\n}}\n",
-        .{ func, specifier, func, test_line },
-    );
+    return allocator.print("import {{ {s} }} from \"{s}\";\nfunction handler(req) {{\n  const r = {s}(\"a\");\n  {s}\n  return Response.text(\"ok\");\n}}\n", .{ func, specifier, func, test_line });
 }
 
 /// Whether the stub has the shape that fails the probed call. An `ok_record` stub
@@ -597,7 +593,7 @@ fn appendKey(
     func: []const u8,
     kind: ProbeKind,
 ) ![]u8 {
-    return std.fmt.allocPrint(allocator, "{s}.{s}#{s}", .{ module, func, @tagName(kind) });
+    return allocator.print("{s}.{s}#{s}", .{ module, func, @tagName(kind) });
 }
 
 /// Probe every export in the registry. The caller owns the rows and their keys.

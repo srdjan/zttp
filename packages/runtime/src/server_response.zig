@@ -387,7 +387,7 @@ test "static 304 response remains bodyless without content length" {
 test "well-known 304 omits content length" {
     const doc = attest_well_known.Doc{
         .body = "representation",
-        .etag_hex = [_]u8{'a'} ** 64,
+        .etag_hex = @as([64]u8, @splat('a')),
     };
     var buf: [512]u8 = undefined;
     const len = try formatWellKnownHeaders(&doc, true, true, &buf);

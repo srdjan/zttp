@@ -7,6 +7,12 @@ const RuntimeFeatureConfig = struct {
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const setjmp_header = b.addWriteFiles().add("panic_recovery.h", "#include <setjmp.h>\n");
+    const setjmp_c = b.addTranslateC(.{
+        .root_source_file = setjmp_header,
+        .target = target,
+        .optimize = optimize,
+    }).addModule("setjmp-c");
     const perf_histogram = b.option(bool, "perf_histogram", "Enable interpreter opcode histogram collection") orelse false;
 
     const zts_dep = b.dependency("zts", .{
@@ -169,6 +175,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     compile_benchmark.addImport("zts", zts_mod);
+    for ([_]*std.Build.Module{ runtime_main, runtime_main_tests, cli_main, cli_main_tests, zruntime, server_tests, runtime_instance }) |module| {
+        module.addImport("setjmp-c", setjmp_c);
+    }
 }
 
 fn runtimeFeatureOptions(b: *std.Build, config: RuntimeFeatureConfig) *std.Build.Step.Options {

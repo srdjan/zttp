@@ -200,9 +200,9 @@ fn Kind(comptime source: Source) type {
 
 const code_count = blk: {
     var count: usize = 0;
-    for (std.meta.fields(Source)) |source_field| {
-        const source: Source = @enumFromInt(source_field.value);
-        count += std.meta.fields(Kind(source)).len;
+    for (@typeInfo(Source).@"enum".field_names) |source_field| {
+        const source: Source = @fromBackingInt(@intCast(@backingInt(@field(Source, source_field))));
+        count += @typeInfo(Kind(source)).@"enum".field_names.len;
     }
     break :blk count;
 };
@@ -210,14 +210,14 @@ const code_count = blk: {
 const all_codes: [code_count]CodeEntry = blk: {
     var entries: [code_count]CodeEntry = undefined;
     var index: usize = 0;
-    for (std.meta.fields(Source)) |source_field| {
-        const source: Source = @enumFromInt(source_field.value);
+    for (@typeInfo(Source).@"enum".field_names) |source_field| {
+        const source: Source = @fromBackingInt(@intCast(@backingInt(@field(Source, source_field))));
         const DiagnosticKind = Kind(source);
-        for (std.meta.fields(DiagnosticKind)) |kind_field| {
-            const kind: DiagnosticKind = @enumFromInt(kind_field.value);
+        for (@typeInfo(DiagnosticKind).@"enum".field_names) |kind_field| {
+            const kind: DiagnosticKind = @fromBackingInt(@intCast(@backingInt(@field(DiagnosticKind, kind_field))));
             entries[index] = .{
                 .source = source,
-                .kind = kind_field.name,
+                .kind = kind_field,
                 .code = code(source, kind),
             };
             index += 1;
@@ -315,8 +315,8 @@ test "projectFlowWitness isolates persistence inputs" {
 
 test "stable severities preserve wire order and labels" {
     const expected = [_][]const u8{ "error", "warning", "advisory" };
-    inline for (std.meta.fields(Severity), expected) |field, label| {
-        const severity: Severity = @enumFromInt(field.value);
+    inline for (@typeInfo(Severity).@"enum".field_names, expected) |field, label| {
+        const severity: Severity = @fromBackingInt(@intCast(@backingInt(@field(Severity, field))));
         try std.testing.expectEqualStrings(label, severity.label());
     }
 }

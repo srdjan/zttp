@@ -665,15 +665,11 @@ fn appendRecoveredReceipt(
     };
     if (!std.mem.eql(u8, receipt.transaction_id, &pending.transaction_id))
         return error.InvalidRecoveredChangeSetReceipt;
-    const summary = try std.fmt.allocPrint(
-        allocator,
-        "recovered verified change set: {d} source file{s} ({s})",
-        .{
-            receipt.changes.len,
-            if (receipt.changes.len == 1) "" else "s",
-            receipt.transaction_id,
-        },
-    );
+    const summary = try allocator.print("recovered verified change set: {d} source file{s} ({s})", .{
+        receipt.changes.len,
+        if (receipt.changes.len == 1) "" else "s",
+        receipt.transaction_id,
+    });
     errdefer allocator.free(summary);
     try session.transcript.entries.append(allocator, .{ .verified_change_set = .{
         .llm_text = summary,
@@ -1152,7 +1148,7 @@ fn envVar(name_z: [:0]const u8) ?[]const u8 {
 
 fn nowUnixMs() i64 {
     var ts: std.posix.timespec = undefined;
-    _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
+    _ = std.c.clock_gettime(@fromBackingInt(@intCast(@backingInt(std.posix.CLOCK.REALTIME))), &ts);
     return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 
@@ -1359,23 +1355,11 @@ pub fn renderCompactResult(
     result: CompactResult,
 ) ![]u8 {
     return switch (result) {
-        .compacted => |details| std.fmt.allocPrint(
-            allocator,
-            "Compacted context at entry {d}: {d} -> {d} estimated tokens.\n",
-            .{ details.first_kept_entry_id, details.tokens_before, details.estimated_tokens_after },
-        ),
+        .compacted => |details| allocator.print("Compacted context at entry {d}: {d} -> {d} estimated tokens.\n", .{ details.first_kept_entry_id, details.tokens_before, details.estimated_tokens_after }),
         .no_change => allocator.dupe(u8, "Nothing to compact.\n"),
-        .not_compactable => |reason| std.fmt.allocPrint(
-            allocator,
-            "Context is not compactable: {s}.\n",
-            .{@tagName(reason)},
-        ),
+        .not_compactable => |reason| allocator.print("Context is not compactable: {s}.\n", .{@tagName(reason)}),
         .unavailable => allocator.dupe(u8, "Compaction requires an active model backend.\n"),
-        .failed => |failure| std.fmt.allocPrint(
-            allocator,
-            "Compaction failed: {s}.\n",
-            .{@errorName(failure)},
-        ),
+        .failed => |failure| allocator.print("Compaction failed: {s}.\n", .{@errorName(failure)}),
     };
 }
 
@@ -2048,11 +2032,7 @@ pub fn fork(
         .model = session.currentModel(),
     });
 
-    const result = try std.fmt.allocPrint(
-        allocator,
-        "Forked to new session: {s}\nParent: {s}\n",
-        .{ new_sid, old_sid },
-    );
+    const result = try allocator.print("Forked to new session: {s}\nParent: {s}\n", .{ new_sid, old_sid });
     errdefer allocator.free(result);
     if (session.journal_writer) |*writer| writer.deinit();
     session.journal_writer = null;
@@ -2731,7 +2711,7 @@ test "setModel rejects compaction tuples with no post-summary request capacity" 
     var session = try AgentSession.initDeepSeek(
         testing.allocator,
         "k",
-        "fixed prompt " ** 1_000,
+        &@as([(1_000) * ("fixed prompt ").len]u8, @bitCast(@as([1_000][("fixed prompt ").len]u8, @splat(("fixed prompt ").*)))),
         "[]",
         deepseek_client.default_base_url,
     );
@@ -3413,7 +3393,7 @@ test "resume fails closed when metadata exists but the journal is missing" {
         const id = try allocator.dupe(u8, source.session_id orelse return error.TestUnexpectedResult);
         errdefer allocator.free(id);
         const path = source.events_path orelse return error.TestUnexpectedResult;
-        const path_z = try allocator.dupeZ(u8, path);
+        const path_z = try allocator.dupeSentinel(u8, path, 0);
         defer allocator.free(path_z);
         if (std.c.unlink(path_z) != 0) return error.TestUnlinkFailed;
         break :blk id;
@@ -3908,8 +3888,8 @@ const TestSummarizer = struct {
 };
 
 fn appendCompactableHistory(allocator: std.mem.Allocator, session: *AgentSession) !void {
-    try session.transcript.append(allocator, .{ .user_text = "old request " ** 4000 });
-    try session.transcript.append(allocator, .{ .model_text = "old response " ** 4000 });
+    try session.transcript.append(allocator, .{ .user_text = &@as([(4000) * ("old request ").len]u8, @bitCast(@as([4000][("old request ").len]u8, @splat(("old request ").*)))) });
+    try session.transcript.append(allocator, .{ .model_text = &@as([(4000) * ("old response ").len]u8, @bitCast(@as([4000][("old response ").len]u8, @splat(("old response ").*)))) });
     try session.transcript.append(allocator, .{ .user_text = "recent request" });
     try session.transcript.append(allocator, .{ .model_text = "recent response" });
 }
@@ -4023,8 +4003,8 @@ test "normal request lifecycle compacts above the soft limit before transport" {
     const allocator = testing.allocator;
     var session = try AgentSession.initDeepSeek(allocator, "test-key", "test system", null, deepseek_client.default_base_url);
     defer session.deinit(allocator);
-    try session.transcript.append(allocator, .{ .user_text = "old request " ** 10_000 });
-    try session.transcript.append(allocator, .{ .model_text = "old response " ** 10_000 });
+    try session.transcript.append(allocator, .{ .user_text = &@as([(10_000) * ("old request ").len]u8, @bitCast(@as([10_000][("old request ").len]u8, @splat(("old request ").*)))) });
+    try session.transcript.append(allocator, .{ .model_text = &@as([(10_000) * ("old response ").len]u8, @bitCast(@as([10_000][("old response ").len]u8, @splat(("old response ").*)))) });
     try session.transcript.append(allocator, .{ .user_text = "current request" });
     const before_len = session.transcript.len();
     var summarizer: TestSummarizer = .{};
@@ -4055,8 +4035,8 @@ test "normal request lifecycle compacts and retries only one overflowing call" {
     const allocator = testing.allocator;
     var session = try AgentSession.initDeepSeek(allocator, "test-key", "test system", null, deepseek_client.default_base_url);
     defer session.deinit(allocator);
-    try session.transcript.append(allocator, .{ .user_text = "old request " ** 4_000 });
-    try session.transcript.append(allocator, .{ .model_text = "old response " ** 4_000 });
+    try session.transcript.append(allocator, .{ .user_text = &@as([(4_000) * ("old request ").len]u8, @bitCast(@as([4_000][("old request ").len]u8, @splat(("old request ").*)))) });
+    try session.transcript.append(allocator, .{ .model_text = &@as([(4_000) * ("old response ").len]u8, @bitCast(@as([4_000][("old response ").len]u8, @splat(("old response ").*)))) });
     try session.transcript.append(allocator, .{ .user_text = "current request" });
     const before_len = session.transcript.len();
     var summarizer: TestSummarizer = .{};
@@ -4087,8 +4067,8 @@ test "full turn overflow retries only the pending request after a completed tool
     const allocator = testing.allocator;
     var session = try AgentSession.initDeepSeek(allocator, "test-key", "test system", null, deepseek_client.default_base_url);
     defer session.deinit(allocator);
-    try session.transcript.append(allocator, .{ .user_text = "old request " ** 4_000 });
-    try session.transcript.append(allocator, .{ .model_text = "old response " ** 4_000 });
+    try session.transcript.append(allocator, .{ .user_text = &@as([(4_000) * ("old request ").len]u8, @bitCast(@as([4_000][("old request ").len]u8, @splat(("old request ").*)))) });
+    try session.transcript.append(allocator, .{ .model_text = &@as([(4_000) * ("old response ").len]u8, @bitCast(@as([4_000][("old response ").len]u8, @splat(("old response ").*)))) });
     const before_turn_len = session.transcript.len();
 
     var registry: Registry = .{};
@@ -4145,8 +4125,8 @@ test "normal request lifecycle surfaces a second overflow without another compac
     const allocator = testing.allocator;
     var session = try AgentSession.initDeepSeek(allocator, "test-key", "test system", null, deepseek_client.default_base_url);
     defer session.deinit(allocator);
-    try session.transcript.append(allocator, .{ .user_text = "old request " ** 4_000 });
-    try session.transcript.append(allocator, .{ .model_text = "old response " ** 4_000 });
+    try session.transcript.append(allocator, .{ .user_text = &@as([(4_000) * ("old request ").len]u8, @bitCast(@as([4_000][("old request ").len]u8, @splat(("old request ").*)))) });
+    try session.transcript.append(allocator, .{ .model_text = &@as([(4_000) * ("old response ").len]u8, @bitCast(@as([4_000][("old response ").len]u8, @splat(("old response ").*)))) });
     try session.transcript.append(allocator, .{ .user_text = "current request" });
     const before_len = session.transcript.len();
     var summarizer: TestSummarizer = .{};
@@ -4174,7 +4154,7 @@ test "normal request lifecycle keeps soft compaction off while hard admission re
     var session = try AgentSession.initLocal(allocator, "test system", null, "http://127.0.0.1:8080");
     defer session.deinit(allocator);
     session.compaction_enabled = false;
-    try session.transcript.append(allocator, .{ .user_text = "large current request " ** 10_000 });
+    try session.transcript.append(allocator, .{ .user_text = &@as([(10_000) * ("large current request ").len]u8, @bitCast(@as([10_000][("large current request ").len]u8, @splat(("large current request ").*)))) });
     var summarizer: TestSummarizer = .{};
     var raw: OverflowThenReplyClient = .{ .prompt_too_long_count = 0 };
     var arena = std.heap.ArenaAllocator.init(allocator);
@@ -4193,7 +4173,7 @@ test "normal request lifecycle keeps soft compaction off while hard admission re
     try testing.expectEqual(@as(usize, 0), summarizer.calls);
     try testing.expect(session.transcript.projection == null);
 
-    try session.transcript.append(allocator, .{ .model_text = "too much history " ** 50_000 });
+    try session.transcript.append(allocator, .{ .model_text = &@as([(50_000) * ("too much history ").len]u8, @bitCast(@as([50_000][("too much history ").len]u8, @splat(("too much history ").*)))) });
     try testing.expectError(error.RequestTooLarge, requestNormalWith(
         allocator,
         arena.allocator(),
@@ -4443,7 +4423,7 @@ test "compact splits one oversized turn before a closed tool pair" {
     var session = try AgentSession.initDeepSeek(allocator, "test-key", "test system", null, deepseek_client.default_base_url);
     defer session.deinit(allocator);
     try session.transcript.append(allocator, .{ .user_text = "inspect and continue" });
-    try session.transcript.append(allocator, .{ .model_text = "early work " ** 10_000 });
+    try session.transcript.append(allocator, .{ .model_text = &@as([(10_000) * ("early work ").len]u8, @bitCast(@as([10_000][("early work ").len]u8, @splat(("early work ").*)))) });
     const calls = [_]turn.ToolCall{.{
         .id = "call_1",
         .name = "workspace_read_file",
@@ -4516,8 +4496,8 @@ test "compact accounts for escaped tool reasoning before choosing a cut" {
     });
     defer session.deinit(allocator);
 
-    try session.transcript.append(allocator, .{ .user_text = "old request " ** 3_000 });
-    try session.transcript.append(allocator, .{ .model_text = "old response " ** 3_000 });
+    try session.transcript.append(allocator, .{ .user_text = &@as([(3_000) * ("old request ").len]u8, @bitCast(@as([3_000][("old request ").len]u8, @splat(("old request ").*)))) });
+    try session.transcript.append(allocator, .{ .model_text = &@as([(3_000) * ("old response ").len]u8, @bitCast(@as([3_000][("old response ").len]u8, @splat(("old response ").*)))) });
     try session.transcript.append(allocator, .{ .user_text = "finish the current repair" });
 
     const reasoning = try allocator.alloc(u8, 55_100);
@@ -4625,8 +4605,8 @@ test "fork copies raw ancestry and projection checkpoints before independent div
         false,
     );
     try testing.expect(first == .compacted);
-    try session.transcript.append(allocator, .{ .user_text = "next old request " ** 4000 });
-    try session.transcript.append(allocator, .{ .model_text = "next old response " ** 4000 });
+    try session.transcript.append(allocator, .{ .user_text = &@as([(4000) * ("next old request ").len]u8, @bitCast(@as([4000][("next old request ").len]u8, @splat(("next old request ").*)))) });
+    try session.transcript.append(allocator, .{ .model_text = &@as([(4000) * ("next old response ").len]u8, @bitCast(@as([4000][("next old response ").len]u8, @splat(("next old response ").*)))) });
     try session.transcript.append(allocator, .{ .user_text = "newest request" });
     try session.transcript.append(allocator, .{ .model_text = "newest response" });
     const repeated = try compactDetailed(
@@ -4815,7 +4795,7 @@ test "initFromEnvWithSessionConfig refuses a drifted protocol without restamping
     // resume must not rewrite it to the current value.
     var original = try session_events.readMeta(allocator, captured_meta_path);
     defer session_events.freeMeta(allocator, &original);
-    const drifted_protocol = "b" ** 64;
+    const drifted_protocol = &@as([64:0]u8, @splat('b'));
     try session_events.writeMeta(allocator, captured_meta_path, .{
         .session_id = original.session_id,
         .workspace_realpath = original.workspace_realpath,

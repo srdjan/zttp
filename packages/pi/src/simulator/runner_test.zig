@@ -26,19 +26,15 @@ fn bindLocalCassette(
     if (newline == 0 or local_cassette[newline - 1] != '}') {
         return error.MalformedTestCassette;
     }
-    return std.fmt.allocPrint(
-        allocator,
-        "{s},\"request_sha256\":\"{s}\"{s}",
-        .{
-            local_cassette[0 .. newline - 1],
-            request_sha256.slice(),
-            local_cassette[newline - 1 ..],
-        },
-    );
+    return allocator.print("{s},\"request_sha256\":\"{s}\"{s}", .{
+        local_cassette[0 .. newline - 1],
+        request_sha256.slice(),
+        local_cassette[newline - 1 ..],
+    });
 }
 
 fn zeroDigest() artifact.Sha256Hex {
-    return .{ .bytes = [_]u8{'0'} ** 64 };
+    return .{ .bytes = @as([64]u8, @splat('0')) };
 }
 
 test "flow runner continues a real multi-Turn transcript and preserves exact workspace bytes" {

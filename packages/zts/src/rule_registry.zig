@@ -647,10 +647,10 @@ comptime {
     // in flow_meta. If a new variant lands without a corresponding rule, the
     // build fails with the variant name — the policy hash cannot silently
     // miss a new ZTS4xx code.
-    const fields = @typeInfo(flow_checker.DiagnosticKind).@"enum".fields;
-    var seen: [fields.len]bool = .{false} ** fields.len;
+    const fields = @typeInfo(flow_checker.DiagnosticKind).@"enum".field_names;
+    var seen: [fields.len]bool = @splat(false);
     for (flow_meta) |entry| {
-        seen[@intFromEnum(entry.kind)] = true;
+        seen[@backingInt(entry.kind)] = true;
     }
     for (seen, 0..) |s, idx| {
         if (!s) {
@@ -860,7 +860,7 @@ fn computePolicyHashFor(flow_version: u32, path_version: u32) [64]u8 {
         // Category byte — included so reclassifying a rule from `.policy` to
         // `.flow` (or vice versa) drifts the hash even when text strings
         // stay identical. Wave 1B/2D P0 #5 (2026-05-23 review).
-        const category_byte: u8 = @intCast(@intFromEnum(rule.category));
+        const category_byte: u8 = @intCast(@backingInt(rule.category));
         hasher.update(&[_]u8{category_byte});
         hasher.update("\x00");
         hasher.update(rule.description);
@@ -872,7 +872,7 @@ fn computePolicyHashFor(flow_version: u32, path_version: u32) [64]u8 {
         // tag instead of parsing prose, so
         // changes here are policy-visible. Sentinel 0xFF stands in for null
         // because RepairIntent has well under 255 variants.
-        const repair_byte: u8 = if (rule.repair) |r| @intCast(@intFromEnum(r)) else 0xFF;
+        const repair_byte: u8 = if (rule.repair) |r| @intCast(@backingInt(r)) else 0xFF;
         hasher.update(&[_]u8{repair_byte});
         hasher.update("\x01");
     }
@@ -945,8 +945,8 @@ test "all_rules includes every flow_checker.DiagnosticKind under .flow" {
     // Mirrors the comptime exhaustiveness gate but verifies the projection
     // into all_rules — guards against a refactor that wires flow_meta but
     // forgets to append it to the unified table.
-    inline for (@typeInfo(flow_checker.DiagnosticKind).@"enum".fields) |field| {
-        const kind: flow_checker.DiagnosticKind = @enumFromInt(field.value);
+    inline for (@typeInfo(flow_checker.DiagnosticKind).@"enum".field_names) |field| {
+        const kind: flow_checker.DiagnosticKind = @fromBackingInt(@intCast(@backingInt(@field(flow_checker.DiagnosticKind, field))));
         const name = @tagName(kind);
         const entry = findByName(name) orelse {
             std.log.err("flow rule '{s}' missing from all_rules", .{name});
@@ -985,14 +985,14 @@ test "policyHash differs when a rule is reclassified to a different category" {
         h.update("\x00");
         h.update(rule.code);
         h.update("\x00");
-        const cat: u8 = @intCast(@intFromEnum(rule.category));
+        const cat: u8 = @intCast(@backingInt(rule.category));
         h.update(&[_]u8{cat});
         h.update("\x00");
         h.update(rule.description);
         h.update("\x00");
         h.update(rule.help);
         h.update("\x00");
-        const repair_byte: u8 = if (rule.repair) |r| @intCast(@intFromEnum(r)) else 0xFF;
+        const repair_byte: u8 = if (rule.repair) |r| @intCast(@backingInt(r)) else 0xFF;
         h.update(&[_]u8{repair_byte});
         h.update("\x01");
     }
@@ -1032,14 +1032,14 @@ test "policyHash differs when a rule's repair intent changes" {
         h.update("\x00");
         h.update(rule.code);
         h.update("\x00");
-        const cat: u8 = @intCast(@intFromEnum(rule.category));
+        const cat: u8 = @intCast(@backingInt(rule.category));
         h.update(&[_]u8{cat});
         h.update("\x00");
         h.update(rule.description);
         h.update("\x00");
         h.update(rule.help);
         h.update("\x00");
-        const repair_byte: u8 = if (rule.repair) |r| @intCast(@intFromEnum(r)) else 0xFF;
+        const repair_byte: u8 = if (rule.repair) |r| @intCast(@backingInt(r)) else 0xFF;
         h.update(&[_]u8{repair_byte});
         h.update("\x01");
     }

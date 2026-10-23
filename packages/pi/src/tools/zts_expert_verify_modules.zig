@@ -140,11 +140,7 @@ fn buildDiagnosticsPayloadFromEnvelope(
     }
 
     return .{ .diagnostics = .{
-        .summary = try std.fmt.allocPrint(
-            allocator,
-            "{d} checked file(s), {d} diagnostic(s)",
-            .{ checked_files.array.items.len, items.len },
-        ),
+        .summary = try allocator.print("{d} checked file(s), {d} diagnostic(s)", .{ checked_files.array.items.len, items.len }),
         .items = items,
     } };
 }

@@ -34,7 +34,7 @@ pub const null_scope: ScopeId = std.math.maxInt(ScopeId);
 /// bits 29 to 31 of the packed binding, over the top of a 16-bit scope, so a
 /// scope at 8192 or above read back truncated and with a corrupted kind.
 fn patternKindWord(kind: anytype, binding_kind: BindingRef.BindingKind) u32 {
-    return @as(u32, @intFromEnum(kind)) | (@as(u32, @intFromEnum(binding_kind)) << 8);
+    return @as(u32, @backingInt(kind)) | (@as(u32, @backingInt(binding_kind)) << 8);
 }
 
 const ListRef = struct {
@@ -809,7 +809,7 @@ pub const DataPayload = extern struct {
     /// Pack binary expression
     pub fn fromBinary(op: BinaryOp, left: NodeIndex, right: NodeIndex) error{NodeIndexOverflow}!DataPayload {
         return .{
-            .a = (@as(u32, @intFromEnum(op)) << 24) | try packNode24(left, false),
+            .a = (@as(u32, @backingInt(op)) << 24) | try packNode24(left, false),
             .b = right,
         };
     }
@@ -817,7 +817,7 @@ pub const DataPayload = extern struct {
     /// Unpack binary expression
     pub fn toBinary(self: DataPayload) struct { op: BinaryOp, left: NodeIndex, right: NodeIndex } {
         return .{
-            .op = @enumFromInt(@as(u8, @truncate(self.a >> 24))),
+            .op = @fromBackingInt(@intCast(@as(u8, @truncate(self.a >> 24)))),
             .left = self.a & 0xFFFFFF,
             .right = self.b,
         };
@@ -838,7 +838,7 @@ comptime {
     std.debug.assert(@sizeOf(DataPayload) == 8);
     std.debug.assert(@sizeOf(NodeTag) == 1);
     std.debug.assert(@sizeOf(SourceLocation) == 16);
-    std.debug.assert(@typeInfo(BinaryOp).@"enum".fields.len < 256);
+    std.debug.assert(@typeInfo(BinaryOp).@"enum".field_names.len < 256);
 }
 
 /// Structure-of-arrays storage: tag(1) + location(16) + payload(8) +
@@ -1035,7 +1035,7 @@ pub const IRStore = struct {
 
     /// Add unary expression
     pub fn addUnary(self: *IRStore, loc: SourceLocation, op: UnaryOp, operand: NodeIndex) !NodeIndex {
-        return self.addNode(.unary_op, loc, .{ .a = @intFromEnum(op), .b = operand });
+        return self.addNode(.unary_op, loc, .{ .a = @backingInt(op), .b = operand });
     }
 
     /// Add identifier reference
@@ -1043,7 +1043,7 @@ pub const IRStore = struct {
         // Pack binding: scope_id(16) | slot(16) in a, kind(8) in b
         const idx = try self.addNode(.identifier, loc, .{
             .a = (@as(u32, binding.scope_id) << 16) | binding.slot,
-            .b = @intFromEnum(binding.kind),
+            .b = @backingInt(binding.kind),
         });
         self.setBindingName(idx, binding.name_atom);
         return idx;
@@ -1056,7 +1056,7 @@ pub const IRStore = struct {
             .scope_id = @truncate(d.a >> 16),
             .slot = @truncate(d.a),
             .name_atom = self.bindingName(idx),
-            .kind = @enumFromInt(@as(u3, @truncate(d.b))),
+            .kind = @fromBackingInt(@intCast(@as(u3, @truncate(d.b)))),
         };
     }
 
@@ -1094,7 +1094,7 @@ pub const IRStore = struct {
                 const b = node.data.binding;
                 break :blk self.addNode(.identifier, loc, .{
                     .a = (@as(u32, b.scope_id) << 16) | b.slot,
-                    .b = @intFromEnum(b.kind),
+                    .b = @backingInt(b.kind),
                 });
             },
             .binary_op => self.addNode(.binary_op, loc, try DataPayload.fromBinary(
@@ -1104,7 +1104,7 @@ pub const IRStore = struct {
             )),
             .unary_op => blk: {
                 const u = node.data.unary;
-                break :blk self.addNode(.unary_op, loc, .{ .a = @intFromEnum(u.op), .b = u.operand });
+                break :blk self.addNode(.unary_op, loc, .{ .a = @backingInt(u.op), .b = u.operand });
             },
             .ternary => blk: {
                 const t = node.data.ternary;
@@ -1134,7 +1134,7 @@ pub const IRStore = struct {
             .assignment => blk: {
                 const a = node.data.assignment;
                 // Pack: a = target, b = value(24) | op(8) (0 = no op, 1+ = op enum + 1)
-                const op_byte: u8 = if (a.op) |op| @as(u8, @intFromEnum(op)) + 1 else 0;
+                const op_byte: u8 = if (a.op) |op| @as(u8, @backingInt(op)) + 1 else 0;
                 const b_val = (try packNode24(a.value, false)) | (@as(u32, op_byte) << 24);
                 break :blk self.addNode(.assignment, loc, .{ .a = a.target, .b = b_val });
             },
@@ -1178,8 +1178,8 @@ pub const IRStore = struct {
             .function_decl => blk: {
                 const v = node.data.var_decl;
                 const binding_packed = (@as(u32, v.binding.scope_id) << 16) | v.binding.slot;
-                const kind_and_binding_kind = @as(u32, @intFromEnum(v.kind)) |
-                    (@as(u32, @intFromEnum(v.binding.kind)) << 2);
+                const kind_and_binding_kind = @as(u32, @backingInt(v.kind)) |
+                    (@as(u32, @backingInt(v.binding.kind)) << 2);
                 const extra_start = try self.addExtra(&.{ binding_packed, v.init, kind_and_binding_kind });
                 break :blk self.addNode(.function_decl, loc, .{ .a = extra_start, .b = 0 });
             },
@@ -1189,8 +1189,8 @@ pub const IRStore = struct {
                 const v = node.data.var_decl;
                 // Store in extra: [binding_packed, init, kind]
                 const binding_packed = (@as(u32, v.binding.scope_id) << 16) | v.binding.slot;
-                const kind_and_binding_kind = @as(u32, @intFromEnum(v.kind)) |
-                    (@as(u32, @intFromEnum(v.binding.kind)) << 2);
+                const kind_and_binding_kind = @as(u32, @backingInt(v.kind)) |
+                    (@as(u32, @backingInt(v.binding.kind)) << 2);
                 const extra_start = try self.addExtra(&.{ binding_packed, v.init, kind_and_binding_kind });
                 break :blk self.addNode(.var_decl, loc, .{ .a = extra_start, .b = 0 });
             },
@@ -1203,7 +1203,7 @@ pub const IRStore = struct {
                 const l = node.data.loop;
                 // Store in extra: [kind, init, condition, update, body]
                 const extra_start = try self.addExtra(&.{
-                    @intFromEnum(l.kind),
+                    @backingInt(l.kind),
                     l.init,
                     l.condition,
                     l.update,
@@ -1216,7 +1216,7 @@ pub const IRStore = struct {
                 const binding_packed = (@as(u32, f.binding.scope_id) << 16) | f.binding.slot;
                 const flags = (@as(u32, if (f.is_for_in) 1 else 0)) |
                     (@as(u32, if (f.is_const) 1 else 0) << 1) |
-                    (@as(u32, @intFromEnum(f.binding.kind)) << 2);
+                    (@as(u32, @backingInt(f.binding.kind)) << 2);
                 // Store: [binding_packed, iterable, flags, body]
                 const extra_start = try self.addExtra(&.{ binding_packed, f.iterable, flags, f.body });
                 break :blk self.addNode(node.tag, loc, .{ .a = extra_start, .b = 0 });
@@ -1262,7 +1262,7 @@ pub const IRStore = struct {
             .match_type_test => blk: {
                 const t = node.data.match_type_test;
                 break :blk self.addNode(.match_type_test, loc, .{
-                    .a = @intFromEnum(t.kind),
+                    .a = @backingInt(t.kind),
                     .b = t.predicate,
                 });
             },
@@ -1333,7 +1333,7 @@ pub const IRStore = struct {
             .export_decl => blk: {
                 const e = node.data.export_decl;
                 const extra_start = try self.addExtra(&.{
-                    @intFromEnum(e.kind),
+                    @backingInt(e.kind),
                     e.declaration,
                     e.specifiers_start,
                     e.specifiers_count,
@@ -1399,7 +1399,7 @@ pub const IRStore = struct {
             .export_specifier => blk: {
                 const e = node.data.export_decl;
                 const extra_start = try self.addExtra(&.{
-                    @intFromEnum(e.kind),
+                    @backingInt(e.kind),
                     e.declaration,
                     e.specifiers_start,
                     e.specifiers_count,
@@ -1448,7 +1448,7 @@ pub const IRStore = struct {
                     const bin = d.toBinary();
                     break :blk .{ .binary = .{ .op = bin.op, .left = bin.left, .right = bin.right } };
                 },
-                .unary_op => .{ .unary = .{ .op = @enumFromInt(@as(u4, @truncate(d.a))), .operand = d.b } },
+                .unary_op => .{ .unary = .{ .op = @fromBackingInt(@intCast(@as(u4, @truncate(d.a)))), .operand = d.b } },
                 .return_stmt,
                 .throw_stmt,
                 .expr_stmt,
@@ -1758,7 +1758,8 @@ test "packed node operands reject overflow and preserve nullable sentinels" {
 }
 
 test "failed node append preserves the complete parallel prefix" {
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), struct {
         fn run(allocator: std.mem.Allocator) !void {
             var store = IRStore.init(allocator);
             defer store.deinit();
@@ -2355,9 +2356,9 @@ pub const IrView = struct {
                 // `getUnary(...) orelse return`, so fail soft to null instead of
                 // aborting the whole analyzer process.
                 const op_raw: u4 = @truncate(d.a);
-                if (op_raw >= @typeInfo(UnaryOp).@"enum".fields.len) break :blk null;
+                if (op_raw >= @typeInfo(UnaryOp).@"enum".field_names.len) break :blk null;
                 break :blk .{
-                    .op = @enumFromInt(op_raw),
+                    .op = @fromBackingInt(@intCast(op_raw)),
                     .operand = d.b,
                 };
             },
@@ -2434,7 +2435,7 @@ pub const IrView = struct {
                 break :blk .{
                     .target = d.a,
                     .value = d.b & 0xFFFFFF,
-                    .op = if (op_byte == 0) null else @enumFromInt(op_byte - 1),
+                    .op = if (op_byte == 0) null else @fromBackingInt(@intCast(op_byte - 1)),
                 };
             },
         };
@@ -2565,10 +2566,10 @@ pub const IrView = struct {
                         .scope_id = @truncate(binding_packed >> 16),
                         .slot = @truncate(binding_packed),
                         .name_atom = ir.bindingName(idx),
-                        .kind = @enumFromInt(@as(u3, @truncate(extra[extra_start + 2] >> 2))),
+                        .kind = @fromBackingInt(@intCast(@as(u3, @truncate(extra[extra_start + 2] >> 2)))),
                     },
                     .init = extra[extra_start + 1],
-                    .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start + 2]))),
+                    .kind = @fromBackingInt(@intCast(@as(u2, @truncate(extra[extra_start + 2])))),
                 };
             },
         };
@@ -2602,7 +2603,7 @@ pub const IrView = struct {
                 const extra_start = d.a;
                 const extra = ir.extra.items;
                 break :blk .{
-                    .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start]))),
+                    .kind = @fromBackingInt(@intCast(@as(u2, @truncate(extra[extra_start])))),
                     .init = extra[extra_start + 1],
                     .condition = extra[extra_start + 2],
                     .update = extra[extra_start + 3],
@@ -2629,7 +2630,7 @@ pub const IrView = struct {
                         .scope_id = @truncate(binding_packed >> 16),
                         .slot = @truncate(binding_packed),
                         .name_atom = ir.bindingName(idx),
-                        .kind = @enumFromInt(@as(u3, @truncate(flags >> 2))),
+                        .kind = @fromBackingInt(@intCast(@as(u3, @truncate(flags >> 2)))),
                     },
                     .iterable = extra[extra_start + 1],
                     .body = extra[extra_start + 3],
@@ -2729,7 +2730,7 @@ pub const IrView = struct {
                 if (idx >= ir.data.items.len) break :blk null;
                 const d = ir.data.items[idx];
                 break :blk .{
-                    .kind = @enumFromInt(@as(u8, @truncate(d.a))),
+                    .kind = @fromBackingInt(@intCast(@as(u8, @truncate(d.a)))),
                     .predicate = d.b,
                 };
             },
@@ -2849,13 +2850,13 @@ pub const IrView = struct {
                 const extra = ir.extra.items;
                 const binding_packed = extra[extra_start + 2];
                 break :blk .{
-                    .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start]))),
+                    .kind = @fromBackingInt(@intCast(@as(u2, @truncate(extra[extra_start])))),
                     .imported_atom = @truncate(extra[extra_start + 1]),
                     .local_binding = .{
                         .scope_id = @truncate(binding_packed >> 16),
                         .slot = @truncate(binding_packed),
                         .name_atom = ir.bindingName(idx),
-                        .kind = @enumFromInt(@as(u3, @truncate(extra[extra_start] >> 8))),
+                        .kind = @fromBackingInt(@intCast(@as(u3, @truncate(extra[extra_start] >> 8)))),
                     },
                 };
             },
@@ -2873,7 +2874,7 @@ pub const IrView = struct {
                 const extra_start = d.a;
                 const extra = ir.extra.items;
                 break :blk .{
-                    .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start]))),
+                    .kind = @fromBackingInt(@intCast(@as(u2, @truncate(extra[extra_start])))),
                     .declaration = extra[extra_start + 1],
                     .specifiers_start = extra[extra_start + 2],
                     .specifiers_count = @truncate(extra[extra_start + 3]),
@@ -2912,12 +2913,12 @@ pub const IrView = struct {
                 const extra = ir.extra.items;
                 const binding_packed = extra[extra_start + 1];
                 break :blk .{
-                    .kind = @enumFromInt(@as(u2, @truncate(extra[extra_start]))),
+                    .kind = @fromBackingInt(@intCast(@as(u2, @truncate(extra[extra_start])))),
                     .binding = .{
                         .scope_id = @truncate(binding_packed >> 16),
                         .slot = @truncate(binding_packed),
                         .name_atom = ir.bindingName(idx),
-                        .kind = @enumFromInt(@as(u3, @truncate(extra[extra_start] >> 8))),
+                        .kind = @fromBackingInt(@intCast(@as(u3, @truncate(extra[extra_start] >> 8)))),
                     },
                     .key = extra[extra_start + 2],
                     .key_atom = @truncate(extra[extra_start + 3]),

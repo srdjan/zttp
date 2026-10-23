@@ -107,7 +107,7 @@ test "normalize registry returns a non-writing version-2 fixed point" {
     var registry: registry_mod.Registry = .{};
     defer registry.deinit(testing.allocator);
     try registry.register(testing.allocator, tool);
-    const args_json = try std.fmt.allocPrint(testing.allocator, "{{\"file\":{f}}}", .{std.json.fmt(file, .{})});
+    const args_json = try testing.allocator.print("{{\"file\":{f}}}", .{std.json.fmt(file, .{})});
     defer testing.allocator.free(args_json);
     var result = try registry.invokeJson(testing.allocator, name, args_json);
     defer result.deinit(testing.allocator);

@@ -94,7 +94,7 @@ fn childExitCode(term: std.process.Child.Term) ?u8 {
         .signal => |signal| if (signal == .INT)
             null
         else
-            128 + @as(u8, @intCast(@intFromEnum(signal))),
+            128 + @as(u8, @intCast(@backingInt(signal))),
         .stopped, .unknown => null,
     };
 }

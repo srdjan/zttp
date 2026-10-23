@@ -54,9 +54,9 @@ test "an identifier no policy entry can hold is refused" {
     var out: [max_identifier_bytes]u8 = undefined;
     try testing.expectError(error.Empty, normalize("", &out));
 
-    const longest = [_]u8{'a'} ** max_identifier_bytes;
+    const longest = @as([max_identifier_bytes]u8, @splat('a'));
     try testing.expectEqualStrings(&longest, try normalize(&longest, &out));
-    const one_too_long = [_]u8{'a'} ** (max_identifier_bytes + 1);
+    const one_too_long = @as([((max_identifier_bytes + 1))]u8, @splat('a'));
     try testing.expectError(error.TooLong, normalize(&one_too_long, &out));
 
     try testing.expectError(error.Malformed, normalize("API\nKEY", &out));

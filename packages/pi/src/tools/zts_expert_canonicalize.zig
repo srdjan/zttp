@@ -114,7 +114,7 @@ test "canonicalize registry returns bound version-2 candidates and optional simu
     defer registry.deinit(testing.allocator);
     try registry.register(testing.allocator, tool);
 
-    const plain_args = try std.fmt.allocPrint(testing.allocator, "{{\"file\":{f}}}", .{std.json.fmt(file, .{})});
+    const plain_args = try testing.allocator.print("{{\"file\":{f}}}", .{std.json.fmt(file, .{})});
     defer testing.allocator.free(plain_args);
     var plain = try registry.invokeJson(testing.allocator, name, plain_args);
     defer plain.deinit(testing.allocator);
@@ -142,7 +142,7 @@ test "canonicalize registry returns bound version-2 candidates and optional simu
     try testing.expectEqual(@as(usize, 64), bound.get("semantics_hash").?.string.len);
     try testing.expectEqualStrings("ZTS608", candidate.get("diagnostic_code").?.string);
 
-    const simulated_args = try std.fmt.allocPrint(testing.allocator, "{{\"file\":{f},\"simulate\":true}}", .{std.json.fmt(file, .{})});
+    const simulated_args = try testing.allocator.print("{{\"file\":{f},\"simulate\":true}}", .{std.json.fmt(file, .{})});
     defer testing.allocator.free(simulated_args);
     var simulated = try registry.invokeJson(testing.allocator, name, simulated_args);
     defer simulated.deinit(testing.allocator);

@@ -355,7 +355,7 @@ test "direct source retains every syntax owner family" {
         type_only_module,
         erased_prefix,
     };
-    var seen = std.EnumSet(Family).initEmpty();
+    var seen = std.EnumSet(Family).empty;
     if (store.annotations.items.len > 0) seen.insert(.variable);
     if (store.declarations.items.len > 0) seen.insert(.declaration);
     if (store.parameter_annotations.items.len > 0) seen.insert(.parameter);
@@ -450,7 +450,7 @@ test "DirectCheckSource publishes one validated capability set" {
         return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(
         "directOwnerFixture",
-        capabilities.atoms.getName(@enumFromInt(function.name_atom)).?,
+        capabilities.atoms.getName(@fromBackingInt(@intCast(function.name_atom))).?,
     );
 
     var wrapper: ?parser.NodeIndex = null;
@@ -672,9 +672,10 @@ test "DirectCheckSource cleans runtime parser and Store allocation failures" {
         }
     };
 
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
     var runtime_failures: usize = 0;
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        no_resize.allocator(),
         Context.runRuntime,
         .{&runtime_failures},
     );
@@ -682,7 +683,7 @@ test "DirectCheckSource cleans runtime parser and Store allocation failures" {
 
     var store_failures: usize = 0;
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        no_resize.allocator(),
         Context.runStore,
         .{&store_failures},
     );
@@ -858,8 +859,8 @@ test "admission failures retain measured legacy preparation errors" {
         .{ .kind = .void_type, .expected = error.VoidType },
         .{ .kind = .nesting_too_deep, .expected = error.NestingTooDeep },
     };
-    try std.testing.expectEqual(std.meta.fields(Kind).len, cases.len);
-    var seen = std.EnumSet(Kind).initEmpty();
+    try std.testing.expectEqual(@typeInfo(Kind).@"enum".field_names.len, cases.len);
+    var seen = std.EnumSet(Kind).empty;
     for (cases) |case| {
         try std.testing.expect(!seen.contains(case.kind));
         seen.insert(case.kind);

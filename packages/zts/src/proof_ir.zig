@@ -303,25 +303,25 @@ const Lowerer = struct {
         return switch (tag) {
             .program, .block => try self.sequence(index),
             .export_decl => blk: {
-                const decl = self.view.getExportDecl(index) orelse break :blk try self.leaf(.plain, index, @intFromEnum(tag));
+                const decl = self.view.getExportDecl(index) orelse break :blk try self.leaf(.plain, index, @backingInt(tag));
                 var node = Tree{ .tag = .sequence, .source = index, .leaf_kind = 0 };
                 errdefer node.deinit(self.allocator);
                 try node.children.append(self.allocator, try self.build(decl.declaration));
                 break :blk node;
             },
             .function_decl => blk: {
-                const decl = self.view.getVarDecl(index) orelse break :blk try self.leaf(.plain, index, @intFromEnum(tag));
+                const decl = self.view.getVarDecl(index) orelse break :blk try self.leaf(.plain, index, @backingInt(tag));
                 break :blk try self.build(decl.init);
             },
             .function_expr, .arrow_function => blk: {
-                const func = self.view.getFunction(index) orelse break :blk try self.leaf(.plain, index, @intFromEnum(tag));
+                const func = self.view.getFunction(index) orelse break :blk try self.leaf(.plain, index, @backingInt(tag));
                 var node = Tree{ .tag = .function, .source = index, .leaf_kind = 0 };
                 errdefer node.deinit(self.allocator);
                 try node.children.append(self.allocator, try self.build(func.body));
                 break :blk node;
             },
             .if_stmt => blk: {
-                const stmt = self.view.getIfStmt(index) orelse break :blk try self.leaf(.plain, index, @intFromEnum(tag));
+                const stmt = self.view.getIfStmt(index) orelse break :blk try self.leaf(.plain, index, @backingInt(tag));
                 var branch = Tree{ .tag = .branch, .source = index, .leaf_kind = 0 };
                 errdefer branch.deinit(self.allocator);
                 try branch.children.append(self.allocator, try self.build(stmt.then_branch));
@@ -343,7 +343,7 @@ const Lowerer = struct {
                 break :blk node;
             },
             .for_of_stmt, .for_in_stmt => blk: {
-                const loop = self.view.getForIter(index) orelse break :blk try self.leaf(.loop_node, index, @intFromEnum(tag));
+                const loop = self.view.getForIter(index) orelse break :blk try self.leaf(.loop_node, index, @backingInt(tag));
                 var node = Tree{ .tag = .loop_node, .source = index, .leaf_kind = 0 };
                 errdefer node.deinit(self.allocator);
                 try self.appendGuarded(&node, loop.iterable);
@@ -351,7 +351,7 @@ const Lowerer = struct {
                 break :blk node;
             },
             .for_stmt, .while_stmt, .do_while_stmt => blk: {
-                const loop = self.view.getLoop(index) orelse break :blk try self.leaf(.loop_node, index, @intFromEnum(tag));
+                const loop = self.view.getLoop(index) orelse break :blk try self.leaf(.loop_node, index, @backingInt(tag));
                 var node = Tree{ .tag = .loop_node, .source = index, .leaf_kind = 0 };
                 errdefer node.deinit(self.allocator);
                 try self.appendGuarded(&node, loop.init);
@@ -360,8 +360,8 @@ const Lowerer = struct {
                 try node.children.append(self.allocator, try self.build(loop.body));
                 break :blk node;
             },
-            .return_stmt => try self.leaf(.return_node, index, @intFromEnum(tag)),
-            else => try self.leaf(.plain, index, @intFromEnum(tag)),
+            .return_stmt => try self.leaf(.return_node, index, @backingInt(tag)),
+            else => try self.leaf(.plain, index, @backingInt(tag)),
         };
     }
 
@@ -432,7 +432,7 @@ fn digestTree(node: *Tree) void {
     var hasher = Sha256.init(.{});
     hasher.update(node_domain);
     var tag_le: [2]u8 = undefined;
-    std.mem.writeInt(u16, &tag_le, @intFromEnum(node.tag), .little);
+    std.mem.writeInt(u16, &tag_le, @backingInt(node.tag), .little);
     hasher.update(&tag_le);
     var kind_le: [2]u8 = undefined;
     std.mem.writeInt(u16, &kind_le, node.leaf_kind, .little);
@@ -1153,7 +1153,7 @@ const NeverResolver = struct {
 
 test "every tag in the alphabet is reachable from real source" {
     const allocator = testing.allocator;
-    var seen = std.EnumSet(Tag).initEmpty();
+    var seen = std.EnumSet(Tag).empty;
 
     const sources = [_][]const u8{
         // function, sequence, return
@@ -1201,8 +1201,8 @@ test "every tag in the alphabet is reachable from real source" {
 
     // An alphabet member no source reaches is a rule that never runs. If a tag
     // is added here, a source that produces it belongs above.
-    inline for (@typeInfo(Tag).@"enum".fields) |field| {
-        const tag: Tag = @enumFromInt(field.value);
+    inline for (@typeInfo(Tag).@"enum".field_names) |field| {
+        const tag: Tag = @fromBackingInt(@intCast(@backingInt(@field(Tag, field))));
         testing.expect(seen.contains(tag)) catch |err| {
             std.debug.print("proof IR tag '{s}' is unreachable from the corpus above\n", .{@tagName(tag)});
             return err;

@@ -341,7 +341,7 @@ fn auditModuleContentWithSpecPath(
     diagnostics: *std.ArrayList(OwnedDiagnostic),
 ) !void {
     const module_content = file_io.readFile(allocator, module_path, 512 * 1024) catch |err| {
-        const message = try std.fmt.allocPrint(allocator, "failed to read module file: {s}", .{@errorName(err)});
+        const message = try allocator.print("failed to read module file: {s}", .{@errorName(err)});
         defer allocator.free(message);
         try appendDiagnostic(allocator, diagnostics, "ZVM000", "error", message, module_path, 1, 1, "ensure the file exists and is readable");
         return;
@@ -359,7 +359,7 @@ fn auditModuleContentWithSpecPath(
 
     if (spec_path) |path| {
         const spec_content = file_io.readFile(allocator, path, 256 * 1024) catch |err| {
-            const message = try std.fmt.allocPrint(allocator, "failed to read module spec: {s}", .{@errorName(err)});
+            const message = try allocator.print("failed to read module spec: {s}", .{@errorName(err)});
             defer allocator.free(message);
             try appendDiagnostic(allocator, diagnostics, "ZVM000", "error", message, path, 1, 1, "ensure the spec file exists and is readable");
             return;
@@ -427,11 +427,7 @@ fn checkBindingExportDrift(
 ) !void {
     for (binding.exports) |binding_export| {
         const manifest_export = findManifestExport(manifest.exports.items, binding_export.name) orelse {
-            const message = try std.fmt.allocPrint(
-                allocator,
-                "module spec is missing export `{s}` from the Zig binding",
-                .{binding_export.name},
-            );
+            const message = try allocator.print("module spec is missing export `{s}` from the Zig binding", .{binding_export.name});
             defer allocator.free(message);
             try appendDiagnostic(
                 allocator,
@@ -448,11 +444,7 @@ fn checkBindingExportDrift(
         };
 
         if (binding_export.effect != manifest_export.effect) {
-            const message = try std.fmt.allocPrint(
-                allocator,
-                "module spec export `{s}` effect `{s}` differs from Zig binding effect `{s}`",
-                .{ binding_export.name, @tagName(manifest_export.effect), @tagName(binding_export.effect) },
-            );
+            const message = try allocator.print("module spec export `{s}` effect `{s}` differs from Zig binding effect `{s}`", .{ binding_export.name, @tagName(manifest_export.effect), @tagName(binding_export.effect) });
             defer allocator.free(message);
             try appendDiagnostic(
                 allocator,
@@ -468,11 +460,7 @@ fn checkBindingExportDrift(
         }
 
         if (binding_export.returns != manifest_export.returns) {
-            const message = try std.fmt.allocPrint(
-                allocator,
-                "module spec export `{s}` returns `{s}` differs from Zig binding returns `{s}`",
-                .{ binding_export.name, @tagName(manifest_export.returns), @tagName(binding_export.returns) },
-            );
+            const message = try allocator.print("module spec export `{s}` returns `{s}` differs from Zig binding returns `{s}`", .{ binding_export.name, @tagName(manifest_export.returns), @tagName(binding_export.returns) });
             defer allocator.free(message);
             try appendDiagnostic(
                 allocator,
@@ -490,11 +478,7 @@ fn checkBindingExportDrift(
 
     for (manifest.exports.items) |manifest_export| {
         if (findBindingExport(binding.exports, manifest_export.name) != null) continue;
-        const message = try std.fmt.allocPrint(
-            allocator,
-            "module spec declares export `{s}` that is not present in the Zig binding",
-            .{manifest_export.name},
-        );
+        const message = try allocator.print("module spec declares export `{s}` that is not present in the Zig binding", .{manifest_export.name});
         defer allocator.free(message);
         try appendDiagnostic(
             allocator,
@@ -533,7 +517,7 @@ fn appendManifestDiagnostic(
     path: []const u8,
     err: moduleMetadata.Error,
 ) !void {
-    const message = try std.fmt.allocPrint(allocator, "invalid module manifest: {s}", .{@errorName(err)});
+    const message = try allocator.print("invalid module manifest: {s}", .{@errorName(err)});
     defer allocator.free(message);
     try appendDiagnostic(
         allocator,
@@ -658,13 +642,9 @@ fn checkLabelDerivation(
         if (binding.derives_from_args or binding.declares_validated) continue;
         if (labelAbstainReason(specifier, binding.name) != null) continue;
 
-        const message = try std.fmt.allocPrint(
-            allocator,
-            "export `{s}` returns `{s}`, which can carry argument data, but sets neither " ++
-                "`derives_from_args` nor `.validated` in `return_labels`; its result would answer " ++
-                "the empty label set, which claims it carries no provenance",
-            .{ binding.name, binding.return_kind },
-        );
+        const message = try allocator.print("export `{s}` returns `{s}`, which can carry argument data, but sets neither " ++
+            "`derives_from_args` nor `.validated` in `return_labels`; its result would answer " ++
+            "the empty label set, which claims it carries no provenance", .{ binding.name, binding.return_kind });
         defer allocator.free(message);
         try appendDiagnostic(
             allocator,
@@ -768,11 +748,7 @@ fn checkCapabilityHelperDrift(
             }
         }
         if (used and !containsString(declared_capabilities, rule.capability)) {
-            const message = try std.fmt.allocPrint(
-                allocator,
-                "module uses `{s}` capability helpers but does not declare `.{s}` in required_capabilities",
-                .{ rule.capability, rule.capability },
-            );
+            const message = try allocator.print("module uses `{s}` capability helpers but does not declare `.{s}` in required_capabilities", .{ rule.capability, rule.capability });
             defer allocator.free(message);
             try appendDiagnostic(
                 allocator,
@@ -892,7 +868,7 @@ fn resolveCompanionPath(
     }
 
     const prefix_len = input_path.len - canonical_input.len;
-    return std.fmt.allocPrint(allocator, "{s}{s}", .{
+    return allocator.print("{s}{s}", .{
         input_path[0..prefix_len],
         canonical_target,
     });
@@ -1056,7 +1032,7 @@ test "every label_abstain_rows row names an export that still abstains" {
     const allocator = std.testing.allocator;
 
     var seen_exports: usize = 0;
-    var matched = [_]bool{false} ** label_abstain_rows.len;
+    var matched = @as([label_abstain_rows.len]bool, @splat(false));
 
     for (builtin_modules.governanceEntries()) |entry| {
         const content = file_io.readFile(allocator, entry.module_path, 512 * 1024) catch continue;

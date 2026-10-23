@@ -147,7 +147,7 @@ const linux_perf = struct {
     fn open() ?linux.fd_t {
         var attr: linux.perf_event_attr = .{
             .type = .HARDWARE,
-            .config = @intFromEnum(linux.PERF.COUNT.HW.INSTRUCTIONS),
+            .config = @backingInt(linux.PERF.COUNT.HW.INSTRUCTIONS),
             .flags = .{ .exclude_kernel = true, .exclude_hv = true },
         };
         const rc = linux.perf_event_open(&attr, 0, -1, -1, 0);
@@ -196,7 +196,7 @@ pub const Counter = struct {
     fd: i32 = -1,
 
     pub fn open() Counter {
-        switch (builtin.os.tag) {
+        switch (builtin.target.os.tag) {
             .macos => {
                 // Probe once: a host that refuses the call, or answers it with
                 // a zero count from a process that has already run, falls back.
@@ -215,7 +215,7 @@ pub const Counter = struct {
     }
 
     pub fn close(self: *Counter) void {
-        if (builtin.os.tag == .linux and self.source == .instructions_linux_perf) {
+        if (builtin.target.os.tag == .linux and self.source == .instructions_linux_perf) {
             linux_perf.close(self.fd);
             self.fd = -1;
         }
@@ -226,8 +226,8 @@ pub const Counter = struct {
     /// reject as a zero count; use `delta` between two readings for a cost.
     pub fn read(self: *const Counter) Reading {
         const value: u64 = switch (self.source) {
-            .instructions_darwin => if (builtin.os.tag == .macos) (darwin.read() orelse 0) else 0,
-            .instructions_linux_perf => if (builtin.os.tag == .linux) (linux_perf.read(self.fd) orelse 0) else 0,
+            .instructions_darwin => if (builtin.target.os.tag == .macos) (darwin.read() orelse 0) else 0,
+            .instructions_linux_perf => if (builtin.target.os.tag == .linux) (linux_perf.read(self.fd) orelse 0) else 0,
             .cpu_time_ns => cpuTimeNs(),
         };
         return .{ .source = self.source, .value = value };
@@ -261,7 +261,7 @@ fn cost(counter: *const Counter, iterations: u64) !u64 {
 test "counter names its source and never silently falls back on macOS" {
     var counter = Counter.open();
     defer counter.close();
-    if (builtin.os.tag == .macos and !darwin.inVirtualMachine()) {
+    if (builtin.target.os.tag == .macos and !darwin.inVirtualMachine()) {
         // A fallback on the developer machine would turn every budget gate
         // into a report-only check without anyone noticing. A virtual machine
         // has no counters, so it falls back the way a Linux runner does.

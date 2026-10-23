@@ -13,7 +13,7 @@ pub const Route = struct {
 pub const routes = [_]Route{
     .{ .label = "aggregate unit suite", .argv = &.{ "zig", "build", "test" } },
     .{ .label = "standalone runtime root", .argv = &.{ "zig", "build", "test-zruntime" } },
-    .{ .label = "release binaries", .argv = &.{ "zig", "build", "-Doptimize=ReleaseFast" } },
+    .{ .label = "release binaries", .argv = &.{ "zig", "build", "-Doptimize=fast" } },
     .{ .label = "handler precompilation", .argv = &.{ "zig", "build", "-Dhandler=examples/handler/handler.ts", "-Dverify", "-Dcontract" } },
     .{ .label = "v1 user-flow smoke", .argv = &.{ "zig", "build", "smoke-v1" } },
     .{ .label = "handler panic isolation", .argv = &.{ "zig", "build", "test-panic-isolation" } },
@@ -122,7 +122,7 @@ test "build selection rejects empty named suites and filtered aggregate executio
     var verdicts: usize = 0;
     const zig = std.testing.environ.getPosix("ZTTP_ZIG_EXE") orelse return error.MissingProbeCompiler;
     for (cases) |case| {
-        const filter = try std.fmt.allocPrint(std.testing.allocator, "-Dtest-filter={s}", .{case.filter});
+        const filter = try std.testing.allocator.print("-Dtest-filter={s}", .{case.filter});
         defer std.testing.allocator.free(filter);
         const result = try std.process.run(std.testing.allocator, std.testing.io, .{
             .argv = &.{ zig, "build", case.task, filter, "-j2" },

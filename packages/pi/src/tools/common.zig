@@ -112,7 +112,7 @@ fn realPathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
 /// the autoloop reach through `std.c.clock_gettime` here.
 pub fn nowUnixMs() i64 {
     var ts: std.posix.timespec = undefined;
-    _ = std.c.clock_gettime(@enumFromInt(@intFromEnum(std.posix.CLOCK.REALTIME)), &ts);
+    _ = std.c.clock_gettime(@fromBackingInt(@intCast(@backingInt(std.posix.CLOCK.REALTIME))), &ts);
     return @as(i64, ts.sec) * 1000 + @divTrunc(@as(i64, ts.nsec), 1_000_000);
 }
 

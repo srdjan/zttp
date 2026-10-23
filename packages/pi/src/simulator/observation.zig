@@ -100,13 +100,13 @@ fn digestReceiptPayload(
     try writeFrame(writer, domain);
     try writer.writeByte('{');
     var wrote_field = false;
-    inline for (@typeInfo(@TypeOf(payload)).@"struct".fields) |field| {
-        if (comptime std.mem.eql(u8, field.name, "applied_at_unix_ms")) continue;
+    inline for (@typeInfo(@TypeOf(payload)).@"struct".field_names) |field| {
+        if (comptime std.mem.eql(u8, field, "applied_at_unix_ms")) continue;
         if (wrote_field) try writer.writeByte(',');
         wrote_field = true;
-        try std.json.Stringify.value(field.name, .{}, writer);
+        try std.json.Stringify.value(field, .{}, writer);
         try writer.writeByte(':');
-        try std.json.Stringify.value(@field(payload, field.name), .{}, writer);
+        try std.json.Stringify.value(@field(payload, field), .{}, writer);
     }
     try writer.writeByte('}');
     return artifact.Sha256Hex.fromBytes(canonical.written());

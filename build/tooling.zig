@@ -82,7 +82,7 @@ pub fn add(ctx: Context) Result {
     verify_run.addArg(b.graph.zig_exe);
     verify_run.setCwd(b.path("."));
     verify_run.has_side_effects = true;
-    if (b.args) |args| verify_run.addArgs(args);
+    verify_run.addPassthruArgs();
     b.step("verify", "Run the sequential local verification driver").dependOn(&verify_run.step);
 
     // Release evidence parsing and rendering stay in repository-only native
@@ -105,7 +105,7 @@ pub fn add(ctx: Context) Result {
     });
     const evidence_publish_cmd = b.addRunArtifact(evidence_publish_exe);
     evidence_publish_cmd.has_side_effects = true;
-    if (b.args) |args| evidence_publish_cmd.addArgs(args);
+    evidence_publish_cmd.addPassthruArgs();
     const evidence_publish_step = b.step("evidence-publish", "Render validated release evidence");
     evidence_publish_step.dependOn(&evidence_publish_cmd.step);
     const evidence_publish_tests = ctx.addTest(.{ .root_module = evidence_publish_mod });
@@ -152,7 +152,7 @@ pub fn add(ctx: Context) Result {
     });
     const coverage_union_cmd = b.addRunArtifact(coverage_union_exe);
     coverage_union_cmd.has_side_effects = true;
-    if (b.args) |args| coverage_union_cmd.addArgs(args);
+    coverage_union_cmd.addPassthruArgs();
     const coverage_union_step = b.step("coverage-union", "Union the tripped rules across published runs of one corpus identity");
     coverage_union_step.dependOn(&coverage_union_cmd.step);
     const coverage_union_tests = ctx.addTest(.{
@@ -181,7 +181,7 @@ pub fn add(ctx: Context) Result {
     });
     const release_check_cmd = b.addRunArtifact(release_check_exe);
     release_check_cmd.has_side_effects = true;
-    if (b.args) |args| release_check_cmd.addArgs(args);
+    release_check_cmd.addPassthruArgs();
     const release_check_step = b.step("release-check", "Print this repository's release-readiness passport");
     release_check_step.dependOn(&release_check_cmd.step);
 
@@ -227,7 +227,7 @@ pub fn add(ctx: Context) Result {
     });
     const standin_cmd = b.addRunArtifact(standin_exe);
     standin_cmd.has_side_effects = true;
-    if (b.args) |args| standin_cmd.addArgs(args);
+    standin_cmd.addPassthruArgs();
     const standin_step = b.step("zttp-standin", "Run the deterministic playbook server");
     standin_step.dependOn(&standin_cmd.step);
 

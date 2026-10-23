@@ -360,7 +360,7 @@ pub const Parser = struct {
                 const spec_idx = view.getListIndex(import_decl.specifiers_start, @intCast(si));
                 const spec = view.getImportSpec(spec_idx) orelse continue;
                 // Resolve atom to string name (handles both predefined and dynamic atoms)
-                const atom: object.Atom = @enumFromInt(spec.imported_atom);
+                const atom: object.Atom = @fromBackingInt(@intCast(spec.imported_atom));
                 const imported_name = resolveAtomName(atom, self.atoms) orelse continue;
                 try names.append(self.allocator, imported_name);
             }
@@ -439,9 +439,9 @@ test "legacy Parser API" {
     // `let x = 1;` pushes 1, stores it to the global (opcode plus u16 atom),
     // and the generator ends every program with ret_undefined.
     try std.testing.expectEqual(@as(usize, 5), bytecode_data.len);
-    try std.testing.expectEqual(@intFromEnum(bytecode.Opcode.push_1), bytecode_data[0]);
-    try std.testing.expectEqual(@intFromEnum(bytecode.Opcode.put_global), bytecode_data[1]);
-    try std.testing.expectEqual(@intFromEnum(bytecode.Opcode.ret_undefined), bytecode_data[4]);
+    try std.testing.expectEqual(@backingInt(bytecode.Opcode.push_1), bytecode_data[0]);
+    try std.testing.expectEqual(@backingInt(bytecode.Opcode.put_global), bytecode_data[1]);
+    try std.testing.expectEqual(@backingInt(bytecode.Opcode.ret_undefined), bytecode_data[4]);
 }
 
 test "legacy Parser API getImports returns imported names" {
@@ -629,7 +629,7 @@ test "typed parser delays generation and matches equivalent JavaScript bytecode 
     try std.testing.expectEqual(raw_atoms.count(), typed_atoms.count());
     try std.testing.expectEqual(raw_atoms.next_id, typed_atoms.next_id);
     for (object.Atom.FIRST_DYNAMIC..raw_atoms.next_id) |atom_id| {
-        const atom: object.Atom = @enumFromInt(atom_id);
+        const atom: object.Atom = @fromBackingInt(@intCast(atom_id));
         try std.testing.expectEqualStrings(raw_atoms.getName(atom).?, typed_atoms.getName(atom).?);
     }
     try std.testing.expectEqual(parsed_progress, typed.js_parser.tokens_advanced);

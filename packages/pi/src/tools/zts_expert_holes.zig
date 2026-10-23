@@ -239,7 +239,7 @@ test "a projection too large for one result comes back trimmed, not as an error"
     // Each line is one type mismatch whose message quotes the offending
     // literal, so enough of them overflow the result limit on the
     // diagnostics alone while staying under the local-variable ceiling.
-    const filler = "x" ** 400;
+    const filler = &@as([400:0]u8, @splat('x'));
     for (0..250) |i| {
         try source.writer.print("  const v{d}: number = \"{s}\";\n", .{ i, filler });
     }

@@ -82,7 +82,7 @@ pub const Inputs = struct {
     /// Digest of the exact serialized runtime capability policy. The consumer
     /// recomputes it from the bytes it is handed, so this is what ties a guard
     /// plan to one policy rather than to any policy.
-    runtime_policy_digest: [32]u8 = [_]u8{0} ** 32,
+    runtime_policy_digest: [32]u8 = @as([32]u8, @splat(0)),
 };
 
 pub const Built = struct {
@@ -231,7 +231,7 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
         null;
     artifact.residual_plan_digest = residual_plan_digest;
     artifact.proof_ir_digest = ir_root;
-    artifact.proof_certificate_digest = [_]u8{0} ** 32;
+    artifact.proof_certificate_digest = @as([32]u8, @splat(0));
     const members = try allocator.alloc(graph.Member, artifact_graph.max_members);
     errdefer allocator.free(members);
     const built_members = try artifact_graph.build(allocator, artifact_graph.fromArtifact(artifact), members);
@@ -244,8 +244,8 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
     // consumer policy can raise the bar on any of them; it cannot shrink the
     // set, because a set a policy could shrink is a set a producer could
     // arrange to have shrunk.
-    inline for (@typeInfo(ps.Property).@"enum".fields) |field| {
-        const property: ps.Property = @enumFromInt(field.value);
+    inline for (@typeInfo(ps.Property).@"enum".field_names) |field| {
+        const property: ps.Property = @fromBackingInt(@intCast(@backingInt(@field(ps.Property, field))));
         if (property.subjectIsEntryFunction()) {
             try builder.add(.{
                 .property = property,
@@ -284,7 +284,7 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
 
     var parts = cert.Parts{
         .identity = .{
-            .executable_root = [_]u8{0} ** 32,
+            .executable_root = @as([32]u8, @splat(0)),
             .ir_root = ir_root,
             .contract_digest = inputs.contract_digest,
             .residual_plan_digest = cert.residualPlanDigest(residual_plan),
@@ -505,33 +505,33 @@ test "the compiler and the kernel agree on the proof-IR alphabet" {
     // The lowering duplicates the kernel's numbering because the kernel is a
     // leaf and must not become the compiler's dependency. This is where the two
     // copies are held against each other.
-    inline for (@typeInfo(zts.ProofIrTag).@"enum".fields) |field| {
-        const tag: zts.ProofIrTag = @enumFromInt(field.value);
+    inline for (@typeInfo(zts.ProofIrTag).@"enum".field_names) |field| {
+        const tag: zts.ProofIrTag = @fromBackingInt(@intCast(@backingInt(@field(zts.ProofIrTag, field))));
         try testing.expectEqual(
-            @as(u16, @intFromEnum(try tagFor(tag))),
-            @as(u16, field.value),
+            @as(u16, @backingInt(try tagFor(tag))),
+            @as(u16, @backingInt(@field(zts.ProofIrTag, field))),
         );
     }
     // The kernel's alphabet may run ahead of the compiler's while a producer
     // side is being built, but only by members named here. A tag the kernel
     // gained that nobody wrote down is the drift this test exists to catch.
     try testing.expectEqual(
-        @typeInfo(zts.ProofIrTag).@"enum".fields.len,
-        @typeInfo(ps.NodeTag).@"enum".fields.len,
+        @typeInfo(zts.ProofIrTag).@"enum".field_names.len,
+        @typeInfo(ps.NodeTag).@"enum".field_names.len,
     );
 
-    inline for (@typeInfo(zts.ProofRule).@"enum".fields) |field| {
-        const rule: zts.ProofRule = @enumFromInt(field.value);
+    inline for (@typeInfo(zts.ProofRule).@"enum".field_names) |field| {
+        const rule: zts.ProofRule = @fromBackingInt(@intCast(@backingInt(@field(zts.ProofRule, field))));
         try testing.expectEqual(
-            @as(u16, @intFromEnum(ruleFor(rule))),
-            @as(u16, field.value),
+            @as(u16, @backingInt(ruleFor(rule))),
+            @as(u16, @backingInt(@field(zts.ProofRule, field))),
         );
     }
 }
 
 test "every rewrite kind maps onto a translation rule" {
-    inline for (@typeInfo(zts.TranslationRewriteKind).@"enum".fields) |field| {
-        const kind: zts.TranslationRewriteKind = @enumFromInt(field.value);
+    inline for (@typeInfo(zts.TranslationRewriteKind).@"enum".field_names) |field| {
+        const kind: zts.TranslationRewriteKind = @fromBackingInt(@intCast(@backingInt(@field(zts.TranslationRewriteKind, field))));
         const rule = rewriteRuleFor(kind);
         try testing.expectEqual(ps.RuleFamily.translation, rule.family());
     }
@@ -548,8 +548,8 @@ test "a discharged property answers, and an undischarged one still answers" {
         .retry_safe = true,
         .capability_bounded = true,
     };
-    inline for (@typeInfo(ps.Property).@"enum".fields) |field| {
-        const property: ps.Property = @enumFromInt(field.value);
+    inline for (@typeInfo(ps.Property).@"enum".field_names) |field| {
+        const property: ps.Property = @fromBackingInt(@intCast(@backingInt(@field(ps.Property, field))));
         try testing.expect(!none.holds(property));
         if (property != .response_total) try testing.expect(all.holds(property));
     }

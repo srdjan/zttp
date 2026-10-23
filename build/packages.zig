@@ -70,6 +70,7 @@ pub fn add(ctx: Context) Result {
         // Adding the source to a second root in the same binary made the linker
         // report every sqlite3_* symbol as a duplicate definition.
         if (std.mem.eql(u8, entry.name, "zts-engine")) {
+            root.addImport("sqlite-c", zts_dep.module("sqlite-c"));
             root.addCSourceFile(.{
                 .file = zts_dep.path("deps/sqlite/sqlite3.c"),
                 .flags = &.{ "-D_GNU_SOURCE", "-DHAVE_MREMAP=0", "-DSQLITE_THREADSAFE=2", "-DSQLITE_OMIT_LOAD_EXTENSION", "-DSQLITE_DQS=0" },

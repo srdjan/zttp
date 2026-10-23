@@ -174,11 +174,11 @@ fn termsToString(alloc: std.mem.Allocator, terms: []const Term) ![]u8 {
         if (idx != 0) try buf.append(alloc, ' ');
         switch (t) {
             .imm => try buf.appendSlice(alloc, "imm"),
-            .child => |i| try buf.appendSlice(alloc, try std.fmt.allocPrint(alloc, "c{d}", .{i})),
-            .local => |i| try buf.appendSlice(alloc, try std.fmt.allocPrint(alloc, "L{d}", .{i})),
-            .call_result => |i| try buf.appendSlice(alloc, try std.fmt.allocPrint(alloc, "call{d}", .{i})),
+            .child => |i| try buf.appendSlice(alloc, try alloc.print("c{d}", .{i})),
+            .local => |i| try buf.appendSlice(alloc, try alloc.print("L{d}", .{i})),
+            .call_result => |i| try buf.appendSlice(alloc, try alloc.print("call{d}", .{i})),
             .binop => |k| try buf.appendSlice(alloc, @tagName(k)),
-            .unop => |k| try buf.appendSlice(alloc, try std.fmt.allocPrint(alloc, "{s}u", .{@tagName(k)})),
+            .unop => |k| try buf.appendSlice(alloc, try alloc.print("{s}u", .{@tagName(k)})),
             .select => try buf.appendSlice(alloc, "?:"),
             .binop_self => try buf.appendSlice(alloc, "<binop>"),
             .unop_self => try buf.appendSlice(alloc, "<unop>"),
@@ -208,7 +208,7 @@ fn proveValueRule(
                 return;
             };
             if (delta != 1) {
-                const msg = try std.fmt.allocPrint(scratch, "lowering nets {d} stack values, expected 1", .{delta});
+                const msg = try scratch.print("lowering nets {d} stack values, expected 1", .{delta});
                 try result.fail(.unbalanced_lowering, where, msg);
                 return;
             }
@@ -219,7 +219,7 @@ fn proveValueRule(
             if (!semantics.termsEql(got, denote)) {
                 const e = try termsToString(scratch, denote);
                 const g = try termsToString(scratch, got);
-                const msg = try std.fmt.allocPrint(scratch, "denote=[{s}] but lower=>[{s}]", .{ e, g });
+                const msg = try scratch.print("denote=[{s}] but lower=>[{s}]", .{ e, g });
                 try result.fail(.lowering_divergence, where, msg);
                 return;
             }

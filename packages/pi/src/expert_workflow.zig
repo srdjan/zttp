@@ -127,11 +127,7 @@ pub fn renderSystemNote(
     if (!hint.injectsSystemNote()) return null;
 
     const route = workflowRoute(hint.kind);
-    return try std.fmt.allocPrint(
-        allocator,
-        workflow_note_prefix ++ " kind={s} confidence={s}\n{s}\n",
-        .{ taskKindName(hint.kind), confidenceName(hint.confidence), route },
-    );
+    return try allocator.print(workflow_note_prefix ++ " kind={s} confidence={s}\n{s}\n", .{ taskKindName(hint.kind), confidenceName(hint.confidence), route });
 }
 
 fn workflowRoute(kind: TaskKind) []const u8 {

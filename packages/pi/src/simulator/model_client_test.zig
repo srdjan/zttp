@@ -31,15 +31,11 @@ fn bindLocalCassette(
     if (newline == 0 or local_cassette[newline - 1] != '}') {
         return error.MalformedTestCassette;
     }
-    return std.fmt.allocPrint(
-        allocator,
-        "{s},\"request_sha256\":\"{s}\"{s}",
-        .{
-            local_cassette[0 .. newline - 1],
-            request_sha256.slice(),
-            local_cassette[newline - 1 ..],
-        },
-    );
+    return allocator.print("{s},\"request_sha256\":\"{s}\"{s}", .{
+        local_cassette[0 .. newline - 1],
+        request_sha256.slice(),
+        local_cassette[newline - 1 ..],
+    });
 }
 
 test "canonical request snapshot covers every model-visible input" {
@@ -431,11 +427,7 @@ test "local replay rejects a wire framing mismatch before releasing a response" 
     var checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&expected)};
     const response =
         "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"ok\"}}]}";
-    const cassette = try std.fmt.allocPrint(
-        testing.allocator,
-        "{{\"v\":1,\"provider\":\"local\",\"stream\":false,\"request_sha256\":\"{s}\"}}\n{{\"body\":{f}}}\n",
-        .{ expected.wire_request_sha256.?.slice(), std.json.fmt(response, .{}) },
-    );
+    const cassette = try testing.allocator.print("{{\"v\":1,\"provider\":\"local\",\"stream\":false,\"request_sha256\":\"{s}\"}}\n{{\"body\":{f}}}\n", .{ expected.wire_request_sha256.?.slice(), std.json.fmt(response, .{}) });
     defer testing.allocator.free(cassette);
     const responses = [_]artifact.ResponseFixture{.{
         .index = 0,
@@ -450,7 +442,7 @@ test "local replay rejects a wire framing mismatch before releasing a response" 
         .bytes = cassette,
     }};
 
-    checkpoints[0].wire_request_sha256 = .{ .bytes = [_]u8{'0'} ** 64 };
+    checkpoints[0].wire_request_sha256 = .{ .bytes = @as([64]u8, @splat('0')) };
     var client = model_client.Client.init(.{
         .provider = .local,
         .model = local_client.default_model,
@@ -521,15 +513,11 @@ test "every Chat Completions provider rebuilds its wire digest on replay" {
         var checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&expected)};
         const response =
             "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"ok\"}}]}";
-        const cassette = try std.fmt.allocPrint(
-            testing.allocator,
-            "{{\"v\":1,\"provider\":\"{s}\",\"stream\":false,\"request_sha256\":\"{s}\"}}\n{{\"body\":{f}}}\n",
-            .{
-                case.header_name,
-                expected.wire_request_sha256.?.slice(),
-                std.json.fmt(response, .{}),
-            },
-        );
+        const cassette = try testing.allocator.print("{{\"v\":1,\"provider\":\"{s}\",\"stream\":false,\"request_sha256\":\"{s}\"}}\n{{\"body\":{f}}}\n", .{
+            case.header_name,
+            expected.wire_request_sha256.?.slice(),
+            std.json.fmt(response, .{}),
+        });
         defer testing.allocator.free(cassette);
         const responses = [_]artifact.ResponseFixture{.{
             .index = 0,
@@ -587,12 +575,8 @@ test "simulator checkpoints bind request budgets normalized usage and projection
     const response =
         "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"ok\"}}]," ++
         "\"usage\":{\"prompt_tokens\":9,\"completion_tokens\":1}}";
-    const cassette = try std.fmt.allocPrint(
-        testing.allocator,
-        "{{\"v\":1,\"provider\":\"deepseek\",\"stream\":false," ++
-            "\"request_sha256\":\"{s}\"}}\n{{\"body\":{f}}}\n",
-        .{ expected.wire_request_sha256.?.slice(), std.json.fmt(response, .{}) },
-    );
+    const cassette = try testing.allocator.print("{{\"v\":1,\"provider\":\"deepseek\",\"stream\":false," ++
+        "\"request_sha256\":\"{s}\"}}\n{{\"body\":{f}}}\n", .{ expected.wire_request_sha256.?.slice(), std.json.fmt(response, .{}) });
     defer testing.allocator.free(cassette);
     const responses = [_]artifact.ResponseFixture{.{
         .index = 0,
@@ -810,12 +794,8 @@ test "simulator client maps malformed and unreadable response fixtures without a
     });
     _ = try model_client.prepareSnapshot(arena.allocator(), &expected);
     const checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&expected)};
-    const malformed_body = try std.fmt.allocPrint(
-        arena.allocator(),
-        "{{\"v\":1,\"provider\":\"local\",\"stream\":false," ++
-            "\"request_sha256\":\"{s}\"}}\n{{\"body\":\"not json\"}}",
-        .{expected.wire_request_sha256.?.slice()},
-    );
+    const malformed_body = try arena.allocator().print("{{\"v\":1,\"provider\":\"local\",\"stream\":false," ++
+        "\"request_sha256\":\"{s}\"}}\n{{\"body\":\"not json\"}}", .{expected.wire_request_sha256.?.slice()});
     const cases = [_]struct {
         bytes: []const u8,
         failure: artifact.ResponseFixtureFailure,

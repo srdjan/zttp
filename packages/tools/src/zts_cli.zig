@@ -688,7 +688,7 @@ fn runGenTestsCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
 
     if (output_path) |out_path| {
         try zts_file_io.writeFile(allocator, out_path, buf.items);
-        const msg = try std.fmt.allocPrint(allocator, "Wrote {d} test{s} to {s}\n", .{
+        const msg = try allocator.print("Wrote {d} test{s} to {s}\n", .{
             count,
             if (count == 1) @as([]const u8, "") else "s",
             out_path,

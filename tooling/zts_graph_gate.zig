@@ -343,7 +343,7 @@ fn parseManifest(
             std.debug.print("  {s}:{d}: unknown tier {s}\n", .{ manifest_path, line_number, tier_word });
             continue;
         };
-        const full_path = try std.fmt.allocPrint(allocator, "{s}{s}", .{ prefix, relative.? });
+        const full_path = try allocator.print("{s}{s}", .{ prefix, relative.? });
         defer allocator.free(full_path);
         const index = pathIndex(files, full_path) orelse {
             if (errors == 0) std.debug.print("zts layering: the manifest does not match the tree:\n", .{});
@@ -467,7 +467,7 @@ fn reportLayering(
         return error.NamedEdgeFloor;
     }
 
-    var tier_sizes = [_]usize{0} ** tier_count;
+    var tier_sizes = @as([tier_count]usize, @splat(0));
     for (graph.files) |file| tier_sizes[file.tier.?] += 1;
     var reached_count: usize = 0;
     var unreachable_count: usize = 0;
@@ -829,7 +829,7 @@ fn usage() noreturn {
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = init.environ });

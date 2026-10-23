@@ -173,7 +173,7 @@ fn fetchAttestHeader(
     try req.sendBodiless();
     var response = try req.receiveHead(&.{});
 
-    const status = @intFromEnum(response.head.status);
+    const status = @backingInt(response.head.status);
     if (status < 200 or status >= 300) return error.HttpStatus;
 
     var it = response.head.iterateHeaders();
@@ -341,11 +341,11 @@ test "parseArgs: url with --json and --trust-key" {
         "https://example.com/api",
         "--json",
         "--trust-key",
-        "a" ** 64,
+        &@as([64:0]u8, @splat('a')),
     });
     try std.testing.expectEqualStrings("https://example.com/api", opts.url);
     try std.testing.expect(opts.json_output);
-    try std.testing.expectEqualStrings("a" ** 64, opts.trust_key_fingerprint_hex.?);
+    try std.testing.expectEqualStrings(&@as([64:0]u8, @splat('a')), opts.trust_key_fingerprint_hex.?);
 }
 
 test "parseArgs: missing url errors" {
@@ -355,7 +355,7 @@ test "parseArgs: missing url errors" {
 
 test "parseArgs: trust-key must be 64 hex chars" {
     try std.testing.expectError(error.InvalidTrustKey, parseArgs(&.{ "http://x", "--trust-key", "tooShort" }));
-    try std.testing.expectError(error.InvalidTrustKey, parseArgs(&.{ "http://x", "--trust-key", "z" ** 64 }));
+    try std.testing.expectError(error.InvalidTrustKey, parseArgs(&.{ "http://x", "--trust-key", &@as([64:0]u8, @splat('z')) }));
 }
 
 test "parseArgs: --help signals via error" {
@@ -386,21 +386,21 @@ test "renderClaimsJson uses JSON string escaping" {
 
     var result = envelope.VerifyResult{
         .claims = .{
-            .contract_sha256 = "a" ** 64,
-            .bytecode_sha256 = "b" ** 64,
-            .policy_sha256 = "c" ** 64,
-            .capability_hash = "d" ** 64,
+            .contract_sha256 = &@as([64:0]u8, @splat('a')),
+            .bytecode_sha256 = &@as([64:0]u8, @splat('b')),
+            .policy_sha256 = &@as([64:0]u8, @splat('c')),
+            .capability_hash = &@as([64:0]u8, @splat('d')),
             .core_profile_id = "zts-model-1",
-            .core_grammar_sha256 = "1" ** 64,
-            .semantics_sha256 = "2" ** 64,
+            .core_grammar_sha256 = &@as([64:0]u8, @splat('1')),
+            .semantics_sha256 = &@as([64:0]u8, @splat('2')),
             .compiler_version = "zttp\"dev\\test",
             .signed_at_unix = 1_700_000_000,
             .property_summary = "quote\" slash\\ newline\n",
             .guarded_categories = "env,cache",
             .routes_count = 2,
         },
-        .public_key = [_]u8{0} ** std.crypto.sign.Ed25519.PublicKey.encoded_length,
-        .fingerprint_hex = [_]u8{'f'} ** 64,
+        .public_key = @as([std.crypto.sign.Ed25519.PublicKey.encoded_length]u8, @splat(0)),
+        .fingerprint_hex = @splat('f'),
         .arena = std.heap.ArenaAllocator.init(testing.allocator),
     };
     defer result.deinit();
@@ -435,21 +435,21 @@ test "renderClaimsHuman keeps static guarded categories separate from claimed ch
     const testing = std.testing;
     var result = envelope.VerifyResult{
         .claims = .{
-            .contract_sha256 = "a" ** 64,
-            .bytecode_sha256 = "b" ** 64,
-            .policy_sha256 = "c" ** 64,
-            .capability_hash = "d" ** 64,
+            .contract_sha256 = &@as([64:0]u8, @splat('a')),
+            .bytecode_sha256 = &@as([64:0]u8, @splat('b')),
+            .policy_sha256 = &@as([64:0]u8, @splat('c')),
+            .capability_hash = &@as([64:0]u8, @splat('d')),
             .core_profile_id = "zts-model-1",
-            .core_grammar_sha256 = "1" ** 64,
-            .semantics_sha256 = "2" ** 64,
+            .core_grammar_sha256 = &@as([64:0]u8, @splat('1')),
+            .semantics_sha256 = &@as([64:0]u8, @splat('2')),
             .compiler_version = "test",
             .signed_at_unix = 7,
             .property_summary = "pure",
             .guarded_categories = "",
             .routes_count = 1,
         },
-        .public_key = [_]u8{0} ** std.crypto.sign.Ed25519.PublicKey.encoded_length,
-        .fingerprint_hex = [_]u8{'f'} ** 64,
+        .public_key = @as([std.crypto.sign.Ed25519.PublicKey.encoded_length]u8, @splat(0)),
+        .fingerprint_hex = @splat('f'),
         .arena = std.heap.ArenaAllocator.init(testing.allocator),
     };
     defer result.deinit();
@@ -464,14 +464,14 @@ test "renderClaimsHuman keeps static guarded categories separate from claimed ch
             "  proof or policy acceptance is reported. For that, check the\n" ++
             "  artifact itself: `zttp proofs verify <bundle-dir> --require-proof`.\n" ++
             "\n" ++
-            "  key fingerprint:  " ++ "f" ** 64 ++ "\n" ++
+            "  key fingerprint:  " ++ &@as([64:0]u8, @splat('f')) ++ "\n" ++
             "  compiler version: test\n" ++
             "  signed at:        7 (unix)\n" ++
-            "  contract sha256:  " ++ "a" ** 64 ++ "\n" ++
-            "  bytecode sha256:  " ++ "b" ** 64 ++ "\n" ++
-            "  executable root:  " ++ "0" ** 64 ++ "\n" ++
-            "  policy sha256:    " ++ "c" ** 64 ++ "\n" ++
-            "  capability hash:  " ++ "d" ** 64 ++ "\n" ++
+            "  contract sha256:  " ++ &@as([64:0]u8, @splat('a')) ++ "\n" ++
+            "  bytecode sha256:  " ++ &@as([64:0]u8, @splat('b')) ++ "\n" ++
+            "  executable root:  " ++ &@as([64:0]u8, @splat('0')) ++ "\n" ++
+            "  policy sha256:    " ++ &@as([64:0]u8, @splat('c')) ++ "\n" ++
+            "  capability hash:  " ++ &@as([64:0]u8, @splat('d')) ++ "\n" ++
             "  routes count:     1\n" ++
             "  claimed chips:    pure\n" ++
             "  guarded categories: (none)\n" ++
@@ -489,14 +489,14 @@ test "renderClaimsHuman keeps static guarded categories separate from claimed ch
             "  proof or policy acceptance is reported. For that, check the\n" ++
             "  artifact itself: `zttp proofs verify <bundle-dir> --require-proof`.\n" ++
             "\n" ++
-            "  key fingerprint:  " ++ "f" ** 64 ++ "\n" ++
+            "  key fingerprint:  " ++ &@as([64:0]u8, @splat('f')) ++ "\n" ++
             "  compiler version: test\n" ++
             "  signed at:        7 (unix)\n" ++
-            "  contract sha256:  " ++ "a" ** 64 ++ "\n" ++
-            "  bytecode sha256:  " ++ "b" ** 64 ++ "\n" ++
-            "  executable root:  " ++ "0" ** 64 ++ "\n" ++
-            "  policy sha256:    " ++ "c" ** 64 ++ "\n" ++
-            "  capability hash:  " ++ "d" ** 64 ++ "\n" ++
+            "  contract sha256:  " ++ &@as([64:0]u8, @splat('a')) ++ "\n" ++
+            "  bytecode sha256:  " ++ &@as([64:0]u8, @splat('b')) ++ "\n" ++
+            "  executable root:  " ++ &@as([64:0]u8, @splat('0')) ++ "\n" ++
+            "  policy sha256:    " ++ &@as([64:0]u8, @splat('c')) ++ "\n" ++
+            "  capability hash:  " ++ &@as([64:0]u8, @splat('d')) ++ "\n" ++
             "  routes count:     1\n" ++
             "  claimed chips:    pure\n" ++
             "  guarded categories: env,egress,cache,sql\n" ++

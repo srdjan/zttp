@@ -617,7 +617,7 @@ pub const expected_nodes = 69;
 pub const expected_opcodes = 127;
 
 comptime {
-    const n = @typeInfo(NodeTag).@"enum".fields.len;
+    const n = @typeInfo(NodeTag).@"enum".field_names.len;
     if (n != expected_nodes) {
         @compileError(std.fmt.comptimePrint(
             "semantics drift: NodeTag has {d} named members, registry pinned to {d}. " ++
@@ -625,7 +625,7 @@ comptime {
             .{ n, expected_nodes, n },
         ));
     }
-    const m = @typeInfo(Opcode).@"enum".fields.len;
+    const m = @typeInfo(Opcode).@"enum".field_names.len;
     if (m != expected_opcodes) {
         @compileError(std.fmt.comptimePrint(
             "semantics drift: Opcode has {d} named members, registry pinned to {d}. " ++
@@ -645,15 +645,15 @@ comptime {
 
 fn hashTerms(hasher: *std.crypto.hash.sha2.Sha256, terms: []const Term) void {
     for (terms) |t| {
-        const tag_byte: u8 = @intCast(@intFromEnum(@as(std.meta.Tag(Term), t)));
+        const tag_byte: u8 = @intCast(@backingInt(@as(std.meta.Tag(Term), t)));
         hasher.update(&[_]u8{tag_byte});
         switch (t) {
             .imm, .select, .binop_self, .unop_self => {},
             .child => |i| hasher.update(&[_]u8{i}),
             .local => |i| hasher.update(&[_]u8{i}),
             .call_result => |i| hasher.update(&[_]u8{i}),
-            .binop => |k| hasher.update(&[_]u8{@intCast(@intFromEnum(k))}),
-            .unop => |k| hasher.update(&[_]u8{@intCast(@intFromEnum(k))}),
+            .binop => |k| hasher.update(&[_]u8{@intCast(@backingInt(k))}),
+            .unop => |k| hasher.update(&[_]u8{@intCast(@backingInt(k))}),
         }
     }
 }
@@ -666,7 +666,7 @@ fn hashU64(hasher: *std.crypto.hash.sha2.Sha256, value: u64) void {
 
 fn hashSteps(hasher: *std.crypto.hash.sha2.Sha256, steps: []const Step) void {
     for (steps) |s| {
-        const tag_byte: u8 = @intCast(@intFromEnum(@as(std.meta.Tag(Step), s)));
+        const tag_byte: u8 = @intCast(@backingInt(@as(std.meta.Tag(Step), s)));
         hasher.update(&[_]u8{tag_byte});
         switch (s) {
             .push_imm, .op_self => {},
@@ -679,11 +679,11 @@ fn hashSteps(hasher: *std.crypto.hash.sha2.Sha256, steps: []const Step) void {
 }
 
 fn hashTransition(hasher: *std.crypto.hash.sha2.Sha256, t: Transition) void {
-    const tag_byte: u8 = @intCast(@intFromEnum(@as(std.meta.Tag(Transition), t)));
+    const tag_byte: u8 = @intCast(@backingInt(@as(std.meta.Tag(Transition), t)));
     hasher.update(&[_]u8{tag_byte});
     switch (t) {
-        .binop => |k| hashU64(hasher, @intCast(@intFromEnum(k))),
-        .unop => |k| hashU64(hasher, @intCast(@intFromEnum(k))),
+        .binop => |k| hashU64(hasher, @intCast(@backingInt(k))),
+        .unop => |k| hashU64(hasher, @intCast(@backingInt(k))),
         .control => {},
     }
 }
@@ -753,9 +753,9 @@ fn computeSemanticsHash() [64]u8 {
     // its disposition, and the exact reason that keeps it in a trusted or
     // translation-validated boundary.
     hasher.update("node-dispositions\x00");
-    inline for (@typeInfo(NodeTag).@"enum".fields) |field| {
-        const disposition = nodeDisposition(@enumFromInt(field.value));
-        hasher.update(field.name);
+    inline for (@typeInfo(NodeTag).@"enum".field_names) |field| {
+        const disposition = nodeDisposition(@fromBackingInt(@intCast(@backingInt(@field(NodeTag, field)))));
+        hasher.update(field);
         hasher.update("\x00");
         hasher.update(@tagName(disposition.kind));
         hasher.update("\x00");
@@ -763,9 +763,9 @@ fn computeSemanticsHash() [64]u8 {
         hasher.update("\x01");
     }
     hasher.update("opcode-dispositions\x00");
-    inline for (@typeInfo(Opcode).@"enum".fields) |field| {
-        const disposition = opcodeDisposition(@enumFromInt(field.value));
-        hasher.update(field.name);
+    inline for (@typeInfo(Opcode).@"enum".field_names) |field| {
+        const disposition = opcodeDisposition(@fromBackingInt(@intCast(@backingInt(@field(Opcode, field)))));
+        hasher.update(field);
         hasher.update("\x00");
         hasher.update(@tagName(disposition.kind));
         hasher.update("\x00");
@@ -809,10 +809,10 @@ pub fn opcodeTableHash() [64]u8 {
 
 fn enumTableHash(comptime E: type) [64]u8 {
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
-    inline for (@typeInfo(E).@"enum".fields) |f| {
-        hasher.update(f.name);
+    inline for (@typeInfo(E).@"enum".field_names) |f| {
+        hasher.update(f);
         hasher.update("\x00");
-        hashU64(&hasher, @intCast(f.value));
+        hashU64(&hasher, @intCast(@backingInt(@field(E, f))));
         hasher.update("\x00");
     }
     const digest = hasher.finalResult();
@@ -847,8 +847,8 @@ pub const Coverage = struct {
 
 pub fn coverage() Coverage {
     var result = Coverage{
-        .nodes_total = @typeInfo(NodeTag).@"enum".fields.len,
-        .opcodes_total = @typeInfo(Opcode).@"enum".fields.len,
+        .nodes_total = @typeInfo(NodeTag).@"enum".field_names.len,
+        .opcodes_total = @typeInfo(Opcode).@"enum".field_names.len,
         .nodes_reachable = 0,
         .nodes_classified = 0,
         .nodes_specified = 0,
@@ -862,11 +862,11 @@ pub fn coverage() Coverage {
         .opcodes_trusted = 0,
         .opcodes_unreachable = 0,
     };
-    inline for (@typeInfo(NodeTag).@"enum".fields) |field| {
-        addNodeDisposition(&result, nodeDisposition(@enumFromInt(field.value)).kind);
+    inline for (@typeInfo(NodeTag).@"enum".field_names) |field| {
+        addNodeDisposition(&result, nodeDisposition(@fromBackingInt(@intCast(@backingInt(@field(NodeTag, field))))).kind);
     }
-    inline for (@typeInfo(Opcode).@"enum".fields) |field| {
-        addOpcodeDisposition(&result, opcodeDisposition(@enumFromInt(field.value)).kind);
+    inline for (@typeInfo(Opcode).@"enum".field_names) |field| {
+        addOpcodeDisposition(&result, opcodeDisposition(@fromBackingInt(@intCast(@backingInt(@field(Opcode, field))))).kind);
     }
     return result;
 }
@@ -920,8 +920,8 @@ fn addOpcodeDisposition(result: *Coverage, kind: DispositionKind) void {
 // ---------------------------------------------------------------------------
 
 test "drift gate is pinned to the real enums" {
-    try std.testing.expectEqual(expected_nodes, @typeInfo(NodeTag).@"enum".fields.len);
-    try std.testing.expectEqual(expected_opcodes, @typeInfo(Opcode).@"enum".fields.len);
+    try std.testing.expectEqual(expected_nodes, @typeInfo(NodeTag).@"enum".field_names.len);
+    try std.testing.expectEqual(expected_opcodes, @typeInfo(Opcode).@"enum".field_names.len);
 
     const c = coverage();
     try std.testing.expectEqual(c.nodes_reachable, c.nodes_classified);
@@ -938,7 +938,7 @@ test "drift gate is pinned to the real enums" {
 }
 
 test "reserved opcode values remain unclassified" {
-    const reserved: Opcode = @enumFromInt(0xff);
+    const reserved: Opcode = @fromBackingInt(@intCast(0xff));
     try std.testing.expectEqual(DispositionKind.unclassified, opcodeDisposition(reserved).kind);
 }
 

@@ -447,7 +447,7 @@ fn collectRoutes(
         if (c.status == want) try list.append(arena, try arena.dupe(u8, c.pattern));
     }
     for (diff.api_route_changes.items) |c| {
-        if (c.status == want) try list.append(arena, try std.fmt.allocPrint(arena, "{s} {s}", .{ c.method, c.path }));
+        if (c.status == want) try list.append(arena, try arena.print("{s} {s}", .{ c.method, c.path }));
     }
     return try list.toOwnedSlice(arena);
 }
@@ -505,7 +505,7 @@ fn appendCounterexample(
     status: u16,
     change: contract_diff.BehaviorChangeKind,
 ) !void {
-    const key = try std.fmt.allocPrint(arena, "{s} {s}", .{ method, pattern });
+    const key = try arena.print("{s} {s}", .{ method, pattern });
     for (seen.items) |s| {
         if (std.mem.eql(u8, s, key)) return;
     }
@@ -602,7 +602,7 @@ fn changedHandlers(
     // Include D (deleted): removing a handler file removes all of its routes
     // and is a breaking change the gate must catch, not silently drop.
     const res = if (head) |h| blk: {
-        const range = try std.fmt.allocPrint(arena, "{s}...{s}", .{ base, h });
+        const range = try arena.print("{s}...{s}", .{ base, h });
         break :blk try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "--diff-filter=ACMRD", range });
     } else try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "--diff-filter=ACMRD", base });
     defer arena.free(res.stdout);
@@ -622,7 +622,7 @@ fn changedHandlers(
 /// Read a path at a git ref. Returns null when the path did not exist there
 /// (a newly added handler), which `git show` reports as a non-zero exit.
 fn readAtRef(arena: std.mem.Allocator, cwd: []const u8, ref: []const u8, path: []const u8) !?[]u8 {
-    const spec = try std.fmt.allocPrint(arena, "{s}:{s}", .{ ref, path });
+    const spec = try arena.print("{s}:{s}", .{ ref, path });
     const res = try runGit(arena, cwd, &.{ "git", "show", spec });
     if (!res.ok) {
         arena.free(res.stdout);
@@ -670,7 +670,7 @@ const RevisionReader = struct {
         const self: *RevisionReader = @ptrCast(@alignCast(context));
         const rel = try repoRelativePath(allocator, self.cwd, path);
         defer allocator.free(rel);
-        const spec = try std.fmt.allocPrint(allocator, "{s}:./{s}", .{ self.ref, rel });
+        const spec = try allocator.print("{s}:./{s}", .{ self.ref, rel });
         defer allocator.free(spec);
         const res = try runGit(allocator, self.cwd, &.{ "git", "show", spec });
         if (!res.ok) {
@@ -1558,11 +1558,11 @@ const HomeOverride = struct {
 
     fn set(path: []const u8) !HomeOverride {
         const previous: ?[:0]u8 = if (std.c.getenv("HOME")) |h|
-            try testing.allocator.dupeZ(u8, std.mem.sliceTo(h, 0))
+            try testing.allocator.dupeSentinel(u8, std.mem.sliceTo(h, 0), 0)
         else
             null;
         errdefer if (previous) |p| testing.allocator.free(p);
-        const path_z = try testing.allocator.dupeZ(u8, path);
+        const path_z = try testing.allocator.dupeSentinel(u8, path, 0);
         defer testing.allocator.free(path_z);
         if (setenv("HOME", path_z.ptr, 1) != 0) return error.TestUnexpectedResult;
         return .{ .previous = previous };

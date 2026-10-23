@@ -9,7 +9,7 @@ zttp can statically prove your handler function is correct at compile time. Enab
 zig build -Dhandler=handler.ts -Dverify
 
 # Combine with other flags
-zig build -Dhandler=handler.ts -Dverify -Doptimize=ReleaseFast
+zig build -Dhandler=handler.ts -Dverify -Doptimize=fast
 ```
 
 Verification runs after parsing and before bytecode generation. If any error-severity diagnostic is found, the build fails with a non-zero exit code. Warnings are reported but do not fail the build.

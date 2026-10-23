@@ -572,8 +572,8 @@ test "SDK module state slots are active-module scoped" {
     defer if (ctx_live) ctx.deinit();
     const handle = contextToHandle(ctx);
     const sdk_handle: *sdk.ModuleHandle = @ptrCast(ctx);
-    const sql_slot = @intFromEnum(module_slots.Slot.sql);
-    const cache_slot = @intFromEnum(module_slots.Slot.cache);
+    const sql_slot = @backingInt(module_slots.Slot.sql);
+    const cache_slot = @backingInt(module_slots.Slot.cache);
     var installed: SdkStateProbe = .{ .handle = sdk_handle, .slot = sql_slot };
     var rejected: SdkStateProbe = .{ .handle = sdk_handle, .slot = sql_slot };
 
@@ -644,7 +644,7 @@ test "SDK module state is isolated by Context lifetime" {
 
     const handle_a: *sdk.ModuleHandle = @ptrCast(ctx_a);
     const handle_b: *sdk.ModuleHandle = @ptrCast(ctx_b);
-    const sql_slot = @intFromEnum(module_slots.Slot.sql);
+    const sql_slot = @backingInt(module_slots.Slot.sql);
     var probe_a: SdkStateProbe = .{ .handle = handle_a, .slot = sql_slot };
     var probe_b: SdkStateProbe = .{ .handle = handle_b, .slot = sql_slot };
 
@@ -682,7 +682,7 @@ test "SDK module state allocation failure preserves caller ownership" {
     defer if (ctx_live) ctx.deinit();
 
     const sdk_handle: *sdk.ModuleHandle = @ptrCast(ctx);
-    const sql_slot = @intFromEnum(module_slots.Slot.sql);
+    const sql_slot = @backingInt(module_slots.Slot.sql);
     var probe: SdkStateProbe = .{ .handle = sdk_handle, .slot = sql_slot };
     _ = pushActiveModuleContext(ctx, "zttp:sql", &.{});
 

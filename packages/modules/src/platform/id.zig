@@ -132,7 +132,7 @@ const testing = std.testing;
 test "formatUuidV4FromBytes: 36 chars, dashes at canonical positions, version 4 + RFC variant" {
     // All-zero input is the cleanest version/variant probe: byte 6 becomes
     // 0x40 (version 4 nibble) and byte 8 becomes 0x80 (RFC 4122 variant).
-    const zeros: [16]u8 = .{0} ** 16;
+    const zeros: [16]u8 = @splat(0);
     var buf: [36]u8 = undefined;
     formatUuidV4FromBytes(zeros, &buf);
     try testing.expectEqualStrings(
@@ -143,7 +143,7 @@ test "formatUuidV4FromBytes: 36 chars, dashes at canonical positions, version 4 
     // All-0xFF probes the opposite half of every byte; version nibble must
     // still be `4` and variant nibble must still be `8|9|a|b` (top two
     // bits 10). 0xFF & 0x3F = 0x3F, then | 0x80 = 0xBF -> 'b' nibble.
-    const ones: [16]u8 = .{0xFF} ** 16;
+    const ones: [16]u8 = @splat(0xFF);
     formatUuidV4FromBytes(ones, &buf);
     try testing.expectEqualStrings(
         "ffffffff-ffff-4fff-bfff-ffffffffffff",
@@ -164,12 +164,12 @@ test "formatUuidV4FromBytes: 36 chars, dashes at canonical positions, version 4 
 test "formatUlidFromInputs: 26 chars, Crockford base32 only, timestamp encoded big-endian" {
     // Timestamp 0 and zero randomness -> all '0' characters.
     var buf: [26]u8 = undefined;
-    formatUlidFromInputs(0, .{0} ** 10, &buf);
+    formatUlidFromInputs(0, @splat(0), &buf);
     try testing.expectEqualStrings("00000000000000000000000000", &buf);
 
     // A timestamp whose low 5 bits are 0b00001 should put '1' at index 9
     // (the least-significant base32 digit of the 10-char ts prefix).
-    formatUlidFromInputs(1, .{0} ** 10, &buf);
+    formatUlidFromInputs(1, @splat(0), &buf);
     try testing.expectEqual(@as(u8, '1'), buf[9]);
     for (buf[0..9]) |c| try testing.expectEqual(@as(u8, '0'), c);
 

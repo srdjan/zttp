@@ -288,7 +288,7 @@ pub fn getRuntimeCallbackStateChecked(
 
 fn realPathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     if (path.len == 0) return error.InvalidPath;
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     var resolved_buf: [std.c.PATH_MAX + 1]u8 = undefined;
@@ -702,7 +702,7 @@ test "the guard refuses an identifier no policy entry can hold" {
     const ctx = try context.Context.init(allocator, &gc_state, .{});
     defer ctx.deinit();
 
-    const longest = [_]u8{'a'} ** identifier.max_identifier_bytes;
+    const longest = @as([identifier.max_identifier_bytes]u8, @splat('a'));
 
     const Observed = struct {
         var longest_allowed: bool = false;
@@ -715,8 +715,8 @@ test "the guard refuses an identifier no policy entry can hold" {
         fn f(handle: *ModuleHandle, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
             _ = args;
             const active_ctx = handleToContext(handle);
-            const max = [_]u8{'a'} ** identifier.max_identifier_bytes;
-            const over = [_]u8{'a'} ** (identifier.max_identifier_bytes + 1);
+            const max = @as([identifier.max_identifier_bytes]u8, @splat('a'));
+            const over = @as([((identifier.max_identifier_bytes + 1))]u8, @splat('a'));
             Observed.longest_allowed = try allowsEnvChecked(active_ctx, &max);
             Observed.too_long_allowed = try allowsEnvChecked(active_ctx, &over);
             Observed.control_byte_allowed = try allowsEnvChecked(active_ctx, "API\nKEY");
@@ -776,10 +776,10 @@ test "active module authorization is scoped to its Context" {
     try std.testing.expect(!hasCapability(handle_a, .random));
     try std.testing.expect(hasCapability(handle_b, .random));
     try std.testing.expect(!hasCapability(handle_b, .clock));
-    try std.testing.expect(activeModuleOwnsStateSlot(handle_a, @intFromEnum(module_slots.Slot.sql)));
-    try std.testing.expect(!activeModuleOwnsStateSlot(handle_a, @intFromEnum(module_slots.Slot.cache)));
-    try std.testing.expect(activeModuleOwnsStateSlot(handle_b, @intFromEnum(module_slots.Slot.cache)));
-    try std.testing.expect(!activeModuleOwnsStateSlot(handle_b, @intFromEnum(module_slots.Slot.sql)));
+    try std.testing.expect(activeModuleOwnsStateSlot(handle_a, @backingInt(module_slots.Slot.sql)));
+    try std.testing.expect(!activeModuleOwnsStateSlot(handle_a, @backingInt(module_slots.Slot.cache)));
+    try std.testing.expect(activeModuleOwnsStateSlot(handle_b, @backingInt(module_slots.Slot.cache)));
+    try std.testing.expect(!activeModuleOwnsStateSlot(handle_b, @backingInt(module_slots.Slot.sql)));
 
     // Context scopes are independent stacks, so they may be restored in an
     // order that is not globally LIFO without disturbing the other Context.

@@ -4,7 +4,7 @@
 //! live allocator bytes, and teardown across handler-shaped programs. Peak
 //! bytes count requested allocator storage, not process RSS or reserved pages.
 //!
-//! Usage: `zig build compile-bench -Doptimize=ReleaseFast -- [flags]`
+//! Usage: `zig build compile-bench -Doptimize=fast -- [flags]`
 //! Flags:
 //!   --json            Emit JSON to stdout.
 //!   --quiet           Suppress human-readable output.
@@ -261,7 +261,7 @@ const GeneratedFixture = enum {
             },
             .blob_4mb => {
                 try w.writeAll("function handler(req: Request): Response { return Response.text(\"");
-                const block = [_]u8{'a'} ** 4096;
+                const block = @as([4096]u8, @splat('a'));
                 for (0..1024) |_| try w.writeAll(&block);
                 try w.writeAll("\"); }\n");
             },
@@ -540,8 +540,8 @@ fn runFixture(allocator: std.mem.Allocator, fx: Fixture, iterations: u32, profil
             result.error_name = @errorName(err);
             return result;
         };
-        inline for (std.meta.fields(CompileStats)) |field| {
-            @field(result.stats, field.name) += @field(stats, field.name);
+        inline for (@typeInfo(CompileStats).@"struct".field_names) |field| {
+            @field(result.stats, field) += @field(stats, field);
         }
     }
     const end = compat.Instant.now() catch {
@@ -549,8 +549,8 @@ fn runFixture(allocator: std.mem.Allocator, fx: Fixture, iterations: u32, profil
         return result;
     };
     result.ns_per_iter = end.since(start) / iterations;
-    inline for (std.meta.fields(CompileStats)) |field| {
-        @field(result.stats, field.name) /= iterations;
+    inline for (@typeInfo(CompileStats).@"struct".field_names) |field| {
+        @field(result.stats, field) /= iterations;
     }
     result.success = true;
     return result;

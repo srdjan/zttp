@@ -120,7 +120,7 @@ pub fn missingCaseHelp(allocator: std.mem.Allocator, coverage: Coverage) std.mem
     if (std.mem.eql(u8, witness, "default")) {
         return allocator.dupe(u8, "missing case: default. The matched type has values that no arm lists, so add a 'default:' arm.");
     }
-    return std.fmt.allocPrint(allocator, "missing case: {s}. Add an arm for it, or add a 'default:' arm.", .{witness});
+    return allocator.print("missing case: {s}. Add an arm for it, or add a 'default:' arm.", .{witness});
 }
 
 pub const MatchAnalysis = struct {
@@ -678,7 +678,7 @@ fn headEql(a: Head, b: Head) bool {
 /// literal names. One kind means a `default:` arm and a type test cover the
 /// same values, so the witness says `default`.
 fn familyCount(members: []const Member) usize {
-    var seen = [_]bool{false} ** 10;
+    var seen = @as([10]bool, @splat(false));
     for (members) |m| {
         const i: usize = switch (m) {
             .boolean, .lit_bool => 0,
@@ -1256,11 +1256,7 @@ const Expect = struct {
 /// first `match` expression in `decls ++ function` is the one analyzed.
 fn expectCoverage(decls: []const u8, param_type: []const u8, arms: []const u8, want: Expect) !void {
     const allocator = std.testing.allocator;
-    const source = try std.fmt.allocPrint(
-        allocator,
-        "{s}\nfunction f(v: {s}): number {{\n  const o = match (v) {{\n{s}\n  }};\n  return 0;\n}}\n",
-        .{ decls, param_type, arms },
-    );
+    const source = try allocator.print("{s}\nfunction f(v: {s}): number {{\n  const o = match (v) {{\n{s}\n  }};\n  return 0;\n}}\n", .{ decls, param_type, arms });
     defer allocator.free(source);
 
     var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);

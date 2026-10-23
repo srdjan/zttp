@@ -762,6 +762,16 @@ test "JSValue toNumber" {
     try std.testing.expectEqual(@as(?f64, null), JSValue.undefined_val.toNumber());
 }
 
+test "optional numeric conversion keeps NaN payloads present" {
+    const patterns = [_]u64{ 0x7ff8000000000000, 0x7ff8000000000001, 0x7ff0000000000001, 0xfff8000000000001 };
+    for (patterns) |bits| {
+        const v = JSValue.fromFloat(@bitCast(bits));
+        const number = v.toNumber() orelse return error.TestUnexpectedResult;
+        try std.testing.expect(std.math.isNan(number));
+        try std.testing.expect(!v.strictEquals(v));
+    }
+}
+
 test "JSValue toNumber preserves NaN" {
     const num = JSValue.nan_val.toNumber();
     try std.testing.expect(num != null);

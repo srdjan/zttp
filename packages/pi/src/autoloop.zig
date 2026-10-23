@@ -782,11 +782,7 @@ fn applyPlans(
         );
         defer committed.deinit(allocator);
 
-        const summary = try std.fmt.allocPrint(
-            allocator,
-            "autoloop verified change set: {s} (plan {s}, {s})",
-            .{ options.file, plan.id, proof.proof_id },
-        );
+        const summary = try allocator.print("autoloop verified change set: {s} (plan {s}, {s})", .{ options.file, plan.id, proof.proof_id });
         var summary_owned = true;
         defer if (summary_owned) allocator.free(summary);
 
@@ -922,19 +918,15 @@ fn emitWitnessReplaySummary(
 
     const done = defeated.consumed + new_w.consumed;
     const truncated: usize = if (total > done) total - done else 0;
-    const note = try std.fmt.allocPrint(
-        allocator,
-        "auto-replay {s}: defeated still-defeated={d} regressed={d}; new reproduces={d} unreached={d}; errors={d}; truncated={d}",
-        .{
-            options.file,
-            defeated.not_reproduced,
-            defeated.reproduced,
-            new_w.reproduced,
-            new_w.not_reproduced,
-            defeated.errors + new_w.errors,
-            truncated,
-        },
-    );
+    const note = try allocator.print("auto-replay {s}: defeated still-defeated={d} regressed={d}; new reproduces={d} unreached={d}; errors={d}; truncated={d}", .{
+        options.file,
+        defeated.not_reproduced,
+        defeated.reproduced,
+        new_w.reproduced,
+        new_w.not_reproduced,
+        defeated.errors + new_w.errors,
+        truncated,
+    });
     var note_owned_by_transcript = false;
     errdefer if (!note_owned_by_transcript) allocator.free(note);
 
@@ -1502,7 +1494,7 @@ test "diffWitnessKeys returns bodies in a but not b, keyed by stable hex" {
     const allocator = testing.allocator;
     const a = [_]ui_payload.WitnessBody{
         .{
-            .key = @constCast("aa" ** 32),
+            .key = @constCast(&@as([(32) * ("aa").len]u8, @bitCast(@as([32][("aa").len]u8, @splat(("aa").*))))),
             .property = @constCast("no_secret_leakage"),
             .summary = @constCast(""),
             .origin_line = 1,
@@ -1516,7 +1508,7 @@ test "diffWitnessKeys returns bodies in a but not b, keyed by stable hex" {
             .io_stubs = &.{},
         },
         .{
-            .key = @constCast("bb" ** 32),
+            .key = @constCast(&@as([(32) * ("bb").len]u8, @bitCast(@as([32][("bb").len]u8, @splat(("bb").*))))),
             .property = @constCast("injection_safe"),
             .summary = @constCast(""),
             .origin_line = 1,
@@ -1532,7 +1524,7 @@ test "diffWitnessKeys returns bodies in a but not b, keyed by stable hex" {
     };
     const b = [_]ui_payload.WitnessBody{
         .{
-            .key = @constCast("aa" ** 32),
+            .key = @constCast(&@as([(32) * ("aa").len]u8, @bitCast(@as([32][("aa").len]u8, @splat(("aa").*))))),
             .property = @constCast("no_secret_leakage"),
             .summary = @constCast(""),
             .origin_line = 1,
@@ -1550,7 +1542,7 @@ test "diffWitnessKeys returns bodies in a but not b, keyed by stable hex" {
     const diff = try diffWitnessKeys(allocator, &a, &b);
     defer allocator.free(diff);
     try testing.expectEqual(@as(usize, 1), diff.len);
-    try testing.expectEqualStrings("bb" ** 32, diff[0].key);
+    try testing.expectEqualStrings(&@as([(32) * ("bb").len]u8, @bitCast(@as([32][("bb").len]u8, @splat(("bb").*)))), diff[0].key);
     try testing.expectEqualStrings("injection_safe", diff[0].property);
 }
 
@@ -1573,7 +1565,7 @@ test "focusedAchieved without focus key defers to result.ok" {
 test "focusedAchieved returns true when focused witness is gone, even if others remain" {
     const others = [_]ui_payload.WitnessBody{
         .{
-            .key = @constCast("cc" ** 32),
+            .key = @constCast(&@as([(32) * ("cc").len]u8, @bitCast(@as([32][("cc").len]u8, @splat(("cc").*))))),
             .property = @constCast("no_secret_leakage"),
             .summary = @constCast(""),
             .origin_line = 1,
@@ -1588,13 +1580,13 @@ test "focusedAchieved returns true when focused witness is gone, even if others 
         },
     };
     const result: GoalCheckResult = .{ .ok = false, .witnesses = @constCast(&others) };
-    try testing.expect(focusedAchieved(result, "aa" ** 32));
+    try testing.expect(focusedAchieved(result, &@as([(32) * ("aa").len]u8, @bitCast(@as([32][("aa").len]u8, @splat(("aa").*))))));
 }
 
 test "focusedAchieved returns false when focused witness is still live" {
     const live = [_]ui_payload.WitnessBody{
         .{
-            .key = @constCast("aa" ** 32),
+            .key = @constCast(&@as([(32) * ("aa").len]u8, @bitCast(@as([32][("aa").len]u8, @splat(("aa").*))))),
             .property = @constCast("no_secret_leakage"),
             .summary = @constCast(""),
             .origin_line = 1,
@@ -1608,7 +1600,7 @@ test "focusedAchieved returns false when focused witness is still live" {
             .io_stubs = &.{},
         },
         .{
-            .key = @constCast("bb" ** 32),
+            .key = @constCast(&@as([(32) * ("bb").len]u8, @bitCast(@as([32][("bb").len]u8, @splat(("bb").*))))),
             .property = @constCast("injection_safe"),
             .summary = @constCast(""),
             .origin_line = 1,
@@ -1623,6 +1615,6 @@ test "focusedAchieved returns false when focused witness is still live" {
         },
     };
     const result: GoalCheckResult = .{ .ok = false, .witnesses = @constCast(&live) };
-    try testing.expect(!focusedAchieved(result, "aa" ** 32));
-    try testing.expect(!focusedAchieved(result, "bb" ** 32));
+    try testing.expect(!focusedAchieved(result, &@as([(32) * ("aa").len]u8, @bitCast(@as([32][("aa").len]u8, @splat(("aa").*))))));
+    try testing.expect(!focusedAchieved(result, &@as([(32) * ("bb").len]u8, @bitCast(@as([32][("bb").len]u8, @splat(("bb").*))))));
 }

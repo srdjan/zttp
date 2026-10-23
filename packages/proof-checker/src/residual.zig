@@ -90,7 +90,7 @@ pub const Family = enum(u3) {
 
     pub fn bit(self: Family) u8 {
         @setRuntimeSafety(true);
-        return @as(u8, 1) << @intFromEnum(self);
+        return @as(u8, 1) << @backingInt(self);
     }
 };
 
@@ -211,13 +211,13 @@ pub const AddressScope = enum(u8) {
 
     pub fn bit(self: AddressScope) u8 {
         @setRuntimeSafety(true);
-        return @as(u8, 1) << @intCast(@intFromEnum(self) - 1);
+        return @as(u8, 1) << @intCast(@backingInt(self) - 1);
     }
 };
 
 comptime {
-    for (@typeInfo(AddressScope).@"enum".fields) |field| {
-        if (field.value < 1 or field.value > @bitSizeOf(u8))
+    for (@typeInfo(AddressScope).@"enum".field_names) |field| {
+        if (@backingInt(@field(AddressScope, field)) < 1 or @backingInt(@field(AddressScope, field)) > @bitSizeOf(u8))
             @compileError("AddressScope exceeds ScopeSet's wire byte");
     }
 }
@@ -246,8 +246,8 @@ pub const ScopeSet = struct {
     pub fn fromWire(bits: u8) ?ScopeSet {
         @setRuntimeSafety(true);
         var known: u8 = 0;
-        inline for (@typeInfo(AddressScope).@"enum".fields) |field| {
-            const scope: AddressScope = @enumFromInt(field.value);
+        inline for (@typeInfo(AddressScope).@"enum".field_names) |field| {
+            const scope: AddressScope = @fromBackingInt(@intCast(@backingInt(@field(AddressScope, field))));
             known |= scope.bit();
         }
         if (bits & ~known != 0) return null;
@@ -510,10 +510,10 @@ const testing = std.testing;
 
 test "every alphabet member round trips and names itself" {
     inline for (.{ GuardKind, Normalization, SinkId, PolicySection, AddressScope }) |T| {
-        inline for (@typeInfo(T).@"enum".fields) |field| {
-            const member: T = @enumFromInt(field.value);
-            try testing.expectEqual(@as(?T, member), T.fromWire(field.value));
-            try testing.expectEqualStrings(field.name, member.name());
+        inline for (@typeInfo(T).@"enum".field_names) |field| {
+            const member: T = @fromBackingInt(@intCast(@backingInt(@field(T, field))));
+            try testing.expectEqual(@as(?T, member), T.fromWire(@backingInt(@field(T, field))));
+            try testing.expectEqualStrings(field, member.name());
         }
         try testing.expectEqual(@as(?T, null), T.fromWire(0));
         try testing.expectEqual(@as(?T, null), T.fromWire(200));
@@ -573,9 +573,9 @@ test "identifier normalization is exact" {
     try testing.expectError(error.Malformed, normalize(.identifier_exact_v1, "A\x00B", &out));
     try testing.expectError(error.Malformed, normalize(.identifier_exact_v1, "A\x7fB", &out));
 
-    const long = [_]u8{'a'} ** (max_identifier_bytes);
+    const long = @as([((max_identifier_bytes))]u8, @splat('a'));
     _ = try normalize(.identifier_exact_v1, &long, &out);
-    const too_long = [_]u8{'a'} ** (max_identifier_bytes + 1);
+    const too_long = @as([((max_identifier_bytes + 1))]u8, @splat('a'));
     var big: [max_endpoint_bytes]u8 = undefined;
     try testing.expectError(error.TooLong, normalize(.identifier_exact_v1, &too_long, &big));
 }
@@ -704,10 +704,10 @@ test "the catalog is non-empty and covers every guard kind" {
     // supplied set.
     try testing.expect(catalog.len >= 8);
 
-    var seen = std.EnumSet(GuardKind).initEmpty();
+    var seen = std.EnumSet(GuardKind).empty;
     for (catalog) |entry| seen.insert(entry.kind);
-    inline for (@typeInfo(GuardKind).@"enum".fields) |field| {
-        const kind: GuardKind = @enumFromInt(field.value);
+    inline for (@typeInfo(GuardKind).@"enum".field_names) |field| {
+        const kind: GuardKind = @fromBackingInt(@intCast(@backingInt(@field(GuardKind, field))));
         try testing.expect(seen.contains(kind));
     }
 

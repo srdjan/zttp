@@ -51,7 +51,7 @@ pub const AtomTable = struct {
         // reserved). Fail closed rather than let the 65293rd distinct interned
         // name alias a sentinel and silently corrupt an object's shape layout.
         if (self.next_id >= 0xFFFE) return error.OutOfMemory;
-        const atom: object.Atom = @enumFromInt(self.next_id);
+        const atom: object.Atom = @fromBackingInt(@intCast(self.next_id));
         const key = try self.allocator.dupe(u8, s);
         errdefer self.allocator.free(key);
 

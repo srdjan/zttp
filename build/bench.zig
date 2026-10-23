@@ -19,9 +19,7 @@ pub fn addRuntimeBench(ctx: Context, test_step: *std.Build.Step) *std.Build.Step
 
     // Benchmark run command
     const bench_cmd = b.addRunArtifact(bench_exe);
-    if (b.args) |args| {
-        bench_cmd.addArgs(args);
-    }
+    bench_cmd.addPassthruArgs();
 
     // Release benchmark policy is implemented in Zig beside the other
     // repository tooling. Best-of-N sampling tames microbenchmark variance.
@@ -82,9 +80,7 @@ pub fn addCompileBench(ctx: Context, test_step: *std.Build.Step, bench_exe: *std
     const compile_bench_cmd = b.addRunArtifact(compile_bench_exe);
     // Bench runs are measurements, not cacheable build products.
     compile_bench_cmd.has_side_effects = true;
-    if (b.args) |args| {
-        compile_bench_cmd.addArgs(args);
-    }
+    compile_bench_cmd.addPassthruArgs();
     const compile_bench_step = b.step("compile-bench", "Run compile-time microbenchmarks");
     compile_bench_step.dependOn(&compile_bench_cmd.step);
 

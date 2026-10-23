@@ -75,7 +75,7 @@ fn execute(
     } else blk: {
         const ext = std.fs.path.extension(relative);
         const stem = relative[0 .. relative.len - ext.len];
-        const owned = try std.fmt.allocPrint(allocator, "{s}.test.jsonl", .{stem});
+        const owned = try allocator.print("{s}.test.jsonl", .{stem});
         output_path_owned = owned;
         break :blk owned;
     };

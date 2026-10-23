@@ -72,7 +72,7 @@ pub fn processSubmit(
             const rendered = try agent.runOneTurn(allocator, session, registry, skill.body, approval_fn);
             return .{ .rendered = rendered };
         }
-        const msg = try std.fmt.allocPrint(allocator, "unknown skill: {s}\nAvailable: run /skills to list\n", .{skill_name});
+        const msg = try allocator.print("unknown skill: {s}\nAvailable: run /skills to list\n", .{skill_name});
         return .{ .tool_result = .{ .ok = false, .llm_text = msg } };
     }
 
@@ -107,23 +107,15 @@ pub fn processSubmit(
         const model_id = std.mem.trim(u8, trimmed["/model ".len..], " \t");
         session.setModel(allocator, model_id) catch |err| {
             const msg = switch (err) {
-                error.UnknownModel => try std.fmt.allocPrint(allocator, "Unknown model: {s}\n", .{model_id}),
-                error.ProviderMismatch => try std.fmt.allocPrint(
-                    allocator,
-                    "Model is not available for the active {s} provider: {s}\n",
-                    .{ session.backendDescriptor().provider_label, model_id },
-                ),
+                error.UnknownModel => try allocator.print("Unknown model: {s}\n", .{model_id}),
+                error.ProviderMismatch => try allocator.print("Model is not available for the active {s} provider: {s}\n", .{ session.backendDescriptor().provider_label, model_id }),
                 error.NoActiveProvider => try allocator.dupe(u8, "No active model provider.\n"),
-                else => try std.fmt.allocPrint(
-                    allocator,
-                    "Model selection was not changed because persistence failed: {s}\n",
-                    .{@errorName(err)},
-                ),
+                else => try allocator.print("Model selection was not changed because persistence failed: {s}\n", .{@errorName(err)}),
             };
             return .{ .tool_result = .{ .ok = false, .llm_text = msg } };
         };
         const model = models_registry.findById(model_id) orelse unreachable;
-        const msg = try std.fmt.allocPrint(allocator, "Model switched to: {s}\n", .{model.display_name});
+        const msg = try allocator.print("Model switched to: {s}\n", .{model.display_name});
         return .{ .tool_result = .{ .ok = true, .llm_text = msg } };
     }
 
@@ -144,7 +136,7 @@ pub fn processSubmit(
             const rendered = try agent.runOneTurn(allocator, session, registry, expanded, approval_fn);
             return .{ .rendered = rendered };
         }
-        const msg = try std.fmt.allocPrint(allocator, "unknown template: {s}\nAvailable: run /templates to list\n", .{tmpl_name});
+        const msg = try allocator.print("unknown template: {s}\nAvailable: run /templates to list\n", .{tmpl_name});
         return .{ .tool_result = .{ .ok = false, .llm_text = msg } };
     }
 
@@ -169,7 +161,7 @@ pub fn processSubmit(
             return .{ .tool_result = .{ .ok = false, .llm_text = try allocator.dupe(u8, "ledger export requires a persisted session\n") } };
         };
         try ledger.exportSessionLedger(allocator, sid, out_path);
-        const msg = try std.fmt.allocPrint(allocator, "ledger exported to {s}\n", .{out_path});
+        const msg = try allocator.print("ledger exported to {s}\n", .{out_path});
         return .{ .tool_result = .{ .ok = true, .llm_text = msg } };
     }
 
@@ -239,7 +231,7 @@ pub fn dispatchLine(
         return .{ .result = try invokeTool(allocator, registry, argv[0], argv[1..]) };
     }
 
-    const msg = try std.fmt.allocPrint(allocator, "unknown tool or command: {s}\n", .{argv[0]});
+    const msg = try allocator.print("unknown tool or command: {s}\n", .{argv[0]});
     return .{ .result = .{ .ok = false, .llm_text = msg } };
 }
 
@@ -398,31 +390,27 @@ fn renderSettings(allocator: std.mem.Allocator) !ToolResult {
     const defaults = loop.RunOptions{};
     const default_model = models_registry.defaultForProvider(models_registry.default_provider);
     const compaction_defaults = @import("compaction.zig").Settings{};
-    const msg = try std.fmt.allocPrint(
-        allocator,
-        "Settings (compile-time defaults):\n" ++
-            "  model:           {s}\n" ++
-            "  max_tokens:      {d}\n" ++
-            "  max_attempts:    {d}\n" ++
-            "  roundtrips/turn: {d}\n" ++
-            "  tool_calls/turn: {d}\n" ++
-            "  batch_size:      {d}\n" ++
-            "  compaction:      enabled\n" ++
-            "  max_input:       {d}\n" ++
-            "  reserve:         {d}\n" ++
-            "  keep_recent:     {d}\n",
-        .{
-            default_model.id,
-            default_model.request_policy.max_output_tokens,
-            loop.interactive_max_attempts,
-            defaults.max_model_roundtrips_per_turn,
-            defaults.max_tool_calls_per_turn,
-            defaults.max_tool_batch_size,
-            compaction_defaults.max_input_tokens,
-            compaction_defaults.reserve_tokens,
-            compaction_defaults.keep_recent_tokens,
-        },
-    );
+    const msg = try allocator.print("Settings (compile-time defaults):\n" ++
+        "  model:           {s}\n" ++
+        "  max_tokens:      {d}\n" ++
+        "  max_attempts:    {d}\n" ++
+        "  roundtrips/turn: {d}\n" ++
+        "  tool_calls/turn: {d}\n" ++
+        "  batch_size:      {d}\n" ++
+        "  compaction:      enabled\n" ++
+        "  max_input:       {d}\n" ++
+        "  reserve:         {d}\n" ++
+        "  keep_recent:     {d}\n", .{
+        default_model.id,
+        default_model.request_policy.max_output_tokens,
+        loop.interactive_max_attempts,
+        defaults.max_model_roundtrips_per_turn,
+        defaults.max_tool_calls_per_turn,
+        defaults.max_tool_batch_size,
+        compaction_defaults.max_input_tokens,
+        compaction_defaults.reserve_tokens,
+        compaction_defaults.keep_recent_tokens,
+    });
     defer allocator.free(msg);
     return ToolResult.withPlainText(allocator, true, msg);
 }
@@ -431,34 +419,30 @@ fn renderSessionSettings(allocator: std.mem.Allocator, session: *const agent.Age
     const defaults = loop.RunOptions{};
     const model_id = session.currentModel() orelse "none";
     const model = models_registry.findById(model_id);
-    const msg = try std.fmt.allocPrint(
-        allocator,
-        "Settings (resolved session):\n" ++
-            "  provider:         {s}\n" ++
-            "  model:            {s}\n" ++
-            "  max_tokens:       {d}\n" ++
-            "  max_attempts:     {d}\n" ++
-            "  roundtrips/turn:  {d}\n" ++
-            "  tool_calls/turn:  {d}\n" ++
-            "  batch_size:       {d}\n" ++
-            "  compaction:       {s}\n" ++
-            "  max_input:        {d}\n" ++
-            "  reserve:          {d}\n" ++
-            "  keep_recent:      {d}\n",
-        .{
-            session.backendDescriptor().provider_label,
-            model_id,
-            if (model) |value| value.request_policy.max_output_tokens else 0,
-            loop.interactive_max_attempts,
-            defaults.max_model_roundtrips_per_turn,
-            defaults.max_tool_calls_per_turn,
-            defaults.max_tool_batch_size,
-            if (session.compaction_enabled) "enabled" else "disabled",
-            session.compaction_settings.max_input_tokens,
-            session.compaction_settings.reserve_tokens,
-            session.compaction_settings.keep_recent_tokens,
-        },
-    );
+    const msg = try allocator.print("Settings (resolved session):\n" ++
+        "  provider:         {s}\n" ++
+        "  model:            {s}\n" ++
+        "  max_tokens:       {d}\n" ++
+        "  max_attempts:     {d}\n" ++
+        "  roundtrips/turn:  {d}\n" ++
+        "  tool_calls/turn:  {d}\n" ++
+        "  batch_size:       {d}\n" ++
+        "  compaction:       {s}\n" ++
+        "  max_input:        {d}\n" ++
+        "  reserve:          {d}\n" ++
+        "  keep_recent:      {d}\n", .{
+        session.backendDescriptor().provider_label,
+        model_id,
+        if (model) |value| value.request_policy.max_output_tokens else 0,
+        loop.interactive_max_attempts,
+        defaults.max_model_roundtrips_per_turn,
+        defaults.max_tool_calls_per_turn,
+        defaults.max_tool_batch_size,
+        if (session.compaction_enabled) "enabled" else "disabled",
+        session.compaction_settings.max_input_tokens,
+        session.compaction_settings.reserve_tokens,
+        session.compaction_settings.keep_recent_tokens,
+    });
     defer allocator.free(msg);
     return ToolResult.withPlainText(allocator, true, msg);
 }
@@ -468,30 +452,26 @@ fn renderStatus(allocator: std.mem.Allocator, session: *const agent.AgentSession
     const model = session.currentModel() orelse "stub";
     const tok = session.token_totals;
     const descriptor = session.backendDescriptor();
-    const msg = try std.fmt.allocPrint(
-        allocator,
-        "Expert status:\n" ++
-            "  provider:      {s}\n" ++
-            "  auth:          {s}\n" ++
-            "  model:         {s}\n" ++
-            "  session:       {s}\n" ++
-            "  persistence:   {s}\n" ++
-            "  tokens.in:     {d}\n" ++
-            "  tokens.cache_r:{d}\n" ++
-            "  tokens.cache_w:{d}\n" ++
-            "  tokens.out:    {d}\n",
-        .{
-            descriptor.provider_label,
-            descriptor.auth_label,
-            model,
-            session_id,
-            if (session.session_dir != null) "enabled" else "disabled",
-            tok.input_tokens,
-            tok.cache_read_input_tokens,
-            tok.cache_creation_input_tokens,
-            tok.output_tokens,
-        },
-    );
+    const msg = try allocator.print("Expert status:\n" ++
+        "  provider:      {s}\n" ++
+        "  auth:          {s}\n" ++
+        "  model:         {s}\n" ++
+        "  session:       {s}\n" ++
+        "  persistence:   {s}\n" ++
+        "  tokens.in:     {d}\n" ++
+        "  tokens.cache_r:{d}\n" ++
+        "  tokens.cache_w:{d}\n" ++
+        "  tokens.out:    {d}\n", .{
+        descriptor.provider_label,
+        descriptor.auth_label,
+        model,
+        session_id,
+        if (session.session_dir != null) "enabled" else "disabled",
+        tok.input_tokens,
+        tok.cache_read_input_tokens,
+        tok.cache_creation_input_tokens,
+        tok.output_tokens,
+    });
     defer allocator.free(msg);
     return ToolResult.withPlainText(allocator, true, msg);
 }
@@ -597,18 +577,18 @@ fn renderChangelog(allocator: std.mem.Allocator) !ToolResult {
 
 fn renderTree(allocator: std.mem.Allocator, current_session_id: ?[]const u8) !ToolResult {
     const root = session_paths.sessionRoot(allocator) catch |err| {
-        const msg = try std.fmt.allocPrint(allocator, "error reading session root: {s}\n", .{@errorName(err)});
+        const msg = try allocator.print("error reading session root: {s}\n", .{@errorName(err)});
         return .{ .ok = false, .llm_text = msg };
     };
     defer allocator.free(root);
 
     const hash = session_paths.cwdHashFull(allocator) catch |err| {
-        const msg = try std.fmt.allocPrint(allocator, "error computing cwd hash: {s}\n", .{@errorName(err)});
+        const msg = try allocator.print("error computing cwd hash: {s}\n", .{@errorName(err)});
         return .{ .ok = false, .llm_text = msg };
     };
 
     const entries = session_paths.listSessions(allocator, root, hash[0..]) catch |err| {
-        const msg = try std.fmt.allocPrint(allocator, "error listing sessions: {s}\n", .{@errorName(err)});
+        const msg = try allocator.print("error listing sessions: {s}\n", .{@errorName(err)});
         return .{ .ok = false, .llm_text = msg };
     };
     defer {
@@ -924,16 +904,8 @@ fn writeDestination(allocator: std.mem.Allocator, session: *const agent.AgentSes
     const dest = agent.destinationForSession(session);
     const line = switch (dest) {
         .offline => allocator.dupe(u8, "\nNo model key is set, so no handler source leaves this process.\n") catch return,
-        .local => |url| std.fmt.allocPrint(
-            allocator,
-            "\nSource the model reads stays on this machine through the local MLX server at {s}.\n",
-            .{url},
-        ) catch return,
-        .deepseek => |url| std.fmt.allocPrint(
-            allocator,
-            "\nSource the model reads is sent to DeepSeek at {s}. Files are sent only when\nthe model reads them; nothing is uploaded up front.\n",
-            .{url},
-        ) catch return,
+        .local => |url| allocator.print("\nSource the model reads stays on this machine through the local MLX server at {s}.\n", .{url}) catch return,
+        .deepseek => |url| allocator.print("\nSource the model reads is sent to DeepSeek at {s}. Files are sent only when\nthe model reads them; nothing is uploaded up front.\n", .{url}) catch return,
     };
     defer allocator.free(line);
     _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);

@@ -636,18 +636,14 @@ pub const CodeGen = struct {
 
         const atoms = self.atoms orelse return imported_atom;
         const imported_name = self.atomName(imported_atom) orelse return imported_atom;
-        const namespaced = try std.fmt.allocPrint(
-            self.allocator,
-            "{s}" ++ module_specifier.namespaced_export_separator ++ "{s}",
-            .{ module_name, imported_name },
-        );
+        const namespaced = try self.allocator.print("{s}" ++ module_specifier.namespaced_export_separator ++ "{s}", .{ module_name, imported_name });
         defer self.allocator.free(namespaced);
         const atom = try atoms.intern(namespaced);
-        return @truncate(@intFromEnum(atom));
+        return @truncate(@backingInt(atom));
     }
 
     fn atomName(self: *CodeGen, atom_idx: u16) ?[]const u8 {
-        const atom: js_object.Atom = @enumFromInt(@as(u32, atom_idx));
+        const atom: js_object.Atom = @fromBackingInt(@intCast(@as(u32, atom_idx)));
         if (atom.isPredefined()) return atom.toPredefinedName();
         if (self.atoms) |atoms| {
             if (atoms.getName(atom)) |name| return name;
@@ -1133,16 +1129,16 @@ pub const CodeGen = struct {
         if (binding.kind != .global and binding.kind != .undeclared_global) return false;
 
         // Must be Math global (atom index)
-        const math_atom: u16 = @intFromEnum(js_object.Atom.Math);
+        const math_atom: u16 = @backingInt(js_object.Atom.Math);
         if (binding.name_atom != math_atom) return false;
 
         // Match property to known Math methods
-        const floor_atom: u16 = @intFromEnum(js_object.Atom.floor);
-        const ceil_atom: u16 = @intFromEnum(js_object.Atom.ceil);
-        const round_atom: u16 = @intFromEnum(js_object.Atom.round);
-        const abs_atom: u16 = @intFromEnum(js_object.Atom.abs);
-        const min_atom: u16 = @intFromEnum(js_object.Atom.min);
-        const max_atom: u16 = @intFromEnum(js_object.Atom.max);
+        const floor_atom: u16 = @backingInt(js_object.Atom.floor);
+        const ceil_atom: u16 = @backingInt(js_object.Atom.ceil);
+        const round_atom: u16 = @backingInt(js_object.Atom.round);
+        const abs_atom: u16 = @backingInt(js_object.Atom.abs);
+        const min_atom: u16 = @backingInt(js_object.Atom.min);
+        const max_atom: u16 = @backingInt(js_object.Atom.max);
 
         const prop = member.property;
 
@@ -1403,7 +1399,7 @@ pub const CodeGen = struct {
         // Hash the shape for deduplication
         var hasher = std.hash.Wyhash.init(0);
         for (atoms) |atom| {
-            hasher.update(std.mem.asBytes(&@intFromEnum(atom)));
+            hasher.update(std.mem.asBytes(&@backingInt(atom)));
         }
         const hash = hasher.final();
 
@@ -1551,7 +1547,7 @@ pub const CodeGen = struct {
                     try self.emitNode(prop.value);
                     const key_str = self.ir.getString(key_str_idx) orelse "";
                     const atom = try self.resolveKeyAtom(key_str, key_str_idx);
-                    try self.emitPutField(@truncate(@intFromEnum(atom)));
+                    try self.emitPutField(@truncate(@backingInt(atom)));
                     self.popStack(2);
                 } else {
                     // Computed key
@@ -2068,7 +2064,7 @@ pub const CodeGen = struct {
 
             try self.emit(.dup);
             self.pushStack(1);
-            try self.emitGetField(@truncate(@intFromEnum(atom)));
+            try self.emitGetField(@truncate(@backingInt(atom)));
             if (binding) |b| {
                 try self.emitSetBinding(b);
             } else {
@@ -2122,7 +2118,7 @@ pub const CodeGen = struct {
 
             try self.emit(.dup);
             self.pushStack(1);
-            try self.emitGetField(@truncate(@intFromEnum(atom)));
+            try self.emitGetField(@truncate(@backingInt(atom)));
 
             if (prop.value == null_node) {
                 try self.emitWildcardPresenceCheck(skip_label);
@@ -2183,7 +2179,7 @@ pub const CodeGen = struct {
     fn matchShapeAtom(self: *CodeGen) !u16 {
         const atoms = self.atoms orelse return 0;
         const atom = try atoms.intern(bytecode.match_shape_global);
-        return @truncate(@intFromEnum(atom));
+        return @truncate(@backingInt(atom));
     }
 
     /// Test the shape of the value on top of the stack, which stays there:
@@ -2196,7 +2192,7 @@ pub const CodeGen = struct {
         try self.emitU16(try self.matchShapeAtom());
         self.pushStack(1); // [v, v, test]
         try self.emit(.swap); // [v, test, v]
-        try self.emitSmallInt(@intFromEnum(shape)); // [v, test, v, shape]
+        try self.emitSmallInt(@backingInt(shape)); // [v, test, v, shape]
         try self.emit(.call);
         try self.emitByte(2);
         self.popStack(2); // [v, matched]
@@ -2279,7 +2275,7 @@ pub const CodeGen = struct {
 
             try self.emit(.dup);
             self.pushStack(1);
-            try self.emitGetField(@truncate(@intFromEnum(atom)));
+            try self.emitGetField(@truncate(@backingInt(atom)));
 
             if (prop.value == null_node) {
                 try self.emitWildcardPresenceCheck(cleanup_label);
@@ -2361,7 +2357,7 @@ pub const CodeGen = struct {
     // ============ Instruction Helpers ============
 
     fn emit(self: *CodeGen, opcode: Opcode) !void {
-        try self.code.append(self.allocator, @intFromEnum(opcode));
+        try self.code.append(self.allocator, @backingInt(opcode));
     }
 
     fn emitByte(self: *CodeGen, b: u8) !void {
@@ -2392,7 +2388,7 @@ pub const CodeGen = struct {
     fn resolveKeyAtom(self: *CodeGen, key_str: []const u8, key_str_idx: u16) !js_object.Atom {
         if (js_object.lookupPredefinedAtom(key_str)) |a| return a;
         if (self.atoms) |atoms| return try atoms.intern(key_str);
-        return @enumFromInt(js_object.Atom.FIRST_DYNAMIC + key_str_idx);
+        return @fromBackingInt(@intCast(js_object.Atom.FIRST_DYNAMIC + key_str_idx));
     }
 
     /// Emit dup + value + strict_eq + conditional jump for discriminant testing.
@@ -2528,11 +2524,11 @@ pub const CodeGen = struct {
         if (func.params_count != 1) return false;
 
         // Check if name is "handler" atom (159)
-        if (func.name_atom == @intFromEnum(js_object.Atom.handler)) return true;
+        if (func.name_atom == @backingInt(js_object.Atom.handler)) return true;
 
         // Also check by string lookup if atoms table is available
         if (self.atoms) |atoms| {
-            const name = atoms.getName(@enumFromInt(func.name_atom));
+            const name = atoms.getName(@fromBackingInt(@intCast(func.name_atom)));
             if (name != null and std.mem.eql(u8, name.?, "handler")) return true;
         }
 
@@ -2596,7 +2592,7 @@ test "basic codegen" {
     try std.testing.expect(result.code.len > 0);
     // 42 is in 4..127, so it takes push_i8 and its byte.
     try std.testing.expect(result.code.len >= 2);
-    try std.testing.expectEqual(@intFromEnum(Opcode.push_i8), result.code[0]);
+    try std.testing.expectEqual(@backingInt(Opcode.push_i8), result.code[0]);
     try std.testing.expectEqual(@as(u8, 42), result.code[1]);
 }
 
@@ -2623,7 +2619,7 @@ test "global binding codegen uses the binding name atom" {
     const result = try gen.generate(global);
 
     try std.testing.expect(result.code.len >= 3);
-    try std.testing.expectEqual(@intFromEnum(Opcode.get_global), result.code[0]);
+    try std.testing.expectEqual(@backingInt(Opcode.get_global), result.code[0]);
     try std.testing.expectEqual(@as(u8, 0x34), result.code[1]);
     try std.testing.expectEqual(@as(u8, 0x12), result.code[2]);
 }
@@ -2658,10 +2654,10 @@ test "binary op codegen" {
     var found_add = false;
     var found_push_3 = false;
     for (result.code) |b| {
-        if (b == @intFromEnum(Opcode.add)) {
+        if (b == @backingInt(Opcode.add)) {
             found_add = true;
         }
-        if (b == @intFromEnum(Opcode.push_3)) {
+        if (b == @backingInt(Opcode.push_3)) {
             found_push_3 = true;
         }
     }
@@ -2693,7 +2689,7 @@ test "bytecode constants refuse an unrepresentable index" {
     const division = try nodes.add(Node.binaryOp(loc, .div, left, right));
     const result = try gen.generate(division);
     // At capacity, emit 7 / 2 normally rather than allocate a folded float.
-    try std.testing.expectEqualSlices(u8, &.{ @intFromEnum(Opcode.push_i8), 7, @intFromEnum(Opcode.push_2), @intFromEnum(Opcode.div), @intFromEnum(Opcode.ret_undefined) }, result.code);
+    try std.testing.expectEqualSlices(u8, &.{ @backingInt(Opcode.push_i8), 7, @backingInt(Opcode.push_2), @backingInt(Opcode.div), @backingInt(Opcode.ret_undefined) }, result.code);
 }
 
 test "constant expressions fold inside a handler without changing source IR" {
@@ -2715,8 +2711,8 @@ test "constant expressions fold inside a handler without changing source IR" {
         const function = constant.toExternPtr(FunctionBytecode);
         // One float push and return; there is no add instruction to execute.
         try std.testing.expectEqual(@as(usize, 5), function.code.len);
-        try std.testing.expectEqual(@intFromEnum(Opcode.push_const), function.code[0]);
-        try std.testing.expectEqual(@intFromEnum(Opcode.ret), function.code[3]);
+        try std.testing.expectEqual(@backingInt(Opcode.push_const), function.code[0]);
+        try std.testing.expectEqual(@backingInt(Opcode.ret), function.code[3]);
         try std.testing.expectEqual(@as(f64, 4.0), function.constants[0].getFloat64());
         found_handler = true;
     }

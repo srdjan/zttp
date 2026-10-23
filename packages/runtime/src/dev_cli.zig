@@ -465,12 +465,12 @@ const commands = [_]cli_help.Command{
 };
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var debug_alloc: if (builtin.mode == .Debug) std.heap.DebugAllocator(.{}) else void =
-        if (builtin.mode == .Debug) .init else {};
-    defer if (builtin.mode == .Debug) {
+    var debug_alloc: if (builtin.mode == .debug) std.heap.SafeAllocator else void =
+        if (builtin.mode == .debug) .init(std.heap.page_allocator, .{}) else {};
+    defer if (builtin.mode == .debug) {
         _ = debug_alloc.deinit();
     };
-    const allocator = if (builtin.mode == .Debug) debug_alloc.allocator() else std.heap.smp_allocator;
+    const allocator = if (builtin.mode == .debug) debug_alloc.allocator() else std.heap.smp_allocator;
 
     const args = try shared.collectArgs(allocator, init.args);
     defer {

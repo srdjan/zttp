@@ -3,7 +3,7 @@
   <p align="center"><a href="https://zigttp.timok.com/">Website</a> - <a href="docs/README.md">Documentation</a></p>
 </p>
 
-# zttp v0.23.0
+# zttp v0.24.0
 
 **The agent writes only what the compiler can prove.**
 
@@ -41,12 +41,12 @@ on aarch64. There is no Intel macOS binary; build from source there.
 curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
 ```
 
-Or build from source with Zig `0.16.0`:
+Or build from source with Zig `0.17.0`:
 
 ```bash
 git clone https://github.com/srdjan/zigttp.git
 cd zigttp
-zig build -Doptimize=ReleaseFast
+zig build -Doptimize=fast
 ```
 
 ## First Handler

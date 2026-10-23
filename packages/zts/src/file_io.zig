@@ -5,7 +5,7 @@ const module_graph = @import("modules/internal/module_graph.zig");
 /// Read a file synchronously using POSIX operations (for use before Io is initialized).
 /// Reads in 4KB chunks without fstat to avoid libc/Linux compatibility issues.
 pub fn readFile(allocator: std.mem.Allocator, path: []const u8, max_size: usize) ![]u8 {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
@@ -31,7 +31,7 @@ pub fn readFile(allocator: std.mem.Allocator, path: []const u8, max_size: usize)
 /// append-only logs that have grown past a read cap. Returns an owned,
 /// exactly-sized slice the caller frees.
 pub fn readFileTail(allocator: std.mem.Allocator, path: []const u8, window: usize) ![]u8 {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
@@ -67,7 +67,7 @@ pub fn readFileTail(allocator: std.mem.Allocator, path: []const u8, window: usiz
 
 /// Check whether a file exists using POSIX open (no fstat/libc dependency).
 pub fn fileExists(allocator: std.mem.Allocator, path: []const u8) bool {
-    const path_z = allocator.dupeZ(u8, path) catch return false;
+    const path_z = allocator.dupeSentinel(u8, path, 0) catch return false;
     defer allocator.free(path_z);
     const fd = std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0) catch return false;
     std.Io.Threaded.closeFd(fd);
@@ -89,14 +89,10 @@ pub fn writeFile(allocator: std.mem.Allocator, path: []const u8, data: []const u
     // (same filesystem). PID + address keeps concurrent writers from colliding.
     const dir = std.fs.path.dirname(path) orelse ".";
     const base = std.fs.path.basename(path);
-    const tmp_path = try std.fmt.allocPrint(
-        allocator,
-        "{s}/.{s}.tmp.{d}.{d}",
-        .{ dir, base, std.c.getpid(), @intFromPtr(data.ptr) },
-    );
+    const tmp_path = try allocator.print("{s}/.{s}.tmp.{d}.{d}", .{ dir, base, std.c.getpid(), @intFromPtr(data.ptr) });
     defer allocator.free(tmp_path);
 
-    const tmp_path_z = try allocator.dupeZ(u8, tmp_path);
+    const tmp_path_z = try allocator.dupeSentinel(u8, tmp_path, 0);
     defer allocator.free(tmp_path_z);
 
     // O_EXCL: never follow or clobber an existing path at the temp location.
@@ -124,7 +120,7 @@ pub fn writeFile(allocator: std.mem.Allocator, path: []const u8, data: []const u
         _ = std.c.fsync(fd);
     }
 
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     if (std.c.rename(tmp_path_z, path_z) != 0) return error.WriteFailure;
 }
@@ -177,7 +173,7 @@ pub const FdStat = struct { size: u64, mode: u32 };
 /// goes through the statx syscall - the stable kernel interface std.Io's own
 /// backend uses - and other POSIX systems use libc fstat.
 pub fn fstatFd(fd: std.c.fd_t) error{StatFailed}!FdStat {
-    if (builtin.os.tag == .linux) {
+    if (builtin.target.os.tag == .linux) {
         const linux = std.os.linux;
         var stx = std.mem.zeroes(linux.Statx);
         const rc = linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true, .MODE = true, .SIZE = true }, &stx);
@@ -193,7 +189,7 @@ pub fn fstatFd(fd: std.c.fd_t) error{StatFailed}!FdStat {
 /// missing. Returns the raw POSIX fd; caller is responsible for closing with
 /// `std.Io.Threaded.closeFd`.
 pub fn openAppend(allocator: std.mem.Allocator, path: []const u8) !std.c.fd_t {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
 
     return std.posix.openatZ(
@@ -230,7 +226,7 @@ fn tmpFilePath(allocator: std.mem.Allocator, tmp: std.testing.TmpDir, name: []co
 }
 
 fn statMode(allocator: std.mem.Allocator, path: []const u8) !u32 {
-    const path_z = try allocator.dupeZ(u8, path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
     defer allocator.free(path_z);
     const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
     defer std.Io.Threaded.closeFd(fd);
@@ -238,7 +234,7 @@ fn statMode(allocator: std.mem.Allocator, path: []const u8) !u32 {
 }
 
 test "writeFile creates new files with mode 0600" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -252,7 +248,7 @@ test "writeFile creates new files with mode 0600" {
 }
 
 test "writeFileCreateExclusive preserves an existing file" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -278,7 +274,7 @@ const ExclusiveRaceTarget = struct {
 };
 
 test "writeFileCreateExclusive does not clobber a target that appears before commit" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -300,7 +296,7 @@ test "writeFileCreateExclusive does not clobber a target that appears before com
 }
 
 test "openAppend creates new files with mode 0600" {
-    if (builtin.os.tag == .windows) return error.SkipZigTest;
+    if (builtin.target.os.tag == .windows) return error.SkipZigTest;
     const allocator = testing.allocator;
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();

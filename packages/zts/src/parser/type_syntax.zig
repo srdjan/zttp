@@ -7975,6 +7975,7 @@ test "second compound annotation rolls back every allocation failure" {
 }
 
 test "second declaration rolls back every store array on allocation failure" {
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
     const source =
         "structural First = { field: number | string; cb: (pair: [number, string]) => `x${boolean}`; tags: string[] };\n" ++
         "structural Second = { field: number | string; cb: (pair: [number, string]) => `y${boolean}`; tags: string[] };";
@@ -8044,7 +8045,7 @@ test "second declaration rolls back every store array on allocation failure" {
         }
     };
     var observed_failures: usize = 0;
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{&observed_failures});
+    try std.testing.checkAllAllocationFailures(no_resize.allocator(), Context.run, .{&observed_failures});
     try std.testing.expect(observed_failures > 0);
 }
 
@@ -9212,7 +9213,7 @@ test "admission raw scanners restore caught rows on allocation failure" {
             return error.OutOfMemory;
         }
     };
-    var observed_failures = [_]usize{0} ** cases.len;
+    var observed_failures = @as([cases.len]usize, @splat(0));
     for (cases, 0..) |case, index| {
         try std.testing.checkAllAllocationFailures(
             std.testing.allocator,
@@ -10592,9 +10593,10 @@ test "admitted semantic publication restores its entry checkpoint on allocation 
     };
 
     inline for (std.meta.tags(Case)) |case| {
+        var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
         var failures: usize = 0;
         try std.testing.checkAllAllocationFailures(
-            std.testing.allocator,
+            no_resize.allocator(),
             Context.run,
             .{ case, &failures },
         );
@@ -10870,9 +10872,9 @@ test "admission vocabulary retains seventeen ordered kinds" {
         .void_type,
         .nesting_too_deep,
     };
-    try std.testing.expectEqual(@as(usize, 17), std.meta.fields(AdmissionKind).len);
+    try std.testing.expectEqual(@as(usize, 17), @typeInfo(AdmissionKind).@"enum".field_names.len);
     for (expected, 0..) |kind, index| {
-        try std.testing.expectEqual(index, @intFromEnum(kind));
+        try std.testing.expectEqual(index, @backingInt(kind));
     }
 }
 
@@ -12259,7 +12261,7 @@ test "admission quoted region retains nested rows before a root terminal" {
 test "admission quoted region restores caught rows on allocation failure" {
     const prefix = "`outer${\"first\n";
     const nested_count = comptime std.ArrayListUnmanaged(LegacyTemplateFrame).growCapacity(1);
-    const source = prefix ++ ("`nested${" ** nested_count) ++ "value" ++ ("}`" ** nested_count) ++ "}`";
+    const source = prefix ++ (@as([(nested_count) * ("`nested${").len]u8, @bitCast(@as([nested_count][("`nested${").len]u8, @splat(("`nested${").*))))) ++ "value" ++ (@as([(nested_count) * ("}`").len]u8, @bitCast(@as([nested_count][("}`").len]u8, @splat(("}`").*))))) ++ "}`";
     var observed_failures: usize = 0;
     try std.testing.checkAllAllocationFailures(
         std.testing.allocator,
@@ -12502,7 +12504,7 @@ test "function type presentation preserves caller seeds and stops compile select
 
 test "function type presentation propagates allocation failure after chunk publication" {
     const first_capacity = comptime std.ArrayListUnmanaged(AdmissionDiagnostic).growCapacity(1);
-    const source = "(x: any) =>\r " ++ ("any | " ** first_capacity) ++ "any";
+    const source = "(x: any) =>\r " ++ (@as([(first_capacity) * ("any | ").len]u8, @bitCast(@as([first_capacity][("any | ").len]u8, @splat(("any | ").*))))) ++ "any";
     var observed_post_publication_failures: usize = 0;
     try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
         fn run(allocator: std.mem.Allocator, text: []const u8, failure_count: *usize) !void {

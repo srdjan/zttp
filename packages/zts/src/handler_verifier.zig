@@ -1357,8 +1357,8 @@ pub const HandlerVerifier = struct {
         return null;
     }
 
-    const ok_atoms = [_]u16{ @intFromEnum(object.Atom.ok), @intFromEnum(object.Atom.isOk) };
-    const err_atoms = [_]u16{@intFromEnum(object.Atom.isErr)};
+    const ok_atoms = [_]u16{ @backingInt(object.Atom.ok), @backingInt(object.Atom.isOk) };
+    const err_atoms = [_]u16{@backingInt(object.Atom.isErr)};
 
     /// Given a member_access node, return the object's binding if the property
     /// matches one of `accepted_atoms` and the object is a tracked result binding.
@@ -1405,8 +1405,8 @@ pub const HandlerVerifier = struct {
     fn checkResultValueAccess(self: *HandlerVerifier, member: Node.MemberExpr, node: NodeIndex) void {
         // Check property - we care about .value (180), .unwrap (202) access
         const prop = member.property;
-        const is_value_access = (prop == @intFromEnum(object.Atom.value) or
-            prop == @intFromEnum(object.Atom.unwrap));
+        const is_value_access = (prop == @backingInt(object.Atom.value) or
+            prop == @backingInt(object.Atom.unwrap));
         if (!is_value_access) return;
 
         // Check if the object is a result binding
@@ -1441,9 +1441,9 @@ pub const HandlerVerifier = struct {
         const key_idx = self.ir_view.getStringIdx(member.computed) orelse return;
         const key = self.ir_view.getString(key_idx) orelse return;
         const prop: u16 = if (std.mem.eql(u8, key, "value"))
-            @intFromEnum(object.Atom.value)
+            @backingInt(object.Atom.value)
         else if (std.mem.eql(u8, key, "unwrap"))
-            @intFromEnum(object.Atom.unwrap)
+            @backingInt(object.Atom.unwrap)
         else
             return;
         self.checkResultValueAccess(.{
@@ -1542,7 +1542,7 @@ pub const HandlerVerifier = struct {
     /// Resolve an atom index to its string name.
     /// Uses predefined atom names or the atom table for dynamic atoms.
     fn resolveAtomName(self: *const HandlerVerifier, atom_idx: u16) ?[]const u8 {
-        const atom: object.Atom = @enumFromInt(atom_idx);
+        const atom: object.Atom = @fromBackingInt(@intCast(atom_idx));
         if (atom.isPredefined()) {
             return atom.toPredefinedName();
         }
@@ -1595,7 +1595,7 @@ pub const HandlerVerifier = struct {
         // program names its binding by atom; a binding whose name some closure
         // captures is not reported. Two bindings that share a name can hide a
         // warning this way, and never raise one.
-        var captured = std.StaticBitSet(1 << 16).initEmpty();
+        var captured = std.StaticBitSet(1 << 16).empty;
         for (0..self.ir_view.nodeCount()) |i| {
             const idx: NodeIndex = @intCast(i);
             if ((self.ir_view.getTag(idx) orelse continue) != .identifier) continue;
@@ -1881,7 +1881,7 @@ pub fn findHandlerFunction(ir_view: IrView, root: NodeIndex) ?NodeIndex {
         if (effective_tag == .function_decl or effective_tag == .var_decl) {
             const decl = ir_view.getVarDecl(effective_stmt) orelse continue;
             if (decl.binding.kind != .global) continue;
-            if (decl.binding.name_atom != @intFromEnum(object.Atom.handler)) continue;
+            if (decl.binding.name_atom != @backingInt(object.Atom.handler)) continue;
 
             const init_tag = ir_view.getTag(decl.init) orelse continue;
             if (init_tag == .function_expr or init_tag == .arrow_function) {
@@ -2634,7 +2634,7 @@ fn optionalAccessHelp(
     producer: []const u8,
     help_buffer: []u8,
 ) !?[]const u8 {
-    const source = try std.fmt.allocPrint(allocator,
+    const source = try allocator.print(
         \\{s}
         \\function handler(req) {{
         \\  const v = {s};

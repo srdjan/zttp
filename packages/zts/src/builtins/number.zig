@@ -475,8 +475,8 @@ test "%matchShape tells a record from the other object classes" {
     try @import("root.zig").initBuiltins(ctx);
 
     const undef = value.JSValue.undefined_val;
-    const record_shape = value.JSValue.fromInt(@intFromEnum(bytecode.MatchShape.record));
-    const array_shape = value.JSValue.fromInt(@intFromEnum(bytecode.MatchShape.array));
+    const record_shape = value.JSValue.fromInt(@backingInt(bytecode.MatchShape.record));
+    const array_shape = value.JSValue.fromInt(@backingInt(bytecode.MatchShape.array));
 
     const record = (try ctx.createObject(null)).toValue();
     const array = (try ctx.createArray()).toValue();

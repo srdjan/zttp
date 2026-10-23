@@ -347,7 +347,7 @@ fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]c
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = init.environ });
@@ -391,19 +391,11 @@ const common_fixture =
     "\"providerToolCount\":12,\"providerToolBytes\":4096,";
 
 fn convergenceFixture(allocator: std.mem.Allocator) ![]u8 {
-    return std.fmt.allocPrint(
-        allocator,
-        "{{{s}\"corpusVersion\":\"{s}\",\"headlineInputHash\":\"{s}\",\"intentSuiteHash\":\"{s}\",\"securityProbeHash\":\"{s}\",\"thresholdHash\":\"{s}\",\"manifestHash\":\"{s}\",\"resultRunHash\":\"{s}\",\"promptPersonaHash\":\"{s}\",\"providerNeutralCatalogHash\":\"{s}\",\"providerSerializedCatalogHash\":\"{s}\",\"schemaHash\":\"{s}\",\"metaHash\":\"{s}\",\"grammarHash\":\"{s}\",\"semanticsHash\":\"{s}\",\"diagnosticHash\":\"{s}\",\"policyHash\":\"{s}\",\"sourceCommit\":\"{s}\",\"sourceDirty\":true,\"rawFirstDraftPassPercent\":69,\"rawFirstDraftPasses\":9,\"firstAttemptGreenPercent\":76,\"firstAttemptGreens\":10,\"finalGreenPercent\":100,\"finalGreens\":13,\"medianRoundtrips\":4,\"intentPassPercent\":100,\"intentPasses\":13,\"intentChecked\":13,\"emptyResponses\":0,\"timeoutFailures\":0,\"decodeFailures\":0}}",
-        .{ common_fixture, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, commit },
-    );
+    return allocator.print("{{{s}\"corpusVersion\":\"{s}\",\"headlineInputHash\":\"{s}\",\"intentSuiteHash\":\"{s}\",\"securityProbeHash\":\"{s}\",\"thresholdHash\":\"{s}\",\"manifestHash\":\"{s}\",\"resultRunHash\":\"{s}\",\"promptPersonaHash\":\"{s}\",\"providerNeutralCatalogHash\":\"{s}\",\"providerSerializedCatalogHash\":\"{s}\",\"schemaHash\":\"{s}\",\"metaHash\":\"{s}\",\"grammarHash\":\"{s}\",\"semanticsHash\":\"{s}\",\"diagnosticHash\":\"{s}\",\"policyHash\":\"{s}\",\"sourceCommit\":\"{s}\",\"sourceDirty\":true,\"rawFirstDraftPassPercent\":69,\"rawFirstDraftPasses\":9,\"firstAttemptGreenPercent\":76,\"firstAttemptGreens\":10,\"finalGreenPercent\":100,\"finalGreens\":13,\"medianRoundtrips\":4,\"intentPassPercent\":100,\"intentPasses\":13,\"intentChecked\":13,\"emptyResponses\":0,\"timeoutFailures\":0,\"decodeFailures\":0}}", .{ common_fixture, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, commit });
 }
 
 fn coverageFixture(allocator: std.mem.Allocator) ![]u8 {
-    return std.fmt.allocPrint(
-        allocator,
-        "{{{s}\"corpusVersion\":\"{s}\",\"headlineInputHash\":\"{s}\",\"intentSuiteHash\":\"{s}\",\"securityProbeHash\":\"{s}\",\"thresholdHash\":\"{s}\",\"manifestHash\":\"{s}\",\"resultRunHash\":\"{s}\",\"promptPersonaHash\":\"{s}\",\"providerNeutralCatalogHash\":\"{s}\",\"providerSerializedCatalogHash\":\"{s}\",\"schemaHash\":\"{s}\",\"metaHash\":\"{s}\",\"grammarHash\":\"{s}\",\"semanticsHash\":\"{s}\",\"diagnosticHash\":\"{s}\",\"policyHash\":\"{s}\",\"sourceCommit\":\"{s}\",\"sourceDirty\":true,\"rulesTotal\":3,\"rulesTripped\":2,\"tripped\":[\"ZTS001\",\"ZTS002\"],\"untripped\":[\"ZTS003\"],\"offRegistry\":[\"ZTS900\"]}}",
-        .{ common_fixture, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, commit },
-    );
+    return allocator.print("{{{s}\"corpusVersion\":\"{s}\",\"headlineInputHash\":\"{s}\",\"intentSuiteHash\":\"{s}\",\"securityProbeHash\":\"{s}\",\"thresholdHash\":\"{s}\",\"manifestHash\":\"{s}\",\"resultRunHash\":\"{s}\",\"promptPersonaHash\":\"{s}\",\"providerNeutralCatalogHash\":\"{s}\",\"providerSerializedCatalogHash\":\"{s}\",\"schemaHash\":\"{s}\",\"metaHash\":\"{s}\",\"grammarHash\":\"{s}\",\"semanticsHash\":\"{s}\",\"diagnosticHash\":\"{s}\",\"policyHash\":\"{s}\",\"sourceCommit\":\"{s}\",\"sourceDirty\":true,\"rulesTotal\":3,\"rulesTripped\":2,\"tripped\":[\"ZTS001\",\"ZTS002\"],\"untripped\":[\"ZTS003\"],\"offRegistry\":[\"ZTS900\"]}}", .{ common_fixture, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, digest, commit });
 }
 
 fn parseFixture(allocator: std.mem.Allocator, encoded: []const u8) !std.json.Parsed(std.json.Value) {
@@ -426,13 +418,13 @@ fn probeValidFixtures() !void {
 fn probeMarkerExtraction() !void {
     const convergence = try convergenceFixture(std.testing.allocator);
     defer std.testing.allocator.free(convergence);
-    const one = try std.fmt.allocPrint(std.testing.allocator, "prefix [test-evidence] {s}\n", .{convergence});
+    const one = try std.testing.allocator.print("prefix [test-evidence] {s}\n", .{convergence});
     defer std.testing.allocator.free(one);
     var parsed = try extract(std.testing.allocator, one, "[test-evidence] ", .convergence);
     parsed.deinit();
 
     try std.testing.expectError(error.MissingOrDuplicateMarker, extract(std.testing.allocator, "ordinary output\n", "[test-evidence] ", .convergence));
-    const two = try std.fmt.allocPrint(std.testing.allocator, "[test-evidence] {s}\n[test-evidence] {s}\n", .{ convergence, convergence });
+    const two = try std.testing.allocator.print("[test-evidence] {s}\n[test-evidence] {s}\n", .{ convergence, convergence });
     defer std.testing.allocator.free(two);
     try std.testing.expectError(error.MissingOrDuplicateMarker, extract(std.testing.allocator, two, "[test-evidence] ", .convergence));
     try std.testing.expectError(error.MalformedJson, extract(std.testing.allocator, "[test-evidence] {\n", "[test-evidence] ", .convergence));

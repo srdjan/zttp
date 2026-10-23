@@ -331,7 +331,7 @@ test "serialize resolves identifier keys through the caller" {
     parser.nodes.tags.items[property.key] = .identifier;
     parser.nodes.data.items[property.key] = .{
         .a = 0,
-        .b = @intFromEnum(ir.BindingRef.BindingKind.global),
+        .b = @backingInt(ir.BindingRef.BindingKind.global),
     };
     parser.nodes.binding_name_atoms.items[property.key] = Fixture.atom;
 

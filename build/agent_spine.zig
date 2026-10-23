@@ -21,14 +21,14 @@ pub fn add(ctx: Context) Result {
     const check_run = b.addRunArtifact(exe);
     check_run.addArg("check");
     check_run.has_side_effects = true;
-    if (b.args) |args| check_run.addArgs(args);
+    check_run.addPassthruArgs();
     const check_step = b.step("check-spine", "Check repository authorities, decisions, and task policy");
     check_step.dependOn(&check_run.step);
 
     const brief_run = b.addRunArtifact(exe);
     brief_run.addArg("brief");
     brief_run.has_side_effects = true;
-    if (b.args) |args| brief_run.addArgs(args);
+    brief_run.addPassthruArgs();
     b.step("brief", "Show the rules and gates that govern repository files").dependOn(&brief_run.step);
 
     // This root stays unfiltered: an unmatched filter would run no probes.

@@ -83,10 +83,10 @@ pub fn changeSetHash(receipt: ui_payload.VerifiedChangeSetPayload) ?[32]u8 {
 /// unknown names, which deliberately aliases "unknown" with "unsatisfied"
 /// so a typo in the goal list never silently passes the termination check.
 pub fn propertyByName(props: ui_payload.PropertiesSnapshot, name: []const u8) bool {
-    inline for (@typeInfo(ui_payload.PropertiesSnapshot).@"struct".fields) |field| {
-        if (field.type != bool) continue;
-        if (std.mem.eql(u8, field.name, name)) {
-            return @field(props, field.name);
+    inline for (@typeInfo(ui_payload.PropertiesSnapshot).@"struct".field_names) |field| {
+        if (@FieldType(ui_payload.PropertiesSnapshot, field) != bool) continue;
+        if (std.mem.eql(u8, field, name)) {
+            return @field(props, field);
         }
     }
     return false;
@@ -109,12 +109,12 @@ fn appendChangeSet(
     const transaction_id: []u8 = if (hash) |value| blk: {
         transaction_buffer = std.fmt.bytesToHex(value, .lower);
         break :blk &transaction_buffer;
-    } else @constCast("g" ** 64);
+    } else @constCast(&@as([64:0]u8, @splat('g')));
     var changes = [_]ui_payload.VerifiedChange{.{
         .file = @constCast(file),
         .baseline_state = @constCast("absent"),
-        .baseline_sha256 = @constCast("a" ** 64),
-        .candidate_sha256 = @constCast("b" ** 64),
+        .baseline_sha256 = @constCast(&@as([64:0]u8, @splat('a'))),
+        .candidate_sha256 = @constCast(&@as([64:0]u8, @splat('b'))),
         .before = null,
         .after = @constCast(""),
         .unified_diff = @constCast(""),
@@ -123,18 +123,18 @@ fn appendChangeSet(
     var inputs = [_]ui_payload.VerifiedProofInput{.{
         .path = @constCast(file),
         .state = @constCast("absent"),
-        .sha256 = @constCast("a" ** 64),
+        .sha256 = @constCast(&@as([64:0]u8, @splat('a'))),
     }};
     const source: ui_payload.UiPayload = .{ .verified_change_set = .{
         .proof_schema_version = @constCast("test-proof-v1"),
         .transaction_id = transaction_id,
         .compiler_version = @constCast("test"),
         .profile_id = @constCast("test"),
-        .policy_hash = @constCast("c" ** 64),
-        .grammar_hash = @constCast("d" ** 64),
-        .semantics_hash = @constCast("e" ** 64),
-        .diagnostic_catalog_hash = @constCast("f" ** 64),
-        .read_set_digest = @constCast("1" ** 64),
+        .policy_hash = @constCast(&@as([64:0]u8, @splat('c'))),
+        .grammar_hash = @constCast(&@as([64:0]u8, @splat('d'))),
+        .semantics_hash = @constCast(&@as([64:0]u8, @splat('e'))),
+        .diagnostic_catalog_hash = @constCast(&@as([64:0]u8, @splat('f'))),
+        .read_set_digest = @constCast(&@as([64:0]u8, @splat('1'))),
         .applied_at_unix_ms = 0,
         .system_proven = false,
         .primary_properties = after,
@@ -256,7 +256,7 @@ test "lastChangeSetHash returns null for a malformed transaction identity" {
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(testing.allocator);
 
-    try appendChangeSet(testing.allocator, &tr, "handler.ts", .{1} ** 32, zeroProps());
+    try appendChangeSet(testing.allocator, &tr, "handler.ts", @splat(1), zeroProps());
     var latest_props = zeroProps();
     latest_props.retry_safe = true;
     try appendChangeSet(testing.allocator, &tr, "handler.ts", null, latest_props);

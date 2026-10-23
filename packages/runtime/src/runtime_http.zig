@@ -671,14 +671,18 @@ fn fetchInitError(
 /// encoded host that fits the buffer is always safe; reject an over-long host up
 /// front (a real DNS name is <= 253 bytes), returning the same UriMissingHost
 /// error the call sites already surface as a clean InvalidUrl.
-fn resolveHostSafe(uri: std.Uri, buf: *[std.Io.net.HostName.max_len]u8) std.Uri.GetHostError!std.Io.net.HostName {
+fn resolveHostSafe(uri: std.Uri, buf: *[std.Io.net.HostName.max_len]u8) std.Io.net.HostName.FromUriError!std.Io.net.HostName {
     if (uri.host) |h| {
         const encoded = switch (h) {
             .raw, .percent_encoded => |s| s,
         };
         if (encoded.len > buf.len) return error.UriMissingHost;
     }
-    return uri.getHost(buf);
+    const component = uri.host orelse return error.UriMissingHost;
+    const bytes = component.toRaw(buf) catch return error.NameTooLong;
+    // IP literals are valid URI hosts but IPv6 is outside DNS-name syntax.
+    if (std.Io.net.IpAddress.parseLiteral(bytes)) |_| return .{ .bytes = bytes } else |_| {}
+    return std.Io.net.HostName.fromUri(uri, buf);
 }
 
 /// Parse and validate the (url, init?) arguments common to all fetch call sites.
@@ -1100,7 +1104,7 @@ fn outboundExchange(rt: View, input: ExchangeInput, failure: *ExchangeFailure) !
 
     var response = req.receiveHead(&.{}) catch |err|
         return failure.set(deadline.failCode("ResponseHeadFailed"), @errorName(err));
-    const status = @intFromEnum(response.head.status);
+    const status = @backingInt(response.head.status);
     var owned_head = try snapshotResponseHead(allocator, response.head);
     errdefer owned_head.deinit(allocator);
 
@@ -1565,7 +1569,8 @@ test "JSON HTTP header refusal releases parsed headers under allocation failure"
     };
     inline for (cases) |case| {
         const input = try rt.ctx.createString("{\"url\":\"http://127.0.0.1:1\",\"headers\":" ++ case[0] ++ "}");
-        try testing.checkAllAllocationFailures(testing.allocator, Probe.run, .{ rt, input, case[1] });
+        var no_resize = testing.FailingAllocator.init(testing.allocator, .{ .resize_fail_index = 0 });
+        try testing.checkAllAllocationFailures(no_resize.allocator(), Probe.run, .{ rt, input, case[1] });
     }
 }
 
@@ -1617,6 +1622,15 @@ test "host resolution accepts a plain host and rejects a missing one" {
     // something empty that later reads as "any host".
     const no_host = try std.Uri.parse("file:///tmp/x");
     try testing.expectError(error.UriMissingHost, resolveHostSafe(no_host, &buf));
+}
+
+test "host resolution preserves IPv6 literals and refuses oversized encoded hosts" {
+    var buffer: [std.Io.net.HostName.max_len]u8 = undefined;
+    const uri = try std.Uri.parse("http://[::1]:8080/");
+    try testing.expectEqualStrings("[::1]", (try resolveHostSafe(uri, &buffer)).bytes);
+    const encoded: [300]u8 = @bitCast(@as([100][3]u8, @splat("%41".*)));
+    const overlong: std.Uri = .{ .scheme = "https", .host = .{ .percent_encoded = &encoded } };
+    try testing.expectError(error.UriMissingHost, resolveHostSafe(overlong, &buffer));
 }
 
 test "the egress allowlist rejects a host it does not name" {

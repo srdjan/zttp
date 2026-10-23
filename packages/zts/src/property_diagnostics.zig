@@ -392,7 +392,7 @@ pub fn formatViolationsSummary(
     if (violations.len == 0) return;
 
     try writer.print("\nVIOLATIONS ({d})\n", .{violations.len});
-    try writer.writeAll("=" ** 60 ++ "\n");
+    try writer.writeAll(&@as([60:0]u8, @splat('=')) ++ "\n");
 
     for (violations) |v| {
         try writer.print("  {s}", .{violationLabel(v.kind)});

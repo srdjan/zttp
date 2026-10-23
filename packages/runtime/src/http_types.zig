@@ -151,7 +151,7 @@ pub const HttpResponse = struct {
 
     /// Debug-only check that the response no longer borrows runtime-managed state.
     pub fn assertDetachedFromRuntime(self: *const HttpResponse) void {
-        if (!std.debug.runtime_safety) return;
+        if (!@import("builtin").mode.runtimeSafety()) return;
         if (self.requires_runtime) {
             std.debug.panic("owned response still requires runtime-managed state", .{});
         }

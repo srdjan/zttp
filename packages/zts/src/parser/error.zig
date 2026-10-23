@@ -225,7 +225,7 @@ pub const ErrorList = struct {
         if (self.errors.items.len >= self.max_errors) return;
         if (self.recordedAt(loc.offset)) return;
 
-        const message = std.fmt.allocPrint(self.allocator, fmt, args) catch {
+        const message = self.allocator.print(fmt, args) catch {
             self.errors_truncated = true;
             return;
         };

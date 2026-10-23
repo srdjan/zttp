@@ -221,11 +221,7 @@ pub fn runIntentCheckCaptured(
     const config = if (intent.zttp_json) |verbatim|
         allocator.dupe(u8, verbatim) catch return .{ .outcome = .failed }
     else
-        std.fmt.allocPrint(
-            allocator,
-            "{{\n  \"entry\": \"{s}\"\n}}\n",
-            .{intent.handler_path},
-        ) catch return .{ .outcome = .failed };
+        allocator.print("{{\n  \"entry\": \"{s}\"\n}}\n", .{intent.handler_path}) catch return .{ .outcome = .failed };
     defer allocator.free(config);
     writeWorkspaceFile(allocator, workspace_abs, "zttp.json", config) catch
         return .{ .outcome = .failed };
@@ -575,7 +571,7 @@ fn calibrateCodeCollectorWith(allocator: std.mem.Allocator, collector: CodeColle
     try clean.append(a, .{ .proof_card = .{ .llm_text = diagnostics } });
     try clean.append(a, .{ .tool_result = .{ .tool_use_id = "read", .tool_name = "workspace_read", .ok = false, .llm_text = diagnostics } });
     try clean.append(a, .{ .tool_result = .{ .tool_use_id = "applied", .tool_name = "propose_change_set", .ok = true, .llm_text = diagnostics } });
-    try clean.append(a, .{ .tool_result = .{ .tool_use_id = "noncompiler", .tool_name = "propose_change_set", .ok = false, .llm_text = try std.fmt.allocPrint(a, "not a compiler rejection: {s}", .{diagnostics}) } });
+    try clean.append(a, .{ .tool_result = .{ .tool_use_id = "noncompiler", .tool_name = "propose_change_set", .ok = false, .llm_text = try a.print("not a compiler rejection: {s}", .{diagnostics}) } });
     try clean.append(a, .{ .diagnostic_box = .{ .llm_text = "ZTS000 clean" } });
     try clean.append(a, .{ .tool_result = .{ .tool_use_id = "check", .tool_name = "zts_check", .ok = true, .llm_text = "ZTS000 clean" } });
     var hits: CodeSet = .empty;

@@ -236,7 +236,7 @@ test "every action names the sink that decides it" {
         .{ .action = .db_write, .sink = "sql_execute" },
         .{ .action = .http_outbound, .sink = "egress_connect" },
     };
-    try std.testing.expectEqual(@typeInfo(Action).@"enum".fields.len, cases.len);
+    try std.testing.expectEqual(@typeInfo(Action).@"enum".field_names.len, cases.len);
     for (cases) |case| {
         try std.testing.expectEqualStrings(case.sink, sinkFor(case.action));
     }

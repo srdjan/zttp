@@ -288,7 +288,7 @@ fn renderConvergenceMarkdown(
     const migrated = if (std.mem.indexOf(u8, intro_migrated, "## Repeatability\n")) |start| block: {
         const end = start + (std.mem.indexOf(u8, intro_migrated[start..], "## Results\n") orelse
             return error.InvalidExistingMarkdown);
-        break :block try std.fmt.allocPrint(allocator, "{s}{s}", .{ intro_migrated[0..start], intro_migrated[end..] });
+        break :block try allocator.print("{s}{s}", .{ intro_migrated[0..start], intro_migrated[end..] });
     } else try allocator.dupe(u8, intro_migrated);
     defer allocator.free(migrated);
 
@@ -393,29 +393,25 @@ fn renderConvergence(
     defer allocator.free(json);
     const existing = try readFile(allocator, io, existing_markdown_path);
     defer allocator.free(existing);
-    const row = try std.fmt.allocPrint(
-        allocator,
-        "| {s} | `{s}` | `{s}` | {d} | {s} | {s} | `{s}` | {d}% ({d}/{d}) | {d}% ({d}/{d}) | {d} | {d}% ({d}/{d}) |",
-        .{
-            recorded_date,
-            short_commit,
-            (try stringField(object, "corpusVersion"))[0..12],
-            try integerField(object, "corpusCases"),
-            try stringField(object, "provider"),
-            try stringField(object, "model"),
-            (try stringField(object, "policyHash"))[0..12],
-            try integerField(object, "rawFirstDraftPassPercent"),
-            try integerField(object, "rawFirstDraftPasses"),
-            try integerField(object, "corpusCases"),
-            try integerField(object, "firstAttemptGreenPercent"),
-            try integerField(object, "firstAttemptGreens"),
-            try integerField(object, "corpusCases"),
-            try integerField(object, "medianRoundtrips"),
-            try integerField(object, "intentPassPercent"),
-            try integerField(object, "intentPasses"),
-            try integerField(object, "intentChecked"),
-        },
-    );
+    const row = try allocator.print("| {s} | `{s}` | `{s}` | {d} | {s} | {s} | `{s}` | {d}% ({d}/{d}) | {d}% ({d}/{d}) | {d} | {d}% ({d}/{d}) |", .{
+        recorded_date,
+        short_commit,
+        (try stringField(object, "corpusVersion"))[0..12],
+        try integerField(object, "corpusCases"),
+        try stringField(object, "provider"),
+        try stringField(object, "model"),
+        (try stringField(object, "policyHash"))[0..12],
+        try integerField(object, "rawFirstDraftPassPercent"),
+        try integerField(object, "rawFirstDraftPasses"),
+        try integerField(object, "corpusCases"),
+        try integerField(object, "firstAttemptGreenPercent"),
+        try integerField(object, "firstAttemptGreens"),
+        try integerField(object, "corpusCases"),
+        try integerField(object, "medianRoundtrips"),
+        try integerField(object, "intentPassPercent"),
+        try integerField(object, "intentPasses"),
+        try integerField(object, "intentChecked"),
+    });
     defer allocator.free(row);
     const markdown = try renderConvergenceMarkdown(allocator, existing, row);
     defer allocator.free(markdown);
@@ -711,12 +707,12 @@ fn renderCoverageMarkdown(
     const union_runs_phrase = if (union_payload.observations == 1)
         try allocator.dupe(u8, "the single published run")
     else
-        try std.fmt.allocPrint(allocator, "the {d} published runs", .{union_payload.observations});
+        try allocator.print("the {d} published runs", .{union_payload.observations});
     defer allocator.free(union_runs_phrase);
     const union_shapes_phrase = if (union_payload.distinctSets == 1)
         try allocator.dupe(u8, "one shape")
     else
-        try std.fmt.allocPrint(allocator, "{d} distinct shapes", .{union_payload.distinctSets});
+        try allocator.print("{d} distinct shapes", .{union_payload.distinctSets});
     defer allocator.free(union_shapes_phrase);
 
     var output: std.Io.Writer.Allocating = .init(allocator);
@@ -949,7 +945,7 @@ fn collectArgs(allocator: std.mem.Allocator, args_vector: std.process.Args) ![]c
 }
 
 pub fn main(init: std.process.Init.Minimal) !void {
-    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    var debug_allocator: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});
     defer _ = debug_allocator.deinit();
     const allocator = debug_allocator.allocator();
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = init.environ });
