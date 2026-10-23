@@ -52,7 +52,10 @@ allow_file="scripts/proof-swallow.allow"
 # surfaces as an accepted artifact, which is the same fail-open one rung later.
 # Both sat outside this gate while it was cited as covering the proof pipeline.
 proof_files=(
+  packages/zts/src/behavior_canonical.zig
+  packages/zts/src/bool_checker.zig
   packages/zts/src/contract_builder.zig
+  packages/zts/src/contract_diff.zig
   packages/zts/src/effect_inference.zig
   packages/zts/src/fault_coverage.zig
   packages/zts/src/flow_checker.zig
@@ -61,11 +64,14 @@ proof_files=(
   packages/zts/src/handler_contract.zig
   packages/zts/src/handler_verifier.zig
   packages/zts/src/intent_extractor.zig
+  packages/zts/src/ir_identity.zig
+  packages/zts/src/match_analysis.zig
   packages/zts/src/path_generator.zig
   packages/zts/src/pipeline.zig
   packages/zts/src/proof_ir.zig
   packages/zts/src/route_resolution.zig
   packages/zts/src/spec_discharge.zig
+  packages/zts/src/strict_checker.zig
   packages/zts/src/translation_witness.zig
   packages/zts/src/type_checker.zig
   packages/zts/src/type_env.zig

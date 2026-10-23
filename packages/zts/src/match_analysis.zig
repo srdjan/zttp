@@ -228,14 +228,14 @@ pub const MatchAnalysis = struct {
     // Narrowing (flow typing of an arm body)
     // ---------------------------------------------------------------------
 
-    pub fn narrowTypeForPattern(self: *const MatchAnalysis, source_type: TypeIndex, pattern: NodeIndex) TypeIndex {
+    pub fn narrowTypeForPattern(self: *const MatchAnalysis, source_type: TypeIndex, pattern: NodeIndex) std.mem.Allocator.Error!TypeIndex {
         if (source_type == null_type_idx) return null_type_idx;
         if (pattern == null_node) return source_type;
 
         var matches = std.ArrayList(TypeIndex).empty;
         defer matches.deinit(self.allocator);
 
-        self.collectMatchingTypes(source_type, pattern, &matches) catch return null_type_idx;
+        try self.collectMatchingTypes(source_type, pattern, &matches);
         return switch (matches.items.len) {
             0 => null_type_idx,
             1 => matches.items[0],
@@ -289,6 +289,14 @@ pub const MatchAnalysis = struct {
     fn patternCanMatchType(self: *const MatchAnalysis, pattern: NodeIndex, type_idx: TypeIndex) bool {
         if (pattern == null_node or type_idx == null_type_idx) return pattern == null_node;
 
+        // A named member narrows by its definition. Judging the bare name by its
+        // tag would answer false for a name that can match, and the arm would lose
+        // that member from its type.
+        if (self.env) |env| {
+            const resolved = env.resolveRef(type_idx);
+            if (resolved != type_idx) return self.patternCanMatchType(pattern, resolved);
+        }
+
         const type_tag = self.pool.getTag(type_idx) orelse return false;
         switch (type_tag) {
             .t_union => {
@@ -301,6 +309,10 @@ pub const MatchAnalysis = struct {
                 if (self.patternCanMatchType(pattern, self.pool.getNullableInner(type_idx))) return true;
                 return self.patternCanMatchType(pattern, self.pool.idx_undefined);
             },
+            // Narrowing cannot judge these. Keeping the member widens the arm type,
+            // and dropping it would narrow the arm below the values it can see.
+            .t_intersection, .t_generic_param, .t_generic_app, .t_unknown_type => return true,
+            // exhaustive: the remaining type tags are judged by the pattern tag below.
             else => {},
         }
 
@@ -318,6 +330,8 @@ pub const MatchAnalysis = struct {
             // wildcard gives, with a name attached.
             .identifier => true,
             .match_type_test => self.typeTestCoversType(pattern, type_idx),
+            // exhaustive: a pattern form with no rule here answers false for every member, so no member
+            //     matches and narrowing is skipped.
             else => false,
         };
     }
@@ -343,11 +357,15 @@ pub const MatchAnalysis = struct {
         const type_tag = self.pool.getTag(type_idx) orelse return false;
         return switch (type_tag) {
             .t_string => true,
+            // A template literal type holds strings, and the pattern text is not matched
+            // against its parts here. Keeping it widens the arm type.
+            .t_template_literal => true,
             .t_literal_string => blk: {
                 const pattern_str = self.patternString(pattern) orelse break :blk false;
                 const data = self.pool.getData(type_idx) orelse break :blk false;
                 break :blk std.mem.eql(u8, pattern_str, self.pool.getName(data.a, @truncate(data.b)));
             },
+            // exhaustive: any other type tag cannot hold a string.
             else => false,
         };
     }
@@ -363,6 +381,7 @@ pub const MatchAnalysis = struct {
                 const member_val: i16 = @bitCast(data.a);
                 break :blk member_val == pattern_i16;
             },
+            // exhaustive: any other type tag cannot hold an integer.
             else => false,
         };
     }
@@ -376,6 +395,7 @@ pub const MatchAnalysis = struct {
                 const data = self.pool.getData(type_idx) orelse break :blk false;
                 break :blk (data.a != 0) == pattern_bool;
             },
+            // exhaustive: any other type tag cannot hold a boolean.
             else => false,
         };
     }
@@ -416,6 +436,7 @@ pub const MatchAnalysis = struct {
                 }
                 break :blk true;
             },
+            // exhaustive: only a tuple or an array can match an array pattern.
             else => false,
         };
     }
@@ -429,6 +450,8 @@ pub const MatchAnalysis = struct {
         const tag = self.ir_view.getTag(node) orelse return null;
         return switch (tag) {
             .lit_string => self.patternString(node),
+            // exhaustive: only a string literal names a record field. Any other key form names none, and the
+            //     caller answers false.
             else => null,
         };
     }
@@ -586,6 +609,7 @@ const Simplifier = struct {
                 }
                 return .{ .array = elems };
             },
+            // exhaustive: an unmodelled pattern sets `unmodelled`, which reports the match as not exhaustive.
             else => return self.refuse(),
         }
     }
@@ -741,6 +765,7 @@ fn cloneWitness(a: std.mem.Allocator, w: Witness) std.mem.Allocator.Error!Witnes
             for (elems, 0..) |e, i| out[i] = try cloneWitness(a, e);
             return .{ .array = out };
         },
+        // exhaustive: every other witness is a leaf that owns no allocation to copy.
         else => return w,
     }
 }
@@ -984,6 +1009,7 @@ const Engine = struct {
                     for (nums.items) |e| if (e == n) return;
                     try nums.append(a, n);
                 },
+                // exhaustive: other literal kinds give the head split no string or number to split on.
                 else => {},
             },
             .array => |elems| {
@@ -991,6 +1017,7 @@ const Engine = struct {
                 for (lens.items) |e| if (e == len) return;
                 try lens.append(a, len);
             },
+            // exhaustive: other patterns give the head split no string, number, or length to split on.
             else => {},
         }
     }
@@ -1051,6 +1078,7 @@ const Engine = struct {
     fn addPatternFields(a: std.mem.Allocator, p: SPat, names: *std.ArrayList([]const u8)) Error!void {
         switch (p) {
             .record => |fields| for (fields) |f| try addName(a, names, f.name),
+            // exhaustive: only a record pattern names fields.
             else => {},
         }
     }
@@ -1090,6 +1118,7 @@ const Engine = struct {
                 }
                 return out;
             },
+            // exhaustive: every other head has no sub-columns.
             else => return &.{},
         }
     }

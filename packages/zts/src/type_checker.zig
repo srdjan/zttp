@@ -3176,7 +3176,10 @@ pub const TypeChecker = struct {
 
     fn findUnionMemberForPattern(self: *const TypeChecker, union_type: TypeIndex, pattern: ir.NodeIndex) TypeIndex {
         const analysis = match_analysis_mod.MatchAnalysis.init(self.allocator, self.ir_view, self.env.pool, self.env);
-        return analysis.narrowTypeForPattern(union_type, pattern);
+        return analysis.narrowTypeForPattern(union_type, pattern) catch {
+            @constCast(self).markAllocationFailure();
+            return null_type_idx;
+        };
     }
 
     /// Register a function's declared parameter types under their binding keys

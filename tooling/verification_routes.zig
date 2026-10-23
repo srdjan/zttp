@@ -35,7 +35,7 @@ pub const routes = [_]Route{
     .{ .label = "getting started smoke", .argv = &.{ "zig", "build", "smoke-getting-started" }, .release_only = true, .release_pipeline = true },
     .{ .label = "release passport", .argv = &.{ "zig", "build", "release-check", "--", "--json" }, .release_only = true, .release_pipeline = true },
     .{ .label = "advisory benchmark", .argv = &.{ "zig", "build", "bench-check" }, .release_only = true, .release_pipeline = true },
-    .{ .label = "formatting", .argv = &.{ "zig", "fmt", "--check", "build.zig", "build/", "packages/", "tooling/" } },
+    .{ .label = "formatting", .argv = &.{ "zig", "fmt", "--check", "build.zig", "zts_main.zig", "scripts/kernel_safety_gate.zig", "scripts/residual_guard_extract.zig", "build/", "packages/", "tooling/" } },
 };
 
 pub fn validate(items: []const Route) !void {

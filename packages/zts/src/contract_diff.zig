@@ -1433,6 +1433,7 @@ fn compareSchemaValue(old_value: std.json.Value, new_value: std.json.Value) ApiR
                 }
                 break :blk if (jsonValueEqual(old_value, new_value)) .unchanged else .breaking;
             },
+            // exhaustive: an object schema against a non-object schema is a breaking change.
             else => .breaking,
         },
         else => if (jsonValueEqual(old_value, new_value)) .unchanged else .breaking,
@@ -1474,6 +1475,8 @@ fn getSchemaObject(obj: std.json.ObjectMap, key: []const u8) ?std.json.ObjectMap
     if (obj.get(key)) |value| {
         return switch (value) {
             .object => |map| map,
+            // exhaustive: a value of another JSON kind reads as absent. compareObjectSchema reads only properties
+            //     and required.
             else => null,
         };
     }
@@ -1484,6 +1487,7 @@ fn getSchemaString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     if (obj.get(key)) |value| {
         return switch (value) {
             .string => |str| str,
+            // exhaustive: a value of another JSON kind reads as absent.
             else => null,
         };
     }
@@ -1494,6 +1498,7 @@ fn getRequiredSet(obj: std.json.ObjectMap) ?[]const std.json.Value {
     if (obj.get("required")) |value| {
         return switch (value) {
             .array => |arr| arr.items,
+            // exhaustive: a value of another JSON kind reads as absent.
             else => null,
         };
     }
@@ -1505,6 +1510,7 @@ fn requiredContains(required: ?[]const std.json.Value, needle: []const u8) bool 
     for (items) |item| {
         switch (item) {
             .string => |value| if (std.mem.eql(u8, value, needle)) return true,
+            // exhaustive: a required entry that is not a string names no property.
             else => {},
         }
     }
@@ -1515,22 +1521,27 @@ fn jsonValueEqual(a: std.json.Value, b: std.json.Value) bool {
     return switch (a) {
         .null => switch (b) {
             .null => true,
+            // exhaustive: values of different JSON kinds are not equal, and unequal reads as breaking.
             else => false,
         },
         .bool => |av| switch (b) {
             .bool => |bv| av == bv,
+            // exhaustive: values of different JSON kinds are not equal, and unequal reads as breaking.
             else => false,
         },
         .integer => |av| switch (b) {
             .integer => |bv| av == bv,
+            // exhaustive: values of different JSON kinds are not equal, and unequal reads as breaking.
             else => false,
         },
         .float => |av| switch (b) {
             .float => |bv| av == bv,
+            // exhaustive: values of different JSON kinds are not equal, and unequal reads as breaking.
             else => false,
         },
         .string => |av| switch (b) {
             .string => |bv| std.mem.eql(u8, av, bv),
+            // exhaustive: values of different JSON kinds are not equal, and unequal reads as breaking.
             else => false,
         },
         .array => |av| switch (b) {
@@ -1541,6 +1552,7 @@ fn jsonValueEqual(a: std.json.Value, b: std.json.Value) bool {
                 }
                 break :blk true;
             },
+            // exhaustive: values of different JSON kinds are not equal, and unequal reads as breaking.
             else => false,
         },
         .object => |av| switch (b) {
@@ -1553,8 +1565,10 @@ fn jsonValueEqual(a: std.json.Value, b: std.json.Value) bool {
                 }
                 break :blk true;
             },
+            // exhaustive: values of different JSON kinds are not equal, and unequal reads as breaking.
             else => false,
         },
+        // exhaustive: any other JSON kind is not equal, and unequal reads as breaking.
         else => false,
     };
 }

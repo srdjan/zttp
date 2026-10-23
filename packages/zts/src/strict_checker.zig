@@ -1407,6 +1407,8 @@ pub const StrictChecker = struct {
                 if (std.mem.eql(u8, method, "filter")) return .{ .transform = .filter, .callback = callback };
                 return inner;
             },
+            // exhaustive: a recognizer. Any other tag is not a dictEntries chain, so the advisory rows ZTS627
+            //     and ZTS628 stay silent.
             else => return null,
         }
     }
@@ -1450,6 +1452,7 @@ pub const StrictChecker = struct {
                 if (block.stmts_count != 1) return null;
                 return self.returnedExpr(self.ir_view.getListIndex(block.stmts_start, 0), depth + 1);
             },
+            // exhaustive: any other tag is the concise arrow body, which is the returned expression.
             else => return body,
         }
     }
@@ -1560,6 +1563,8 @@ pub const StrictChecker = struct {
                 const member = self.ir_view.getMember(assign.target) orelse return false;
                 return self.isBindingReference(member.object, target);
             },
+            // exhaustive: any other tag is not itself a mutation. scanLiveMutation reads its children through
+            //     expressionChildren.
             else => return false,
         }
     }
@@ -1757,6 +1762,7 @@ pub const StrictChecker = struct {
                     self.annotated_function_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch self.markAllocationFailure();
                 }
             },
+            // exhaustive: other tags record nothing. The walk below visits every child.
             else => {},
         }
         self.ir_view.forEachChild(node, self, collectAnnotatedFunctions);
@@ -1967,6 +1973,7 @@ pub const StrictChecker = struct {
                 const binding = self.ir_view.getBinding(node) orelse break :blk false;
                 break :blk self.static_literal_bindings.contains(bindingKey(binding));
             },
+            // exhaustive: any other key form is not static. A non-static key reports a dynamic computed property access error.
             else => false,
         };
     }
@@ -2125,6 +2132,7 @@ fn rawBoundaryBase(env: ?*const TypeEnv, annotation: []const u8) ?[]const u8 {
                 if (rawBoundaryBase(env, text[member_start..i])) |raw| return raw;
                 member_start = i + 1;
             },
+            // exhaustive: every other character leaves the quote and nesting state unchanged.
             else => {},
         }
     }
@@ -2165,6 +2173,7 @@ fn transparentRawAlias(env: *const TypeEnv, name: []const u8) ?[]const u8 {
         .t_number => "number",
         .t_boolean => "boolean",
         .t_unknown_type => "unknown",
+        // exhaustive: any other tag is a structured or named type, and exposes no raw built-in.
         else => null,
     };
 }
@@ -2196,6 +2205,7 @@ fn stripOuterParens(annotation: []const u8) ?[]const u8 {
                 depth -= 1;
                 if (depth == 0 and i != text.len - 1) return null;
             },
+            // exhaustive: every other character leaves the quote and nesting state unchanged.
             else => {},
         }
     }

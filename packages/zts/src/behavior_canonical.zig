@@ -253,6 +253,7 @@ fn runPass(
         switch (kind) {
             .pure => stats.pure_dedup += 1,
             .idempotent_call => stats.idempotent_collapse += 1,
+            // exhaustive: firstApplicableLaw returns only .pure or .idempotent_call.
             else => unreachable,
         }
         if (fired_out) |list| {
@@ -276,6 +277,8 @@ fn firstApplicableLaw(binding: *const FunctionBinding) ?LawKind {
         switch (law) {
             .pure => return .pure,
             .idempotent_call => has_idempotent = true,
+            // exhaustive: .inverse_of and .absorbing are not consumed as rewrites. An unconsumed law leaves
+            //     the sequence unrewritten, which compares as different and never as equal.
             else => {},
         }
     }

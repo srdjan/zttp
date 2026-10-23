@@ -73,6 +73,50 @@ for script in scripts/check-capability-helpers.sh scripts/check-docs-drift.sh; d
   esac
 done
 
+# check-kernel-safety.sh and check-capability-helpers.sh: BSD xargs exits 0
+# without running on empty input, so each gate counts its input first. Each
+# probe runs a copy of the script in a scratch repository with too few files.
+# The capability control proves the same scratch layout passes at the floor.
+make_scratch() {
+  local dir="$1" count="$2" prefix="$3"
+  mkdir -p "$dir/scripts" "$dir/$prefix"
+  command cp scripts/check-kernel-safety.sh scripts/check-capability-helpers.sh "$dir/scripts/"
+  git -C "$dir" init -q
+  local i=0
+  while [[ "$i" -lt "$count" ]]; do
+    : > "$dir/$prefix/f$i.zig"
+    i=$((i + 1))
+  done
+  git -C "$dir" add -A
+}
+
+expect_floor_failure() {
+  local label="$1" dir="$2" script="$3"
+  local output
+  if output="$(cd "$dir" && bash "scripts/$script" 2>&1)"; then
+    fail "$label: $script passed with too few input files"
+  fi
+  case "$output" in
+    *"the floor is"*) ;;
+    *) fail "$label: $script failed for the wrong reason: $output" ;;
+  esac
+}
+
+make_scratch "$work/k0" 0 packages/proof-checker/src
+make_scratch "$work/k12" 12 packages/proof-checker/src
+make_scratch "$work/c0" 0 packages/modules/src
+make_scratch "$work/c29" 29 packages/modules/src
+make_scratch "$work/c30" 30 packages/modules/src
+expect_floor_failure "kernel safety, empty list" "$work/k0" check-kernel-safety.sh
+expect_floor_failure "kernel safety, 12 files" "$work/k12" check-kernel-safety.sh
+expect_floor_failure "capability helpers, empty list" "$work/c0" check-capability-helpers.sh
+expect_floor_failure "capability helpers, 29 files" "$work/c29" check-capability-helpers.sh
+if control_output="$(cd "$work/c30" && bash scripts/check-capability-helpers.sh 2>&1)"; then
+  :
+else
+  fail "capability control: 30 empty files were rejected: $control_output"
+fi
+
 # scripts/test-examples.sh: a suite that reports zero passed tests must fail
 # even with zero failures. A fake zttp stands in for the real binary, so the
 # probe takes no build and no example input. The control proves the fake is
@@ -101,4 +145,4 @@ case "$zero_output" in
   *) fail "examples: zero-test run failed for the wrong reason: $zero_output" ;;
 esac
 
-echo "gate floor test: ok (rg floors in 2 scripts, 3 probes each; examples zero-test probe)"
+echo "gate floor test: ok (rg floors in 2 scripts, 3 probes each; input floors in 2 scripts; examples zero-test probe)"

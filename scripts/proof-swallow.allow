@@ -340,3 +340,76 @@ packages/tools/src/precompile_imports.zig at catch-switch
 packages/zts/src/type_env.zig populateSourceTypesImpl catch-block
 packages/zts/src/type_env.zig populateSourceTypesImpl catch-block@2
 packages/zts/src/type_env.zig populateParsedDeclaration catch-block
+
+# BoolChecker records an allocation failure with markAllocationFailure, and
+# `check` returns OutOfMemory when the flag is set. No caller reads a boolean
+# verdict from a checker that took a failed allocation. The poison and block
+# catches only defer that failure until `check` reports it.
+packages/zts/src/bool_checker.zig addDiagnostic catch-block
+packages/zts/src/bool_checker.zig annotateNodeType catch-poison
+packages/zts/src/bool_checker.zig annotateNodeType catch-poison@2
+packages/zts/src/bool_checker.zig installGuards catch-poison
+packages/zts/src/bool_checker.zig resolveFacts catch-block
+packages/zts/src/bool_checker.zig restoreGuards catch-poison
+packages/zts/src/bool_checker.zig scanImports catch-poison
+packages/zts/src/bool_checker.zig scanImports catch-poison@2
+packages/zts/src/bool_checker.zig walkExpr catch-poison
+packages/zts/src/bool_checker.zig walkStmt catch-poison
+packages/zts/src/bool_checker.zig walkStmt catch-poison@2
+packages/zts/src/bool_checker.zig walkStmt catch-poison@3
+packages/zts/src/bool_checker.zig walkStmt catch-poison@4
+packages/zts/src/bool_checker.zig walkStmt catch-poison@5
+
+# A schema that fails to parse is classified `.breaking`, the most severe
+# change. The catch can raise the classification of an upgrade and can never
+# lower it to `.unchanged`.
+packages/zts/src/contract_diff.zig compareSchemaJson catch-return
+packages/zts/src/contract_diff.zig compareSchemaJson catch-return@2
+
+# Each switch propagates OutOfMemory and maps every other parse failure to a
+# named verdict: `unparsable` for `compare`, and false for
+# `importsOnlyBuiltinModules`. Neither answer says two sources are identical or
+# that the imports are all built in. `Parsed.init` maps every non-memory parser
+# error to NoTree, which both callers turn into one of those two answers.
+packages/zts/src/ir_identity.zig compare catch-switch
+packages/zts/src/ir_identity.zig compare catch-switch@2
+packages/zts/src/ir_identity.zig importsOnlyBuiltinModules catch-switch
+packages/zts/src/ir_identity.zig init catch-switch
+
+# A spent work budget leaves the match not provably exhaustive, or drops only
+# the redundancy verdict. The first adds the ZTS205 warning and reports
+# exhaustive only when the arms were proven to cover the type. The second drops
+# the ZTS216 unreachable-arm warning, which no verdict depends on. OutOfMemory
+# propagates in both. `renderTop` sets `open`, which renders the witness as
+# `default`, the widest text; it changes no verdict.
+packages/zts/src/match_analysis.zig analyze catch-switch
+packages/zts/src/match_analysis.zig analyze catch-switch@2
+packages/zts/src/match_analysis.zig renderTop catch-switch
+
+# An allocation failure poisons the checker, and `ensureHealthy` fails the
+# pipeline before the narrowed type of the arm is used. Null is the untyped
+# placeholder while the poisoned checker unwinds.
+packages/zts/src/type_checker.zig findUnionMemberForPattern catch-block
+
+# StrictChecker records an allocation failure with markAllocationFailure, and
+# `check` returns OutOfMemory when the flag is set. A failed diagnostic or
+# table write therefore cannot reach a reported verdict. The block, poison, and
+# multiline catches only defer that failure until `check` reports it.
+packages/zts/src/strict_checker.zig addDiagnostic catch-block
+packages/zts/src/strict_checker.zig addRawBoundaryDiagnostic catch-block
+packages/zts/src/strict_checker.zig addRawBoundaryDiagnostic catch-block@2
+packages/zts/src/strict_checker.zig checkAmbientGlobal catch-block
+packages/zts/src/strict_checker.zig checkAmbientGlobal catch-block@2
+packages/zts/src/strict_checker.zig collectAnnotatedFunctions catch-poison
+packages/zts/src/strict_checker.zig collectAnnotatedFunctions catch-poison@2
+packages/zts/src/strict_checker.zig collectAnnotatedFunctions catch-poison@3
+packages/zts/src/strict_checker.zig collectAnnotatedFunctions catch-poison@4
+packages/zts/src/strict_checker.zig collectAssignments catch-multiline
+packages/zts/src/strict_checker.zig collectAssignments catch-multiline@2
+packages/zts/src/strict_checker.zig collectEntriesDerivedBindings catch-multiline
+packages/zts/src/strict_checker.zig collectStaticLiterals catch-poison
+packages/zts/src/strict_checker.zig countDeclaredName catch-block
+packages/zts/src/strict_checker.zig recordCall catch-block
+packages/zts/src/strict_checker.zig recordCall catch-block@2
+packages/zts/src/strict_checker.zig resolveFacts catch-block
+packages/zts/src/strict_checker.zig scanImports catch-poison

@@ -59,6 +59,7 @@ fn makeNullable(t: ExprType) ExprType {
         .string, .optional_string => .optional_string,
         .object, .optional_object => .optional_object,
         .undefined => .undefined,
+        // exhaustive: a type with no optional variant answers .unknown, which fails closed in a boolean context.
         else => .unknown,
     };
 }
@@ -441,6 +442,8 @@ pub const BoolChecker = struct {
                 self.walkExpr(node);
             },
 
+            // exhaustive: the parser produces only break, continue, and import statements among the tags not
+            //     listed here. None carries an expression to check, and the other statement tags are refused.
             else => {},
         }
     }
@@ -484,6 +487,7 @@ pub const BoolChecker = struct {
                             .div => "/",
                             .mod => "%",
                             .pow => "**",
+                            // exhaustive: the enclosing arm lists exactly these five operators.
                             else => unreachable,
                         };
                         self.requireNumeric(bin.left, op_name);
@@ -504,6 +508,8 @@ pub const BoolChecker = struct {
                     .strict_eq, .strict_neq => {
                         self.checkTautologicalComparison(node, bin);
                     },
+                    // exhaustive: the remaining operators (comparison, bitwise, loose equality) put no type obligation
+                    //     on their operands in this checker. The walk below visits both operands.
                     else => {},
                 }
                 // Annotate binary op nodes for type-directed codegen.
@@ -723,6 +729,7 @@ pub const BoolChecker = struct {
             .spread,
             => .unknown,
 
+            // exhaustive: any other tag has no statically known type. .unknown fails closed in a boolean context.
             else => .unknown,
         };
     }
@@ -763,6 +770,7 @@ pub const BoolChecker = struct {
                 }
                 break :blk joined orelse .unknown;
             },
+            // exhaustive: any other declared type is not one of the primitive kinds. .unknown fails closed.
             else => .unknown,
         };
     }
@@ -906,6 +914,9 @@ pub const BoolChecker = struct {
                         }
                     }
                 },
+                // exhaustive: a return nested in any other statement is not scanned, so the inferred type can be too
+                //     narrow. An unannotated function is refused by strict mode (ZTS601), and an annotated
+                //     one is checked against its declaration (ZTS204).
                 else => {},
             }
         }
@@ -1033,6 +1044,8 @@ pub const BoolChecker = struct {
                 .add, .sub, .mul, .div, .mod, .pow, .lt, .lte, .gt, .gte => {
                     self.node_types.put(self.allocator, node, .number) catch self.markAllocationFailure();
                 },
+                // exhaustive: only numeric operators and string concatenation get a specialization hint. With no
+                //     hint, codegen takes the generic path.
                 else => {},
             }
         } else if (op == .add and left_type == .string and right_type == .string) {
@@ -1705,7 +1718,7 @@ fn checkSourceFull(source: []const u8, expect_errors: u32, expect_warnings: ?u32
     var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
     defer parser.deinit();
 
-    const root = parser.parse() catch |err| return err;
+    const root = try parser.parse();
 
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
     var checker = BoolChecker.init(allocator, ir_view, null);

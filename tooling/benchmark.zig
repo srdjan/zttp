@@ -302,6 +302,12 @@ fn loadBaseline(allocator: std.mem.Allocator, path: []const u8) !Report {
         .allocate = .alloc_always,
     }) catch return error.InvalidBenchmarkBaseline;
     try validateBaselineValue(root);
+    if (toolchainMismatch(root, builtin.zig_version_string)) |recorded| {
+        std.debug.print(
+            "warning: baseline was recorded with Zig {s} and this run uses Zig {s}; a shortfall may come from the toolchain\n",
+            .{ recorded, builtin.zig_version_string },
+        );
+    }
     return std.json.parseFromSliceLeaky(Report, allocator, bytes, .{
         .allocate = .alloc_always,
         .ignore_unknown_fields = true,
@@ -328,6 +334,13 @@ fn validateBaselineValue(root: std.json.Value) !void {
     for ([_][]const u8{ "os", "os_release", "architecture", "processor" }) |field| {
         if ((try requiredString(host.object, field)).len == 0) return error.InvalidBenchmarkBaseline;
     }
+}
+
+/// Returns the recorded Zig version when it differs from `running`. The caller warns and does not fail.
+fn toolchainMismatch(root: std.json.Value, running: []const u8) ?[]const u8 {
+    const provenance = root.object.get("provenance") orelse return null;
+    const recorded = requiredString(provenance.object, "zig_version") catch return null;
+    return if (std.mem.eql(u8, recorded, running)) null else recorded;
 }
 
 fn requiredString(object: std.json.ObjectMap, field: []const u8) ![]const u8 {
@@ -804,6 +817,9 @@ test "baseline validation requires clean five-run provenance" {
     var partial_parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, partial, .{});
     defer partial_parsed.deinit();
     try std.testing.expectError(error.InvalidBenchmarkBaseline, validateBaselineValue(partial_parsed.value));
+
+    try std.testing.expectEqualStrings("0.16.0", toolchainMismatch(parsed.value, "0.17.0").?);
+    try std.testing.expect(toolchainMismatch(parsed.value, "0.16.0") == null);
 }
 
 test "comparison rejects non-finite thresholds and measurements" {

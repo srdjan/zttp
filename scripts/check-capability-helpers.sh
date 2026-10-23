@@ -18,6 +18,16 @@ rg_error_marker="$(mktemp)"
 trap 'command rm -f "$rg_error_marker"' EXIT
 export rg_error_marker
 
+# Floor on this gate's input. BSD xargs runs nothing and exits 0 on an empty
+# list, so a missing source tree would pass every scan. Measured 2026-10-23: 33
+# Zig files under the two roots.
+minimum_files=30
+file_count="$(git ls-files -- 'packages/modules/src' 'packages/zts/src/modules' | grep -c '\.zig$' || true)"
+if [ "$file_count" -lt "$minimum_files" ]; then
+    echo "FAIL: found $file_count Zig files to scan; the floor is $minimum_files" >&2
+    exit 1
+fi
+
 check_pattern() {
     local description="$1"
     local pattern="$2"
