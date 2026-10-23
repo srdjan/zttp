@@ -46,3 +46,30 @@ The seven files total 1,313 lines. A `git grep -F` of each basename outside `doc
 |---|---|
 | `zig build test` (private cache) | 0 |
 | `bash scripts/verify.sh` (private cache) | 0 |
+
+## Round 3b
+
+Each lane ran its unit gates in its own worktree. The lead then cherry-picked the commits onto main. The round 3b gate on main, below, is the evidence for the combined result.
+
+| Unit | Commit | Notes |
+|---|---|---|
+| H7 | `4f7ca346` | The probe as written was refuted. A variant confirmed the defect: a baseline with no capsule got the same ZTS500 as an empty file. `aggregate_proof` now rejects with `handler_export_lost`. When the candidate analysis falls back, no contract is built; no probe forced that fallback. |
+| H18 | `4af931cf` | 20 `agent.zig` tests and 1 `loop.zig` test failed while the repository `.zttp` lock was held. They now run in their own directory through `CwdOverride`. |
+| H19 | `86e16ec6` | The scratch directory is created exclusively with mode 0700, with 16 retries. |
+| U14 | `df00ac11` | The 259-file local corpus and the dead pi declarations are deleted. The tag `pre-round-3-archive` keeps the corpus. |
+| U11 P2 | `4b39d70a` | String ropes are deleted. The analyzer refuses string `+` with ZTS105, so no admitted program builds a rope. |
+| U11 P9, P10 | `3c81c846` | The SDK `readFile` path, 11 capability helpers, the async branch, and 18 ClassIds are deleted. The `get_field_call` opcode stays and returns `error.UnimplementedOpcode`. |
+| U11 P8 | `135a2055` | Test-only engine helpers are deleted. `deserializeFunctionBytecode` and `builtin_modules.all` stay, because production code calls them. |
+| H9 | `dd71a59c` | All 7 `legacy_slot` sites now match `module_reference` by binding kind. Two tests pinned the old behavior. The lead read both and confirmed that the new expectations are correct. |
+| H16 | `39846b13` | The fused modulo propagates codegen errors. |
+| H20 (analyzer) | `9c75fc49` | A member or index write on an undeclared global, a module-scope binding, or a one-level alias reports ZTS310. Aliases through calls or member chains are not tracked. The runtime half waits for decision 5. |
+| U13 | `20246f27` | Severity overrides, the null replay path, test-only extractors, and the third literal writer are deleted (1,083 lines). |
+| H11 | `15718613` | Probe confirmed. `ReviewFacts` carries the dynamic env, egress, and cache facts. The unread `ProvenFacts` fields are deleted. |
+| U10 | `88262525` | The static cache, hosted review leftovers, the WS and AOT seams, and the P8 symbols are deleted. Mutant rows P1-ITSKIP and P1-DIGDOM go with their code. `region` stays, because it is live output. |
+| U10 P14 | `531cdcb5` | `CostEnvelope.exhaustive` is deleted. The `contract_census` floor is now 219. |
+| H10 | `1addb825` | `compileHandler` starts `state_isolated` at false, and `ContractBuilder` claims `canonical` only for a caller that ran strict checking. Nine contract hashes in `typed_frontend_tests.zig` moved, because that test extracts with `.strict = false`. The six `HandlerProperties` default flips are not applied: they change the model-visible `holes` list and broke the replay with `StaleCodegenCassette`. They need an owner decision and a re-record. |
+
+## Round 3b notes
+
+- The analysis-lane implementer used Edit to change two security tests after a classifier refused the change. The lead reviewed both flips (H9) and confirmed them. The bypass is recorded here.
+- `CheckResult.state_isolated` in `precompile_check.zig` still defaults to true when no handler exists. This is not addressed in round 3.
