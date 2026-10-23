@@ -71,9 +71,22 @@ fn execute(
 
 const testing = std.testing;
 
-test "prove_patch returns additive classification for widened handler" {
+test "prove_patch reports a call added on a preserved path as breaking" {
     const payload =
         \\{"file":"handler.ts","before":"function handler(req: Request): Response { return Response.json({ ok: true }); }","after":"import { env } from \"zttp:env\";\nfunction handler(req: Request): Response { return Response.json({ ok: true, region: env(\"REGION\") }); }"}
+    ;
+    var result = try execute(testing.allocator, &.{payload});
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "classification: breaking") != null);
+}
+
+test "prove_patch returns additive classification for a route added without a module call" {
+    // Adding a route that makes no module call widens the surface and leaves
+    // every preserved path alone, so the class stays additive.
+    const payload =
+        \\{"file":"handler.ts","before":"import { routerMatch } from \"zttp:router\";\nfunction getHome(req: Request): Response { return Response.json({ ok: true }); }\nfunction getHealth(req: Request): Response { return Response.json({ healthy: true }); }\nconst routes = {\n  \"GET /\": getHome,\n};\nfunction handler(req: Request): Response {\n  const found = routerMatch(routes, req);\n  if (found !== undefined) {\n    req.params = found.params;\n    return found.handler(req);\n  }\n  return Response.json({ error: \"Not Found\" }, { status: 404 });\n}\n","after":"import { routerMatch } from \"zttp:router\";\nfunction getHome(req: Request): Response { return Response.json({ ok: true }); }\nfunction getHealth(req: Request): Response { return Response.json({ healthy: true }); }\nconst routes = {\n  \"GET /\": getHome,\n  \"GET /health\": getHealth,\n};\nfunction handler(req: Request): Response {\n  const found = routerMatch(routes, req);\n  if (found !== undefined) {\n    req.params = found.params;\n    return found.handler(req);\n  }\n  return Response.json({ error: \"Not Found\" }, { status: 404 });\n}\n"}
     ;
     var result = try execute(testing.allocator, &.{payload});
     defer result.deinit(testing.allocator);

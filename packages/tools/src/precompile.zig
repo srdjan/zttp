@@ -7456,12 +7456,15 @@ test "collectImportedFailableCalls answers every non-builtin record" {
 // One fault coverage record across check, compile, and text output
 // ---------------------------------------------------------------------------
 
-/// A failable call whose result is read but never tested: no path records it,
-/// so the walk lists it as unseen and `fault_covered` is refused.
+/// A failable call inside a closure body: `walkPaths` does not enter a nested
+/// function, so no path records the call. The walk lists it as unseen and
+/// `fault_covered` is refused. (A failable call nested in a returned or
+/// initializer expression is recorded since the I/O tracker descends.)
 const unseen_call_handler =
     \\import { jwtVerify } from "zttp:auth";
     \\function handler(req: Request): Response {
-    \\  return Response.text(jwtVerify("t", "s").error);
+    \\  const read = (): string => jwtVerify("t", "s").error;
+    \\  return Response.text(read());
     \\}
 ;
 
@@ -11908,4 +11911,315 @@ test "CHECK import path selection preserves explicit names and normalized cycle 
     const explicit = try resolveCheckImportPath(allocator, "/virtual", "./helper.custom");
     defer allocator.free(explicit);
     try std.testing.expectEqualStrings("/virtual/helper.custom", explicit);
+}
+
+/// The behavioral verdict that `zts prove-behavior` reports for an edit.
+fn proveBehaviorVerdict(
+    allocator: std.mem.Allocator,
+    before_src: []const u8,
+    after_src: []const u8,
+) !zts.contract_diff.Classification {
+    var before = try runCheckOnlyFromSourceWithOptions(allocator, before_src, "handler.ts", .{ .json_mode = true });
+    defer before.deinit(allocator);
+    var after = try runCheckOnlyFromSourceWithOptions(allocator, after_src, "handler.ts", .{ .json_mode = true });
+    defer after.deinit(allocator);
+    const before_contract = before.contract orelse return error.NoContractFromBefore;
+    const after_contract = after.contract orelse return error.NoContractFromAfter;
+    var diff = try zts.contract_diff.diffContracts(allocator, &before_contract, &after_contract);
+    defer diff.deinit(allocator);
+    return diff.behavioralVerdict();
+}
+
+const io_nested_return_a =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  return Response.text(String(cacheSet("items", "k2", "v", 60)));
+    \\}
+;
+const io_nested_return_b =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  return Response.text(String(true));
+    \\}
+;
+const io_nested_const_a =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  const n = String(cacheSet("items", "k2", "v", 60));
+    \\  return Response.text(n);
+    \\}
+;
+const io_nested_const_b =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  const n = String(true);
+    \\  return Response.text(n);
+    \\}
+;
+const io_same_source =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  const a = req.url;
+    \\  cacheSet("items", a, "v", 60);
+    \\  return Response.text("ok");
+    \\}
+;
+
+test "prove-behavior: a module call nested in a returned expression is breaking when removed" {
+    const verdict = try proveBehaviorVerdict(std.testing.allocator, io_nested_return_a, io_nested_return_b);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, verdict);
+}
+
+test "prove-behavior: a module call nested in a const initializer is breaking when removed" {
+    const verdict = try proveBehaviorVerdict(std.testing.allocator, io_nested_const_a, io_nested_const_b);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, verdict);
+}
+
+test "prove-behavior: a handler diffed with itself stays equivalent after nested calls are tracked" {
+    const sources = [_][]const u8{ io_nested_return_a, io_nested_const_a, io_same_source };
+    for (sources) |source| {
+        const verdict = try proveBehaviorVerdict(std.testing.allocator, source, source);
+        try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, verdict);
+    }
+}
+
+test "prove-behavior: a module call in a ternary branch is breaking when removed" {
+    // ZTS612 refuses an effectful arm, so the call is a pure module export.
+    const before =
+        \\import { slugify } from "zttp:text";
+        \\export function handler(req: Request): Response {
+        \\  const n = req.method === "GET" ? slugify(req.url) : "no";
+        \\  return Response.text(n);
+        \\}
+    ;
+    const after =
+        \\import { slugify } from "zttp:text";
+        \\export function handler(req: Request): Response {
+        \\  const n = req.method === "GET" ? req.url : "no";
+        \\  return Response.text(n);
+        \\}
+    ;
+    const verdict = try proveBehaviorVerdict(std.testing.allocator, before, after);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, verdict);
+}
+
+test "prove-behavior: a module call in the right operand of ?? is breaking when removed" {
+    const before =
+        \\import { cacheGet, cacheSet } from "zttp:cache";
+        \\export function handler(req: Request): Response {
+        \\  const hit = cacheGet("items", "k");
+        \\  const n = hit ?? String(cacheSet("items", "k", "v", 60));
+        \\  return Response.text(n);
+        \\}
+    ;
+    const after =
+        \\import { cacheGet, cacheSet } from "zttp:cache";
+        \\export function handler(req: Request): Response {
+        \\  const hit = cacheGet("items", "k");
+        \\  const n = hit ?? "none";
+        \\  return Response.text(n);
+        \\}
+    ;
+    const verdict = try proveBehaviorVerdict(std.testing.allocator, before, after);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, verdict);
+}
+
+test "prove-behavior: a module call in the right operand of && is breaking when removed" {
+    const before =
+        \\import { cacheSet } from "zttp:cache";
+        \\export function handler(req: Request): Response {
+        \\  cacheSet("items", "k", "v", 60);
+        \\  const ok = req.method === "GET" && cacheSet("items", "k2", "v", 60);
+        \\  return Response.text(String(ok));
+        \\}
+    ;
+    const after =
+        \\import { cacheSet } from "zttp:cache";
+        \\export function handler(req: Request): Response {
+        \\  cacheSet("items", "k", "v", 60);
+        \\  const ok = req.method === "GET" && true;
+        \\  return Response.text(String(ok));
+        \\}
+    ;
+    const verdict = try proveBehaviorVerdict(std.testing.allocator, before, after);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, verdict);
+}
+
+const NestedCallPair = struct { name: []const u8, before: []const u8, after: []const u8 };
+
+const io_if_a =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  if (String(cacheSet("items", "k2", "v", 60)) === req.url) {
+    \\    return Response.text("yes");
+    \\  }
+    \\  return Response.text("no");
+    \\}
+;
+const io_if_b =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  if (String(true) === req.url) {
+    \\    return Response.text("yes");
+    \\  }
+    \\  return Response.text("no");
+    \\}
+;
+const io_ife_a =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  if (req.method === "GET") {
+    \\    return Response.text("yes");
+    \\  } else if (String(cacheSet("items", "k2", "v", 60)) === req.url) {
+    \\    return Response.text("maybe");
+    \\  }
+    \\  return Response.text("no");
+    \\}
+;
+const io_ife_b =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  if (req.method === "GET") {
+    \\    return Response.text("yes");
+    \\  } else if (String(true) === req.url) {
+    \\    return Response.text("maybe");
+    \\  }
+    \\  return Response.text("no");
+    \\}
+;
+const io_ifn_a =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  if (String(cacheSet("items", "k2", "v", 60)) === req.url) {
+    \\    cacheSet("items", "k3", "v", 60);
+    \\  }
+    \\  return Response.text("no");
+    \\}
+;
+const io_ifn_b =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  if (String(true) === req.url) {
+    \\    cacheSet("items", "k3", "v", 60);
+    \\  }
+    \\  return Response.text("no");
+    \\}
+;
+const io_for_a =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  for (const x of [String(cacheSet("items", "k2", "v", 60))]) {
+    \\    cacheSet("items", x, "v", 60);
+    \\  }
+    \\  return Response.text("ok");
+    \\}
+;
+const io_for_b =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  for (const x of [String(true)]) {
+    \\    cacheSet("items", x, "v", 60);
+    \\  }
+    \\  return Response.text("ok");
+    \\}
+;
+const io_match_a =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  const out = match (String(cacheSet("items", "k2", "v", 60))) {
+    \\    when "true": "yes"
+    \\    default: "no"
+    \\  };
+    \\  return Response.text(out);
+    \\}
+;
+const io_match_b =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  const out = match (String(true)) {
+    \\    when "true": "yes"
+    \\    default: "no"
+    \\  };
+    \\  return Response.text(out);
+    \\}
+;
+const io_map_a =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  const xs = ["a", "b"];
+    \\  const ys = xs.map((x) => String(cacheSet("items", x, "v", 60)));
+    \\  return Response.text(ys.join(","));
+    \\}
+;
+const io_map_b =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  const xs = ["a", "b"];
+    \\  const ys = xs.map((x) => String(true));
+    \\  return Response.text(ys.join(","));
+    \\}
+;
+const io_each_a =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  const xs = ["a", "b"];
+    \\  xs.forEach((x) => {
+    \\    cacheSet("items", x, "v", 60);
+    \\  });
+    \\  return Response.text("ok");
+    \\}
+;
+const io_each_b =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  cacheSet("items", "k", "v", 60);
+    \\  const xs = ["a", "b"];
+    \\  xs.forEach((x) => {
+    \\    String(x);
+    \\  });
+    \\  return Response.text("ok");
+    \\}
+;
+
+const nested_call_pairs = [_]NestedCallPair{
+    .{ .name = "if condition, then-branch returns", .before = io_if_a, .after = io_if_b },
+    .{ .name = "else-if condition", .before = io_ife_a, .after = io_ife_b },
+    .{ .name = "if condition, fall-through", .before = io_ifn_a, .after = io_ifn_b },
+    .{ .name = "for...of iterable", .before = io_for_a, .after = io_for_b },
+    .{ .name = "match discriminant", .before = io_match_a, .after = io_match_b },
+    .{ .name = "inline map callback", .before = io_map_a, .after = io_map_b },
+    .{ .name = "inline forEach callback", .before = io_each_a, .after = io_each_b },
+};
+
+test "prove-behavior: a module call removed from a condition, iterable, discriminant, or inline callback is breaking" {
+    for (nested_call_pairs) |pair| {
+        errdefer std.debug.print("pair: {s}\n", .{pair.name});
+        const verdict = try proveBehaviorVerdict(std.testing.allocator, pair.before, pair.after);
+        try std.testing.expectEqual(zts.contract_diff.Classification.breaking, verdict);
+    }
+}
+
+test "prove-behavior: a handler with a call in a condition, iterable, discriminant, or inline callback diffs equivalent with itself" {
+    for (nested_call_pairs) |pair| {
+        errdefer std.debug.print("pair: {s}\n", .{pair.name});
+        const verdict = try proveBehaviorVerdict(std.testing.allocator, pair.before, pair.before);
+        try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, verdict);
+    }
 }

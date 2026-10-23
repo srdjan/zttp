@@ -1376,9 +1376,16 @@ pub const PathGenerator = struct {
 
         switch (tag) {
             .return_stmt => {
-                // Leaf: complete path found. Emit test case.
+                // Leaf: complete path found. The returned value runs before the
+                // function returns, so its module calls belong to this path.
+                // They are dropped again after the emit: the path ends here.
+                const saved_io = self.io_seq.items.len;
+                if (self.ir_view.getOptValue(node)) |value| {
+                    try self.trackModuleCall(value, null);
+                }
                 const status = self.extractReturnStatus(node);
                 try self.emitTestCase(status);
+                self.io_seq.shrinkRetainingCapacity(saved_io);
             },
 
             .block, .program => {
@@ -1388,6 +1395,10 @@ pub const PathGenerator = struct {
 
             .if_stmt => {
                 const if_s = self.ir_view.getIfStmt(node) orelse return;
+
+                // The condition runs before the fork, so its module calls
+                // belong to both paths and to the statements after the `if`.
+                try self.trackModuleCall(if_s.condition, null);
 
                 const saved_constraints = self.constraints.items.len;
                 const saved_io = self.io_seq.items.len;
@@ -1416,6 +1427,8 @@ pub const PathGenerator = struct {
 
             .match_expr => {
                 const match_data = self.ir_view.getMatchExpr(node) orelse return;
+                // The discriminant runs once, before any arm.
+                try self.trackModuleCall(match_data.discriminant, null);
                 var i: u8 = 0;
                 while (i < match_data.arms_count) : (i += 1) {
                     const arm_idx = self.ir_view.getListIndex(match_data.arms_start, i);
@@ -1445,6 +1458,8 @@ pub const PathGenerator = struct {
 
             .for_of_stmt => {
                 const fi = self.ir_view.getForIter(node) orelse return;
+                // The iterable runs once, before the loop and outside its multiplicity.
+                try self.trackModuleCall(fi.iterable, null);
                 // The body is walked once below, as a representative iteration.
                 // Paths through zero iterations, or through differing branch
                 // choices across iterations, are never emitted, so from here on
@@ -1469,6 +1484,8 @@ pub const PathGenerator = struct {
 
             .switch_stmt => {
                 const sw = self.ir_view.getSwitchStmt(node) orelse return;
+                // The discriminant runs once, before any case.
+                try self.trackModuleCall(sw.discriminant, null);
                 for (0..sw.cases_count) |i| {
                     const case_idx = self.ir_view.getListIndex(sw.cases_start, @intCast(i));
                     const cc = self.ir_view.getCaseClause(case_idx) orelse continue;
@@ -1516,6 +1533,9 @@ pub const PathGenerator = struct {
                     return;
                 } else if (then_always and if_s.else_branch == null_node) {
                     // Then-branch returns, no else: fork then-path, continue for fall-through
+                    // The condition runs before the fork: both paths and the
+                    // fall-through carry its module calls.
+                    try self.trackModuleCall(if_s.condition, null);
                     const saved = self.constraints.items.len;
                     const saved_io = self.io_seq.items.len;
                     try self.extractAllConstraints(if_s.condition);
@@ -1943,8 +1963,37 @@ pub const PathGenerator = struct {
         return self.trackModuleCallUnder(node, binding_key, false);
     }
 
-    /// `under_nullish` is true when `node` is the left operand of `??`. The
-    /// fallback then answers an absent value from an optional-returning export.
+    /// Record every module call in the expression at `node`, in evaluation
+    /// order: the callee and the arguments (left to right) before the call
+    /// that consumes them, and the operands of an operator left to right.
+    ///
+    /// `binding_key` and `under_nullish` describe `node` itself and are not
+    /// passed to its children. `binding_key` names the `const` that the whole
+    /// initializer is bound to. `under_nullish` is true when `node` is the
+    /// left operand of `??`: the fallback then answers an absent value from an
+    /// optional-returning export.
+    ///
+    /// A call that runs only on some paths is recorded as if it ran: the right
+    /// operand of `??`, `&&`, and `||`, and both branches of a ternary or the
+    /// arms of a `match`, in source order. The tracker has no per-call
+    /// condition, and forking the enumeration at an expression would change
+    /// the path set of every handler that holds one. A missed call is the
+    /// unsound direction for a behavior diff, because the diff would read an
+    /// edit that adds or removes the call as equivalent. An extra record only
+    /// makes such an edit `breaking`, which is conservative.
+    ///
+    /// A function written inline as an argument of a call, such as the callback
+    /// of `items.map((x) => cacheSet(...))`, runs inside that call. Its body is
+    /// entered, and its calls are recorded after the other arguments and before
+    /// the call that receives it, as if they ran once. The callback runs once
+    /// per element, and the record carries the multiplicity of the call site,
+    /// so the cost envelope counts it once.
+    ///
+    /// Any other nested function is not entered. `walkPaths` does not enter it
+    /// either, and a closure bound to a name runs only when it is called,
+    /// which this walk does not model. A module call that only such a closure
+    /// makes is not recorded. This is a residual, and the unseen-call scan
+    /// still lists a failable call there.
     fn trackModuleCallUnder(
         self: *PathGenerator,
         node: NodeIndex,
@@ -1952,6 +2001,33 @@ pub const PathGenerator = struct {
         under_nullish: bool,
     ) error{OutOfMemory}!void {
         const tag = self.ir_view.getTag(node) orelse return;
+
+        switch (tag) {
+            .function_decl, .function_expr, .arrow_function => return,
+            // Look through nullish coalescing: env("X") ?? "default". The left
+            // operand keeps the binding of the whole expression. The right
+            // operand is a different value and takes none.
+            .binary_op => {
+                const bin = self.ir_view.getBinary(node) orelse return;
+                if (bin.op == .nullish) {
+                    try self.trackModuleCallUnder(bin.left, binding_key, true);
+                    try self.trackModuleCallUnder(bin.right, null, false);
+                    return;
+                }
+            },
+            // exhaustive: every other tag falls through to the expressionChildren descent below, so no child is dropped.
+            else => {},
+        }
+
+        const is_call = tag == .call or tag == .method_call;
+        var children = self.ir_view.expressionChildren(node);
+        while (children.next()) |child| {
+            if (is_call and self.isFunctionNode(child)) {
+                try self.trackInlineFunctionBody(child);
+            } else {
+                try self.trackModuleCallUnder(child, null, false);
+            }
+        }
 
         if (tag == .call) {
             const call = self.ir_view.getCall(node) orelse return;
@@ -1967,17 +2043,19 @@ pub const PathGenerator = struct {
                     .absent_handled = under_nullish and isOptionalReturn(meta.returns),
                 });
             }
-            return;
         }
+    }
 
-        // Look through nullish coalescing: env("X") ?? "default"
-        if (tag == .binary_op) {
-            const bin = self.ir_view.getBinary(node) orelse return;
-            if (bin.op == .nullish) {
-                try self.trackModuleCallUnder(bin.left, binding_key, true);
-                return;
-            }
-        }
+    fn isFunctionNode(self: *const PathGenerator, node: NodeIndex) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        return tag == .function_expr or tag == .arrow_function;
+    }
+
+    /// Record the calls in the body of a function that is written inline as an
+    /// argument of a call. A block body is walked through its statements.
+    fn trackInlineFunctionBody(self: *PathGenerator, node: NodeIndex) error{OutOfMemory}!void {
+        const func = self.ir_view.getFunction(node) orelse return;
+        try self.trackModuleCallUnder(func.body, null, false);
     }
 
     fn currentMultiplicity(self: *const PathGenerator) Mult {
@@ -3269,8 +3347,11 @@ test "emitTestCase keeps argument signature allocation failure conservative" {
     defer generator.deinit();
     try generator.scanImports();
     try generator.findHandlerBindings(handler_fn);
+    // The tracker descends through an expression, so track each statement once.
     for (0..ir_view.nodeCount()) |idx| {
-        try generator.trackModuleCall(@intCast(idx), null);
+        if (ir_view.getTag(@intCast(idx)) != .expr_stmt) continue;
+        const expr = ir_view.getOptValue(@intCast(idx)) orelse continue;
+        try generator.trackModuleCall(expr, null);
     }
     try std.testing.expectEqual(@as(usize, 1), generator.io_seq.items.len);
 
@@ -4156,7 +4237,8 @@ test "the scan names a failable call the walk never recorded" {
     const source =
         \\import { jwtVerify } from "zttp:auth";
         \\function handler(req) {
-        \\  return Response.text(jwtVerify("t", "secret").error);
+        \\  const read = () => jwtVerify("t", "secret").error;
+        \\  return Response.text(read());
         \\}
     ;
 

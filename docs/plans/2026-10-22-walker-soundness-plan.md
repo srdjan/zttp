@@ -205,7 +205,7 @@ Each unit runs these steps unfiltered and reads each exit status directly: `zig 
 | W3b | done: the verifier walks `assert`, nested functions, closures (with every flag cleared), and spread operands; upvalue reads map to a unique declared binding; residual: a hoisted `function` that reads a Result declared later is not resolved |
 | W4 | done: the kill walk reaches every assignment; the return join covers loops, `if` without a covering return, and `assert`; ZTS204 checks an `assert` error expression; one fixture (`flow_false_proofs.zig`) wraps its `assert` message in `Response.text`; 296-file sweep unchanged |
 | W5 | done: an array-literal or untracked assignment root counts as a mutation; the escape scan checks every value position through the child map; `!routes` and `typeof routes` now stay resolved (sound precision gain); 296-file sweep unchanged |
-| W6 | not started |
+| W6 | done: the tracker records nested calls, `return` values, `if` conditions, `for...of` iterables, `match` discriminants, and inline callbacks; an added call on a preserved path is now `breaking` (was `additive`); 14 handlers gain io entries; residuals: a named closure called later, a `match` arm body that is a bare expression, a changed ternary condition |
 | W7a | not started |
 | W7b | not started; decision 9(a) |
 | W8 | not started |

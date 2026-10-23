@@ -1275,7 +1275,8 @@ test "a handler whose only failable call is unseen is not covered" {
     const source =
         \\import { jwtVerify } from "zttp:auth";
         \\function handler(req) {
-        \\  return Response.text(jwtVerify("t", "secret").error);
+        \\  const read = () => jwtVerify("t", "secret").error;
+        \\  return Response.text(read());
         \\}
     ;
 
@@ -1816,9 +1817,11 @@ test "a failable call that a conjunct condition tests is walked" {
     }
 }
 
-test "a failable call under an or in an if condition has no constraint and stays unseen" {
-    // Observed: `||` yields no path constraint, so no path tests the call. It is
-    // on no path and stays listed as unseen, and the handler is not clean.
+test "a failable call under an or in an if condition is recorded but no path fails it" {
+    // Observed: `||` yields no path constraint, so no path tests the call. The
+    // condition runs before the fork, so the walk records the call on both
+    // paths and it is no longer unseen. No path gives it a failure, so the
+    // site is counted and not covered, and the handler is not clean.
     const source =
         \\import { verifyWebhookSignature } from "zttp:auth";
         \\function handler(req) {
@@ -1829,6 +1832,8 @@ test "a failable call under an or in an if condition has no constraint and stays
         \\}
     ;
     const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
-    try std.testing.expectEqual(@as(usize, 1), coverage.unseen_calls);
+    try std.testing.expectEqual(@as(usize, 0), coverage.unseen_calls);
+    try std.testing.expectEqual(@as(u32, 1), coverage.total_failable);
+    try std.testing.expectEqual(@as(u32, 0), coverage.covered);
     try std.testing.expect(!coverage.clean);
 }
