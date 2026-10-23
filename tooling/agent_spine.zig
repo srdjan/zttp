@@ -948,6 +948,10 @@ fn checkAnchorText(ctx: *Context, failures: *std.ArrayList(Failure), document: [
                 try addFailure(ctx, failures, .symbol_anchor, "{s} anchors {s}, but the target does not exist; correct the relative path", .{ document, text });
                 return;
             }
+            if (!std.mem.endsWith(u8, target.?, ".zig")) {
+                try addFailure(ctx, failures, .symbol_anchor, "{s} anchors {s}, but only Zig files take a #symbol anchor; reference the file or a Zig declaration", .{ document, text });
+                return;
+            }
             const source = try readFile(ctx.root_dir, ctx.io, ctx.a(), target.?);
             if (!try declaresSymbol(ctx.a(), target.?, source, parsed.value)) try addFailure(ctx, failures, .symbol_anchor, "{s} anchors {s}, but {s} declares no {s}; use a current top-level declaration", .{ document, text, target.?, parsed.value });
         },
@@ -996,7 +1000,6 @@ fn resolveAnchorPath(ctx: *Context, document: []const u8, path: []const u8) !?[]
 
 fn declaresSymbol(allocator: std.mem.Allocator, path: []const u8, source: []const u8, symbol: []const u8) !bool {
     if (std.mem.endsWith(u8, path, ".zig")) return declaresZigSymbol(allocator, source, symbol);
-    if (std.mem.endsWith(u8, path, ".ts") or std.mem.endsWith(u8, path, ".tsx")) return declaresTypeScriptSymbol(source, symbol);
     return false;
 }
 
@@ -1020,129 +1023,6 @@ fn declaresZigSymbol(allocator: std.mem.Allocator, source: []const u8, symbol: [
         }
     }
     return false;
-}
-
-fn declaresTypeScriptSymbol(source: []const u8, symbol: []const u8) bool {
-    var depth: usize = 0;
-    var state: enum { code, line_comment, block_comment, single, double, template, regex, regex_class } = .code;
-    var expect_name = false;
-    var i: usize = 0;
-    while (i < source.len) {
-        const byte = source[i];
-        switch (state) {
-            .line_comment => {
-                if (byte == '\n') state = .code;
-                i += 1;
-            },
-            .block_comment => {
-                if (byte == '*' and i + 1 < source.len and source[i + 1] == '/') {
-                    state = .code;
-                    i += 2;
-                } else i += 1;
-            },
-            .single => {
-                if (byte == '\\') i += @min(@as(usize, 2), source.len - i) else {
-                    if (byte == '\'') state = .code;
-                    i += 1;
-                }
-            },
-            .double => {
-                if (byte == '\\') i += @min(@as(usize, 2), source.len - i) else {
-                    if (byte == '"') state = .code;
-                    i += 1;
-                }
-            },
-            .template => {
-                if (byte == '\\') i += @min(@as(usize, 2), source.len - i) else {
-                    if (byte == '`') state = .code;
-                    i += 1;
-                }
-            },
-            .regex => {
-                if (byte == '\\') {
-                    i += @min(@as(usize, 2), source.len - i);
-                } else {
-                    if (byte == '[') state = .regex_class else if (byte == '/') state = .code;
-                    i += 1;
-                }
-            },
-            .regex_class => {
-                if (byte == '\\') {
-                    i += @min(@as(usize, 2), source.len - i);
-                } else {
-                    if (byte == ']') state = .regex;
-                    i += 1;
-                }
-            },
-            .code => {
-                if (byte == '/' and i + 1 < source.len and source[i + 1] == '/') {
-                    state = .line_comment;
-                    i += 2;
-                    continue;
-                }
-                if (byte == '/' and i + 1 < source.len and source[i + 1] == '*') {
-                    state = .block_comment;
-                    i += 2;
-                    continue;
-                }
-                if (byte == '/' and startsRegexLiteral(source, i)) {
-                    state = .regex;
-                    i += 1;
-                    continue;
-                }
-                if (byte == '\'') {
-                    state = .single;
-                    i += 1;
-                    continue;
-                }
-                if (byte == '"') {
-                    state = .double;
-                    i += 1;
-                    continue;
-                }
-                if (byte == '`') {
-                    state = .template;
-                    i += 1;
-                    continue;
-                }
-                if (byte == '{') {
-                    depth += 1;
-                    i += 1;
-                    continue;
-                }
-                if (byte == '}') {
-                    depth -|= 1;
-                    i += 1;
-                    continue;
-                }
-                if (depth == 0 and (std.ascii.isAlphabetic(byte) or byte == '_' or byte == '$')) {
-                    const start = i;
-                    i += 1;
-                    while (i < source.len and (std.ascii.isAlphanumeric(source[i]) or source[i] == '_' or source[i] == '$')) i += 1;
-                    const token = source[start..i];
-                    if (expect_name) {
-                        if (std.mem.eql(u8, token, symbol)) return true;
-                        expect_name = false;
-                    } else if (std.mem.eql(u8, token, "const") or std.mem.eql(u8, token, "let") or std.mem.eql(u8, token, "function") or std.mem.eql(u8, token, "class") or std.mem.eql(u8, token, "type") or std.mem.eql(u8, token, "interface") or std.mem.eql(u8, token, "enum")) {
-                        expect_name = true;
-                    }
-                    continue;
-                }
-                i += 1;
-            },
-        }
-    }
-    return false;
-}
-
-fn startsRegexLiteral(source: []const u8, slash: usize) bool {
-    var index = slash;
-    while (index > 0) {
-        index -= 1;
-        if (std.ascii.isWhitespace(source[index])) continue;
-        return std.mem.indexOfScalar(u8, "=(:,[!&|?{;", source[index]) != null;
-    }
-    return true;
 }
 
 fn checkDocsPolicy(ctx: *Context, failures: *std.ArrayList(Failure)) !void {
@@ -1544,9 +1424,7 @@ const FixtureMutation = enum {
     link_line_anchor,
     missing_zig_symbol,
     nested_zig_symbol,
-    missing_ts_symbol,
-    nested_ts_symbol,
-    regex_ts_symbol,
+    ts_symbol,
     strict_undeclared_document,
     missing_marker,
     duplicate_marker,
@@ -1590,9 +1468,7 @@ const rejection_scenarios = [_]RejectionScenario{
     .{ .mutation = .link_line_anchor, .kind = .line_anchor, .diagnostic = "spine[line_anchor]: docs/solutions/note.md anchors ../../src/main.zig:1-2 by line; replace it with a file or #symbol reference\n" },
     .{ .mutation = .missing_zig_symbol, .kind = .symbol_anchor, .diagnostic = "spine[symbol_anchor]: docs/solutions/note.md anchors src/main.zig#missing, but src/main.zig declares no missing; use a current top-level declaration\n" },
     .{ .mutation = .nested_zig_symbol, .kind = .symbol_anchor, .diagnostic = "spine[symbol_anchor]: docs/solutions/note.md anchors src/main.zig#nested, but src/main.zig declares no nested; use a current top-level declaration\n" },
-    .{ .mutation = .missing_ts_symbol, .kind = .symbol_anchor, .diagnostic = "spine[symbol_anchor]: docs/solutions/note.md anchors src/handler.ts#missing, but src/handler.ts declares no missing; use a current top-level declaration\n" },
-    .{ .mutation = .nested_ts_symbol, .kind = .symbol_anchor, .diagnostic = "spine[symbol_anchor]: docs/solutions/note.md anchors src/handler.ts#nestedTs, but src/handler.ts declares no nestedTs; use a current top-level declaration\n" },
-    .{ .mutation = .regex_ts_symbol, .kind = .symbol_anchor, .diagnostic = "spine[symbol_anchor]: docs/solutions/note.md anchors src/handler.ts#invented, but src/handler.ts declares no invented; use a current top-level declaration\n" },
+    .{ .mutation = .ts_symbol, .kind = .symbol_anchor, .diagnostic = "spine[symbol_anchor]: docs/solutions/note.md anchors src/handler.ts#handler, but only Zig files take a #symbol anchor; reference the file or a Zig declaration\n" },
     .{ .mutation = .strict_undeclared_document, .kind = .docs_policy, .diagnostic = "spine[docs_policy]: UNDECLARED.md is tracked but undeclared; add it as an authority, area, solution, or vendored path\n" },
     .{ .mutation = .missing_marker, .kind = .generated_markers, .diagnostic = "spine[generated_markers]: AGENTS.md needs one ordered complete pair for each generated areas and gates block; repair the markers\n" },
     .{ .mutation = .duplicate_marker, .kind = .generated_markers, .diagnostic = "spine[generated_markers]: AGENTS.md needs one ordered complete pair for each generated areas and gates block; repair the markers\n" },
@@ -1841,12 +1717,7 @@ fn writeCommandFixture(io: std.Io, tmp: *std.testing.TmpDir, safe_approval: bool
     try tmp.dir.writeFile(io, .{ .sub_path = "build.zig", .data = "pub fn build() void {}\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "tasks.txt", .data = "verify\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "pub fn main() void { const nested = 1; _ = nested; }\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "src/handler.ts", .data =
-        \\const pattern = /export const invented = 1/;
-        \\export const handler = () => 1;
-        \\function outer() { const nestedTs = 1; return nestedTs; }
-        \\
-    });
+    try tmp.dir.writeFile(io, .{ .sub_path = "src/handler.ts", .data = "export const handler = () => 1;\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "AGENTS.md", .data =
         \\# Fixture
         \\
@@ -1989,9 +1860,7 @@ fn applyFixtureMutation(
         .link_line_anchor,
         .missing_zig_symbol,
         .nested_zig_symbol,
-        .missing_ts_symbol,
-        .nested_ts_symbol,
-        .regex_ts_symbol,
+        .ts_symbol,
         => try writeMutatedSolution(io, tmp, mutation),
         .missing_marker, .duplicate_marker, .reversed_marker, .crossing_markers => try writeMutatedRoot(io, tmp, mutation),
         .deleted_tracked_paths => {
@@ -2069,9 +1938,7 @@ fn writeMutatedSolution(io: std.Io, tmp: *std.testing.TmpDir, mutation: FixtureM
         .link_line_anchor => "Uses [main](../../src/main.zig:1-2).\n",
         .missing_zig_symbol => "Uses `src/main.zig#missing`.\n",
         .nested_zig_symbol => "Uses `src/main.zig#nested`.\n",
-        .missing_ts_symbol => "Uses `src/handler.ts#missing`.\n",
-        .nested_ts_symbol => "Uses `src/handler.ts#nestedTs`.\n",
-        .regex_ts_symbol => "Uses `src/handler.ts#invented`.\n",
+        .ts_symbol => "Uses `src/handler.ts#handler`.\n",
         else => "Fixture note.\n",
     };
     var source: std.Io.Writer.Allocating = .init(std.testing.allocator);
