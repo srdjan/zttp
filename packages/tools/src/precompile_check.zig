@@ -70,7 +70,8 @@ pub const CheckResult = struct {
     exhaustive_returns: bool = false,
     results_safe: bool = false,
     optionals_safe: bool = false,
-    state_isolated: bool = true,
+    /// Set only by the verifier. A file with no handler never runs it.
+    state_isolated: bool = false,
     no_unreachable: bool = true,
     paths_enumerated: u32 = 0,
     paths_exhaustive: bool = false,

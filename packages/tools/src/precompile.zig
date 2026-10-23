@@ -5938,6 +5938,22 @@ test "compileHandler projects verifier properties only when verification runs" {
     try std.testing.expect(props.optional_safe);
 }
 
+test "check without a handler does not claim state isolation" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const greeting: string = "hi";
+        \\function helper(): string { return greeting; }
+        \\
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "lib.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+
+    try std.testing.expect(!result.verify_ran);
+    try std.testing.expect(!result.state_isolated);
+    const props = (result.contract orelse return error.TestUnexpectedResult).properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!props.state_isolated);
+}
+
 test "compileHandler claims state isolation only when the verifier ran and found no module mutation" {
     const allocator = std.testing.allocator;
     const source =
@@ -8495,10 +8511,10 @@ test "CHECK preserves legacy preparation diagnostics and recovery boundaries" {
     const CompatibilityStage = enum { strip, parse, contract_without_handler, contract };
     const proof_suggestion =
         "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, " ++
-        "but it does not hold: cost_bounded, deterministic, fault_covered, idempotent, optional_safe, result_safe. " ++
+        "but it does not hold: cost_bounded, deterministic, fault_covered, idempotent, optional_safe, result_safe, state_isolated. " ++
         "Return a narrow Proof capsule with only the properties it holds, e.g. " ++
         "`function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | " ++
-        "\"state_isolated\" | \"pure\" | \"stateless\" | \"no_secret_leakage\" | " ++
+        "\"pure\" | \"stateless\" | \"no_secret_leakage\" | " ++
         "\"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | " ++
         "\"injection_safe\" | \"canonical\">`.";
     const compatibility_cases = [_]struct {
@@ -9824,7 +9840,7 @@ test "CHECK preserves predicate marker classification" {
                 .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
                 .line = 1,
                 .column = 1,
-                .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: cost_bounded, deterministic, fault_covered, idempotent, optional_safe, result_safe. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\">`.",
+                .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: cost_bounded, deterministic, fault_covered, idempotent, optional_safe, result_safe, state_isolated. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"pure\" | \"stateless\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\">`.",
             },
         },
     };
@@ -10032,10 +10048,10 @@ test "CHECK preserves repeated global declaration bindings" {
     };
     const proof_suggestion =
         "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, " ++
-        "but it does not hold: cost_bounded, deterministic, fault_covered, idempotent, optional_safe, result_safe. " ++
+        "but it does not hold: cost_bounded, deterministic, fault_covered, idempotent, optional_safe, result_safe, state_isolated. " ++
         "Return a narrow Proof capsule with only the properties it holds, e.g. " ++
         "`function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | " ++
-        "\"state_isolated\" | \"pure\" | \"stateless\" | \"no_secret_leakage\" | " ++
+        "\"pure\" | \"stateless\" | \"no_secret_leakage\" | " ++
         "\"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | " ++
         "\"injection_safe\" | \"canonical\">`.";
     const cases = [_]struct {
