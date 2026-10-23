@@ -37,7 +37,8 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
     const kernel_safety = ctx.addGate(&.{ "/bin/bash", "scripts/check-kernel-safety.sh" }, "test-kernel-safety", "Check local runtime safety in the acceptance kernel");
     kernel_safety.run.has_side_effects = true;
 
-    // A ReleaseFast root disables safety in imported modules on Zig 0.16.0.
+    // A ReleaseFast root disabled safety in imported modules when measured on
+    // Zig 0.16.0; this probe checks the local setting on the current toolchain.
     // The function-local setting in safety.check must still turn a failed
     // invariant into a panic with a stable diagnostic.
     const kernel_safety_probe_mod = b.createModule(.{

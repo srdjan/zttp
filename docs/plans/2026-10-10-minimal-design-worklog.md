@@ -1,6 +1,6 @@
 # Minimal design implementation worklog
 
-The user authorized the full scope of `2026-10-08-minimal-design-audit.md`.
+The user authorized the full scope of `pre-round-3-archive:docs/plans/2026-10-08-minimal-design-audit.md`.
 The user paused the work on October 9 and resumed it on October 10.
 The resumed baseline was clean local `main` at `7912bb56`.
 

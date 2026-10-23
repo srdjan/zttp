@@ -1,6 +1,6 @@
 # Coupling census worklog
 
-This file records the counts, classifications, probes, and gate exit statuses for each unit of the [coupling census plan](2026-10-22-coupling-census-plan.md).
+This file records the counts, classifications, probes, and gate exit statuses for each unit of the coupling census plan (`pre-round-3-archive:docs/plans/2026-10-22-coupling-census-plan.md`).
 
 All builds used a private cache under `/private/tmp/claude-501/zcache-u1/` with `DEEPSEEK_API_KEY` unset. Logs are in `/private/tmp/claude-501/u1logs/`. Each exit status was read directly from the build command.
 
@@ -77,7 +77,7 @@ Probes, each reverted afterwards (`grep -c probe_flag` gives 0 in both files):
 
 ### The spine failure is outside U1
 
-`check-spine` prints 35 `spine[line_anchor]` messages. Every message names `docs/plans/2026-10-22-coupling-census-plan.md`, which anchors source files by line number (for example `review.zig`). The spine rejects line anchors and asks for a file or `#symbol` reference. The plan document came in with commit 74ce28cc, after the baseline at 0d4866c8 where `check-spine` passed. `test-spine` fails for the same reason, because its probe runs the check on the repository. U1 does not edit the plan except for one Progress row, and the worklog uses no line anchors. I did not rewrite the anchors. The lead owns that decision. All other steps of `zig build test` passed, including `test-proof-swallow` and `test-module-boundary`.
+`check-spine` prints 35 `spine[line_anchor]` messages. Every message names `pre-round-3-archive:docs/plans/2026-10-22-coupling-census-plan.md`, which anchors source files by line number (for example `review.zig`). The spine rejects line anchors and asks for a file or `#symbol` reference. The plan document came in with commit 74ce28cc, after the baseline at 0d4866c8 where `check-spine` passed. `test-spine` fails for the same reason, because its probe runs the check on the repository. U1 does not edit the plan except for one Progress row, and the worklog uses no line anchors. I did not rewrite the anchors. The lead owns that decision. All other steps of `zig build test` passed, including `test-proof-swallow` and `test-module-boundary`.
 
 ### U1 lead verification
 

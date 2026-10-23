@@ -316,7 +316,7 @@ fn cmdBuild(ctx: cli_help.Ctx) anyerror!void {
 }
 
 fn cmdLedger(ctx: cli_help.Ctx) anyerror!void {
-    // Session ledger management (list, resume, export, replay). Lives only
+    // Session ledger commands (export, replay, stats). Lives only
     // in the developer CLI; the pi-free `zts` analyzer binary does not
     // carry it.
     try pi_app.runLedgerCommand(ctx.allocator, ctx.args);
@@ -455,7 +455,7 @@ const commands = [_]cli_help.Command{
     .{ .name = "test", .run = cmdTest, .section = .core, .args = "[tests.jsonl]", .blurb = "Run handler tests" },
     .{ .name = "compile", .run = cmdCompile, .section = .package, .args = "<handler.ts> -o <bin>", .blurb = "Build a binary from an explicit path" },
     .{ .name = "build", .run = cmdBuild, .section = .package, .args = "[-o <bin>]", .blurb = "Emit a self-contained binary" },
-    .{ .name = "ledger", .run = cmdLedger, .section = .proof_ledger, .args = "[export|replay]", .blurb = "Export or replay an expert-session verified-patch ledger" },
+    .{ .name = "ledger", .run = cmdLedger, .section = .proof_ledger, .args = "[export|replay|stats]", .blurb = "Export, replay, or summarize expert-session verified-patch ledgers" },
     .{ .name = "expert", .run = cmdExpert, .section = .core, .blurb = "Interactive compiler-in-the-loop agent", .injects_stored_providers = true },
     .{ .name = "deploy", .run = cmdDeploy, .section = .core, .blurb = "Build, prove, deploy (local default)" },
     .{ .name = "verify", .run = cmdVerify, .section = .proof_ledger, .args = "<url>", .blurb = "Verify a deployed proof receipt" },

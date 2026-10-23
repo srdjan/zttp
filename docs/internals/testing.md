@@ -269,7 +269,7 @@ source that differs. It also rejects a missing, malformed, or stale marker.
 
 ## What `zig build test` Excludes
 
-Three build steps:
+Ten build steps run only under `scripts/verify.sh`:
 
 - **`test-zruntime`**, the `zruntime_tests.zig` root. See the next section.
 - **`test-module-scope-panic`**, a focused executable that proves authorization
@@ -277,12 +277,22 @@ Three build steps:
 - **`test-panic-isolation`**, an end-to-end script that needs the installed
   `zttp` binary, so it depends on the install step rather than on a test root.
   This step also depends on `test-module-scope-panic`.
+- **`smoke-v1`**, a build step that runs the v1 user flow in a temporary
+  directory.
+- **Six single-script drift gates**, each its own build step that starts one
+  script: `test-idiom-table`, `test-canonical-style`, `test-grammar-drift`,
+  `test-decision-registry`, `test-meta-drift`, and `test-agent-determinism`.
+  The table below lists what each asserts.
 
-Everything driven by a shell script rather than a build step is also outside
-it: `smoke-v1`, `scripts/test-install-archive-safety.sh`,
-`scripts/check-semantics-spec.sh`, `zts module-spec-render --check`, the
-policy-hash and expert-subsystem assertions, and `zig fmt --check`.
-`scripts/verify.sh` runs all of them.
+Four scripts and two commands run only under `scripts/verify.sh`, with no
+build step of their own: `scripts/check-normalize-idempotent.sh`,
+`scripts/check-semantics-spec.sh`, `scripts/test-install-archive-safety.sh`,
+and `scripts/test-release-notes.sh` (release routes only), plus
+`zts module-spec-render --check`, the policy-hash and expert-subsystem
+assertions, and `zig fmt --check`. The release routes also run
+`release-provenance`, `smoke-getting-started`, `release-check`, and
+`bench-check`. `tooling/verification_routes.zig` is the list that
+`scripts/verify.sh` follows.
 
 `scripts/test-examples.sh` used to be on that list and is not any more. Being
 driven by a shell script is a reason to wire the script into the build graph,
@@ -341,7 +351,7 @@ built binary. `scripts/verify.sh` runs the same seven:
 | `check-canonical-style.sh` | every ZTS code the `canonical-style` skill cites exists, and each labelled "before" snippet contains that rule's own `rule_registry` example (source-only; no binary needed) |
 | `check-grammar-drift.sh` | spec section 8's productions match `grammar_registry.zig` in document order |
 | `check-decision-registry.sh` | every decision kind `meta` publishes is emitted somewhere |
-| `check-meta-drift.sh` | the six registry hashes `meta` publishes match their pins |
+| `check-meta-drift.sh` | the core profile id and the five registry hashes `meta` publishes match their pins |
 | `check-agent-determinism.sh` | the same request twice produces identical bytes |
 
 Each carries a floor on its own input, because a gate whose corpus is empty or
@@ -440,9 +450,9 @@ census requires every `ReasonCode` member to be named inside a kernel test
 block, or to carry a row in the script that states why no input produces it.
 
 `zig build test-kernel-safety` keeps runtime safety on in the kernel inside
-ReleaseFast release binaries. On Zig 0.16.0 a dependency module's optimize
-mode does not isolate safety from the root module, so every non-test kernel
-function begins with `@setRuntimeSafety(true)`. The gate parses each kernel file.
+ReleaseFast release binaries. A dependency module's optimize mode did not
+isolate safety from the root module when measured on Zig 0.16.0, so every
+non-test kernel function begins with `@setRuntimeSafety(true)`. The gate parses each kernel file.
 It fails when a function omits that first statement. It also refuses
 `std.debug.assert` or `@setRuntimeSafety(false)` outside a test.
 Its floors are 13 files and 248 non-test functions.

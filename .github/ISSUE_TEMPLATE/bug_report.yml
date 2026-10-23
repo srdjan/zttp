@@ -12,7 +12,7 @@ body:
     attributes:
       label: Version
       description: Output of `zttp version`, or the git commit / binary hash.
-      placeholder: "zttp 0.16.0-rc2"
+      placeholder: "zttp 0.24.0"
     validations:
       required: true
   - type: input

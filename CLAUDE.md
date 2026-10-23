@@ -11,12 +11,12 @@ deferred from this beta.
 
 ## Build & Run
 
-Validated on Zig 0.16.0 stable. The build produces three binaries: `zttp` (developer CLI and local runtime entry point), `zttp-runtime` (internal runtime template wrapped by self-contained outputs), and `zts` (pi-free analyzer CLI for IDE and CI integrations).
+Validated on Zig 0.17.0 stable. The build produces three binaries: `zttp` (developer CLI and local runtime entry point), `zttp-runtime` (internal runtime template wrapped by self-contained outputs), and `zts` (pi-free analyzer CLI for IDE and CI integrations).
 
 ```bash
 zig build                                            # Debug build (all three binaries)
 zig build test                                       # Bulk unit suite (excludes zruntime root, smoke, panic-isolation)
-bash scripts/verify.sh                               # Full local gate mirroring CI, including zig fmt --check
+bash scripts/verify.sh                               # Full local gate, including zig fmt --check
 zig build run -- examples/handler/handler.ts -p 3000 # Run zttp
 ```
 
@@ -29,7 +29,7 @@ Release builds, handler precompilation (`-Dhandler` with `-Dverify` and `-Dcontr
 `zttp verify <url>` verifies provenance for a signed live-endpoint claim. It is
 distinct from `zttp proofs verify <bundle-dir>`, which checks bundle integrity
 and, when the artifact carries a certificate, runs semantic acceptance against
-the artifact itself. `edge` is compiled out by default. Hosted
+the artifact itself. `edge` is removed. Hosted
 cloud deploy and the account verbs are deferred from this beta; hosted
 control-plane, registry, and OCI image orchestration are out of core.
 

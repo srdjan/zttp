@@ -10,7 +10,7 @@ the validation of U2 and U3.
 | Document | Content |
 |---|---|
 | [Completeness audit](2026-10-21-completeness-audit.md) | About 100 findings from four research agents, with a Fable validation verdict for each finding (section H) |
-| [Quick-fixes plan](2026-10-21-quick-fixes-plan.md) | Plan for Q1 to Q3, with the codex corrections |
+| Quick-fixes plan (`pre-round-3-archive:docs/plans/2026-10-21-quick-fixes-plan.md`) | Plan for Q1 to Q3, with the codex corrections |
 | [Soundness plan](2026-10-21-soundness-plan.md) | Plan for U6 and U1 (with the codex corrections), and the full U2 and U3 specification |
 
 The audit cites probe files under a session scratchpad directory. That

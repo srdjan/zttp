@@ -117,7 +117,7 @@ const help_all_mid =
     \\
     \\Proof ledger:
     \\  zttp proofs [list|show|diff|watch|export|badge|bundle|verify|gate]
-    \\  zttp ledger [export|replay]          Export or replay an expert-session verified-patch ledger
+    \\  zttp ledger [export|replay|stats]    Export, replay, or summarize expert-session verified-patch ledgers
     \\  zttp verify <url>                    Verify a deployed proof receipt
     \\
     \\Credentials:

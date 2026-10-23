@@ -1661,12 +1661,11 @@ pub const NormalizeOptions = struct {
     /// Run the canonical formatter over the rewrite fixed point.
     ///
     /// A caller that presents the result as its own edit turns this off. The
-    /// pi veto's salvage-on-reject is that caller: it normalizes only a
-    /// would-be-reject and writes the result back as the model's edit, so with
-    /// layout on, one `let` the model should have written `const` came back as
-    /// a whole-file reindent. Its own comment calls the salvage surgical, and
-    /// the guard it uses to detect one - the bytes changed - is true for
-    /// almost every file once layout runs.
+    /// aggregate proof gate in `packages/pi` is that caller: it normalizes a
+    /// candidate and writes the result back as the model's edit, so with layout
+    /// on, one `let` the model should have written `const` came back as a
+    /// whole-file reindent. The check it uses to detect a rewrite - the bytes
+    /// changed - is true for almost every file once layout runs.
     layout: bool = true,
 };
 
@@ -3097,9 +3096,9 @@ test "normalizeSource: ternary with a relational condition parenthesizes the who
 }
 
 test "layout off returns the rewrite fixed point in the author's whitespace" {
-    // The pi veto writes this result back as the model's own edit, so a
-    // salvage that reindented the file would land a whole-file diff for one
-    // rewritten token.
+    // The aggregate proof gate writes this result back as the model's own
+    // edit, so a rewrite that reindented the file would land a whole-file diff
+    // for one rewritten token.
     const allocator = std.testing.allocator;
     const source =
         \\function handler(req: Request): Response {

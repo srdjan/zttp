@@ -135,9 +135,9 @@ pub fn init(b: *std.Build) Context {
     };
 
     // Consumer acceptance kernel. Each function enables runtime safety with
-    // @setRuntimeSafety(true), enforced by test-kernel-safety. On Zig 0.16.0,
-    // a dependency module's optimize mode does not isolate runtime safety
-    // from a ReleaseFast root module.
+    // @setRuntimeSafety(true), enforced by test-kernel-safety. A dependency
+    // module's optimize mode did not isolate runtime safety from a ReleaseFast
+    // root module when measured on Zig 0.16.0.
     const proof_checker_dep = b.dependency("zttp_proof_checker", .{
         .target = target,
         .optimize = optimize,

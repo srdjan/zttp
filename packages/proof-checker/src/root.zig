@@ -11,8 +11,9 @@
 //! enforcement, isolation, and every request-time check.
 //!
 //! Every production function enables runtime safety in its own body. A module
-//! optimization mode does not isolate runtime safety from a ReleaseFast root
-//! module on Zig 0.16.0. The kernel safety gate enforces this local setting.
+//! optimization mode did not isolate runtime safety from a ReleaseFast root
+//! module when measured on Zig 0.16.0. The kernel safety gate enforces this
+//! local setting.
 
 pub const capability_policy = @import("capability_policy.zig");
 pub const certificate = @import("certificate.zig");

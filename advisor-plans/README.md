@@ -17,7 +17,7 @@ overlapping plans at the same time.
 | [003](003-zttp-zts-simplification-audit.md) | Simplify the zttp and zts foundation | P1 | L | DIRECTION ACCEPTED; preserve features and initial wire formats; shared analysis first |
 | 004 | Share single-module analysis between check and compile (`pre-round-2-archive:advisor-plans/004-shared-analysis-first-unit.md`) | P1 | M | ACCEPTED 2026-10-11; promoted to docs/plans, completed |
 | [005](005-feature-removal-rebase.md) | Remove the features that do not carry the agent-compiler | P1 | XL | Phases 1 to 3 complete; first Phase 4 source unit complete; offline evidence and final release check follow source closure |
-| [006](006-modular-boundaries.md) | Make analysis and runtime ownership explicit | P1 | L | COMPLETE 2026-10-22; five phases reviewed, aggregate/full gate passed; isolated `codex/modular-boundaries` worktree |
+| 006 (`pre-round-3-archive:advisor-plans/006-modular-boundaries.md`) | Make analysis and runtime ownership explicit | P1 | L | COMPLETE 2026-10-22; five phases reviewed, aggregate/full gate passed; isolated `codex/modular-boundaries` worktree |
 
 Plan 002's cutover half is superseded: the default provider moved to DeepSeek on
 2026-08-14. Its measurement half stands, and the local corpus is still parked at

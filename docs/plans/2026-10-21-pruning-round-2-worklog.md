@@ -1,6 +1,6 @@
 # Pruning round 2 worklog
 
-Plan: [pruning round 2](2026-10-21-pruning-round-2-plan.md).
+Plan: pruning round 2 (`pre-round-3-archive:docs/plans/2026-10-21-pruning-round-2-plan.md`).
 The owner approved implementation of U1 to U17 (decision 6, option A) on 2026-10-21 with "yes".
 
 ## Baseline

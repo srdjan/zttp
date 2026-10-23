@@ -120,7 +120,7 @@ Edit sites: `packages/zts/src/contracts_root.zig`, `packages/zts/src/root.zig`, 
 
 Delete: `packages/pi/src/expert_reach_main.zig`, `expert_reach_report.zig`, `expert_reach_corpus.zig`, `expert_reach.zig`, `expert_reach_tests.zig`, `docs/provable-reach.json`, `packages/pi/src/rpc_mode.zig`, `--mode rpc`.
 Keep `docs/provable-reach.md` as the M3 record. Retarget its JSON links at lines 8 and 178 to `pre-rebase:docs/provable-reach.json`.
-Edit sites: `build/tooling.zig` (`provable-reach`), `build/host_tests.zig` (`test-provable-reach`), `scripts/manual-steps.allow`, `packages/pi/src/tests.zig`, `packages/pi/src/app.zig`, `cli_help.zig`, `packages/pi/README.md`, `docs/internals/testing.md`, `docs/plans/2026-10-08-minimal-design-audit.md:261`, two solution docs that cite reach files (`a-dispatched-route-was-never-walked-so-its-leak-proved-clean.md:60`).
+Edit sites: `build/tooling.zig` (`provable-reach`), `build/host_tests.zig` (`test-provable-reach`), `scripts/manual-steps.allow`, `packages/pi/src/tests.zig`, `packages/pi/src/app.zig`, `cli_help.zig`, `packages/pi/README.md`, `docs/internals/testing.md`, `pre-round-3-archive:docs/plans/2026-10-08-minimal-design-audit.md`, two solution docs that cite reach files (`a-dispatched-route-was-never-walked-so-its-leak-proved-clean.md:60`).
 
 ### G12 SMT layer and z3
 

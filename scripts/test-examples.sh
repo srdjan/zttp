@@ -145,8 +145,8 @@ echo "Suites: $((PASS + FAIL)) total, $PASS passed, $FAIL failed"
 # refactor that drops calls - or an examples/ tree that loses files - leaves
 # this script printing "Suites: 0 total, 0 passed, 0 failed" and exiting 0,
 # which reads as coverage. The number is a backstop against an emptied run and
-# not a target: set well under the current count so adding a suite never has to
-# move it, and a deletion of any real fraction of them does.
+# not a target: it equals the current count, so a deleted suite fails the floor.
+# Adding a suite leaves the run passing; raise the floor by hand to keep it exact.
 # The unfiltered retained example suite measured 33 passing suites in Phase 3; tests/validate added the 34th.
 MIN_SUITES=34
 if [ "$((PASS + FAIL))" -lt "$MIN_SUITES" ]; then
