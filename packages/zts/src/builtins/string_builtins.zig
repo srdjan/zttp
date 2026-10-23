@@ -41,7 +41,6 @@ fn utf16CodeUnitAt(data: []const u8, target_idx: u32) ?u16 {
 fn stringIsAscii(this: value.JSValue) bool {
     if (this.isString()) return this.toPtr(string.JSString).flags.is_ascii;
     if (this.isStringSlice()) return this.toPtr(string.SliceString).flags.is_ascii;
-    if (this.isRope()) return this.toPtr(string.RopeNode).flags.is_ascii;
     return false;
 }
 
@@ -65,12 +64,8 @@ fn utf16SliceByteOffsets(data: []const u8, is_ascii: bool, start_units: u32, end
 /// String.prototype.length - Get string length
 pub fn stringLength(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = args;
-    // ASCII fast path: UTF-16 code units equal byte length, so stay O(1) and
-    // avoid flattening concat ropes.
+    // ASCII fast path: UTF-16 code units equal byte length, so stay O(1).
     if (stringIsAscii(this)) {
-        if (this.isRope()) {
-            return value.JSValue.fromInt(@intCast(this.toPtr(string.RopeNode).total_len));
-        }
         if (getStringDataCtx(this, ctx)) |data| {
             return value.JSValue.fromInt(@intCast(data.len));
         }
@@ -282,7 +277,7 @@ pub fn stringIncludes(ctx: *context.Context, this: value.JSValue, args: []const 
 /// String.prototype.slice(start, end?) - Extract substring
 /// Uses zero-copy SliceString for substrings >= 16 bytes
 pub fn stringSlice(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    // Get data from any string type (flatten ropes if needed)
+    // Get data from any string type
     const data = getStringDataCtx(this, ctx) orelse return value.JSValue.undefined_val;
 
     // Indices are UTF-16 code units. For ASCII the count equals the byte length
@@ -365,7 +360,7 @@ pub fn stringSlice(ctx: *context.Context, this: value.JSValue, args: []const val
 /// String.prototype.substring(start, end?) - Extract substring
 /// Uses zero-copy SliceString for substrings >= 16 bytes
 pub fn stringSubstring(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    // Get data from any string type (flatten ropes if needed)
+    // Get data from any string type
     const data = getStringDataCtx(this, ctx) orelse return value.JSValue.undefined_val;
 
     // Indices are UTF-16 code units. For ASCII the count equals the byte length
@@ -680,16 +675,12 @@ pub fn stringConcat(ctx: *context.Context, this: value.JSValue, args: []const va
     // Fast path: no args, return this
     if (args.len == 0) return this;
 
-    // Get this as string (handle all string types: JSString, SliceString, Rope)
+    // Get this as string (handle all string types: JSString, SliceString)
     const this_str: *const string.JSString = blk: {
         if (this.isString()) break :blk this.toPtr(string.JSString);
         if (this.isStringSlice()) {
             const slice = this.toPtr(string.SliceString);
             break :blk slice.flatten(allocator) catch return this;
-        }
-        if (this.isRope()) {
-            const rope = this.toPtr(string.RopeNode);
-            break :blk rope.flatten(allocator) catch return this;
         }
         return this;
     };
@@ -706,10 +697,6 @@ pub fn stringConcat(ctx: *context.Context, this: value.JSValue, args: []const va
         } else if (arg.isStringSlice()) {
             const slice = arg.toPtr(string.SliceString);
             const flat = slice.flatten(allocator) catch return this;
-            strings.append(allocator, flat) catch return this;
-        } else if (arg.isRope()) {
-            const rope = arg.toPtr(string.RopeNode);
-            const flat = rope.flatten(allocator) catch return this;
             strings.append(allocator, flat) catch return this;
         }
     }
@@ -780,7 +767,7 @@ pub fn stringConstructor(ctx: *context.Context, this: value.JSValue, args: []con
     }
     const val = args[0];
 
-    // String(s) on a value that is already a string (flat, slice, or rope)
+    // String(s) on a value that is already a string (flat or slice)
     // returns it unchanged - no allocation or copy, matching JS semantics.
     if (val.isAnyString()) return val;
 

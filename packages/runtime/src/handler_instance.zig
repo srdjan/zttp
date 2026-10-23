@@ -1644,7 +1644,7 @@ pub const HandlerInstance = struct {
     }
 
     /// Set a response body from any JS string value. A genuine flat JSString can
-    /// be borrowed (pinned via its pointer); a rope/slice is flattened (into the
+    /// be borrowed (pinned via its pointer); a slice is flattened (into the
     /// request arena) and copied, since there is no JSString handle to borrow.
     fn setResponseBody(self: *Self, response: *HttpResponse, val: zq.JSValue, borrow_body: bool) !void {
         if (val.isString()) {
@@ -1660,7 +1660,7 @@ pub const HandlerInstance = struct {
     }
 
     /// Put a response header whose value is any JS string. Flat strings keep the
-    /// borrow fast path; rope/slice values are flattened and copied.
+    /// borrow fast path; slice values are flattened and copied.
     fn putResponseHeader(self: *Self, response: *HttpResponse, name: []const u8, val: zq.JSValue, borrow_body: bool) !void {
         if (val.isString()) {
             const str = val.toPtr(zq.JSString);
@@ -1678,7 +1678,7 @@ pub const HandlerInstance = struct {
         var response = HttpResponse.init(self.allocator);
 
         if (!result.isObject()) {
-            // If result is any string (flat, slice, or concat rope), use it as
+            // If result is any string (flat or slice), use it as
             // the body (supported return type). getStringDataCtx is non-null for
             // every string kind and null for primitives, which fall through to 500.
             if (getStringDataCtx(result, self.ctx) != null) {

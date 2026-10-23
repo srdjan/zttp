@@ -703,21 +703,15 @@ pub const Context = struct {
 
     /// JIT helper: get element by index
     /// Intern a computed string property key into an Atom (flat/slice borrowed
-    /// directly, multi-leaf rope flattened to a temporary). Mirrors the
+    /// directly). Mirrors the
     /// interpreter's helper so JIT and interpreter agree on `obj[stringKey]`.
     /// Intern a computed string property key into an Atom (flat/slice borrowed
-    /// directly, multi-leaf rope flattened to a temporary). Single source of
+    /// directly). Single source of
     /// truth shared by the interpreter dispatch loop and the JIT helpers so
     /// `obj[stringKey]` resolves identically in both tiers.
     pub fn internComputedKey(self: *Context, key_val: value.JSValue) ?object.Atom {
         if (key_val.stringBytes()) |bytes| {
             return self.atoms.intern(bytes) catch null;
-        }
-        if (key_val.isRope()) {
-            const rope = key_val.toPtr(string.RopeNode);
-            const flat = rope.flatten(self.allocator) catch return null;
-            defer string.freeString(self.allocator, flat);
-            return self.atoms.intern(flat.data()) catch null;
         }
         return null;
     }

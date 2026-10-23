@@ -21,8 +21,8 @@
 //!
 //! The corpus is restricted to integer / boolean / numeric-overflow results.
 //! String results are intentionally excluded from RAW comparison: comparing
-//! them safely needs the ctx-bound rope/slice flatten path (a raw
-//! toPtr(JSString) cast is unsound on slices and ropes). String-PRODUCING
+//! them safely needs the ctx-bound slice flatten path (a raw
+//! toPtr(JSString) cast is unsound on slices). String-PRODUCING
 //! opcodes are still covered by a dedicated gate below that reduces every
 //! string result to a boolean inside the VM (strict_eq against an expected
 //! constant), so no tier's string output is ever inspected via raw casts here.

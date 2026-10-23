@@ -17,7 +17,7 @@ pub const MemTag = enum(u4) {
     byte_array = 6,
     varref = 7,
     symbol = 8,
-    rope = 9, // Rope node for O(1) string concatenation
+    // 9 reserved: was the rope node. Keep the value out of reuse.
     string_slice = 10, // Zero-copy slice referencing parent string
     // 11-15 reserved for future use
 };

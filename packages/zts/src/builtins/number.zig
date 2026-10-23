@@ -425,43 +425,6 @@ test "globalIsNaN coerces ToNumber; Number.isNaN does not ENG12" {
     try std.testing.expect(numberIsNaN(ctx, undef, &.{value.JSValue.nan_val}).toBoolean());
 }
 
-test "Number() flattens a concat rope into the request arena, not libc" {
-    // A concat rope has no bytes of its own. Coercing it flattens it and caches
-    // the flat string in the rope node, so the flat copy must come from an
-    // allocator whose lifetime covers the rope. Before this was context-aware,
-    // Number/isNaN/isFinite flattened through std.heap.c_allocator and nothing
-    // ever freed the copy: one leak per call, invisible to the testing allocator.
-    const allocator = std.testing.allocator;
-    const gc_mod = @import("../gc.zig");
-    const arena_mod = @import("../arena.zig");
-
-    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
-    defer gc_state.deinit();
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    var req_arena = try arena_mod.Arena.init(allocator, .{ .size = 4096 });
-    defer req_arena.deinit();
-    var hybrid = arena_mod.HybridAllocator{
-        .persistent = allocator,
-        .arena = &req_arena,
-    };
-    ctx.setHybridAllocator(&hybrid);
-
-    const left = string.createStringWithArena(&req_arena, "  12") orelse return error.OutOfMemory;
-    const right = string.createStringWithArena(&req_arena, "34  ") orelse return error.OutOfMemory;
-    const rope = string.createRopeFromStringsWithArena(&req_arena, left, right) orelse return error.OutOfMemory;
-    const rope_val = value.JSValue.fromPtr(rope);
-    try std.testing.expect(rope_val.isRope());
-
-    const undef = value.JSValue.undefined_val;
-    const result = numberConstructor(ctx, undef, &.{rope_val});
-    try std.testing.expectEqual(@as(f64, 1234), result.toNumber() orelse return error.TestUnexpectedResult);
-
-    const flat = rope.asLeaf() orelse return error.TestUnexpectedResult;
-    try std.testing.expect(req_arena.contains(flat));
-}
-
 test "%matchShape tells a record from the other object classes" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

@@ -144,58 +144,28 @@ pub fn getJSString(val: value.JSValue) ?*string.JSString {
     return null;
 }
 
-/// Get string data from any string type (flat string, slice, or rope).
-/// For concat ropes, flattens using the context's arena (if available) or heap allocator.
-/// The flattened result is cached in the rope node for subsequent accesses.
+/// Get string data from any string type (flat string or slice).
 pub fn getStringData(val: value.JSValue) ?[]const u8 {
-    return getStringDataImpl(val, null);
-}
-
-/// Context-aware variant that uses the arena for flattening concat ropes.
-pub fn getStringDataCtx(val: value.JSValue, ctx: *context.Context) ?[]const u8 {
-    return getStringDataImpl(val, ctx);
-}
-
-/// Opaque-pointer variant for callers (e.g. cmp.zig) that cannot import
-/// context.zig without creating a circular dependency. The caller must pass
-/// a *Context cast to *anyopaque; null is treated as no-context (c_allocator
-/// fallback, same as getStringData).
-pub fn getStringDataAnyCtx(val: value.JSValue, ctx: ?*anyopaque) ?[]const u8 {
-    const typed_ctx: ?*context.Context = if (ctx) |c| @ptrCast(@alignCast(c)) else null;
-    return getStringDataImpl(val, typed_ctx);
-}
-
-pub fn getStringDataImpl(val: value.JSValue, ctx: ?*context.Context) ?[]const u8 {
     if (val.isString()) {
         return val.toPtr(string.JSString).data();
     }
     if (val.isStringSlice()) {
         return val.toPtr(string.SliceString).data();
     }
-    if (val.isRope()) {
-        const rope = val.toPtr(string.RopeNode);
-        if (rope.kind == .leaf) {
-            return rope.payload.leaf.data();
-        }
-        // Concat rope: flatten and cache by converting to leaf. Nothing frees
-        // a cached leaf, so with a context the flat copy comes from the
-        // allocator that owns the context's strings, as in
-        // Context.createStringPtr, and never from libc.
-        if (ctx) |c| {
-            const flat = if (c.hybrid) |h|
-                rope.flattenWithArena(h.arena) orelse return null
-            else
-                rope.flatten(c.allocator) catch return null;
-            rope.kind = .leaf;
-            rope.payload = .{ .leaf = flat };
-            return flat.data();
-        }
-        const flat = rope.flatten(std.heap.c_allocator) catch return null;
-        rope.kind = .leaf;
-        rope.payload = .{ .leaf = flat };
-        return flat.data();
-    }
     return null;
+}
+
+/// Same as getStringData. The context parameter is kept so callers stay unchanged.
+pub fn getStringDataCtx(val: value.JSValue, ctx: *context.Context) ?[]const u8 {
+    _ = ctx;
+    return getStringData(val);
+}
+
+/// Opaque-pointer variant for callers (e.g. cmp.zig) that cannot import
+/// context.zig without creating a circular dependency. Same as getStringData.
+pub fn getStringDataAnyCtx(val: value.JSValue, ctx: ?*anyopaque) ?[]const u8 {
+    _ = ctx;
+    return getStringData(val);
 }
 
 /// Get the parent JSString, handling both flat strings and slices.

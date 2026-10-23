@@ -64,19 +64,10 @@ pub fn getStringData(val: zq.JSValue) ?[]const u8 {
     if (val.isStringSlice()) {
         return val.toPtr(zq.string.SliceString).data();
     }
-    if (val.isRope()) {
-        const rope = val.toPtr(zq.string.RopeNode);
-        if (rope.kind == .leaf) {
-            return rope.payload.leaf.data();
-        }
-    }
     return null;
 }
 
-/// Flattening string accessor: like getStringData but materializes a concat
-/// rope (caching it as a leaf). Use at sinks that must accept any JS string,
-/// since a `"a" + b` concatenation of combined length >= 64 is a concat rope
-/// that getStringData reports as null.
+/// Context-aware string accessor. Same as getStringData.
 const getStringDataCtx = zq.builtins.helpers.getStringDataCtx;
 
 pub fn getDynamicProperty(ctx: *zq.Context, obj: *zq.JSObject, pool: *const zq.HiddenClassPool, name: []const u8) ?zq.JSValue {

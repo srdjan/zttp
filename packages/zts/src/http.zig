@@ -500,8 +500,8 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
     // Handle null/undefined
     if (node.isNull() or node.isUndefined()) return;
 
-    // Handle string-like values (flat, rope, slice)
-    if (node.isStringOrRope()) {
+    // Handle string-like values (flat, slice)
+    if (node.isAnyString()) {
         const text = try getStringArgWithCtx(node, ctx);
         try escapeHtml(text, writer);
         return;
@@ -745,7 +745,7 @@ fn isRawTextElement(tag: []const u8) bool {
 fn renderRawChildren(ctx: *context.Context, children: value.JSValue, writer: anytype) !void {
     if (children.isNull() or children.isUndefined()) return;
 
-    if (children.isStringOrRope()) {
+    if (children.isAnyString()) {
         const text = try getStringArgWithCtx(children, ctx);
         try writer.writeAll(text);
         return;
@@ -776,37 +776,12 @@ fn renderRawChildren(ctx: *context.Context, children: value.JSValue, writer: any
 // ============================================================================
 
 fn getStringArgWithCtx(val: value.JSValue, ctx: ?*context.Context) ![]const u8 {
+    _ = ctx;
     if (val.isString()) {
         return val.toPtr(string.JSString).data();
     }
     if (val.isStringSlice()) {
         return val.toPtr(string.SliceString).data();
-    }
-    if (val.isRope()) {
-        const rope = val.toPtr(string.RopeNode);
-        if (rope.kind == .leaf) {
-            return rope.payload.leaf.data();
-        }
-        // Flatten concat rope and cache result. Nothing frees a cached leaf,
-        // so with a context the flat copy comes from the request arena, or
-        // from the context's own allocator when there is no arena or it is
-        // full, and never from libc.
-        if (ctx) |c| {
-            if (c.hybrid) |hybrid| {
-                if (rope.flattenWithArena(hybrid.arena)) |flat| {
-                    rope.kind = .leaf;
-                    rope.payload = .{ .leaf = flat };
-                    return flat.data();
-                }
-            }
-        }
-        const flat = if (ctx) |c|
-            try rope.flatten(c.allocator)
-        else
-            try rope.flatten(std.heap.c_allocator);
-        rope.kind = .leaf;
-        rope.payload = .{ .leaf = flat };
-        return flat.data();
     }
     return "";
 }
@@ -915,19 +890,10 @@ fn writeJson(ctx: *context.Context, val: value.JSValue, writer: *std.Io.Writer, 
         }
     } else if (val.isAnyString()) {
         try writer.writeByte('"');
-        // Handle all string types: flat strings, ropes, and slices
+        // Handle all string types: flat strings and slices
         const data = blk: {
             if (val.isString()) {
                 break :blk val.toPtr(string.JSString).data();
-            } else if (val.isRope()) {
-                const rope = val.toPtr(string.RopeNode);
-                if (ctx.hybrid) |hyb| {
-                    const flat = rope.flattenWithArena(hyb.arena) orelse return RenderError.OutOfMemory;
-                    break :blk flat.data();
-                } else {
-                    const flat = rope.flatten(ctx.allocator) catch return RenderError.OutOfMemory;
-                    break :blk flat.data();
-                }
             } else {
                 // String slice
                 const slice = val.toPtr(string.SliceString);

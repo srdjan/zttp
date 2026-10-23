@@ -9,9 +9,9 @@ extern fn zttpSdkExtractString(val: JSValue, out_ptr: *[*]const u8, out_len: *us
 extern fn zttpSdkCreateString(handle: *ModuleHandle, ptr: [*]const u8, len: usize, out: *JSValue) bool;
 extern fn zttpSdkIsString(val: JSValue) bool;
 
-/// Extract a borrowed string slice from a JSValue. Handles flat, slice,
-/// and leaf rope strings. Returns null for non-string values or
-/// non-flattened concat ropes. Slice is valid for the current call.
+/// Extract a borrowed string slice from a JSValue. Handles flat and slice
+/// strings. Returns null for non-string values.
+/// Slice is valid for the current call.
 pub fn extractString(val: JSValue) ?[]const u8 {
     var ptr: [*]const u8 = undefined;
     var len: usize = 0;

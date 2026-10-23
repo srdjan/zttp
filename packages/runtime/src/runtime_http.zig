@@ -71,11 +71,8 @@ fn effectiveOutboundTimeoutMs(rt: View) u32 {
 }
 const natives = @import("runtime_natives.zig");
 pub const getStringData = natives.getStringData;
-// Context-aware string accessor that flattens concat ropes into the request
-// arena. The local natives.getStringData only handles flat strings, slices, and
-// already-flattened (.leaf) ropes — it returns null for a concat rope, which is
-// what string concatenation (>= 64 bytes) produces. Response extraction must use
-// this flattening variant or it silently drops rope/slice bodies and headers.
+// Context-aware string accessor for flat and slice strings. Response extraction
+// uses it so slice bodies and headers are not dropped.
 const getStringDataCtx = zq.builtins.helpers.getStringDataCtx;
 const getDynamicProperty = natives.getDynamicProperty;
 const getObjectProperty = natives.getObjectProperty;

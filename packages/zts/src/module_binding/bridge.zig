@@ -349,7 +349,7 @@ pub const sdk_bridge = struct {
     }
 
     pub export fn zttpSdkIsString(val: value.JSValue) bool {
-        return val.isStringOrRope();
+        return val.isAnyString();
     }
 
     pub export fn zttpSdkIsObject(val: value.JSValue) bool {

@@ -22,7 +22,7 @@
 # A row closes when every symbol behind it has a curated name. Measured after
 # the split, most rows reach seven to eighteen symbols, and most of what the
 # short ones reach is genuinely internal - interpreter.PerfStats,
-# string.RopeNode, bytecode_cache.SliceWriter, sqlite.Db. Curating those to
+# bytecode_cache.SliceWriter, sqlite.Db. Curating those to
 # delete a row would trade a gated internal surface for an ungated public
 # one, which is worse. Close a row when the name belongs in the curated
 # surface on its own merits, not to make this list shorter.

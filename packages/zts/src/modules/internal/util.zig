@@ -18,23 +18,13 @@ pub fn castContext(ctx_ptr: *anyopaque) *context.Context {
 }
 
 /// Extract string data from a JSValue.
-/// Handles flat JSString, SliceString, and RopeNode (flattened to leaf).
+/// Handles flat JSString and SliceString.
 pub fn extractString(val: value.JSValue) ?[]const u8 {
     if (val.isString()) {
         return val.toPtr(string.JSString).data();
     }
     if (val.isStringSlice()) {
         return val.toPtr(string.SliceString).data();
-    }
-    if (val.isRope()) {
-        const rope = val.toPtr(string.RopeNode);
-        // Only handle leaf ropes that wrap a JSString directly
-        if (rope.asLeaf()) |leaf| {
-            return leaf.data();
-        }
-        // Concat ropes would need flattening with an allocator;
-        // callers should ensure strings are flattened before passing to native modules
-        return null;
     }
     return null;
 }

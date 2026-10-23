@@ -286,13 +286,6 @@ pub const JSValue = packed struct(u64) {
         return ((header.* >> 1) & 0xF) == 3; // MemTag.string
     }
 
-    /// Check if value is a rope (lazy string concatenation)
-    pub inline fn isRope(self: JSValue) bool {
-        if (!self.isPtr()) return false;
-        const header = self.toPtr(u32);
-        return ((header.* >> 1) & 0xF) == 9; // MemTag.rope
-    }
-
     /// Check if value is a string slice (zero-copy substring)
     pub inline fn isStringSlice(self: JSValue) bool {
         if (!self.isPtr()) return false;
@@ -300,18 +293,13 @@ pub const JSValue = packed struct(u64) {
         return ((header.* >> 1) & 0xF) == 10; // MemTag.string_slice
     }
 
-    /// Check if value is any string type (flat string, rope, or slice)
+    /// Check if value is any string type (flat string or slice)
     /// Use this for typeof checks and general string operations
-    pub inline fn isStringOrRope(self: JSValue) bool {
+    pub inline fn isAnyString(self: JSValue) bool {
         if (!self.isPtr()) return false;
         const header = self.toPtr(u32);
         const tag = (header.* >> 1) & 0xF;
-        return tag == 3 or tag == 9 or tag == 10; // MemTag.string, rope, or string_slice
-    }
-
-    /// Alias for isStringOrRope - check any string type
-    pub inline fn isAnyString(self: JSValue) bool {
-        return self.isStringOrRope();
+        return tag == 3 or tag == 10; // MemTag.string or string_slice
     }
 
     /// Check if value is an object (heap object with object tag)
@@ -406,59 +394,8 @@ pub const JSValue = packed struct(u64) {
         }
 
         // String comparison (compare by value, not pointer)
-        // Handle flat strings, ropes, and slices
-        const self_is_str = self.isString();
-        const self_is_rope = self.isRope();
-        const self_is_slice = self.isStringSlice();
-        const other_is_str = other.isString();
-        const other_is_rope = other.isRope();
-        const other_is_slice = other.isStringSlice();
-
-        const self_is_any_str = self_is_str or self_is_rope or self_is_slice;
-        const other_is_any_str = other_is_str or other_is_rope or other_is_slice;
-
-        if (self_is_any_str and other_is_any_str) {
-            // Get data from each string type
-            const self_data = getStringData(self, self_is_str, self_is_rope, self_is_slice);
-            const other_data = getStringData(other, other_is_str, other_is_rope, other_is_slice);
-
-            // If both have direct data access (flat string or slice), compare directly
-            if (self_data != null and other_data != null) {
-                return string.eqlStrings(self_data.?, other_data.?);
-            }
-
-            // One or both is a rope: need special handling
-            if (self_is_rope and other_is_rope) {
-                const rope_a = self.toPtr(string.RopeNode);
-                const rope_b = other.toPtr(string.RopeNode);
-                if (rope_a.total_len != rope_b.total_len) return false;
-
-                if (rope_a.kind == .leaf and rope_b.kind == .leaf) {
-                    return string.eqlStrings(
-                        rope_a.payload.leaf.data(),
-                        rope_b.payload.leaf.data(),
-                    );
-                }
-
-                if (rope_a.kind == .leaf) {
-                    return rope_b.eqlBytes(rope_a.payload.leaf.data());
-                }
-                if (rope_b.kind == .leaf) {
-                    return rope_a.eqlBytes(rope_b.payload.leaf.data());
-                }
-
-                return ropeEqualsRope(rope_a, rope_b);
-            }
-
-            // One is rope, other has data
-            if (self_is_rope) {
-                const rope = self.toPtr(string.RopeNode);
-                return rope.eqlBytes(other_data.?);
-            }
-            if (other_is_rope) {
-                const rope = other.toPtr(string.RopeNode);
-                return rope.eqlBytes(self_data.?);
-            }
+        if (stringBytes(self)) |self_data| {
+            if (stringBytes(other)) |other_data| return string.eqlStrings(self_data, other_data);
         }
 
         // Bytes compares by content (spec 6.3 puts equality in the pure
@@ -478,112 +415,14 @@ pub const JSValue = packed struct(u64) {
         return false;
     }
 
-    /// Public: a direct byte view of a string value (flat string, slice, or a
-    /// single-leaf rope). Returns null for a non-string or a multi-leaf rope -
-    /// the caller must flatten the latter. No allocation.
+    /// Public: a direct byte view of a string value (flat string or slice).
+    /// Returns null for a non-string. No allocation.
     pub fn stringBytes(val: JSValue) ?[]const u8 {
-        return getStringData(val, val.isString(), val.isRope(), val.isStringSlice());
-    }
-
-    /// Helper: get string data directly if possible (flat string or slice)
-    /// Returns null for ropes which need special traversal
-    fn getStringData(val: JSValue, is_str: bool, is_rope: bool, is_slice: bool) ?[]const u8 {
         const string = @import("string.zig");
-        if (is_str) {
-            return val.toPtr(string.JSString).data();
-        }
-        if (is_slice) {
-            return val.toPtr(string.SliceString).data();
-        }
-        if (is_rope) {
-            const rope = val.toPtr(string.RopeNode);
-            if (rope.kind == .leaf) {
-                return rope.payload.leaf.data();
-            }
-        }
+        if (val.isString()) return val.toPtr(string.JSString).data();
+        if (val.isStringSlice()) return val.toPtr(string.SliceString).data();
         return null;
     }
-
-    /// Compare two concat ropes by streaming through leaves in parallel.
-    /// Uses iterative DFS with bounded stacks - no static mutable state.
-    fn ropeEqualsRope(a: *const @import("string.zig").RopeNode, b: *const @import("string.zig").RopeNode) bool {
-        const string_mod = @import("string.zig");
-        const RopeNode = string_mod.RopeNode;
-        const max_depth = 64;
-
-        if (a.total_len != b.total_len) return false;
-
-        // DFS stacks for iterative leaf traversal of each rope
-        var buf_a: [max_depth]*const RopeNode = undefined;
-        var len_a: usize = 1;
-        buf_a[0] = a;
-        var buf_b: [max_depth]*const RopeNode = undefined;
-        var len_b: usize = 1;
-        buf_b[0] = b;
-
-        // Current leaf data and position within each leaf
-        var data_a: []const u8 = &.{};
-        var pos_a: usize = 0;
-        var data_b: []const u8 = &.{};
-        var pos_b: usize = 0;
-
-        while (true) {
-            // Advance to next leaf on side A if current is exhausted
-            while (pos_a >= data_a.len) {
-                if (len_a == 0) {
-                    // A is exhausted - B must also be exhausted (lengths match)
-                    return pos_b >= data_b.len and len_b == 0;
-                }
-                len_a -= 1;
-                const node = buf_a[len_a];
-                switch (node.kind) {
-                    .leaf => {
-                        data_a = node.payload.leaf.data();
-                        pos_a = 0;
-                    },
-                    .concat => {
-                        // Push right first so left is popped first (DFS in-order)
-                        if (len_a + 2 > max_depth) return false;
-                        buf_a[len_a] = node.payload.concat.right;
-                        buf_a[len_a + 1] = node.payload.concat.left;
-                        len_a += 2;
-                    },
-                }
-            }
-
-            // Advance to next leaf on side B if current is exhausted
-            while (pos_b >= data_b.len) {
-                if (len_b == 0) return false; // B exhausted but A has data
-                len_b -= 1;
-                const node = buf_b[len_b];
-                switch (node.kind) {
-                    .leaf => {
-                        data_b = node.payload.leaf.data();
-                        pos_b = 0;
-                    },
-                    .concat => {
-                        if (len_b + 2 > max_depth) return false;
-                        buf_b[len_b] = node.payload.concat.right;
-                        buf_b[len_b + 1] = node.payload.concat.left;
-                        len_b += 2;
-                    },
-                }
-            }
-
-            // Compare as many bytes as possible from current leaves
-            const remaining_a = data_a.len - pos_a;
-            const remaining_b = data_b.len - pos_b;
-            const chunk = @min(remaining_a, remaining_b);
-
-            if (!string_mod.eqlStrings(data_a[pos_a..][0..chunk], data_b[pos_b..][0..chunk])) {
-                return false;
-            }
-
-            pos_a += chunk;
-            pos_b += chunk;
-        }
-    }
-
     /// Type coercion to boolean (ToBoolean)
     pub inline fn toBoolean(self: JSValue) bool {
         if (self.isNull() or self.isUndefined() or self.isFalse()) return false;
@@ -597,7 +436,6 @@ pub const JSValue = packed struct(u64) {
         const string_mod = @import("string.zig");
         if (self.isString()) return self.toPtr(string_mod.JSString).len != 0;
         if (self.isStringSlice()) return self.toPtr(string_mod.SliceString).len != 0;
-        if (self.isRope()) return self.toPtr(string_mod.RopeNode).total_len != 0;
         // Objects and functions are truthy
         return true;
     }
@@ -617,7 +455,7 @@ pub const JSValue = packed struct(u64) {
         if (self.isNull()) return "object"; // Historical quirk
         if (self.isBool()) return "boolean";
         if (self.isNumber()) return "number";
-        if (self.isStringOrRope()) return "string"; // Both flat strings and ropes
+        if (self.isAnyString()) return "string";
         if (self.isCallable()) return "function";
         return "object";
     }
@@ -919,83 +757,4 @@ test "JSValue float type checks" {
     try std.testing.expect(!float_val.isInt());
     try std.testing.expect(!float_val.isPtr());
     try std.testing.expect(!float_val.isSpecial());
-}
-
-test "ropeEqualsRope - identical content via many concatenations" {
-    const string = @import("string.zig");
-    const allocator = std.testing.allocator;
-
-    // Build two ropes with identical content "abcabc...abc" (20 repetitions)
-    // Keep under depth-32 rebalance threshold to avoid pre-existing leak in concatRopes
-    const piece = try string.createString(allocator, "abc");
-    defer string.freeString(allocator, piece);
-
-    var rope_a = try string.createRopeLeaf(allocator, piece);
-    var rope_b = try string.createRopeLeaf(allocator, piece);
-
-    for (0..19) |_| {
-        rope_a = try string.concatRopeString(allocator, rope_a, piece);
-        rope_b = try string.concatRopeString(allocator, rope_b, piece);
-    }
-    defer string.freeRope(allocator, rope_a);
-    defer string.freeRope(allocator, rope_b);
-
-    try std.testing.expect(JSValue.ropeEqualsRope(rope_a, rope_b));
-}
-
-test "ropeEqualsRope - different content same length" {
-    const string = @import("string.zig");
-    const allocator = std.testing.allocator;
-
-    const piece_a = try string.createString(allocator, "abc");
-    defer string.freeString(allocator, piece_a);
-    const piece_b = try string.createString(allocator, "abd");
-    defer string.freeString(allocator, piece_b);
-
-    var rope_a = try string.createRopeLeaf(allocator, piece_a);
-    var rope_b = try string.createRopeLeaf(allocator, piece_b);
-
-    for (0..9) |_| {
-        rope_a = try string.concatRopeString(allocator, rope_a, piece_a);
-        rope_b = try string.concatRopeString(allocator, rope_b, piece_b);
-    }
-    defer string.freeRope(allocator, rope_a);
-    defer string.freeRope(allocator, rope_b);
-
-    try std.testing.expect(!JSValue.ropeEqualsRope(rope_a, rope_b));
-}
-
-test "ropeEqualsRope - asymmetric tree structure" {
-    const string = @import("string.zig");
-    const allocator = std.testing.allocator;
-
-    // Build a deep rope: concat each char one at a time
-    const a_str = try string.createString(allocator, "a");
-    defer string.freeString(allocator, a_str);
-    const b_str = try string.createString(allocator, "b");
-    defer string.freeString(allocator, b_str);
-    const c_str = try string.createString(allocator, "c");
-    defer string.freeString(allocator, c_str);
-
-    // Deep rope: ((a + b) + c) + a + b + c ... (20 chars)
-    var deep = try string.createRopeLeaf(allocator, a_str);
-    const chars = [_]*string.JSString{ b_str, c_str, a_str, b_str, c_str };
-    for (0..19) |i| {
-        deep = try string.concatRopeString(allocator, deep, chars[i % chars.len]);
-    }
-    defer string.freeRope(allocator, deep);
-
-    // Shallow rope: split flat content into two halves to make a 2-leaf concat
-    const flat = try deep.flatten(allocator);
-    defer string.freeString(allocator, flat);
-    const flat_data = flat.data();
-    const mid = flat_data.len / 2;
-    const left_str = try string.createString(allocator, flat_data[0..mid]);
-    defer string.freeString(allocator, left_str);
-    const right_str = try string.createString(allocator, flat_data[mid..]);
-    defer string.freeString(allocator, right_str);
-    const shallow = try string.createRopeFromStrings(allocator, left_str, right_str);
-    defer string.freeRope(allocator, shallow);
-
-    try std.testing.expect(JSValue.ropeEqualsRope(deep, shallow));
 }

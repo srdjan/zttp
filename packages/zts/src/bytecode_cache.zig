@@ -133,7 +133,7 @@ fn serializeConstant(val: value.JSValue, writer: anytype, allocator: std.mem.All
         }
     }
 
-    // Ropes, string-slices, objects, and symbols are not representable in the
+    // String-slices, objects, and symbols are not representable in the
     // constant stream. Writing `undefined` here silently corrupts the constant
     // (the stream stays in sync, so deserialize swaps in undefined undetectably).
     // Fail with a catchable error (like the >64KB string guard) so the caller

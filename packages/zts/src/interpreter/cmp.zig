@@ -1,8 +1,6 @@
 //! Pure ECMAScript-style value primitives: ordering, loose equality, and
-//! string-length lookup across flat/rope/slice representations. None take
-//! an Interpreter -- safe to call from anywhere. (String ordering may flatten
-//! a concat rope on first access; the result is cached in the rope node, so
-//! observable behavior stays referentially transparent.)
+//! string-length lookup across flat/slice representations. None take
+//! an Interpreter -- safe to call from anywhere.
 
 const std = @import("std");
 const value = @import("../value.zig");
@@ -20,16 +18,16 @@ const helpers = @import("../builtins/helpers.zig");
 /// every tier.
 ///
 /// Context-aware callers (interpreter, JIT) should use compareValuesCtx and
-/// pass the request Context so that concat-rope flattening uses the arena
-/// rather than c_allocator. compareValues is kept for context-free sites
+/// pass the request Context (the string accessor currently ignores it).
+/// compareValues is kept for context-free sites
 /// (tests, analyzer-only paths) and delegates to compareValuesCtx(a, b, null).
 pub inline fn compareValues(a: value.JSValue, b: value.JSValue) ?std.math.Order {
     return compareValuesCtx(a, b, null);
 }
 
 /// Context-aware variant. Pass `ctx` as `*Context` cast to `*anyopaque` to
-/// route concat-rope flattening through the request arena; pass `null` for the
-/// context-free (c_allocator) path. The `?*anyopaque` indirection avoids a
+/// carry the request context; pass `null` for the
+/// context-free path. The `?*anyopaque` indirection avoids a
 /// circular import: context.zig imports cmp.zig, and cmp.zig imports
 /// helpers.zig which imports context.zig, so cmp.zig cannot name *Context
 /// directly.
@@ -113,15 +111,11 @@ pub inline fn looseEquals(a: value.JSValue, b: value.JSValue) bool {
     return false;
 }
 
-/// Length of any string type: flat JSString, RopeNode, or SliceString.
+/// Length of any string type: flat JSString or SliceString.
 pub inline fn getAnyStringLength(val: value.JSValue) value.JSValue {
     if (val.isString()) {
         const str = val.toPtr(string.JSString);
         return value.JSValue.fromInt(@intCast(str.len));
-    }
-    if (val.isRope()) {
-        const rope = val.toPtr(string.RopeNode);
-        return value.JSValue.fromInt(@intCast(rope.total_len));
     }
     if (val.isStringSlice()) {
         const slice = val.toPtr(string.SliceString);
@@ -168,20 +162,6 @@ test "regression: getAnyStringLength handles all string types" {
     defer string.freeString(allocator, flat);
     const flat_val = value.JSValue.fromPtr(flat);
     try std.testing.expectEqual(value.JSValue.fromInt(5), getAnyStringLength(flat_val));
-
-    // Rope (leaf)
-    const leaf = try string.createRopeLeaf(allocator, flat);
-    defer allocator.destroy(leaf);
-    const leaf_val = value.JSValue.fromPtr(leaf);
-    try std.testing.expectEqual(value.JSValue.fromInt(5), getAnyStringLength(leaf_val));
-
-    // Rope (concat)
-    const str2 = try string.createString(allocator, " world");
-    defer string.freeString(allocator, str2);
-    const rope = try string.createRopeFromStrings(allocator, flat, str2);
-    defer string.freeRope(allocator, rope);
-    const rope_val = value.JSValue.fromPtr(rope);
-    try std.testing.expectEqual(value.JSValue.fromInt(11), getAnyStringLength(rope_val));
 
     // SliceString
     const slice = try string.createSlice(allocator, flat, 1, 3);
