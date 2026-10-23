@@ -4,7 +4,7 @@
 //! compiler is enforcing, not whatever the autoloop's CLI flag happened
 //! to be set to.
 //!
-//! The tool shells out to `zts check --json` to keep the implementation
+//! The tool runs the `zts check --json` analysis in-process to keep the implementation
 //! a single source of truth with the in-process verifier; the JSON output
 //! already includes `declared_specs` and `spec_diagnostics`.
 //!
@@ -75,8 +75,8 @@ fn execute(
     defer allocator.free(absolute);
     const relative = common.relativeToRoot(root, absolute);
 
-    const argv = [_][]const u8{ "zig", "build", "cli", "--", "check", relative, "--json" };
-    var outcome = try common.runCommand(allocator, root, &argv);
+    const argv = [_][]const u8{ "zts", "check", relative, "--json" };
+    var outcome = try common.checkJsonOutcome(allocator, absolute, relative);
     defer outcome.deinit(allocator);
 
     // Parse the JSON and project just the spec section so the agent does
@@ -196,4 +196,29 @@ test "tool registers expected name and label" {
     try testing.expectEqualStrings("specs-status", tool.label);
     try testing.expect(std.mem.indexOf(u8, tool.description, "Proof<T, P>") != null);
     try testing.expect(std.mem.indexOf(u8, tool.description, "ZTS500") != null);
+}
+
+const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
+const cwd_support = @import("../test_support/cwd.zig");
+
+test "pi_specs_status runs in a workspace that has no build.zig" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "specs-status-inproc");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, "handler.ts",
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.json({ ok: true });
+        \\}
+        \\
+    );
+
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    var result = try execute(allocator, &.{"handler.ts"});
+    defer result.deinit(allocator);
+    try testing.expect(result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"declared_specs\":[\"deterministic\"]") != null);
 }

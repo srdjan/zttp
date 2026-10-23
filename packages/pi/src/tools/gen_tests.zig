@@ -1,4 +1,6 @@
 const std = @import("std");
+const zts = @import("zts");
+const zts_cli = @import("zts_cli");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 
@@ -80,8 +82,27 @@ fn execute(
         break :blk owned;
     };
 
-    const argv = [_][]const u8{ "zig", "build", "cli", "--", "gen-tests", relative, "-o", output_path };
-    var outcome = try common.runCommand(allocator, root, &argv);
+    const argv = [_][]const u8{ "zts", "gen-tests", relative, "-o", output_path };
+    var buf: std.Io.Writer.Allocating = .init(allocator);
+    defer buf.deinit();
+    const count = zts_cli.precompile.runGenTests(allocator, relative, &buf.writer) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {
+            const message = try allocator.print("gen-tests failed: {s}\n", .{@errorName(err)});
+            defer allocator.free(message);
+            var outcome = try common.inProcessOutcome(allocator, 1, "", message);
+            defer outcome.deinit(allocator);
+            return try common.commandOutcomeToToolResult(allocator, &argv, &outcome);
+        },
+    };
+    try zts.file_io.writeFile(allocator, output_path, buf.written());
+    const message = try allocator.print("Wrote {d} test{s} to {s}\n", .{
+        count,
+        if (count == 1) @as([]const u8, "") else "s",
+        output_path,
+    });
+    defer allocator.free(message);
+    var outcome = try common.inProcessOutcome(allocator, 0, "", message);
     defer outcome.deinit(allocator);
     return try common.commandOutcomeToToolResult(allocator, &argv, &outcome);
 }
@@ -112,4 +133,32 @@ test "out-of-workspace output_path is rejected" {
         error.PathOutsideWorkspace,
         execute(testing.allocator, &.{ "handler.ts", "../../../../../../outside.test.jsonl" }),
     );
+}
+
+const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
+const cwd_support = @import("../test_support/cwd.zig");
+
+test "workspace_gen_tests writes the suite in a workspace that has no build.zig" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "gen-tests-inproc");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, "handler.ts",
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.json({ ok: true });
+        \\}
+        \\
+    );
+
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    var result = try execute(allocator, &.{"handler.ts"});
+    defer result.deinit(allocator);
+    try testing.expect(result.ok);
+
+    const written = try zts.file_io.readFile(allocator, "handler.test.jsonl", 1024 * 1024);
+    defer allocator.free(written);
+    try testing.expect(written.len > 0);
 }

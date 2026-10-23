@@ -45,8 +45,8 @@ fn execute(
     defer allocator.free(absolute);
     const relative = common.relativeToRoot(root, absolute);
 
-    const argv = [_][]const u8{ "zig", "build", "cli", "--", "check", relative, "--json" };
-    var outcome = try common.runCommand(allocator, root, &argv);
+    const argv = [_][]const u8{ "zts", "check", relative, "--json" };
+    var outcome = try common.checkJsonOutcome(allocator, absolute, relative);
     defer outcome.deinit(allocator);
     return try common.commandOutcomeToToolResult(allocator, &argv, &outcome);
 }
@@ -58,4 +58,48 @@ test "tool description matches the current zts check properties contract" {
     try testing.expect(std.mem.indexOf(u8, tool.description, "result_safe") != null);
     try testing.expect(std.mem.indexOf(u8, tool.description, "current on-disk proof state") != null);
     try testing.expect(std.mem.indexOf(u8, tool.description, "proof_card") != null);
+}
+
+const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
+const cwd_support = @import("../test_support/cwd.zig");
+
+test "zts_check runs in a workspace that has no build.zig" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "zts-check-inproc");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, "handler.ts",
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.json({ ok: true });
+        \\}
+        \\
+    );
+
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    var result = try execute(allocator, &.{"handler.ts"});
+    defer result.deinit(allocator);
+    try testing.expect(result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"exit_code\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "proof") != null);
+}
+
+test "zts_check reports a failing handler as not ok" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "zts-check-inproc-bad");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, "handler.ts", "function handler(");
+
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    var result = try execute(allocator, &.{"handler.ts"});
+    defer result.deinit(allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"exit_code\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "success") != null);
 }

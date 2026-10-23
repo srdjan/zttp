@@ -1,5 +1,6 @@
 const std = @import("std");
 const zts = @import("zts");
+const zts_cli = @import("zts_cli");
 const registry_mod = @import("../registry/registry.zig");
 const ui_payload = @import("../ui_payload.zig");
 const json_writer = @import("../providers/json_writer.zig");
@@ -324,6 +325,83 @@ pub fn isSecretBasename(base: []const u8) bool {
         std.mem.endsWith(u8, base, ".key") or
         std.mem.startsWith(u8, base, "id_rsa") or
         std.mem.startsWith(u8, base, "id_ed25519");
+}
+
+/// An in-process analyzer run shaped as a finished child process, so a tool
+/// keeps its `commandOutcomeToToolResult` output. Copies both streams.
+pub fn inProcessOutcome(
+    allocator: std.mem.Allocator,
+    exit_code: u8,
+    stdout: []const u8,
+    stderr: []const u8,
+) !CommandOutcome {
+    const term = try allocator.dupe(u8, "exited");
+    errdefer allocator.free(term);
+    const out = try allocator.dupe(u8, stdout);
+    errdefer allocator.free(out);
+    const err = try allocator.dupe(u8, stderr);
+    return .{ .ok = exit_code == 0, .exit_code = exit_code, .term = term, .stdout = out, .stderr = err };
+}
+
+/// `zts check --json` for `relative` (a path under the workspace root `absolute`
+/// names), run in this process. It reads the project's SQL schema and policy as
+/// the CLI does and writes no file descriptor, so it needs no `build.zig` in the
+/// workspace. Exit code 1 means the check found errors or could not run.
+pub fn checkJsonOutcome(
+    allocator: std.mem.Allocator,
+    absolute: []const u8,
+    relative: []const u8,
+) !CommandOutcome {
+    var paths = zts_cli.edit_simulate.discoverProjectPaths(allocator, absolute) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return checkFailureOutcome(allocator, relative, "project configuration could not be loaded"),
+    };
+    defer paths.deinit(allocator);
+    const policy_source: ?[]u8 = if (paths.policy) |policy_path|
+        zts.file_io.readFile(allocator, policy_path, 1024 * 1024) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => return checkFailureOutcome(allocator, relative, "configured capability policy could not be loaded"),
+        }
+    else
+        null;
+    defer if (policy_source) |src| allocator.free(src);
+
+    var result = zts_cli.precompile.runCheckOnlyWithOptions(allocator, relative, .{
+        .sql_schema_path = paths.sqlite,
+        .json_mode = true,
+        .policy_source = policy_source,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return checkFailureOutcome(allocator, relative, @errorName(err)),
+    };
+    defer result.deinit(allocator);
+
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    const contract: ?*const zts.HandlerContract = if (result.contract) |*c| c else null;
+    const has_errors = result.totalErrors() > 0;
+    const written = if (has_errors)
+        zts_cli.json_diagnostics.writeErrorJson(&aw.writer, contract, result.json_diagnostics.items, result.proof_trace_json)
+    else
+        zts_cli.json_diagnostics.writeSuccessJson(&aw.writer, contract, result.json_diagnostics.items, result.proof_trace_json);
+    written catch return error.OutOfMemory;
+    return inProcessOutcome(allocator, if (has_errors) 1 else 0, aw.written(), "");
+}
+
+fn checkFailureOutcome(allocator: std.mem.Allocator, file: []const u8, message: []const u8) !CommandOutcome {
+    const diagnostics = [_]zts_cli.json_diagnostics.JsonDiagnostic{.{
+        .code = zts.DiagnosticCatalog.driverCode(.compiler_io_failure),
+        .severity = "error",
+        .message = message,
+        .file = file,
+        .line = 1,
+        .column = 1,
+        .suggestion = null,
+    }};
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    defer aw.deinit();
+    zts_cli.json_diagnostics.writeErrorJson(&aw.writer, null, diagnostics[0..], null) catch return error.OutOfMemory;
+    return inProcessOutcome(allocator, 1, aw.written(), "");
 }
 
 pub fn commandOutcomeToToolResult(
