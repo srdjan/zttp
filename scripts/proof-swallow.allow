@@ -129,8 +129,6 @@ packages/zts/src/type_checker.zig registerParamTypes catch-poison
 packages/zts/src/type_checker.zig schemaValueToType catch-block
 packages/zts/src/type_checker.zig schemaValueToType catch-poison
 packages/zts/src/type_checker.zig walkExpr catch-poison
-packages/zts/src/type_checker.zig walkMatchWithNarrowing catch-poison
-packages/zts/src/type_checker.zig walkStmt catch-block
 packages/zts/src/type_checker.zig walkStmt catch-poison
 
 # Invalid schema JSON yields no compiled type entry, so no schema shape can be
@@ -212,7 +210,6 @@ packages/zts/src/type_checker.zig extractTypeofGuard catch-return@2
 packages/zts/src/type_checker.zig inferObjectLiteralType catch-block@2
 packages/zts/src/type_checker.zig registerParamTypes catch-poison@2
 packages/zts/src/type_checker.zig schemaValueToType catch-block@2
-packages/zts/src/type_checker.zig walkMatchWithNarrowing catch-poison@2
 
 # TypeEnv and its pool reject poison before a caller can use partial semantic
 # types. The numbered rows cover separate insertions in the same function.

@@ -117,6 +117,45 @@ pub const TypeChecker = struct {
         key: u64,
         /// What the key held before the change, or null when it held nothing.
         prev: ?TypeIndex,
+        /// True when the change dropped the narrowing, false when it installed
+        /// one. A scope's kills are applied again where its branch joins.
+        killed: bool,
+    };
+
+    /// The keys a scope killed, collected without an allocation. More keys than
+    /// the buffer holds set `overflow`, which stands for every key: the join
+    /// then drops every narrowing, and a kill is never lost.
+    const KillSet = struct {
+        const capacity = 32;
+        keys: [capacity]u64 = undefined,
+        len: usize = 0,
+        overflow: bool = false,
+
+        fn add(self: *KillSet, key: u64) void {
+            if (self.overflow or self.contains(key)) return;
+            if (self.len == capacity) {
+                self.overflow = true;
+                return;
+            }
+            self.keys[self.len] = key;
+            self.len += 1;
+        }
+
+        fn contains(self: *const KillSet, key: u64) bool {
+            if (self.overflow) return true;
+            for (self.keys[0..self.len]) |k| {
+                if (k == key) return true;
+            }
+            return false;
+        }
+
+        fn merge(self: *KillSet, other: KillSet) void {
+            if (other.overflow) {
+                self.overflow = true;
+                return;
+            }
+            for (other.keys[0..other.len]) |k| self.add(k);
+        }
     };
 
     const ActiveDeclaredType = struct {
@@ -442,11 +481,17 @@ pub const TypeChecker = struct {
         return self.narrow_journal.items.len;
     }
 
-    fn endNarrowScope(self: *TypeChecker, mark: usize) void {
+    /// Close a branch scope and undo every change it made. Undoing also undoes
+    /// a kill, although the branch really did drop that narrowing. So the
+    /// result names the keys the branch killed, and the caller applies them
+    /// with `applyKills` where the branch joins the code after it.
+    fn endNarrowScope(self: *TypeChecker, mark: usize) KillSet {
+        var kills: KillSet = .{};
         var i = self.narrow_journal.items.len;
         while (i > mark) {
             i -= 1;
             const entry = self.narrow_journal.items[i];
+            if (entry.killed) kills.add(entry.key);
             if (entry.prev) |prev| {
                 self.narrowed.put(self.allocator, entry.key, prev) catch self.markAllocationFailure();
             } else {
@@ -455,21 +500,52 @@ pub const TypeChecker = struct {
         }
         self.narrow_journal.items.len = mark;
         if (self.narrow_scopes > 0) self.narrow_scopes -= 1;
+        return kills;
+    }
+
+    /// Drop the narrowings the closed scope killed, now that its changes are
+    /// undone. `killNarrowing` journals each drop in the enclosing scope, so a
+    /// kill survives every scope it is nested in.
+    fn applyKills(self: *TypeChecker, kills: KillSet) void {
+        if (kills.overflow) {
+            self.killAllNarrowings();
+            return;
+        }
+        for (kills.keys[0..kills.len]) |key| self.killNarrowing(key);
+    }
+
+    /// Start recording the keys killed from here on, without undoing anything.
+    /// `endKillWatch` reports them. A watch is not a branch: its changes stay.
+    fn beginKillWatch(self: *TypeChecker) usize {
+        self.narrow_scopes += 1;
+        return self.narrow_journal.items.len;
+    }
+
+    /// The entries stay in the journal while an enclosing scope is open, so
+    /// that scope still undoes them. With none open nothing reads them.
+    fn endKillWatch(self: *TypeChecker, mark: usize) KillSet {
+        var kills: KillSet = .{};
+        for (self.narrow_journal.items[mark..]) |entry| {
+            if (entry.killed) kills.add(entry.key);
+        }
+        if (self.narrow_scopes > 0) self.narrow_scopes -= 1;
+        if (self.narrow_scopes == 0) self.narrow_journal.items.len = mark;
+        return kills;
     }
 
     /// Record what `key` held before it is overwritten or removed, so the
     /// enclosing branch scope can put it back. Outside a branch scope there is
     /// nothing to undo to, and nothing is recorded.
-    fn recordNarrowChange(self: *TypeChecker, key: u64) void {
+    fn recordNarrowChange(self: *TypeChecker, key: u64, killed: bool) void {
         if (self.narrow_scopes == 0) return;
         self.narrow_journal.append(
             self.allocator,
-            .{ .key = key, .prev = self.narrowed.get(key) },
+            .{ .key = key, .prev = self.narrowed.get(key), .killed = killed },
         ) catch self.markAllocationFailure();
     }
 
     fn putNarrowed(self: *TypeChecker, key: u64, narrowed_type: TypeIndex) void {
-        self.recordNarrowChange(key);
+        self.recordNarrowChange(key, false);
         self.narrowed.put(self.allocator, key, narrowed_type) catch self.markAllocationFailure();
     }
 
@@ -477,7 +553,7 @@ pub const TypeChecker = struct {
     /// that installed it described the old value. Nothing killed these before,
     /// so a guard installed by an early return survived a later reassignment.
     fn killNarrowing(self: *TypeChecker, key: u64) void {
-        self.recordNarrowChange(key);
+        self.recordNarrowChange(key, true);
         _ = self.narrowed.remove(key);
     }
 
@@ -494,7 +570,7 @@ pub const TypeChecker = struct {
             count += 1;
         }
         for (doomed[0..count]) |key| {
-            self.recordNarrowChange(key);
+            self.recordNarrowChange(key, true);
             _ = self.narrowed.remove(key);
         }
         // More than the buffer holds is rare and the remainder is dropped on
@@ -561,7 +637,7 @@ pub const TypeChecker = struct {
     /// each one back.
     fn killAllNarrowings(self: *TypeChecker) void {
         var keys = self.narrowed.keyIterator();
-        while (keys.next()) |key| self.recordNarrowChange(key.*);
+        while (keys.next()) |key| self.recordNarrowChange(key.*, true);
         self.narrowed.clearRetainingCapacity();
     }
 
@@ -594,6 +670,17 @@ pub const TypeChecker = struct {
         const element = self.env.pool.getArrayElement(array);
         if (element == null_type_idx) return;
         self.binding_types.put(self.allocator, bindingKey(fi.binding), element) catch self.markAllocationFailure();
+    }
+
+    /// Walk a nested function's body in its own narrow scope and discard what
+    /// the scope killed. The body has not run where the function is declared,
+    /// so its kills do not describe the code after the declaration. The scope
+    /// also keeps what the body installs from leaking out. A call that runs the
+    /// body is a separate question that this walk does not answer.
+    fn walkFunctionBody(self: *TypeChecker, body: NodeIndex) void {
+        const mark = self.beginNarrowScope();
+        self.walkStmt(body);
+        _ = self.endNarrowScope(mark);
     }
 
     fn walkStmt(self: *TypeChecker, node: NodeIndex) void {
@@ -687,7 +774,9 @@ pub const TypeChecker = struct {
 
             .if_stmt => {
                 const if_s = self.ir_view.getIfStmt(node) orelse return;
+                const watch = self.beginKillWatch();
                 self.walkExpr(if_s.condition);
+                const condition_kills = self.endKillWatch(watch);
                 self.recordContextType(if_s.condition);
 
                 // Narrow in both branches when the condition is an admitted
@@ -696,30 +785,44 @@ pub const TypeChecker = struct {
                 // `binding_types` - that map is the declared type, and
                 // overwriting it is what made a narrowing impossible to kill
                 // without losing the declaration.
-                const narrow = self.extractNarrowingGuard(if_s.condition);
+                var narrow = self.extractNarrowingGuard(if_s.condition);
+                // The guard is read from the condition's syntax, after the
+                // condition ran. A kill inside the condition describes a later
+                // value than the one the test compared, so it voids the guard.
+                if (narrow.key) |key| {
+                    if (condition_kills.contains(key)) narrow = .{};
+                }
+
+                // Each branch runs inside its own narrow scope, so every
+                // narrowing written while walking it - the guard's own and any
+                // a nested early return installs - is undone on the way out.
+                // Restoring only the guard's key let the nested one escape and
+                // describe the path where this condition was false. A kill is
+                // undone too, so each branch's kills come back at the join: a
+                // branch that returns reaches no code after the `if`, and its
+                // kills are dropped. The else branch is walked after the then
+                // scope is restored, so it does not see the then branch's kills.
+                var join: KillSet = .{};
                 if (narrow.key != null and narrow.narrowed_type != null_type_idx) {
                     const key = narrow.key.?;
 
-                    // Each branch runs inside its own narrow scope, so every
-                    // narrowing written while walking it - the guard's own and
-                    // any a nested early return installs - is undone on the way
-                    // out. Restoring only the guard's key let the nested one
-                    // escape and describe the path where this condition was
-                    // false.
                     const then_mark = self.beginNarrowScope();
                     // A negated guard means the then-branch runs when the test
                     // failed, so the narrowed type belongs to the else branch.
                     if (!narrow.negated) self.putNarrowed(key, narrow.narrowed_type);
                     self.walkStmt(if_s.then_branch);
-                    self.endNarrowScope(then_mark);
+                    const then_kills = self.endNarrowScope(then_mark);
+                    if (!self.branchAlwaysReturns(if_s.then_branch)) join.merge(then_kills);
 
                     if (if_s.else_branch != null_node) {
                         const else_mark = self.beginNarrowScope();
                         const else_narrowed = if (narrow.negated) narrow.narrowed_type else narrow.else_type;
                         if (else_narrowed != null_type_idx) self.putNarrowed(key, else_narrowed);
                         self.walkStmt(if_s.else_branch);
-                        self.endNarrowScope(else_mark);
+                        const else_kills = self.endNarrowScope(else_mark);
+                        if (!self.branchAlwaysReturns(if_s.else_branch)) join.merge(else_kills);
                     }
+                    self.applyKills(join);
 
                     // Forward narrowing after early return:
                     // if (!x) { return; } narrows x to non-null after the block
@@ -737,12 +840,15 @@ pub const TypeChecker = struct {
                     // way out than one installed by a guard.
                     const then_mark = self.beginNarrowScope();
                     self.walkStmt(if_s.then_branch);
-                    self.endNarrowScope(then_mark);
+                    const then_kills = self.endNarrowScope(then_mark);
+                    if (!self.branchAlwaysReturns(if_s.then_branch)) join.merge(then_kills);
                     if (if_s.else_branch != null_node) {
                         const else_mark = self.beginNarrowScope();
                         self.walkStmt(if_s.else_branch);
-                        self.endNarrowScope(else_mark);
+                        const else_kills = self.endNarrowScope(else_mark);
+                        if (!self.branchAlwaysReturns(if_s.else_branch)) join.merge(else_kills);
                     }
+                    self.applyKills(join);
                 }
             },
 
@@ -792,18 +898,12 @@ pub const TypeChecker = struct {
                 // a narrowing established inside the body does not survive the
                 // back edge.
                 self.killNarrowingsAssignedIn(fi.body, 0, false);
-                var before = self.narrowed.clone(self.allocator) catch {
-                    self.markAllocationFailure();
-                    self.walkStmt(fi.body);
-                    return;
-                };
-                defer before.deinit(self.allocator);
+                // The body's scope puts back every narrowing the body changed,
+                // which is the state before the body. It also undoes the kills
+                // the body made, so they are applied again after the loop.
+                const body_mark = self.beginNarrowScope();
                 self.walkStmt(fi.body);
-                self.narrowed.clearRetainingCapacity();
-                var it = before.iterator();
-                while (it.next()) |entry| {
-                    self.putNarrowed(entry.key_ptr.*, entry.value_ptr.*);
-                }
+                self.applyKills(self.endNarrowScope(body_mark));
             },
 
             .switch_stmt => {
@@ -846,7 +946,7 @@ pub const TypeChecker = struct {
                 else
                     null_type_idx;
                 self.registerParamTypes(func, sig orelse .{});
-                self.walkStmt(func.body);
+                self.walkFunctionBody(func.body);
                 self.current_return_type = saved_return;
             },
 
@@ -865,7 +965,7 @@ pub const TypeChecker = struct {
                 else
                     null_type_idx;
                 self.registerParamTypes(func, sig orelse .{});
-                self.walkStmt(func.body);
+                self.walkFunctionBody(func.body);
                 self.current_return_type = saved_return;
             },
 
@@ -927,17 +1027,22 @@ pub const TypeChecker = struct {
 
             .binary_op => {
                 const bin = self.ir_view.getBinary(node) orelse return;
-                self.walkExpr(bin.left);
                 if (bin.op == .and_op or bin.op == .or_op) {
+                    const watch = self.beginKillWatch();
+                    self.walkExpr(bin.left);
+                    const left_kills = self.endKillWatch(watch);
                     // The right operand runs only when the left one was true
                     // (`&&`) or false (`||`), so it is typed under that guard.
                     self.recordContextType(bin.left);
                     const mark = self.beginNarrowScope();
-                    self.installBranchNarrowing(bin.left, bin.op == .and_op);
+                    self.installBranchNarrowing(bin.left, bin.op == .and_op, left_kills);
                     self.walkExpr(bin.right);
                     self.recordContextType(bin.right);
-                    self.endNarrowScope(mark);
+                    // The right operand may not run, but when it does its kills
+                    // hold for the code after it.
+                    self.applyKills(self.endNarrowScope(mark));
                 } else {
+                    self.walkExpr(bin.left);
                     self.walkExpr(bin.right);
                 }
                 if (bin.op == .add and
@@ -1084,7 +1189,7 @@ pub const TypeChecker = struct {
                 else
                     null_type_idx;
                 self.registerParamTypes(func, sig orelse .{});
-                self.walkStmt(func.body);
+                self.walkFunctionBody(func.body);
                 self.current_return_type = saved_return;
             },
 
@@ -1556,19 +1661,24 @@ pub const TypeChecker = struct {
     /// other condition installs what its guard says for that sense: the
     /// narrowed type when the guard describes the true branch, the else type
     /// when it describes the false branch.
-    fn installBranchNarrowing(self: *TypeChecker, condition: NodeIndex, sense: bool) void {
+    ///
+    /// The guard is read from the syntax of a condition that already ran. A key
+    /// in `killed` was killed while it ran, so its guard describes a value the
+    /// binding no longer holds, and nothing is installed for it.
+    fn installBranchNarrowing(self: *TypeChecker, condition: NodeIndex, sense: bool, killed: KillSet) void {
         const tag = self.ir_view.getTag(condition) orelse return;
         if (tag == .binary_op) {
             const bin = self.ir_view.getBinary(condition) orelse return;
             if ((bin.op == .and_op and sense) or (bin.op == .or_op and !sense)) {
-                self.installBranchNarrowing(bin.left, sense);
+                self.installBranchNarrowing(bin.left, sense, killed);
                 // The right side is only reached once the left side held.
-                self.installBranchNarrowing(bin.right, sense);
+                self.installBranchNarrowing(bin.right, sense, killed);
                 return;
             }
         }
         const guard = self.extractNarrowingGuard(condition);
         const key = guard.key orelse return;
+        if (killed.contains(key)) return;
         const narrowed = if (sense)
             (if (guard.negated) null_type_idx else guard.narrowed_type)
         else
@@ -2920,31 +3030,32 @@ pub const TypeChecker = struct {
         const pool = self.env.pool;
         const is_union = if (pool.getTag(disc_type)) |tag| tag == .t_union else false;
 
+        // Each arm is an alternative path, so it runs in its own narrow scope
+        // and the arms do not see each other's kills. The scope undoes the
+        // arm's narrowing of the scrutinee and its kills; the kills of every
+        // arm come back after the `match`.
+        var join: KillSet = .{};
         for (0..me.arms_count) |i| {
             const arm_idx = self.ir_view.getListIndex(me.arms_start, @intCast(i));
             const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
 
+            const mark = self.beginNarrowScope();
+            // Unless the arm narrows a union, it sees the scrutinee's own type.
+            // A binding still needs its field type: without one it infers
+            // nothing, and a call that misuses it is checked against nothing.
+            var scrutinee = disc_type;
             if (is_union and disc_key != null and arm.pattern != ir.null_node) {
                 const narrowed_type = self.findUnionMemberForPattern(disc_type, arm.pattern);
                 if (narrowed_type != null_type_idx) {
-                    const saved = self.narrowed.get(disc_key.?);
-                    self.narrowed.put(self.allocator, disc_key.?, narrowed_type) catch self.markAllocationFailure();
-                    self.bindPatternBindings(arm.pattern, narrowed_type);
-                    self.walkExpr(arm.body);
-                    if (saved) |s| {
-                        self.narrowed.put(self.allocator, disc_key.?, s) catch self.markAllocationFailure();
-                    } else {
-                        _ = self.narrowed.remove(disc_key.?);
-                    }
-                    continue;
+                    self.putNarrowed(disc_key.?, narrowed_type);
+                    scrutinee = narrowed_type;
                 }
             }
-            // Not a narrowable union, so the arm sees the scrutinee's own type.
-            // A binding still needs its field type: without one it infers
-            // nothing, and a call that misuses it is checked against nothing.
-            self.bindPatternBindings(arm.pattern, disc_type);
+            self.bindPatternBindings(arm.pattern, scrutinee);
             self.walkExpr(arm.body);
+            join.merge(self.endNarrowScope(mark));
         }
+        self.applyKills(join);
     }
 
     /// Give every field a record pattern binds the type that field has in the
@@ -7886,4 +7997,319 @@ test "a call in a member base, a computed key, or a spread operand is checked" {
     try expectKindCounts(mkArrCall("[...mkArr(1)]"), .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 });
     try expectKindCounts(mkArrCall("{ ...{ v: mkArr(1) } }"), .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 });
     try expectKindCounts(mkArrCall("[...mkArr(\"a\")]"), .{ .arg_type = 0, .return_type = 0, .ambiguous = 0 });
+}
+
+// T2 (D16, D23): a kill inside a branch survives the branch.
+
+/// A `run` whose `x` is narrowed to `string` by an early-return guard. `middle`
+/// follows the guard and `needS(x)` follows `middle`.
+fn narrowedThen(comptime middle: []const u8) []const u8 {
+    const head =
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function run(input: string | undefined, c: boolean, d: boolean): number {
+        \\  let x: string | undefined = input;
+        \\  let n = 0;
+        \\  if (x === undefined) {
+        \\    return 0;
+        \\  }
+    ;
+    const tail =
+        \\  return needS(x) + n;
+        \\}
+    ;
+    return head ++ "\n" ++ middle ++ "\n" ++ tail;
+}
+
+const refused_once: KindCounts = .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 };
+const accepted: KindCounts = .{ .arg_type = 0, .return_type = 0, .ambiguous = 0 };
+
+test "narrowing: a kill in a branch that falls through survives the branch" {
+    // br_assign. The branch scope restored the narrowing on the way out, so the
+    // kill inside it was undone and `needS(x)` read `string`.
+    try expectKindCounts(narrowedThen("  if (c) {\n    x = undefined;\n  }"), refused_once);
+    // Control: the branch changes another binding, and `x` stays narrowed.
+    try expectKindCounts(narrowedThen("  if (c) {\n    n = 1;\n  }"), accepted);
+    // The same kill outside a branch is refused (br_ctrl).
+    try expectKindCounts(narrowedThen("  x = undefined;"), refused_once);
+}
+
+test "narrowing: a kill in the else branch or in a nested branch survives" {
+    try expectKindCounts(narrowedThen("  if (c) {\n    n = 1;\n  } else {\n    x = undefined;\n  }"), refused_once);
+    try expectKindCounts(narrowedThen("  if (c) {\n    if (d) {\n      x = undefined;\n    }\n  }"), refused_once);
+    try expectKindCounts(
+        narrowedThen("  if (c) {\n    if (d) {\n      n = 1;\n    }\n  }"),
+        accepted,
+    );
+}
+
+test "narrowing: a kill in a branch that cannot fall through is not applied at the join" {
+    // p11_then_return_kill. The branch returns after the kill, so no path from
+    // it reaches `needS(x)`.
+    try expectKindCounts(narrowedThen("  if (c) {\n    x = undefined;\n    return 1;\n  }"), accepted);
+    // p5_else_leak. Only the then branch reaches the join, and it kills nothing.
+    // The else branch returns, and it is walked without the then branch's kills.
+    try expectKindCounts(
+        narrowedThen("  if (c) {\n    n = 1;\n  } else {\n    x = undefined;\n    return 1;\n  }"),
+        accepted,
+    );
+    try expectKindCounts(
+        narrowedThen("  if (c) {\n    x = undefined;\n  } else {\n    return needS(x);\n  }"),
+        refused_once, // the then branch falls through with the kill, the else read is fine
+    );
+}
+
+test "narrowing: a kill in one branch does not reach the other branch" {
+    // The else branch reads `x` after the then branch killed it. The read is on
+    // a path where the kill never ran.
+    try expectKindCounts(
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function run(input: string | undefined, c: boolean): number {
+        \\  let x: string | undefined = input;
+        \\  if (x === undefined) {
+        \\    return 0;
+        \\  }
+        \\  if (c) {
+        \\    x = undefined;
+        \\    return 1;
+        \\  } else {
+        \\    return needS(x);
+        \\  }
+        \\}
+    , accepted);
+}
+
+test "narrowing: assigning a string in a branch loses the narrowing (accepted precision cost)" {
+    // p6_assign_string_in_branch. `x` is a `string` on both paths, but the join
+    // keeps no assignment narrowing, so the narrowing is dropped.
+    try expectKindCounts(narrowedThen("  if (c) {\n    x = \"other\";\n  }"), refused_once);
+}
+
+test "narrowing: a narrowing installed inside a branch is undone after it" {
+    const head =
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function run(input: string | undefined, c: boolean): number {
+        \\  let x: string | undefined = input;
+    ;
+    try expectKindCounts(
+        head ++
+            \\
+            \\  if (c) {
+            \\    if (x === undefined) {
+            \\      return 0;
+            \\    }
+            \\  }
+            \\  return needS(x);
+            \\}
+        ,
+        refused_once,
+    );
+    // Control: the guard is outside the branch.
+    try expectKindCounts(
+        head ++
+            \\
+            \\  if (x === undefined) {
+            \\    return 0;
+            \\  }
+            \\  if (c) {
+            \\    return 2;
+            \\  }
+            \\  return needS(x);
+            \\}
+        ,
+        accepted,
+    );
+}
+
+/// A `run` whose condition is `cond`, where `x` is a `string | undefined`.
+fn conditionThen(comptime cond: []const u8) []const u8 {
+    return
+    \\function needS(s: string): number {
+    \\  return s.length;
+    \\}
+    \\function run(input: string | undefined): number {
+    \\  let x: string | undefined = input;
+    \\  const ok = 
+    ++ cond ++ ";\n" ++
+        \\  return ok ? 1 : 0;
+        \\}
+    ;
+}
+
+test "narrowing: a kill inside a left operand voids the guard read from its syntax" {
+    // reinstall_and. `installBranchNarrowing` read `x !== undefined` from the
+    // left operand's syntax after the operand ran, and put the narrowing back
+    // over the kill.
+    try expectKindCounts(
+        conditionThen("x !== undefined && (x = undefined) === undefined && needS(x) > 0"),
+        refused_once,
+    );
+    // Control: the operand in the middle kills nothing.
+    try expectKindCounts(
+        conditionThen("x !== undefined && (input === undefined) === false && needS(x) > 0"),
+        accepted,
+    );
+    // The same chain under `||`: the right operand runs when the left is false.
+    try expectKindCounts(
+        conditionThen("x === undefined || (x = undefined) === undefined || needS(x) > 0"),
+        refused_once,
+    );
+}
+
+test "narrowing: a kill in the right operand of && survives the expression" {
+    try expectKindCounts(
+        narrowedThen("  const k = c && (x = undefined) === undefined;"),
+        refused_once,
+    );
+    try expectKindCounts(
+        narrowedThen("  const k = c && n === 0;"),
+        accepted,
+    );
+}
+
+test "narrowing: a kill in an if condition is seen in the branch and after it" {
+    // The condition is a conjunction, so it installs no guard of its own. The
+    // kill in its right operand holds in the branch (one refusal) and after
+    // the `if` (the second).
+    try expectKindCounts(
+        narrowedThen("  if (x !== undefined && (x = undefined) === undefined) {\n    n = needS(x);\n  }"),
+        .{ .arg_type = 2, .return_type = 0, .ambiguous = 0 },
+    );
+}
+
+test "narrowing: a kill in a match arm survives the match" {
+    // The arm assigns a binding narrowed before the match. Nothing used to
+    // restore it, and the kill was already lost to the arm's own scope in the
+    // discriminant case below.
+    const other =
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function run(input: string | undefined, m: { kind: "a" } | { kind: "b" }): number {
+        \\  let x: string | undefined = input;
+        \\  if (x === undefined) {
+        \\    return 0;
+        \\  }
+        \\  const k = match (m) {
+        \\    when { kind: "a" }: ARM
+        \\    default: 0
+        \\  };
+        \\  return needS(x) + k;
+        \\}
+    ;
+    try expectKindCounts(replaceArm(other, "((x = undefined) === undefined ? 1 : 2)"), refused_once);
+    try expectKindCounts(replaceArm(other, "(x === undefined ? 1 : 2)"), accepted);
+}
+
+test "narrowing: an arm that assigns the narrowed scrutinee keeps the kill" {
+    // The match restored the discriminant's saved narrowing by hand after the
+    // arm, which put it back over the arm's own assignment.
+    const disc =
+        \\function needAB(m: { kind: "a", v: string } | { kind: "b", n: number }): number {
+        \\  return 1;
+        \\}
+        \\function run(
+        \\  p: { kind: "a", v: string } | { kind: "b", n: number } | undefined,
+        \\  q: { kind: "a", v: string } | { kind: "b", n: number } | undefined,
+        \\): number {
+        \\  let m: { kind: "a", v: string } | { kind: "b", n: number } | undefined = p;
+        \\  if (m === undefined) {
+        \\    return 0;
+        \\  }
+        \\  const k = match (m) {
+        \\    when { kind: "a" }: ARM
+        \\    default: 0
+        \\  };
+        \\  return needAB(m) + k;
+        \\}
+    ;
+    try expectKindCounts(replaceArm(disc, "((m = q) === undefined ? 1 : 2)"), refused_once);
+    try expectKindCounts(replaceArm(disc, "1"), accepted);
+}
+
+/// Replace the `ARM` marker in `source` with `arm`.
+fn replaceArm(comptime source: []const u8, comptime arm: []const u8) []const u8 {
+    const at = comptime std.mem.indexOf(u8, source, "ARM").?;
+    return source[0..at] ++ arm ++ source[at + 3 ..];
+}
+
+test "narrowing: a kill in a for...of body survives the loop" {
+    // The loop restores the narrowing from before the body; the kill comes back
+    // after the loop.
+    try expectKindCounts(
+        narrowedThen("  for (const i of [1, 2]) {\n    if (c) {\n      x = undefined;\n    }\n  }"),
+        refused_once,
+    );
+    try expectKindCounts(
+        narrowedThen("  for (const i of [1, 2]) {\n    if (c) {\n      n = i;\n    }\n  }"),
+        accepted,
+    );
+}
+
+test "narrowing: a nested function body kills nothing where it is declared" {
+    // The body has not run at the declaration. A call that runs it is not
+    // modelled here.
+    try expectKindCounts(
+        narrowedThen("  const clear = (): number => {\n    x = undefined;\n    return 1;\n  };"),
+        accepted,
+    );
+    // What the body installs does not leak out of it either: `y` is narrowed
+    // only inside the closure.
+    try expectKindCounts(
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function run(input: string | undefined): number {
+        \\  const f = (y: string | undefined): number => {
+        \\    if (y === undefined) {
+        \\      return 0;
+        \\    }
+        \\    return needS(y);
+        \\  };
+        \\  return f(input) + needS(input);
+        \\}
+    , refused_once);
+}
+
+/// A branch that assigns each of `count` bindings, and then `x` when `kill_x`.
+fn manyKills(comptime count: usize, comptime kill_x: bool) []const u8 {
+    @setEvalBranchQuota(100_000);
+    comptime var decls: []const u8 = "";
+    comptime var kills: []const u8 = "";
+    inline for (0..count) |i| {
+        const name = std.fmt.comptimePrint("v{d}", .{i});
+        decls = decls ++ "  let " ++ name ++ ": number = 0;\n";
+        kills = kills ++ "    " ++ name ++ " = 1;\n";
+    }
+    if (kill_x) kills = kills ++ "    x = undefined;\n";
+    return
+    \\function needS(s: string): number {
+    \\  return s.length;
+    \\}
+    \\function run(input: string | undefined, c: boolean): number {
+    \\  let x: string | undefined = input;
+    \\  if (x === undefined) {
+    \\    return 0;
+    \\  }
+    ++ "\n" ++ decls ++ "  if (c) {\n" ++ kills ++ "  }\n" ++
+        \\  return needS(x);
+        \\}
+    ;
+}
+
+test "narrowing: more kills than the join buffer holds still kill every narrowing" {
+    // `x` is killed after forty other bindings, so a join that kept only the
+    // first keys would lose it. Overflow stands for every key.
+    try expectKindCounts(manyKills(40, true), refused_once);
+    // Overflow drops every narrowing, so `x` goes too although this branch
+    // never assigns it. That is the accepted cost of a bounded buffer.
+    try expectKindCounts(manyKills(40, false), refused_once);
+    // Control: a few kills fit the buffer, and `x` keeps its narrowing.
+    try expectKindCounts(manyKills(3, false), accepted);
+    try expectKindCounts(manyKills(3, true), refused_once);
 }

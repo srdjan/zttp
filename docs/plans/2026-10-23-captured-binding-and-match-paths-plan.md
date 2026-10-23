@@ -128,7 +128,7 @@ Each unit runs these steps unfiltered and reads each exit status directly: `zig 
 | Unit | State |
 |---|---|
 | T1 | done: `walkExpr` reads member bases, computed keys, spread operands, and object spread members, and sends any other tag through `expressionChildren`; `p4_objbase_hole.ts` and `p4_spread_hole.ts` give ZTS203; the 296-file sweep is byte-identical; `zig build test` 200/200 steps, 9483/9489 tests |
-| T2 | not started |
+| T2 | done: journal entries record kills, `endNarrowScope` returns them, and each join applies the kills of the branches that fall through; `match` arms and loop bodies use journaled scopes; a nested function body discards its kills; a kill in a condition voids its guard; `br_assign.ts` and `reinstall_and.ts` give ZTS203, `p5` and `p11` still pass, `p6` is refused (accepted cost); three stale swallow rows deleted under decision 14(a); the 296-file sweep is byte-identical; `zig build test` 200/200 steps, 9497/9503 tests |
 | T3 | not started |
 | T4 | not started |
 | T5 | waits for decision 13 |
