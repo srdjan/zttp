@@ -851,13 +851,13 @@ pub const HandlerAnalyzer = struct {
 test "HandlerAnalyzer init and deinit" {
     const allocator = std.testing.allocator;
 
-    var nodes = ir.NodeList.init(allocator);
+    var nodes = ir.IRStore.init(allocator);
     defer nodes.deinit();
 
     var constants = ir.ConstantPool.init(allocator);
     defer constants.deinit();
 
-    const ir_view = ir.IrView.fromNodeList(&nodes, &constants);
+    const ir_view = ir.IrView.fromIRStore(&nodes, &constants);
 
     var analyzer = HandlerAnalyzer.init(allocator, ir_view, null);
     defer analyzer.deinit();

@@ -605,68 +605,6 @@ pub const Node = struct {
     }
 };
 
-/// Node storage with arena-style allocation
-pub const NodeList = struct {
-    nodes: std.ArrayList(Node),
-    allocator: std.mem.Allocator,
-    // Storage for node index lists (statements, arguments, etc.)
-    // Lists are stored contiguously, start position is returned when adding
-    index_lists: std.ArrayList(NodeIndex),
-
-    pub fn init(allocator: std.mem.Allocator) NodeList {
-        return .{
-            .nodes = .empty,
-            .allocator = allocator,
-            .index_lists = .empty,
-        };
-    }
-
-    pub fn deinit(self: *NodeList) void {
-        self.nodes.deinit(self.allocator);
-        self.index_lists.deinit(self.allocator);
-    }
-
-    /// Add a node and return its index
-    pub fn add(self: *NodeList, node: Node) !NodeIndex {
-        const idx = @as(NodeIndex, @intCast(self.nodes.items.len));
-        try self.nodes.append(self.allocator, node);
-        return idx;
-    }
-
-    /// Get a node by index
-    pub fn get(self: *const NodeList, idx: NodeIndex) ?*const Node {
-        if (idx == null_node or idx >= self.nodes.items.len) return null;
-        return &self.nodes.items[idx];
-    }
-
-    /// Reserve space for multiple nodes (returns first index)
-    pub fn reserve(self: *NodeList, count: usize) !NodeIndex {
-        const first_idx = @as(NodeIndex, @intCast(self.nodes.items.len));
-        try self.nodes.ensureUnusedCapacity(self.allocator, count);
-        return first_idx;
-    }
-
-    /// Get slice of nodes
-    pub fn slice(self: *const NodeList) []const Node {
-        return self.nodes.items;
-    }
-
-    /// Add a list of indices and return the starting position
-    pub fn addIndexList(self: *NodeList, indices: []const NodeIndex) !NodeIndex {
-        if (indices.len == 0) return null_node;
-        const start = @as(NodeIndex, @intCast(self.index_lists.items.len));
-        try self.index_lists.appendSlice(self.allocator, indices);
-        return start;
-    }
-
-    /// Get an index from the index list storage
-    pub fn getListIndex(self: *const NodeList, list_start: NodeIndex, offset: u16) NodeIndex {
-        const pos = list_start + offset;
-        if (pos >= self.index_lists.items.len) return null_node;
-        return self.index_lists.items[pos];
-    }
-};
-
 /// Constant pool for strings and floats
 /// Uses hash maps for O(1) deduplication instead of O(n) linear scan
 pub const ConstantPool = struct {
@@ -1077,8 +1015,6 @@ pub const IRStore = struct {
     // ============================================================
 
     /// Add a Node struct, converting to compact SoA representation.
-    /// This method enables drop-in replacement of NodeList with IRStore
-    /// in the parser without changing node creation code.
     pub fn add(self: *IRStore, node: Node) !NodeIndex {
         const loc = node.loc;
         const idx = try switch (node.tag) {
@@ -1481,22 +1417,6 @@ test "node creation" {
     try std.testing.expect(bool_node.data.bool_value);
 }
 
-test "node list operations" {
-    var list = NodeList.init(std.testing.allocator);
-    defer list.deinit();
-
-    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-
-    const idx1 = try list.add(Node.litInt(loc, 10));
-    const idx2 = try list.add(Node.litInt(loc, 20));
-
-    try std.testing.expectEqual(@as(NodeIndex, 0), idx1);
-    try std.testing.expectEqual(@as(NodeIndex, 1), idx2);
-
-    const node = list.get(idx1).?;
-    try std.testing.expectEqual(@as(i32, 10), node.data.int_value);
-}
-
 test "source-backed strings keep borrowing explicit across failures and duplicates" {
     const Probe = struct {
         fn run(allocator: std.mem.Allocator) !void {
@@ -1781,46 +1701,25 @@ test "failed node append preserves the complete parallel prefix" {
 }
 
 // ============================================================================
-// Phase 8: IrView Abstraction Layer
+// IrView
 // ============================================================================
 
-/// Unified view for IR access - can be backed by NodeList (AoS) or IRStore (SoA).
-/// This abstraction enables safe migration from NodeList to IRStore without
-/// changing codegen code.
+/// Read-only view over an `IRStore` and its constant pool.
 ///
 /// Usage:
 /// ```zig
-/// // With NodeList (current)
-/// var view = IrView.fromNodeList(&nodes, &ir_constants);
-///
-/// // With IRStore (future)
 /// var view = IrView.fromIRStore(&store, &ir_constants);
-///
-/// // Access is the same:
 /// const tag = view.getTag(idx);
 /// const binary = view.getBinary(idx);
 /// ```
 pub const IrView = struct {
-    impl: Impl,
+    store: *const IRStore,
     ir_constants: *const ConstantPool,
-
-    const Impl = union(enum) {
-        node_list: *const NodeList,
-        ir_store: *const IRStore,
-    };
-
-    /// Create view from NodeList (Array-of-Structs)
-    pub fn fromNodeList(nodes: *const NodeList, constants: *const ConstantPool) IrView {
-        return .{
-            .impl = .{ .node_list = nodes },
-            .ir_constants = constants,
-        };
-    }
 
     /// Create view from IRStore (Structure-of-Arrays)
     pub fn fromIRStore(store: *const IRStore, constants: *const ConstantPool) IrView {
         return .{
-            .impl = .{ .ir_store = store },
+            .store = store,
             .ir_constants = constants,
         };
     }
@@ -1829,10 +1728,8 @@ pub const IrView = struct {
 
     /// Get node tag
     pub fn getTag(self: IrView, idx: NodeIndex) ?NodeTag {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.tag else null,
-            .ir_store => |ir| if (idx < ir.tags.items.len) ir.tags.items[idx] else null,
-        };
+        const ir = self.store;
+        return if (idx < ir.tags.items.len) ir.tags.items[idx] else null;
     }
 
     /// Invoke `visit(ctx, child)` for each structural child node-index of `node`,
@@ -2252,248 +2149,212 @@ pub const IrView = struct {
 
     /// Get node source location
     pub fn getLoc(self: IrView, idx: NodeIndex) ?SourceLocation {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.loc else null,
-            .ir_store => |ir| if (idx < ir.locs.items.len) ir.locs.items[idx] else null,
-        };
+        const ir = self.store;
+        return if (idx < ir.locs.items.len) ir.locs.items[idx] else null;
     }
 
     /// Check if node index is valid
     pub fn isValid(self: IrView, idx: NodeIndex) bool {
         if (idx == null_node) return false;
-        return switch (self.impl) {
-            .node_list => |nl| idx < nl.nodes.items.len,
-            .ir_store => |ir| idx < ir.tags.items.len,
-        };
+        const ir = self.store;
+        return idx < ir.tags.items.len;
     }
 
     /// Get total node count (useful for capacity pre-allocation)
     pub fn nodeCount(self: IrView) usize {
-        return switch (self.impl) {
-            .node_list => |nl| nl.nodes.items.len,
-            .ir_store => |ir| ir.tags.items.len,
-        };
+        const ir = self.store;
+        return ir.tags.items.len;
     }
 
     /// Get index from list storage
     pub fn getListIndex(self: IrView, list_start: NodeIndex, offset: u16) NodeIndex {
-        return switch (self.impl) {
-            .node_list => |nl| nl.getListIndex(list_start, offset),
-            .ir_store => |ir| ir.getListIndex(list_start, offset),
-        };
+        const ir = self.store;
+        return ir.getListIndex(list_start, offset);
     }
 
     // ============ Literal Accessors ============
 
     /// Get integer literal value
     pub fn getIntValue(self: IrView, idx: NodeIndex) ?i32 {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.int_value else null,
-            .ir_store => |ir| if (idx < ir.data.items.len) ir.data.items[idx].toInt() else null,
-        };
+        const ir = self.store;
+        return if (idx < ir.data.items.len) ir.data.items[idx].toInt() else null;
     }
 
     /// Get float literal index into constant pool
     pub fn getFloatIdx(self: IrView, idx: NodeIndex) ?u16 {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.float_idx else null,
-            .ir_store => |ir| if (idx < ir.data.items.len) @truncate(ir.data.items[idx].a) else null,
-        };
+        const ir = self.store;
+        return if (idx < ir.data.items.len) @truncate(ir.data.items[idx].a) else null;
     }
 
     /// Get string literal index into constant pool
     pub fn getStringIdx(self: IrView, idx: NodeIndex) ?u16 {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.string_idx else null,
-            .ir_store => |ir| if (idx < ir.data.items.len) @truncate(ir.data.items[idx].a) else null,
-        };
+        const ir = self.store;
+        return if (idx < ir.data.items.len) @truncate(ir.data.items[idx].a) else null;
     }
 
     /// Get boolean literal value
     pub fn getBoolValue(self: IrView, idx: NodeIndex) ?bool {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.bool_value else null,
-            .ir_store => |ir| if (idx < ir.data.items.len) ir.data.items[idx].a != 0 else null,
-        };
+        const ir = self.store;
+        return if (idx < ir.data.items.len) ir.data.items[idx].a != 0 else null;
     }
 
     // ============ Expression Accessors ============
 
     /// Get identifier/binding reference
     pub fn getBinding(self: IrView, idx: NodeIndex) ?BindingRef {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.binding else null,
-            .ir_store => |ir| if (idx < ir.data.items.len) ir.getBinding(idx) else null,
-        };
+        const ir = self.store;
+        return if (idx < ir.data.items.len) ir.getBinding(idx) else null;
     }
 
     /// Get binary expression data
     pub fn getBinary(self: IrView, idx: NodeIndex) ?Node.BinaryExpr {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.binary else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const bin = ir.data.items[idx].toBinary();
-                break :blk .{
-                    .op = bin.op,
-                    .left = bin.left,
-                    .right = bin.right,
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const bin = ir.data.items[idx].toBinary();
+            break :blk .{
+                .op = bin.op,
+                .left = bin.left,
+                .right = bin.right,
+            };
         };
     }
 
     /// Get unary expression data
     pub fn getUnary(self: IrView, idx: NodeIndex) ?Node.UnaryExpr {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.unary else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                // `op` is a packed u4 but `UnaryOp` has fewer than 16 members,
-                // so an out-of-range value (e.g. when this node is not actually
-                // a unary op) would make `@enumFromInt` panic. Callers use
-                // `getUnary(...) orelse return`, so fail soft to null instead of
-                // aborting the whole analyzer process.
-                const op_raw: u4 = @truncate(d.a);
-                if (op_raw >= @typeInfo(UnaryOp).@"enum".field_names.len) break :blk null;
-                break :blk .{
-                    .op = @fromBackingInt(@intCast(op_raw)),
-                    .operand = d.b,
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            // `op` is a packed u4 but `UnaryOp` has fewer than 16 members,
+            // so an out-of-range value (e.g. when this node is not actually
+            // a unary op) would make `@enumFromInt` panic. Callers use
+            // `getUnary(...) orelse return`, so fail soft to null instead of
+            // aborting the whole analyzer process.
+            const op_raw: u4 = @truncate(d.a);
+            if (op_raw >= @typeInfo(UnaryOp).@"enum".field_names.len) break :blk null;
+            break :blk .{
+                .op = @fromBackingInt(@intCast(op_raw)),
+                .operand = d.b,
+            };
         };
     }
 
     /// Get ternary expression data
     pub fn getTernary(self: IrView, idx: NodeIndex) ?Node.TernaryExpr {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.ternary else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                // Ternary uses extra data: [condition, then, else]
-                const extra_start = d.a;
-                break :blk .{
-                    .condition = ir.extra.items[extra_start],
-                    .then_branch = ir.extra.items[extra_start + 1],
-                    .else_branch = ir.extra.items[extra_start + 2],
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            // Ternary uses extra data: [condition, then, else]
+            const extra_start = d.a;
+            break :blk .{
+                .condition = ir.extra.items[extra_start],
+                .then_branch = ir.extra.items[extra_start + 1],
+                .else_branch = ir.extra.items[extra_start + 2],
+            };
         };
     }
 
     /// Get call expression data
     pub fn getCall(self: IrView, idx: NodeIndex) ?Node.CallExpr {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.call else null,
-            .ir_store => |ir| ir.getCallData(idx),
-        };
+        const ir = self.store;
+        return ir.getCallData(idx);
     }
 
     /// Get member access expression data
     pub fn getMember(self: IrView, idx: NodeIndex) ?Node.MemberExpr {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.member else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                const tag = ir.tags.items[idx];
-                // Member packed formats differ by tag.
-                switch (tag) {
-                    .computed_access => {
-                        break :blk .{
-                            .object = d.a,
-                            .property = 0,
-                            .computed = d.b,
-                            .is_optional = false,
-                        };
-                    },
-                    else => {
-                        // Member packed: a = object, b[0:16] = property, b[16:17] = is_optional
-                        break :blk .{
-                            .object = d.a,
-                            .property = @truncate(d.b),
-                            .computed = null_node,
-                            .is_optional = (d.b >> 16) != 0,
-                        };
-                    },
-                }
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            const tag = ir.tags.items[idx];
+            // Member packed formats differ by tag.
+            switch (tag) {
+                .computed_access => {
+                    break :blk .{
+                        .object = d.a,
+                        .property = 0,
+                        .computed = d.b,
+                        .is_optional = false,
+                    };
+                },
+                else => {
+                    // Member packed: a = object, b[0:16] = property, b[16:17] = is_optional
+                    break :blk .{
+                        .object = d.a,
+                        .property = @truncate(d.b),
+                        .computed = null_node,
+                        .is_optional = (d.b >> 16) != 0,
+                    };
+                },
+            }
         };
     }
 
     /// Get assignment expression data
     pub fn getAssignment(self: IrView, idx: NodeIndex) ?Node.AssignExpr {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.assignment else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                // Assignment: a = target, b[0:24] = value, b[24:32] = op (0 = none)
-                const op_byte: u8 = @truncate(d.b >> 24);
-                break :blk .{
-                    .target = d.a,
-                    .value = d.b & 0xFFFFFF,
-                    .op = if (op_byte == 0) null else @fromBackingInt(@intCast(op_byte - 1)),
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            // Assignment: a = target, b[0:24] = value, b[24:32] = op (0 = none)
+            const op_byte: u8 = @truncate(d.b >> 24);
+            break :blk .{
+                .target = d.a,
+                .value = d.b & 0xFFFFFF,
+                .op = if (op_byte == 0) null else @fromBackingInt(@intCast(op_byte - 1)),
+            };
         };
     }
 
     /// Get array literal data
     pub fn getArray(self: IrView, idx: NodeIndex) ?Node.ArrayExpr {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.array else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                break :blk .{
-                    .elements_start = d.a,
-                    .elements_count = @truncate(d.b),
-                    .has_spread = (d.b >> 16) != 0,
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            break :blk .{
+                .elements_start = d.a,
+                .elements_count = @truncate(d.b),
+                .has_spread = (d.b >> 16) != 0,
+            };
         };
     }
 
     /// Get object literal data
     pub fn getObject(self: IrView, idx: NodeIndex) ?Node.ObjectExpr {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.object else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                break :blk .{
-                    .properties_start = d.a,
-                    .properties_count = @truncate(d.b),
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            break :blk .{
+                .properties_start = d.a,
+                .properties_count = @truncate(d.b),
+            };
         };
     }
 
     /// Get property expression data
     pub fn getProperty(self: IrView, idx: NodeIndex) ?Node.PropertyExpr {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.property else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                // Property: a = key, b[0:24] = value, b[24] = is_shorthand.
-                // Mask the value field: @truncate to NodeIndex (u32) would leave the flag
-                // bits in place, so a shorthand property (bit 24) would read back with
-                // 0x01000000 OR'd into the node index and resolve to garbage.
-                // The 24-bit field also holds `null_node` (a match-pattern field
-                // `_`, which has no pattern node), truncated on the way in. Widen
-                // the all-ones value back to `null_node`, or a field `_` would
-                // read as a node index no tree holds and lose its presence test.
-                const packed_value: u24 = @truncate(d.b);
-                break :blk .{
-                    .key = d.a,
-                    .value = if (packed_value == std.math.maxInt(u24)) null_node else @as(NodeIndex, packed_value),
-                    .is_shorthand = (d.b >> 24) & 1 != 0,
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            // Property: a = key, b[0:24] = value, b[24] = is_shorthand.
+            // Mask the value field: @truncate to NodeIndex (u32) would leave the flag
+            // bits in place, so a shorthand property (bit 24) would read back with
+            // 0x01000000 OR'd into the node index and resolve to garbage.
+            // The 24-bit field also holds `null_node` (a match-pattern field
+            // `_`, which has no pattern node), truncated on the way in. Widen
+            // the all-ones value back to `null_node`, or a field `_` would
+            // read as a node index no tree holds and lose its presence test.
+            const packed_value: u24 = @truncate(d.b);
+            break :blk .{
+                .key = d.a,
+                .value = if (packed_value == std.math.maxInt(u24)) null_node else @as(NodeIndex, packed_value),
+                .is_shorthand = (d.b >> 24) & 1 != 0,
+            };
         };
     }
 
@@ -2503,24 +2364,22 @@ pub const IrView = struct {
     /// on both implementations. Read a declaration with `getFunctionOfDecl`.
     pub fn getFunction(self: IrView, idx: NodeIndex) ?Node.FunctionExpr {
         if (self.getTag(idx) == .function_decl) return null;
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.function else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                // Function uses extra data for full structure
-                const extra_start = d.a;
-                const extra = ir.extra.items;
-                if (extra_start + 5 >= extra.len) break :blk null;
-                break :blk .{
-                    .scope_id = @truncate(extra[extra_start]),
-                    .name_atom = @truncate(extra[extra_start + 1]),
-                    .params_start = extra[extra_start + 2],
-                    .params_count = @truncate(extra[extra_start + 3]),
-                    .body = extra[extra_start + 4],
-                    .flags = @bitCast(@as(u8, @truncate(extra[extra_start + 5]))),
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            // Function uses extra data for full structure
+            const extra_start = d.a;
+            const extra = ir.extra.items;
+            if (extra_start + 5 >= extra.len) break :blk null;
+            break :blk .{
+                .scope_id = @truncate(extra[extra_start]),
+                .name_atom = @truncate(extra[extra_start + 1]),
+                .params_start = extra[extra_start + 2],
+                .params_count = @truncate(extra[extra_start + 3]),
+                .body = extra[extra_start + 4],
+                .flags = @bitCast(@as(u8, @truncate(extra[extra_start + 5]))),
+            };
         };
     }
 
@@ -2552,231 +2411,205 @@ pub const IrView = struct {
 
     /// Get variable declaration data
     pub fn getVarDecl(self: IrView, idx: NodeIndex) ?Node.VarDecl {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.var_decl else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                const extra_start = d.a;
-                const extra = ir.extra.items;
-                // VarDecl in extra: [binding_packed, init, kind]
-                const binding_packed = extra[extra_start];
-                break :blk .{
-                    .binding = .{
-                        .scope_id = @truncate(binding_packed >> 16),
-                        .slot = @truncate(binding_packed),
-                        .name_atom = ir.bindingName(idx),
-                        .kind = @fromBackingInt(@intCast(@as(u3, @truncate(extra[extra_start + 2] >> 2)))),
-                    },
-                    .init = extra[extra_start + 1],
-                    .kind = @fromBackingInt(@intCast(@as(u2, @truncate(extra[extra_start + 2])))),
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            const extra_start = d.a;
+            const extra = ir.extra.items;
+            // VarDecl in extra: [binding_packed, init, kind]
+            const binding_packed = extra[extra_start];
+            break :blk .{
+                .binding = .{
+                    .scope_id = @truncate(binding_packed >> 16),
+                    .slot = @truncate(binding_packed),
+                    .name_atom = ir.bindingName(idx),
+                    .kind = @fromBackingInt(@intCast(@as(u3, @truncate(extra[extra_start + 2] >> 2)))),
+                },
+                .init = extra[extra_start + 1],
+                .kind = @fromBackingInt(@intCast(@as(u2, @truncate(extra[extra_start + 2])))),
+            };
         };
     }
 
     /// Get if statement data
     pub fn getIfStmt(self: IrView, idx: NodeIndex) ?Node.IfStmt {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.if_stmt else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                const extra_start = d.a;
-                const extra = ir.extra.items;
-                break :blk .{
-                    .condition = extra[extra_start],
-                    .then_branch = extra[extra_start + 1],
-                    .else_branch = extra[extra_start + 2],
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            const extra_start = d.a;
+            const extra = ir.extra.items;
+            break :blk .{
+                .condition = extra[extra_start],
+                .then_branch = extra[extra_start + 1],
+                .else_branch = extra[extra_start + 2],
+            };
         };
     }
 
     /// Get loop statement data
     pub fn getLoop(self: IrView, idx: NodeIndex) ?Node.LoopStmt {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.loop else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                const extra_start = d.a;
-                const extra = ir.extra.items;
-                break :blk .{
-                    .kind = @fromBackingInt(@intCast(@as(u2, @truncate(extra[extra_start])))),
-                    .init = extra[extra_start + 1],
-                    .condition = extra[extra_start + 2],
-                    .update = extra[extra_start + 3],
-                    .body = extra[extra_start + 4],
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            const extra_start = d.a;
+            const extra = ir.extra.items;
+            break :blk .{
+                .kind = @fromBackingInt(@intCast(@as(u2, @truncate(extra[extra_start])))),
+                .init = extra[extra_start + 1],
+                .condition = extra[extra_start + 2],
+                .update = extra[extra_start + 3],
+                .body = extra[extra_start + 4],
+            };
         };
     }
 
     /// Get for-of/for-in statement data
     pub fn getForIter(self: IrView, idx: NodeIndex) ?Node.ForIterStmt {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.for_iter else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                const extra_start = d.a;
-                const extra = ir.extra.items;
-                const binding_packed = extra[extra_start];
-                const flags = extra[extra_start + 2];
-                break :blk .{
-                    .is_for_in = (flags & 1) != 0,
-                    .binding = .{
-                        .scope_id = @truncate(binding_packed >> 16),
-                        .slot = @truncate(binding_packed),
-                        .name_atom = ir.bindingName(idx),
-                        .kind = @fromBackingInt(@intCast(@as(u3, @truncate(flags >> 2)))),
-                    },
-                    .iterable = extra[extra_start + 1],
-                    .body = extra[extra_start + 3],
-                    .is_const = (flags >> 1) & 1 != 0,
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            const extra_start = d.a;
+            const extra = ir.extra.items;
+            const binding_packed = extra[extra_start];
+            const flags = extra[extra_start + 2];
+            break :blk .{
+                .is_for_in = (flags & 1) != 0,
+                .binding = .{
+                    .scope_id = @truncate(binding_packed >> 16),
+                    .slot = @truncate(binding_packed),
+                    .name_atom = ir.bindingName(idx),
+                    .kind = @fromBackingInt(@intCast(@as(u3, @truncate(flags >> 2)))),
+                },
+                .iterable = extra[extra_start + 1],
+                .body = extra[extra_start + 3],
+                .is_const = (flags >> 1) & 1 != 0,
+            };
         };
     }
 
     /// Get switch statement data
     pub fn getSwitchStmt(self: IrView, idx: NodeIndex) ?Node.SwitchStmt {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.switch_stmt else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                const list_ref = ir.getListRef(d.b) orelse break :blk null;
-                break :blk .{
-                    .discriminant = d.a,
-                    .cases_start = list_ref.start,
-                    .cases_count = @intCast(list_ref.count),
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            const list_ref = ir.getListRef(d.b) orelse break :blk null;
+            break :blk .{
+                .discriminant = d.a,
+                .cases_start = list_ref.start,
+                .cases_count = @intCast(list_ref.count),
+            };
         };
     }
 
     /// Get case clause data
     pub fn getCaseClause(self: IrView, idx: NodeIndex) ?Node.CaseClause {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.case_clause else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                const list_ref = ir.getListRef(d.b) orelse break :blk null;
-                break :blk .{
-                    .test_expr = d.a,
-                    .body_start = list_ref.start,
-                    .body_count = list_ref.count,
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            const list_ref = ir.getListRef(d.b) orelse break :blk null;
+            break :blk .{
+                .test_expr = d.a,
+                .body_start = list_ref.start,
+                .body_count = list_ref.count,
+            };
         };
     }
 
     /// Get match expression data
     pub fn getMatchExpr(self: IrView, idx: NodeIndex) ?Node.MatchExpr {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.match_expr else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                const list_ref = ir.getListRef(d.b) orelse break :blk null;
-                break :blk .{
-                    .discriminant = d.a,
-                    .arms_start = list_ref.start,
-                    .arms_count = @intCast(list_ref.count),
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            const list_ref = ir.getListRef(d.b) orelse break :blk null;
+            break :blk .{
+                .discriminant = d.a,
+                .arms_start = list_ref.start,
+                .arms_count = @intCast(list_ref.count),
+            };
         };
     }
 
     /// Get match arm data
     pub fn getMatchArm(self: IrView, idx: NodeIndex) ?Node.MatchArm {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.match_arm else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                break :blk .{
-                    .pattern = d.a,
-                    .body = d.b,
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            break :blk .{
+                .pattern = d.a,
+                .body = d.b,
+            };
         };
     }
 
     /// Get match pattern (object pattern) data
     pub fn getMatchPattern(self: IrView, idx: NodeIndex) ?Node.MatchPatternObj {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.match_pattern else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                break :blk .{
-                    .props_start = d.a,
-                    .props_count = @truncate(d.b),
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            break :blk .{
+                .props_start = d.a,
+                .props_count = @truncate(d.b),
+            };
         };
     }
 
     /// Get a type-test pattern's kind and lowered predicate (spec 5.5).
     pub fn getMatchTypeTest(self: IrView, idx: NodeIndex) ?Node.MatchTypeTest {
         if (self.getTag(idx) != .match_type_test) return null;
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.match_type_test else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                break :blk .{
-                    .kind = @fromBackingInt(@intCast(@as(u8, @truncate(d.a)))),
-                    .predicate = d.b,
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            break :blk .{
+                .kind = @fromBackingInt(@intCast(@as(u8, @truncate(d.a)))),
+                .predicate = d.b,
+            };
         };
     }
 
     /// Get block data
     pub fn getBlock(self: IrView, idx: NodeIndex) ?Node.BlockData {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.block else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                break :blk .{
-                    .stmts_start = d.a,
-                    .stmts_count = @truncate(d.b),
-                    .scope_id = @truncate(d.b >> 16),
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            break :blk .{
+                .stmts_start = d.a,
+                .stmts_count = @truncate(d.b),
+                .scope_id = @truncate(d.b >> 16),
+            };
         };
     }
 
     /// Get optional value (for return, expr_stmt, etc.)
     pub fn getOptValue(self: IrView, idx: NodeIndex) ?NodeIndex {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.opt_value else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const val = ir.data.items[idx].a;
-                break :blk if (val == null_node) null else val;
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const val = ir.data.items[idx].a;
+            break :blk if (val == null_node) null else val;
         };
     }
 
     /// Get assert statement data: condition and optional error expression
     pub fn getAssertStmt(self: IrView, idx: NodeIndex) ?Node.AssertStmt {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.assert_stmt else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                break :blk .{
-                    .condition = d.a,
-                    .error_expr = d.b,
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            break :blk .{
+                .condition = d.a,
+                .error_expr = d.b,
+            };
         };
     }
 
@@ -2785,22 +2618,16 @@ pub const IrView = struct {
     /// part of this view: it is a binding position, and its kind is not stored.
     /// Packing: a = extra_start -> extra = [try_block, binding_packed, catch_block, finally_block]
     pub fn getTryBlocks(self: IrView, idx: NodeIndex) ?TryBlocks {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| .{
-                .try_block = node.data.try_stmt.try_block,
-                .catch_block = node.data.try_stmt.catch_block,
-                .finally_block = node.data.try_stmt.finally_block,
-            } else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const extra_start = ir.data.items[idx].a;
-                const extra = ir.extra.items;
-                break :blk .{
-                    .try_block = extra[extra_start],
-                    .catch_block = extra[extra_start + 2],
-                    .finally_block = extra[extra_start + 3],
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const extra_start = ir.data.items[idx].a;
+            const extra = ir.extra.items;
+            break :blk .{
+                .try_block = extra[extra_start],
+                .catch_block = extra[extra_start + 2],
+                .finally_block = extra[extra_start + 3],
+            };
         };
     }
 
@@ -2813,74 +2640,66 @@ pub const IrView = struct {
     /// The body of a `labeled_stmt`. The label is an atom and holds no code.
     /// Packing: a = label_atom, b = body
     pub fn getLabeledBody(self: IrView, idx: NodeIndex) ?NodeIndex {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.labeled.body else null,
-            .ir_store => |ir| if (idx < ir.data.items.len) ir.data.items[idx].b else null,
-        };
+        const ir = self.store;
+        return if (idx < ir.data.items.len) ir.data.items[idx].b else null;
     }
 
     // ============ Module Accessors ============
 
     /// Get import declaration data
     pub fn getImportDecl(self: IrView, idx: NodeIndex) ?Node.ImportDecl {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.import_decl else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                const list_ref = ir.getListRef(d.b) orelse break :blk null;
-                break :blk .{
-                    .module_idx = @truncate(d.a),
-                    .specifiers_start = list_ref.start,
-                    .specifiers_count = @intCast(list_ref.count),
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            const list_ref = ir.getListRef(d.b) orelse break :blk null;
+            break :blk .{
+                .module_idx = @truncate(d.a),
+                .specifiers_start = list_ref.start,
+                .specifiers_count = @intCast(list_ref.count),
+            };
         };
     }
 
     /// Get import specifier data
     /// Packing: a = extra_start -> extra = [kind, imported_atom, binding_packed]
     pub fn getImportSpec(self: IrView, idx: NodeIndex) ?Node.ImportSpec {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.import_spec else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                const extra_start = d.a;
-                const extra = ir.extra.items;
-                const binding_packed = extra[extra_start + 2];
-                break :blk .{
-                    .kind = @fromBackingInt(@intCast(@as(u2, @truncate(extra[extra_start])))),
-                    .imported_atom = @truncate(extra[extra_start + 1]),
-                    .local_binding = .{
-                        .scope_id = @truncate(binding_packed >> 16),
-                        .slot = @truncate(binding_packed),
-                        .name_atom = ir.bindingName(idx),
-                        .kind = @fromBackingInt(@intCast(@as(u3, @truncate(extra[extra_start] >> 8)))),
-                    },
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            const extra_start = d.a;
+            const extra = ir.extra.items;
+            const binding_packed = extra[extra_start + 2];
+            break :blk .{
+                .kind = @fromBackingInt(@intCast(@as(u2, @truncate(extra[extra_start])))),
+                .imported_atom = @truncate(extra[extra_start + 1]),
+                .local_binding = .{
+                    .scope_id = @truncate(binding_packed >> 16),
+                    .slot = @truncate(binding_packed),
+                    .name_atom = ir.bindingName(idx),
+                    .kind = @fromBackingInt(@intCast(@as(u3, @truncate(extra[extra_start] >> 8)))),
+                },
+            };
         };
     }
 
     /// Get export declaration data
     /// Packing: a = extra_start -> extra = [kind, declaration, specifiers_start, specifiers_count, from_module_idx]
     pub fn getExportDecl(self: IrView, idx: NodeIndex) ?Node.ExportDecl {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.export_decl else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                const extra_start = d.a;
-                const extra = ir.extra.items;
-                break :blk .{
-                    .kind = @fromBackingInt(@intCast(@as(u2, @truncate(extra[extra_start])))),
-                    .declaration = extra[extra_start + 1],
-                    .specifiers_start = extra[extra_start + 2],
-                    .specifiers_count = @truncate(extra[extra_start + 3]),
-                    .from_module_idx = @truncate(extra[extra_start + 4]),
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            const extra_start = d.a;
+            const extra = ir.extra.items;
+            break :blk .{
+                .kind = @fromBackingInt(@intCast(@as(u2, @truncate(extra[extra_start])))),
+                .declaration = extra[extra_start + 1],
+                .specifiers_start = extra[extra_start + 2],
+                .specifiers_count = @truncate(extra[extra_start + 3]),
+                .from_module_idx = @truncate(extra[extra_start + 4]),
+            };
         };
     }
 
@@ -2904,27 +2723,25 @@ pub const IrView = struct {
 
     /// Get pattern element data
     pub fn getPatternElem(self: IrView, idx: NodeIndex) ?Node.PatternElem {
-        return switch (self.impl) {
-            .node_list => |nl| if (nl.get(idx)) |node| node.data.pattern_elem else null,
-            .ir_store => |ir| blk: {
-                if (idx >= ir.data.items.len) break :blk null;
-                const d = ir.data.items[idx];
-                const extra_start = d.a;
-                const extra = ir.extra.items;
-                const binding_packed = extra[extra_start + 1];
-                break :blk .{
-                    .kind = @fromBackingInt(@intCast(@as(u2, @truncate(extra[extra_start])))),
-                    .binding = .{
-                        .scope_id = @truncate(binding_packed >> 16),
-                        .slot = @truncate(binding_packed),
-                        .name_atom = ir.bindingName(idx),
-                        .kind = @fromBackingInt(@intCast(@as(u3, @truncate(extra[extra_start] >> 8)))),
-                    },
-                    .key = extra[extra_start + 2],
-                    .key_atom = @truncate(extra[extra_start + 3]),
-                    .default_value = extra[extra_start + 4],
-                };
-            },
+        const ir = self.store;
+        return blk: {
+            if (idx >= ir.data.items.len) break :blk null;
+            const d = ir.data.items[idx];
+            const extra_start = d.a;
+            const extra = ir.extra.items;
+            const binding_packed = extra[extra_start + 1];
+            break :blk .{
+                .kind = @fromBackingInt(@intCast(@as(u2, @truncate(extra[extra_start])))),
+                .binding = .{
+                    .scope_id = @truncate(binding_packed >> 16),
+                    .slot = @truncate(binding_packed),
+                    .name_atom = ir.bindingName(idx),
+                    .kind = @fromBackingInt(@intCast(@as(u3, @truncate(extra[extra_start] >> 8)))),
+                },
+                .key = extra[extra_start + 2],
+                .key_atom = @truncate(extra[extra_start + 3]),
+                .default_value = extra[extra_start + 4],
+            };
         };
     }
 
@@ -2941,26 +2758,25 @@ pub const IrView = struct {
     }
 };
 
-test "IrView NodeList basic operations" {
+test "IrView IRStore basic operations" {
     const allocator = std.testing.allocator;
 
-    var nodes = NodeList.init(allocator);
-    defer nodes.deinit();
+    var store = IRStore.init(allocator);
+    defer store.deinit();
 
     var constants = ConstantPool.init(allocator);
     defer constants.deinit();
 
     const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
 
-    // Add nodes
-    const int_idx = try nodes.add(Node.litInt(loc, 42));
-    const bool_idx = try nodes.add(Node.litBool(loc, true));
-    const left = try nodes.add(Node.litInt(loc, 10));
-    const right = try nodes.add(Node.litInt(loc, 20));
-    const binary_idx = try nodes.add(Node.binaryOp(loc, .add, left, right));
+    const int_idx = try store.add(Node.litInt(loc, 42));
+    const bool_idx = try store.add(Node.litBool(loc, true));
+    const left = try store.add(Node.litInt(loc, 10));
+    const right = try store.add(Node.litInt(loc, 20));
+    const binary_idx = try store.add(Node.binaryOp(loc, .add, left, right));
 
     // Create view
-    const view = IrView.fromNodeList(&nodes, &constants);
+    const view = IrView.fromIRStore(&store, &constants);
 
     // Test basic accessors
     try std.testing.expectEqual(NodeTag.lit_int, view.getTag(int_idx).?);
@@ -2979,48 +2795,11 @@ test "IrView NodeList basic operations" {
     // Test validity
     try std.testing.expect(view.isValid(int_idx));
     try std.testing.expect(!view.isValid(null_node));
-    try std.testing.expect(!view.isValid(999999));
-}
-
-test "IrView IRStore basic operations" {
-    const allocator = std.testing.allocator;
-
-    var store = IRStore.init(allocator);
-    defer store.deinit();
-
-    var constants = ConstantPool.init(allocator);
-    defer constants.deinit();
-
-    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-
-    // Add nodes using IRStore
-    const int_idx = try store.addLitInt(loc, 42);
-    const left = try store.addLitInt(loc, 10);
-    const right = try store.addLitInt(loc, 20);
-    const binary_idx = try store.addBinary(loc, .add, left, right);
-
-    // Create view
-    const view = IrView.fromIRStore(&store, &constants);
-
-    // Test basic accessors
-    try std.testing.expectEqual(NodeTag.lit_int, view.getTag(int_idx).?);
-    try std.testing.expectEqual(@as(i32, 42), view.getIntValue(int_idx).?);
-
-    // Test binary expression
-    try std.testing.expectEqual(NodeTag.binary_op, view.getTag(binary_idx).?);
-    const binary = view.getBinary(binary_idx).?;
-    try std.testing.expectEqual(BinaryOp.add, binary.op);
-    try std.testing.expectEqual(left, binary.left);
-    try std.testing.expectEqual(right, binary.right);
-
-    // Test validity
-    try std.testing.expect(view.isValid(int_idx));
-    try std.testing.expect(!view.isValid(null_node));
 }
 
 /// A `function_decl` holds `var_decl` data: a binding and the function
 /// expression as its `init`. `getFunction` must not read it as a function.
-fn buildDeclFixture(comptime Store: type, store: *Store) !struct { decl: NodeIndex, func: NodeIndex, body: NodeIndex } {
+fn buildDeclFixture(store: *IRStore) !struct { decl: NodeIndex, func: NodeIndex, body: NodeIndex } {
     const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
     const body = try store.add(.{ .tag = .block, .loc = loc, .data = .{ .block = .{
         .stmts_start = 0,
@@ -3059,7 +2838,7 @@ test "IrView reads a function_decl through getFunctionOfDecl on the IRStore" {
     defer store.deinit();
     var constants = ConstantPool.init(allocator);
     defer constants.deinit();
-    const fx = try buildDeclFixture(IRStore, &store);
+    const fx = try buildDeclFixture(&store);
     const view = IrView.fromIRStore(&store, &constants);
 
     try std.testing.expect(view.getFunction(fx.decl) == null);
@@ -3069,23 +2848,6 @@ test "IrView reads a function_decl through getFunctionOfDecl on the IRStore" {
     try std.testing.expect(view.getFunction(fx.func) != null);
     try std.testing.expect(view.getFunctionOfDecl(fx.func) == null);
     try std.testing.expect(view.getFunctionOfDecl(fx.body) == null);
-}
-
-test "IrView reads a function_decl through getFunctionOfDecl on the NodeList" {
-    const allocator = std.testing.allocator;
-    var nodes = NodeList.init(allocator);
-    defer nodes.deinit();
-    var constants = ConstantPool.init(allocator);
-    defer constants.deinit();
-    const fx = try buildDeclFixture(NodeList, &nodes);
-    const view = IrView.fromNodeList(&nodes, &constants);
-
-    try std.testing.expect(view.getFunction(fx.decl) == null);
-    const func = view.getFunctionOfDecl(fx.decl) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(ScopeId, 3), func.scope_id);
-    try std.testing.expectEqual(fx.body, func.body);
-    try std.testing.expect(view.getFunction(fx.func) != null);
-    try std.testing.expect(view.getFunctionOfDecl(fx.func) == null);
 }
 
 test "ConstantPool refuses the 65537th distinct constant and keeps deduplicating" {
@@ -3647,37 +3409,6 @@ test "expressionChildren of try and labeled statements reads the blocks and the 
         .{ .tag = .lit_int, .int = 3 },
     });
     const labeled = try store.add(.{
-        .tag = .labeled_stmt,
-        .loc = testLoc(),
-        .data = .{ .labeled = .{ .label_atom = 7, .body = try_block } },
-    });
-    try expectViewChildren(view, labeled, &.{.{ .tag = .lit_int, .int = 1 }});
-}
-
-test "expressionChildren of try and labeled statements agree on a NodeList" {
-    var nodes = NodeList.init(std.testing.allocator);
-    defer nodes.deinit();
-    var constants = ConstantPool.init(std.testing.allocator);
-    defer constants.deinit();
-    const view = IrView.fromNodeList(&nodes, &constants);
-
-    const try_block = try nodes.add(Node.litInt(testLoc(), 1));
-    const finally_block = try nodes.add(Node.litInt(testLoc(), 3));
-    const try_node = try nodes.add(.{
-        .tag = .try_stmt,
-        .loc = testLoc(),
-        .data = .{ .try_stmt = .{
-            .try_block = try_block,
-            .catch_binding = BindingRef.global(3),
-            .catch_block = null_node,
-            .finally_block = finally_block,
-        } },
-    });
-    try expectViewChildren(view, try_node, &.{
-        .{ .tag = .lit_int, .int = 1 },
-        .{ .tag = .lit_int, .int = 3 },
-    });
-    const labeled = try nodes.add(.{
         .tag = .labeled_stmt,
         .loc = testLoc(),
         .data = .{ .labeled = .{ .label_atom = 7, .body = try_block } },

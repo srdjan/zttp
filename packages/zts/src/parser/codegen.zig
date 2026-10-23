@@ -29,7 +29,6 @@ const UpvalueInfo = bytecode.UpvalueInfo;
 const Node = ir.Node;
 const NodeTag = ir.NodeTag;
 const NodeIndex = ir.NodeIndex;
-const NodeList = ir.NodeList;
 const IRStore = ir.IRStore;
 const IrView = ir.IrView;
 const ConstantPool = ir.ConstantPool;
@@ -125,16 +124,6 @@ pub const CodeGen = struct {
     /// This limit applies globally across all functions in a file to ensure unique IC indices.
     pub const IC_CACHE_SIZE: u16 = 512;
 
-    pub fn init(
-        allocator: std.mem.Allocator,
-        nodes: *const NodeList,
-        ir_constants: *const ConstantPool,
-        scopes: *ScopeAnalyzer,
-    ) CodeGen {
-        return initWithStrings(allocator, nodes, ir_constants, scopes, null, null);
-    }
-
-    /// Initialize with IRStore (new SoA format)
     pub fn initWithIRStore(
         allocator: std.mem.Allocator,
         nodes: *const IRStore,
@@ -146,38 +135,6 @@ pub const CodeGen = struct {
         return .{
             .allocator = allocator,
             .ir = IrView.fromIRStore(nodes, ir_constants),
-            .scopes = scopes,
-            .strings = strings_table,
-            .atoms = atoms_table,
-            .code = std.ArrayList(u8).empty,
-            .constants = std.ArrayList(JSValue).empty,
-            .upvalue_info = std.ArrayList(UpvalueInfo).empty,
-            .line_table = std.ArrayList(bytecode.LineEntry).empty,
-            .labels = std.ArrayList(Label).empty,
-            .pending_jumps = std.ArrayList(PendingJump).empty,
-            .loop_stack = std.ArrayList(LoopContext).empty,
-            .current_scope = 0,
-            .max_stack_depth = 0,
-            .current_stack_depth = 0,
-            .ic_cache_idx = 0,
-            .opt_stats = .{},
-            .node_types = null,
-            .shapes = .empty,
-            .shape_dedup = .{},
-        };
-    }
-
-    pub fn initWithStrings(
-        allocator: std.mem.Allocator,
-        nodes: *const NodeList,
-        ir_constants: *const ConstantPool,
-        scopes: *ScopeAnalyzer,
-        strings_table: ?*string.StringTable,
-        atoms_table: ?*atom_table.AtomTable,
-    ) CodeGen {
-        return .{
-            .allocator = allocator,
-            .ir = IrView.fromNodeList(nodes, ir_constants),
             .scopes = scopes,
             .strings = strings_table,
             .atoms = atoms_table,
@@ -2575,7 +2532,7 @@ pub const CodeGen = struct {
 test "basic codegen" {
     const allocator = std.testing.allocator;
 
-    var nodes = NodeList.init(allocator);
+    var nodes = IRStore.init(allocator);
     defer nodes.deinit();
 
     var constants = ConstantPool.init(allocator);
@@ -2588,7 +2545,7 @@ test "basic codegen" {
     const loc = ir.SourceLocation{ .line = 1, .column = 1, .offset = 0 };
     const lit_node = try nodes.add(Node.litInt(loc, 42));
 
-    var gen = CodeGen.init(allocator, &nodes, &constants, &scopes);
+    var gen = CodeGen.initWithIRStore(allocator, &nodes, &constants, &scopes, null, null);
     defer gen.deinit();
 
     const result = try gen.generate(lit_node);
@@ -2602,7 +2559,7 @@ test "basic codegen" {
 test "global binding codegen uses the binding name atom" {
     const allocator = std.testing.allocator;
 
-    var nodes = NodeList.init(allocator);
+    var nodes = IRStore.init(allocator);
     defer nodes.deinit();
     var constants = ConstantPool.init(allocator);
     defer constants.deinit();
@@ -2617,7 +2574,7 @@ test "global binding codegen uses the binding name atom" {
         .kind = .global,
     }));
 
-    var gen = CodeGen.init(allocator, &nodes, &constants, &scopes);
+    var gen = CodeGen.initWithIRStore(allocator, &nodes, &constants, &scopes, null, null);
     defer gen.deinit();
     const result = try gen.generate(global);
 
@@ -2630,7 +2587,7 @@ test "global binding codegen uses the binding name atom" {
 test "binary op codegen" {
     const allocator = std.testing.allocator;
 
-    var nodes = NodeList.init(allocator);
+    var nodes = IRStore.init(allocator);
     defer nodes.deinit();
 
     var constants = ConstantPool.init(allocator);
@@ -2646,7 +2603,7 @@ test "binary op codegen" {
     const right = try nodes.add(Node.litInt(loc, 2));
     const add_node = try nodes.add(Node.binaryOp(loc, .add, left, right));
 
-    var gen = CodeGen.init(allocator, &nodes, &constants, &scopes);
+    var gen = CodeGen.initWithIRStore(allocator, &nodes, &constants, &scopes, null, null);
     defer gen.deinit();
 
     const result = try gen.generate(add_node);
@@ -2671,13 +2628,13 @@ test "binary op codegen" {
 
 test "bytecode constants refuse an unrepresentable index" {
     const allocator = std.testing.allocator;
-    var nodes = NodeList.init(allocator);
+    var nodes = IRStore.init(allocator);
     defer nodes.deinit();
     var constants = ConstantPool.init(allocator);
     defer constants.deinit();
     var scopes = try ScopeAnalyzer.init(allocator);
     defer scopes.deinit();
-    var gen = CodeGen.init(allocator, &nodes, &constants, &scopes);
+    var gen = CodeGen.initWithIRStore(allocator, &nodes, &constants, &scopes, null, null);
     defer gen.deinit();
     try gen.constants.resize(allocator, std.math.maxInt(u16));
     @memset(gen.constants.items, JSValue.undefined_val);

@@ -245,7 +245,7 @@ test "selected graph profiles preserve reads bytecode and complete atoms" {
         for (actual.modules, actual.parsers, actual.codegens, case.bytecode) |*module, *parser, *cg, expected| {
             try std.testing.expect(cg.scopes == &parser.scopes);
             try std.testing.expect(cg.ir.ir_constants == &parser.constants);
-            try std.testing.expect(cg.ir.impl.ir_store == &parser.nodes);
+            try std.testing.expect(cg.ir.store == &parser.nodes);
             var buffer: [4096]u8 = undefined;
             const cache = @import("../../bytecode_cache.zig");
             var writer = cache.SliceWriter{ .buffer = &buffer };

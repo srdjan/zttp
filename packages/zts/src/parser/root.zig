@@ -52,7 +52,6 @@ pub const type_syntax = @import("type_syntax.zig");
 pub const Node = @import("ir.zig").Node;
 pub const NodeTag = @import("ir.zig").NodeTag;
 pub const NodeIndex = @import("ir.zig").NodeIndex;
-pub const NodeList = @import("ir.zig").NodeList;
 pub const ConstantPool = @import("ir.zig").ConstantPool;
 pub const BinaryOp = @import("ir.zig").BinaryOp;
 pub const UnaryOp = @import("ir.zig").UnaryOp;

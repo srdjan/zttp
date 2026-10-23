@@ -25,7 +25,6 @@ const SourceLocation = token_mod.SourceLocation;
 const Node = ir.Node;
 const NodeTag = ir.NodeTag;
 const NodeIndex = ir.NodeIndex;
-const NodeList = ir.NodeList;
 const IRStore = ir.IRStore;
 const ConstantPool = ir.ConstantPool;
 const BindingRef = ir.BindingRef;

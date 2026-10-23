@@ -4459,7 +4459,7 @@ test "TypeChecker init and deinit" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    var node_list = ir.NodeList.init(allocator);
+    var node_list = ir.IRStore.init(allocator);
     defer node_list.deinit();
     var constants = ir.ConstantPool.init(allocator);
     defer constants.deinit();
@@ -4467,10 +4467,10 @@ test "TypeChecker init and deinit" {
     _ = try node_list.add(.{
         .tag = .program,
         .loc = .{ .line = 1, .column = 1, .offset = 0 },
-        .data = .{ .binary = .{ .op = .add, .left = null_node, .right = null_node } },
+        .data = .{ .block = .{ .stmts_start = 0, .stmts_count = 0, .scope_id = ir.null_scope } },
     });
 
-    const view = ir.IrView.fromNodeList(&node_list, &constants);
+    const view = ir.IrView.fromIRStore(&node_list, &constants);
     var checker = TypeChecker.init(allocator, view, null, &env);
     defer checker.deinit();
 
@@ -4740,11 +4740,11 @@ test "ternary join: never on one side is removed" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    var node_list = ir.NodeList.init(allocator);
+    var node_list = ir.IRStore.init(allocator);
     defer node_list.deinit();
     var constants = ir.ConstantPool.init(allocator);
     defer constants.deinit();
-    const view = ir.IrView.fromNodeList(&node_list, &constants);
+    const view = ir.IrView.fromIRStore(&node_list, &constants);
 
     var checker = TypeChecker.init(allocator, view, null, &env);
     defer checker.deinit();
@@ -5303,11 +5303,11 @@ test "the join asks for structural identity, not the same pool index" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    var node_list = ir.NodeList.init(allocator);
+    var node_list = ir.IRStore.init(allocator);
     defer node_list.deinit();
     var constants = ir.ConstantPool.init(allocator);
     defer constants.deinit();
-    const view = ir.IrView.fromNodeList(&node_list, &constants);
+    const view = ir.IrView.fromIRStore(&node_list, &constants);
 
     var checker = TypeChecker.init(allocator, view, null, &env);
     defer checker.deinit();
