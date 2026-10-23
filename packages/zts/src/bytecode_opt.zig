@@ -7,7 +7,6 @@
 //!   get_loc N + add              -> get_loc_add N           (saves 1 dispatch)
 //!   get_loc N + get_loc M + add  -> get_loc_get_loc_add N M (saves 2 dispatches)
 //!   push_const X + call N        -> push_const_call X N     (saves 1 dispatch)
-//!   get_field X + call_method N  -> get_field_call X N      (DISABLED, see below)
 //!
 //! Safety: Never fuses across basic block boundaries (jump targets).
 
@@ -15,17 +14,6 @@ const std = @import("std");
 const bytecode = @import("bytecode.zig");
 const translation_witness = @import("translation_witness.zig");
 const Opcode = bytecode.Opcode;
-
-/// ENG-2: the get_field(_ic) + call_method -> get_field_call fusion is disabled.
-/// The fused get_field_call handler mis-resolves a zero-arg method call on an
-/// object literal with a user-defined property name (`({greet:()=>7}).greet()`),
-/// falling through to a NotCallable (HTTP 500). Leaving these calls as
-/// get_field_ic + call_method is both correct and keeps the inline cache the
-/// fused opcode discards (it used raw getProperty). Re-enable only with a fixed
-/// handler + regression coverage; the saved single dispatch is a perf
-/// follow-up, not a correctness concern for the beta. Runtime-level coverage:
-/// zruntime.zig "ENG-2: zero-arg user-named method on object literal is callable".
-const enable_get_field_call_fusion = false;
 
 /// Statistics from optimization pass
 pub const OptStats = struct {
@@ -333,46 +321,6 @@ pub const BytecodeOptimizer = struct {
             stats.dispatches_saved += 1;
             stats.bytes_saved += 3;
             self.noteRewrite(.push_const_call, pos, @intCast(info1.size + info2.size), 4);
-            return 4;
-        }
-
-        // Pattern: get_field X + call_method N -> get_field_call X N
-        // Original: get_field(3) + call_method(2) = 5 bytes
-        // Fused: get_field_call(4) = 4 bytes, NOP 1 byte
-        // Disabled via enable_get_field_call_fusion (ENG-2); see file header.
-        if (enable_get_field_call_fusion and op1 == .get_field and op2 == .call_method) {
-            const atom_idx = self.readU16(code, pos + 1);
-            const argc = code[next_pos + 1];
-            code[pos] = @backingInt(Opcode.get_field_call);
-            self.writeU16(code, pos + 1, atom_idx);
-            code[pos + 3] = argc;
-            // NOP out remaining byte (position 4)
-            code[pos + 4] = @backingInt(Opcode.nop);
-            stats.get_field_call_count += 1;
-            stats.dispatches_saved += 1;
-            stats.bytes_saved += 1;
-            self.noteRewrite(.get_field_call, pos, @intCast(info1.size + info2.size), 4);
-            return 4; // Size of get_field_call
-        }
-
-        // Pattern: get_field_ic X Y + call_method N -> get_field_call X N
-        // Original: get_field_ic(5) + call_method(2) = 7 bytes
-        // Fused: get_field_call(4) = 4 bytes, NOP 3 bytes
-        // Note: Drops the IC index, but method dispatch typically doesn't benefit from IC anyway
-        if (enable_get_field_call_fusion and op1 == .get_field_ic and op2 == .call_method) {
-            const atom_idx = self.readU16(code, pos + 1);
-            const argc = code[next_pos + 1];
-            code[pos] = @backingInt(Opcode.get_field_call);
-            self.writeU16(code, pos + 1, atom_idx);
-            code[pos + 3] = argc;
-            // NOP out remaining bytes (positions 4, 5, 6)
-            code[pos + 4] = @backingInt(Opcode.nop);
-            code[pos + 5] = @backingInt(Opcode.nop);
-            code[pos + 6] = @backingInt(Opcode.nop);
-            stats.get_field_call_count += 1;
-            stats.dispatches_saved += 1;
-            stats.bytes_saved += 3;
-            self.noteRewrite(.get_field_call, pos, @intCast(info1.size + info2.size), 4);
             return 4;
         }
 

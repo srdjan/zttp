@@ -32,7 +32,6 @@ const hmacSha256ForActiveModule = capabilities.hmacSha256ForActiveModule;
 const nowMsForActiveModule = capabilities.nowMsForActiveModule;
 const openSqliteDbChecked = capabilities.openSqliteDbChecked;
 const readEnvChecked = capabilities.readEnvChecked;
-const readFileChecked = capabilities.readFileChecked;
 const sha256ForActiveModule = capabilities.sha256ForActiveModule;
 const writeStderrForActiveModule = capabilities.writeStderrForActiveModule;
 
@@ -331,21 +330,6 @@ pub const sdk_bridge = struct {
 
     pub export fn zttpSdkIsCallable(val: value.JSValue) bool {
         return val.isCallable();
-    }
-
-    pub export fn zttpSdkReadFile(
-        handle: *ModuleHandle,
-        path_ptr: [*]const u8,
-        path_len: usize,
-        max_size: usize,
-        out_ptr: *[*]u8,
-        out_len: *usize,
-    ) bool {
-        const ctx = handleToContext(handle);
-        const buf = readFileChecked(ctx, path_ptr[0..path_len], max_size) catch return false;
-        out_ptr.* = buf.ptr;
-        out_len.* = buf.len;
-        return true;
     }
 
     pub export fn zttpSdkIsString(val: value.JSValue) bool {

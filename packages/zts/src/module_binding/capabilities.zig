@@ -15,7 +15,6 @@ const value = @import("../value.zig");
 const context = @import("../context.zig");
 const cost_meter = context.cost_meter;
 const compat = @import("zts-base").compat;
-const file_io = @import("../file_io.zig");
 const sqlite_runtime = @import("../sqlite.zig");
 const security_events = @import("../security_events.zig");
 const gc = @import("../gc.zig");
@@ -210,18 +209,6 @@ pub fn nowNsForActiveModule(ctx: *context.Context) ActiveCapabilityError!u64 {
     return compat.realtimeNowNs() catch error.ClockUnavailable;
 }
 
-pub fn clockNowMsChecked(ctx: *context.Context) error{CapabilityViolation}!i64 {
-    return nowMsForActiveModule(ctx) catch |err| return panicCapabilityError(ctx, err, .clock);
-}
-
-pub fn clockNowNsChecked(ctx: *context.Context) error{CapabilityViolation}!u64 {
-    return nowNsForActiveModule(ctx) catch |err| return panicCapabilityError(ctx, err, .clock);
-}
-
-pub fn clockNowSecsChecked(ctx: *context.Context) error{CapabilityViolation}!i64 {
-    return @divTrunc(try clockNowMsChecked(ctx), 1000);
-}
-
 pub fn fillRandomForActiveModule(ctx: *context.Context, buf: []u8) ActiveCapabilityError!void {
     try requireActiveCapability(ctx, .random);
     if (buf.len == 0) return;
@@ -257,33 +244,12 @@ fn fillOsEntropy(buf: []u8) !void {
     }
 }
 
-pub fn fillRandomChecked(ctx: *context.Context, buf: []u8) error{CapabilityViolation}!void {
-    fillRandomForActiveModule(ctx, buf) catch |err| return panicCapabilityError(ctx, err, .random);
-}
-
 pub fn writeStderrForActiveModule(ctx: *context.Context, buf: []const u8) ActiveCapabilityError!void {
     try requireActiveCapability(ctx, .stderr);
     if (buf.len == 0) return;
 
     const written = std.c.write(std.c.STDERR_FILENO, buf.ptr, buf.len);
     if (written != @as(isize, @intCast(buf.len))) return error.StderrWriteFailed;
-}
-
-pub fn writeStderrChecked(ctx: *context.Context, buf: []const u8) error{CapabilityViolation}!void {
-    writeStderrForActiveModule(ctx, buf) catch |err| return panicCapabilityError(ctx, err, .stderr);
-}
-
-pub fn runtimeCallbackCapabilityChecked(ctx: *context.Context) error{CapabilityViolation}!void {
-    requireActiveCapability(ctx, .runtime_callback) catch |err| return panicCapabilityError(ctx, err, .runtime_callback);
-}
-
-pub fn getRuntimeCallbackStateChecked(
-    ctx: *context.Context,
-    comptime T: type,
-    slot: usize,
-) error{CapabilityViolation}!?*T {
-    try runtimeCallbackCapabilityChecked(ctx);
-    return ctx.getModuleState(T, slot);
 }
 
 fn realPathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -295,10 +261,6 @@ fn realPathAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     const resolved = std.c.realpath(path_z, &resolved_buf) orelse return error.PathNotCanonical;
     const len = std.mem.len(resolved);
     return try allocator.dupe(u8, resolved[0..len]);
-}
-
-fn canonicalizeExistingPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
-    return realPathAlloc(allocator, path);
 }
 
 fn canonicalizeCreatablePath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -318,28 +280,10 @@ fn canonicalizeCreatablePath(allocator: std.mem.Allocator, path: []const u8) ![]
     return std.fs.path.join(allocator, &.{ parent, basename });
 }
 
-pub fn allowSdkFilePath(ctx: *context.Context, path: []const u8) !void {
-    const canonical = try canonicalizeExistingPath(ctx.allocator, path);
-    defer ctx.allocator.free(canonical);
-    try ctx.allowSdkFilePathCanonical(canonical);
-}
-
 pub fn allowSdkSqlitePath(ctx: *context.Context, path: []const u8) !void {
     const canonical = try canonicalizeCreatablePath(ctx.allocator, path);
     defer ctx.allocator.free(canonical);
     try ctx.allowSdkSqlitePathCanonical(canonical);
-}
-
-pub fn readFileChecked(
-    ctx: *context.Context,
-    path: []const u8,
-    max_size: usize,
-) ![]u8 {
-    requireActiveCapability(ctx, .filesystem) catch |err| return panicCapabilityError(ctx, err, .filesystem);
-    const canonical = try canonicalizeExistingPath(ctx.allocator, path);
-    defer ctx.allocator.free(canonical);
-    if (!ctx.allowsSdkFilePathCanonical(canonical)) return error.FilePathNotAllowed;
-    return file_io.readFile(ctx.allocator, path, max_size);
 }
 
 pub fn readEnvForActiveModule(ctx: *context.Context, name_z: [:0]const u8) ActiveCapabilityError!?[]const u8 {
@@ -349,7 +293,7 @@ pub fn readEnvForActiveModule(ctx: *context.Context, name_z: [:0]const u8) Activ
     // first, but a third-party SDK module that declares .env and never calls it
     // would otherwise read any process env var (env values are flow-labeled
     // .secret), bypassing the policy the contract advertises. Mirrors
-    // readFileChecked / openSqliteDbChecked, which gate internally. `allows`
+    // openSqliteDbChecked, which gates internally. `allows`
     // returns true when no allowlist is configured, so this matches the
     // built-in module's behavior exactly and only closes the bypass.
     var buf: [identifier.max_identifier_bytes]u8 = undefined;
@@ -371,15 +315,6 @@ pub fn readEnvChecked(ctx: *context.Context, name_z: [:0]const u8) error{Capabil
 
 pub fn sqliteCapabilityChecked(ctx: *context.Context) error{CapabilityViolation}!void {
     requireActiveCapability(ctx, .sqlite) catch |err| return panicCapabilityError(ctx, err, .sqlite);
-}
-
-pub fn getSqliteStateChecked(
-    ctx: *context.Context,
-    comptime T: type,
-    slot: usize,
-) error{CapabilityViolation}!?*T {
-    try sqliteCapabilityChecked(ctx);
-    return ctx.getModuleState(T, slot);
 }
 
 pub fn openSqliteDbChecked(
@@ -412,23 +347,6 @@ pub fn sha256ForActiveModule(
     var hasher = std.crypto.hash.sha2.Sha256.init(.{});
     hasher.update(data);
     out.* = hasher.finalResult();
-}
-
-pub fn sha256Checked(
-    ctx: *context.Context,
-    out: *[std.crypto.hash.sha2.Sha256.digest_length]u8,
-    data: []const u8,
-) error{CapabilityViolation}!void {
-    sha256ForActiveModule(ctx, out, data) catch |err| return panicCapabilityError(ctx, err, .crypto);
-}
-
-pub fn hmacSha256Checked(
-    ctx: *context.Context,
-    out: *[std.crypto.auth.hmac.sha2.HmacSha256.mac_length]u8,
-    data: []const u8,
-    key: []const u8,
-) error{CapabilityViolation}!void {
-    hmacSha256ForActiveModule(ctx, out, data, key) catch |err| return panicCapabilityError(ctx, err, .crypto);
 }
 
 /// What a per-module denial names in the shared event stream: the sink that
@@ -597,7 +515,7 @@ test "wrapNativeFnWithCapabilities activates context for built-in native fns" {
         struct {
             fn f(ctx_ptr: *anyopaque, _: value.JSValue, _: []const value.JSValue) anyerror!value.JSValue {
                 const active_ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
-                _ = clockNowMsChecked(active_ctx) catch 0;
+                _ = nowMsForActiveModule(active_ctx) catch 0;
                 return value.JSValue.true_val;
             }
         }.f,

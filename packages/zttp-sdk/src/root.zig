@@ -12,7 +12,6 @@ pub const array = @import("array.zig");
 pub const result = @import("result.zig");
 pub const sqlite = @import("sqlite.zig");
 pub const callable = @import("callable.zig");
-pub const filesystem = @import("filesystem.zig");
 pub const env = @import("env.zig");
 pub const cache = @import("cache.zig");
 pub const args = @import("args.zig");
@@ -89,7 +88,6 @@ pub const resultErrValue = result.resultErrValue;
 pub const resultErrs = result.resultErrs;
 
 pub const isCallable = callable.isCallable;
-pub const readFile = filesystem.readFile;
 pub const readEnv = env.readEnv;
 pub const allowsEnv = env.allowsEnv;
 pub const allowsCacheNamespace = cache.allowsCacheNamespace;

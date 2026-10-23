@@ -1,4 +1,4 @@
-//! Function-call dispatch: native vs bytecode vs generator vs async.
+//! Function-call dispatch: native vs bytecode vs generator.
 
 const std = @import("std");
 const value = @import("../value.zig");
@@ -13,8 +13,8 @@ const InterpreterError = Interpreter.InterpreterError;
 /// Stack-allocated argument cap. argc is u8 so the runtime ceiling is 255.
 pub const MAX_STACK_ARGS = 256;
 
-/// Perform a function call, dispatching to native, bytecode, generator, or
-/// async based on the callable's flags.
+/// Perform a function call, dispatching to native, bytecode, or generator
+/// based on the callable's flags.
 ///
 /// Stack on entry:
 ///   Regular: [func, arg0, ..., argN-1]
@@ -104,36 +104,6 @@ pub fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!vo
         const prev_closure = self.current_closure;
         self.current_closure = closure_data;
         defer self.current_closure = prev_closure;
-
-        if (func_obj.flags.is_async) {
-            // Simplified async: execute synchronously, return a resolved
-            // Promise-like {value, then}. Full async support requires an
-            // event loop and proper Promise integration.
-            const result = try frame.callBytecodeFunction(self, func_val, func_bc, this_val, args[0..argc]);
-
-            const promise_obj = self.ctx.createObject(null) catch {
-                return error.OutOfMemory;
-            };
-
-            const value_atom = self.ctx.atoms.intern("value") catch return error.OutOfMemory;
-            self.ctx.setPropertyChecked(promise_obj, value_atom, result) catch |err| {
-                return switch (err) {
-                    error.ArenaObjectEscape => error.ArenaObjectEscape,
-                    else => error.OutOfMemory,
-                };
-            };
-
-            const then_atom = self.ctx.atoms.intern("then") catch return error.OutOfMemory;
-            self.ctx.setPropertyChecked(promise_obj, then_atom, value.JSValue.true_val) catch |err| {
-                return switch (err) {
-                    error.ArenaObjectEscape => error.ArenaObjectEscape,
-                    else => error.OutOfMemory,
-                };
-            };
-
-            try self.ctx.push(promise_obj.toValue());
-            return;
-        }
 
         const result = try frame.callBytecodeFunction(self, func_val, func_bc, this_val, args[0..argc]);
         try self.ctx.push(result);

@@ -1306,33 +1306,13 @@ pub const ClassId = enum(u8) {
     object = 0,
     array = 1,
     function = 2,
-    bound_function = 3,
-    generator = 4,
     @"error" = 5,
-    array_buffer = 6,
-    typed_array = 7,
-    data_view = 8,
-    promise = 9,
-    map = 10,
-    set = 11,
-    weak_map = 12,
-    weak_set = 13,
-    regexp = 14,
-    date = 15,
-    proxy = 16,
-    string_object = 17,
-    number_object = 18,
-    boolean_object = 19,
-    symbol_object = 20,
-    arguments = 21,
     result = 22, // Result type for functional error handling
     range_iterator = 23, // Lazy range iterator for for...of
     dict = 24, // Dict<K, V>: immutable, insertion-ordered keyed data (spec 6.2)
     bytes = 25, // Bytes: immutable octet data (spec 6.3)
-    // Custom class IDs start here
+    // Values 3-4 and 6-21 were never assigned; leave them unused.
     _,
-
-    pub const FIRST_CUSTOM: u8 = 64;
 };
 
 /// JavaScript object
@@ -1374,12 +1354,6 @@ pub const JSObject = extern struct {
         /// Result objects: atom id for error field kind (`error`/`errors`), undefined for ok
         pub const RESULT_ERROR_FIELD: usize = 2;
 
-        /// WeakMap/WeakSet: internal hash map data pointer
-        pub const WEAK_COLLECTION_DATA: usize = 0;
-
-        /// Generator objects: generator state data pointer
-        pub const GENERATOR_DATA: usize = 0;
-
         /// Range iterator: start value (i32 stored as JSValue)
         pub const RANGE_START: usize = 0;
         /// Range iterator: end value (i32 stored as JSValue)
@@ -1413,7 +1387,7 @@ pub const JSObject = extern struct {
         is_callable: bool = false,
         has_small_array: bool = false, // Dense array optimization
         is_generator: bool = false, // Generator function (function*)
-        is_async: bool = false, // Async function (async function)
+        is_async: bool = false, // No longer set; the bit keeps the flag layout stable
         is_arena: bool = false, // Allocated from request arena (ephemeral)
         // `new` is rejected at parse time, so there is no is_constructor bit.
         _reserved: u1 = 0,
@@ -1748,7 +1722,7 @@ pub const JSObject = extern struct {
     }
 
     /// Create a JS bytecode function object
-    /// Copies is_generator and is_async flags from bytecode for efficient call-time checks
+    /// Copies the is_generator flag from bytecode for efficient call-time checks
     pub fn createBytecodeFunction(allocator: std.mem.Allocator, class_idx: HiddenClassIndex, bytecode_ptr: *const @import("bytecode.zig").FunctionBytecode, name: Atom) !*JSObject {
         // Allocate bytecode function data
         const data = try allocator.create(BytecodeFunctionData);
@@ -1768,7 +1742,6 @@ pub const JSObject = extern struct {
             .flags = .{
                 .is_callable = true,
                 .is_generator = bytecode_ptr.flags.is_generator,
-                .is_async = bytecode_ptr.flags.is_async,
             },
             .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
             .overflow_slots = null,
@@ -1801,7 +1774,7 @@ pub const JSObject = extern struct {
     }
 
     /// Create a closure (function with captured upvalues)
-    /// Copies is_generator and is_async flags from bytecode for efficient call-time checks
+    /// Copies the is_generator flag from bytecode for efficient call-time checks
     pub fn createClosure(
         allocator: std.mem.Allocator,
         class_idx: HiddenClassIndex,
@@ -1828,7 +1801,6 @@ pub const JSObject = extern struct {
             .flags = .{
                 .is_callable = true,
                 .is_generator = bytecode_ptr.flags.is_generator,
-                .is_async = bytecode_ptr.flags.is_async,
             },
             .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
             .overflow_slots = null,

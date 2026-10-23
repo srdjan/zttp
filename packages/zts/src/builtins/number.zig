@@ -299,7 +299,7 @@ fn isRecord(val: value.JSValue) bool {
     // as covering a value the coverage check never modelled.
     return switch (object.JSObject.fromValue(val).class_id) {
         .object, .result => true,
-        .array, .function, .bound_function, .generator, .@"error", .array_buffer, .typed_array, .data_view, .promise, .map, .set, .weak_map, .weak_set, .regexp, .date, .proxy, .string_object, .number_object, .boolean_object, .symbol_object, .arguments, .range_iterator, .dict, .bytes => false,
+        .array, .function, .@"error", .range_iterator, .dict, .bytes => false,
         _ => false,
     };
 }

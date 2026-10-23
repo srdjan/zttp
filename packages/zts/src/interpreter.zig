@@ -55,7 +55,7 @@ pub const Interpreter = struct {
 
     /// Distance from current pc to the opcode that initiated the call.
     /// Default 2 for .call/.call_method (opcode + argc).
-    /// Set to 4 for .push_const_call (opcode + u16 + argc) and .get_field_call.
+    /// Set to 4 for .push_const_call (opcode + u16 + argc).
     call_opcode_offset: usize = 2,
 
     // Perf counters, read by `zig build bench`. These profiled the JIT before it
@@ -1520,46 +1520,9 @@ pub const Interpreter = struct {
                 self.call_opcode_offset = 2;
                 continue :sw @fromBackingInt(@intCast(self.pc[0]));
             },
-            .get_field_call => {
-                self.advanceOp();
-                const atom_idx = util.readU16(self.pc);
-                const argc: u8 = self.pc[2];
-                self.pc += 3;
-                self.call_opcode_offset = 4;
-                defer self.call_opcode_offset = 2;
-                const atom: object.Atom = @fromBackingInt(@intCast(atom_idx));
-
-                const obj = self.ctx.pop();
-                if (obj.isObject()) {
-                    const js_obj = object.JSObject.fromValue(obj);
-                    const pool = self.ctx.hidden_class_pool orelse {
-                        try self.ctx.push(value.JSValue.undefined_val);
-                        try call.doCall(self, argc, true);
-                        continue :sw @fromBackingInt(@intCast(self.pc[0]));
-                    };
-                    if (js_obj.getProperty(pool, atom)) |method| {
-                        try self.ctx.push(method);
-                        try call.doCall(self, argc, true);
-                        continue :sw @fromBackingInt(@intCast(self.pc[0]));
-                    }
-                } else if (obj.isAnyString()) {
-                    if (self.ctx.string_prototype) |proto| {
-                        const pool = self.ctx.hidden_class_pool orelse {
-                            try self.ctx.push(value.JSValue.undefined_val);
-                            try call.doCall(self, argc, true);
-                            continue :sw @fromBackingInt(@intCast(self.pc[0]));
-                        };
-                        if (proto.getProperty(pool, atom)) |method| {
-                            try self.ctx.push(method);
-                            try call.doCall(self, argc, true);
-                            continue :sw @fromBackingInt(@intCast(self.pc[0]));
-                        }
-                    }
-                }
-                try self.ctx.push(value.JSValue.undefined_val);
-                try call.doCall(self, argc, true);
-                continue :sw @fromBackingInt(@intCast(self.pc[0]));
-            },
+            // Never emitted: the get_field_call fusion is deleted. The opcode
+            // value stays because the opcode table is hashed.
+            .get_field_call => return error.UnimplementedOpcode,
 
             // ========================================
             // Iterator Operations

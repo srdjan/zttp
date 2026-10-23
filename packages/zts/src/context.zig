@@ -220,8 +220,6 @@ pub const Context = struct {
     /// Per-request virtual-module call counters, reset by the runtime after
     /// request accounting has observed them.
     cost_meter: cost_meter.Meter = .{},
-    /// Canonical filesystem paths that SDK modules may read. Empty means deny.
-    sdk_file_allowlist: SdkPathAllowList,
     /// Canonical SQLite database paths that SDK modules may open. Empty means deny.
     sdk_sqlite_allowlist: SdkPathAllowList,
     /// Cooperative per-request interrupt. Self-set by the deadline check at loop
@@ -301,7 +299,6 @@ pub const Context = struct {
             .capability_policy = .{},
             .policy_generation = 0,
             .cost_meter = .{},
-            .sdk_file_allowlist = .{},
             .sdk_sqlite_allowlist = .{},
             .interrupt_requested = std.atomic.Value(bool).init(false),
             .deadline_ns = 0,
@@ -315,7 +312,6 @@ pub const Context = struct {
             ctx.bytecode_functions.deinit(allocator);
             ctx.builtin_objects.deinit(allocator);
             ctx.sdk_sqlite_allowlist.deinit(allocator);
-            ctx.sdk_file_allowlist.deinit(allocator);
             ctx.render_writer.deinit();
             ctx.json_writer.deinit();
             ctx.atoms.deinit();
@@ -655,7 +651,6 @@ pub const Context = struct {
         if (self.hidden_class_pool) |p| p.deinit();
 
         self.sdk_sqlite_allowlist.deinit(self.allocator);
-        self.sdk_file_allowlist.deinit(self.allocator);
 
         // Clean up object literal shapes
         self.literal_shapes.deinit(self.allocator);
@@ -681,16 +676,8 @@ pub const Context = struct {
         self.module_state[slot] = .{ .ptr = ptr, .deinit_fn = deinit_fn };
     }
 
-    pub fn allowSdkFilePathCanonical(self: *Context, canonical_path: []const u8) !void {
-        try self.sdk_file_allowlist.appendUnique(self.allocator, canonical_path);
-    }
-
     pub fn allowSdkSqlitePathCanonical(self: *Context, canonical_path: []const u8) !void {
         try self.sdk_sqlite_allowlist.appendUnique(self.allocator, canonical_path);
-    }
-
-    pub fn allowsSdkFilePathCanonical(self: *const Context, canonical_path: []const u8) bool {
-        return self.sdk_file_allowlist.contains(canonical_path);
     }
 
     pub fn allowsSdkSqlitePathCanonical(self: *const Context, canonical_path: []const u8) bool {

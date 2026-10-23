@@ -53,27 +53,15 @@ pub const pushActiveModuleContext = capabilities.pushActiveModuleContext;
 pub const popActiveModuleContext = capabilities.popActiveModuleContext;
 pub const nowMsForActiveModule = capabilities.nowMsForActiveModule;
 pub const nowNsForActiveModule = capabilities.nowNsForActiveModule;
-pub const clockNowMsChecked = capabilities.clockNowMsChecked;
-pub const clockNowNsChecked = capabilities.clockNowNsChecked;
-pub const clockNowSecsChecked = capabilities.clockNowSecsChecked;
 pub const fillRandomForActiveModule = capabilities.fillRandomForActiveModule;
-pub const fillRandomChecked = capabilities.fillRandomChecked;
 pub const writeStderrForActiveModule = capabilities.writeStderrForActiveModule;
-pub const writeStderrChecked = capabilities.writeStderrChecked;
-pub const runtimeCallbackCapabilityChecked = capabilities.runtimeCallbackCapabilityChecked;
-pub const getRuntimeCallbackStateChecked = capabilities.getRuntimeCallbackStateChecked;
-pub const allowSdkFilePath = capabilities.allowSdkFilePath;
 pub const allowSdkSqlitePath = capabilities.allowSdkSqlitePath;
-pub const readFileChecked = capabilities.readFileChecked;
 pub const readEnvForActiveModule = capabilities.readEnvForActiveModule;
 pub const readEnvChecked = capabilities.readEnvChecked;
 pub const sqliteCapabilityChecked = capabilities.sqliteCapabilityChecked;
-pub const getSqliteStateChecked = capabilities.getSqliteStateChecked;
 pub const openSqliteDbChecked = capabilities.openSqliteDbChecked;
 pub const hmacSha256ForActiveModule = capabilities.hmacSha256ForActiveModule;
 pub const sha256ForActiveModule = capabilities.sha256ForActiveModule;
-pub const sha256Checked = capabilities.sha256Checked;
-pub const hmacSha256Checked = capabilities.hmacSha256Checked;
 pub const allowsCacheNamespaceForActiveModule = capabilities.allowsCacheNamespaceForActiveModule;
 pub const allowsCacheNamespaceChecked = capabilities.allowsCacheNamespaceChecked;
 pub const allowsEnvForActiveModule = capabilities.allowsEnvForActiveModule;
@@ -703,31 +691,6 @@ test "SDK module state allocation failure preserves caller ownership" {
     ctx.deinit();
     ctx_live = false;
     try std.testing.expectEqual(@as(usize, 1), probe.cleanup_count);
-}
-
-test "SDK filesystem reads require canonical allowlist entry" {
-    const allocator = std.testing.allocator;
-    var gc_state = try gc.GC.init(allocator, .{ .nursery_size = 4096 });
-    defer gc_state.deinit();
-    const ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    const token = pushActiveModuleContext(ctx, "partner:filesystem", &.{.filesystem});
-    defer popActiveModuleContext(token);
-
-    try std.testing.expectError(
-        error.FilePathNotAllowed,
-        readFileChecked(ctx, "build.zig", 1024 * 1024),
-    );
-
-    try allowSdkFilePath(ctx, "build.zig");
-    const bytes = try readFileChecked(ctx, "build.zig", 1024 * 1024);
-    defer allocator.free(bytes);
-    try std.testing.expect(bytes.len > 0);
-    // The checked read returns the whole file, as the standard library reads it.
-    const expected = try std.Io.Dir.cwd().readFileAlloc(std.testing.io, "build.zig", allocator, .limited(1024 * 1024));
-    defer allocator.free(expected);
-    try std.testing.expectEqualStrings(expected, bytes);
 }
 
 test "SDK sqlite opens require canonical allowlist entry" {

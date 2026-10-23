@@ -237,10 +237,6 @@ pub export fn zttpSdkAllowsCacheNamespace(_: *sdk.ModuleHandle, _: [*]const u8, 
     return true;
 }
 
-pub export fn zttpSdkReadFile(_: *sdk.ModuleHandle, _: [*]const u8, _: usize, _: usize, _: *[*]u8, _: *usize) bool {
-    return false;
-}
-
 pub export fn zttpSdkAllowsSqlQuery(_: *sdk.ModuleHandle, _: [*]const u8, _: usize) bool {
     return true;
 }

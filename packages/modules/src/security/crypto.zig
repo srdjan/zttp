@@ -29,7 +29,7 @@ pub const binding = sdk.ModuleBinding{
         .{
             .name = "sha256",
             .derives_from_args = true,
-            // Reaches sha256Checked through the SDK, which is what `.crypto`
+            // Reaches sha256ForActiveModule through the SDK, which is what `.crypto`
             // gates.
             .required_capabilities = &.{.crypto},
             .module_func = sha256Impl,

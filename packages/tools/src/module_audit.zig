@@ -110,13 +110,11 @@ const ForbiddenPattern = struct {
 
 const capability_rules = [_]CapabilityRule{
     .{ .capability = "env", .helpers = &.{ "readEnvChecked", "readEnvForActiveModule" } },
-    .{ .capability = "clock", .helpers = &.{ "clockNowMsChecked", "clockNowNsChecked", "clockNowSecsChecked", "nowMsForActiveModule", "nowNsForActiveModule" } },
-    .{ .capability = "random", .helpers = &.{ "fillRandomChecked", "fillRandomForActiveModule" } },
-    .{ .capability = "crypto", .helpers = &.{ "sha256Checked", "sha256ForActiveModule", "hmacSha256Checked", "hmacSha256ForActiveModule" } },
-    .{ .capability = "stderr", .helpers = &.{ "writeStderrChecked", "writeStderrForActiveModule" } },
-    .{ .capability = "runtime_callback", .helpers = &.{ "runtimeCallbackCapabilityChecked", "getRuntimeCallbackStateChecked" } },
-    .{ .capability = "sqlite", .helpers = &.{ "sqliteCapabilityChecked", "getSqliteStateChecked", "openSqliteDbChecked" } },
-    .{ .capability = "filesystem", .helpers = &.{"readFileChecked"} },
+    .{ .capability = "clock", .helpers = &.{ "nowMsForActiveModule", "nowNsForActiveModule" } },
+    .{ .capability = "random", .helpers = &.{"fillRandomForActiveModule"} },
+    .{ .capability = "crypto", .helpers = &.{ "sha256ForActiveModule", "hmacSha256ForActiveModule" } },
+    .{ .capability = "stderr", .helpers = &.{"writeStderrForActiveModule"} },
+    .{ .capability = "sqlite", .helpers = &.{ "sqliteCapabilityChecked", "openSqliteDbChecked" } },
     .{ .capability = "network", .helpers = &.{"requireCapability(handle, .network)"} },
     .{ .capability = "policy_check", .helpers = &.{ "allowsEnvChecked", "allowsEnvForActiveModule", "allowsCacheNamespaceChecked", "allowsCacheNamespaceForActiveModule", "allowsSqlQueryChecked", "allowsSqlQueryForActiveModule", "allowsSqlWriteChecked", "allowsSqlWriteForActiveModule" } },
 };
@@ -138,7 +136,7 @@ const forbidden_patterns = [_]ForbiddenPattern{
         .code = "ZVM001",
         .pattern = "file_io.readFile",
         .message = "virtual module reads files directly",
-        .suggestion = "use readFileChecked instead of file_io.readFile",
+        .suggestion = "virtual modules have no file read path; remove the read",
     },
     .{
         .code = "ZVM001",
@@ -150,31 +148,31 @@ const forbidden_patterns = [_]ForbiddenPattern{
         .code = "ZVM001",
         .pattern = "compat.realtimeNowMs",
         .message = "virtual module reads the clock directly",
-        .suggestion = "use clockNowMsChecked instead of compat.realtimeNowMs",
+        .suggestion = "use nowMsForActiveModule instead of compat.realtimeNowMs",
     },
     .{
         .code = "ZVM001",
         .pattern = "compat.realtimeNowNs",
         .message = "virtual module reads the clock directly",
-        .suggestion = "use clockNowNsChecked instead of compat.realtimeNowNs",
+        .suggestion = "use nowNsForActiveModule instead of compat.realtimeNowNs",
     },
     .{
         .code = "ZVM001",
         .pattern = "std.c.write(",
         .message = "virtual module writes to stderr directly",
-        .suggestion = "use writeStderrChecked instead of std.c.write",
+        .suggestion = "use writeStderrForActiveModule instead of std.c.write",
     },
     .{
         .code = "ZVM001",
         .pattern = "HmacSha256.create",
         .message = "virtual module performs HMAC directly",
-        .suggestion = "use hmacSha256Checked instead of HmacSha256.create",
+        .suggestion = "use hmacSha256ForActiveModule instead of HmacSha256.create",
     },
     .{
         .code = "ZVM001",
         .pattern = "Sha256.init",
         .message = "virtual module hashes directly",
-        .suggestion = "use sha256Checked instead of Sha256.init",
+        .suggestion = "use sha256ForActiveModule instead of Sha256.init",
     },
     .{
         .code = "ZVM001",
@@ -1082,7 +1080,7 @@ test "verify module reports helper use without declared capability" {
         \\};
         \\
         \\fn useClock() void {
-        \\    _ = clockNowMsChecked();
+        \\    _ = nowMsForActiveModule();
         \\}
     ;
 
