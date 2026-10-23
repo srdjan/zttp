@@ -229,6 +229,10 @@ pub const TypeChecker = struct {
     /// ZTS603, so `check` removes ZTS205 when it found no type error: one
     /// mistake, one diagnostic.
     strict_checker_follows: bool = false,
+    /// Set by `scanClosureWrites` before the walk when a function body at any
+    /// depth assigns a captured or module-level binding. A call may then run
+    /// that closure, so each call kills every narrowing.
+    closure_writes_outer: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -293,6 +297,7 @@ pub const TypeChecker = struct {
         // file still narrows. A predicate whose body is not an admitted test is
         // rejected here and installs nothing anywhere.
         self.admitTypePredicates(root, 0);
+        self.scanClosureWrites(root, 0, false);
         self.walkStmt(root);
         if (self.bound_var_annotations != self.env.varAnnotationCount()) {
             self.binding_resolution_failed = true;
@@ -640,6 +645,46 @@ pub const TypeChecker = struct {
         self.narrowed.clearRetainingCapacity();
     }
 
+    /// Set `closure_writes_outer` when a function body, at any depth, assigns
+    /// an identifier whose binding is a captured one (`upvalue`) or a
+    /// module-level one (`global`). Only an assignment to an identifier writes
+    /// a binding: the profile refuses compound assignment, so `asgn.op` is
+    /// null in an accepted program, and a `for...of` loop declares its own
+    /// binding. The rule is program-wide on purpose. A call can run a closure
+    /// that the analyzer cannot name: `route_resolution.zig` resolves some
+    /// immutable identifiers to their function, but not a function value in
+    /// general. A closure that writes an outer binding anywhere therefore
+    /// makes every call suspect, and the call arms kill every narrowing.
+    ///
+    /// The walk descends through `IrView.expressionChildren`, so it reaches
+    /// every position that holds code. Past `max_kill_depth` it gives up and
+    /// sets the flag, because a write it did not see is the unsound direction.
+    fn scanClosureWrites(self: *TypeChecker, node: NodeIndex, depth: u16, in_closure: bool) void {
+        if (self.closure_writes_outer or node == null_node) return;
+        if (depth > max_kill_depth) {
+            self.closure_writes_outer = true;
+            return;
+        }
+        const tag = self.ir_view.getTag(node) orelse return;
+        if (in_closure and tag == .assignment) {
+            const asgn = self.ir_view.getAssignment(node) orelse return;
+            if (self.ir_view.getTag(asgn.target) == .identifier) {
+                if (self.ir_view.getBinding(asgn.target)) |binding| {
+                    if (binding.kind == .upvalue or binding.kind == .global) {
+                        self.closure_writes_outer = true;
+                        return;
+                    }
+                }
+            }
+        }
+        const child_in_closure = in_closure or tag == .function_decl or
+            tag == .function_expr or tag == .arrow_function;
+        var children = self.ir_view.expressionChildren(node);
+        while (children.next()) |child| {
+            self.scanClosureWrites(child, depth + 1, child_in_closure);
+        }
+    }
+
     /// Compare a value that leaves the enclosing function with its declared
     /// return type. `node` is the statement that returns it: a `return`, or an
     /// `assert` whose error expression a failed condition returns. A function
@@ -680,6 +725,20 @@ pub const TypeChecker = struct {
         const mark = self.beginNarrowScope();
         self.walkStmt(body);
         _ = self.endNarrowScope(mark);
+    }
+
+    /// The call arms' order when `closure_writes_outer` is set. The arguments
+    /// run before the call, so each is walked first and `f(clear(), x)` reads
+    /// `x` after the kill that `clear()` made. The argument check follows. The
+    /// callee has then run and may have written any outer binding, so every
+    /// narrowing dies, journaled for the joins like any other kill.
+    fn walkCallArgsThenKill(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
+        for (0..call.args_count) |i| {
+            const arg = self.ir_view.getListIndex(call.args_start, @intCast(i));
+            self.walkExpr(arg);
+        }
+        self.checkCallArgs(node, call);
+        self.killAllNarrowings();
     }
 
     fn walkStmt(self: *TypeChecker, node: NodeIndex) void {
@@ -1009,6 +1068,10 @@ pub const TypeChecker = struct {
                 self.reportNominalConstructorCall(node, c);
                 self.reportReadonlyMutation(node, c);
                 self.walkExpr(c.callee);
+                if (self.closure_writes_outer) {
+                    self.walkCallArgsThenKill(node, c);
+                    return;
+                }
                 // Check argument types against function signature
                 self.checkCallArgs(node, c);
                 for (0..c.args_count) |i| {
@@ -1068,6 +1131,10 @@ pub const TypeChecker = struct {
             .method_call => {
                 const mc = self.ir_view.getCall(node) orelse return;
                 self.walkExpr(mc.callee);
+                if (self.closure_writes_outer) {
+                    self.walkCallArgsThenKill(node, mc);
+                    return;
+                }
                 self.checkCallArgs(node, mc);
                 for (0..mc.args_count) |i| {
                     const arg = self.ir_view.getListIndex(mc.args_start, @intCast(i));
@@ -8597,4 +8664,160 @@ test "capture: without the parser record a captured binding has no type" {
     const with = try typedDiagnosticsImpl(allocator, source, false, false, true);
     defer freeSeenDiagnostics(allocator, with);
     try std.testing.expectEqual(@as(usize, 1), countKind(with, .arg_type_mismatch));
+}
+
+// T4 (D14): a call can run a closure that assigns an outer binding.
+
+/// `narrowedThen` with a closure that clears `x`, then `middle`.
+fn narrowedThenClear(comptime middle: []const u8) []const u8 {
+    return narrowedThen(
+        "  const clear = (): number => {\n    x = undefined;\n    return 1;\n  };\n" ++ middle,
+    );
+}
+
+test "call kill: a call after a narrowing reads the declared type when a closure clears it" {
+    // o1.ts, with the return type written so that ZTS600 does not hide it.
+    try expectKindCounts(narrowedThenClear("  n = clear();"), refused_once);
+    // The callee need not be the closure: the analyzer cannot tell which
+    // closure a call reaches, so any call kills.
+    try expectKindCounts(narrowedThenClear("  n = needS(\"a\");"), refused_once);
+    try expectKindCounts(narrowedThenClear("  n = [1, 2].length + needS(\"a\");"), refused_once);
+}
+
+test "call kill: the arguments run before the call" {
+    // `need(clear(), x)`: the inner call kills the narrowing before `x` is read.
+    try expectKindCounts(
+        \\function need(n: number, s: string): number {
+        \\  return n + s.length;
+        \\}
+        \\function run(input: string | undefined): number {
+        \\  let x: string | undefined = input;
+        \\  const clear = (): number => {
+        \\    x = undefined;
+        \\    return 1;
+        \\  };
+        \\  if (x === undefined) {
+        \\    return 0;
+        \\  }
+        \\  return need(clear(), x);
+        \\}
+    , refused_once);
+    // Control: the same call with the arguments in an order that reads `x`
+    // first still checks `x` before the outer call kills.
+    try expectKindCounts(
+        \\function need(s: string, n: number): number {
+        \\  return n + s.length;
+        \\}
+        \\function run(input: string | undefined): number {
+        \\  let x: string | undefined = input;
+        \\  const clear = (): number => {
+        \\    x = undefined;
+        \\    return 1;
+        \\  };
+        \\  if (x === undefined) {
+        \\    return 0;
+        \\  }
+        \\  return need(x, 1);
+        \\}
+    , accepted);
+}
+
+test "call kill: a call inside a loop body or an && chain kills for what follows" {
+    // p8_loop_call.ts. The loop body's kill reaches the join after the loop.
+    try expectKindCounts(
+        narrowedThenClear("  for (const i of [1, 2]) {\n    n = n + clear();\n  }"),
+        refused_once,
+    );
+    // p15_and_chain_reinstall.ts. `clear()` in the middle of the chain voids
+    // the guard that the left operand installed.
+    try expectKindCounts(
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function run(input: string | undefined): number {
+        \\  let x: string | undefined = input;
+        \\  const clear = (): number => {
+        \\    x = undefined;
+        \\    return 1;
+        \\  };
+        \\  const ok = x !== undefined && clear() === 1 && needS(x) > 0;
+        \\  if (ok) {
+        \\    return 1;
+        \\  }
+        \\  return 0;
+        \\}
+    , refused_once);
+}
+
+test "call kill: a function that assigns a module-level let kills after a call to it" {
+    const source =
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\let g: string | undefined = "a";
+        \\function reset(): number {
+        \\  g = undefined;
+        \\  return 1;
+        \\}
+        \\function run(): number {
+        \\  if (g === undefined) {
+        \\    return 0;
+        \\  }
+        \\  const c = reset();
+        \\  return needS(g) + c;
+        \\}
+    ;
+    try expectKindCounts(source, refused_once);
+}
+
+test "call kill: no closure writes an outer binding, so a call keeps the narrowing" {
+    // A closure that writes only its own local, and a function that reads a
+    // module-level let, are not writes to an outer binding.
+    try expectKindCounts(
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function log(n: number): number {
+        \\  const own = n;
+        \\  return own;
+        \\}
+        \\function run(input: string | undefined): number {
+        \\  const x: string | undefined = input;
+        \\  if (x === undefined) {
+        \\    return 0;
+        \\  }
+        \\  const c = log(1);
+        \\  return needS(x) + c;
+        \\}
+    , accepted);
+}
+
+test "call kill: a closure that is declared and never called leaves a later read alone" {
+    // p12_closure_decl_call.ts. The program-wide flag is set, because `clear`
+    // writes `x`. Every call is walked with the kill, but no call comes between
+    // the guard and `needS(x)`: the call in `g`'s body is in a nested scope
+    // whose kills are discarded at its declaration, and `needS(x)` checks its
+    // argument before its own kill.
+    try expectKindCounts(
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function log(n: number): number {
+        \\  return n;
+        \\}
+        \\function run(input: string | undefined): number {
+        \\  let x: string | undefined = input;
+        \\  const clear = (): number => {
+        \\    x = undefined;
+        \\    return 1;
+        \\  };
+        \\  if (x === undefined) {
+        \\    return 0;
+        \\  }
+        \\  const g = (): number => {
+        \\    return log(1);
+        \\  };
+        \\  return needS(x);
+        \\}
+    , accepted);
 }
