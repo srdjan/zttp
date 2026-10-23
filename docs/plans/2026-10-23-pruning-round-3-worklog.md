@@ -70,6 +70,9 @@ Each lane ran its unit gates in its own worktree. The lead then cherry-picked th
 | H10 | `1addb825` | `compileHandler` starts `state_isolated` at false, and `ContractBuilder` claims `canonical` only for a caller that ran strict checking. Nine contract hashes in `typed_frontend_tests.zig` moved, because that test extracts with `.strict = false`. The six `HandlerProperties` default flips are not applied: they change the model-visible `holes` list and broke the replay with `StaleCodegenCassette`. They need an owner decision and a re-record. |
 | U12 P3 | `c189fe3f` | `NodeList`, `fromNodeList`, and the two-format `IrView` are deleted. `IrView` reads only an `IRStore`. Four NodeList tests that repeated IRStore tests are deleted. |
 | U12 P8 | `37a76d62` | Test-only frontend entry points are deleted: `parseExpressionPrefix`, two trivia attach helpers, `markNominal`, six `IRStore` add helpers, `scanAdmissionEndpoint`, `rollbackUnconfirmed`, `getUpvalues`, the printer `self_check` parameter, and `Options.width`. `ExpressionProfile` is now a bool. `planApplicationBases` stays, because six tests of owner-less annotations call it. `TypePool.invalidateTypeKeys` now has no caller. |
+| U15 P15 | `1d2e5411` | The TypeScript symbol lexer is deleted (142 lines). A `#symbol` anchor on a file that is not `.zig` is refused, and one rejection probe covers it. |
+| U15 P16 | `c5749a6d` | `test-meta-drift` compares `describe-rule --hash` with `policy-hash.txt`; a `deadbeef` pin made it exit 1. The `checkExpertMetadata` route is deleted; `meta.golden.json` pins its `rule_count` check exactly. Six drift gates are now dependencies of `test`, and their `verify` routes are deleted. Warm `zig build test -j1` took 75.14 s before and 79.11 s and 81.51 s after; the noise was not measured. The six gates take 1.34 s together when warm. |
+| U15 P17 | `72f209b7` | The corrected v0.21.0 notes, `scripts/setup.sh`, two CODEOWNERS rows for untracked paths, and the stale run steps of `docs/provable-reach.md` are deleted (333 lines). The section that `STRATEGY.md` cites stays. |
 
 ## Round 3b notes
 
@@ -77,3 +80,13 @@ Each lane ran its unit gates in its own worktree. The lead then cherry-picked th
 - `CheckResult.state_isolated` in `precompile_check.zig` still defaults to true when no handler exists. This is not addressed in round 3.
 - The H16 test and U12 P3 landed in separate lanes. The H16 test used `NodeList`, so main failed to compile until `56be5180` moved it to an `IRStore`. After that fix, `test-zts`, `test-precompile`, `test-canonicalize`, and `test-diagnostic-corpus` exited 0 on main.
 - `test-kernel-safety` fails on main after U10: it found 246 non-test kernel function bodies against a floor of 248. U10 deleted `acceptsSchema`, `skipAll`, and `domainDigest`. The classifier refused the lead's floor edit, so the owner lowers the floor.
+
+## Round 3b gate (at `72f209b7`)
+
+| Command | Exit status |
+|---|---|
+| `zig build test` (private cache) | 1: only `test-kernel-safety` failed (246 found, floor 248); 208 of 212 steps succeeded |
+| `zig build check-spine` | 0 |
+| `bash scripts/verify.sh` | not run: its `test` route stops at the same floor |
+
+The test count in that summary covers only the steps that ran after the cache was warm. It is not a count of the whole suite. The H24 and H18 repeat runs wait for the floor change.
