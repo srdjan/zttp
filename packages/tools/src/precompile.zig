@@ -1093,12 +1093,9 @@ fn runCheckOnParsedSource(
                 .unreachable_code = false,
                 .bytecode_verified = false,
             };
-            for (verifier_diags) |d| {
-                if (d.kind == .unreachable_after_return) {
-                    result.no_unreachable = false;
-                    break;
-                }
-            }
+            result.no_unreachable = for (verifier_diags) |d| {
+                if (d.kind == .unreachable_after_return) break false;
+            } else true;
         }
 
         result.flow_errors = @intCast(checked.flow_error_count);
@@ -5974,6 +5971,7 @@ test "check without a handler does not claim state isolation" {
 
     try std.testing.expect(!result.verify_ran);
     try std.testing.expect(!result.state_isolated);
+    try std.testing.expect(!result.no_unreachable);
     const props = (result.contract orelse return error.TestUnexpectedResult).properties orelse return error.TestUnexpectedResult;
     try std.testing.expect(!props.state_isolated);
 }

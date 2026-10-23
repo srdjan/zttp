@@ -76,7 +76,8 @@ pub const CheckResult = struct {
     optionals_safe: bool = false,
     /// Set only by the verifier. A file with no handler never runs it.
     state_isolated: bool = false,
-    no_unreachable: bool = true,
+    /// Set only when the verifier ran clean.
+    no_unreachable: bool = false,
     paths_enumerated: u32 = 0,
     paths_exhaustive: bool = false,
     /// Why coverage is or is not complete. A static string, so nothing owns it.
