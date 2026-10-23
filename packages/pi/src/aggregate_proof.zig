@@ -125,6 +125,7 @@ pub fn prove(
     var baseline_primary_properties: ?ui_payload.PropertiesSnapshot = null;
     var primary_properties: ?ui_payload.PropertiesSnapshot = null;
     for (roots, 0..) |relative_root, root_index| {
+        var baseline_has_handler = false;
         const before_path = try baseline.pathFor(allocator, relative_root);
         defer allocator.free(before_path);
         const after_path = try candidate.pathFor(allocator, relative_root);
@@ -155,7 +156,7 @@ pub fn prove(
         defer if (after_policy) |src| allocator.free(src);
 
         if (fileExists(allocator, before_path)) {
-            const properties = collectCheckDiagnostics(
+            const collected = collectCheckDiagnostics(
                 allocator,
                 &baseline_diagnostics,
                 baseline.root,
@@ -166,9 +167,10 @@ pub fn prove(
                 if (err == error.OutOfMemory) return err;
                 return rejectedFmt(allocator, "baseline_analysis_failed", "baseline analysis failed for {s}: {s}", .{ relative_root, @errorName(err) });
             };
-            if (root_index == 0) baseline_primary_properties = properties;
+            baseline_has_handler = (collected.handler_line orelse 0) != 0;
+            if (root_index == 0) baseline_primary_properties = collected.properties;
         }
-        const properties = collectCheckDiagnostics(
+        const collected = collectCheckDiagnostics(
             allocator,
             &candidate_diagnostics,
             candidate.root,
@@ -179,7 +181,12 @@ pub fn prove(
             if (err == error.OutOfMemory) return err;
             return rejectedFmt(allocator, "candidate_analysis_failed", "candidate analysis failed for {s}: {s}", .{ relative_root, @errorName(err) });
         };
-        if (root_index == 0) primary_properties = properties;
+        // shortcut: a candidate whose analysis fell back builds no contract, so a lost
+        // handler is not seen there; the fallback only runs when full analysis fails.
+        if (baseline_has_handler and collected.handler_line == 0) {
+            return rejectedFmt(allocator, "handler_export_lost", "aggregate proof rejected {s}: the candidate has no handler export", .{relative_root});
+        }
+        if (root_index == 0) primary_properties = collected.properties;
     }
 
     if (firstNewDiagnostic(baseline_diagnostics.items, candidate_diagnostics.items)) |diagnostic| {
@@ -404,6 +411,13 @@ fn appendUniqueOwned(allocator: std.mem.Allocator, roots: *std.ArrayList([]u8), 
     try roots.append(allocator, try allocator.dupe(u8, value));
 }
 
+const Collected = struct {
+    properties: ?ui_payload.PropertiesSnapshot,
+    /// Line of the handler function the contract found; 0 means the file has no
+    /// handler. Null when no contract was built (the fallback path skips it).
+    handler_line: ?u32,
+};
+
 fn collectCheckDiagnostics(
     allocator: std.mem.Allocator,
     out: *std.ArrayList(Diagnostic),
@@ -411,7 +425,7 @@ fn collectCheckDiagnostics(
     handler_path: []const u8,
     schema_path: ?[]const u8,
     policy_source: ?[]const u8,
-) !?ui_payload.PropertiesSnapshot {
+) !Collected {
     var check = zts_cli.precompile.runCheckOnlyWithOptions(allocator, handler_path, .{
         .sql_schema_path = schema_path,
         .json_mode = true,
@@ -445,11 +459,17 @@ fn collectCheckDiagnostics(
             @errorName(full_error),
         );
         try appendCheckDiagnostics(allocator, out, materialized_root, fallback.json_diagnostics.items);
-        return if (fallback.properties) |properties| proof_enrichment.propertiesSnapshot(properties) else null;
+        return .{
+            .properties = if (fallback.properties) |properties| proof_enrichment.propertiesSnapshot(properties) else null,
+            .handler_line = null,
+        };
     };
     defer check.deinit(allocator);
     try appendCheckDiagnostics(allocator, out, materialized_root, check.json_diagnostics.items);
-    return if (check.properties) |properties| proof_enrichment.propertiesSnapshot(properties) else null;
+    return .{
+        .properties = if (check.properties) |properties| proof_enrichment.propertiesSnapshot(properties) else null,
+        .handler_line = if (check.contract) |contract| contract.handler.line else null,
+    };
 }
 
 fn appendCheckDiagnostics(
@@ -816,4 +836,44 @@ test "only a new failed full analysis rejects an edit" {
     try testing.expect(firstNewDiagnostic(baseline.items, same_failure.items) == null);
     const rejected = firstNewDiagnostic(clean.items, baseline.items) orelse return error.TestUnexpectedResult;
     try testing.expectEqualStrings("analysis_incomplete", rejected.code);
+}
+
+/// Prove an edit that replaces `src/handler.ts` with an empty file and return
+/// whether the aggregate proof rejected it.
+fn emptiedHandlerIsRejected(baseline_source: []const u8) !bool {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "zttp.json",
+        .data = "{\"entry\":\"src/handler.ts\"}",
+    });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/handler.ts", .data = baseline_source });
+    const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root_z);
+    const root = try testing.allocator.dupe(u8, root_z);
+    defer testing.allocator.free(root);
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/handler.ts", .content = "" });
+    defer prepared.deinit(testing.allocator);
+    var snapshot = try workspace_snapshot.Snapshot.capture(testing.allocator, &prepared);
+    defer snapshot.deinit(testing.allocator);
+    var result = try prove(testing.allocator, &prepared, &snapshot);
+    defer result.deinit(testing.allocator);
+    return result == .rejected;
+}
+
+test "aggregate proof rejects an emptied handler whose baseline already has ZTS500" {
+    // ZTS310 and ZTS500 in the baseline: an empty candidate with fewer
+    // diagnostics must not pass as a sub-multiset of them.
+    try testing.expect(try emptiedHandlerIsRejected(
+        "let count = 0;\n" ++
+            "structural Guard<T> = Proof<T, \"state_isolated\">;\n" ++
+            "function handler(req: Request): Guard<Response> {\n" ++
+            "  count = count + 1;\n" ++
+            "  return Response.json({ count: count });\n}\n",
+    ));
+    // No capsule: the baseline's ZTS500 message equals the one an empty file gets.
+    try testing.expect(try emptiedHandlerIsRejected(
+        "export function handler(req: Request): Response { return Response.text(\"old\"); }\n",
+    ));
 }
