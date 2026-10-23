@@ -715,3 +715,32 @@ Storage map for the 69 `NodeTag` members, from the Codex round. `E[n]` means `ex
 | `pattern_element`, `pattern_rest`, `pattern_default` | nested pattern `E[2]`, default `E[4]`; `getPatternElem` |
 | `import_decl` | specifiers `R(b)`; `getImportDecl` |
 | `export_decl`, `export_specifier` | `E[1]`, `L(E[2])`; `getExportDecl` |
+
+## Walker soundness units
+
+The plan is `docs/plans/2026-10-22-walker-soundness-plan.md`. Its progress table gives the change and the residual gaps of each unit. This section records the commits, the moved verdicts, and the gate evidence.
+
+For each unit, the lead ran the gates in the plan section "Gates" on a private cache, with `DEEPSEEK_API_KEY` unset. Every listed step exited 0. No unit moved `test-expert-app` replay, `test-meta-drift`, or a committed golden. No unit changed `proof_ir.zig` lowering or certificate bytes.
+
+| Unit | Commit | Moved verdicts | `zig build test` |
+|---|---|---|---|
+| W1 | `24477edd` | none | 200/200 steps, 9250/9256 tests |
+| W2 | `c3e59f8e` | `cap_in_assert.ts`, `in_spread.ts`, `in_objspread.ts`: `retry_safe` and `idempotent` no longer proven | 200/200 steps, 9255/9261 tests |
+| W3a | `3248c73b` | `res_nested.ts`, `res_let_reassign.ts`, `opt_renarrow.ts`: now refused (ZTS303, ZTS309) | 200/200 steps |
+| W3b | `2be327aa` | `res2_assert.ts`, `res2_closure.ts`: now refused (ZTS303); the false ZTS305 for `assert` is gone | 200/200 steps |
+| W4 | `d6ba9e4e` | `n2_init.ts`, `r3_forof.ts`: now refused (ZTS203, ZTS204); one fixture in `flow_false_proofs.zig` changed its `assert` message; 296-file sweep unchanged | 200/200 steps, 9279/9285 tests |
+| W5 | `2e8d9a1d` | `rt2_arrayroot.ts`, `rt_forof.ts`: now refused (ZTS302, ZTS303); 296-file sweep unchanged | 200/200 steps, 9289/9295 tests |
+| W6 | `78ac439d` | `diff_ret2`, `diff_ret3`: now `breaking`; an added call on a preserved path is `breaking` (was `additive`); 14 handlers gain io entries in their cost records | 200/200 steps, 9347/9353 tests |
+| W7a | `ac472eb1` | `diff_two_dyn.ts` to `diff_one_dyn.ts`: now `breaking` | 200/200 steps, 9378/9384 tests |
+| W7b | `db5e81a0` | `diff_one_dyn.ts` to `diff_one_dyn_b.ts`: now `breaking`; a self-diff stays `equivalent`; adding a route to a `routerMatch` handler is `breaking` | 200/200 steps, 9416/9422 tests |
+| W8 | `fbc1357c` | `as_a.ts` to `as_b.ts`: now `breaking`; `fault_covered` can become true for `assert result.ok`; no tracked handler has an `assert`, and the 296-file sweep is unchanged | 200/200 steps, 9451/9457 tests |
+| W9 | `6b3da260` | `examples/handler/feature-probes.ts` loses a false ZTS604 at line 111; spread and closure probes now give ZTS612, ZTS608, and ZTS622; two shadow probes lose a false ZTS608 | 200/200 steps, 9475/9481 tests |
+| W10 | `9b9ee658` | five probes now give ZTS102 (array spread, object spread, member base, optional chain base, computed key); 296-file sweep byte-identical | 200/200 steps, 9482/9488 tests |
+
+The probe sources are in `/private/tmp/claude-501/probes/s/`, `/private/tmp/claude-501/fable/`, `/private/tmp/claude-501/w9/p/`, `/private/tmp/claude-501/w9rev/p/`, and `/private/tmp/claude-501/w10/p/`. Each unit copied its probes into tests, so the scratch directories are not needed again.
+
+Two premises in the plan were wrong:
+- W9: the strict walks already entered closures. The misses in closures came from upvalue keys: a closure names a captured binding with its own scope and slot.
+- W10: D13 was wider than planned. The boolean checker also treated member bases and computed keys as leaves.
+
+Open items for the owner are D14, D15, and the residual gaps in the progress table.

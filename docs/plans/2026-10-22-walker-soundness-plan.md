@@ -1,6 +1,6 @@
 # Walker soundness plan: close the confirmed walk fail-opens
 
-Status: revised 2026-10-22 after one validation round (Codex astra for facts, Fable for the argument). The owner chose decision 9(a) with "a" on 2026-10-22.
+Status: done 2026-10-22. W1 to W11 are committed. D14, D15, and the residual gaps in the progress table wait for the owner. Revised 2026-10-22 after one validation round (Codex astra for facts, Fable for the argument). The owner chose decision 9(a) with "a" on 2026-10-22.
 
 Authority: the owner chose decision 8(a) with "a". That answer also accepted decision 5(a): plan, validate, and implement a fix for the confirmed fail-opens. It accepted decision 6(a): probe the five suspects first. It accepted decision 7(a): defer the contract diff gaps and the six properties that never reach the ledger.
 
@@ -212,4 +212,4 @@ Each unit runs these steps unfiltered and reads each exit status directly: `zig 
 | W8 | done: `assert c, e` forks one failure path for each way `c` is false, with the status of `e` or 500 for a bare assert; an edit to an assert error response is now `breaking`; `fault_covered` can become true when `assert result.ok` guards a failable call |
 | W9 | done: the six `.spread` arms read `getOptValue`; `isPureExpr`, `walkExpr`, `scanLiveMutation`, `collectAssignments`, and `collectCallCounts` descend through `expressionChildren`; a captured binding matches by name atom for ZTS604, ZTS608, and ZTS622; the plan premise was wrong: the walks already entered closures, and the closure misses came from upvalue keys; sweep: one moved verdict, `examples/handler/feature-probes.ts` loses a false ZTS604; residuals: ZTS620 misses a compare on a captured boolean because `inferType` cannot type an upvalue after `check` (same gap as D14); a `match` pattern binding that shadows an arrow helper and is called from a closure probably adds a false ZTS608 (not probed) (parameters and `for...of` bindings now count as declarations, which removed the probed false ZTS608) |
 | W10 | done: the probe confirmed D13 and found it wider: a misuse under an array spread, an object spread, a member base, or an optional chain base was missed; `walkExpr` now walks member bases and computed keys, reads spread operands with `getOptValue`, skips `object_spread` as a property, and sends any other tag through `expressionChildren`; the 296-file sweep is byte-identical |
-| W11 | not started |
+| W11 | done: worklog section "Walker soundness units", the `AGENTS.md` sentence, the solution note, and this index row |
