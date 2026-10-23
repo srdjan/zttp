@@ -28,10 +28,11 @@ Each analysis pass in zts has its own hand-written recursive walk over the IR. E
 | D12 | `strict_checker.zig` | Six `.spread` arms read word `b`. `collectCallCounts` reads `object_spread` as a property. The walks do not enter closures. | A spread operand or a closure holds the refused form. | ZTS612, ZTS622, ZTS608, and nested strict checks can miss a refusal, and `contract_builder.zig` then sets `canonical` true. ZTS620 is missed in a closure. ZTS604 is a false refusal in a closure. | Codex arm table, `res_closure_guard2.ts`, `opt_closure.ts` (Fable) |
 | D13 | `bool_checker.zig` | `.spread` is treated as a leaf, and `object_spread` is read as a property. | A boolean misuse is inside a spread operand. | A missed boolean error. Boolean errors gate contract extraction in `pipeline.zig`. | Codex (code read, no probe) |
 | D14 | `type_checker.zig` narrowing across a call | A narrowing is not killed when a call runs a closure that assigns the narrowed variable. Inside the closure the variable is an `upvalue` binding with another key, and no call kills narrowings. | `let x: string \| undefined`; a closure sets `x = undefined`; an `x === undefined` early return; the closure is called; then `needS(x)`. | No ZTS203. Only the unrelated ZTS604 and ZTS600 refuse the probe today. | `/private/tmp/claude-501/w4/p/o1.ts` (found during W4) |
+| D15 | `path_generator.zig` paths through a `match` expression | A `match` used as an expression (for example `return match (x) { ... }`) yields one behavior path, so its arms are not separate paths. | An edit adds an arm to a `match` that a handler returns. | `prove-behavior` reports `equivalent` (found during W7b, present before it). | not yet probed in a committed test |
 
 D13 has no probe yet. W10 writes one before it changes code.
 
-D14 is out of scope for W4. It needs its own design, because a sound rule must kill narrowings of every captured variable that any called closure can assign. It is recorded here for the owner and for a later unit.
+D14 and D15 are out of scope for this plan. D14 needs its own design, because a sound rule must kill narrowings of every captured variable that any called closure can assign. D15 needs `walkPaths` to fork a path for each arm of a `match` expression. Both are recorded here for the owner and for a later unit.
 
 ## Design
 
@@ -207,7 +208,7 @@ Each unit runs these steps unfiltered and reads each exit status directly: `zig 
 | W5 | done: an array-literal or untracked assignment root counts as a mutation; the escape scan checks every value position through the child map; `!routes` and `typeof routes` now stay resolved (sound precision gain); 296-file sweep unchanged |
 | W6 | done: the tracker records nested calls, `return` values, `if` conditions, `for...of` iterables, `match` discriminants, and inline callbacks; an added call on a preserved path is now `breaking` (was `additive`); 14 handlers gain io entries; residuals: a named closure called later, a `match` arm body that is a bare expression, a changed ternary condition |
 | W7a | done: a `?` token never equals another signature in the law canonicalizer, and a `|` literal encodes as `?`; no tracked contract changed |
-| W7b | not started; decision 9(a) |
+| W7b | done (decision 9(a)): a path with a `?` argument never matches its twin unless both sources have an equal IR identity and import only `zttp:` modules; adding a route to a `routerMatch` handler is now `breaking`; `--prove` live reload blocks a formatting-only save of a handler with a local import and a dynamic argument |
 | W8 | not started |
 | W9 | not started |
 | W10 | not started |

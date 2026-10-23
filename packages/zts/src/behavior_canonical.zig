@@ -135,7 +135,7 @@ fn signaturesEqual(a: ?[]const u8, b: ?[]const u8) bool {
 /// True iff some token of a `|`-joined signature is exactly `?`. The path
 /// generator encodes a string literal that holds `|` as `?`, so no other
 /// token contains `|`, and the split is unambiguous.
-fn hasUnknownToken(signature: []const u8) bool {
+pub fn hasUnknownToken(signature: []const u8) bool {
     var tokens = std.mem.splitScalar(u8, signature, '|');
     while (tokens.next()) |token| {
         if (std.mem.eql(u8, token, "?")) return true;

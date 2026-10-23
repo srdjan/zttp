@@ -82,9 +82,10 @@ test "prove_patch reports a call added on a preserved path as breaking" {
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "classification: breaking") != null);
 }
 
-test "prove_patch returns additive classification for a route added without a module call" {
-    // Adding a route that makes no module call widens the surface and leaves
-    // every preserved path alone, so the class stays additive.
+test "prove_patch reports a route added to a handler with a dynamic module argument as breaking" {
+    // `routerMatch(routes, req)` receives the route table, a dynamic argument.
+    // The contract names it `?` on both sides and cannot tell two tables apart,
+    // so the preserved paths do not match and the edit is not a safe widening.
     const payload =
         \\{"file":"handler.ts","before":"import { routerMatch } from \"zttp:router\";\nfunction getHome(req: Request): Response { return Response.json({ ok: true }); }\nfunction getHealth(req: Request): Response { return Response.json({ healthy: true }); }\nconst routes = {\n  \"GET /\": getHome,\n};\nfunction handler(req: Request): Response {\n  const found = routerMatch(routes, req);\n  if (found !== undefined) {\n    req.params = found.params;\n    return found.handler(req);\n  }\n  return Response.json({ error: \"Not Found\" }, { status: 404 });\n}\n","after":"import { routerMatch } from \"zttp:router\";\nfunction getHome(req: Request): Response { return Response.json({ ok: true }); }\nfunction getHealth(req: Request): Response { return Response.json({ healthy: true }); }\nconst routes = {\n  \"GET /\": getHome,\n  \"GET /health\": getHealth,\n};\nfunction handler(req: Request): Response {\n  const found = routerMatch(routes, req);\n  if (found !== undefined) {\n    req.params = found.params;\n    return found.handler(req);\n  }\n  return Response.json({ error: \"Not Found\" }, { status: 404 });\n}\n"}
     ;
@@ -92,5 +93,18 @@ test "prove_patch returns additive classification for a route added without a mo
     defer result.deinit(testing.allocator);
 
     try testing.expect(result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "classification: additive") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "classification: breaking") != null);
+}
+
+test "prove_patch reports a formatting-only edit to a handler with a dynamic module argument as equivalent" {
+    // The two sources have one syntax tree, so the dynamic argument is the same
+    // expression on both sides and the edit is a no-op.
+    const payload =
+        \\{"file":"handler.ts","before":"import { cacheSet } from \"zttp:cache\";\nfunction handler(req: Request): Response {\n  const a = req.url;\n  cacheSet(\"items\", a, \"v\", 60);\n  return Response.text(\"ok\");\n}\n","after":"import { cacheSet } from \"zttp:cache\";\n// the key is the url\nfunction handler(req: Request): Response {\n    const a = req.url;\n\n    cacheSet( \"items\",  a, \"v\", 60 );   // write\n    return Response.text( \"ok\" );\n}\n"}
+    ;
+    var result = try execute(testing.allocator, &.{payload});
+    defer result.deinit(testing.allocator);
+
+    try testing.expect(result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "classification: equivalent") != null);
 }

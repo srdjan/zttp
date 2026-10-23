@@ -10,6 +10,7 @@
 const std = @import("std");
 const handler_contract = @import("zts-contracts").handler_contract;
 const behavior_canonical = @import("behavior_canonical.zig");
+const ir_identity = @import("ir_identity.zig");
 const builtin_modules = @import("zts-engine").builtin_modules;
 const HandlerContract = handler_contract.HandlerContract;
 const RouteInfo = handler_contract.RouteInfo;
@@ -435,6 +436,7 @@ pub const ContractDiff = struct {
         allocator: std.mem.Allocator,
         old: *const HandlerContract,
         new: *const HandlerContract,
+        options: DiffOptions,
     ) !void {
         if (self.laws_used.items.len > 0) return;
         const structural = self.classifyStructural();
@@ -483,7 +485,7 @@ pub const ContractDiff = struct {
             var found = false;
             for (new_canons.items, 0..) |*new_canon, j| {
                 if (matched[j]) continue;
-                if (!canonicalPathsEqual(&old_canon, new_canon)) continue;
+                if (!canonicalPathsEqual(&old_canon, new_canon, options.same_program)) continue;
                 matched[j] = true;
                 found = true;
                 break;
@@ -529,8 +531,16 @@ pub const ContractDiff = struct {
 
 /// Canonicalized paths are equal when their keys (route, conditions)
 /// match AND their response/failure status match AND their io_sequences
-/// are byte-for-byte identical.
-fn canonicalPathsEqual(a: *const handler_contract.BehaviorPath, b: *const handler_contract.BehaviorPath) bool {
+/// are byte-for-byte identical AND no call holds an argument the contract
+/// cannot name. A `?` token stands for a dynamic argument, and two paths whose
+/// calls both carry `?` may pass different values, so equal bytes prove
+/// nothing. `same_program` lifts that rule: the caller has shown that both
+/// contracts come from one program, so every `?` is the same expression.
+fn canonicalPathsEqual(
+    a: *const handler_contract.BehaviorPath,
+    b: *const handler_contract.BehaviorPath,
+    same_program: bool,
+) bool {
     if (!behaviorPathKeysMatch(a, b)) return false;
     if (a.response_status != b.response_status) return false;
     if (a.is_failure_path != b.is_failure_path) return false;
@@ -538,9 +548,19 @@ fn canonicalPathsEqual(a: *const handler_contract.BehaviorPath, b: *const handle
     for (a.io_sequence.items, b.io_sequence.items) |ia, ib| {
         if (!std.mem.eql(u8, ia.module, ib.module)) return false;
         if (!std.mem.eql(u8, ia.func, ib.func)) return false;
-        if (!eqlOptStr(ia.arg_signature, ib.arg_signature)) return false;
+        if (!ioSignaturesEqual(ia.arg_signature, ib.arg_signature, same_program)) return false;
     }
     return true;
+}
+
+/// Two io arguments are equal when their signatures match and, unless the two
+/// contracts come from one program, name every argument. A null signature
+/// (no arguments recorded) names none, so it is unknown too.
+fn ioSignaturesEqual(a: ?[]const u8, b: ?[]const u8, same_program: bool) bool {
+    if (!eqlOptStr(a, b)) return false;
+    if (same_program) return true;
+    const signature = a orelse return false;
+    return !behavior_canonical.hasUnknownToken(signature);
 }
 
 /// Linear membership check on an already-seen list of FiredLawIds.
@@ -565,12 +585,61 @@ fn costClassLabel(class: ?handler_contract.BoundClass) []const u8 {
     return if (class) |c| c.asString() else "absent";
 }
 
-/// Compare two contracts and produce a structural diff.
+/// How a diff reads the two contracts.
+pub const DiffOptions = struct {
+    /// True only when the caller has shown that both contracts come from the
+    /// same program (equal IR identity, see `diffContractsFromSources`). The
+    /// contracts name a dynamic argument as `?` and cannot tell two dynamic
+    /// arguments apart, so without this proof a path that passes `?` to a
+    /// module call never matches its twin.
+    same_program: bool = false,
+};
+
+/// Compare two contracts and produce a structural diff. A path that passes a
+/// dynamic argument to a module call is never canonically equal to its twin,
+/// so such a handler diffs `breaking` against itself. A caller that holds both
+/// sources calls `diffContractsFromSources`, which lifts that rule for an
+/// identical program.
 /// All slices in the returned diff point into the old/new contracts.
 pub fn diffContracts(
     allocator: std.mem.Allocator,
     old: *const HandlerContract,
     new: *const HandlerContract,
+) !ContractDiff {
+    return diffContractsWithOptions(allocator, old, new, .{});
+}
+
+/// `diffContracts` for a caller that holds the source of both sides. When the
+/// two sources have an equal IR identity (the same tree modulo positions and
+/// trivia) and import only built-in `zttp:` modules, the edit is a no-op and
+/// each `?` is the same expression on both sides. Any other outcome keeps the
+/// strict reading: a source that does not parse, and a source with any other
+/// import (a relative file or a partner module). The identity covers the
+/// handler file only, so an edit confined to an imported file leaves the tree
+/// unchanged, and a dynamic argument computed by that file may differ. The cost
+/// is that a handler with a local import and a dynamic module argument is
+/// `breaking` against itself.
+pub fn diffContractsFromSources(
+    allocator: std.mem.Allocator,
+    old: *const HandlerContract,
+    new: *const HandlerContract,
+    before_source: []const u8,
+    after_source: []const u8,
+) !ContractDiff {
+    const identical = switch (try ir_identity.compare(allocator, before_source, after_source, .{})) {
+        .identical => true,
+        .differs, .unmodeled, .unparsable => false,
+    };
+    // Equal trees import the same specifiers, so one side answers for both.
+    const same_program = identical and try ir_identity.importsOnlyBuiltinModules(allocator, after_source);
+    return diffContractsWithOptions(allocator, old, new, .{ .same_program = same_program });
+}
+
+pub fn diffContractsWithOptions(
+    allocator: std.mem.Allocator,
+    old: *const HandlerContract,
+    new: *const HandlerContract,
+    options: DiffOptions,
 ) !ContractDiff {
     var routes: std.ArrayList(RouteChange) = .empty;
     errdefer routes.deinit(allocator);
@@ -742,7 +811,7 @@ pub fn diffContracts(
     };
     errdefer diff.deinit(allocator);
 
-    try diff.tryCanonicalEquivalence(allocator, old, new);
+    try diff.tryCanonicalEquivalence(allocator, old, new, options);
 
     return diff;
 }

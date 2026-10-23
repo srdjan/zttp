@@ -106,7 +106,7 @@ fn computeProveSummary(
 
     if (before_result.contract) |*before_contract| {
         if (after_result.contract) |*after_contract| {
-            var diff = try contract_diff.diffContracts(allocator, before_contract, after_contract);
+            var diff = try contract_diff.diffContractsFromSources(allocator, before_contract, after_contract, before_source, after);
             defer diff.deinit(allocator);
             const classification = diff.classify();
             const recommendation = try contract_diff.generateRecommendation(allocator, classification, &diff, null);

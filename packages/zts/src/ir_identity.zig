@@ -94,6 +94,32 @@ pub fn compare(
     return cmp.nodes(left.root, right.root, 0);
 }
 
+/// True when every import in `source` names a built-in virtual module
+/// (`zttp:...`). A relative import names a file that this source does not
+/// contain, and so does any other specifier: the tree of the importing file is
+/// the same whatever the imported file holds. A source that does not parse
+/// answers false, because no import list was read.
+pub fn importsOnlyBuiltinModules(allocator: std.mem.Allocator, source: []const u8) error{OutOfMemory}!bool {
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+
+    var parsed = Parsed.init(allocator, source, &atoms, true) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        error.NoTree => return false,
+    };
+    defer parsed.deinit();
+
+    const view = parsed.view();
+    for (0..view.nodeCount()) |index| {
+        const node: NodeIndex = @intCast(index);
+        if (view.getTag(node) != .import_decl) continue;
+        const decl = view.getImportDecl(node) orelse return false;
+        const specifier = view.getString(decl.module_idx) orelse return false;
+        if (engine.builtin_modules.fromSpecifier(specifier) == null) return false;
+    }
+    return true;
+}
+
 /// One side owns its parser and borrows the original source.
 const Parsed = struct {
     parser: parser_mod.JsParser,
@@ -820,4 +846,26 @@ test "identity ignores admitted type text and retains runtime names and declined
     const declined = "const answer: /* gap */ number = 1;\n";
     try testing.expectEqualDeep(Verdict{ .unparsable = .original }, try compare(testing.allocator, declined, repaired, .{}));
     try testing.expectEqualDeep(Verdict{ .unparsable = .repaired }, try compare(testing.allocator, repaired, declined, .{}));
+}
+
+test "importsOnlyBuiltinModules accepts virtual modules and refuses every other specifier" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try importsOnlyBuiltinModules(allocator, "function handler(req) { return 1; }"));
+    try std.testing.expect(try importsOnlyBuiltinModules(
+        allocator,
+        "import { env } from \"zttp:env\";\nimport { cacheSet } from \"zttp:cache\";\nfunction handler(req) { return env(\"A\"); }",
+    ));
+    try std.testing.expect(!try importsOnlyBuiltinModules(
+        allocator,
+        "import { key } from \"./helper.ts\";\nfunction handler(req) { return key(req); }",
+    ));
+    try std.testing.expect(!try importsOnlyBuiltinModules(
+        allocator,
+        "import { env } from \"zttp:env\";\nimport { key } from \"../lib/helper\";\nfunction handler(req) { return key(req); }",
+    ));
+    try std.testing.expect(!try importsOnlyBuiltinModules(
+        allocator,
+        "import { thing } from \"partner:thing\";\nfunction handler(req) { return thing(); }",
+    ));
+    try std.testing.expect(!try importsOnlyBuiltinModules(allocator, "function handler( {"));
 }

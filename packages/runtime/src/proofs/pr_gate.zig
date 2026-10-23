@@ -961,7 +961,7 @@ fn analyzeHandler(
         return .{ .path = try arena.dupe(u8, path), .verdict = .additive };
     }
 
-    var diff = try contract_diff.diffContracts(gpa, before_contract.?, after_contract.?);
+    var diff = try contract_diff.diffContractsFromSources(gpa, before_contract.?, after_contract.?, before_src, after_src);
     defer diff.deinit(gpa);
 
     // A critical lost proof makes the handler breaking, whatever

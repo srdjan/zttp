@@ -439,6 +439,20 @@ records a dynamic argument, and a string literal that holds `|`, as the token
 two dynamic arguments may hold different values. Two writes to different
 dynamic keys stay two writes.
 
+The same rule applies when the gate compares two paths. A path whose module call
+receives a `?` argument is not equal to its twin, because the contract cannot
+tell two dynamic values apart. Changing `cacheSet("items", a, ...)` to
+`cacheSet("items", b, ...)` is `breaking`. One case stays `equivalent`. The
+gate parses the handler source on both sides, and the two syntax trees must be the
+same after the gate ignores comments, whitespace, and positions. The handler
+must also import only built-in `zttp:` modules. An identical program is then a
+no-op, so each `?` is the same expression.
+
+A handler that imports a local file does not qualify. The tree of the handler
+is the same whatever the imported file holds, and the imported file may compute
+the dynamic argument. Such a handler with a `?` argument is `breaking` against
+itself. This is the cost of the rule.
+
 ### A lost proof
 
 The gate also compares the proven properties of each handler. A property that

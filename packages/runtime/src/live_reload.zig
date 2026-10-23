@@ -87,6 +87,10 @@ pub const LiveReloadState = struct {
     handler_path: []const u8,
     config: LiveReloadConfig,
     current_contract: ?HandlerContract,
+    /// Source of `current_contract`, owned. The next reload compares its IR
+    /// identity with the new source, so a save that changes nothing but
+    /// formatting does not read as a changed dynamic argument.
+    current_source: ?[]u8,
     previous_stamp: u64,
     watch_paths: []const []const u8,
     /// Last source-bytes sha logged to .zttp/proofs.jsonl. Suppresses
@@ -115,6 +119,7 @@ pub const LiveReloadState = struct {
             .handler_path = handler_path,
             .config = config,
             .current_contract = null,
+            .current_source = null,
             .previous_stamp = 0,
             .watch_paths = watch_paths,
             .last_ledger_sha = null,
@@ -124,6 +129,7 @@ pub const LiveReloadState = struct {
 
     pub fn deinit(self: *LiveReloadState) void {
         if (self.current_contract) |*c| c.deinit(self.allocator);
+        if (self.current_source) |s| self.allocator.free(s);
         if (self.proof_trace_json) |ptj| self.allocator.free(ptj);
     }
 
@@ -252,6 +258,11 @@ pub const LiveReloadState = struct {
             return;
         };
         defer if (new_code) |c| self.allocator.free(c);
+        // `doSwap` takes the source away from `new_code`, so keep a copy for the
+        // identity check of the next reload. Without a copy the next diff reads
+        // dynamic arguments strictly.
+        const source_copy: ?[]u8 = self.allocator.dupe(u8, new_code.?) catch null;
+        defer if (source_copy) |c| self.allocator.free(c);
 
         var timer = compat.Timer.start() catch null;
 
@@ -310,14 +321,10 @@ pub const LiveReloadState = struct {
                     }
                 }
 
-                var diff = contract_diff.diffContracts(
-                    self.allocator,
-                    old_contract,
-                    &new_contract,
-                ) catch |err| {
+                var diff = self.diffAgainstCurrent(old_contract, &new_contract, source_copy) catch |err| {
                     printProve("Contract diff failed: {}. Reloading without proof comparison.\n", .{err});
                     if (self.doSwap(&new_code, &new_contract, analysis.configuredPolicy())) {
-                        self.updateCurrentContract(new_contract);
+                        self.updateCurrentContract(new_contract, source_copy);
                     } else {
                         new_contract.deinit(self.allocator);
                     }
@@ -336,7 +343,7 @@ pub const LiveReloadState = struct {
                 ) catch |err| {
                     printProve("Upgrade analysis failed: {}. Reloading without proof comparison.\n", .{err});
                     if (self.doSwap(&new_code, &new_contract, analysis.configuredPolicy())) {
-                        self.updateCurrentContract(new_contract);
+                        self.updateCurrentContract(new_contract, source_copy);
                     } else {
                         new_contract.deinit(self.allocator);
                     }
@@ -352,7 +359,7 @@ pub const LiveReloadState = struct {
                     }
                     if (self.doSwap(&new_code, &new_contract, analysis.configuredPolicy())) {
                         self.tryLogSwap(&new_contract, &sha_hex);
-                        self.updateCurrentContract(new_contract);
+                        self.updateCurrentContract(new_contract, source_copy);
                         if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
                     } else {
                         new_contract.deinit(self.allocator);
@@ -366,7 +373,7 @@ pub const LiveReloadState = struct {
             } else {
                 if (self.doSwap(&new_code, &new_contract, analysis.configuredPolicy())) {
                     self.tryLogSwap(&new_contract, &sha_hex);
-                    self.updateCurrentContract(new_contract);
+                    self.updateCurrentContract(new_contract, source_copy);
                     if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
                 } else {
                     new_contract.deinit(self.allocator);
@@ -379,7 +386,7 @@ pub const LiveReloadState = struct {
             };
             analysis.contract = null;
             if (self.doSwap(&new_code, &new_contract, analysis.configuredPolicy())) {
-                self.updateCurrentContract(new_contract);
+                self.updateCurrentContract(new_contract, source_copy);
             } else {
                 new_contract.deinit(self.allocator);
             }
@@ -426,15 +433,33 @@ pub const LiveReloadState = struct {
         const sha_hex = std.fmt.bytesToHex(sha_digest, .lower);
 
         self.tryLogSwap(&contract, &sha_hex);
-        self.updateCurrentContract(contract);
+        self.updateCurrentContract(contract, source);
         self.installRuntimeContract(analysis.configuredPolicy());
         if (self.current_contract) |*current| self.renderHud(current, null, elapsed_ms, &sha_hex);
         printProve("Initial proof ready ({d}ms).\n", .{elapsed_ms});
     }
 
-    fn updateCurrentContract(self: *LiveReloadState, new_contract: HandlerContract) void {
+    fn updateCurrentContract(self: *LiveReloadState, new_contract: HandlerContract, source: ?[]const u8) void {
         if (self.current_contract) |*c| c.deinit(self.allocator);
         self.current_contract = new_contract;
+        if (self.current_source) |old| self.allocator.free(old);
+        self.current_source = if (source) |s| self.allocator.dupe(u8, s) catch null else null;
+    }
+
+    /// Diff the running contract against the new one. With both sources the
+    /// diff lifts the unknown-argument rule for an identical program.
+    fn diffAgainstCurrent(
+        self: *LiveReloadState,
+        old_contract: *const HandlerContract,
+        new_contract: *const HandlerContract,
+        new_source: ?[]const u8,
+    ) !contract_diff.ContractDiff {
+        if (self.current_source) |old_source| {
+            if (new_source) |source| {
+                return contract_diff.diffContractsFromSources(self.allocator, old_contract, new_contract, old_source, source);
+            }
+        }
+        return contract_diff.diffContracts(self.allocator, old_contract, new_contract);
     }
 
     fn installRuntimeContract(self: *LiveReloadState, configured_policy: ?*const HandlerPolicy) void {

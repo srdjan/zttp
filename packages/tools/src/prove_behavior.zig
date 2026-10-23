@@ -123,7 +123,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         std.process.exit(2);
     };
 
-    var diff = try contract_diff.diffContracts(allocator, before_contract, after_contract);
+    var diff = try contract_diff.diffContractsFromSources(allocator, before_contract, after_contract, before_src, after_src);
     defer diff.deinit(allocator);
     const classification = diff.behavioralVerdict();
 

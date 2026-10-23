@@ -11925,7 +11925,7 @@ fn proveBehaviorVerdict(
     defer after.deinit(allocator);
     const before_contract = before.contract orelse return error.NoContractFromBefore;
     const after_contract = after.contract orelse return error.NoContractFromAfter;
-    var diff = try zts.contract_diff.diffContracts(allocator, &before_contract, &after_contract);
+    var diff = try zts.contract_diff.diffContractsFromSources(allocator, &before_contract, &after_contract, before_src, after_src);
     defer diff.deinit(allocator);
     return diff.behavioralVerdict();
 }
@@ -12241,7 +12241,7 @@ fn proveBehaviorOutcome(
     defer after.deinit(allocator);
     const before_contract = before.contract orelse return error.NoContractFromBefore;
     const after_contract = after.contract orelse return error.NoContractFromAfter;
-    var diff = try zts.contract_diff.diffContracts(allocator, &before_contract, &after_contract);
+    var diff = try zts.contract_diff.diffContractsFromSources(allocator, &before_contract, &after_contract, before_src, after_src);
     defer diff.deinit(allocator);
     return .{ .verdict = diff.behavioralVerdict(), .laws_fired = diff.laws_used.items.len };
 }
@@ -12325,4 +12325,128 @@ test "prove-behavior: a string literal that holds a pipe is unknown and does not
     const outcome = try proveBehaviorOutcome(std.testing.allocator, same_pipe_literal_twice, one_pipe_literal);
     try std.testing.expectEqual(zts.contract_diff.Classification.breaking, outcome.verdict);
     try std.testing.expectEqual(@as(usize, 0), outcome.laws_fired);
+}
+
+const one_dynamic_key_url =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  const a = req.url;
+    \\  const b = req.method;
+    \\  cacheSet("items", a, "v", 60);
+    \\  return Response.text("ok");
+    \\}
+;
+const one_dynamic_key_method =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function handler(req: Request): Response {
+    \\  const a = req.url;
+    \\  const b = req.method;
+    \\  cacheSet("items", b, "v", 60);
+    \\  return Response.text("ok");
+    \\}
+;
+const one_dynamic_key_url_reformatted =
+    \\import { cacheSet } from "zttp:cache";
+    \\// The key is the request url.
+    \\export function handler(req: Request): Response {
+    \\    const a = req.url;   // read the url
+    \\
+    \\    const b = req.method;
+    \\    cacheSet( "items",  a, "v", 60 );
+    \\    return Response.text( "ok" );
+    \\}
+;
+
+test "prove-behavior: changing which dynamic value a call receives is breaking" {
+    const outcome = try proveBehaviorOutcome(std.testing.allocator, one_dynamic_key_url, one_dynamic_key_method);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, outcome.verdict);
+}
+
+test "prove-behavior: a handler with a dynamic argument diffs equivalent with itself" {
+    const outcome = try proveBehaviorOutcome(std.testing.allocator, one_dynamic_key_url, one_dynamic_key_url);
+    try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, outcome.verdict);
+}
+
+test "prove-behavior: a comment and whitespace edit to a dynamic-argument handler stays equivalent" {
+    const outcome = try proveBehaviorOutcome(std.testing.allocator, one_dynamic_key_url, one_dynamic_key_url_reformatted);
+    try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, outcome.verdict);
+}
+
+test "diffContracts without sources reads a dynamic argument strictly" {
+    // The contracts name both keys `?`. Without the proof of one program, a
+    // handler is not equivalent to itself, and an edit never reads as safe.
+    const allocator = std.testing.allocator;
+    var before = try runCheckOnlyFromSourceWithOptions(allocator, one_dynamic_key_url, "handler.ts", .{ .json_mode = true });
+    defer before.deinit(allocator);
+    var after = try runCheckOnlyFromSourceWithOptions(allocator, one_dynamic_key_method, "handler.ts", .{ .json_mode = true });
+    defer after.deinit(allocator);
+    const before_contract = before.contract orelse return error.NoContractFromBefore;
+    const after_contract = after.contract orelse return error.NoContractFromAfter;
+
+    var strict_self = try zts.contract_diff.diffContracts(allocator, &before_contract, &before_contract);
+    defer strict_self.deinit(allocator);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, strict_self.behavioralVerdict());
+
+    var strict_edit = try zts.contract_diff.diffContracts(allocator, &before_contract, &after_contract);
+    defer strict_edit.deinit(allocator);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, strict_edit.behavioralVerdict());
+}
+
+/// Answers every import read with one source, so the handler under test sees a
+/// helper file without a disk.
+const FixedImportReader = struct {
+    source: []const u8,
+
+    fn read(context: *anyopaque, allocator: std.mem.Allocator, _: []const u8) anyerror![]u8 {
+        const self: *FixedImportReader = @ptrCast(@alignCast(context));
+        return allocator.dupe(u8, self.source);
+    }
+
+    fn reader(self: *FixedImportReader) ImportReader {
+        return .{ .context = self, .read = read };
+    }
+};
+
+test "diffContractsFromSources keeps the strict reading when the handler imports a local file" {
+    // The handler source is the same on both sides, so the syntax trees are
+    // identical. The helper that computes the cache key is not: it reads the
+    // url before and the method after. The contract names `key(req)` as `?` on
+    // both sides, so only the strict reading refuses to call the edit a no-op.
+    // The cost: the handler is `breaking` against itself.
+    const allocator = std.testing.allocator;
+    const handler_source =
+        \\import { cacheSet } from "zttp:cache";
+        \\import { key } from "./helper.ts";
+        \\export function handler(req: Request): Response {
+        \\  cacheSet("items", key(req), "v", 60);
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const helper_before = "export function key(req: Request): string { return req.url; }";
+    const helper_after = "export function key(req: Request): string { return req.method; }";
+
+    var before_reader: FixedImportReader = .{ .source = helper_before };
+    var after_reader: FixedImportReader = .{ .source = helper_after };
+    var before = try runCheckOnlyFromSourceWithOptions(allocator, handler_source, "/virtual/handler.ts", .{
+        .json_mode = true,
+        .import_reader = before_reader.reader(),
+    });
+    defer before.deinit(allocator);
+    var after = try runCheckOnlyFromSourceWithOptions(allocator, handler_source, "/virtual/handler.ts", .{
+        .json_mode = true,
+        .import_reader = after_reader.reader(),
+    });
+    defer after.deinit(allocator);
+    const before_contract = before.contract orelse return error.NoContractFromBefore;
+    const after_contract = after.contract orelse return error.NoContractFromAfter;
+
+    var diff = try zts.contract_diff.diffContractsFromSources(
+        allocator,
+        &before_contract,
+        &after_contract,
+        handler_source,
+        handler_source,
+    );
+    defer diff.deinit(allocator);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, diff.behavioralVerdict());
 }
