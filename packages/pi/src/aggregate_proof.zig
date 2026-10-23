@@ -167,7 +167,7 @@ pub fn prove(
                 if (err == error.OutOfMemory) return err;
                 return rejectedFmt(allocator, "baseline_analysis_failed", "baseline analysis failed for {s}: {s}", .{ relative_root, @errorName(err) });
             };
-            baseline_has_handler = (collected.handler_line orelse 0) != 0;
+            baseline_has_handler = collected.has_handler orelse false;
             if (root_index == 0) baseline_primary_properties = collected.properties;
         }
         const collected = collectCheckDiagnostics(
@@ -181,9 +181,8 @@ pub fn prove(
             if (err == error.OutOfMemory) return err;
             return rejectedFmt(allocator, "candidate_analysis_failed", "candidate analysis failed for {s}: {s}", .{ relative_root, @errorName(err) });
         };
-        // shortcut: a candidate whose analysis fell back builds no contract, so a lost
-        // handler is not seen there; the fallback only runs when full analysis fails.
-        if (baseline_has_handler and collected.handler_line == 0) {
+        // A candidate that did not parse is unknown, not handler-less.
+        if (baseline_has_handler and !(collected.has_handler orelse true)) {
             return rejectedFmt(allocator, "handler_export_lost", "aggregate proof rejected {s}: the candidate has no handler export", .{relative_root});
         }
         if (root_index == 0) primary_properties = collected.properties;
@@ -413,9 +412,7 @@ fn appendUniqueOwned(allocator: std.mem.Allocator, roots: *std.ArrayList([]u8), 
 
 const Collected = struct {
     properties: ?ui_payload.PropertiesSnapshot,
-    /// Line of the handler function the contract found; 0 means the file has no
-    /// handler. Null when no contract was built (the fallback path skips it).
-    handler_line: ?u32,
+    has_handler: ?bool,
 };
 
 fn collectCheckDiagnostics(
@@ -461,14 +458,14 @@ fn collectCheckDiagnostics(
         try appendCheckDiagnostics(allocator, out, materialized_root, fallback.json_diagnostics.items);
         return .{
             .properties = if (fallback.properties) |properties| proof_enrichment.propertiesSnapshot(properties) else null,
-            .handler_line = null,
+            .has_handler = fallback.has_handler,
         };
     };
     defer check.deinit(allocator);
     try appendCheckDiagnostics(allocator, out, materialized_root, check.json_diagnostics.items);
     return .{
         .properties = if (check.properties) |properties| proof_enrichment.propertiesSnapshot(properties) else null,
-        .handler_line = if (check.contract) |contract| contract.handler.line else null,
+        .has_handler = check.has_handler,
     };
 }
 
@@ -841,6 +838,10 @@ test "only a new failed full analysis rejects an edit" {
 /// Prove an edit that replaces `src/handler.ts` with an empty file and return
 /// whether the aggregate proof rejected it.
 fn emptiedHandlerIsRejected(baseline_source: []const u8) !bool {
+    return replacedHandlerIsRejected(baseline_source, "");
+}
+
+fn replacedHandlerIsRejected(baseline_source: []const u8, candidate_source: []const u8) !bool {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(testing.io, "src");
@@ -853,7 +854,7 @@ fn emptiedHandlerIsRejected(baseline_source: []const u8) !bool {
     defer testing.allocator.free(root_z);
     const root = try testing.allocator.dupe(u8, root_z);
     defer testing.allocator.free(root);
-    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/handler.ts", .content = "" });
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/handler.ts", .content = candidate_source });
     defer prepared.deinit(testing.allocator);
     var snapshot = try workspace_snapshot.Snapshot.capture(testing.allocator, &prepared);
     defer snapshot.deinit(testing.allocator);
@@ -875,5 +876,16 @@ test "aggregate proof rejects an emptied handler whose baseline already has ZTS5
     // No capsule: the baseline's ZTS500 message equals the one an empty file gets.
     try testing.expect(try emptiedHandlerIsRejected(
         "export function handler(req: Request): Response { return Response.text(\"old\"); }\n",
+    ));
+}
+
+test "aggregate proof rejects a lost handler when both sides stop before the contract" {
+    // A type error stops the check before the contract on both sides, so
+    // neither side has a contract to compare handler lines.
+    try testing.expect(try replacedHandlerIsRejected(
+        "const n: number = \"x\";\n" ++
+            "function handler(req: Request): Response { return Response.text(\"old\"); }\n",
+        "const n: number = \"x\";\n" ++
+            "function helper(): string { return \"old\"; }\n",
     ));
 }

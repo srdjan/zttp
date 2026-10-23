@@ -55,6 +55,10 @@ pub const CheckResult = struct {
     /// non-idiomatic spelling never fails a build.
     strict_advisories: u32 = 0,
     is_typescript: bool = false,
+    /// The file declares a handler. Set right after parsing, so a check that
+    /// stops early or skips the contract still reports it. Null when parsing
+    /// failed, so nothing is known.
+    has_handler: ?bool = null,
     verify_ran: bool = false,
     verify_errors: u32 = 0,
     verify_warnings: u32 = 0,

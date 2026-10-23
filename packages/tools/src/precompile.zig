@@ -897,6 +897,8 @@ fn runCheckOnParsedSource(
     };
 
     const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    const handler_fn = zts.findHandlerFunction(ir_view, root);
+    result.has_handler = handler_fn != null;
     var parsed = if (source_kind.isTyped())
         zts.parsedModuleFromDirectCheck(&source_owner) orelse return error.DirectTypeSyntaxUnavailable
     else
@@ -1038,7 +1040,7 @@ fn runCheckOnParsedSource(
     var imported_graph: ?FlowModuleGraph = null;
     defer if (imported_graph) |*graph| graph.deinit();
     var verify_info: ?VerificationInfo = null;
-    if (zts.findHandlerFunction(ir_view, root)) |hf| {
+    if (handler_fn) |hf| {
         // Retain exactly the flow/effect reader's snapshots. The fault scan
         // below still performs its own independent traversal and reads.
         imported_graph = try loadFlowModulesForCheck(allocator, parsed, source, try analysis.facts(), handler_path, opts.import_reader);
@@ -1128,7 +1130,7 @@ fn runCheckOnParsedSource(
             .imported_effects = if (imported_graph) |*graph| graph.imported_effects.items else &.{},
         },
     );
-    if (zts.findHandlerFunction(ir_view, root) != null) {
+    if (handler_fn != null) {
         try projectCompletedFlow(
             allocator,
             &result.contract.?,
@@ -1175,7 +1177,6 @@ fn runCheckOnParsedSource(
 
     // Stage 9: Path generation + Stage 10: Fault coverage
     {
-        const handler_fn = findHandlerFunction(ir_view, root);
         if (handler_fn) |hf| {
             var path_analysis = try analyzeHandlerPaths(
                 path_allocator,
@@ -5936,6 +5937,29 @@ test "compileHandler projects verifier properties only when verification runs" {
     const props = contract.properties orelse return error.MissingProperties;
     try std.testing.expect(props.result_safe);
     try std.testing.expect(props.optional_safe);
+}
+
+test "check reports a handler even when it stops before the contract" {
+    const allocator = std.testing.allocator;
+    const handler = "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
+    const mistyped = "function handler(req: Request): Response { const n: number = \"x\"; return Response.text(\"ok\"); }\n";
+    const helper = "function helper(): string { return \"ok\"; }\n";
+    const unparsed = "function handler(req: Request): Response { var n = 1; return Response.text(\"ok\"); }\n";
+    const cases = [_]struct { source: []const u8, skip_contract: bool, has_handler: ?bool }{
+        .{ .source = handler, .skip_contract = true, .has_handler = true },
+        .{ .source = mistyped, .skip_contract = false, .has_handler = true },
+        .{ .source = helper, .skip_contract = true, .has_handler = false },
+        .{ .source = unparsed, .skip_contract = false, .has_handler = null },
+    };
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{
+            .json_mode = true,
+            .skip_contract = case.skip_contract,
+        });
+        defer result.deinit(allocator);
+        try std.testing.expect(result.contract == null);
+        try std.testing.expectEqual(case.has_handler, result.has_handler);
+    }
 }
 
 test "check without a handler does not claim state isolation" {
