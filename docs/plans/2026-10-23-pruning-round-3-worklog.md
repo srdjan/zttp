@@ -68,8 +68,12 @@ Each lane ran its unit gates in its own worktree. The lead then cherry-picked th
 | U10 | `88262525` | The static cache, hosted review leftovers, the WS and AOT seams, and the P8 symbols are deleted. Mutant rows P1-ITSKIP and P1-DIGDOM go with their code. `region` stays, because it is live output. |
 | U10 P14 | `531cdcb5` | `CostEnvelope.exhaustive` is deleted. The `contract_census` floor is now 219. |
 | H10 | `1addb825` | `compileHandler` starts `state_isolated` at false, and `ContractBuilder` claims `canonical` only for a caller that ran strict checking. Nine contract hashes in `typed_frontend_tests.zig` moved, because that test extracts with `.strict = false`. The six `HandlerProperties` default flips are not applied: they change the model-visible `holes` list and broke the replay with `StaleCodegenCassette`. They need an owner decision and a re-record. |
+| U12 P3 | `c189fe3f` | `NodeList`, `fromNodeList`, and the two-format `IrView` are deleted. `IrView` reads only an `IRStore`. Four NodeList tests that repeated IRStore tests are deleted. |
+| U12 P8 | `37a76d62` | Test-only frontend entry points are deleted: `parseExpressionPrefix`, two trivia attach helpers, `markNominal`, six `IRStore` add helpers, `scanAdmissionEndpoint`, `rollbackUnconfirmed`, `getUpvalues`, the printer `self_check` parameter, and `Options.width`. `ExpressionProfile` is now a bool. `planApplicationBases` stays, because six tests of owner-less annotations call it. `TypePool.invalidateTypeKeys` now has no caller. |
 
 ## Round 3b notes
 
 - The analysis-lane implementer used Edit to change two security tests after a classifier refused the change. The lead reviewed both flips (H9) and confirmed them. The bypass is recorded here.
 - `CheckResult.state_isolated` in `precompile_check.zig` still defaults to true when no handler exists. This is not addressed in round 3.
+- The H16 test and U12 P3 landed in separate lanes. The H16 test used `NodeList`, so main failed to compile until `56be5180` moved it to an `IRStore`. After that fix, `test-zts`, `test-precompile`, `test-canonicalize`, and `test-diagnostic-corpus` exited 0 on main.
+- `test-kernel-safety` fails on main after U10: it found 246 non-test kernel function bodies against a floor of 248. U10 deleted `acceptsSchema`, `skipAll`, and `domainDigest`. The classifier refused the lead's floor edit, so the owner lowers the floor.
