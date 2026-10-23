@@ -6,6 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Hardening and pruning, round 3](2026-10-23-pruning-round-3-list.md) | Audit list 2026-10-23: 24 hardening, 17 pruning, 12 consolidation, and 7 documentation items; nothing selected | No implementation authority |
 | [Captured binding and match paths](2026-10-23-captured-binding-and-match-paths-plan.md) | Done 2026-10-23: T1 to T6 committed; `path_analyzer_version` 4; the DeepSeek re-record is approved (decision 15(a)) and run by the owner; results in the [worklog](2026-10-22-coupling-census-worklog.md) | Owner chose decisions 10(a), 11(a), 12(a) with "as recommended", 13(a) and 14(a) with "as recommended", and 15(a) and 16(a) with "a" |
 | [Walker soundness](2026-10-22-walker-soundness-plan.md) | Done 2026-10-22: W1 to W10 committed, W11 records; D14, D15, and the residual gaps wait for the owner | Owner chose decisions 8(a), 5(a), 6(a), 7(a), and 9(a) with "a" |
 | [Coupling census](2026-10-22-coupling-census-plan.md) | Complete 2026-10-22; U1 to U4 committed, `verify.sh` passed; U5 census confirmed two fail-opens (assert, spread), not fixed; results in the [worklog](2026-10-22-coupling-census-worklog.md) | Owner chose audit decisions 1(a) to 4(a) with "as recommended" |
