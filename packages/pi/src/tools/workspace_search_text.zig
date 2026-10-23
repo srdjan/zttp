@@ -127,6 +127,10 @@ fn execute(
     defer allocator.free(absolute);
     const relative = common.relativeToRoot(root, absolute);
 
+    if (try common.ignoredRefusal(allocator, root, relative, name)) |refusal| {
+        return .{ .ok = false, .llm_text = refusal };
+    }
+
     // Search via `rg` when present, otherwise fall back to an in-process search
     // for an explicitly named file.
     // `runCommand` spawns children under an empty environ and resolves a bare
@@ -166,6 +170,15 @@ fn renderSearchOutput(
     var records = std.ArrayList(SearchRecord).empty;
     defer records.deinit(allocator);
     try parseSearchRecords(allocator, output.stdout, &records);
+    // The secret boundary: rg `--hidden` and the in-process search both read
+    // `.env`, so every record is checked here whatever produced it.
+    var kept: usize = 0;
+    for (records.items) |record| {
+        if (common.isSecretBasename(std.fs.path.basename(record.path))) continue;
+        records.items[kept] = record;
+        kept += 1;
+    }
+    records.shrinkRetainingCapacity(kept);
     std.mem.sort(SearchRecord, records.items, {}, struct {
         fn lessThan(_: void, a: SearchRecord, b: SearchRecord) bool {
             const path_order = std.mem.order(u8, a.path, b.path);
@@ -748,4 +761,56 @@ test "workspace_search_text: in-process fallback propagates allocation failure" 
         searchFileUnderAllocationFailure,
         .{ tmp.abs_path, file_path },
     );
+}
+
+test "workspace_search_text: records under a secret basename never reach the page" {
+    const stdout =
+        ".env\x001:API_KEY=hunter2\n" ++
+        "config/server.pem\x002:PEM-BODY\n" ++
+        "src/a.ts\x003:API_KEY visible\n";
+    const output: SearchOutput = .{
+        .stdout = @constCast(stdout),
+        .stderr = @constCast(""),
+        .ok = true,
+    };
+    var result = try renderSearchOutput(testing.allocator, "API_KEY", 0, 50, true, &output);
+    defer result.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "hunter2") == null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "PEM-BODY") == null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "src/a.ts") != null);
+}
+
+test "workspace_search_text: a recursive search in a non-git workspace omits .env lines" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "search-secret-nogit");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, ".env", "API_KEY=hunter2\n");
+    try tmp.writeFile(allocator, "src/a.ts", "API_KEY visible\n");
+
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    var result = try tool.execute(allocator, &.{"{\"query\":\"API_KEY\"}"});
+    defer result.deinit(allocator);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "hunter2") == null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"path\":\".env\"") == null);
+}
+
+test "workspace_search_text: an explicit secret path is refused" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "search-secret-explicit");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, ".env", "API_KEY=hunter2\n");
+
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    var result = try tool.execute(allocator, &.{"{\"query\":\"API_KEY\",\"path\":\".env\"}"});
+    defer result.deinit(allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "hunter2") == null);
 }

@@ -78,7 +78,7 @@ fn execute(
     defer allocator.free(absolute);
     const relative = common.relativeToRoot(root, absolute);
 
-    if (try ignoredRefusal(allocator, root, relative)) |refusal| {
+    if (try common.ignoredRefusal(allocator, root, relative, name)) |refusal| {
         return .{ .ok = false, .llm_text = refusal };
     }
 
@@ -109,59 +109,6 @@ fn execute(
         offset,
         max_bytes,
     );
-}
-
-/// Return an owned refusal message when `relative` is a path the tool must not
-/// read, or null when the read may proceed. The message never carries file
-/// content.
-///
-/// The check runs `git check-ignore -v -- <relative>` in the workspace root.
-/// Exit 0 means ignored and the tool refuses, naming the matching pattern and
-/// its source. Exit 1 means not ignored and the tool reads. Any other result
-/// (not a git repository, git missing, git failure) applies the fixed
-/// basename deny list in `isSecretBasename`.
-///
-/// `common.runCommand` runs git with an empty environment and no HOME, so the
-/// global git excludes file does not apply. A workspace nested inside a
-/// parent repository that ignores it reads every file as ignored.
-fn ignoredRefusal(
-    allocator: std.mem.Allocator,
-    root: []const u8,
-    relative: []const u8,
-) !?[]u8 {
-    const argv = [_][]const u8{ "git", "check-ignore", "-v", "--", relative };
-    const maybe_outcome: ?common.CommandOutcome = common.runCommand(allocator, root, &argv) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => null,
-    };
-    if (maybe_outcome) |outcome_value| {
-        var outcome = outcome_value;
-        defer outcome.deinit(allocator);
-        if (outcome.exit_code) |code| {
-            if (code == 1) return null;
-            if (code == 0) {
-                const line_end = std.mem.indexOfScalar(u8, outcome.stdout, '\n') orelse outcome.stdout.len;
-                const line = outcome.stdout[0..line_end];
-                const match = line[0 .. std.mem.indexOfScalar(u8, line, '\t') orelse line.len];
-                return try allocator.print(name ++ ": path is ignored by git and is not readable (source:line:pattern {s})\n", .{match});
-            }
-        }
-    }
-    if (isSecretBasename(std.fs.path.basename(relative))) {
-        return try allocator.dupe(u8, name ++ ": path matches the secret file deny list and is not readable\n");
-    }
-    return null;
-}
-
-/// Fixed deny list used when git cannot answer: `.env`, `.env.*`, `*.pem`,
-/// `*.key`, `id_rsa*`, `id_ed25519*`.
-fn isSecretBasename(base: []const u8) bool {
-    return std.mem.eql(u8, base, ".env") or
-        std.mem.startsWith(u8, base, ".env.") or
-        std.mem.endsWith(u8, base, ".pem") or
-        std.mem.endsWith(u8, base, ".key") or
-        std.mem.startsWith(u8, base, "id_rsa") or
-        std.mem.startsWith(u8, base, "id_ed25519");
 }
 
 /// Render the largest page at `offset` whose complete envelope stays inside
@@ -375,8 +322,8 @@ test "workspace_read_file: refuses a gitignored file without returning its conte
     var tmp = try IsolatedTmp.init(allocator, "workspace-read-ignored");
     defer tmp.cleanup(allocator);
     try initGitWorkspace(allocator, &tmp);
-    try tmp.writeFile(allocator, ".gitignore", ".env\n");
-    try tmp.writeFile(allocator, ".env", "API_KEY=hunter2\n");
+    try tmp.writeFile(allocator, ".gitignore", "scratch.txt\n");
+    try tmp.writeFile(allocator, "scratch.txt", "API_KEY=hunter2\n");
     try tmp.writeFile(allocator, "notes.txt", "plain notes\n");
 
     const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
@@ -384,11 +331,11 @@ test "workspace_read_file: refuses a gitignored file without returning its conte
     try std.Io.Threaded.chdir(tmp.abs_path);
     defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
-    var refused = try execute(allocator, &.{".env"});
+    var refused = try execute(allocator, &.{"scratch.txt"});
     defer refused.deinit(allocator);
     try testing.expect(!refused.ok);
     try testing.expect(std.mem.indexOf(u8, refused.llm_text, "ignored by git") != null);
-    try testing.expect(std.mem.indexOf(u8, refused.llm_text, ".gitignore:1:.env") != null);
+    try testing.expect(std.mem.indexOf(u8, refused.llm_text, ".gitignore:1:scratch.txt") != null);
     try testing.expect(std.mem.indexOf(u8, refused.llm_text, "hunter2") == null);
 
     var allowed = try execute(allocator, &.{"notes.txt"});
@@ -425,13 +372,53 @@ test "workspace_read_file: a non-git workspace applies the secret deny list" {
 }
 
 test "workspace_read_file: deny list matches the documented basenames only" {
-    try testing.expect(isSecretBasename(".env"));
-    try testing.expect(isSecretBasename(".env.local"));
-    try testing.expect(isSecretBasename("tls.pem"));
-    try testing.expect(isSecretBasename("signing.key"));
-    try testing.expect(isSecretBasename("id_rsa.pub"));
-    try testing.expect(isSecretBasename("id_ed25519"));
-    try testing.expect(!isSecretBasename("environment.ts"));
-    try testing.expect(!isSecretBasename("keyboard.ts"));
-    try testing.expect(!isSecretBasename("handler.ts"));
+    try testing.expect(common.isSecretBasename(".env"));
+    try testing.expect(common.isSecretBasename(".env.local"));
+    try testing.expect(common.isSecretBasename("tls.pem"));
+    try testing.expect(common.isSecretBasename("signing.key"));
+    try testing.expect(common.isSecretBasename("id_rsa.pub"));
+    try testing.expect(common.isSecretBasename("id_ed25519"));
+    try testing.expect(!common.isSecretBasename("environment.ts"));
+    try testing.expect(!common.isSecretBasename("keyboard.ts"));
+    try testing.expect(!common.isSecretBasename("handler.ts"));
+}
+
+test "workspace_read_file: a tracked .env in a git workspace is refused" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "workspace-read-tracked-env");
+    defer tmp.cleanup(allocator);
+    try initGitWorkspace(allocator, &tmp);
+    try tmp.writeFile(allocator, ".env", "API_KEY=hunter2\n");
+    const add_argv = [_][]const u8{ "git", "add", "-f", ".env" };
+    var added = try common.runCommand(allocator, tmp.abs_path, &add_argv);
+    defer added.deinit(allocator);
+    try testing.expect(added.ok);
+
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    var refused = try execute(allocator, &.{".env"});
+    defer refused.deinit(allocator);
+    try testing.expect(!refused.ok);
+    try testing.expect(std.mem.indexOf(u8, refused.llm_text, "hunter2") == null);
+}
+
+test "workspace_read_file: an untracked .env in a git workspace is refused" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "workspace-read-untracked-env");
+    defer tmp.cleanup(allocator);
+    try initGitWorkspace(allocator, &tmp);
+    try tmp.writeFile(allocator, ".env", "API_KEY=hunter2\n");
+
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    var refused = try execute(allocator, &.{".env"});
+    defer refused.deinit(allocator);
+    try testing.expect(!refused.ok);
+    try testing.expect(std.mem.indexOf(u8, refused.llm_text, "hunter2") == null);
 }

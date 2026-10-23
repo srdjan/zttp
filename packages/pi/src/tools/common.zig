@@ -273,6 +273,59 @@ pub fn runCommand(
     };
 }
 
+/// Return an owned refusal message when `relative` is a path that a workspace
+/// tool must not read, or null when the read may proceed. The message never
+/// carries file content.
+///
+/// The fixed basename deny list in `isSecretBasename` applies first and
+/// unconditionally, so a committed or untracked `.env` is refused whatever git
+/// says. Then `git check-ignore -v -- <relative>` runs in the workspace root.
+/// Exit 0 means ignored and the tool refuses, naming the matching pattern and
+/// its source. Any other result reads.
+///
+/// `runCommand` runs git with an empty environment and no HOME, so the global
+/// git excludes file does not apply. A workspace nested inside a parent
+/// repository that ignores it reads every file as ignored.
+pub fn ignoredRefusal(
+    allocator: std.mem.Allocator,
+    root: []const u8,
+    relative: []const u8,
+    comptime tool_name: []const u8,
+) !?[]u8 {
+    if (isSecretBasename(std.fs.path.basename(relative))) {
+        return try allocator.dupe(u8, tool_name ++ ": path matches the secret file deny list and is not readable\n");
+    }
+    const argv = [_][]const u8{ "git", "check-ignore", "-v", "--", relative };
+    const maybe_outcome: ?CommandOutcome = runCommand(allocator, root, &argv) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => null,
+    };
+    if (maybe_outcome) |outcome_value| {
+        var outcome = outcome_value;
+        defer outcome.deinit(allocator);
+        if (outcome.exit_code) |code| {
+            if (code == 0) {
+                const line_end = std.mem.indexOfScalar(u8, outcome.stdout, '\n') orelse outcome.stdout.len;
+                const line = outcome.stdout[0..line_end];
+                const match = line[0 .. std.mem.indexOfScalar(u8, line, '\t') orelse line.len];
+                return try allocator.print(tool_name ++ ": path is ignored by git and is not readable (source:line:pattern {s})\n", .{match});
+            }
+        }
+    }
+    return null;
+}
+
+/// Fixed deny list: `.env`, `.env.*`, `*.pem`, `*.key`, `id_rsa*`,
+/// `id_ed25519*`.
+pub fn isSecretBasename(base: []const u8) bool {
+    return std.mem.eql(u8, base, ".env") or
+        std.mem.startsWith(u8, base, ".env.") or
+        std.mem.endsWith(u8, base, ".pem") or
+        std.mem.endsWith(u8, base, ".key") or
+        std.mem.startsWith(u8, base, "id_rsa") or
+        std.mem.startsWith(u8, base, "id_ed25519");
+}
+
 pub fn commandOutcomeToToolResult(
     allocator: std.mem.Allocator,
     argv: []const []const u8,

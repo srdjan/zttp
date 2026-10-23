@@ -5,8 +5,10 @@
 //!
 //! Walk order: start at the resolved cwd; at each level read AGENTS.md then
 //! CLAUDE.md if present; ascend until either `.git/` is observed at the
-//! current level (inclusive, so the repo root's files are included) or the
-//! filesystem root is reached. Files are concatenated in outer-first order
+//! current level (inclusive, so the repo root's files are included). With no
+//! `.git/` at any level the workspace root is the starting directory, so a
+//! parent's files such as `~/AGENTS.md` are never read. Files are concatenated
+//! in outer-first order
 //! so nested rules read after (and conceptually refine) parent rules.
 //!
 //! Caps keep the loader bounded. Crossing either cap is an explicit error:
@@ -26,7 +28,7 @@ pub const Options = struct {
     per_file_cap: usize = 64 * 1024,
     /// Hard cap on the concatenated output. Crossing it fails explicitly.
     total_cap: usize = 512 * 1024,
-    /// Stop walking (inclusive) when a directory contains `.git`.
+    /// Stop walking (inclusive) at the nearest `.git` root, or at the starting directory when none exists.
     stop_at_git_root: bool = true,
 };
 
@@ -68,6 +70,7 @@ pub fn loadFromDir(
     const cwd_owned = try allocator.dupe(u8, cwd_abs);
     defer allocator.free(cwd_owned);
     var current: []const u8 = cwd_owned;
+    const root: ?[]const u8 = if (options.stop_at_git_root) gitRootOrStart(allocator, cwd_owned) else null;
 
     while (true) {
         var level_buf: LevelBuf = .{};
@@ -76,7 +79,7 @@ pub fn loadFromDir(
         try readIfPresent(allocator, current, options.filename_primary, options.per_file_cap, &level_buf);
         try readIfPresent(allocator, current, options.filename_alternate, options.per_file_cap, &level_buf);
 
-        const has_git = options.stop_at_git_root and dirHasGit(allocator, current);
+        const at_root = if (root) |r| std.mem.eql(u8, current, r) else false;
 
         if (level_buf.files.items.len > 0) {
             try levels.append(allocator, level_buf);
@@ -84,7 +87,7 @@ pub fn loadFromDir(
             level_buf.deinit(allocator);
         }
 
-        if (has_git) break;
+        if (at_root) break;
 
         const parent = std.fs.path.dirname(current) orelse break;
         if (parent.len == current.len) break;
@@ -164,6 +167,17 @@ fn readIfPresent(
     errdefer allocator.free(body);
 
     try out.files.append(allocator, .{ .path = joined, .body = body });
+}
+
+/// The nearest ancestor of `start` (inclusive) that holds `.git`, else `start`.
+fn gitRootOrStart(allocator: std.mem.Allocator, start: []const u8) []const u8 {
+    var current = start;
+    while (true) {
+        if (dirHasGit(allocator, current)) return current;
+        const parent = std.fs.path.dirname(current) orelse return start;
+        if (parent.len == current.len) return start;
+        current = parent;
+    }
 }
 
 fn dirHasGit(allocator: std.mem.Allocator, dir: []const u8) bool {
@@ -295,4 +309,21 @@ test "total cap surfaces as an error" {
 test "rejects relative cwd" {
     const err = loadFromDir(testing.allocator, "relative/path", .{});
     try testing.expectError(error.PathNotAbsolute, err);
+}
+
+test "a tree without .git does not read a parent AGENTS.md" {
+    var tree = try initTmp(testing.allocator);
+    defer tree.cleanup(testing.allocator);
+
+    try tree.writeFile(testing.allocator, "AGENTS.md", "PARENT\n");
+    try tree.writeFile(testing.allocator, "sub/AGENTS.md", "SUB\n");
+
+    const sub_abs = try tree.childPath(testing.allocator, "sub");
+    defer testing.allocator.free(sub_abs);
+
+    const result = (try loadFromDir(testing.allocator, sub_abs, .{})) orelse return error.TestExpected;
+    defer testing.allocator.free(result);
+
+    try testing.expect(std.mem.indexOf(u8, result, "SUB") != null);
+    try testing.expect(std.mem.indexOf(u8, result, "PARENT") == null);
 }
