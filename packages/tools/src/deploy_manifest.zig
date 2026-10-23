@@ -26,9 +26,6 @@ pub const ProvenRoute = struct {
 };
 
 pub const ProvenFacts = struct {
-    handler_name: []const u8,
-    handler_path: []const u8,
-
     env_vars: []const []const u8,
     env_proven: bool,
 
@@ -41,7 +38,6 @@ pub const ProvenFacts = struct {
     routes: []const ProvenRoute,
 
     proof_level: ProofLevel,
-    checks_passed: []const []const u8,
 
     retry_safe: bool = false,
     read_only: bool = false,
@@ -52,7 +48,6 @@ pub const ProvenFacts = struct {
     /// sites. Surfaced in the live HUD so authors see `+deterministic`
     /// flip when they introduce a non-deterministic builtin.
     deterministic: bool = false,
-    max_io_depth: ?u32 = null,
 
     // Data flow provenance
     no_secret_leakage: bool = false,
@@ -73,25 +68,11 @@ pub const ProvenFacts = struct {
 
 /// Derive platform-agnostic ProvenFacts from a HandlerContract.
 /// All slices in the returned struct point into the contract's owned data
-/// or into the checks_buf. The caller must keep the contract alive while
-/// using the facts. checks_buf is allocated and must be freed by the caller.
+/// The caller must keep the contract alive while using the facts.
 pub fn extractProvenFacts(
     allocator: std.mem.Allocator,
     contract: *const HandlerContract,
-) !struct { facts: ProvenFacts, checks_buf: [][]const u8, routes_buf: []ProvenRoute } {
-    // Handler name: strip directory and extension from path
-    const handler_name = extractHandlerName(contract.handler.path);
-
-    // Collect checks that passed
-    var checks: std.ArrayList([]const u8) = .empty;
-    errdefer checks.deinit(allocator);
-
-    if (contract.verification) |v| {
-        if (v.exhaustive_returns) try checks.append(allocator, "exhaustiveReturns");
-        if (v.results_safe) try checks.append(allocator, "resultsSafe");
-        if (v.bytecode_verified) try checks.append(allocator, "bytecodeVerified");
-    }
-
+) !struct { facts: ProvenFacts, routes_buf: []ProvenRoute } {
     // Build routes from contract
     var routes: std.ArrayList(ProvenRoute) = .empty;
     errdefer routes.deinit(allocator);
@@ -103,16 +84,12 @@ pub fn extractProvenFacts(
         });
     }
 
-    const checks_buf = try checks.toOwnedSlice(allocator);
-    errdefer allocator.free(checks_buf);
     const routes_buf = try routes.toOwnedSlice(allocator);
 
     const proof_level = deriveProofLevel(contract);
 
     return .{
         .facts = .{
-            .handler_name = handler_name,
-            .handler_path = contract.handler.path,
             .env_vars = contract.env.literal.items,
             .env_proven = !contract.env.dynamic,
             .egress_endpoints = contract.egress.endpoints.items,
@@ -121,14 +98,12 @@ pub fn extractProvenFacts(
             .cache_proven = !contract.cache.dynamic,
             .routes = routes_buf,
             .proof_level = proof_level,
-            .checks_passed = checks_buf,
             .retry_safe = if (contract.properties) |p| p.retry_safe else false,
             .read_only = if (contract.properties) |p| p.read_only else false,
             .injection_safe = if (contract.properties) |p| p.injection_safe else false,
             .idempotent = if (contract.properties) |p| p.idempotent else false,
             .state_isolated = if (contract.properties) |p| p.state_isolated else false,
             .deterministic = if (contract.properties) |p| p.deterministic else false,
-            .max_io_depth = if (contract.properties) |p| p.max_io_depth else null,
             .no_secret_leakage = if (contract.properties) |p| p.no_secret_leakage else false,
             .no_credential_leakage = if (contract.properties) |p| p.no_credential_leakage else false,
             .input_validated = if (contract.properties) |p| p.input_validated else false,
@@ -136,26 +111,8 @@ pub fn extractProvenFacts(
             .results_safe = if (contract.verification) |v| v.results_safe else false,
             .fault_covered = if (contract.properties) |p| p.fault_covered else false,
         },
-        .checks_buf = checks_buf,
         .routes_buf = routes_buf,
     };
-}
-
-fn extractHandlerName(path: []const u8) []const u8 {
-    // Find last '/' for filename start
-    var start: usize = 0;
-    for (path, 0..) |c, i| {
-        if (c == '/') start = i + 1;
-    }
-    const filename = path[start..];
-
-    // Strip extension
-    var end = filename.len;
-    for (filename, 0..) |c, i| {
-        if (c == '.') end = i;
-    }
-    if (end == 0) return filename;
-    return filename[0..end];
 }
 
 pub const deriveProofLevel = zts.ContractProof.level;
@@ -167,11 +124,6 @@ pub const deriveProofLevel = zts.ContractProof.level;
 fn makeTestContract(allocator: std.mem.Allocator) !HandlerContract {
     const path = try allocator.dupe(u8, "handler.ts");
     return handler_contract.emptyContract(path);
-}
-
-test "extractHandlerName basic" {
-    try std.testing.expectEqualStrings("handler", extractHandlerName("handler.ts"));
-    try std.testing.expectEqualStrings("my-handler", extractHandlerName("my-handler.ts"));
 }
 
 test "deriveProofLevel none when no verification" {
@@ -234,12 +186,9 @@ test "extractProvenFacts minimal contract" {
     defer contract.deinit(allocator);
 
     const result = try extractProvenFacts(allocator, &contract);
-    defer allocator.free(result.checks_buf);
     defer allocator.free(result.routes_buf);
 
     const facts = result.facts;
-    try std.testing.expectEqualStrings("handler", facts.handler_name);
-    try std.testing.expectEqualStrings("handler.ts", facts.handler_path);
     try std.testing.expectEqual(@as(usize, 0), facts.env_vars.len);
     try std.testing.expect(facts.env_proven);
     try std.testing.expectEqual(@as(usize, 0), facts.routes.len);
@@ -268,7 +217,6 @@ test "extractProvenFacts with env and egress" {
     };
 
     const result = try extractProvenFacts(allocator, &contract);
-    defer allocator.free(result.checks_buf);
     defer allocator.free(result.routes_buf);
 
     const facts = result.facts;
@@ -279,7 +227,6 @@ test "extractProvenFacts with env and egress" {
     try std.testing.expectEqual(@as(usize, 1), facts.egress_endpoints.len);
     try std.testing.expect(!facts.egress_proven);
     try std.testing.expectEqual(ProofLevel.partial, facts.proof_level);
-    try std.testing.expectEqual(@as(usize, 3), facts.checks_passed.len);
 }
 
 /// The seven properties whose absence must read as false. A contract with
@@ -301,7 +248,6 @@ test "extractProvenFacts reads every security property as false when properties 
     try std.testing.expect(contract.properties == null);
 
     const result = try extractProvenFacts(allocator, &contract);
-    defer allocator.free(result.checks_buf);
     defer allocator.free(result.routes_buf);
 
     inline for (security_property_names) |name| {
@@ -324,7 +270,6 @@ test "extractProvenFacts keeps a proven property when properties is set" {
     };
 
     const result = try extractProvenFacts(allocator, &contract);
-    defer allocator.free(result.checks_buf);
     defer allocator.free(result.routes_buf);
 
     try std.testing.expect(result.facts.injection_safe);
@@ -410,12 +355,11 @@ const facts_source_exclusions = [_]Exclusion{
     .{ .name = "post_only", .reason = not_carried },
     .{ .name = "canonical", .reason = not_carried },
     .{ .name = "cost_bounded", .reason = not_carried },
+    .{ .name = "max_io_depth", .reason = not_carried },
 };
 
 /// The `ProvenFacts` fields that do not come from `HandlerProperties`, each with its source.
 const facts_target_exclusions = [_]Exclusion{
-    .{ .name = "handler_name", .reason = "the file stem of contract.handler.path" },
-    .{ .name = "handler_path", .reason = "contract.handler.path" },
     .{ .name = "env_vars", .reason = "contract.env.literal" },
     .{ .name = "env_proven", .reason = "not contract.env.dynamic" },
     .{ .name = "egress_endpoints", .reason = "contract.egress.endpoints" },
@@ -424,7 +368,6 @@ const facts_target_exclusions = [_]Exclusion{
     .{ .name = "cache_proven", .reason = "not contract.cache.dynamic" },
     .{ .name = "routes", .reason = "contract.routes" },
     .{ .name = "proof_level", .reason = "deriveProofLevel over the contract verification and dynamic flags" },
-    .{ .name = "checks_passed", .reason = "the passed flags of contract.verification" },
     .{ .name = "results_safe", .reason = "contract.verification.results_safe, not HandlerProperties.result_safe" },
 };
 
@@ -445,11 +388,9 @@ test "extractProvenFacts copies every HandlerProperties field that ProvenFacts c
         inline for (@typeInfo(zts.HandlerProperties).@"struct".field_names) |field| {
             if (@FieldType(zts.HandlerProperties, field) == bool) @field(source, field) = flag;
         }
-        source.max_io_depth = if (flag) 7 else null;
         contract.properties = source;
 
         const result = try extractProvenFacts(allocator, &contract);
-        defer allocator.free(result.checks_buf);
         defer allocator.free(result.routes_buf);
 
         var compared: usize = 0;
@@ -459,8 +400,8 @@ test "extractProvenFacts copies every HandlerProperties field that ProvenFacts c
                 compared += 1;
             }
         }
-        // The floor: twelve of the twenty fields are carried.
-        try std.testing.expectEqual(@as(usize, 12), compared);
+        // The floor: eleven of the twenty fields are carried.
+        try std.testing.expectEqual(@as(usize, 11), compared);
     }
 }
 
@@ -482,7 +423,6 @@ test "extractProvenFacts reads results_safe from verification and not from resul
         };
 
         const result = try extractProvenFacts(allocator, &contract);
-        defer allocator.free(result.checks_buf);
         defer allocator.free(result.routes_buf);
         try std.testing.expectEqual(flag, result.facts.results_safe);
     }

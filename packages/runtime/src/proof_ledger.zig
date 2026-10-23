@@ -593,7 +593,8 @@ test "appendEvent preserves existing hosted state bytes" {
     try testing.expectEqualStrings(
         "{\"ts\":1,\"kind\":\"deploy\",\"handlerPath\":\"src/handler.ts\",\"facts\":{" ++
             "\"contractSha\":\"sha-sentinel\",\"proofLevel\":\"complete\",\"envKeys\":[\"PORT\"]," ++
-            "\"egressEndpoints\":[],\"cacheNamespaces\":[],\"capabilities\":[],\"routes\":[]," ++
+            "\"egressEndpoints\":[],\"cacheNamespaces\":[],\"envProven\":false,\"egressProven\":false," ++
+            "\"cacheProven\":false,\"capabilities\":[],\"routes\":[]," ++
             "\"properties\":{\"retrySafe\":false,\"readOnly\":true,\"deterministic\":true," ++
             "\"injectionSafe\":true,\"idempotent\":false,\"stateIsolated\":true," ++
             "\"noSecretLeakage\":true,\"noCredentialLeakage\":true,\"inputValidated\":true," ++

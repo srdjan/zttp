@@ -3193,7 +3193,6 @@ test "multi-module compile proves no security property in the extracted facts" {
     try std.testing.expect(merged.properties == null);
 
     const extracted = try deploy_manifest.extractProvenFacts(allocator, &merged);
-    defer allocator.free(extracted.checks_buf);
     defer allocator.free(extracted.routes_buf);
 
     const names = [_][]const u8{

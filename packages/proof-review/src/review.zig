@@ -133,6 +133,15 @@ pub const property_metas = [_]PropertyMeta{
     .{ .field = "fault_covered", .json_key = "faultCovered", .label = "fault-covered" },
 };
 
+// The three set-completeness flags of ReviewFacts. A literal set that turns dynamic
+// is a demotion in `deriveDelta`, and the reverse is a promotion. Each flag is true
+// only when the contract proved the set closed, so a missing key reads as not held.
+pub const flag_metas = [_]PropertyMeta{
+    .{ .field = "env_proven", .json_key = "envProven", .label = "env-proven" },
+    .{ .field = "egress_proven", .json_key = "egressProven", .label = "egress-proven" },
+    .{ .field = "cache_proven", .json_key = "cacheProven", .label = "cache-proven" },
+};
+
 // ReviewFacts is the persisted-and-rendered projection of a contract. Strings
 // are owned and freed in deinit. Routes are owned (pattern bytes duped).
 pub const ReviewFacts = struct {
@@ -144,6 +153,9 @@ pub const ReviewFacts = struct {
     routes: []const Route,
     capabilities: []const []const u8,
     properties: Properties,
+    env_proven: bool = false,
+    egress_proven: bool = false,
+    cache_proven: bool = false,
     /// Active specs from the compiled contract. Each entry carries the name
     /// plus its current discharge state. The HUD renders failed entries as
     /// `[FAIL]` with a per-property suggestion.
@@ -198,6 +210,9 @@ pub const ReviewFacts = struct {
             .cache_namespaces = cache_namespaces,
             .routes = routes,
             .capabilities = caps,
+            .env_proven = facts.env_proven,
+            .egress_proven = facts.egress_proven,
+            .cache_proven = facts.cache_proven,
             .properties = .{
                 .retry_safe = facts.retry_safe,
                 .read_only = facts.read_only,
@@ -257,6 +272,10 @@ pub const ReviewFacts = struct {
         try writeStringArray(json, self.egress_endpoints);
         try json.objectField("cacheNamespaces");
         try writeStringArray(json, self.cache_namespaces);
+        inline for (flag_metas) |meta| {
+            try json.objectField(meta.json_key);
+            try json.write(@field(self, meta.field));
+        }
         try json.objectField("capabilities");
         try writeStringArray(json, self.capabilities);
         try json.objectField("routes");
@@ -370,6 +389,9 @@ pub const ReviewFacts = struct {
             .routes = routes,
             .capabilities = capabilities,
             .properties = props,
+            .env_proven = parseFlag(obj, "envProven"),
+            .egress_proven = parseFlag(obj, "egressProven"),
+            .cache_proven = parseFlag(obj, "cacheProven"),
             .declared_specs = declared_specs,
             .intent_assertion_count = intent_assertion_count,
             .intent_dynamic = intent_dynamic,
@@ -455,6 +477,28 @@ pub const ReviewDelta = struct {
     }
 };
 
+fn recordChange(
+    allocator: std.mem.Allocator,
+    promoted: *std.ArrayList(PropertyChange),
+    demoted: *std.ArrayList(PropertyChange),
+    meta: PropertyMeta,
+    old_v: bool,
+    new_v: bool,
+) !void {
+    if (old_v == new_v) return;
+    const change = PropertyChange{
+        .name = meta.field,
+        .label = meta.label,
+        .old_value = old_v,
+        .new_value = new_v,
+    };
+    if (!old_v and new_v) {
+        try promoted.append(allocator, change);
+    } else {
+        try demoted.append(allocator, change);
+    }
+}
+
 /// Derive a delta of `current` against `baseline`. With no baseline the delta
 /// is empty by construction so `classify` returns `.safe` for first deploys;
 /// the renderer separately surfaces "baseline: none" so that case is still
@@ -497,21 +541,10 @@ pub fn deriveDelta(
     var demoted: std.ArrayList(PropertyChange) = .empty;
     errdefer demoted.deinit(allocator);
     inline for (property_metas) |meta| {
-        const old_v = @field(b.properties, meta.field);
-        const new_v = @field(current.properties, meta.field);
-        if (old_v != new_v) {
-            const change = PropertyChange{
-                .name = meta.field,
-                .label = meta.label,
-                .old_value = old_v,
-                .new_value = new_v,
-            };
-            if (!old_v and new_v) {
-                try promoted.append(allocator, change);
-            } else {
-                try demoted.append(allocator, change);
-            }
-        }
+        try recordChange(allocator, &promoted, &demoted, meta, @field(b.properties, meta.field), @field(current.properties, meta.field));
+    }
+    inline for (flag_metas) |meta| {
+        try recordChange(allocator, &promoted, &demoted, meta, @field(b, meta.field), @field(current, meta.field));
     }
 
     const level_change: ?ProofLevelChange = if (current.proof_level == b.proof_level)
@@ -1005,6 +1038,11 @@ fn writeStringArray(json: *std.json.Stringify, items: []const []const u8) !void 
     try json.endArray();
 }
 
+fn parseFlag(obj: std.json.ObjectMap, key: []const u8) bool {
+    const v = obj.get(key) orelse return false;
+    return v == .bool and v.bool;
+}
+
 fn parseStringArray(
     allocator: std.mem.Allocator,
     obj: std.json.ObjectMap,
@@ -1275,8 +1313,6 @@ test "fromProvenFacts: projects every field from ProvenFacts" {
     };
 
     const facts = ProvenFacts{
-        .handler_name = "demo",
-        .handler_path = "src/handler.ts",
         .env_vars = &env_in,
         .env_proven = true,
         .egress_endpoints = &egress_in,
@@ -1285,7 +1321,6 @@ test "fromProvenFacts: projects every field from ProvenFacts" {
         .cache_proven = true,
         .routes = &routes_in,
         .proof_level = .complete,
-        .checks_passed = &.{},
         .retry_safe = true,
         .read_only = true,
         .injection_safe = false,
@@ -1348,8 +1383,6 @@ test "fromProvenFacts: dedupes duplicate env keys" {
     const allocator = std.testing.allocator;
     const env_in = [_][]const u8{ "PORT", "DB_URL", "PORT" };
     const facts = ProvenFacts{
-        .handler_name = "demo",
-        .handler_path = "src/handler.ts",
         .env_vars = &env_in,
         .env_proven = true,
         .egress_endpoints = &.{},
@@ -1358,7 +1391,6 @@ test "fromProvenFacts: dedupes duplicate env keys" {
         .cache_proven = true,
         .routes = &.{},
         .proof_level = .none,
-        .checks_passed = &.{},
     };
 
     var review = try ReviewFacts.fromProvenFacts(allocator, &facts, &.{}, "sha-1", &.{});
@@ -1367,6 +1399,78 @@ test "fromProvenFacts: dedupes duplicate env keys" {
     try std.testing.expectEqual(@as(usize, 2), review.env_keys.len);
     try std.testing.expectEqualStrings("DB_URL", review.env_keys[0]);
     try std.testing.expectEqualStrings("PORT", review.env_keys[1]);
+}
+
+test "deriveDelta: a change from a literal to a dynamic env, egress, or cache set is a demotion" {
+    const allocator = std.testing.allocator;
+    const Case = struct { env: bool, egress: bool, cache: bool, label: []const u8 };
+    const cases = [_]Case{
+        .{ .env = false, .egress = true, .cache = true, .label = "env-proven" },
+        .{ .env = true, .egress = false, .cache = true, .label = "egress-proven" },
+        .{ .env = true, .egress = true, .cache = false, .label = "cache-proven" },
+    };
+    for (cases) |c| {
+        const base = ProvenFacts{
+            .env_vars = &.{},
+            .env_proven = true,
+            .egress_endpoints = &.{},
+            .egress_proven = true,
+            .cache_namespaces = &.{},
+            .cache_proven = true,
+            .routes = &.{},
+            .proof_level = .complete,
+        };
+        var changed = base;
+        changed.env_proven = c.env;
+        changed.egress_proven = c.egress;
+        changed.cache_proven = c.cache;
+
+        var baseline = try ReviewFacts.fromProvenFacts(allocator, &base, &.{}, "sha-old", &.{});
+        defer baseline.deinit(allocator);
+        var current = try ReviewFacts.fromProvenFacts(allocator, &changed, &.{}, "sha-new", &.{});
+        defer current.deinit(allocator);
+
+        var delta = try deriveDelta(allocator, &current, &baseline);
+        defer delta.deinit(allocator);
+        try std.testing.expect(!delta.isEmpty());
+        try std.testing.expectEqual(@as(usize, 1), delta.demoted_properties.len);
+        try std.testing.expectEqualStrings(c.label, delta.demoted_properties[0].label);
+        try std.testing.expectEqual(Verdict.breaking, classify(&delta));
+
+        // The reverse direction is a promotion and not breaking.
+        var reverse = try deriveDelta(allocator, &baseline, &current);
+        defer reverse.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), reverse.promoted_properties.len);
+        try std.testing.expectEqual(Verdict.safe_with_additions, classify(&reverse));
+    }
+}
+
+test "ReviewFacts: the proven flags round trip through JSON" {
+    const allocator = std.testing.allocator;
+    var facts = ReviewFacts{
+        .contract_sha = "sha",
+        .proof_level = .complete,
+        .env_keys = &.{},
+        .egress_endpoints = &.{},
+        .cache_namespaces = &.{},
+        .routes = &.{},
+        .capabilities = &.{},
+        .properties = .{},
+        .env_proven = true,
+        .egress_proven = false,
+        .cache_proven = true,
+    };
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    var json: std.json.Stringify = .{ .writer = &out.writer };
+    try facts.writeJson(&json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, out.writer.buffered(), .{});
+    defer parsed.deinit();
+    var round = try ReviewFacts.parseJson(allocator, parsed.value.object);
+    defer round.deinit(allocator);
+    try std.testing.expect(round.env_proven);
+    try std.testing.expect(!round.egress_proven);
+    try std.testing.expect(round.cache_proven);
 }
 
 test "ReviewFacts: writeJson then parseJson round trips" {
@@ -1919,7 +2023,7 @@ const properties_source_exclusions = [_]Exclusion{
     .{ .name = "post_only", .reason = "ProvenFacts has no field for it, so Properties cannot hold it" },
     .{ .name = "canonical", .reason = "ProvenFacts has no field for it, so Properties cannot hold it" },
     .{ .name = "cost_bounded", .reason = "ProvenFacts has no field for it, so Properties cannot hold it" },
-    .{ .name = "max_io_depth", .reason = "ProvenFacts carries it, but Properties holds boolean flags only and has no numeric field" },
+    .{ .name = "max_io_depth", .reason = "ProvenFacts has no field for it, so Properties cannot hold it" },
 };
 
 /// The `Properties` fields that do not come from `HandlerProperties`, each with its source.
@@ -1974,7 +2078,6 @@ test "ReviewFacts carries every HandlerProperties flag that Properties names, th
         };
 
         const extracted = try zts_cli.deploy_manifest.extractProvenFacts(allocator, &contract);
-        defer allocator.free(extracted.checks_buf);
         defer allocator.free(extracted.routes_buf);
         var facts = try ReviewFacts.fromProvenFacts(allocator, &extracted.facts, &.{}, "sha", &.{});
         defer facts.deinit(allocator);

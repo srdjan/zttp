@@ -653,10 +653,7 @@ pub fn factsFromContract(
     contract_sha: []const u8,
 ) !review_facts_mod.ReviewFacts {
     var extract = try deploy_manifest.extractProvenFacts(allocator, contract);
-    defer {
-        allocator.free(extract.checks_buf);
-        allocator.free(extract.routes_buf);
-    }
+    defer allocator.free(extract.routes_buf);
 
     // No capability statement reads as no capabilities for display purposes.
     const caps_slice = if (contract.capabilities) |*caps| caps.slice() else &[_]zts.module_binding.ModuleCapability{};
