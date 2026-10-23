@@ -5,6 +5,7 @@
 //! the help printers are internal because only these commands invoke them.
 
 const std = @import("std");
+const writeAllFd = @import("posix_util.zig").writeAllFd;
 const builtin = @import("builtin");
 
 const zts = @import("zts");
@@ -136,17 +137,17 @@ fn failCompileCommandArgs(err: CommandArgError) !void {
         },
         .missing_handler_path => {
             std.log.err("handler file path required", .{});
-            printCompileHelp();
+            try printCompileHelp();
             return error.MissingArgument;
         },
         .missing_output_flag => {
             std.log.err("-o <output> required", .{});
-            printCompileHelp();
+            try printCompileHelp();
             return error.MissingArgument;
         },
         .unknown_arg => |arg| {
             std.log.err("Unknown argument: {s}", .{arg});
-            printCompileHelp();
+            try printCompileHelp();
             return error.UnknownOption;
         },
     }
@@ -155,7 +156,7 @@ fn failCompileCommandArgs(err: CommandArgError) !void {
 pub fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     const opts = switch (parseCompileCommandArgs(argv)) {
         .help => {
-            printCompileHelp();
+            try printCompileHelp();
             return;
         },
         .ok => |opts| opts,
@@ -343,7 +344,7 @@ fn failBuildCommandArgs(err: CommandArgError) !void {
         },
         .unknown_arg => |arg| {
             std.log.err("Unknown argument: {s}", .{arg});
-            printBuildHelp();
+            try printBuildHelp();
             return error.UnknownOption;
         },
         .missing_handler_path,
@@ -359,7 +360,7 @@ fn projectRunCommand(allocator: std.mem.Allocator, artifact: *const ProjectArtif
 pub fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     const opts = switch (parseBuildCommandArgs(argv)) {
         .help => {
-            printBuildHelp();
+            try printBuildHelp();
             return;
         },
         .ok => |opts| opts,
@@ -439,22 +440,22 @@ fn failLocalDeployCommandArgs(err: LocalDeployArgError) !void {
     switch (err) {
         .missing_target_value => {
             std.debug.print("--target requires exactly one value: local.\n\n", .{});
-            printLocalDeployHelp();
+            try printLocalDeployHelp();
             return error.MissingArgument;
         },
         .duplicate_target => {
             std.debug.print("Pass --target only once.\n\n", .{});
-            printLocalDeployHelp();
+            try printLocalDeployHelp();
             return error.InvalidArgument;
         },
         .unknown_target => |target| {
             std.debug.print("Unknown deploy target: {s}. Only 'local' is supported.\n\n", .{target});
-            printLocalDeployHelp();
+            try printLocalDeployHelp();
             return error.InvalidArgument;
         },
         .unknown_arg => |arg| {
             std.debug.print("Unknown argument for `zttp deploy --local`: {s}\n\n", .{arg});
-            printLocalDeployHelp();
+            try printLocalDeployHelp();
             return error.UnknownOption;
         },
     }
@@ -463,7 +464,7 @@ fn failLocalDeployCommandArgs(err: LocalDeployArgError) !void {
 pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     const opts = switch (parseLocalDeployCommandArgs(argv)) {
         .help => {
-            printLocalDeployHelp();
+            try printLocalDeployHelp();
             return;
         },
         .ok => |opts| opts,
@@ -1195,7 +1196,7 @@ fn codesignAdHoc(allocator: std.mem.Allocator, path: []const u8) void {
     }
 }
 
-fn printCompileHelp() void {
+fn printCompileHelp() !void {
     const help =
         \\zttp compile <handler.ts> -o <output>
         \\
@@ -1214,10 +1215,10 @@ fn printCompileHelp() void {
         \\`zttp build` instead.
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
-fn printBuildHelp() void {
+fn printBuildHelp() !void {
     const help =
         \\zttp build [-o <output>] [--no-attest]
         \\
@@ -1232,10 +1233,10 @@ fn printBuildHelp() void {
         \\  --help                Show this help
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
-fn printLocalDeployHelp() void {
+fn printLocalDeployHelp() !void {
     const help =
         \\zttp deploy [--no-attest]
         \\  (--local is an accepted alias; deploy takes no arguments)
@@ -1256,7 +1257,7 @@ fn printLocalDeployHelp() void {
         \\  --help                Show this help
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
 const ArtifactTailProbe = struct {

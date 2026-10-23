@@ -283,12 +283,16 @@ pub fn runCompileWithArgs(allocator: std.mem.Allocator, argv: []const []const u8
                 return error.VerificationFailed;
             };
             defer allocator.free(viol_path);
+            var violations_written = true;
             writeFilePosix(viol_path, viol_jsonl, allocator) catch |err| {
                 debugPrint("Error writing violations file '{s}': {}\n", .{ viol_path, err });
+                violations_written = false;
             };
             if (compiled.violations_summary) |summary| debugPrint("{s}", .{summary});
-            debugPrint("  Counterexample tests written to: {s}\n", .{viol_path});
-            debugPrint("  Run: zig build run -- {s} --test {s}\n", .{ output_path_final, viol_path });
+            if (violations_written) {
+                debugPrint("  Counterexample tests written to: {s}\n", .{viol_path});
+                debugPrint("  Run: zig build run -- {s} --test {s}\n", .{ output_path_final, viol_path });
+            }
         } else if (compiled.violations_summary) |summary| {
             debugPrint("{s}", .{summary});
         }
@@ -1723,7 +1727,10 @@ pub fn compileHandler(
                 if (all_violations.items.len > 0) {
                     var vj_buf: std.ArrayList(u8) = .empty;
                     var vj_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &vj_buf);
-                    zts.property_diagnostics.writeViolationsJsonl(&vj_aw.writer, allocator, all_violations.items, handler_tests) catch {};
+                    zts.property_diagnostics.writeViolationsJsonl(&vj_aw.writer, allocator, all_violations.items, handler_tests) catch |err| {
+                        vj_aw.deinit();
+                        return err;
+                    };
                     vj_buf = vj_aw.toArrayList();
                     if (vj_buf.items.len > 0) {
                         viol_jsonl_result = try vj_buf.toOwnedSlice(allocator);
@@ -2038,7 +2045,10 @@ pub fn compileHandler(
                     allocator,
                     all_violations.items,
                     handler_tests,
-                ) catch {};
+                ) catch |err| {
+                    viol_aw.deinit();
+                    return err;
+                };
                 viol_buf = viol_aw.toArrayList();
                 if (viol_buf.items.len > 0) {
                     violations_jsonl = try viol_buf.toOwnedSlice(allocator);

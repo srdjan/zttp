@@ -3,6 +3,7 @@
 //! serving. Dispatch and error-to-exit-code translation stay in dev_cli.main.
 
 const std = @import("std");
+const writeAllFd = @import("posix_util.zig").writeAllFd;
 const builtin = @import("builtin");
 
 const zts = @import("zts");
@@ -206,7 +207,7 @@ fn optionValue(argv: []const []const u8, name: []const u8) ?[]const u8 {
     return null;
 }
 
-pub fn printDevHelp() void {
+pub fn printDevHelp() !void {
     const help =
         \\zttp dev [options] [handler.ts]
         \\
@@ -225,7 +226,7 @@ pub fn printDevHelp() void {
         \\
         \\If no handler path is passed, the entry in zttp.json is used.
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
 test "childExitCode propagates a failed serve child but not a clean stop" {

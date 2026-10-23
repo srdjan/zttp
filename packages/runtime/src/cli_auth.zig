@@ -9,6 +9,7 @@
 //! expert dispatch. Shell-set variables always win; the file only fills gaps.
 
 const std = @import("std");
+const writeAllFd = @import("posix_util.zig").writeAllFd;
 const builtin = @import("builtin");
 
 extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
@@ -57,7 +58,7 @@ pub fn authCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         std.mem.eql(u8, argv[0], "-h") or
         std.mem.eql(u8, argv[0], "help"))
     {
-        printAuthHelp();
+        try printAuthHelp();
         return;
     }
 
@@ -92,11 +93,11 @@ pub fn authCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     }
 
     std.debug.print("Unknown auth subcommand: {s}\n\n", .{sub});
-    printAuthHelp();
+    try printAuthHelp();
     return error.InvalidArgument;
 }
 
-pub fn printAuthHelp() void {
+pub fn printAuthHelp() !void {
     const help =
         \\zttp auth - store cloud-provider API keys for expert
         \\
@@ -115,7 +116,7 @@ pub fn printAuthHelp() void {
         \\Shell-set variables always win; the stored value only fills gaps.
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
 fn authProviderSet(

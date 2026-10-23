@@ -70,7 +70,7 @@ fn ensureDefaultProviderReadyOrExit(allocator: std.mem.Allocator) void {
 /// then calls this with no extra args).
 fn dispatchExpert(allocator: std.mem.Allocator, expert_args: []const []const u8) !void {
     if (hasHelpFlag(expert_args)) {
-        cli_help.printExpertHelp();
+        try cli_help.printExpertHelp();
         return;
     }
     switch (cli_args.validateExpertArgs(expert_args)) {
@@ -131,37 +131,37 @@ fn cmdInit(ctx: cli_help.Ctx) anyerror!void {
     }
     const outcome = init_command.initCommand(ctx.allocator, ctx.args) catch |err| {
         if (err == error.HelpRequested) {
-            init_command.printInitHelp();
+            try init_command.printInitHelp();
             return;
         }
         if (err == error.MissingProjectName) {
             std.debug.print("zttp init requires a project name.\n\n", .{});
-            init_command.printInitHelp();
+            try init_command.printInitHelp();
             std.process.exit(1);
         }
         if (err == error.MissingTemplate) {
             std.debug.print("--template requires one of: " ++ template_choices ++ ".\n\n", .{});
-            init_command.printInitHelp();
+            try init_command.printInitHelp();
             std.process.exit(1);
         }
         if (err == error.InvalidTemplate) {
             std.debug.print("Unknown template. Choose one of: " ++ template_choices ++ ".\n\n", .{});
-            init_command.printInitHelp();
+            try init_command.printInitHelp();
             std.process.exit(1);
         }
         if (err == error.InvalidProjectName) {
             std.debug.print("Invalid project name. Use letters, numbers, '-' or '_', starting with a letter or number.\n\n", .{});
-            init_command.printInitHelp();
+            try init_command.printInitHelp();
             std.process.exit(1);
         }
         if (err == error.MissingExtensionName) {
             std.debug.print("zttp init --extension requires a name.\n\n", .{});
-            init_command.printInitHelp();
+            try init_command.printInitHelp();
             std.process.exit(1);
         }
         if (err == error.InvalidArgument or err == error.UnknownOption) {
             std.debug.print("Invalid init arguments.\n\n", .{});
-            init_command.printInitHelp();
+            try init_command.printInitHelp();
             std.process.exit(1);
         }
         return err;
@@ -181,7 +181,7 @@ fn cmdInit(ctx: cli_help.Ctx) anyerror!void {
 
 fn cmdDev(ctx: cli_help.Ctx) anyerror!void {
     if (hasLongHelpFlag(ctx.args)) {
-        dev_command.printDevHelp();
+        try dev_command.printDevHelp();
         return;
     }
     dev_command.devCommand(ctx.allocator, ctx.argv0, ctx.args) catch |err| {
@@ -217,7 +217,7 @@ test "serveFlagErrorMessage explains flag errors and keeps unknown names" {
 
 fn cmdDoctor(ctx: cli_help.Ctx) anyerror!void {
     if (hasHelpFlag(ctx.args)) {
-        printDoctorHelp();
+        try printDoctorHelp();
         return;
     }
     doctorCommand(ctx.allocator, ctx.args) catch |err| {
@@ -241,7 +241,7 @@ fn cmdDoctor(ctx: cli_help.Ctx) anyerror!void {
 fn cmdTest(ctx: cli_help.Ctx) anyerror!void {
     test_command.testCommand(ctx.allocator, ctx.args) catch |err| {
         if (err == error.HelpRequested) {
-            test_command.printTestHelp();
+            try test_command.printTestHelp();
             return;
         }
         if (err == error.NoProjectConfig) {
@@ -257,7 +257,7 @@ fn cmdTest(ctx: cli_help.Ctx) anyerror!void {
             } else {
                 std.debug.print("zttp test accepts at most one tests.jsonl path.\n\n", .{});
             }
-            test_command.printTestHelp();
+            try test_command.printTestHelp();
             std.process.exit(1);
         }
         if (err == error.CheckFailed or err == error.UnsupportedMultipleOutboundHosts) {
@@ -372,17 +372,17 @@ fn cmdDeploy(ctx: cli_help.Ctx) anyerror!void {
 fn cmdVerify(ctx: cli_help.Ctx) anyerror!void {
     const opts = verify_cli.parseArgs(ctx.args) catch |err| switch (err) {
         error.HelpRequested => {
-            verify_cli.printHelp();
+            try verify_cli.printHelp();
             return;
         },
         error.MissingArgument => {
             std.debug.print("zttp verify: <url> is required\n\n", .{});
-            verify_cli.printHelp();
+            try verify_cli.printHelp();
             std.process.exit(verify_cli.exit_arg_error);
         },
         error.UnknownArgument, error.TooManyArguments, error.InvalidTrustKey => {
             std.debug.print("zttp verify: invalid arguments\n\n", .{});
-            verify_cli.printHelp();
+            try verify_cli.printHelp();
             std.process.exit(verify_cli.exit_arg_error);
         },
     };
@@ -402,13 +402,13 @@ fn cmdProofs(ctx: cli_help.Ctx) anyerror!void {
 }
 
 fn cmdVersion(_: cli_help.Ctx) anyerror!void {
-    shared.printVersion();
+    try shared.printVersion();
     return;
 }
 
 fn cmdHelp(ctx: cli_help.Ctx) anyerror!void {
     if (cli_help.hasAllFlag(ctx.args)) {
-        cli_help.printHelpAll();
+        try cli_help.printHelpAll();
         return;
     }
     if (unknownHelpTopic(ctx.args)) |topic| {
@@ -418,7 +418,7 @@ fn cmdHelp(ctx: cli_help.Ctx) anyerror!void {
         );
         std.process.exit(1);
     }
-    cli_help.printHelp();
+    try cli_help.printHelp();
 }
 
 /// The first `help` argument that names no command, or null when the arguments
@@ -486,7 +486,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             try runtime_cli.serveCommandWithEnviron(allocator, &.{}, init.environ);
             return;
         }
-        cli_help.printHelp();
+        try cli_help.printHelp();
         return;
     }
 
@@ -556,7 +556,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     std.debug.print("Unknown command: {s}\n\n", .{command});
-    cli_help.printHelp();
+    try cli_help.printHelp();
     std.process.exit(1);
 }
 

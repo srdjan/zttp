@@ -4,6 +4,7 @@
 //! the policy hash for CI assertions.
 
 const std = @import("std");
+const writeAllFd = @import("precompile_util.zig").writeAllFd;
 const zts = @import("zts");
 const policy_catalog = zts.PolicyCatalog;
 const idiomCatalog = zts.IdiomCatalog;
@@ -23,7 +24,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         } else if (std.mem.eql(u8, arg, "--idioms")) {
             idiom_mode = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            printHelp();
+            try printHelp();
             return;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             // Unknown flag (e.g. a typo): reject loudly rather than ignoring it.
@@ -35,8 +36,8 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
     if (hash_mode) {
         const hash = zts.policyHash();
-        _ = std.c.write(std.c.STDOUT_FILENO, &hash, hash.len);
-        _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
+        try writeAllFd(std.c.STDOUT_FILENO, &hash);
+        try writeAllFd(std.c.STDOUT_FILENO, "\n");
         return;
     }
 
@@ -57,7 +58,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         }
         buf = aw.toArrayList();
         if (buf.items.len > 0) {
-            _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+            try writeAllFd(std.c.STDOUT_FILENO, buf.items);
         }
         return;
     }
@@ -78,7 +79,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
                 }
                 buf = aw.toArrayList();
                 if (buf.items.len > 0) {
-                    _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+                    try writeAllFd(std.c.STDOUT_FILENO, buf.items);
                 }
                 return;
             }
@@ -88,7 +89,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
                 try writeUnknownRuleJson(&aw.writer, name);
                 try aw.writer.writeAll("\n");
                 buf = aw.toArrayList();
-                _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+                try writeAllFd(std.c.STDOUT_FILENO, buf.items);
                 std.process.exit(1);
             }
             try aw.writer.print("Unknown rule: {s}\n", .{name});
@@ -125,7 +126,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
     buf = aw.toArrayList();
     if (buf.items.len > 0) {
-        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+        try writeAllFd(std.c.STDOUT_FILENO, buf.items);
     }
 }
 
@@ -293,7 +294,7 @@ fn writeUnknownRuleJson(writer: anytype, query: []const u8) !void {
     try writer.writeAll("}");
 }
 
-fn printHelp() void {
+fn printHelp() !void {
     const help =
         \\zts describe-rule - describe diagnostic rules
         \\
@@ -308,7 +309,7 @@ fn printHelp() void {
         \\With no arguments, lists all rules.
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
 const testing = std.testing;

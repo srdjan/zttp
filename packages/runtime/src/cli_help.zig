@@ -4,6 +4,7 @@
 //! live with their own command modules.
 
 const std = @import("std");
+const writeAllFd = @import("posix_util.zig").writeAllFd;
 const zts_cli = @import("zts_cli");
 
 /// One `zttp`-owned command, as both the dispatcher and the `help --all`
@@ -81,8 +82,8 @@ const core_help =
     \\
 ;
 
-pub fn printHelp() void {
-    _ = std.c.write(std.c.STDOUT_FILENO, core_help.ptr, core_help.len);
+pub fn printHelp() !void {
+    try writeAllFd(std.c.STDOUT_FILENO, core_help);
 }
 
 // `help --all` is rendered in three static spans with the two analyzer
@@ -179,10 +180,10 @@ pub fn renderHelpAllForTest(buf: []u8) []const u8 {
 /// The buffer size a caller must provide to `renderHelpAllForTest`.
 pub const help_all_buffer_size = help_all_capacity;
 
-pub fn printHelpAll() void {
+pub fn printHelpAll() !void {
     var buf: [help_all_capacity]u8 = undefined;
     const out = renderHelpAll(&buf);
-    _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
+    try writeAllFd(std.c.STDOUT_FILENO, out);
 }
 
 const expert_help =
@@ -242,8 +243,8 @@ const expert_help =
     \\
 ;
 
-pub fn printExpertHelp() void {
-    _ = std.c.write(std.c.STDOUT_FILENO, expert_help.ptr, expert_help.len);
+pub fn printExpertHelp() !void {
+    try writeAllFd(std.c.STDOUT_FILENO, expert_help);
 }
 
 fn has(haystack: []const u8, needle: []const u8) bool {

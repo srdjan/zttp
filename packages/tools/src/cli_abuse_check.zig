@@ -160,13 +160,14 @@ pub fn main(init: std.process.Init) !void {
     var check = Check{ .gpa = gpa, .io = io, .zts = zts, .work = work };
     std.debug.print("cli abuse: {s}\n", .{zts});
     for (cases) |case| runCase(&check, case);
+    runUnwritableStdout(&check);
 
     const ran = check.passed + check.failed;
     std.debug.print("cli abuse: {d} of {d} cases passed\n", .{ check.passed, ran });
     // Floor on the check's own input: a harness that ran fewer cases than it
     // defines checked less than its name says.
-    if (ran != cases.len) {
-        std.debug.print("error: ran {d} cases, but this check defines {d}\n", .{ ran, cases.len });
+    if (ran != cases.len + unwritable_stdout_cases) {
+        std.debug.print("error: ran {d} cases, but this check defines {d}\n", .{ ran, cases.len + unwritable_stdout_cases });
         std.process.exit(1);
     }
     if (check.failed > 0) std.process.exit(1);
@@ -366,4 +367,36 @@ fn describeMismatch(value: std.json.Value, case: Case) ?[]const u8 {
     };
     if (!std.mem.eql(u8, code, expected_code)) return "the first diagnostic carries a different code than expected";
     return null;
+}
+
+/// Cases that `runUnwritableStdout` runs outside the `cases` table.
+const unwritable_stdout_cases = 1;
+
+/// A command whose standard output cannot take a write must exit non-zero
+/// instead of reporting success after a dropped response. Descriptor 1 is
+/// reopened on `/dev/null` read-only, so every write fails with EBADF on Linux
+/// and macOS alike (macOS has no `/dev/full`).
+fn runUnwritableStdout(check: *Check) void {
+    const name = "agent response to an unwritable stdout";
+    const result = std.process.run(check.gpa, check.io, .{
+        .argv = &.{ "/bin/sh", "-c", "exec \"$0\" agent --stdin-json 0</dev/null 1</dev/null", check.zts },
+        .cwd = .{ .path = check.work },
+        .timeout = .{ .duration = .{ .raw = Io.Duration.fromSeconds(deadline_seconds), .clock = .awake } },
+    }) catch |err| {
+        check.fail(name, "the process did not finish within {d}s or could not run: {s}", .{ deadline_seconds, @errorName(err) });
+        return;
+    };
+    defer check.gpa.free(result.stdout);
+    defer check.gpa.free(result.stderr);
+    switch (result.term) {
+        .exited => |code| if (code == 0) {
+            check.fail(name, "exit code 0 after the response was dropped", .{});
+            return;
+        },
+        else => {
+            check.fail(name, "the process did not exit normally: {any}", .{result.term});
+            return;
+        },
+    }
+    check.pass(name);
 }

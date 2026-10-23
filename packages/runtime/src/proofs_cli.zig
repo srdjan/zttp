@@ -59,10 +59,14 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var stderr_buf: [1024]u8 = undefined;
     var stdout_writer = printer_mod.FdWriter.init(std.c.STDOUT_FILENO, stdout_buf[0..]);
     var stderr_writer = printer_mod.FdWriter.init(std.c.STDERR_FILENO, stderr_buf[0..]);
-    defer stdout_writer.interface.flush() catch {};
-    defer stderr_writer.interface.flush() catch {};
-
-    try runWith(allocator, argv, &stdout_writer.interface, &stderr_writer.interface);
+    runWith(allocator, argv, &stdout_writer.interface, &stderr_writer.interface) catch |err| {
+        // The command's own error wins over a flush failure.
+        stdout_writer.interface.flush() catch {};
+        stderr_writer.interface.flush() catch {};
+        return err;
+    };
+    stderr_writer.interface.flush() catch {};
+    try stdout_writer.interface.flush();
 }
 
 /// Tests pass `std.Io.Writer.Allocating` buffers as `stdout`/`stderr` and

@@ -5,6 +5,7 @@
 //! missing args or unknown flags propagate an error (1).
 
 const std = @import("std");
+const writeAllFd = @import("precompile_util.zig").writeAllFd;
 const zts = @import("zts");
 const module_audit = @import("module_audit.zig");
 const expert_meta = @import("expert_meta.zig");
@@ -21,8 +22,8 @@ fn hasHelpFlag(argv: []const []const u8) bool {
     return false;
 }
 
-fn writeOwnedToStdout(bytes: []const u8) void {
-    _ = std.c.write(std.c.STDOUT_FILENO, bytes.ptr, bytes.len);
+fn writeOwnedToStdout(bytes: []const u8) !void {
+    try writeAllFd(std.c.STDOUT_FILENO, bytes);
 }
 
 /// Persisted shape for the text formatter: only the fields it prints, duped
@@ -53,7 +54,7 @@ const TextEmitter = struct {
 
 pub fn runMeta(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     if (hasHelpFlag(argv)) {
-        printMetaHelp();
+        try printMetaHelp();
         return;
     }
     // Help flags are handled above; reject any other unrecognized flag rather
@@ -81,12 +82,12 @@ pub fn runMeta(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     }
 
     buf = aw.toArrayList();
-    writeOwnedToStdout(buf.items);
+    try writeOwnedToStdout(buf.items);
 }
 
 pub fn runVerifyPaths(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     if (hasHelpFlag(argv)) {
-        printVerifyHelp();
+        try printVerifyHelp();
         return;
     }
     var json_mode = false;
@@ -99,13 +100,13 @@ pub fn runVerifyPaths(allocator: std.mem.Allocator, argv: []const []const u8) !v
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             try paths.append(allocator, arg);
         } else {
-            printVerifyHelp();
+            try printVerifyHelp();
             std.process.exit(1);
         }
     }
 
     if (paths.items.len == 0) {
-        printVerifyHelp();
+        try printVerifyHelp();
         std.process.exit(1);
     }
 
@@ -153,19 +154,19 @@ pub fn runVerifyPaths(allocator: std.mem.Allocator, argv: []const []const u8) !v
     }
 
     buf = aw.toArrayList();
-    writeOwnedToStdout(buf.items);
+    try writeOwnedToStdout(buf.items);
 
     if (has_errors) std.process.exit(1);
 }
 
 pub fn runVerifyModules(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     if (hasHelpFlag(argv)) {
-        printVerifyModulesHelp();
+        try printVerifyModulesHelp();
         return;
     }
     var parsed = parseVerifyModulesArgs(allocator, argv) catch |err| switch (err) {
         error.InvalidArguments, error.UnknownArgument => {
-            printVerifyModulesHelp();
+            try printVerifyModulesHelp();
             return err;
         },
         else => return err,
@@ -177,7 +178,7 @@ pub fn runVerifyModules(allocator: std.mem.Allocator, argv: []const []const u8) 
         try module_audit.verifyBuiltins(allocator, .{ .strict = parsed.strict })
     else blk: {
         if (parsed.paths.items.len == 0) {
-            printVerifyModulesHelp();
+            try printVerifyModulesHelp();
             return error.MissingArgument;
         }
         break :blk try module_audit.verifyPaths(allocator, parsed.paths.items, .{ .strict = parsed.strict });
@@ -211,7 +212,7 @@ pub fn runVerifyModules(allocator: std.mem.Allocator, argv: []const []const u8) 
     }
 
     buf = aw.toArrayList();
-    writeOwnedToStdout(buf.items);
+    try writeOwnedToStdout(buf.items);
 
     if (result.hasErrors()) std.process.exit(1);
 }
@@ -251,7 +252,7 @@ fn parseVerifyModulesArgs(
     return parsed;
 }
 
-fn printMetaHelp() void {
+fn printMetaHelp() !void {
     const help =
         \\zts meta - show policy metadata
         \\
@@ -261,10 +262,10 @@ fn printMetaHelp() void {
         \\and category breakdown.
         \\
     ;
-    writeOwnedToStdout(help);
+    try writeOwnedToStdout(help);
 }
 
-fn printVerifyHelp() void {
+fn printVerifyHelp() !void {
     const help =
         \\zts verify-paths - verify handler files
         \\
@@ -274,10 +275,10 @@ fn printVerifyHelp() void {
         \\Exit code 1 if any errors found.
         \\
     ;
-    writeOwnedToStdout(help);
+    try writeOwnedToStdout(help);
 }
 
-fn printVerifyModulesHelp() void {
+fn printVerifyModulesHelp() !void {
     const help =
         \\zts verify-modules - audit built-in virtual module files
         \\
@@ -296,7 +297,7 @@ fn printVerifyModulesHelp() void {
         \\Exit code 1 if any errors found.
         \\
     ;
-    writeOwnedToStdout(help);
+    try writeOwnedToStdout(help);
 }
 
 // ---------------------------------------------------------------------------

@@ -1,4 +1,5 @@
 const std = @import("std");
+const writeAllFd = @import("precompile_util.zig").writeAllFd;
 const zts = @import("zts");
 
 const zts_file_io = zts.file_io;
@@ -27,10 +28,10 @@ pub fn runSpecHashCommand(_: std.mem.Allocator, argv: []const []const u8) !void 
         const allocator = std.heap.smp_allocator;
         const line = try allocator.print("{{\"semanticsHash\":\"{s}\"}}\n", .{hash});
         defer allocator.free(line);
-        _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
+        try writeAllFd(std.c.STDOUT_FILENO, line);
     } else {
-        _ = std.c.write(std.c.STDOUT_FILENO, &hash, hash.len);
-        _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
+        try writeAllFd(std.c.STDOUT_FILENO, &hash);
+        try writeAllFd(std.c.STDOUT_FILENO, "\n");
     }
 }
 
@@ -71,7 +72,7 @@ pub fn runSpecRenderCommand(_: std.mem.Allocator, argv: []const []const u8) !voi
             std.process.exit(1);
         }
         const ok = "spec-render --check: spec is in sync\n";
-        _ = std.c.write(std.c.STDOUT_FILENO, ok, ok.len);
+        try writeAllFd(std.c.STDOUT_FILENO, ok);
         return;
     }
 
@@ -81,7 +82,7 @@ pub fn runSpecRenderCommand(_: std.mem.Allocator, argv: []const []const u8) !voi
     }
 
     if (rendered.len > 0) {
-        _ = std.c.write(std.c.STDOUT_FILENO, rendered.ptr, rendered.len);
+        try writeAllFd(std.c.STDOUT_FILENO, rendered);
     }
 }
 
@@ -150,7 +151,7 @@ pub fn runSpecCheckCommand(_: std.mem.Allocator, argv: []const []const u8) !void
         try writeSpecCheckText(allocator, &buf, report);
     }
     if (buf.items.len > 0) {
-        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+        try writeAllFd(std.c.STDOUT_FILENO, buf.items);
     }
 
     const all_ok = report.ok();

@@ -6,6 +6,7 @@
 //! expert loop.
 
 const std = @import("std");
+const writeAllFd = @import("precompile_util.zig").writeAllFd;
 const zts = @import("zts");
 const precompile = @import("precompile.zig");
 const project_config_mod = @import("project_config");
@@ -303,7 +304,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
     buf = aw.toArrayList();
     if (buf.items.len > 0) {
-        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+        try writeAllFd(std.c.STDOUT_FILENO, buf.items);
     }
     if (!verdict_available) std.process.exit(1);
 }
@@ -332,7 +333,7 @@ fn runWithArgsWriter(allocator: std.mem.Allocator, argv: []const []const u8, wri
             continue;
         }
         if (std.mem.eql(u8, arg, "--help")) {
-            printHelp();
+            try printHelp();
             return true;
         }
         if (!std.mem.startsWith(u8, arg, "-") and handler_path == null) {
@@ -563,7 +564,7 @@ pub fn readAllStdin(allocator: std.mem.Allocator) ![]u8 {
     return buf.toOwnedSlice(allocator);
 }
 
-fn printHelp() void {
+fn printHelp() !void {
     const help =
         \\zts edit-simulate - simulate an edit and report violations
         \\
@@ -580,7 +581,7 @@ fn printHelp() void {
         \\Output: JSON with violations array and summary (total, new, preexisting).
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
 // ---------------------------------------------------------------------------

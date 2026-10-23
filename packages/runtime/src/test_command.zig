@@ -3,6 +3,7 @@
 //! and error-to-exit-code translation stay in dev_cli.main.
 
 const std = @import("std");
+const writeAllFd = @import("posix_util.zig").writeAllFd;
 const builtin = @import("builtin");
 
 const project_config_mod = @import("project_config");
@@ -81,7 +82,7 @@ pub fn testCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     try runtime_cli.serveCommand(serve_arena.allocator(), &serve_args);
 }
 
-pub fn printTestHelp() void {
+pub fn printTestHelp() !void {
     const help =
         \\zttp test [tests.jsonl]
         \\
@@ -94,7 +95,7 @@ pub fn printTestHelp() void {
         \\  zttp test tests/handler.test.jsonl
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
 test "testCommand validates arguments before project discovery" {

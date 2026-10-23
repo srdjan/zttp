@@ -1,4 +1,5 @@
 const std = @import("std");
+const writeAllFd = @import("posix_util.zig").writeAllFd;
 const builtin = @import("builtin");
 
 const Server = @import("server.zig").Server;
@@ -85,16 +86,16 @@ pub fn main(init: std.process.Init.Minimal) !void {
                 return;
             },
             .version => {
-                shared.printVersion();
+                try shared.printVersion();
                 return;
             },
             .help => {
-                printAppendedHelp();
+                try printAppendedHelp();
                 return;
             },
             .unknown_positional => |arg| {
                 std.debug.print("Unknown argument for self-contained binary: {s}\n\n", .{arg});
-                printAppendedHelp();
+                try printAppendedHelp();
                 std.process.exit(1);
             },
         }
@@ -106,7 +107,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
             try serveCommandWithEnviron(allocator, &.{}, init.environ);
             return;
         }
-        printHelp();
+        try printHelp();
         return;
     }
 
@@ -119,11 +120,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
     if (std.mem.eql(u8, command, "version") or std.mem.eql(u8, command, "--version")) {
-        shared.printVersion();
+        try shared.printVersion();
         return;
     }
     if (std.mem.eql(u8, command, "--help") or std.mem.eql(u8, command, "help")) {
-        printHelp();
+        try printHelp();
         return;
     }
 
@@ -133,7 +134,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
 fn attestCommand(allocator: std.mem.Allocator) !void {
     var payload = (try self_extract.detect(allocator)) orelse {
-        shared.writeStdoutLine("{\"error\":\"no embedded payload; attest is only available on self-extracting binaries\"}");
+        try shared.writeStdoutLine("{\"error\":\"no embedded payload; attest is only available on self-extracting binaries\"}");
         std.process.exit(1);
     };
     defer payload.deinit(allocator);
@@ -143,13 +144,13 @@ fn attestCommand(allocator: std.mem.Allocator) !void {
 
 fn attestPayload(allocator: std.mem.Allocator, payload: *const self_extract.Payload) !void {
     const contract_json = payload.contract_json orelse {
-        shared.writeStdoutLine("{\"error\":\"embedded payload has no contract\"}");
+        try shared.writeStdoutLine("{\"error\":\"embedded payload has no contract\"}");
         std.process.exit(1);
     };
 
     var raw = contract_runtime.parseContractJson(allocator, contract_json) catch |err| {
         if (err == error.UnsupportedRuntimeAuthority) return err;
-        shared.writeStdoutLine("{\"error\":\"failed to parse contract\"}");
+        try shared.writeStdoutLine("{\"error\":\"failed to parse contract\"}");
         std.process.exit(1);
     };
     defer raw.deinit();
@@ -172,7 +173,7 @@ fn attestPayload(allocator: std.mem.Allocator, payload: *const self_extract.Payl
         "{{\"policyHash\":\"{s}\",\"artifactSha256\":\"{s}\",\"artifactActual\":\"{s}\",\"capabilityHash\":\"{s}\"}}\n",
         .{ &policy_hex, &artifact_hex, &actual_hex, &cap_hex },
     );
-    _ = std.c.write(std.c.STDOUT_FILENO, line.ptr, line.len);
+    try writeAllFd(std.c.STDOUT_FILENO, line);
 }
 
 const AppendedInvocation = union(enum) {
@@ -576,7 +577,7 @@ fn applyServeFlags(
         const arg = argv[i];
         if (try parseCommonServeFlag(arg, &i, argv, config)) continue;
         if (std.mem.eql(u8, arg, "--help")) {
-            printServeHelp();
+            try printServeHelp();
             return error.HelpRequested;
         } else if (std.mem.eql(u8, arg, "-e") or std.mem.eql(u8, arg, "--eval")) {
             const raw_eval = try shared.takeArg(&i, argv, error.MissingEvalCode);
@@ -801,25 +802,25 @@ fn parseAppendedServeArgs(argv: []const []const u8, config: *ServerConfig, emit_
         const arg = argv[i];
         if (try parseCommonServeFlag(arg, &i, argv, config)) continue;
         if (std.mem.eql(u8, arg, "--help")) {
-            if (emit_diagnostics) printAppendedHelp();
+            if (emit_diagnostics) try printAppendedHelp();
             return error.HelpRequested;
         }
         if (!std.mem.startsWith(u8, arg, "-")) {
             if (emit_diagnostics) {
                 std.debug.print("Unknown argument for self-contained binary: {s}\n\n", .{arg});
-                printAppendedHelp();
+                try printAppendedHelp();
             }
             return error.UnknownArgument;
         }
         if (emit_diagnostics) {
             std.debug.print("Unknown option for self-contained binary: {s}\n\n", .{arg});
-            printAppendedHelp();
+            try printAppendedHelp();
         }
         return error.UnknownOption;
     }
 }
 
-fn printAppendedHelp() void {
+fn printAppendedHelp() !void {
     const help =
         \\Usage: <binary> [options]
         \\       <binary> attest
@@ -835,7 +836,7 @@ fn printAppendedHelp() void {
         \\  --lifecycle <MODE>    ephemeral, bounded, ttl, or reuse
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
 /// Every verb `main` dispatches, for the drift gate below. `serve` is also the
@@ -845,8 +846,8 @@ const dispatched_verbs = [_][]const u8{
     "serve", "attest", "version", "help",
 };
 
-fn printHelp() void {
-    _ = std.c.write(std.c.STDOUT_FILENO, runtime_help_text.ptr, runtime_help_text.len);
+fn printHelp() !void {
+    try writeAllFd(std.c.STDOUT_FILENO, runtime_help_text);
 }
 
 const runtime_help_text =
@@ -863,7 +864,7 @@ const runtime_help_text =
     \\
 ;
 
-fn printServeHelp() void {
+fn printServeHelp() !void {
     const help =
         \\zttp serve [options] <handler.ts>
         \\zttp serve -e "function handler(req) { return Response.json({ok:true}) }"
@@ -894,7 +895,7 @@ fn printServeHelp() void {
         \\  --force-swap          With --watch, apply breaking swaps anyway
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
 test "appendedServerConfig wires the embedded capability policy for enforcement" {

@@ -1,4 +1,5 @@
 const std = @import("std");
+const writeAllFd = @import("posix_util.zig").writeAllFd;
 const builtin = @import("builtin");
 const project_config_mod = @import("project_config");
 const zts = @import("zts");
@@ -99,14 +100,14 @@ pub fn prepareInlineSource(allocator: std.mem.Allocator, source: []const u8) !ex
     return if (prepared) .{ .prepared_eval = .{ .code = code } } else .{ .inline_code = code };
 }
 
-pub fn printVersion() void {
+pub fn printVersion() !void {
     const version = "zttp " ++ zts.version.string ++ "\n";
-    _ = std.c.write(std.c.STDOUT_FILENO, version.ptr, version.len);
+    try writeAllFd(std.c.STDOUT_FILENO, version);
 }
 
-pub fn writeStdoutLine(s: []const u8) void {
-    _ = std.c.write(std.c.STDOUT_FILENO, s.ptr, s.len);
-    _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
+pub fn writeStdoutLine(s: []const u8) !void {
+    try writeAllFd(std.c.STDOUT_FILENO, s);
+    try writeAllFd(std.c.STDOUT_FILENO, "\n");
 }
 
 pub fn writeStderrLine(s: []const u8) void {

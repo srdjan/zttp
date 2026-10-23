@@ -10,6 +10,7 @@
 //! (well-known endpoint plus transparency log).
 
 const std = @import("std");
+const writeAllFd = @import("posix_util.zig").writeAllFd;
 const envelope = @import("attest/envelope.zig");
 const attest_header_strings = @import("attest/header_strings.zig");
 
@@ -67,7 +68,7 @@ pub fn parseArgs(argv: []const []const u8) !Options {
     };
 }
 
-pub fn printHelp() void {
+pub fn printHelp() !void {
     const help =
         \\zttp verify <url> [--trust-key <hex>] [--json]
         \\
@@ -89,7 +90,7 @@ pub fn printHelp() void {
         \\  5  HTTP-level error (DNS, connect, status >= 400)
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
 pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
@@ -136,7 +137,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     if (opts.json_output) {
         try writeClaimsJson(allocator, opts.url, &result);
     } else {
-        writeClaimsHuman(opts.url, &result);
+        try writeClaimsHuman(opts.url, &result);
     }
     return exit_ok;
 }
@@ -244,10 +245,10 @@ fn renderClaimsHuman(
     );
 }
 
-fn writeClaimsHuman(url: []const u8, result: *const envelope.VerifyResult) void {
+fn writeClaimsHuman(url: []const u8, result: *const envelope.VerifyResult) !void {
     var buf: [4096]u8 = undefined;
     const out = renderClaimsHuman(&buf, url, result) catch return;
-    _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
+    try writeAllFd(std.c.STDOUT_FILENO, out);
 }
 
 fn renderClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *const envelope.VerifyResult) ![]u8 {
@@ -312,7 +313,7 @@ fn renderClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *cons
 fn writeClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *const envelope.VerifyResult) !void {
     const out = try renderClaimsJson(allocator, url, result);
     defer allocator.free(out);
-    _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
+    try writeAllFd(std.c.STDOUT_FILENO, out);
 }
 
 fn writeStderr(msg: []const u8) void {

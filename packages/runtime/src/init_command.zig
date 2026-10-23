@@ -4,6 +4,7 @@
 //! dev_cli.main.
 
 const std = @import("std");
+const writeAllFd = @import("posix_util.zig").writeAllFd;
 const builtin = @import("builtin");
 
 const zts = @import("zts");
@@ -405,7 +406,7 @@ fn printInitExpertHandoff(name: []const u8) void {
     std.debug.print("\n", .{});
 }
 
-pub fn printInitHelp() void {
+pub fn printInitHelp() !void {
     const help =
         \\zttp init <name> [--template basic|api] [--expert]
         \\zttp init --extension <name>
@@ -443,7 +444,7 @@ pub fn printInitHelp() void {
         \\  zttp init --extension my-partner
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
 fn handlerPathForTemplate(template: Template) []const u8 {

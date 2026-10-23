@@ -15,6 +15,7 @@
 //! additive (safe), 1 = breaking, 2 = usage or compile error.
 
 const std = @import("std");
+const writeAllFd = @import("precompile_util.zig").writeAllFd;
 const zts = @import("zts");
 const edit_simulate = @import("edit_simulate.zig");
 const precompile = @import("precompile.zig");
@@ -206,7 +207,7 @@ fn writeJson(
 
     const bytes = aw.writer.buffered();
     if (bytes.len > 0) {
-        _ = std.c.write(std.c.STDOUT_FILENO, bytes.ptr, bytes.len);
+        try writeAllFd(std.c.STDOUT_FILENO, bytes);
     }
 }
 

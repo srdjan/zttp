@@ -16,6 +16,7 @@ pub const canonicalize = @import("canonicalize.zig");
 pub const module_audit = @import("module_audit.zig");
 pub const json_diagnostics = @import("json_diagnostics.zig");
 const json_diag = precompile.json_diag;
+const writeAllFd = @import("precompile_util.zig").writeAllFd;
 const search_rules = @import("search_rules.zig");
 const prove_behavior = @import("prove_behavior.zig");
 const expert = @import("expert.zig");
@@ -113,7 +114,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
 pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     if (argv.len == 0 or std.mem.eql(u8, argv[0], "--help") or std.mem.eql(u8, argv[0], "help")) {
-        printHelp();
+        try printHelp();
         return;
     }
 
@@ -169,22 +170,6 @@ fn writeCheckEnvelope(
     }
 }
 
-/// Writes every byte to `fd`. A short write continues from the unwritten tail,
-/// an interrupted write retries, and any other failure is `error.WriteFailed`.
-fn writeAllFd(fd: std.c.fd_t, bytes: []const u8) !void {
-    var offset: usize = 0;
-    while (offset < bytes.len) {
-        const rest = bytes[offset..];
-        const n = std.c.write(fd, rest.ptr, rest.len);
-        if (n < 0) {
-            if (std.posix.errno(n) == .INTR) continue;
-            return error.WriteFailed;
-        }
-        if (n == 0) return error.WriteFailed;
-        offset += @intCast(n);
-    }
-}
-
 fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     var sql_schema_path: ?[]const u8 = null;
     var handler_path: ?[]const u8 = null;
@@ -219,7 +204,7 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
             continue;
         }
         if (std.mem.eql(u8, arg, "--help")) {
-            printCheckHelp();
+            try printCheckHelp();
             return;
         }
         if (!std.mem.startsWith(u8, arg, "-") and handler_path == null) {
@@ -357,7 +342,7 @@ fn writeMissingSqlSchemaJson(allocator: std.mem.Allocator, target: []const u8) !
 
     buf = aw.toArrayList();
     if (buf.items.len > 0) {
-        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+        try writeAllFd(std.c.STDOUT_FILENO, buf.items);
     }
 }
 
@@ -370,7 +355,7 @@ fn writePolicyLoadFailureJson(allocator: std.mem.Allocator, target: []const u8) 
 
     buf = aw.toArrayList();
     if (buf.items.len > 0) {
-        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+        try writeAllFd(std.c.STDOUT_FILENO, buf.items);
     }
 }
 
@@ -452,14 +437,14 @@ fn runFeaturesCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
 
     if (json_mode) {
-        json_diag.writeFeaturesJson(&aw.writer) catch return;
+        try json_diag.writeFeaturesJson(&aw.writer);
     } else {
-        json_diag.writeFeaturesText(&aw.writer) catch return;
+        try json_diag.writeFeaturesText(&aw.writer);
     }
 
     buf = aw.toArrayList();
     if (buf.items.len > 0) {
-        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+        try writeAllFd(std.c.STDOUT_FILENO, buf.items);
     }
 }
 
@@ -504,7 +489,7 @@ fn runRestrictionsCommand(_: std.mem.Allocator, argv: []const []const u8) !void 
                 \\  --by class        Group entries by the failure class they prevent
                 \\
             ;
-            _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+            try writeAllFd(std.c.STDOUT_FILENO, help);
             return;
         }
         return error.InvalidArgument;
@@ -519,16 +504,16 @@ fn runRestrictionsCommand(_: std.mem.Allocator, argv: []const []const u8) !void 
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
 
     if (markdown_mode) {
-        json_diag.writeRestrictionsMarkdown(&aw.writer) catch return;
+        try json_diag.writeRestrictionsMarkdown(&aw.writer);
     } else if (json_mode) {
-        json_diag.writeRestrictionsJson(&aw.writer) catch return;
+        try json_diag.writeRestrictionsJson(&aw.writer);
     } else {
-        json_diag.writeRestrictionsText(&aw.writer, group_by) catch return;
+        try json_diag.writeRestrictionsText(&aw.writer, group_by);
     }
 
     buf = aw.toArrayList();
     if (buf.items.len > 0) {
-        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+        try writeAllFd(std.c.STDOUT_FILENO, buf.items);
     }
 }
 
@@ -551,14 +536,14 @@ fn runModulesCommand(_: std.mem.Allocator, argv: []const []const u8) !void {
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
 
     if (json_mode) {
-        json_diag.writeModulesJson(&aw.writer) catch return;
+        try json_diag.writeModulesJson(&aw.writer);
     } else {
-        json_diag.writeModulesText(&aw.writer) catch return;
+        try json_diag.writeModulesText(&aw.writer);
     }
 
     buf = aw.toArrayList();
     if (buf.items.len > 0) {
-        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+        try writeAllFd(std.c.STDOUT_FILENO, buf.items);
     }
 }
 
@@ -603,7 +588,7 @@ const help_tail =
     \\
 ;
 
-fn printHelp() void {
+fn printHelp() !void {
     var buf: [4096]u8 = undefined;
     var w = std.Io.Writer.fixed(&buf);
     // The usage lines come from the shared registry so `zts` and `zttp`
@@ -614,10 +599,10 @@ fn printHelp() void {
     }
     w.writeAll(help_tail) catch {};
     const out = w.buffered();
-    _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
+    try writeAllFd(std.c.STDOUT_FILENO, out);
 }
 
-fn printCheckHelp() void {
+fn printCheckHelp() !void {
     const help =
         \\zts check - verify handler and show proof card
         \\
@@ -640,7 +625,7 @@ fn printCheckHelp() void {
         \\  2  warnings only (no errors)
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
 fn runGenTestsCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
@@ -657,7 +642,7 @@ fn runGenTestsCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
             continue;
         }
         if (std.mem.eql(u8, arg, "--help")) {
-            printGenTestsHelp();
+            try printGenTestsHelp();
             return;
         }
         if (!std.mem.startsWith(u8, arg, "-") and handler_path == null) {
@@ -697,12 +682,12 @@ fn runGenTestsCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
         _ = std.c.write(std.c.STDERR_FILENO, msg.ptr, msg.len);
     } else {
         if (buf.items.len > 0) {
-            _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+            try writeAllFd(std.c.STDOUT_FILENO, buf.items);
         }
     }
 }
 
-fn printGenTestsHelp() void {
+fn printGenTestsHelp() !void {
     const help =
         \\zts gen-tests - generate JSONL tests from proven behavioral paths
         \\
@@ -718,7 +703,7 @@ fn printGenTestsHelp() void {
         \\If no handler is specified, uses the entry from zttp.json.
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
 test "check envelope writer failure propagates" {

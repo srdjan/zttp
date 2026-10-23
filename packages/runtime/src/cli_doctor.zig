@@ -10,6 +10,7 @@
 //! shipped inside the user-facing binary.
 
 const std = @import("std");
+const writeAllFd = @import("posix_util.zig").writeAllFd;
 const builtin = @import("builtin");
 const project_config_mod = @import("project_config");
 const zts_cli = @import("zts_cli");
@@ -32,7 +33,7 @@ pub fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !vo
 
     if (argv.len > 1) {
         std.debug.print("zttp doctor accepts at most one path.\n\n", .{});
-        printDoctorHelp();
+        try printDoctorHelp();
         return error.InvalidArgument;
     }
 
@@ -151,7 +152,7 @@ pub fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !vo
     return error.NoProjectConfig;
 }
 
-pub fn printDoctorHelp() void {
+pub fn printDoctorHelp() !void {
     const help =
         \\zttp doctor [path]
         \\
@@ -169,7 +170,7 @@ pub fn printDoctorHelp() void {
         \\  zttp doctor src/handler.ts
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
 pub fn runDoctorAnalyzerForProject(

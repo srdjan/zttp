@@ -3,6 +3,7 @@
 //! Searches rules by keyword (substring match against name, description, help).
 
 const std = @import("std");
+const writeAllFd = @import("precompile_util.zig").writeAllFd;
 const zts = @import("zts");
 const policy_catalog = zts.PolicyCatalog;
 const describe_rule = @import("describe_rule.zig");
@@ -15,7 +16,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         if (std.mem.eql(u8, arg, "--json")) {
             json_mode = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
-            printHelp();
+            try printHelp();
             return;
         } else if (std.mem.startsWith(u8, arg, "-")) {
             // Unknown flag (e.g. a typo): reject loudly rather than ignoring it.
@@ -26,7 +27,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     }
 
     const search_term = keyword orelse {
-        printHelp();
+        try printHelp();
         return;
     };
 
@@ -62,11 +63,11 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
 
     buf = aw.toArrayList();
     if (buf.items.len > 0) {
-        _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+        try writeAllFd(std.c.STDOUT_FILENO, buf.items);
     }
 }
 
-fn printHelp() void {
+fn printHelp() !void {
     const help =
         \\zts search - search diagnostic rules by keyword
         \\
@@ -75,5 +76,5 @@ fn printHelp() void {
         \\Searches rule names, descriptions, and help text for substring matches.
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }

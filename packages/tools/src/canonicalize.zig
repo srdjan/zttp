@@ -4,6 +4,7 @@
 //! through edit-simulate / compiler veto; this module never writes source.
 
 const std = @import("std");
+const writeAllFd = @import("precompile_util.zig").writeAllFd;
 const zts = @import("zts");
 const precompile = @import("precompile.zig");
 const edit_simulate = @import("edit_simulate.zig");
@@ -1990,7 +1991,7 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
             if (i >= argv.len) return error.InvalidArgument;
             sql_schema_path = argv[i];
         } else if (std.mem.eql(u8, arg, "--help")) {
-            printNormalizeHelp();
+            try printNormalizeHelp();
             return;
         } else if (!std.mem.startsWith(u8, arg, "-") and file == null) {
             file = arg;
@@ -2023,7 +2024,7 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
             write_mode and nr.fully_canonical and nr.converged and nr.printed,
         );
         buf = aw.toArrayList();
-        if (buf.items.len > 0) _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+        if (buf.items.len > 0) try writeAllFd(std.c.STDOUT_FILENO, buf.items);
     }
 
     if (!nr.printed) reportPrinterRefusal(path, nr.printer_refusal);
@@ -2075,7 +2076,7 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
     }
 
     if (!json_mode and nr.canonical_source.len > 0) {
-        _ = std.c.write(std.c.STDOUT_FILENO, nr.canonical_source.ptr, nr.canonical_source.len);
+        try writeAllFd(std.c.STDOUT_FILENO, nr.canonical_source);
     }
 }
 
@@ -2091,7 +2092,7 @@ fn reportPrinterRefusal(path: []const u8, reason: ?zts.printer.Refusal) void {
     _ = std.c.write(std.c.STDERR_FILENO, "\n", 1);
 }
 
-fn printNormalizeHelp() void {
+fn printNormalizeHelp() !void {
     const help =
         \\zts normalize - rewrite a handler into Canonical Normal Form
         \\
@@ -2104,7 +2105,7 @@ fn printNormalizeHelp() void {
         \\  --sql-schema   schema a `zttp:sql` handler is type-checked against
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
 pub fn writeJson(writer: anytype, result: *const Result) !void {
@@ -2154,7 +2155,7 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         } else if (std.mem.eql(u8, arg, "--simulate")) {
             simulate_mode = true;
         } else if (std.mem.eql(u8, arg, "--help")) {
-            printHelp();
+            try printHelp();
             return;
         } else if (!std.mem.startsWith(u8, arg, "-") and file == null) {
             file = arg;
@@ -2181,10 +2182,10 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
     try writeJsonWithSimulation(&aw.writer, &result, simulation);
     buf = aw.toArrayList();
-    if (buf.items.len > 0) _ = std.c.write(std.c.STDOUT_FILENO, buf.items.ptr, buf.items.len);
+    if (buf.items.len > 0) try writeAllFd(std.c.STDOUT_FILENO, buf.items);
 }
 
-fn printHelp() void {
+fn printHelp() !void {
     const help =
         \\zts canonicalize - preview canonical local refactors
         \\
@@ -2194,7 +2195,7 @@ fn printHelp() void {
         \\runs edit-simulate; it never writes source.
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
 test "canonicalFunctionReplacement rewrites arrow expression" {

@@ -11,6 +11,7 @@
 //! the verdict.
 
 const std = @import("std");
+const writeAllFd = @import("precompile_util.zig").writeAllFd;
 const zts = @import("zts");
 const agent_identity = @import("agent_identity.zig");
 const module_graph_record = @import("module_graph_record.zig");
@@ -2550,14 +2551,14 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h") or
             std.mem.eql(u8, arg, "help"))
         {
-            printHelp();
+            try printHelp();
             return;
         } else {
             return error.InvalidArgument;
         }
     }
     if (!stdin_json) {
-        printHelp();
+        try printHelp();
         return error.InvalidArgument;
     }
 
@@ -2572,10 +2573,10 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     try handleRequest(allocator, io_backend.io(), request, &out.writer);
 
     const bytes = out.writer.buffered();
-    if (bytes.len > 0) _ = std.c.write(std.c.STDOUT_FILENO, bytes.ptr, bytes.len);
+    if (bytes.len > 0) try writeAllFd(std.c.STDOUT_FILENO, bytes);
 }
 
-fn printHelp() void {
+fn printHelp() !void {
     const help =
         \\zts agent - the version-2 agent protocol over stdin/stdout
         \\
@@ -2594,7 +2595,7 @@ fn printHelp() void {
         \\generate.
         \\
     ;
-    _ = std.c.write(std.c.STDOUT_FILENO, help.ptr, help.len);
+    try writeAllFd(std.c.STDOUT_FILENO, help);
 }
 
 // ---------------------------------------------------------------------------
@@ -6046,7 +6047,7 @@ test "every published example exercises the form it names" {
 test "the example evidence check can fail, so its verdict means something" {
     // The floor under the gate above. A walk that answered true for everything
     // would pass every row while proving nothing, so this asks it for a form
-    // no example contains: `while` is refused by this profile and appears in
+    // no example contains: `break` is admitted by this profile and appears in
     // none of them.
     const a = testing.allocator;
     const entry = example_registry.findByFeature("match expression") orelse
@@ -6058,16 +6059,16 @@ test "the example evidence check can fail, so its verdict means something" {
     const accepted = frontend.acceptedCapabilities() orelse return error.TestExpectedExample;
     const view = accepted.ir_view;
 
-    var saw_while = false;
+    var saw_break = false;
     var saw_match = false;
     var i: zts.parser.NodeIndex = 0;
     while (i < view.nodeCount()) : (i += 1) {
         const tag = view.getTag(i) orelse continue;
-        if (tag == .while_stmt) saw_while = true;
+        if (tag == .break_stmt) saw_break = true;
         if (tag == .match_expr) saw_match = true;
     }
     try testing.expect(saw_match);
-    try testing.expect(!saw_while);
+    try testing.expect(!saw_break);
 }
 
 test "the examples section stops being deferred" {

@@ -8,6 +8,7 @@
 //! per file.
 
 const std = @import("std");
+const writeAllFd = @import("precompile_util.zig").writeAllFd;
 const zts = @import("zts");
 
 const file_io = zts.file_io;
@@ -18,8 +19,8 @@ fn isHelpToken(arg: []const u8) bool {
     return std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "help");
 }
 
-fn writeOut(s: []const u8) void {
-    _ = std.c.write(std.c.STDOUT_FILENO, s.ptr, s.len);
+fn writeOut(s: []const u8) !void {
+    try writeAllFd(std.c.STDOUT_FILENO, s);
 }
 
 fn writeErr(s: []const u8) void {
@@ -57,7 +58,7 @@ pub fn runModuleSpecRenderCommand(_: std.mem.Allocator, argv: []const []const u8
         } else if (std.mem.eql(u8, arg, "--json")) {
             json_mode = true;
         } else if (isHelpToken(arg)) {
-            writeOut(
+            try writeOut(
                 \\module-spec-render [--check] [--json]
                 \\
                 \\Generate packages/modules/module-specs/*.json and the Module Catalog
@@ -130,15 +131,15 @@ pub fn runModuleSpecRenderCommand(_: std.mem.Allocator, argv: []const []const u8
     if (!check_mode) {
         const line = try allocator.print("module-spec-render: wrote {d} artifacts\n", .{written});
         defer allocator.free(line);
-        writeOut(line);
+        try writeOut(line);
         return;
     }
 
     if (stale.items.len == 0) {
         if (json_mode) {
-            writeOut("{\"inSync\":true,\"stale\":[]}\n");
+            try writeOut("{\"inSync\":true,\"stale\":[]}\n");
         } else {
-            writeOut("module-spec-render --check: all generated module artifacts are in sync\n");
+            try writeOut("module-spec-render --check: all generated module artifacts are in sync\n");
         }
         return;
     }
@@ -154,7 +155,7 @@ pub fn runModuleSpecRenderCommand(_: std.mem.Allocator, argv: []const []const u8
             try buf.append(allocator, '"');
         }
         try buf.appendSlice(allocator, "]}\n");
-        writeOut(buf.items);
+        try writeOut(buf.items);
     } else {
         writeErr("module-spec-render --check: these generated module artifacts are stale:\n");
         for (stale.items) |p| {

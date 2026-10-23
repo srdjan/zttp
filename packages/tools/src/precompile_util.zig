@@ -38,3 +38,19 @@ pub fn deriveSiblingPath(allocator: std.mem.Allocator, output_path: []const u8, 
     @memcpy(result[dir.len..], suffix);
     return result;
 }
+
+/// Writes every byte to `fd`. A short write continues from the unwritten tail,
+/// an interrupted write retries, and any other failure is `error.WriteFailed`.
+pub fn writeAllFd(fd: std.c.fd_t, bytes: []const u8) !void {
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const rest = bytes[offset..];
+        const n = std.c.write(fd, rest.ptr, rest.len);
+        if (n < 0) {
+            if (std.posix.errno(n) == .INTR) continue;
+            return error.WriteFailed;
+        }
+        if (n == 0) return error.WriteFailed;
+        offset += @intCast(n);
+    }
+}
