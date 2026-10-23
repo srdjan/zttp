@@ -599,6 +599,12 @@ pub const BoolChecker = struct {
                 const obj = self.ir_view.getObject(node) orelse return;
                 for (0..obj.properties_count) |i| {
                     const prop = self.ir_view.getListIndex(obj.properties_start, @intCast(i));
+                    // A spread member is not a property: its operand is payload
+                    // word `a`, read by `getOptValue`.
+                    if (self.ir_view.getTag(prop) == .object_spread) {
+                        if (self.ir_view.getOptValue(prop)) |operand| self.walkExpr(operand);
+                        continue;
+                    }
                     const prop_data = self.ir_view.getProperty(prop) orelse continue;
                     self.walkExpr(prop_data.value);
                 }
@@ -620,6 +626,18 @@ pub const BoolChecker = struct {
                 self.walkStmt(func.body);
             },
 
+            // A member read evaluates its base, and a computed read its key too.
+            .member_access, .optional_chain, .computed_access => {
+                const member = self.ir_view.getMember(node) orelse return;
+                self.walkExpr(member.object);
+                self.walkExpr(member.computed);
+            },
+
+            // The spread operand is payload word `a`, read by `getOptValue`.
+            .spread => {
+                if (self.ir_view.getOptValue(node)) |operand| self.walkExpr(operand);
+            },
+
             // Leaf expressions - no children to walk
             .lit_int,
             .lit_float,
@@ -628,13 +646,15 @@ pub const BoolChecker = struct {
             .lit_null,
             .lit_undefined,
             .identifier,
-            .member_access,
-            .computed_access,
-            .optional_chain,
-            .spread,
             => {},
 
-            else => {},
+            // A tag named above is read by its own arm. Any other tag passes
+            // each child it holds back to this walk, so a boolean misuse under
+            // a node this walk does not name is still seen.
+            else => {
+                var children = self.ir_view.expressionChildren(node);
+                while (children.next()) |child| self.walkExpr(child);
+            },
         }
     }
 
@@ -2604,4 +2624,36 @@ test "the import scan maps builtin slots to return types in both atom modes" {
         // jwtVerify returns a Result; env returns an optional string.
         try std.testing.expectEqual(@as(u32, 1), checker.module_result_fn_slots.count());
     }
+}
+
+// D13: a boolean misuse under a spread, a member base, or a computed key.
+
+test "sound: ! on a number in an array element is refused" {
+    try checkSource("const n = 5; const z = [!n];", 1);
+}
+
+test "sound: ! on a number in an array spread operand is refused" {
+    // The spread was a leaf, so its operand was never walked.
+    try checkSource("const n = 5; const z = [...[!n]];", 1);
+}
+
+test "sound: ! on a number in an object spread operand is refused" {
+    // The spread member was read as a property.
+    try checkSource("const n = 5; const z = { ...{ v: !n } };", 1);
+}
+
+test "sound: ! on a number in a member base is refused" {
+    try checkSource("const n = 5; const z = [!n].length;", 1);
+}
+
+test "sound: ! on a number in an optional chain base is refused" {
+    try checkSource("const n = 5; const z = [!n]?.length;", 1);
+}
+
+test "sound: ! on a number in a computed key is refused" {
+    try checkSource("const n = 5; const xs = [1, 2]; const z = xs[(!n) ? 0 : 1];", 1);
+}
+
+test "sound: ! on a boolean in a spread operand passes" {
+    try checkSource("const b = 1 > 0; const z = [...[!b]];", 0);
 }
