@@ -12515,3 +12515,69 @@ test "prove-behavior: changing the status of an assert error response reports on
     const bd = diff.behavior_diff orelse return error.NoBehaviorDiff;
     try std.testing.expectEqual(@as(u32, 1), bd.response_changed);
 }
+
+const match_return_a =
+    \\export function handler(req: Request): Response {
+    \\  const m = req.method;
+    \\  return match (m) {
+    \\    when "GET": Response.text("get")
+    \\    default: Response.text("other", { status: 405 })
+    \\  };
+    \\}
+;
+const match_return_added_arm =
+    \\export function handler(req: Request): Response {
+    \\  const m = req.method;
+    \\  return match (m) {
+    \\    when "GET": Response.text("get")
+    \\    when "POST": Response.text("post", { status: 201 })
+    \\    default: Response.text("other", { status: 405 })
+    \\  };
+    \\}
+;
+const match_return_changed_status =
+    \\export function handler(req: Request): Response {
+    \\  const m = req.method;
+    \\  return match (m) {
+    \\    when "GET": Response.text("get")
+    \\    default: Response.text("other", { status: 500 })
+    \\  };
+    \\}
+;
+
+test "prove-behavior: adding an arm to a returned match is breaking with a path count counterexample" {
+    const allocator = std.testing.allocator;
+    var before = try runCheckOnlyFromSourceWithOptions(allocator, match_return_a, "handler.ts", .{ .json_mode = true });
+    defer before.deinit(allocator);
+    var after = try runCheckOnlyFromSourceWithOptions(allocator, match_return_added_arm, "handler.ts", .{ .json_mode = true });
+    defer after.deinit(allocator);
+    const before_contract = before.contract orelse return error.NoContractFromBefore;
+    const after_contract = after.contract orelse return error.NoContractFromAfter;
+    var diff = try zts.contract_diff.diffContractsFromSources(allocator, &before_contract, &after_contract, match_return_a, match_return_added_arm);
+    defer diff.deinit(allocator);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, diff.behavioralVerdict());
+    try std.testing.expectEqualStrings("behavior path count differs", diff.canonical_counterexample orelse return error.NoCounterexample);
+}
+
+test "prove-behavior: changing the status of a returned match arm reports one changed response" {
+    const allocator = std.testing.allocator;
+    var before = try runCheckOnlyFromSourceWithOptions(allocator, match_return_a, "handler.ts", .{ .json_mode = true });
+    defer before.deinit(allocator);
+    var after = try runCheckOnlyFromSourceWithOptions(allocator, match_return_changed_status, "handler.ts", .{ .json_mode = true });
+    defer after.deinit(allocator);
+    const before_contract = before.contract orelse return error.NoContractFromBefore;
+    const after_contract = after.contract orelse return error.NoContractFromAfter;
+    var diff = try zts.contract_diff.diffContractsFromSources(allocator, &before_contract, &after_contract, match_return_a, match_return_changed_status);
+    defer diff.deinit(allocator);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, diff.behavioralVerdict());
+    const bd = diff.behavior_diff orelse return error.NoBehaviorDiff;
+    try std.testing.expectEqual(@as(u32, 1), bd.response_changed);
+}
+
+test "prove-behavior: handlers that return a match diff equivalent with themselves" {
+    const sources = [_][]const u8{ match_return_a, match_return_added_arm, match_return_changed_status };
+    for (sources) |source| {
+        const outcome = try proveBehaviorOutcome(std.testing.allocator, source, source);
+        try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, outcome.verdict);
+    }
+}

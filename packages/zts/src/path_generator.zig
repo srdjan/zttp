@@ -230,7 +230,28 @@ fn dupePathIoCall(
 /// walked-call fix only adds proven cases) and over-lists behaviors (the
 /// infeasible-path fix removes paths), so it never claims a property that the
 /// fixed analysis refuses.
-pub const path_analyzer_version: u32 = 3;
+///
+/// 4 changes three things, and each changes which forks the generator emits or
+/// which calls it records. The I/O tracker (W6) records a module call in every
+/// expression position (a returned value, an initializer, an `if` condition, a
+/// `for...of` iterable, a `match` discriminant, an inline callback) in
+/// evaluation order, where 3 recorded only a whole initializer or statement
+/// value. A string literal argument that holds `|` has the signature `?`
+/// (W7a). An `assert c, e` (W8) forks one failure path for each way `c` is
+/// false, with the status of `e`, or 500 for a bare `assert`. A returned
+/// `match` (T5) forks one path for each arm, with the status of the arm body,
+/// where 3 emitted one path with status 200.
+///
+/// A version 3 artifact probably over-claims against 4 for a handler that uses
+/// one of these forms. Its path set lacks the `assert` failure paths and the
+/// arm paths of a returned `match`, so the response statuses and the path count
+/// it lists are probably incomplete. Its I/O sequence lacks the calls that 3 did
+/// not record, so its cost envelope is probably too low. It probably
+/// under-claims `fault_covered` for a failable call that an `assert` guards,
+/// because 3 had no failure path to hold `result_not_ok`. For a handler with
+/// none of these forms the paths are the same under 3 and 4, and only the
+/// policy hash differs. This has not been measured over every handler.
+pub const path_analyzer_version: u32 = 4;
 
 /// Methods tried in order for a path whose constraints name no method.
 const request_method_candidates = [_][]const u8{ "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS" };
@@ -1381,10 +1402,10 @@ pub const PathGenerator = struct {
                 // They are dropped again after the emit: the path ends here.
                 const saved_io = self.io_seq.items.len;
                 if (self.ir_view.getOptValue(node)) |value| {
-                    try self.trackModuleCall(value, null);
+                    try self.walkReturnedValue(value);
+                } else {
+                    try self.emitTestCase(200);
                 }
-                const status = self.extractReturnStatus(node);
-                try self.emitTestCase(status);
                 self.io_seq.shrinkRetainingCapacity(saved_io);
             },
 
@@ -1559,6 +1580,48 @@ pub const PathGenerator = struct {
             self.constraints.shrinkRetainingCapacity(saved_constraints);
             self.io_seq.shrinkRetainingCapacity(saved_io);
         }
+    }
+
+    /// The paths of a returned value. A value that is not a `match` is one
+    /// leaf: its module calls are recorded and one path ends here with its
+    /// status.
+    ///
+    /// A returned `match` forks one path for each arm, `default` included.
+    /// The discriminant runs once before any arm, so its module calls are
+    /// recorded before the fork and stay for every arm. Each arm saves the
+    /// constraints and the I/O sequence, walks its body through this function
+    /// (a nested returned `match` forks again), and restores them. An arm adds
+    /// no constraint: a pattern is not a request condition the generator can
+    /// solve, so the paths differ by status and by module calls only. The
+    /// caller drops the discriminant's calls after the last arm. The parser
+    /// refuses a `match` with no arm, so the loop always walks the first arm.
+    ///
+    /// Residual gaps, left open on purpose. Each leaves a behavior diff
+    /// `equivalent` where the behavior changed:
+    /// - an arm pattern that changes while the arm status stays the same;
+    /// - two arms with the same status that swap bodies;
+    /// - a returned ternary, which is still one leaf;
+    /// - a `match` that is reached through a `const` and returned by name.
+    fn walkReturnedValue(self: *PathGenerator, value: NodeIndex) error{OutOfMemory}!void {
+        if (self.ir_view.getTag(value) == .match_expr) {
+            if (self.ir_view.getMatchExpr(value)) |match_data| {
+                try self.trackModuleCall(match_data.discriminant, null);
+                const saved_constraints = self.constraints.items.len;
+                const saved_io = self.io_seq.items.len;
+                var i: u8 = 0;
+                while (i < match_data.arms_count) : (i += 1) {
+                    if (i > 0 and self.path_count >= MAX_PATHS) break;
+                    const arm_idx = self.ir_view.getListIndex(match_data.arms_start, i);
+                    const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+                    try self.walkReturnedValue(arm.body);
+                    self.constraints.shrinkRetainingCapacity(saved_constraints);
+                    self.io_seq.shrinkRetainingCapacity(saved_io);
+                }
+                return;
+            }
+        }
+        try self.trackModuleCall(value, null);
+        try self.emitTestCase(self.extractExprStatus(value));
     }
 
     fn walkBlockFrom(self: *PathGenerator, block: Node.BlockData, first: u16) !void {
@@ -2224,11 +2287,6 @@ pub const PathGenerator = struct {
     // -------------------------------------------------------------------
     // Response status extraction
     // -------------------------------------------------------------------
-
-    fn extractReturnStatus(self: *PathGenerator, node: NodeIndex) u16 {
-        const ret_val = self.ir_view.getOptValue(node) orelse return 200;
-        return self.extractExprStatus(ret_val);
-    }
 
     /// The response status of the value an exit returns: the `status` of a
     /// `Response` helper call, and 200 for any other value.
@@ -5738,4 +5796,83 @@ test "a module call in the assert condition is on both paths" {
     const tests = fixture.generator.getTests();
     try std.testing.expectEqual(@as(usize, 2), tests.len);
     for (tests) |t| try std.testing.expectEqual(@as(usize, 1), t.io_stubs.items.len);
+}
+
+test "a returned match forks one path for each arm, default included" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  return match (req.method) {
+        \\    when "GET": Response.text("get")
+        \\    when "POST": Response.text("post", { status: 201 })
+        \\    default: Response.text("other", { status: 405 })
+        \\  };
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 3), tests.len);
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 200));
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 201));
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 405));
+}
+
+test "a returned ternary stays one path" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  return req.method === "GET" ? Response.text("get") : Response.text("other", { status: 405 });
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), fixture.generator.getTests().len);
+}
+
+test "a nested returned match forks again" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req) {
+        \\  return match (req.method) {
+        \\    when "GET": match (req.url) {
+        \\      when "/a": Response.text("a")
+        \\      default: Response.text("not a", { status: 404 })
+        \\    }
+        \\    default: Response.text("other", { status: 405 })
+        \\  };
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 3), tests.len);
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 200));
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 404));
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 405));
+}
+
+test "a module call in the returned match discriminant is on every arm path and an arm call on its own" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sha256 } from "zttp:crypto";
+        \\function handler(req) {
+        \\  return match (sha256(req.url)) {
+        \\    when "x": Response.text(sha256("arm"))
+        \\    default: Response.text("other", { status: 405 })
+        \\  };
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    for (tests) |t| {
+        const expected: usize = if (t.expected_status == 405) 1 else 2;
+        try std.testing.expectEqual(expected, t.io_stubs.items.len);
+    }
 }
