@@ -2654,13 +2654,13 @@ test "bytecode constants refuse an unrepresentable index" {
 
 test "a full constant pool refuses a fused modulo instead of emitting the operands twice" {
     const allocator = std.testing.allocator;
-    var nodes = NodeList.init(allocator);
+    var nodes = IRStore.init(allocator);
     defer nodes.deinit();
     var constants = ConstantPool.init(allocator);
     defer constants.deinit();
     var scopes = try ScopeAnalyzer.init(allocator);
     defer scopes.deinit();
-    var gen = CodeGen.init(allocator, &nodes, &constants, &scopes);
+    var gen = CodeGen.initWithIRStore(allocator, &nodes, &constants, &scopes, null, null);
     defer gen.deinit();
     try gen.constants.resize(allocator, std.math.maxInt(u16) + 1);
     @memset(gen.constants.items, JSValue.undefined_val);
@@ -2674,7 +2674,7 @@ test "a full constant pool refuses a fused modulo instead of emitting the operan
     try std.testing.expectError(error.TooManyConstants, gen.generate(fused));
 
     // A pattern mismatch still falls back to `mod_const_i8`, which needs no constant.
-    var gen2 = CodeGen.init(allocator, &nodes, &constants, &scopes);
+    var gen2 = CodeGen.initWithIRStore(allocator, &nodes, &constants, &scopes, null, null);
     defer gen2.deinit();
     try gen2.constants.resize(allocator, std.math.maxInt(u16) + 1);
     @memset(gen2.constants.items, JSValue.undefined_val);
