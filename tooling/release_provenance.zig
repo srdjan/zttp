@@ -254,7 +254,7 @@ pub fn main(_: std.process.Init.Minimal) !void {
     defer report.deinit(allocator);
 
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     var stderr_buffer: [4096]u8 = undefined;
     var stderr_writer = std.Io.File.stderr().writer(io, &stderr_buffer);
     if (report.errors.items.len != 0) {

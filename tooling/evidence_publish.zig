@@ -4,7 +4,7 @@ const std = @import("std");
 const evidence_marker = @import("evidence_marker.zig");
 
 const convergence_marker = "[codegen-convergence] ";
-const coverage_marker = "[proof-coverage] ";
+pub const coverage_marker = "[proof-coverage] ";
 const seed_marker = "[seed-coverage] ";
 const union_marker = @import("coverage_union.zig").marker;
 
@@ -917,7 +917,7 @@ fn printCoverageInputs(
     const object = try objectOf(evidence.value);
     const tripped = try valueStrings(object.get("tripped").?);
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     try stdout_writer.interface.print("{s}\n", .{try stringField(object, "corpusVersion")});
     try writeUnionPending(&stdout_writer.interface, tripped);
     try stdout_writer.interface.writeByte('\n');

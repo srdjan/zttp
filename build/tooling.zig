@@ -43,6 +43,15 @@ pub fn add(ctx: Context) Result {
     const zts_graph_gate_exe = b.addExecutable(.{ .name = "zts-graph-gate", .root_module = graph_gate_mod });
     const graph_gate_tests = ctx.addTest(.{ .root_module = graph_gate_mod });
     const run_graph_gate_tests = ctx.addRunTest(graph_gate_tests);
+    const production_branch_metric_mod = b.createModule(.{
+        .root_source_file = b.path("tooling/production_branch_metric.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    const production_branch_metric_exe = b.addExecutable(.{
+        .name = "production-branch-metric-probe",
+        .root_module = production_branch_metric_mod,
+    });
     const native_gate_test_step = b.step("test-native-gates", "Run native repository gate tests");
     native_gate_test_step.dependOn(&run_repo_gate_tests.step);
     native_gate_test_step.dependOn(&run_graph_gate_tests.step);
@@ -58,12 +67,16 @@ pub fn add(ctx: Context) Result {
         \\test "$(head -n 1 "$probe_file")" = 'native gate prefix'
         \\test "$(grep -c '^release script: ' "$probe_file")" -eq 1
         \\test "$(grep -c '^zts layering: OK ' "$probe_file")" -eq 1
-        \\printf 'native gate stream probe: earlier output and both verdicts preserved\n'
+        \\{ printf 'metric prefix\n'; "$3" build.zig; } > "$probe_file"
+        \\test "$(head -n 1 "$probe_file")" = 'metric prefix'
+        \\test "$(grep -c '^production_branch_metric ' "$probe_file")" -eq 1
+        \\printf 'native gate stream probe: earlier output and all verdicts preserved\n'
         ,
         "native-gate-stream-probe",
     });
     stream_probe.addArtifactArg(repo_gate_exe);
     stream_probe.addArtifactArg(zts_graph_gate_exe);
+    stream_probe.addArtifactArg(production_branch_metric_exe);
     stream_probe.setCwd(b.path("."));
     stream_probe.has_side_effects = true;
     native_gate_test_step.dependOn(&stream_probe.step);
@@ -93,6 +106,10 @@ pub fn add(ctx: Context) Result {
             .target = b.graph.host,
             .optimize = optimize,
         }),
+    });
+    const evidence_marker_exe = b.addExecutable(.{
+        .name = "evidence-marker-probe",
+        .root_module = evidence_marker_tests.root_module,
     });
     const evidence_publish_mod = b.createModule(.{
         .root_source_file = b.path("tooling/evidence_publish.zig"),
@@ -197,11 +214,6 @@ pub fn add(ctx: Context) Result {
     // Repository-only AST metric. The live command receives the tracked Zig
     // source list from a NUL-safe script; its unit tests pin the AST definition
     // and its input floors. It is never installed in user projects.
-    const production_branch_metric_mod = b.createModule(.{
-        .root_source_file = b.path("tooling/production_branch_metric.zig"),
-        .target = b.graph.host,
-        .optimize = optimize,
-    });
     const production_branch_metric_tests = ctx.addTest(.{
         .filters = test_filters,
         .root_module = production_branch_metric_mod,
@@ -212,6 +224,58 @@ pub fn add(ctx: Context) Result {
     const production_branch_metric_test_step = b.step("test-production-branch-metric", "Test and run the production branch metric");
     production_branch_metric_test_step.dependOn(&run_production_branch_metric_tests.step);
     production_branch_metric_test_step.dependOn(&production_branch_metric.run.step);
+
+    // Evidence commands must retain output that already exists on stdout.
+    const evidence_stream_probe = b.addSystemCommand(&.{
+        "/bin/sh",               "-c",
+        \\set -eu
+        \\probe_dir=$(mktemp -d)
+        \\trap 'rm -rf "$probe_dir"' EXIT
+        \\failed=0
+        \\check_prefix() {
+        \\  if test "$(head -n 1 "$probe_dir/output")" != "$1"; then
+        \\    printf 'lost stdout prefix: %s\n' "$1" >&2
+        \\    failed=1
+        \\  fi
+        \\}
+        \\"$1" > "$probe_dir/markers.log" 2>&1
+        \\coverage_marker="$6"
+        \\sed -n "s/^\[evidence-fixture-coverage\] /$coverage_marker/p" "$probe_dir/markers.log" > "$probe_dir/coverage.log"
+        \\test "$(wc -l < "$probe_dir/coverage.log" | tr -d ' ')" -eq 1
+        \\{ printf 'evidence publisher prefix\n'; "$2" coverage-inputs "$probe_dir/coverage.log"; } > "$probe_dir/output"
+        \\check_prefix 'evidence publisher prefix'
+        \\mkdir -p "$probe_dir/provenance/docs"
+        \\git -C "$probe_dir/provenance" init -q
+        \\printf 'source\n' > "$probe_dir/provenance/source.txt"
+        \\git -C "$probe_dir/provenance" add source.txt
+        \\git -C "$probe_dir/provenance" -c user.name=probe -c user.email=probe@example.invalid -c commit.gpgsign=false commit -qm source
+        \\source_commit=$(git -C "$probe_dir/provenance" rev-parse HEAD)
+        \\for name in coverage convergence; do printf '{"complete":true,"publishable":true,"publicationMode":true,"sourceDirty":false,"sourceCommit":"%s"}\n' "$source_commit" > "$probe_dir/provenance/docs/$name.json"; done
+        \\git -C "$probe_dir/provenance" add docs
+        \\git -C "$probe_dir/provenance" -c user.name=probe -c user.email=probe@example.invalid -c commit.gpgsign=false commit -qm evidence
+        \\(cd "$probe_dir/provenance" && { printf 'release provenance prefix\n'; "$3"; } > "$probe_dir/output")
+        \\check_prefix 'release provenance prefix'
+        \\{ printf 'evidence marker prefix\n'; "$4" "$probe_dir/coverage.log" "$coverage_marker" coverage; } > "$probe_dir/output"
+        \\check_prefix 'evidence marker prefix'
+        \\version=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+        \\source_tree=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+        \\(cd "$probe_dir/provenance" && { printf 'coverage union prefix\n'; "$5" "$version" "$source_tree" --measured-zero; } > "$probe_dir/output")
+        \\check_prefix 'coverage union prefix'
+        \\test "$(grep -c '^\[coverage-union\] ' "$probe_dir/output")" -eq 1
+        \\test "$failed" -eq 0
+        \\printf 'evidence stream probe: all four prefixes preserved\n'
+        ,
+        "evidence-stream-probe",
+    });
+    evidence_stream_probe.addArtifactArg(evidence_marker_tests);
+    evidence_stream_probe.addArtifactArg(evidence_publish_exe);
+    evidence_stream_probe.addArtifactArg(release_provenance_exe);
+    evidence_stream_probe.addArtifactArg(evidence_marker_exe);
+    evidence_stream_probe.addArtifactArg(coverage_union_exe);
+    evidence_stream_probe.addArg(@import("../tooling/evidence_publish.zig").coverage_marker);
+    evidence_stream_probe.setCwd(b.path("."));
+    evidence_stream_probe.has_side_effects = true;
+    native_gate_test_step.dependOn(&evidence_stream_probe.step);
 
     // Development-only deterministic author. It speaks non-streaming Chat
     // Completions on loopback and is never part of the install step.

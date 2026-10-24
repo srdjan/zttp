@@ -9,7 +9,20 @@ set -euo pipefail
 ROOT="${1:-.}"
 ROOT="$(cd "$ROOT" && pwd)"
 
+fail() {
+  printf 'documentation links: %s\n' "$1" >&2
+  exit 1
+}
+
 missing=0
+checked=0
+inventory="$(mktemp)"
+scan="$(mktemp)"
+trap 'command rm -f "$inventory" "$scan"' EXIT
+
+if ! (cd "$ROOT" && git ls-files -z '*.md') > "$inventory"; then
+  fail "tracked documentation inventory failed"
+fi
 
 anchor_exists() {
   local md_file="$1"
@@ -71,7 +84,16 @@ while IFS= read -r -d '' file; do
 
   full_file="$ROOT/$file"
   [ -f "$full_file" ] || continue
+  checked=$((checked + 1))
   base_dir="$(dirname "$full_file")"
+
+  if ! perl -ne '
+      while (/\[[^\]]*\]\(([^)]+)\)/g) {
+        print $. . ":" . $1 . "\n";
+      }
+    ' "$full_file" > "$scan"; then
+    fail "Perl link scan failed for $file"
+  fi
 
   while IFS= read -r entry; do
     line="${entry%%:*}"
@@ -109,14 +131,12 @@ while IFS= read -r -d '' file; do
         missing=$((missing + 1))
       fi
     fi
-  done < <(
-    perl -ne '
-      while (/\[[^\]]*\]\(([^)]+)\)/g) {
-        print $. . ":" . $1 . "\n";
-      }
-    ' "$full_file"
-  )
-done < <(cd "$ROOT" && git ls-files -z '*.md')
+  done < "$scan"
+done < "$inventory"
+
+if [ "$checked" -eq 0 ]; then
+  fail "no tracked documentation files were checked"
+fi
 
 if [ "$missing" -gt 0 ]; then
   printf '\n%d missing documentation link(s)\n' "$missing"

@@ -453,7 +453,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     defer result.deinit(allocator);
 
     var stdout_buffer: [64 * 1024]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     try stdout_writer.interface.writeAll(marker);
     try writeJson(result, &stdout_writer.interface);
     try stdout_writer.interface.writeByte('\n');

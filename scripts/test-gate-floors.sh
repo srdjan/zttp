@@ -117,6 +117,34 @@ else
   fail "capability control: 30 empty files were rejected: $control_output"
 fi
 
+# audit-docs.sh must reject an empty inventory and every failed scanner.
+mkdir "$work/docs-empty" "$work/docs-not-git" "$work/docs-scan" "$work/fake-perl"
+git -C "$work/docs-empty" init -q
+git -C "$work/docs-scan" init -q
+printf '[missing](missing.md)\n' > "$work/docs-scan/README.md"
+git -C "$work/docs-scan" add README.md
+cat > "$work/fake-perl/perl" <<'STUB'
+#!/bin/sh
+exit 2
+STUB
+chmod +x "$work/fake-perl/perl"
+
+expect_docs_failure() {
+  local label="$1" dir="$2" path="$3" needle="$4"
+  local output
+  if output="$(PATH="$path" bash scripts/audit-docs.sh "$dir" 2>&1)"; then
+    fail "$label: audit-docs.sh reported success"
+  fi
+  case "$output" in
+    *"$needle"*) ;;
+    *) fail "$label: audit-docs.sh failed for the wrong reason: $output" ;;
+  esac
+}
+
+expect_docs_failure "documentation links, empty inventory" "$work/docs-empty" "$PATH" "no tracked documentation files"
+expect_docs_failure "documentation links, failed Git inventory" "$work/docs-not-git" "$PATH" "tracked documentation inventory failed"
+expect_docs_failure "documentation links, failed Perl scan" "$work/docs-scan" "$work/fake-perl:$PATH" "Perl link scan failed"
+
 # scripts/test-examples.sh: a suite that reports zero passed tests must fail
 # even with zero failures. A fake zttp stands in for the real binary, so the
 # probe takes no build and no example input. The control proves the fake is
@@ -145,4 +173,4 @@ case "$zero_output" in
   *) fail "examples: zero-test run failed for the wrong reason: $zero_output" ;;
 esac
 
-echo "gate floor test: ok (rg floors in 2 scripts, 3 probes each; input floors in 2 scripts; examples zero-test probe)"
+echo "gate floor test: ok (scanner and input floors, examples zero-test probe)"

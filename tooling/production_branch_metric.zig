@@ -393,9 +393,9 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     const report = try collect(io_backend.io(), allocator, paths.items, require_package_floor);
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io_backend.io(), &stdout_buffer);
-    defer stdout_writer.interface.flush() catch {};
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io_backend.io(), &stdout_buffer);
     if (json) try writeJson(&stdout_writer.interface, report) else try writeText(&stdout_writer.interface, report);
+    try stdout_writer.interface.flush();
 }
 
 test "metric pins decision semantics and excludes test bodies" {

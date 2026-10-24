@@ -371,7 +371,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     var parsed = try extract(allocator, log, args[2], try Kind.parse(args[3]));
     defer parsed.deinit();
     var stdout_buffer: [64 * 1024]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(io, &stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writerStreaming(io, &stdout_buffer);
     var json: std.json.Stringify = .{
         .writer = &stdout_writer.interface,
         .options = .{ .escape_unicode = true },
