@@ -1058,15 +1058,23 @@ pub const HiddenClassPool = struct {
         entry.valid = true;
     }
 
+    fn reserveClass(self: *HiddenClassPool) !void {
+        try self.property_counts.ensureUnusedCapacity(self.allocator, 1);
+        try self.properties_starts.ensureUnusedCapacity(self.allocator, 1);
+        try self.prototype_indices.ensureUnusedCapacity(self.allocator, 1);
+        try self.sorted_starts.ensureUnusedCapacity(self.allocator, 1);
+    }
+
     /// Allocate a new hidden class with given property count
     fn allocClass(self: *HiddenClassPool, prop_count: u16, prototype: HiddenClassIndex) !HiddenClassIndex {
-        const idx = self.count;
-        self.count += 1;
+        try self.reserveClass();
 
-        try self.property_counts.append(self.allocator, prop_count);
-        try self.properties_starts.append(self.allocator, @intCast(self.property_names.items.len));
-        try self.prototype_indices.append(self.allocator, prototype);
-        try self.sorted_starts.append(self.allocator, SORTED_START_INVALID);
+        const idx = self.count;
+        self.property_counts.appendAssumeCapacity(prop_count);
+        self.properties_starts.appendAssumeCapacity(@intCast(self.property_names.items.len));
+        self.prototype_indices.appendAssumeCapacity(prototype);
+        self.sorted_starts.appendAssumeCapacity(SORTED_START_INVALID);
+        self.count += 1;
 
         return HiddenClassIndex.fromInt(idx);
     }
@@ -1151,76 +1159,66 @@ pub const HiddenClassPool = struct {
         const old_prop_count = self.getPropertyCount(from_idx);
         const new_prop_count = old_prop_count + 1;
         const prototype = self.getPrototype(from_idx);
-
-        const new_idx = try self.allocClass(new_prop_count, prototype);
-
-        // Copy old properties to new location (SoA format)
-        // IMPORTANT: Ensure capacity BEFORE copying to avoid aliasing bug where
-        // appendSlice would reallocate while reading from the same array
-        if (old_prop_count > 0) {
-            const old_start = self.properties_starts.items[from];
-
-            // Ensure capacity for old properties + 1 new property
-            try self.property_names.ensureUnusedCapacity(self.allocator, new_prop_count);
-            try self.property_offsets.ensureUnusedCapacity(self.allocator, new_prop_count);
-            try self.property_flags.ensureUnusedCapacity(self.allocator, new_prop_count);
-
-            // Now safe to copy - no reallocation will occur
-            self.property_names.appendSliceAssumeCapacity(self.property_names.items[old_start..][0..old_prop_count]);
-            self.property_offsets.appendSliceAssumeCapacity(self.property_offsets.items[old_start..][0..old_prop_count]);
-            self.property_flags.appendSliceAssumeCapacity(self.property_flags.items[old_start..][0..old_prop_count]);
-        }
-
-        // Add new property using SoA arrays
-        try self.property_names.append(self.allocator, name);
-        try self.property_offsets.append(self.allocator, old_prop_count); // offset = old count
-        try self.property_flags.append(self.allocator, .{}); // default flags
-
-        // Record transition for O(1) lookup
-        try self.transition_map.put(self.allocator, key, new_idx);
-
-        if (new_prop_count >= BINARY_SEARCH_THRESHOLD) {
-            try self.buildSortedProperties(new_idx, new_prop_count);
-        }
-
-        return new_idx;
-    }
-
-    fn buildSortedProperties(self: *HiddenClassPool, idx: HiddenClassIndex, prop_count: u16) !void {
-        const i = idx.toInt();
-        if (i >= self.count) return;
-        const start = self.properties_starts.items[i];
-        const names = self.property_names.items[start..][0..prop_count];
-        const offsets = self.property_offsets.items[start..][0..prop_count];
+        const old_start = if (old_prop_count > 0) self.properties_starts.items[from] else 0;
 
         const Entry = struct {
             name: Atom,
             offset: u16,
         };
+        var sorted_entries: ?[]Entry = null;
+        defer if (sorted_entries) |entries| self.allocator.free(entries);
 
-        var entries = try self.allocator.alloc(Entry, prop_count);
-        defer self.allocator.free(entries);
-
-        for (names, 0..) |n, idx_entry| {
-            entries[idx_entry] = .{ .name = n, .offset = offsets[idx_entry] };
-        }
-
-        std.mem.sort(Entry, entries, {}, struct {
-            fn lessThan(_: void, a: Entry, b: Entry) bool {
-                return @backingInt(a.name) < @backingInt(b.name);
+        if (new_prop_count >= BINARY_SEARCH_THRESHOLD) {
+            const entries = try self.allocator.alloc(Entry, new_prop_count);
+            sorted_entries = entries;
+            const old_names = self.property_names.items[old_start..][0..old_prop_count];
+            const old_offsets = self.property_offsets.items[old_start..][0..old_prop_count];
+            for (old_names, old_offsets, 0..) |old_name, old_offset, entry_idx| {
+                entries[entry_idx] = .{
+                    .name = old_name,
+                    .offset = old_offset,
+                };
             }
-        }.lessThan);
+            entries[old_prop_count] = .{ .name = name, .offset = old_prop_count };
 
-        const sorted_start: u32 = @intCast(self.sorted_property_names.items.len);
-        try self.sorted_property_names.ensureUnusedCapacity(self.allocator, prop_count);
-        try self.sorted_property_offsets.ensureUnusedCapacity(self.allocator, prop_count);
+            std.mem.sort(Entry, entries, {}, struct {
+                fn lessThan(_: void, a: Entry, b: Entry) bool {
+                    return @backingInt(a.name) < @backingInt(b.name);
+                }
+            }.lessThan);
 
-        for (entries) |entry| {
-            self.sorted_property_names.appendAssumeCapacity(entry.name);
-            self.sorted_property_offsets.appendAssumeCapacity(entry.offset);
+            try self.sorted_property_names.ensureUnusedCapacity(self.allocator, new_prop_count);
+            try self.sorted_property_offsets.ensureUnusedCapacity(self.allocator, new_prop_count);
         }
 
-        self.sorted_starts.items[i] = sorted_start;
+        try self.reserveClass();
+        try self.property_names.ensureUnusedCapacity(self.allocator, new_prop_count);
+        try self.property_offsets.ensureUnusedCapacity(self.allocator, new_prop_count);
+        try self.property_flags.ensureUnusedCapacity(self.allocator, new_prop_count);
+        try self.transition_map.ensureUnusedCapacity(self.allocator, 1);
+
+        const new_idx = try self.allocClass(new_prop_count, prototype);
+
+        if (old_prop_count > 0) {
+            self.property_names.appendSliceAssumeCapacity(self.property_names.items[old_start..][0..old_prop_count]);
+            self.property_offsets.appendSliceAssumeCapacity(self.property_offsets.items[old_start..][0..old_prop_count]);
+            self.property_flags.appendSliceAssumeCapacity(self.property_flags.items[old_start..][0..old_prop_count]);
+        }
+        self.property_names.appendAssumeCapacity(name);
+        self.property_offsets.appendAssumeCapacity(old_prop_count);
+        self.property_flags.appendAssumeCapacity(.{});
+        self.transition_map.putAssumeCapacity(key, new_idx);
+
+        if (sorted_entries) |entries| {
+            const sorted_start: u32 = @intCast(self.sorted_property_names.items.len);
+            for (entries) |entry| {
+                self.sorted_property_names.appendAssumeCapacity(entry.name);
+                self.sorted_property_offsets.appendAssumeCapacity(entry.offset);
+            }
+            self.sorted_starts.items[new_idx.toInt()] = sorted_start;
+        }
+
+        return new_idx;
     }
 
     /// Get empty root class index
@@ -1281,21 +1279,22 @@ pub const HiddenClassPool = struct {
             return to_idx;
         }
 
-        // Create function class with 2 reserved slots
+        try self.reserveClass();
+        try self.property_names.ensureUnusedCapacity(self.allocator, 2);
+        try self.property_offsets.ensureUnusedCapacity(self.allocator, 2);
+        try self.property_flags.ensureUnusedCapacity(self.allocator, 2);
+        try self.transition_map.ensureUnusedCapacity(self.allocator, 1);
+
         const prototype = self.getPrototype(from_idx);
         const new_idx = try self.allocClass(2, prototype);
 
-        // Add reserved property slots (using SoA arrays)
-        try self.property_names.append(self.allocator, reserved0);
-        try self.property_offsets.append(self.allocator, 0);
-        try self.property_flags.append(self.allocator, .{});
-
-        try self.property_names.append(self.allocator, reserved1);
-        try self.property_offsets.append(self.allocator, 1);
-        try self.property_flags.append(self.allocator, .{});
-
-        // Record transition for O(1) lookup
-        try self.transition_map.put(self.allocator, key, new_idx);
+        self.property_names.appendAssumeCapacity(reserved0);
+        self.property_offsets.appendAssumeCapacity(0);
+        self.property_flags.appendAssumeCapacity(.{});
+        self.property_names.appendAssumeCapacity(reserved1);
+        self.property_offsets.appendAssumeCapacity(1);
+        self.property_flags.appendAssumeCapacity(.{});
+        self.transition_map.putAssumeCapacity(key, new_idx);
 
         return new_idx;
     }
@@ -2839,6 +2838,53 @@ test "HiddenClassPool multiple properties" {
     try std.testing.expect(proto_slot != null);
     try std.testing.expectEqual(@as(u16, 0), length_slot.?);
     try std.testing.expectEqual(@as(u16, 1), proto_slot.?);
+}
+
+test "HiddenClassPool addProperty is atomic on allocation failure" {
+    const atoms = [_]Atom{
+        .length,
+        .prototype,
+        .constructor,
+        .name,
+        .message,
+        .valueOf,
+        .toString,
+        .toJSON,
+    };
+
+    var fail_offset: usize = 0;
+    var saw_failure = false;
+    while (true) : (fail_offset += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{});
+        const allocator = failing.allocator();
+        var pool = try HiddenClassPool.init(allocator);
+        defer pool.deinit();
+
+        var class_idx = pool.getEmptyClass();
+        for (atoms[0 .. atoms.len - 1]) |atom| {
+            class_idx = try pool.addProperty(class_idx, atom);
+        }
+
+        failing.fail_index = failing.alloc_index + fail_offset;
+        failing.resize_fail_index = failing.resize_index;
+        const attempted = pool.addProperty(class_idx, atoms[atoms.len - 1]);
+        if (attempted) |_| break else |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            saw_failure = true;
+        }
+
+        failing.fail_index = std.math.maxInt(usize);
+        failing.resize_fail_index = std.math.maxInt(usize);
+        const retry = try pool.addProperty(class_idx, atoms[atoms.len - 1]);
+
+        try std.testing.expectEqual(@as(u16, atoms.len), pool.getPropertyCount(retry));
+        try std.testing.expectEqualSlices(Atom, &atoms, pool.propertyNames(retry));
+        for (atoms, 0..) |atom, offset| {
+            try std.testing.expectEqual(@as(?u16, @intCast(offset)), pool.findProperty(retry, atom));
+            try std.testing.expect(pool.getPropertyFlags(retry, atom) != null);
+        }
+    }
+    try std.testing.expect(saw_failure);
 }
 
 test "HiddenClassIndex none check" {
