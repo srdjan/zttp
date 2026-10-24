@@ -734,9 +734,6 @@ pub const ReplayState = struct {
     }
 };
 
-/// Parse a recorded entry's result back to a JSValue and count a divergence if
-/// a non-null/undefined recording failed to parse. Shared tail of both replay
-/// stubs so the parse-failure heuristic has a single owner.
 /// A recorded entry replayed against changed arguments is a behavior drift.
 /// Returns true when the live args diverge from what was recorded. Skips when
 /// the recording did not pin args ("[]" or empty), so zero-arg calls and
@@ -754,15 +751,10 @@ fn replayRecordedEntry(state: *ReplayState, ctx: *context.Context, entry: IoEntr
     if (serializeArgsJson(ctx.allocator, ctx, args)) |live| {
         defer ctx.allocator.free(live);
         if (argsDrifted(entry.args_json, live)) state.divergences += 1;
-    }
-    const result = jsonToJSValue(ctx, entry.result_json);
-    if (result.isUndefined() and entry.result_json.len > 0 and
-        !std.mem.eql(u8, entry.result_json, "null") and
-        !std.mem.eql(u8, entry.result_json, "undefined"))
-    {
+    } else {
         state.divergences += 1;
     }
-    return result;
+    return jsonToJSValue(ctx, entry.result_json);
 }
 
 /// Generate a replay stub NativeFn at compile time.
@@ -829,11 +821,24 @@ const ParseResult = struct {
     end: usize,
 };
 
+const DecodeError = error{ OutOfMemory, InvalidReplayValue };
+
 /// Parse a JSON string into a JSValue. Used by replay stubs to reconstruct
 /// recorded return values from their JSONL representation.
 pub fn jsonToJSValue(ctx: *context.Context, json: []const u8) value.JSValue {
-    if (json.len == 0) return value.JSValue.undefined_val;
-    const result = parseValue(ctx, json, 0, 0);
+    const result = decodeJsonToJSValue(ctx, json) catch {
+        if (ctx.getModuleState(ReplayState, REPLAY_STATE_SLOT)) |state| {
+            state.divergences += 1;
+        }
+        return value.JSValue.undefined_val;
+    };
+    return result;
+}
+
+fn decodeJsonToJSValue(ctx: *context.Context, json: []const u8) DecodeError!value.JSValue {
+    if (json.len == 0) return error.InvalidReplayValue;
+    const result = try parseValue(ctx, json, 0, 0);
+    if (skipWhitespace(json, result.end) != json.len) return error.InvalidReplayValue;
     return result.val;
 }
 
@@ -842,24 +847,31 @@ pub fn jsonToJSValue(ctx: *context.Context, json: []const u8) value.JSValue {
 // native stack. Mirrors the serializer's MAX_JSON_DEPTH discipline.
 const MAX_PARSE_DEPTH: u32 = 128;
 
-fn parseValue(ctx: *context.Context, json: []const u8, start: usize, depth: u32) ParseResult {
+fn parseValue(ctx: *context.Context, json: []const u8, start: usize, depth: u32) DecodeError!ParseResult {
     const pos = skipWhitespace(json, start);
-    if (pos >= json.len) return .{ .val = value.JSValue.undefined_val, .end = pos };
-    if (depth >= MAX_PARSE_DEPTH) return .{ .val = value.JSValue.undefined_val, .end = pos };
+    if (pos >= json.len or depth >= MAX_PARSE_DEPTH) return error.InvalidReplayValue;
 
     return switch (json[pos]) {
         '"' => parseString(ctx, json, pos),
         '{' => parseObject(ctx, json, pos, depth),
         '[' => parseArray(ctx, json, pos, depth),
-        't' => .{ .val = value.JSValue.true_val, .end = @min(pos + 4, json.len) },
-        'f' => .{ .val = value.JSValue.false_val, .end = @min(pos + 5, json.len) },
-        'n' => .{ .val = value.JSValue.undefined_val, .end = @min(pos + 4, json.len) },
+        't' => parseLiteral(json, pos, "true", value.JSValue.true_val),
+        'f' => parseLiteral(json, pos, "false", value.JSValue.false_val),
+        'n' => parseLiteral(json, pos, "null", value.JSValue.undefined_val),
+        'u' => parseLiteral(json, pos, "undefined", value.JSValue.undefined_val),
         '-', '0'...'9' => parseNumber(ctx, json, pos),
-        else => .{ .val = value.JSValue.undefined_val, .end = pos + 1 },
+        else => error.InvalidReplayValue,
     };
 }
 
-fn parseString(ctx: *context.Context, json: []const u8, start: usize) ParseResult {
+fn parseLiteral(json: []const u8, start: usize, literal: []const u8, val: value.JSValue) DecodeError!ParseResult {
+    if (start + literal.len > json.len or !std.mem.eql(u8, json[start .. start + literal.len], literal)) {
+        return error.InvalidReplayValue;
+    }
+    return .{ .val = val, .end = start + literal.len };
+}
+
+fn parseString(ctx: *context.Context, json: []const u8, start: usize) DecodeError!ParseResult {
     // start points to opening quote
     var pos = start + 1;
     // Fast path: no escapes
@@ -874,20 +886,20 @@ fn parseString(ctx: *context.Context, json: []const u8, start: usize) ParseResul
         if (json[pos] == '"') {
             if (!has_escapes) {
                 const str_data = json[content_start..pos];
-                const js_str = ctx.createString(str_data) catch return .{ .val = value.JSValue.undefined_val, .end = pos + 1 };
+                const js_str = try ctx.createString(str_data);
                 return .{ .val = js_str, .end = pos + 1 };
             }
             // Slow path: unescape
-            const unescaped = unescapeJson(ctx.allocator, json[content_start..pos]) catch return .{ .val = value.JSValue.undefined_val, .end = pos + 1 };
+            const unescaped = try unescapeJson(ctx.allocator, json[content_start..pos]);
             defer ctx.allocator.free(unescaped);
-            const js_str = ctx.createString(unescaped) catch return .{ .val = value.JSValue.undefined_val, .end = pos + 1 };
+            const js_str = try ctx.createString(unescaped);
             return .{ .val = js_str, .end = pos + 1 };
         }
     }
-    return .{ .val = value.JSValue.undefined_val, .end = pos };
+    return error.InvalidReplayValue;
 }
 
-fn parseNumber(ctx: *context.Context, json: []const u8, start: usize) ParseResult {
+fn parseNumber(ctx: *context.Context, json: []const u8, start: usize) DecodeError!ParseResult {
     var pos = start;
     var is_float = false;
     if (pos < json.len and json[pos] == '-') pos += 1;
@@ -912,97 +924,72 @@ fn parseNumber(ctx: *context.Context, json: []const u8, start: usize) ParseResul
         } else |_| {}
     }
     // Fall back to float
-    const f = std.fmt.parseFloat(f64, num_str) catch {
-        return .{ .val = value.JSValue.undefined_val, .end = pos };
-    };
+    const f = std.fmt.parseFloat(f64, num_str) catch return error.InvalidReplayValue;
     return .{ .val = allocFloat(ctx, f), .end = pos };
 }
 
-fn parseArray(ctx: *context.Context, json: []const u8, start: usize, depth: u32) ParseResult {
-    const pool = ctx.hidden_class_pool orelse return .{ .val = value.JSValue.undefined_val, .end = start + 1 };
-    const arr = object.JSObject.create(ctx.allocator, ctx.root_class_idx, null, pool) catch {
-        return .{ .val = value.JSValue.undefined_val, .end = start + 1 };
-    };
+fn parseArray(ctx: *context.Context, json: []const u8, start: usize, depth: u32) DecodeError!ParseResult {
+    const pool = ctx.hidden_class_pool orelse return error.InvalidReplayValue;
+    const arr = try object.JSObject.create(ctx.allocator, ctx.root_class_idx, null, pool);
     arr.class_id = .array;
-    ctx.builtin_objects.append(ctx.allocator, arr) catch {};
+    ctx.builtin_objects.append(ctx.allocator, arr) catch |err| {
+        arr.destroy(ctx.allocator);
+        return err;
+    };
 
     var pos = start + 1; // skip '['
-    var first = true;
+    pos = skipWhitespace(json, pos);
+    if (pos < json.len and json[pos] == ']') return .{ .val = arr.toValue(), .end = pos + 1 };
+
     while (pos < json.len) {
-        pos = skipWhitespace(json, pos);
-        if (pos >= json.len or json[pos] == ']') {
-            pos += 1;
-            break;
-        }
-        if (!first) {
-            if (pos < json.len and json[pos] == ',') pos += 1;
-            pos = skipWhitespace(json, pos);
-        }
-        first = false;
-        if (pos >= json.len or json[pos] == ']') {
-            pos += 1;
-            break;
-        }
-        const elem_start = pos;
-        const elem = parseValue(ctx, json, pos, depth + 1);
+        const elem = try parseValue(ctx, json, pos, depth + 1);
         pos = elem.end;
-        arr.arrayPush(ctx.allocator, elem.val) catch {};
-        // Guarantee forward progress. parseValue returns end == start when the
-        // MAX_PARSE_DEPTH cap is hit (an adversarial/corrupted trace nested past
-        // 128 levels); without this break the loop would re-read the same
-        // character forever (100% CPU + unbounded arrayPush). parseObject is
-        // immune because its non-string-key escape always advances.
-        if (pos <= elem_start) break;
+        try arr.arrayPush(ctx.allocator, elem.val);
+        pos = skipWhitespace(json, pos);
+        if (pos >= json.len) return error.InvalidReplayValue;
+        if (json[pos] == ']') return .{ .val = arr.toValue(), .end = pos + 1 };
+        if (json[pos] != ',') return error.InvalidReplayValue;
+        pos = skipWhitespace(json, pos + 1);
+        if (pos >= json.len or json[pos] == ']') return error.InvalidReplayValue;
     }
-    return .{ .val = arr.toValue(), .end = pos };
+    return error.InvalidReplayValue;
 }
 
-fn parseObject(ctx: *context.Context, json: []const u8, start: usize, depth: u32) ParseResult {
-    const pool = ctx.hidden_class_pool orelse return .{ .val = value.JSValue.undefined_val, .end = start + 1 };
-    const obj = object.JSObject.create(ctx.allocator, ctx.root_class_idx, null, pool) catch {
-        return .{ .val = value.JSValue.undefined_val, .end = start + 1 };
+fn parseObject(ctx: *context.Context, json: []const u8, start: usize, depth: u32) DecodeError!ParseResult {
+    const pool = ctx.hidden_class_pool orelse return error.InvalidReplayValue;
+    const obj = try object.JSObject.create(ctx.allocator, ctx.root_class_idx, null, pool);
+    ctx.builtin_objects.append(ctx.allocator, obj) catch |err| {
+        obj.destroy(ctx.allocator);
+        return err;
     };
-    ctx.builtin_objects.append(ctx.allocator, obj) catch {};
 
     var pos = start + 1; // skip '{'
-    var first = true;
+    pos = skipWhitespace(json, pos);
+    if (pos < json.len and json[pos] == '}') return .{ .val = obj.toValue(), .end = pos + 1 };
+
     while (pos < json.len) {
-        pos = skipWhitespace(json, pos);
-        if (pos >= json.len or json[pos] == '}') {
-            pos += 1;
-            break;
-        }
-        if (!first) {
-            if (pos < json.len and json[pos] == ',') pos += 1;
-            pos = skipWhitespace(json, pos);
-        }
-        first = false;
-        if (pos >= json.len or json[pos] == '}') {
-            pos += 1;
-            break;
-        }
-        // Parse key (must be a string)
-        if (json[pos] != '"') {
-            pos += 1;
-            continue;
-        }
-        const key_result = parseRawString(json, pos);
+        if (json[pos] != '"') return error.InvalidReplayValue;
+        const key_result = try parseRawString(json, pos);
         pos = key_result.end;
         const key_str = key_result.data;
 
-        // Skip colon
         pos = skipWhitespace(json, pos);
-        if (pos < json.len and json[pos] == ':') pos += 1;
+        if (pos >= json.len or json[pos] != ':') return error.InvalidReplayValue;
 
-        // Parse value
-        const val_result = parseValue(ctx, json, pos, depth + 1);
+        const val_result = try parseValue(ctx, json, pos + 1, depth + 1);
         pos = val_result.end;
 
-        // Set property on object
-        const atom = ctx.atoms.intern(key_str) catch continue;
-        obj.setProperty(ctx.allocator, pool, atom, val_result.val) catch {};
+        const atom = try ctx.atoms.intern(key_str);
+        try obj.setProperty(ctx.allocator, pool, atom, val_result.val);
+
+        pos = skipWhitespace(json, pos);
+        if (pos >= json.len) return error.InvalidReplayValue;
+        if (json[pos] == '}') return .{ .val = obj.toValue(), .end = pos + 1 };
+        if (json[pos] != ',') return error.InvalidReplayValue;
+        pos = skipWhitespace(json, pos + 1);
+        if (pos >= json.len or json[pos] == '}') return error.InvalidReplayValue;
     }
-    return .{ .val = obj.toValue(), .end = pos };
+    return error.InvalidReplayValue;
 }
 
 const RawStringResult = struct {
@@ -1012,7 +999,7 @@ const RawStringResult = struct {
 
 /// Extract the raw content of a JSON string (without unescaping).
 /// Returns the slice between the quotes.
-fn parseRawString(json: []const u8, start: usize) RawStringResult {
+fn parseRawString(json: []const u8, start: usize) DecodeError!RawStringResult {
     var pos = start + 1; // skip opening quote
     const content_start = pos;
     while (pos < json.len) : (pos += 1) {
@@ -1024,7 +1011,7 @@ fn parseRawString(json: []const u8, start: usize) RawStringResult {
             return .{ .data = json[content_start..pos], .end = pos + 1 };
         }
     }
-    return .{ .data = json[content_start..pos], .end = pos };
+    return error.InvalidReplayValue;
 }
 
 fn skipWhitespace(json: []const u8, start: usize) usize {
@@ -1510,6 +1497,100 @@ test "jsonToJSValue array" {
     try std.testing.expect(arr_val.isObject());
     const arr_obj = object.JSObject.fromValue(arr_val);
     try std.testing.expectEqual(@as(u32, 3), arr_obj.getArrayLength());
+}
+
+fn expectReplayDecodeAllocationDivergence(result_json: []const u8) !void {
+    var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer test_arena.deinit();
+    var failing = std.testing.FailingAllocator.init(test_arena.allocator(), .{});
+    const ctx = try testCreateContext(failing.allocator());
+    defer testDestroyContext(ctx);
+
+    const io_calls = [_]IoEntry{.{
+        .seq = 0,
+        .module = "test",
+        .func = "decode",
+        .args_json = "[]",
+        .result_json = result_json,
+    }};
+    var state = ReplayState{ .io_calls = &io_calls, .cursor = 0, .divergences = 0 };
+    ctx.setModuleState(REPLAY_STATE_SLOT, &state, ReplayState.deinitOpaque);
+
+    // Permit argument serialization, container creation, and replay-root tracking.
+    // The next allocation stores array overflow or interns the dynamic object key.
+    failing.fail_index = failing.alloc_index + 3;
+    const result = try makeReplayStub("test", "decode")(ctx, value.JSValue.undefined_val, &.{});
+
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(u32, 1), state.divergences);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "replay rejects an array truncated by allocation failure" {
+    try expectReplayDecodeAllocationDivergence("[1,2,3,4,5,6,7,8]");
+}
+
+test "replay rejects an object truncated by allocation failure" {
+    try expectReplayDecodeAllocationDivergence("{\"replay_decode_key\":1}");
+}
+
+test "replay rejects trailing recorded input" {
+    const io_calls = [_]IoEntry{.{
+        .seq = 0,
+        .module = "test",
+        .func = "decode",
+        .args_json = "[]",
+        .result_json = "true false",
+    }};
+    var state = ReplayState{ .io_calls = &io_calls, .cursor = 0, .divergences = 0 };
+    var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer test_arena.deinit();
+    const ctx = try testCreateContext(test_arena.allocator());
+    defer testDestroyContext(ctx);
+    ctx.setModuleState(REPLAY_STATE_SLOT, &state, ReplayState.deinitOpaque);
+
+    const result = try makeReplayStub("test", "decode")(ctx, value.JSValue.undefined_val, &.{});
+
+    try std.testing.expectEqual(@as(u32, 1), state.divergences);
+    try std.testing.expect(result.isUndefined());
+}
+
+test "replay decoder rejects incomplete containers and preserves null values" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const ctx = try testCreateContext(arena.allocator());
+    defer testDestroyContext(ctx);
+    for ([_][]const u8{ "[1", "[1,]", "[1 2]", "{\"a\":1", "{\"a\":1,}", "{\"a\" 1}", "tru", "false true" }) |json| {
+        try std.testing.expectError(error.InvalidReplayValue, decodeJsonToJSValue(ctx, json));
+    }
+    for ([_][]const u8{ "null", "undefined", " null \n" }) |json| {
+        try std.testing.expect((try decodeJsonToJSValue(ctx, json)).isUndefined());
+    }
+}
+
+test "replay rejects argument serialization allocation failure" {
+    var test_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer test_arena.deinit();
+    var failing = std.testing.FailingAllocator.init(test_arena.allocator(), .{});
+    const ctx = try testCreateContext(failing.allocator());
+    defer testDestroyContext(ctx);
+
+    const io_calls = [_]IoEntry{.{
+        .seq = 0,
+        .module = "test",
+        .func = "decode",
+        .args_json = "[]",
+        .result_json = "1",
+    }};
+    var state = ReplayState{ .io_calls = &io_calls, .cursor = 0, .divergences = 0 };
+    ctx.setModuleState(REPLAY_STATE_SLOT, &state, ReplayState.deinitOpaque);
+
+    failing.fail_index = failing.alloc_index;
+    const result = try makeReplayStub("test", "decode")(ctx, value.JSValue.undefined_val, &.{});
+
+    try std.testing.expect(failing.has_induced_failure);
+    try std.testing.expectEqual(@as(u32, 1), state.divergences);
+    try std.testing.expectEqual(@as(i32, 1), result.getInt());
 }
 
 test "ReplayState nextIO" {
