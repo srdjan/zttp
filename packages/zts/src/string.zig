@@ -6,6 +6,38 @@ const std = @import("std");
 const heap = @import("heap.zig");
 const arena_mod = @import("arena.zig");
 
+fn checkStringLength(len: usize) error{OutOfMemory}!void {
+    // Handler-visible lengths use signed i32 values, including for ASCII input.
+    if (len > std.math.maxInt(i32)) return error.OutOfMemory;
+}
+
+test "string length fits both storage and handler length" {
+    try checkStringLength(0);
+    try checkStringLength(std.math.maxInt(i32));
+    try std.testing.expectError(error.OutOfMemory, checkStringLength(@as(usize, std.math.maxInt(i32)) + 1));
+    try std.testing.expectError(error.OutOfMemory, checkStringLength(std.math.maxInt(u32)));
+    try std.testing.expectError(error.OutOfMemory, checkStringLength(std.math.maxInt(usize)));
+}
+
+test "concatenation rejects signed length overflow before allocating" {
+    var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
+    const large = JSString{
+        .header = heap.MemBlockHeader.init(.string, @sizeOf(JSString)),
+        .flags = .{},
+        .len = std.math.maxInt(i32),
+        .hash = 0,
+    };
+    const small = JSString{
+        .header = heap.MemBlockHeader.init(.string, @sizeOf(JSString)),
+        .flags = .{},
+        .len = 1,
+        .hash = 0,
+    };
+    try std.testing.expectError(error.OutOfMemory, concatStrings(failing.allocator(), &large, &small));
+    try std.testing.expectError(error.OutOfMemory, concatMany(failing.allocator(), &.{ &large, &small, &small }));
+    try std.testing.expect(!failing.has_induced_failure);
+}
+
 /// JavaScript string representation
 /// Uses extern struct for predictable C-compatible memory layout
 pub const JSString = extern struct {
@@ -621,6 +653,7 @@ pub const StringTable = struct {
 
     /// Intern a string (get or create unique instance)
     pub fn intern(self: *StringTable, s: []const u8) !*JSString {
+        try checkStringLength(s.len);
         const hash = hashString(s);
 
         // Check if already interned
@@ -658,6 +691,7 @@ pub const StringTable = struct {
 
     /// Create a new JSString
     fn createString(self: *StringTable, s: []const u8, hash: u64) !*JSString {
+        try checkStringLength(s.len);
         const total_size = @sizeOf(JSString) + s.len;
         const mem = try self.allocator.alignedAlloc(u8, std.mem.Alignment.of(JSString), total_size);
         errdefer self.allocator.free(mem);
@@ -689,6 +723,7 @@ pub const StringTable = struct {
 
 /// Create a non-interned string (caller owns memory)
 pub fn createString(allocator: std.mem.Allocator, s: []const u8) !*JSString {
+    try checkStringLength(s.len);
     const total_size = @sizeOf(JSString) + s.len;
     const mem = try allocator.alignedAlloc(u8, std.mem.Alignment.of(JSString), total_size);
 
@@ -718,6 +753,7 @@ pub fn freeString(allocator: std.mem.Allocator, str: *JSString) void {
 
 /// Create a string using arena allocation (ephemeral, dies at request end)
 pub fn createStringWithArena(arena: *arena_mod.Arena, s: []const u8) ?*JSString {
+    checkStringLength(s.len) catch return null;
     const total_size = @sizeOf(JSString) + s.len;
     const mem = arena.alloc(total_size) orelse return null;
 
@@ -740,10 +776,9 @@ pub fn createStringWithArena(arena: *arena_mod.Arena, s: []const u8) ?*JSString 
 
 /// Concatenate two strings
 pub fn concatStrings(allocator: std.mem.Allocator, a: *const JSString, b: *const JSString) !*JSString {
-    // Checked add: a wraparound here would under-allocate and let the memcpy
-    // below write past the buffer (heap corruption). A length that overflows u32
-    // cannot be represented in JSString.len, so surface it as OutOfMemory.
+    // Reject overflow before allocating or reading either string's backing bytes.
     const total_len = std.math.add(u32, a.len, b.len) catch return error.OutOfMemory;
+    try checkStringLength(total_len);
     const total_size = @sizeOf(JSString) + @as(usize, total_len);
     const mem = try allocator.alignedAlloc(u8, std.mem.Alignment.of(JSString), total_size);
 
@@ -792,6 +827,7 @@ pub fn concatMany(allocator: std.mem.Allocator, strings: []const *const JSString
         total_len = std.math.add(u32, total_len, s.len) catch return error.OutOfMemory;
         all_ascii = all_ascii and s.flags.is_ascii;
     }
+    try checkStringLength(total_len);
 
     // Single allocation for result
     const total_size = @sizeOf(JSString) + @as(usize, total_len);
