@@ -3,7 +3,8 @@
 ## Objective and constraints
 
 The owner requested a ranked list before more features. The list must reduce complexity without losing functionality.
-This task authorizes an audit and documentation. It does not authorize code changes or a Git history rewrite.
+The owner authorized implementation with `go ahead` after accepting the ranked list.
+The [implementation plan](2026-10-24-hardening-pruning-plan.md) bounds the work. No Git history rewrite is authorized.
 The source baseline is `d7aaf1f4`. Work stays on local `main`, with no push.
 Standing decisions in `docs/decisions.md` still apply. Earlier closed findings stay closed unless current evidence contradicts them.
 
@@ -45,4 +46,5 @@ The final documentation log is `/tmp/zttp-pruning-round-4-docs.log`.
 
 ## Next action
 
-The main agent will commit the report locally. The owner will select any later implementation scope.
+The main agent will execute the plan, review worker diffs, run authoritative checks, and commit each isolated change.
+Proof-default recording and representation compatibility need their concrete checks before execution.

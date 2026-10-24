@@ -6,6 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Hardening and pruning implementation, round 4](2026-10-24-hardening-pruning-plan.md) | Active: bounded execution of the 16 ranked findings | Owner authorized execution with `go ahead` |
 | [Hardening and pruning, round 4](2026-10-24-hardening-pruning-list.md) | Audit list 2026-10-24: 16 ranked findings, evidence limits, preservation rules, and execution order | Owner requested the audit; implementation scope is unselected |
 | [Hardening and pruning worklog, round 4](2026-10-24-hardening-pruning-worklog.md) | Audit evidence and report checks | Records the current audit only |
 | [Pruning round 3 plan](2026-10-23-pruning-round-3-plan.md) | Validated 2026-10-23; U0 to U15; decision 5 open | Owner chose decisions 1(a) to 4(a) with "as recommended" |
