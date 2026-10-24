@@ -19,7 +19,6 @@ pub const routes = [_]Route{
     .{ .label = "normalization idempotence", .argv = &.{ "bash", "scripts/check-normalize-idempotent.sh" } },
     .{ .label = "installer archive safety", .argv = &.{ "bash", "scripts/test-install-archive-safety.sh" } },
     .{ .label = "strict semantics specification", .argv = &.{ "bash", "scripts/check-semantics-spec.sh" } },
-    .{ .label = "module binding specifications", .argv = &.{ "./zig-out/bin/zts", "module-spec-render", "--check" } },
     .{ .label = "curated release notes", .argv = &.{ "sh", "scripts/test-release-notes.sh" }, .release_only = true },
     .{ .label = "release evidence provenance", .argv = &.{ "zig", "build", "release-provenance" }, .release_only = true },
     // Release-only checks previously called directly by release.sh. Keeping

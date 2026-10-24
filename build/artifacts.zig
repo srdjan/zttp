@@ -108,6 +108,33 @@ pub fn add(ctx: Context, gates: repo_gates.Result) Binaries {
     // stale installation left in zig-out by an earlier invocation.
     gates.meta_drift.addFileArg(zts_exe.getEmittedBin());
     gates.agent_determinism.addFileArg(zts_exe.getEmittedBin());
+    const module_specs = std.Build.Step.Run.create(b, "check-module-specs");
+    module_specs.addFileArg(zts_exe.getEmittedBin());
+    module_specs.addArgs(&.{ "module-spec-render", "--check" });
+    module_specs.has_side_effects = true;
+    gates.docs_drift_step.dependOn(&module_specs.step);
+    const module_spec_probe = b.addSystemCommand(&.{
+        "/bin/sh",               "-c",
+        \\set -eu
+        \\probe_dir=$(mktemp -d)
+        \\trap 'rm -rf "$probe_dir"' EXIT
+        \\git ls-files -z -- 'packages/modules/module-specs/*.json' docs/virtual-modules/README.md > "$probe_dir/inputs"
+        \\test -s "$probe_dir/inputs"
+        \\tar --null -T "$probe_dir/inputs" -cf "$probe_dir/files.tar"
+        \\mkdir "$probe_dir/root"
+        \\tar -xf "$probe_dir/files.tar" -C "$probe_dir/root"
+        \\(cd "$probe_dir/root" && "$1" module-spec-render --check)
+        \\sed 's/zttp:env/zttp:stale/g' "$probe_dir/root/docs/virtual-modules/README.md" > "$probe_dir/changed"
+        \\mv "$probe_dir/changed" "$probe_dir/root/docs/virtual-modules/README.md"
+        \\if (cd "$probe_dir/root" && "$1" module-spec-render --check) > "$probe_dir/result" 2>&1; then exit 1; fi
+        \\grep -F 'docs/virtual-modules/README.md' "$probe_dir/result" > /dev/null
+        \\printf 'module renderer probe: stale catalog refused\n'
+        ,
+        "module-renderer-probe",
+    });
+    module_spec_probe.addFileArg(zts_exe.getEmittedBin());
+    module_spec_probe.has_side_effects = true;
+    gates.docs_drift_step.dependOn(&module_spec_probe.step);
 
     // Strip debug info from the three installed binaries when -Dstrip is set.
     // scripts/release.sh passes -Dstrip so shipped tarballs stay small; local

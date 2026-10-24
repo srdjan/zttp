@@ -39,6 +39,15 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
     const b = ctx.b;
 
     const kernel_safety = ctx.addGate(&.{ "/bin/bash", "scripts/check-kernel-safety.sh" }, "test-kernel-safety", "Check local runtime safety in the acceptance kernel");
+    const kernel_safety_gate = b.addExecutable(.{
+        .name = "kernel-safety-gate",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("scripts/kernel_safety_gate.zig"),
+            .target = b.graph.host,
+            .optimize = ctx.optimize,
+        }),
+    });
+    kernel_safety.run.addArtifactArg(kernel_safety_gate);
     kernel_safety.run.has_side_effects = true;
 
     // A ReleaseFast root disabled safety in imported modules when measured on

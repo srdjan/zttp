@@ -145,6 +145,24 @@ expect_docs_failure "documentation links, empty inventory" "$work/docs-empty" "$
 expect_docs_failure "documentation links, failed Git inventory" "$work/docs-not-git" "$PATH" "tracked documentation inventory failed"
 expect_docs_failure "documentation links, failed Perl scan" "$work/docs-scan" "$work/fake-perl:$PATH" "Perl link scan failed"
 
+# The typed renderer checks known paths, not an extra tracked spec file.
+if extra_spec_output="$(bash -c '
+  git() {
+    command git "$@" || return "$?"
+    if [[ "$*" == "ls-files -z -- packages/modules/module-specs/*.json" ]]; then
+      printf "packages/modules/module-specs/orphan.json\0"
+    fi
+  }
+  export -f git
+  bash scripts/check-docs-drift.sh
+' 2>&1)"; then
+  fail "module spec inventory: an extra tracked spec reported success"
+fi
+case "$extra_spec_output" in
+  *"module specs have"*) ;;
+  *) fail "module spec inventory: failed for the wrong reason: $extra_spec_output" ;;
+esac
+
 # scripts/test-examples.sh: a suite that reports zero passed tests must fail
 # even with zero failures. A fake zttp stands in for the real binary, so the
 # probe takes no build and no example input. The control proves the fake is
@@ -173,4 +191,4 @@ case "$zero_output" in
   *) fail "examples: zero-test run failed for the wrong reason: $zero_output" ;;
 esac
 
-echo "gate floor test: ok (scanner and input floors, examples zero-test probe)"
+echo "gate floor test: ok (scanner and input floors, module-spec inventory, examples zero-test probe)"

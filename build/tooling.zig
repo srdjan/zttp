@@ -49,7 +49,7 @@ pub fn add(ctx: Context) Result {
         .optimize = optimize,
     });
     const production_branch_metric_exe = b.addExecutable(.{
-        .name = "production-branch-metric-probe",
+        .name = "production-branch-metric",
         .root_module = production_branch_metric_mod,
     });
     const native_gate_test_step = b.step("test-native-gates", "Run native repository gate tests");
@@ -219,8 +219,11 @@ pub fn add(ctx: Context) Result {
         .root_module = production_branch_metric_mod,
     });
     const run_production_branch_metric_tests = ctx.addRunTest(production_branch_metric_tests);
-    const production_branch_metric = ctx.addGate(&.{ "/bin/bash", "scripts/run-production-branch-metric.sh" }, "production-branch-metric", "Measure production branch points in tracked Zig sources");
-    _ = ctx.addGate(&.{ "/bin/bash", "scripts/run-production-branch-metric.sh", "--json" }, "production-branch-metric-json", "Measure production branch points as JSON");
+    const production_branch_metric = ctx.addGate(&.{ "/bin/bash", "scripts/run-production-branch-metric.sh", "--tool" }, "production-branch-metric", "Measure production branch points in tracked Zig sources");
+    production_branch_metric.run.addArtifactArg(production_branch_metric_exe);
+    const metric_json = ctx.addGate(&.{ "/bin/bash", "scripts/run-production-branch-metric.sh", "--tool" }, "production-branch-metric-json", "Measure production branch points as JSON");
+    metric_json.run.addArtifactArg(production_branch_metric_exe);
+    metric_json.run.addArg("--json");
     const production_branch_metric_test_step = b.step("test-production-branch-metric", "Test and run the production branch metric");
     production_branch_metric_test_step.dependOn(&run_production_branch_metric_tests.step);
     production_branch_metric_test_step.dependOn(&production_branch_metric.run.step);

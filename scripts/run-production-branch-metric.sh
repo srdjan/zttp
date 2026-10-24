@@ -5,6 +5,12 @@ set -euo pipefail
 # same way the rest of scripts/ does. A bare `zig` fails the whole gate for a
 # caller who invoked the compiler by absolute path or a versioned name.
 ZIG="${ZIG:-zig}"
+if [[ "${1:-}" == --tool ]]; then
+  metric=("$2")
+  shift 2
+else
+  metric=("$ZIG" run tooling/production_branch_metric.zig --)
+fi
 
 # Enumerate tracked sources with NUL delimiters so paths containing spaces or
 # shell metacharacters remain single arguments. Exclude the metric itself so
@@ -16,4 +22,4 @@ git ls-files -z -- '*.zig' ':!tooling/production_branch_metric.zig' |
       [ -f "$file" ] && printf "%s\0" "$file"
     done
   ' sh |
-  "$ZIG" run tooling/production_branch_metric.zig -- --require-package-floor --paths0-from-stdin "$@"
+  "${metric[@]}" --require-package-floor --paths0-from-stdin "$@"

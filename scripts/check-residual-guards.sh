@@ -42,9 +42,17 @@ doc_evidence="$tmp_dir/doc-evidence"
 
 # Bind the typed imports to the two declared inputs. Pass the same checker path
 # for the AST scan that recovers each published guard_impl constant name.
-if ! zig run --dep residual --dep guard_catalog \
-  -Mroot=scripts/residual_guard_extract.zig \
-  -Mresidual="$checker" -Mguard_catalog="$mirror" -- \
+if [[ "$#" -eq 0 ]]; then
+  extractor=("${ZIG:-zig}" run --dep residual --dep guard_catalog
+    -Mroot=scripts/residual_guard_extract.zig
+    -Mresidual="$checker" -Mguard_catalog="$mirror" --)
+elif [[ "$#" -eq 1 ]]; then
+  extractor=("$1")
+else
+  echo 'usage: check-residual-guards.sh [extractor-executable]' >&2
+  exit 2
+fi
+if ! "${extractor[@]}" \
   "$checker" \
   "$checker_catalog" "$checker_doc_catalog" "$mirror_catalog" "$checker_enabled" "$enabled"
 then

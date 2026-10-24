@@ -291,11 +291,12 @@ Four build steps run only under `scripts/verify.sh`:
 
 The six single-script drift gates run inside `zig build test`: `test-idiom-table`, `test-canonical-style`, `test-grammar-drift`, `test-decision-registry`, `test-meta-drift`, and `test-agent-determinism`. `test-meta-drift` also compares `describe-rule --hash` with `policy-hash.txt`.
 
-Four scripts and two commands run only under `scripts/verify.sh`, with no
+Four scripts and one command run only under `scripts/verify.sh`, with no
 build step of their own: `scripts/check-normalize-idempotent.sh`,
 `scripts/check-semantics-spec.sh`, `scripts/test-install-archive-safety.sh`,
 and `scripts/test-release-notes.sh` (release routes only), plus
-`zts module-spec-render --check` and `zig fmt --check`. The release routes also run
+`zig fmt --check`. `test-docs-drift` runs `zts module-spec-render --check` and
+rejects a stale catalog in an isolated copy. The release routes also run
 `release-provenance`, `smoke-getting-started`, `release-check`, and
 `bench-check`. `tooling/verification_routes.zig` is the list that
 `scripts/verify.sh` follows.

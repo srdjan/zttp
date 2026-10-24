@@ -24,4 +24,11 @@ if [ "$count" -lt "$minimum_files" ]; then
   exit 1
 fi
 
-xargs -0 zig run scripts/kernel_safety_gate.zig -- < "$list"
+if [[ "$#" -eq 1 ]]; then
+  xargs -0 "$1" < "$list"
+elif [[ "$#" -eq 0 ]]; then
+  xargs -0 "${ZIG:-zig}" run scripts/kernel_safety_gate.zig -- < "$list"
+else
+  echo 'usage: check-kernel-safety.sh [gate-executable]' >&2
+  exit 2
+fi

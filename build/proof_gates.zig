@@ -71,6 +71,23 @@ pub fn add(ctx: Context) Result {
     // The residual-guard boundary: consumer catalog, compiler mirror, enabled
     // families, measured conversions, and published documentation.
     const residual_guards_drift = ctx.addGate(&.{ "bash", "scripts/check-residual-guards.sh" }, "test-residual-guards-drift", "Check residual guard catalogs, evidence, and docs");
+    const residual_extract_mod = b.createModule(.{
+        .root_source_file = b.path("scripts/residual_guard_extract.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    });
+    residual_extract_mod.addImport("residual", b.createModule(.{
+        .root_source_file = b.path("packages/proof-checker/src/residual.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    }));
+    residual_extract_mod.addImport("guard_catalog", b.createModule(.{
+        .root_source_file = b.path("packages/zts/src/guard_catalog.zig"),
+        .target = b.graph.host,
+        .optimize = optimize,
+    }));
+    const residual_extract = b.addExecutable(.{ .name = "residual-guard-extract", .root_module = residual_extract_mod });
+    residual_guards_drift.run.addArtifactArg(residual_extract);
     residual_guards_drift.run.has_side_effects = true;
 
     // The trusted-boundary ratchet. Rooted at its own file because nothing in
