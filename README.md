@@ -8,8 +8,17 @@
 **The agent writes only what the compiler can prove.**
 
 zttp is an agent-compiler: a restricted TypeScript profile with bounded static
-analyses, a compiler-in-the-loop coding agent, and a local runtime. Describe the
-handler you want in plain English. The agent drafts it, and the compiler simulates
+analyses, a compiler-in-the-loop coding agent, and a local runtime. 
+
+> [!IMPORTANT]
+> **zttp** is experimental software, not a supported product or a
+> production-ready runtime/compiler. Expect bugs and breaking changes.
+
+---
+
+So, how do we use it?
+
+Describe the handler you want in plain English. The agent drafts it, and the compiler simulates
 every draft before it reaches disk. A draft that adds a violation is vetoed; supported
 repairs are normalized or applied before the edit can land. A deployed binary carries
 the resulting certificate, and an independent consumer checker decides which claims
