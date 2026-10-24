@@ -358,12 +358,8 @@ test "workspace_read_file: a non-git workspace applies the secret deny list" {
     defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
     inline for (.{ ".env", "config/server.pem" }) |denied| {
-        var refused = try execute(allocator, &.{denied});
-        defer refused.deinit(allocator);
-        try testing.expect(!refused.ok);
-        try testing.expect(std.mem.indexOf(u8, refused.llm_text, "deny list") != null);
-        try testing.expect(std.mem.indexOf(u8, refused.llm_text, "hunter2") == null);
-        try testing.expect(std.mem.indexOf(u8, refused.llm_text, "PEM-BODY") == null);
+        // The workspace resolver refuses before any read; the loop renders the deny-list message.
+        try testing.expectError(error.SecretPath, execute(allocator, &.{denied}));
     }
 
     var allowed = try execute(allocator, &.{"notes.txt"});
@@ -383,18 +379,12 @@ test "workspace_read_file: deny list matches the documented basenames only" {
     try testing.expect(!common.isSecretBasename("handler.ts"));
 }
 
-test "workspace_read_file: a file under a secret-named directory is refused" {
+test "workspace_read_file: deny list matches a secret-named directory component" {
     try testing.expect(common.isSecretPath("config/.env.d/prod.txt"));
     try testing.expect(common.isSecretPath("keys/id_rsa.d/config"));
     try testing.expect(common.isSecretPath(".env"));
     try testing.expect(!common.isSecretPath("src/environment/handler.ts"));
     try testing.expect(!common.isSecretPath("src/handler.ts"));
-
-    var tmp = try IsolatedTmp.init(testing.allocator, "workspace-read-secret-dir");
-    defer tmp.cleanup(testing.allocator);
-    const refusal = (try common.ignoredRefusal(testing.allocator, tmp.abs_path, "config/.env.d/prod.txt", name)) orelse return error.TestUnexpectedResult;
-    defer testing.allocator.free(refusal);
-    try testing.expect(std.mem.indexOf(u8, refusal, "secret file deny list") != null);
 }
 
 test "workspace_read_file: a tracked .env in a git workspace is refused" {
@@ -413,10 +403,7 @@ test "workspace_read_file: a tracked .env in a git workspace is refused" {
     try std.Io.Threaded.chdir(tmp.abs_path);
     defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
-    var refused = try execute(allocator, &.{".env"});
-    defer refused.deinit(allocator);
-    try testing.expect(!refused.ok);
-    try testing.expect(std.mem.indexOf(u8, refused.llm_text, "hunter2") == null);
+    try testing.expectError(error.SecretPath, execute(allocator, &.{".env"}));
 }
 
 test "workspace_read_file: an untracked .env in a git workspace is refused" {
@@ -431,8 +418,5 @@ test "workspace_read_file: an untracked .env in a git workspace is refused" {
     try std.Io.Threaded.chdir(tmp.abs_path);
     defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
-    var refused = try execute(allocator, &.{".env"});
-    defer refused.deinit(allocator);
-    try testing.expect(!refused.ok);
-    try testing.expect(std.mem.indexOf(u8, refused.llm_text, "hunter2") == null);
+    try testing.expectError(error.SecretPath, execute(allocator, &.{".env"}));
 }

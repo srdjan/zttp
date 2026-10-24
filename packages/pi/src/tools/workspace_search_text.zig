@@ -809,8 +809,5 @@ test "workspace_search_text: an explicit secret path is refused" {
     try std.Io.Threaded.chdir(tmp.abs_path);
     defer std.Io.Threaded.chdir(saved_cwd) catch {};
 
-    var result = try tool.execute(allocator, &.{"{\"query\":\"API_KEY\",\"path\":\".env\"}"});
-    defer result.deinit(allocator);
-    try testing.expect(!result.ok);
-    try testing.expect(std.mem.indexOf(u8, result.llm_text, "hunter2") == null);
+    try testing.expectError(error.SecretPath, tool.execute(allocator, &.{"{\"query\":\"API_KEY\",\"path\":\".env\"}"}));
 }

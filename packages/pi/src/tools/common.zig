@@ -139,10 +139,20 @@ pub fn resolveInsideWorkspace(
         try std.fs.path.resolve(allocator, &.{ root_real, requested_path });
     defer allocator.free(resolved);
 
-    if (!isPathInsideRoot(root_real, resolved) and !isPathInsideRoot(root_lexical, resolved)) {
+    const lexical_root = if (isPathInsideRoot(root_real, resolved))
+        root_real
+    else if (isPathInsideRoot(root_lexical, resolved))
+        root_lexical
+    else
         return error.PathOutsideWorkspace;
+    const canonical = try resolveCanonicalTargetInsideWorkspace(allocator, root_real, resolved);
+    errdefer allocator.free(canonical);
+    // The deny list reads the path below the root both as named and as resolved,
+    // so a symlink can neither hide a secret nor rename one.
+    if (isSecretPath(relativeToRoot(lexical_root, resolved)) or isSecretPath(relativeToRoot(root_real, canonical))) {
+        return error.SecretPath;
     }
-    return resolveCanonicalTargetInsideWorkspace(allocator, root_real, resolved);
+    return canonical;
 }
 
 fn resolveCanonicalTargetInsideWorkspace(
@@ -278,11 +288,11 @@ pub fn runCommand(
 /// tool must not read, or null when the read may proceed. The message never
 /// carries file content.
 ///
-/// The fixed deny list in `isSecretPath` applies first, to every component, and
-/// unconditionally, so a committed or untracked `.env` is refused whatever git
-/// says. Then `git check-ignore -v -- <relative>` runs in the workspace root.
-/// Exit 0 means ignored and the tool refuses, naming the matching pattern and
-/// its source. Any other result reads.
+/// The fixed deny list is not checked here: `resolveInsideWorkspace` refuses a
+/// secret path before any tool reaches this call, whatever git says. This runs
+/// `git check-ignore -v -- <relative>` in the workspace root. Exit 0 means
+/// ignored and the tool refuses, naming the matching pattern and its source.
+/// Any other result reads.
 ///
 /// `runCommand` runs git with an empty environment and no HOME, so the global
 /// git excludes file does not apply. A workspace nested inside a parent
@@ -293,9 +303,6 @@ pub fn ignoredRefusal(
     relative: []const u8,
     comptime tool_name: []const u8,
 ) !?[]u8 {
-    if (isSecretPath(relative)) {
-        return try allocator.dupe(u8, tool_name ++ ": path matches the secret file deny list and is not readable\n");
-    }
     const argv = [_][]const u8{ "git", "check-ignore", "-v", "--", relative };
     const maybe_outcome: ?CommandOutcome = runCommand(allocator, root, &argv) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -706,6 +713,24 @@ test "resolveInsideWorkspace: plain relative path resolves inside" {
     const resolved = try resolveInsideWorkspace(allocator, tmp.abs_path, "handler.ts");
     defer allocator.free(resolved);
     try testing.expectEqualStrings(expected, resolved);
+}
+
+test "resolveInsideWorkspace: refuses a secret path, also through a symlink" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "resolve-inside-secret");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, ".env.prod.ts", "const k: string = \"secret\";\n");
+    const target = try tmp.childPath(allocator, ".env.prod.ts");
+    defer allocator.free(target);
+    const link = try tmp.childPath(allocator, "notes.ts");
+    defer allocator.free(link);
+    try createSymlinkAbsolute(allocator, target, link, .{});
+
+    try testing.expectError(error.SecretPath, resolveInsideWorkspace(allocator, tmp.abs_path, ".env.prod.ts"));
+    try testing.expectError(error.SecretPath, resolveInsideWorkspace(allocator, tmp.abs_path, "config/.env.d/prod.txt"));
+    try testing.expectError(error.SecretPath, resolveInsideWorkspace(allocator, tmp.abs_path, "notes.ts"));
+    const plain = try resolveInsideWorkspace(allocator, tmp.abs_path, "src/handler.ts");
+    allocator.free(plain);
 }
 
 test "resolveInsideWorkspace: rejects ../ escape" {

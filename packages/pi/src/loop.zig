@@ -1007,6 +1007,11 @@ fn invokeToolRecovering(
             "tool is not available to the model: {s}",
             .{call.name},
         ),
+        error.SecretPath => registry_mod.ToolResult.errFmt(
+            allocator,
+            "{s}: path matches the secret file deny list and is not readable",
+            .{call.name},
+        ),
         else => registry_mod.ToolResult.errFmt(
             allocator,
             "{s}: {s}",
@@ -2516,4 +2521,25 @@ test "gate instrument: a proposed change set is counted as one tool call" {
     defer buf.deinit();
     try gate_record.writeJsonl(rec, buf.writer());
     try testing.expect(std.mem.indexOf(u8, buf.written(), "\"tool_calls_total\":0") == null);
+}
+
+test "a secret path reaches the model as the deny-list refusal, not its content" {
+    var tmp = try IsolatedTmp.init(testing.allocator, "loop-secret");
+    defer tmp.cleanup(testing.allocator);
+    try tmp.writeFile(testing.allocator, ".env.prod.ts", "const k: string = \"hunter2\";\n");
+    var cwd = try CwdOverride.set(testing.allocator, tmp.abs_path);
+    defer cwd.restore(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, @import("tools/workspace_read_file.zig").tool);
+
+    var result = try invokeToolRecovering(testing.allocator, &registry, .{
+        .id = "call-1",
+        .name = "workspace_read_file",
+        .args_json = "{\"path\":\".env.prod.ts\"}",
+    });
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "deny list") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "hunter2") == null);
 }
