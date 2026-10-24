@@ -148,16 +148,16 @@
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
-      "does": "runs precompile and CHECK behavior tests",
-      "requiredWhen": "after precompile or CHECK changes"
+      "does": "runs focused precompile and CHECK behavior tests",
+      "requiredWhen": "after precompile or CHECK changes; aggregate coverage is in test-agent-protocol"
     },
     {
       "task": "test-canonicalize",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
-      "does": "runs canonicalize and normalize tests",
-      "requiredWhen": "after source-repair or normalization changes"
+      "does": "runs focused canonicalize and normalize tests",
+      "requiredWhen": "after source-repair or normalization changes; aggregate coverage is in test-agent-protocol"
     },
     {
       "task": "test-expert",
@@ -252,8 +252,8 @@
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
-      "does": "runs the offline provider cassette harness",
-      "requiredWhen": "after cassette or provider wire changes"
+      "does": "runs the focused offline provider cassette harness",
+      "requiredWhen": "after cassette or provider wire changes; aggregate coverage is in test-expert-app"
     },
     {
       "task": "test-recorder-smoke",
@@ -268,8 +268,8 @@
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
-      "does": "runs the offline full-flow simulator",
-      "requiredWhen": "after simulator or fail-closed flow changes"
+      "does": "runs the focused offline full-flow simulator",
+      "requiredWhen": "after simulator or fail-closed flow changes; aggregate coverage is in test-expert-app"
     },
     {
       "task": "test-standin",

@@ -44,7 +44,7 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&unit.run_unit_tests.step);
     test_step.dependOn(&unit.run_cli_tests.step);
-    // Every host test root from the table in build/host_tests.zig.
+    // Enclosing host roots cover the focused subsets listed in host_tests.zig.
     for (host.runs) |run| test_step.dependOn(&run.step);
     test_step.dependOn(&capability_audit.step);
     test_step.dependOn(gates.kernel_safety_step);

@@ -96,8 +96,8 @@ The native port and its limits are described in `docs/internals/agent-spine.md`.
 | `zig build test-residual-guards-drift` | checks residual guard catalogs, evidence, and documentation | after residual-guard changes |
 | `zig build test-proof-ratchet` | checks disclosed trust against kernel reconstruction | after proof-ratchet changes |
 | `zig build test-proof-review` | runs proof-review package tests | after proof-review changes |
-| `zig build test-precompile` | runs precompile and CHECK behavior tests | after precompile or CHECK changes |
-| `zig build test-canonicalize` | runs canonicalize and normalize tests | after source-repair or normalization changes |
+| `zig build test-precompile` | runs focused precompile and CHECK behavior tests | after precompile or CHECK changes; aggregate coverage is in test-agent-protocol |
+| `zig build test-canonicalize` | runs focused canonicalize and normalize tests | after source-repair or normalization changes; aggregate coverage is in test-agent-protocol |
 | `zig build test-expert` | runs expert command contract tests | after expert command changes |
 | `zig build test-zts-cli` | runs analyzer dispatch and machine-command tests | after zts CLI changes |
 | `zig build test-deploy-manifest` | runs proven-facts extraction tests | after deploy-manifest changes |
@@ -109,9 +109,9 @@ The native port and its limits are described in `docs/internals/agent-spine.md`.
 | `zig build test-project-config` | runs project configuration discovery tests | after configuration discovery changes |
 | `zig build test-instruction-counter` | runs retired instruction-counter tests | after instruction counter changes |
 | `zig build test-expert-app` | runs expert loop and provider integration tests | after expert loop or provider changes |
-| `zig build test-cassette` | runs the offline provider cassette harness | after cassette or provider wire changes |
+| `zig build test-cassette` | runs the focused offline provider cassette harness | after cassette or provider wire changes; aggregate coverage is in test-expert-app |
 | `zig build test-recorder-smoke` | runs provider-free recorder capture and replay | after recorder changes |
-| `zig build test-simulator` | runs the offline full-flow simulator | after simulator or fail-closed flow changes |
+| `zig build test-simulator` | runs the focused offline full-flow simulator | after simulator or fail-closed flow changes; aggregate coverage is in test-expert-app |
 | `zig build test-standin` | runs the deterministic stand-in through the expert loop | after stand-in, veto, or rule changes |
 | `zig build test-expert-mlx-e2e` | uses the operator's configured MLX server for a real model flow | only when the operator requests local model use |
 | `zig build test-diagnostic-corpus` | checks diagnostic corpus cases against committed goldens | after diagnostics or corpus changes |

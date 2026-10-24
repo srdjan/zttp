@@ -21,6 +21,13 @@ run interactive
 cli interactive
 brief repository-navigation
 
+# Collected inventories on 2026-10-24 establish these complete subsets. Their
+# enclosing roots execute in `test`; these steps are focused developer entry points.
+test-precompile subset-of-test-agent-protocol
+test-canonicalize subset-of-test-agent-protocol
+test-cassette subset-of-test-expert-app
+test-simulator subset-of-test-expert-app
+
 # Runs the deterministic playbook server and blocks. `zig build test` already
 # compiles the executable - deliberately, since nothing installs it and a break
 # would otherwise surface only when somebody ran this by hand - so what is

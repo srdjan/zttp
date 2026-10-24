@@ -19,6 +19,8 @@ pub const HostTestRoot = struct {
     pi_modules: bool = false,
     standin_only: bool = false,
     needs_install: bool = false,
+    /// Focused subsets remain callable; their enclosing root runs in the aggregate.
+    aggregate: bool = true,
 };
 
 // Host-side test roots for the tools and pi packages. Roots that differ only
@@ -33,10 +35,10 @@ pub const HostTestRoot = struct {
 // scripts/check-docs-drift.sh reads the step names out of this table and
 // holds docs/internals/testing.md to them.
 const host_test_roots = [_]HostTestRoot{
-    .{ .owner = .tools, .src = "src/precompile.zig", .step = "test-precompile", .desc = "Run precompile tool tests", .project_config = true },
+    .{ .owner = .tools, .src = "src/precompile.zig", .step = "test-precompile", .desc = "Run precompile tool tests", .project_config = true, .aggregate = false },
     // collected_via_named_module: canonicalize.zig is reached only through
     // the `zts_cli` module, so this root is what runs its tests.
-    .{ .owner = .tools, .src = "src/canonicalize.zig", .step = "test-canonicalize", .desc = "Run canonicalize/normalize tool tests", .project_config = true },
+    .{ .owner = .tools, .src = "src/canonicalize.zig", .step = "test-canonicalize", .desc = "Run canonicalize/normalize tool tests", .project_config = true, .aggregate = false },
     .{ .owner = .tools, .src = "src/expert.zig", .step = "test-expert", .desc = "Run zts expert v1 contract tripwires", .project_config = true },
     // collected_via_named_module: zts_cli.zig and the command files it
     // imports (describe_rule.zig, search_rules.zig, ...) are reached only
@@ -72,15 +74,15 @@ const host_test_roots = [_]HostTestRoot{
     // Focused subset covering only the record/replay layer: runs offline,
     // never needs an API key, and does not transitively pull in the
     // tools/skills tests, so it stays fast.
-    .{ .owner = .pi, .src = "src/cassette_tests.zig", .step = "test-cassette", .desc = "Run pi provider cassette harness tests (offline)", .project_config = true, .pi_modules = true },
+    .{ .owner = .pi, .src = "src/cassette_tests.zig", .step = "test-cassette", .desc = "Run pi provider cassette harness tests (offline)", .project_config = true, .pi_modules = true, .aggregate = false },
     .{ .owner = .pi, .src = "src/recorder_smoke_tests.zig", .step = "test-recorder-smoke", .desc = "Run provider-free recorder capture and replay smoke test", .project_config = true, .pi_modules = true },
-    .{ .owner = .pi, .src = "src/simulator_tests.zig", .step = "test-simulator", .desc = "Run fail-closed full-flow simulator tests (offline)", .project_config = true, .pi_modules = true },
+    .{ .owner = .pi, .src = "src/simulator_tests.zig", .step = "test-simulator", .desc = "Run fail-closed full-flow simulator tests (offline)", .project_config = true, .pi_modules = true, .aggregate = false },
     .{ .owner = .pi, .src = "src/standin_tests.zig", .step = "test-standin", .desc = "Run the deterministic stand-in through the real expert loop", .project_config = true, .pi_modules = true, .standin_only = true },
 };
 
 pub const Result = struct {
-    /// The Run step of each root, in table order, for the aggregate `test` step.
-    runs: [host_test_roots.len]*std.Build.Step.Run,
+    /// The roots selected for aggregate execution, in table order.
+    runs: []*std.Build.Step.Run,
     /// The `test-project-config` root.
     project_config: *std.Build.Step.Run,
 };
@@ -110,6 +112,7 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Result {
     );
 
     var host_test_runs: [host_test_roots.len]*std.Build.Step.Run = undefined;
+    var aggregate_runs: std.ArrayList(*std.Build.Step.Run) = .empty;
     var project_config_run: ?*std.Build.Step.Run = null;
     for (host_test_roots, 0..) |root, i| {
         const owner_dep = switch (root.owner) {
@@ -137,6 +140,7 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Result {
         if (root.standin_only) tests.root_module.addOptions("standin_range_doc", standin_range_doc);
         if (root.standin_only) tests.root_module.addOptions("unseeded_rules", unseeded_rules);
         host_test_runs[i] = ctx.addRunTest(tests);
+        if (root.aggregate) aggregate_runs.append(b.allocator, host_test_runs[i]) catch @panic("OOM");
         if (root.needs_install) {
             host_test_runs[i].step.dependOn(b.getInstallStep());
         }
@@ -173,7 +177,7 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Result {
     mlx_e2e_step.dependOn(&run_mlx_e2e_tests.step);
 
     return .{
-        .runs = host_test_runs,
+        .runs = aggregate_runs.toOwnedSlice(b.allocator) catch @panic("OOM"),
         .project_config = project_config_run orelse @panic("host_test_roots has no test-project-config row"),
     };
 }

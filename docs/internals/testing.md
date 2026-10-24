@@ -49,6 +49,15 @@ there without a row here fails `zig build test-docs-drift`:
 | `test-simulator` | `packages/pi/src/simulator_tests.zig` |
 | `test-standin` | `packages/pi/src/standin_tests.zig` |
 
+The aggregate runs `test-agent-protocol` in place of its complete
+`test-precompile` and `test-canonicalize` subsets, and `test-expert-app` in place
+of its complete `test-cassette` and `test-simulator` subsets. All four focused
+steps remain callable. Collected inventories on 2026-10-24 contained 318, 390,
+388, and 818 entries respectively, with no entry missing from the enclosing
+root. This removes 1,914 repeated entries from aggregate execution; it does
+not establish a wall-clock saving. The standalone runtime process remains
+separate.
+
 `test-standin` compiles with its filters pinned to the literal `stand-in`
 (the `standin_only` row in `host_test_roots`, applied at `build/host_tests.zig`), so a
 test in that root whose name omits the token never runs.
