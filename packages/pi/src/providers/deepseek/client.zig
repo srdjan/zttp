@@ -24,6 +24,14 @@ const context_budget = @import("../../context_budget.zig");
 const model_registry = @import("../models.zig");
 const capture_sink = @import("../capture_sink.zig");
 const chat_completions = @import("../chat_completions.zig");
+const response_fields = @import("../response_fields.zig");
+const max_tool_name_bytes = response_fields.max_tool_name_bytes;
+const optionalString = response_fields.optionalString;
+const requiredString = response_fields.requiredString;
+const nonEmpty = response_fields.nonEmpty;
+const decodeUsage = response_fields.decodeUsage;
+const validateJsonArguments = response_fields.validateJsonArguments;
+const validToolName = response_fields.validToolName;
 
 pub const default_base_url = "https://api.deepseek.com";
 pub const default_model = model_registry.defaultForProvider(.deepseek).id;
@@ -39,10 +47,7 @@ pub fn effectiveBaseUrl(raw: ?[]const u8) []const u8 {
 
 const chat_completions_path = "/chat/completions";
 const max_response_body_bytes: usize = 16 * 1024 * 1024;
-const max_tool_args_bytes: usize = 256 * 1024;
 const max_tool_calls: usize = 16;
-const max_tool_name_bytes: usize = 128;
-const max_value_depth: usize = 16;
 const max_response_json_depth: usize = 64;
 
 const TransportResponse = union(enum) {
@@ -639,76 +644,6 @@ fn decodeResponseValue(
         .usage = usage,
         .stop_reason = finish_reason,
     };
-}
-
-fn optionalString(value: ?std.json.Value) !?[]const u8 {
-    const present = value orelse return null;
-    return switch (present) {
-        .null => null,
-        .string => |text| text,
-        else => ClientError.UnexpectedResponseShape,
-    };
-}
-
-fn requiredString(value: ?std.json.Value) ![]const u8 {
-    return (try optionalString(value)) orelse ClientError.MalformedToolCall;
-}
-
-fn nonEmpty(value: ?[]const u8) ?[]const u8 {
-    const text = value orelse return null;
-    return if (text.len == 0) null else text;
-}
-
-fn decodeUsage(value: ?std.json.Value) !turn.Usage {
-    const present = value orelse return .{};
-    if (present == .null) return .{};
-    if (present != .object) return ClientError.UnexpectedResponseShape;
-    return .{
-        .input_tokens = try optionalTokenCount(present.object.get("prompt_tokens")),
-        .output_tokens = try optionalTokenCount(present.object.get("completion_tokens")),
-    };
-}
-
-fn optionalTokenCount(value: ?std.json.Value) !u64 {
-    const present = value orelse return 0;
-    if (present != .integer or present.integer < 0) return ClientError.UnexpectedResponseShape;
-    return @intCast(present.integer);
-}
-
-fn validateJsonArguments(arena: std.mem.Allocator, args: []const u8) !void {
-    if (args.len > max_tool_args_bytes) return ClientError.MalformedToolCall;
-    const value = std.json.parseFromSliceLeaky(std.json.Value, arena, args, .{
-        .duplicate_field_behavior = .@"error",
-        .max_value_len = max_tool_args_bytes,
-    }) catch return ClientError.MalformedToolCall;
-    if (value != .object) return ClientError.MalformedToolCall;
-    try validateJsonDepth(value, 0);
-}
-
-fn validateJsonDepth(value: std.json.Value, depth: usize) !void {
-    if (depth > max_value_depth) return ClientError.MalformedToolCall;
-    switch (value) {
-        .array => |items| for (items.items) |item| try validateJsonDepth(item, depth + 1),
-        .object => |object| {
-            var iterator = object.iterator();
-            while (iterator.next()) |entry| try validateJsonDepth(entry.value_ptr.*, depth + 1);
-        },
-        else => {},
-    }
-}
-
-fn validToolName(name: []const u8) bool {
-    if (name.len == 0 or name.len > max_tool_name_bytes or !isIdentifierStart(name[0])) return false;
-    for (name[1..]) |byte| if (!isIdentifierContinue(byte)) return false;
-    return true;
-}
-
-fn isIdentifierStart(byte: u8) bool {
-    return std.ascii.isAlphabetic(byte) or byte == '_';
-}
-
-fn isIdentifierContinue(byte: u8) bool {
-    return std.ascii.isAlphanumeric(byte) or byte == '_' or byte == '.' or byte == '-';
 }
 
 // -----------------------------------------------------------------------
