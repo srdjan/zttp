@@ -710,7 +710,8 @@ pub const HandlerPool = struct {
         // one when comparing against the policy threshold.
         const request_count_after: u64 = rt.request_count + 1;
         const policy_recycle = switch (self.pooling_policy) {
-            .reuse_unbounded => rt.ctx.atoms.count() >= self.pooling_thresholds.max_dynamic_atoms,
+            .reuse_unbounded => rt.ctx.atoms.count() >= self.pooling_thresholds.max_dynamic_atoms or
+                (if (rt.ctx.hidden_class_pool) |classes| classes.count >= self.pooling_thresholds.max_hidden_classes else false),
             .ephemeral => true,
             .reuse_bounded_by_count => request_count_after >= self.pooling_thresholds.max_requests,
             .reuse_bounded_by_ttl => blk: {
@@ -1110,6 +1111,56 @@ test "reuse_unbounded runtime recycles once its dynamic atom count reaches the t
 
     pool.releaseForRequest(rt1);
     try testing.expectEqual(@as(u64, 1), pool.getMetrics().recycles);
+}
+
+test "reuse_unbounded recycles layout permutations without growing atoms" {
+    const allocator = std.heap.c_allocator;
+    var pool = try HandlerPool.init(
+        allocator,
+        .{},
+        "function handler(req) { return Response.text('ok'); }",
+        "<runtime-pool-test>",
+        1,
+        0,
+    );
+    defer pool.deinit();
+    pool.pooling_policy = .reuse_unbounded;
+    const rt = try pool.acquireForRequest();
+    const layouts = rt.ctx.hidden_class_pool.?;
+    var names: [6]zq.Atom = undefined;
+    for (&names, 0..) |*name, index| {
+        const text = try allocator.print("layout_permutation_{d}", .{index});
+        defer allocator.free(text);
+        name.* = try rt.ctx.atoms.intern(text);
+    }
+    const baseline_atoms = rt.ctx.atoms.count();
+    const baseline_classes = layouts.count;
+    const permutations = struct {
+        fn add(classes: *zq.HiddenClassPool, from: zq.HiddenClassIndex, atoms: []const zq.Atom, used: u8) !void {
+            for (atoms, 0..) |name, index| {
+                const bit = @as(u8, 1) << @as(u3, @intCast(index));
+                if (used & bit != 0) continue;
+                const next = try classes.addProperty(from, name);
+                try add(classes, next, atoms, used | bit);
+            }
+        }
+    };
+    try permutations.add(layouts, layouts.getEmptyClass(), &names, 0);
+    try testing.expectEqual(baseline_atoms, rt.ctx.atoms.count());
+    try testing.expectEqual(baseline_classes + 1956, layouts.count);
+    var soa_bytes: usize = 0;
+    inline for (.{ layouts.property_counts, layouts.properties_starts, layouts.prototype_indices, layouts.sorted_starts, layouts.property_names, layouts.property_offsets, layouts.property_flags, layouts.sorted_property_names, layouts.sorted_property_offsets }) |list| {
+        soa_bytes += list.capacity * @sizeOf(@TypeOf(list.items[0]));
+    }
+    std.debug.print("[layout-retention] classes={d} soa_capacity_bytes={d} transition_capacity={d} atoms={d}\n", .{ layouts.count, soa_bytes, layouts.transition_map.capacity(), baseline_atoms });
+    // Cross the measured class boundary while the independent atom limit stays clear.
+    pool.pooling_thresholds.max_hidden_classes = layouts.count;
+    try testing.expect(baseline_atoms < pool.pooling_thresholds.max_dynamic_atoms);
+    pool.releaseForRequest(rt);
+    try testing.expectEqual(@as(u64, 1), pool.getMetrics().recycles);
+    const fresh = try pool.acquireForRequest();
+    defer pool.releaseForRequest(fresh);
+    try testing.expect(fresh.ctx.hidden_class_pool.?.count < pool.pooling_thresholds.max_hidden_classes);
 }
 
 test "reuse_unbounded runtime under the atom threshold is not recycled" {

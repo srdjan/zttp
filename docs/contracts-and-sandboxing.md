@@ -135,6 +135,13 @@ artifacts do not activate this cache today. When a future policy does
 authorize caching, the cache key is method plus URL and the
 `X-Zttp-Proof-Cache: hit` response header confirms a hit.
 
+Even `reuse_unbounded` slots recycle at request release after reaching 32,768
+interned atoms or 8,192 hidden classes. Reordering a fixed set of JSON property
+names creates new classes without new atoms. The class ceiling permits all
+permutations of six names (1,956 added classes) but recycles before retaining
+all permutations of seven (13,699). These are release-time count ceilings;
+they do not bound one request's peak allocation or total retained bytes.
+
 ### When each contract assertion is enforced
 
 The contract is consulted at four distinct moments. Knowing which

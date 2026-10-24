@@ -67,6 +67,8 @@ pub const PoolingThresholds = struct {
     /// while still forcing a recycle well before the fail-closed OOM guard
     /// would turn into a standing per-slot outage.
     max_dynamic_atoms: u32 = 32_768,
+    /// Bounds layout permutations even when requests reuse the same atom names.
+    max_hidden_classes: u32 = 8_192,
 };
 
 /// Map proven contract properties to a lifecycle policy. Null falls back to
