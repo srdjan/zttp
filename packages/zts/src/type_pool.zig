@@ -2129,7 +2129,9 @@ pub fn parseTypeExpr(pool: *TypePool, allocator: std.mem.Allocator, source: []co
         .source = source,
         .pos = 0,
     };
-    return parser.parseUnion();
+    const parsed = parser.parseUnion();
+    parser.skipWs();
+    return if (parser.pos == source.len) parsed else null_type_idx;
 }
 
 const TypeExprParser = struct {
@@ -2701,6 +2703,17 @@ test "TypePool primitives" {
     try std.testing.expect(pool.idx_string != null_type_idx);
     try std.testing.expectEqual(TypeTag.t_boolean, pool.getTag(pool.idx_boolean).?);
     try std.testing.expectEqual(TypeTag.t_number, pool.getTag(pool.idx_number).?);
+}
+
+test "parseTypeExpr consumes the complete signature" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    try std.testing.expectEqual(pool.idx_boolean, parseTypeExpr(&pool, allocator, " \tboolean\r\n"));
+    for ([_][]const u8{ "boolean junk", "string[] trailing", "{ ok: boolean } extra" }) |source| {
+        try std.testing.expectEqual(null_type_idx, parseTypeExpr(&pool, allocator, source));
+    }
 }
 
 test "TypePool records primitive initialization allocation failure" {

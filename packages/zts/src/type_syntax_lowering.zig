@@ -824,7 +824,7 @@ fn expectExactPool(left: *const TypePool, right: *const TypePool) !void {
     }
 }
 
-fn expectParsedLoweringMatchesLegacy(source: []const u8) !void {
+fn expectParsedLoweringMatchesLegacy(source: []const u8, rejected_prefix: ?[]const u8) !void {
     const allocator = std.testing.allocator;
     var legacy = TypePool.init(allocator);
     defer legacy.deinit(allocator);
@@ -867,7 +867,13 @@ fn expectParsedLoweringMatchesLegacy(source: []const u8) !void {
     );
     const direct_root = try loweredChild(lowered, value.root, lowered.len);
     try direct.ensureHealthy();
-    try std.testing.expectEqual(legacy_root, direct_root);
+    if (rejected_prefix) |name| {
+        try std.testing.expectEqual(null_type_idx, legacy_root);
+        try std.testing.expectEqual(type_pool_mod.TypeTag.t_ref, direct.getTag(direct_root).?);
+        try std.testing.expectEqualStrings(name, direct.getRefName(direct_root));
+    } else {
+        try std.testing.expectEqual(legacy_root, direct_root);
+    }
     try expectExactPool(&legacy, &direct);
 }
 
@@ -879,14 +885,21 @@ test "parsed lowering preserves legacy constructor name order" {
         "`a${Left}b${Right}c`",
         "{ callback: (first: Left, second: `x${Right}y`) => { result: End } }",
         "(first: Left, second:) =>",
-        "(first: Left, Right)",
-        "(first: Left, second: Right, Final)",
-        "((inner: Left, Selected), Outer)",
-        "(first: Outer<Left>, Selected)",
         "number",
         "()",
     };
-    for (cases) |source| try expectParsedLoweringMatchesLegacy(source);
+    for (cases) |source| try expectParsedLoweringMatchesLegacy(source, null);
+}
+
+test "admitted malformed groups retain lowering while binding signatures reject their suffix" {
+    // Direct admission retains its historical prefix; binding signatures require full consumption.
+    const cases = [_]struct { source: []const u8, prefix: []const u8 }{
+        .{ .source = "(first: Left, Right)", .prefix = "first" },
+        .{ .source = "(first: Left, second: Right, Final)", .prefix = "first" },
+        .{ .source = "((inner: Left, Selected), Outer)", .prefix = "inner" },
+        .{ .source = "(first: Outer<Left>, Selected)", .prefix = "first" },
+    };
+    for (cases) |case| try expectParsedLoweringMatchesLegacy(case.source, case.prefix);
 }
 
 test "public lowering closes allocation failures and preserves constructor order" {

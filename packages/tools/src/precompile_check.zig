@@ -987,6 +987,18 @@ test "frozen signature corpus: the gate has an input before it has a verdict" {
     }
 }
 
+test "binding signature parser rejects trailing type text" {
+    const allocator = std.testing.allocator;
+    var pool = zts.TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    const valid = returnKindToTs(.boolean);
+    try std.testing.expectEqual(pool.idx_boolean, zts.parseTypeExpr(&pool, allocator, valid));
+    const malformed = try allocator.print("{s} junk", .{valid});
+    defer allocator.free(malformed);
+    try std.testing.expectEqual(zts.null_type_idx, zts.parseTypeExpr(&pool, allocator, malformed));
+    try pool.ensureHealthy();
+}
+
 test "every ReturnKind spells a type the pool parses" {
     // The gate over the corpus can only see kinds some export declares. This
     // one runs over the enum itself, so a kind added without a `returnKindToTs`
