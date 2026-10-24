@@ -9545,7 +9545,7 @@ test "CHECK preserves arrow capture after line comment text" {
     try std.testing.expectEqual(cases.len, observed);
 }
 
-test "CHECK preserves legacy predicate target and return classification" {
+test "CHECK classifies predicate targets and quoted return types" {
     const allocator = std.testing.allocator;
     const cases = [_]struct {
         source: []const u8,
@@ -9553,8 +9553,8 @@ test "CHECK preserves legacy predicate target and return classification" {
         diagnostic: LegacyCompoundDiagnostic,
     }{
         .{ .source = "function guard(value: unknown): missing is string { return true; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .type_failure = false, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
-        .{ .source = "function guard(value: unknown): \"x is y\" { return true; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .type_failure = false, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: fault_covered. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"deterministic\" | \"read_only\" | \"retry_safe\" | \"idempotent\" | \"state_isolated\" | \"pure\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
-        .{ .source = "function guard(value: unknown): value\tis\tstring { return true; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .type_failure = true, .diagnostic = .{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 1, .column = 51, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" } },
+        .{ .source = "function guard(value: unknown): \"x is y\" { return true; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .type_failure = true, .diagnostic = .{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 1, .column = 44, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" } },
+        .{ .source = "function guard(value: unknown): value\tis\tstring { return true; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .type_failure = true, .diagnostic = .{ .code = "ZTS211", .message = "type predicate 'guard' is not verified by its body", .line = 1, .column = 1, .suggestion = "Return one admitted narrowing test over the named parameter, combined with &&, || or !." } },
     };
     const typed_stages = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
     const full_stages = StageSet.initMany(&.{
@@ -9797,9 +9797,9 @@ test "CHECK preserves typed arrow return forms and parameter refusals" {
         .{ .source = "const echo = ((value: string): string => value);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
         .{ .source = "const make = (): (value: string) => string => (value: string): string => value;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic_without_cost },
         .{ .source = "const guard = (value: unknown): missing is string => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
-        .{ .source = "const guard = (value: unknown): \"x is y\" => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
-        .{ .source = "const guard = (value: unknown): value\tis\tstring => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 1, .column = 15, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" } },
-        .{ .source = "const guard = (readonly: unknown): readonly\tis\tstring => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 1, .column = 15, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" } },
+        .{ .source = "const guard = (value: unknown): \"x is y\" => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 1, .column = 15, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" } },
+        .{ .source = "const guard = (value: unknown): value\tis\tstring => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
+        .{ .source = "const guard = (readonly: unknown): readonly\tis\tstring => true;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
         .{ .source = "const echo = value: string => value;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 14, .suggestion = null } },
         .{ .source = "const choice = true ? \"a\" : \"b\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
         .{ .source = "const choice = true ? (1) : (2);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
@@ -9856,13 +9856,13 @@ test "CHECK preserves predicate marker classification" {
         },
         .{
             .source = "function guard(candidate: unknown): candidate\tis \"a is b\" { return true; }\n",
-            .stage = .contract,
+            .stage = .types,
             .diagnostic = .{
-                .code = "ZTS500",
-                .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
+                .code = "ZTS211",
+                .message = "type predicate 'guard' is not verified by its body",
                 .line = 1,
                 .column = 1,
-                .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: cost_bounded, deterministic, fault_covered, idempotent, optional_safe, result_safe, state_isolated. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"pure\" | \"stateless\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\">`.",
+                .suggestion = "Return one admitted narrowing test over the named parameter, combined with &&, || or !.",
             },
         },
     };

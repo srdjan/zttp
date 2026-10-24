@@ -1125,84 +1125,77 @@ pub const TypeEnv = struct {
         function_accumulators: *DirectFunctionAccumulators,
         observer: ?DirectReplayObserver,
     ) !void {
-        switch (syntax.legacy_return_kind) {
-            .ordinary => {
-                const value = switch (syntax.structure) {
-                    .value => |value| value,
-                    .predicate => syntax.legacy_ordinary_prefix orelse
-                        return error.InvalidReturnSyntax,
-                };
-                const type_idx = try self.lowerDirectHeaderRoot(
-                    input.store,
-                    application_bases,
-                    lowered,
-                    callable_sets,
-                    signature.owner,
-                    value.root,
-                    value.node_range,
-                    value.raw_span,
-                );
-                const accumulator = try self.replayDirectSignatureEvent(
-                    input.ir_view,
-                    signature,
-                    compatibility_order,
-                    function_accumulators,
-                    observer,
-                );
-                accumulator.signature.return_type = type_idx;
-                accumulator.publish_name = input.ir_view.getTag(signature.owner) == .function_expr;
-                try self.putDirectSourceAnnotation(
-                    signature.owner,
-                    return_annotation_slot,
-                    syntax.raw_span.text(input.store.source),
-                );
-            },
-            .type_guard => {
-                const accumulator = try self.replayDirectSignatureEvent(
-                    input.ir_view,
-                    signature,
-                    compatibility_order,
-                    function_accumulators,
-                    observer,
-                );
-                accumulator.signature.return_type = self.pool.idx_boolean;
-                accumulator.publish_name = input.ir_view.getTag(signature.owner) == .function_expr;
+        const ordinary_value: ?TypeSyntax.TypeValue = switch (syntax.structure) {
+            .value => |value| value,
+            // Keep the existing refusal path for malformed empty narrowing.
+            .predicate => |predicate| if (predicate.narrowed.root == .absent) syntax.legacy_ordinary_prefix else null,
+        };
+        if (ordinary_value) |value| {
+            const type_idx = try self.lowerDirectHeaderRoot(
+                input.store,
+                application_bases,
+                lowered,
+                callable_sets,
+                signature.owner,
+                value.root,
+                value.node_range,
+                value.raw_span,
+            );
+            const accumulator = try self.replayDirectSignatureEvent(
+                input.ir_view,
+                signature,
+                compatibility_order,
+                function_accumulators,
+                observer,
+            );
+            accumulator.signature.return_type = type_idx;
+            accumulator.publish_name = input.ir_view.getTag(signature.owner) == .function_expr;
+            try self.putDirectSourceAnnotation(
+                signature.owner,
+                return_annotation_slot,
+                syntax.raw_span.text(input.store.source),
+            );
+        } else {
+            const predicate = syntax.structure.predicate;
+            const accumulator = try self.replayDirectSignatureEvent(
+                input.ir_view,
+                signature,
+                compatibility_order,
+                function_accumulators,
+                observer,
+            );
+            accumulator.signature.return_type = self.pool.idx_boolean;
+            accumulator.publish_name = input.ir_view.getTag(signature.owner) == .function_expr;
 
-                const predicate = switch (syntax.structure) {
-                    .value => return,
-                    .predicate => |predicate| predicate,
-                };
-                switch (predicate.target) {
-                    .unresolved => return,
-                    .resolved => {},
-                }
-                switch (predicate.narrowed.root) {
-                    .absent => return,
-                    .present => {},
-                }
-                if (!directPredicateMarkerMatches(input.store, syntax, predicate)) return;
-                const compact_position = directPredicateParameterIndex(
-                    input.store,
-                    input.atoms,
-                    signature,
-                    predicate.target_span.text(input.store.source),
-                ) orelse return;
-                const narrowed = try self.lowerDirectHeaderRoot(
-                    input.store,
-                    application_bases,
-                    lowered,
-                    callable_sets,
-                    signature.owner,
-                    predicate.narrowed.root,
-                    predicate.narrowed.node_range,
-                    predicate.narrowed.raw_span,
-                );
-                if (narrowed == null_type_idx) return;
-                accumulator.signature.type_predicate = .{
-                    .param_index = compact_position,
-                    .narrowed = narrowed,
-                };
-            },
+            switch (predicate.target) {
+                .unresolved => return,
+                .resolved => {},
+            }
+            switch (predicate.narrowed.root) {
+                .absent => return,
+                .present => {},
+            }
+            const compact_position = directPredicateParameterIndex(
+                input.store,
+                input.atoms,
+                signature,
+                predicate.target_span.text(input.store.source),
+            ) orelse return;
+            const narrowed = try self.lowerDirectHeaderRoot(
+                input.store,
+                application_bases,
+                lowered,
+                callable_sets,
+                signature.owner,
+                predicate.narrowed.root,
+                predicate.narrowed.node_range,
+                predicate.narrowed.raw_span,
+            );
+            if (narrowed == null_type_idx) return;
+            accumulator.signature.type_predicate = .{
+                .param_index = compact_position,
+                .narrowed = narrowed,
+            };
         }
     }
 
@@ -1218,41 +1211,6 @@ pub const TypeEnv = struct {
             if (std.mem.eql(u8, name, target)) return @intCast(index);
         }
         return null;
-    }
-
-    fn directPredicateMarkerMatches(
-        store: *const TypeSyntax.Store,
-        syntax: *const TypeSyntax.ReturnSyntax,
-        predicate: TypeSyntax.PredicateSyntax,
-    ) bool {
-        const marker = " is ";
-        const raw = syntax.raw_span.text(store.source);
-        const relative_marker_start = std.mem.indexOf(u8, raw, marker) orelse return false;
-        // Store validation bounds raw_span; indexOf keeps the complete marker inside that span.
-        const marker_start = syntax.raw_span.start + @as(u32, @intCast(relative_marker_start));
-        const narrowed_start = marker_start + @as(u32, marker.len);
-        const target_span = trimDirectTypeSpan(store.source, .{
-            .start = syntax.raw_span.start,
-            .end = marker_start,
-        });
-        const narrowed_span = trimDirectTypeSpan(store.source, .{
-            .start = narrowed_start,
-            .end = syntax.raw_span.end,
-        });
-        return std.meta.eql(target_span, predicate.target_span) and
-            std.meta.eql(narrowed_span, predicate.narrowed.raw_span);
-    }
-
-    fn trimDirectTypeSpan(source: []const u8, span: TypeSyntax.Span) TypeSyntax.Span {
-        var start: usize = span.start;
-        var end: usize = span.end;
-        while (start < end and isDirectTypeWhitespace(source[start])) start += 1;
-        while (end > start and isDirectTypeWhitespace(source[end - 1])) end -= 1;
-        return .{ .start = @intCast(start), .end = @intCast(end) };
-    }
-
-    fn isDirectTypeWhitespace(byte: u8) bool {
-        return byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n';
     }
 
     fn populateDirectVariable(

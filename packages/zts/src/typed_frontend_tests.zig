@@ -11055,6 +11055,7 @@ const DirectPredicateCase = enum {
     named_guard_unverified,
     arrow_guard_unverified,
     ordinary_tab,
+    ordinary_newline,
     arrow_ordinary_tab,
     readonly_tab,
     quoted_value,
@@ -11244,36 +11245,13 @@ fn expectDirectPredicateConsumerInner(
             );
             try std.testing.expectEqual(direct_pool.idx_string, direct_signature.return_type);
         },
-        .ordinary_tab, .arrow_ordinary_tab => {
+        .ordinary_tab, .arrow_ordinary_tab, .readonly_tab, .ordinary_newline => {
             try std.testing.expectEqual(
                 TypeSyntax.LegacyReturnKind.ordinary,
                 return_syntax.legacy_return_kind,
             );
             try std.testing.expect(return_syntax.legacy_ordinary_prefix != null);
-            try std.testing.expectEqualStrings(
-                "candidate\tis\tstring ",
-                return_syntax.raw_span.text(source),
-            );
-            try std.testing.expectEqual(TypeTag.t_ref, direct_pool.getTag(direct_signature.return_type).?);
-            try std.testing.expectEqualStrings(
-                "candidate",
-                direct_pool.getRefName(direct_signature.return_type),
-            );
-        },
-        .readonly_tab => {
-            try std.testing.expectEqual(
-                TypeSyntax.LegacyReturnKind.ordinary,
-                return_syntax.legacy_return_kind,
-            );
-            try std.testing.expect(return_syntax.legacy_ordinary_prefix != null);
-            try std.testing.expectEqual(
-                TypeTag.t_ref,
-                direct_pool.getTag(direct_signature.return_type).?,
-            );
-            try std.testing.expectEqualStrings(
-                "is",
-                direct_pool.getRefName(direct_signature.return_type),
-            );
+            try std.testing.expectEqual(direct_pool.idx_boolean, direct_signature.return_type);
         },
         .empty_narrowing => {
             const predicate = switch (return_syntax.structure) {
@@ -11296,7 +11274,8 @@ fn expectDirectPredicateConsumerInner(
                 .value => {},
                 .predicate => return error.TestUnexpectedResult,
             }
-            try std.testing.expectEqual(direct_pool.idx_boolean, direct_signature.return_type);
+            try std.testing.expectEqual(TypeTag.t_literal_string, direct_pool.getTag(direct_signature.return_type).?);
+            try std.testing.expectEqualStrings("x is y", direct_pool.getLiteralStringValue(direct_signature.return_type).?);
         },
         .quoted_marker_tab => {
             try std.testing.expectEqual(
@@ -11386,8 +11365,8 @@ fn expectDirectPredicateConsumerInner(
     direct_checker.scopes = &direct.scopes;
     const type_ok = try direct_checker.check(direct_root);
     const expected_type: []const type_checker_mod.DiagnosticKind = switch (case) {
-        .named_guard_unverified, .quoted_marker_space => &.{.invalid_type_predicate},
-        .ordinary_tab, .arrow_ordinary_tab, .readonly_tab => &.{.return_type_mismatch},
+        .named_guard_unverified, .quoted_marker_space, .quoted_marker_tab, .ordinary_tab, .readonly_tab => &.{.invalid_type_predicate},
+        .quoted_value => &.{.return_type_mismatch},
         else => &.{},
     };
     try std.testing.expectEqual(@as(u32, @intCast(expected_type.len)), type_ok);
@@ -11428,10 +11407,11 @@ test "direct predicates preserve construction and checker behavior" {
         .{ .case = .named_guard_verified, .source = "function guard(candidate: unknown): candidate is string { return typeof candidate === \"string\"; }", .predicate = .{ .parameter = 0 }, .return_spelling = null },
         .{ .case = .named_guard_unverified, .source = "function guard(candidate: unknown): candidate is string { return true; }", .predicate = .{ .parameter = 0 }, .return_spelling = null },
         .{ .case = .arrow_guard_unverified, .source = "const guard = (candidate: unknown): candidate is string => true;", .predicate = .{ .parameter = 0 }, .return_spelling = null },
-        .{ .case = .ordinary_tab, .source = "function guard(candidate: unknown): candidate\tis\tstring { return true; }", .predicate = .absent, .return_spelling = "candidate\tis\tstring " },
-        .{ .case = .arrow_ordinary_tab, .source = "const guard = (candidate: unknown): candidate\tis\tstring => true;", .predicate = .absent, .return_spelling = "candidate\tis\tstring " },
-        .{ .case = .readonly_tab, .source = "function guard(readonly: unknown): readonly\tis\tstring { return true; }", .predicate = .absent, .return_spelling = "readonly\tis\tstring " },
-        .{ .case = .quoted_value, .source = "const text = (): \"x is y\" => true;", .predicate = .absent, .return_spelling = null },
+        .{ .case = .ordinary_newline, .source = "function guard(candidate: unknown): candidate\nis\r\nstring { return typeof candidate === \"string\"; }", .predicate = .{ .parameter = 0 }, .return_spelling = null },
+        .{ .case = .ordinary_tab, .source = "function guard(candidate: unknown): candidate\tis\tstring { return true; }", .predicate = .{ .parameter = 0 }, .return_spelling = null },
+        .{ .case = .arrow_ordinary_tab, .source = "const guard = (candidate: unknown): candidate\tis\tstring => true;", .predicate = .{ .parameter = 0 }, .return_spelling = null },
+        .{ .case = .readonly_tab, .source = "function guard(readonly: unknown): readonly\tis\tstring { return true; }", .predicate = .{ .parameter = 0 }, .return_spelling = null },
+        .{ .case = .quoted_value, .source = "const text = (): \"x is y\" => true;", .predicate = .absent, .return_spelling = "\"x is y\" " },
         .{ .case = .empty_narrowing, .source = "function guard(candidate: unknown): candidate is { return true; }", .predicate = .absent, .return_spelling = null },
         .{ .case = .unresolved_target, .source = "function guard(candidate: unknown): missing is string[] { return true; }\n", .predicate = .absent, .return_spelling = null },
         .{ .case = .mixed_untyped_target, .source = "function guard(candidate, marker: unknown): candidate is string[] { return true; }\n", .predicate = .absent, .return_spelling = null },
@@ -11441,7 +11421,7 @@ test "direct predicates preserve construction and checker behavior" {
         .{ .case = .captured_generic, .source = "const guard = <T>(candidate: unknown): candidate is T => true;", .predicate = .captured_generic, .return_spelling = null },
         .{ .case = .trailing_ordinary, .source = "function echo(value: string): string   { return value; }", .predicate = .absent, .return_spelling = "string   " },
         .{ .case = .quoted_marker_space, .source = "function guard(candidate: unknown): candidate is \"a is b\" { return true; }\n", .predicate = .{ .literal = "a is b" }, .return_spelling = null },
-        .{ .case = .quoted_marker_tab, .source = "function guard(candidate: unknown): candidate\tis \"a is b\" { return true; }\n", .predicate = .absent, .return_spelling = null },
+        .{ .case = .quoted_marker_tab, .source = "function guard(candidate: unknown): candidate\tis \"a is b\" { return true; }\n", .predicate = .{ .literal = "a is b" }, .return_spelling = null },
     };
     var seen = std.EnumSet(DirectPredicateCase).empty;
     for (cases) |case| {
