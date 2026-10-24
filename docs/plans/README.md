@@ -6,12 +6,12 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [Hardening and pruning implementation, round 4](2026-10-24-hardening-pruning-plan.md) | Active: bounded execution of the 16 ranked findings | Owner authorized execution with `go ahead` |
-| [Hardening and pruning, round 4](2026-10-24-hardening-pruning-list.md) | Audit list 2026-10-24: 16 ranked findings, evidence limits, preservation rules, and execution order | Owner requested the audit; implementation scope is unselected |
-| [Hardening and pruning worklog, round 4](2026-10-24-hardening-pruning-worklog.md) | Audit evidence and report checks | Records the current audit only |
-| [Pruning round 3 plan](2026-10-23-pruning-round-3-plan.md) | Validated 2026-10-23; U0 to U15; decision 5 open | Owner chose decisions 1(a) to 4(a) with "as recommended" |
+| [Hardening and pruning implementation, round 4](2026-10-24-hardening-pruning-plan.md) | Implemented and verified 2026-10-24; U12 deferred, U13 retained for compatibility | Owner authorized execution with `go ahead`; full unrestricted verification passed |
+| [Hardening and pruning, round 4](2026-10-24-hardening-pruning-list.md) | Selected audit list: 16 findings; implementation and dispositions are in the worklog | Owner authorized the bounded implementation plan |
+| [Hardening and pruning worklog, round 4](2026-10-24-hardening-pruning-worklog.md) | Local commits, passing full verification and benchmark gate, and deferred scope | The final unrestricted verification supersedes the earlier sandbox failures |
+| [Pruning round 3 plan](2026-10-23-pruning-round-3-plan.md) | Executed 2026-10-23; U0 to U15 and later corrections recorded; decision 5 resolved as (b); H10 defaults deferred | Owner chose decisions 1(a) to 4(a), then decision 5(b) |
 | [Hardening and pruning, round 3](2026-10-23-pruning-round-3-list.md) | Audit list 2026-10-23: 24 hardening, 17 pruning, 12 consolidation, and 7 documentation items; rounds 3a and 3b selected | Owner chose decision 1(a) |
-| [Pruning round 3 worklog](2026-10-23-pruning-round-3-worklog.md) | Results of the round 3 units; U0 recorded | Records the owner decisions of the round 3 plan |
+| [Pruning round 3 worklog](2026-10-23-pruning-round-3-worklog.md) | Completed units, final passing aggregate and full gate, owner decisions, and later corrections | Records the owner decisions of the round 3 plan |
 | [Captured binding and match paths](2026-10-23-captured-binding-and-match-paths-plan.md) | Done 2026-10-23: T1 to T6 committed; `path_analyzer_version` 4; the DeepSeek re-record is approved (decision 15(a)) and run by the owner; results in the [worklog](2026-10-22-coupling-census-worklog.md) | Owner chose decisions 10(a), 11(a), 12(a) with "as recommended", 13(a) and 14(a) with "as recommended", and 15(a) and 16(a) with "a" |
 | [Walker soundness](2026-10-22-walker-soundness-plan.md) | Done 2026-10-22: W1 to W10 committed, W11 records; D14, D15, and the residual gaps wait for the owner | Owner chose decisions 8(a), 5(a), 6(a), 7(a), and 9(a) with "a" |
 | Coupling census (`pre-round-3-archive:docs/plans/2026-10-22-coupling-census-plan.md`) | Complete 2026-10-22; U1 to U4 committed, `verify.sh` passed; U5 census confirmed two fail-opens (assert, spread), not fixed; results in the [worklog](2026-10-22-coupling-census-worklog.md) | Owner chose audit decisions 1(a) to 4(a) with "as recommended" |
