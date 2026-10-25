@@ -26,12 +26,12 @@ pub fn build(b: *std.Build) void {
     const ctx = Context.init(b);
 
     const pkgs = packages.add(ctx);
-    const proofs = proof_gates.add(ctx);
+    const tools = tooling.add(ctx);
+    const proofs = proof_gates.add(ctx, tools);
     const host = host_tests.add(ctx, proofs);
     const diagnostic_corpus = corpus.add(ctx);
     const flow_census_gate = flow_census.add(ctx);
     const capability_audit = repo_gates.addCapabilityAudit(ctx);
-    const tools = tooling.add(ctx);
     const gates = repo_gates.add(ctx, tools);
     const gate_floor_probe = repo_gates.addGateFloorProbe(ctx);
     capability_audit.step.dependOn(&gate_floor_probe.step);

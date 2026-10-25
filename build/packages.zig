@@ -140,7 +140,7 @@ pub fn add(ctx: Context) Result {
 
     // Consumer acceptance kernel. Declared first so the module is
     // available to every consumer below it, and wired with no imports of its
-    // own: the package is a leaf, and `scripts/check-proof-checker.sh` fails
+    // own: the package is a leaf, and `zts-graph-gate kernel-leaf` fails
     // when that stops being true. Context.zig states why a release build keeps
     // runtime safety in it.
     const proof_checker_tests = ctx.addTest(.{

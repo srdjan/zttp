@@ -50,10 +50,10 @@ Measurements showed that the tiered JIT did not compile on the request path. Com
 
 - Status: standing
 - Decided: 2026-08-31
-- Binds: packages/proof-checker, packages/runtime, scripts/check-proof-checker.sh
+- Binds: packages/proof-checker, packages/runtime, tooling/zts_graph_gate.zig
 - Gate: zig build test-proof-checker-purity
 
-The consumer must derive its verdict without producer authority. Commit `f2ecf5f3` added the independent kernel on this date.
+The consumer must derive its verdict without producer authority. Commit `f2ecf5f3` added the independent kernel on this date. The leaf check moved from `scripts/check-proof-checker.sh` to the native graph gate (`zts-graph-gate kernel-leaf`, in `tooling/kernel_leaf_gate.zig`) on 2026-10-25, under the same step.
 
 ## Analyzer compatibility
 

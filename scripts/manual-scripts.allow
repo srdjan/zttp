@@ -44,6 +44,5 @@ update-contract-goldens.sh golden-regeneration
 update-expert-goldens.sh golden-regeneration
 # Standalone helpers also exercised by wrappers or release fixture copies. The
 # graph census proves direct execution only, not arbitrary shell control flow.
-check-module-boundary.sh standalone-boundary-helper-with-wrapper-tests
 render-release-notes.sh standalone-release-renderer-with-fixture-tests
 zts-import-graph.sh import-graph-inspection

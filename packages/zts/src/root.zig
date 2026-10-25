@@ -41,7 +41,7 @@
 //!
 //! The second tier is gated, not merely documented.
 //! `scripts/module-boundary.allow` records which internal module each consumer
-//! package may name, and `scripts/check-module-boundary.sh` (the
+//! package may name, and `zts-graph-gate module-boundary` (the
 //! `test-module-boundary` build step, which `zig build test` depends on) fails
 //! both on an unlisted reach and on a listed row nothing uses any more. That
 //! is an allowlist, not a compiler-enforced split: every consumer still

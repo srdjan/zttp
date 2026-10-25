@@ -26,7 +26,7 @@ tags:
   - threat-model
 binds:
   - packages/proof-checker/src/checker.zig
-  - scripts/check-proof-checker.sh
+  - tooling/kernel_leaf_gate.zig
   - tooling/repo_gate.zig
 ---
 

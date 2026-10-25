@@ -445,7 +445,7 @@ that nothing uses fails the same gate. Run `zig build test-module-boundary`.
 `packages/proof-checker` is the consumer acceptance kernel and the only thing
 in the repository whose word decides whether an artifact may serve production
 traffic. `zig build test-proof-checker` runs its suite;
-`zig build test-proof-checker-purity` runs `scripts/check-proof-checker.sh`,
+`zig build test-proof-checker-purity` runs `zts-graph-gate kernel-leaf`,
 which asserts the package still imports nothing but `std` and its own siblings,
 reaches no filesystem, clock, process, network, signing, or allocator, and that
 the suite the first step reports on is not empty. The second gate exists because

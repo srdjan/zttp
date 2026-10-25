@@ -32,7 +32,7 @@ retire_when: "A Zig release after 0.16.0 makes a dependency module's own .optimi
 binds:
   - packages/proof-checker/src/safety.zig
   - build/kernel_safety_release_probe.zig
-  - scripts/check-proof-checker.sh
+  - tooling/kernel_leaf_gate.zig
 proves: zig build test-kernel-safety
 ---
 

@@ -81,7 +81,14 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
     run_kernel_safety_index_probe.addCheck(.{ .expect_term = .{ .signal = .ABRT } });
     kernel_safety.step.dependOn(&run_kernel_safety_index_probe.step);
 
-    const module_boundary = ctx.addGate(&.{ "/bin/bash", "scripts/test-module-boundary.sh" }, "test-module-boundary", "Check consumer reach into zts internals against the allowlist");
+    // The native graph gate reads the allowlist, `root.zig`, and the tracked files at run time, so the
+    // run is never cached.
+    const module_boundary = ctx.b.addRunArtifact(tools.zts_graph_gate_exe);
+    module_boundary.addArg("module-boundary");
+    module_boundary.setCwd(ctx.b.path("."));
+    module_boundary.has_side_effects = true;
+    const module_boundary_step = ctx.b.step("test-module-boundary", "Check consumer reach into zts internals against the allowlist");
+    module_boundary_step.dependOn(&module_boundary.step);
     const release_workflow = ctx.addGate(&.{ "/bin/bash", "scripts/test-release-workflow.sh" }, "test-release-workflow", "Check release script invariants");
     release_workflow.run.addArtifactArg(tools.repo_gate_exe);
     const proof_swallow = ctx.addGate(&.{ "/bin/bash", "scripts/check-proof-swallow.sh" }, "test-proof-swallow", "Check the proof pipeline for unreviewed swallowed errors");
@@ -110,7 +117,7 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
 
     return .{
         .kernel_safety_step = kernel_safety.step,
-        .module_boundary = module_boundary.run,
+        .module_boundary = module_boundary,
         .release_workflow = release_workflow.run,
         .proof_swallow = proof_swallow.run,
         .zts_layering = zts_layering.run,

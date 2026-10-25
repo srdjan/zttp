@@ -79,7 +79,7 @@ semantic analysis: a `pub fn` that nobody calls is never analyzed, so it can
 reference symbols that do not exist and the build still passes.
 
 **Confirm cross-package reach with the boundary gate, not by eye.**
-`scripts/check-module-boundary.sh` fails in both directions - an unlisted
+`zig build test-module-boundary` (`tooling/module_boundary_gate.zig`) fails in both directions - an unlisted
 reach fails, and a row in `scripts/module-boundary.allow` that nothing uses
 fails too. Removing the last consumer of a `zts` internal module from
 `runtime`, `tools`, or `pi` turns that row stale and reddens the gate. Prune
@@ -182,6 +182,6 @@ HTTP requests still use `armRequestDeadline` and recycle slots after timeouts.
 ## Related
 
 - [Balance a rich ZTS surface with a small certified kernel](zts-rich-surface-small-kernel.md)
-- `scripts/module-boundary.allow` and `scripts/check-module-boundary.sh` - the two-directional reach gate
+- `scripts/module-boundary.allow` and `tooling/module_boundary_gate.zig` - the two-directional reach gate
 - `scripts/verify.sh` - the full local gate mirroring CI
 - `docs/internals/testing.md` - which `zig build test*` step covers what

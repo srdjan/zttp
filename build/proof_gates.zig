@@ -3,6 +3,7 @@
 
 const std = @import("std");
 const Context = @import("Context.zig");
+const tooling = @import("tooling.zig");
 
 pub const Result = struct {
     proof_checker_purity: *std.Build.Step.Run,
@@ -14,7 +15,7 @@ pub const Result = struct {
     run_proof_ratchet_tests: *std.Build.Step.Run,
 };
 
-pub fn add(ctx: Context) Result {
+pub fn add(ctx: Context, tools: tooling.Result) Result {
     const b = ctx.b;
     const target = ctx.target;
     const optimize = ctx.optimize;
@@ -45,8 +46,13 @@ pub fn add(ctx: Context) Result {
     // The kernel's own floor: the suite above reports a pass whether it
     // collected two hundred tests or none, so a separate gate asserts the
     // corpus is non-empty and the package still imports nothing.
-    const proof_checker_purity = ctx.addGate(&.{ "bash", "scripts/check-proof-checker.sh" }, "test-proof-checker-purity", "Check the acceptance kernel is a leaf with a non-empty suite");
-    proof_checker_purity.run.has_side_effects = true;
+    // The native graph gate reads the kernel files at run time, so the run is never cached.
+    const proof_checker_purity = ctx.b.addRunArtifact(tools.zts_graph_gate_exe);
+    proof_checker_purity.addArg("kernel-leaf");
+    proof_checker_purity.setCwd(ctx.b.path("."));
+    proof_checker_purity.has_side_effects = true;
+    const proof_checker_purity_step = ctx.b.step("test-proof-checker-purity", "Check the acceptance kernel is a leaf with a non-empty suite");
+    proof_checker_purity_step.dependOn(&proof_checker_purity.step);
 
     // Every script in scripts/ must be invoked by something or say why not. A
     // gate nothing runs reports nothing, which reads the same as a gate that
@@ -111,7 +117,7 @@ pub fn add(ctx: Context) Result {
     proof_ratchet_step.dependOn(&run_proof_ratchet_tests.step);
 
     return .{
-        .proof_checker_purity = proof_checker_purity.run,
+        .proof_checker_purity = proof_checker_purity,
         .script_reachability = script_reachability.run,
         .diagnostic_producers = diagnostic_producers.run,
         .proof_ratchet_drift = proof_ratchet_drift.run,

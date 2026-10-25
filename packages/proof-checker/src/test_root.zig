@@ -1,6 +1,6 @@
 //! Test root for the acceptance kernel.
 //!
-//! Every source file in `src/` is referenced here. `scripts/check-proof-checker.sh`
+//! Every source file in `src/` is referenced here. `zts-graph-gate kernel-leaf`
 //! fails when one is missing, so a file cannot be added to the kernel and left
 //! outside the suite that is later cited as evidence for it.
 
