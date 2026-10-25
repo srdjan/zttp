@@ -744,12 +744,6 @@ pub const ModuleAnalysisSession = struct {
         select_flow: bool = false,
     };
 
-    const FullConfig = struct {
-        strict: bool = true,
-        manifest_registry: ?*const manifest_registry_mod.Registry = null,
-        policy_sections: guard_catalog.SectionSet = .{},
-    };
-
     pub const ContractOnlyOptions = struct {
         extraction: ExtractContractOptions = .{},
         select_flow: bool = false,
@@ -766,8 +760,9 @@ pub const ModuleAnalysisSession = struct {
     allocator: std.mem.Allocator = undefined,
     parsed: ParsedModule = undefined,
     profile: Profile = undefined,
-    full_opts: FullConfig = .{},
+    /// One option set for every profile. `.full` fills only `strict` and `manifest_registry`.
     extraction_opts: ExtractContractOptions = .{},
+    policy_sections: guard_catalog.SectionSet = .{},
     source_types: ModuleSourceTypeInput = .omitted,
     contract_context: ContractContext = .{},
     state: SessionState = .uninitialized,
@@ -775,8 +770,9 @@ pub const ModuleAnalysisSession = struct {
     extraction_type_env_storage: TypeEnvStorage = .{},
     resolved: ?ResolvedModule = null,
     checked: ?CheckedModule = null,
-    standalone_checker: ?TypeChecker = null,
-    extraction_checker: ?TypeChecker = null,
+    /// The checker the contract pass owns when `resolved` has none: the standalone
+    /// session, or the custom `type_check` callback session. Never both.
+    contract_checker: ?TypeChecker = null,
     standalone_flow_checker: ?FlowChecker = null,
     resolution_facts: ?ModuleFacts = null,
     contract_facts: ?ModuleFacts = null,
@@ -801,11 +797,11 @@ pub const ModuleAnalysisSession = struct {
             .allocator = allocator,
             .parsed = parsed,
             .profile = .full,
-            .full_opts = .{
+            .extraction_opts = .{
                 .strict = opts.strict,
                 .manifest_registry = opts.manifest_registry,
-                .policy_sections = opts.policy_sections,
             },
+            .policy_sections = opts.policy_sections,
             .source_types = source_types,
             .state = .ready,
             .resolution_state = .ready,
@@ -876,10 +872,8 @@ pub const ModuleAnalysisSession = struct {
         self.checked = null;
         if (self.standalone_flow_checker) |*flow| flow.deinit();
         self.standalone_flow_checker = null;
-        if (self.extraction_checker) |*checker| checker.deinit();
-        self.extraction_checker = null;
-        if (self.standalone_checker) |*checker| checker.deinit();
-        self.standalone_checker = null;
+        if (self.contract_checker) |*checker| checker.deinit();
+        self.contract_checker = null;
         if (self.resolved) |*resolved| resolved.deinit();
         self.resolved = null;
         self.extraction_type_env_storage.deinit(self.allocator);
@@ -1097,7 +1091,7 @@ pub const ModuleAnalysisSession = struct {
         self.contract_facts = try buildModuleFacts(
             self.allocator,
             self.parsed,
-            self.full_opts.manifest_registry,
+            self.extraction_opts.manifest_registry,
         );
         if (hasAuthoredSource(self.source_types)) {
             try self.type_env_storage.initWithSource(
@@ -1107,10 +1101,10 @@ pub const ModuleAnalysisSession = struct {
         }
         self.resolved = try resolve(self.allocator, self.parsed, .{
             .type_env = self.type_env_storage.envPtr(),
-            .strict = self.full_opts.strict,
+            .strict = self.extraction_opts.strict,
             .module_facts = &self.contract_facts.?,
             .type_import_facts = &self.contract_facts.?,
-            .policy_sections = self.full_opts.policy_sections,
+            .policy_sections = self.policy_sections,
         });
         if (self.resolved.?.type_checker) |*checker| try checker.ensureHealthy();
         self.resolution_state = .completed;
@@ -1123,7 +1117,7 @@ pub const ModuleAnalysisSession = struct {
         }
 
         try self.completeStandaloneTypeSession();
-        try self.prepareContractFacts(false);
+        try self.prepareContractFacts();
         if (self.flow_state == .ready) {
             self.standalone_flow_checker = FlowChecker.init(
                 self.allocator,
@@ -1166,7 +1160,7 @@ pub const ModuleAnalysisSession = struct {
         } else {
             try self.completeStandaloneTypeSession();
         }
-        try self.prepareContractFacts(false);
+        try self.prepareContractFacts();
     }
 
     fn completeStandaloneTypeSession(self: *ModuleAnalysisSession) !void {
@@ -1176,13 +1170,13 @@ pub const ModuleAnalysisSession = struct {
             self.allocator,
             try sourceTypeInput(self.parsed, self.source_types),
         );
-        self.standalone_checker = TypeChecker.init(
+        self.contract_checker = TypeChecker.init(
             self.allocator,
             self.parsed.ir_view,
             self.parsed.atoms,
             self.type_env_storage.envPtr().?,
         );
-        const checker = &self.standalone_checker.?;
+        const checker = &self.contract_checker.?;
         checker.scopes = self.parsed.scopes;
         checker.import_facts = if (self.resolution_facts) |*facts_value|
             facts_value
@@ -1195,14 +1189,10 @@ pub const ModuleAnalysisSession = struct {
         self.contract_type_state = .completed;
     }
 
-    fn prepareContractFacts(self: *ModuleAnalysisSession, force_distinct: bool) !void {
+    fn prepareContractFacts(self: *ModuleAnalysisSession) !void {
         if (self.extraction_opts.module_facts != null) return;
-        if (!force_distinct and
-            self.profile == .sound_extraction and
-            self.extraction_opts.manifest_registry == null)
-        {
-            return;
-        }
+        // Without a registry the contract facts equal the resolution facts, so one copy serves both.
+        if (self.profile == .sound_extraction and self.extraction_opts.manifest_registry == null) return;
         self.contract_facts = try buildModuleFacts(
             self.allocator,
             self.parsed,
@@ -1228,7 +1218,7 @@ pub const ModuleAnalysisSession = struct {
         if (self.resolved) |*resolved| {
             if (resolved.type_checker) |*checker| return checker;
         }
-        return if (self.standalone_checker) |*checker| checker else error.AnalysisPassIncomplete;
+        return if (self.contract_checker) |*checker| checker else error.AnalysisPassIncomplete;
     }
 
     fn prepareContractEffectFacts(
@@ -1259,13 +1249,9 @@ pub const ModuleAnalysisSession = struct {
         self: *ModuleAnalysisSession,
         filename: []const u8,
     ) !ContractExtraction {
-        const opts = if (self.profile == .full) ExtractContractOptions{
-            .strict = self.full_opts.strict,
-            .manifest_registry = self.full_opts.manifest_registry,
-        } else self.extraction_opts;
         const checker = try self.completedTypeChecker();
         try checker.ensureHealthy();
-        return self.extractCheckedResult(filename, opts, checker);
+        return self.extractCheckedResult(filename, self.extraction_opts, checker);
     }
 
     fn extractCustomResult(
@@ -1276,17 +1262,17 @@ pub const ModuleAnalysisSession = struct {
             self.allocator,
             try sourceTypeInput(self.parsed, self.source_types),
         );
-        self.extraction_checker = TypeChecker.init(
+        self.contract_checker = TypeChecker.init(
             self.allocator,
             self.parsed.ir_view,
             self.parsed.atoms,
             self.extraction_type_env_storage.envPtr().?,
         );
-        const checker = &self.extraction_checker.?;
+        const checker = &self.contract_checker.?;
         checker.scopes = self.parsed.scopes;
         checker.import_facts = if (self.resolution_facts) |*facts_value| facts_value else null;
         _ = try self.extraction_opts.type_check(checker, self.parsed.root);
-        try self.prepareContractFacts(true);
+        try self.prepareContractFacts();
         try checker.ensureHealthy();
         return self.extractCheckedResult(filename, self.extraction_opts, checker);
     }

@@ -1145,9 +1145,9 @@ test "ModuleAnalysisSession runs a custom callback only during extraction" {
 
     try analysis.complete();
     try testing.expectError(error.TestTypeCheckRan, analysis.extractContract("custom.ts"));
-    try testing.expect(analysis.extraction_checker != null);
+    try testing.expect(analysis.contract_checker != null);
     try testing.expect(analysis.resolved.?.type_checker != null);
-    try testing.expect(&analysis.extraction_checker.? != &analysis.resolved.?.type_checker.?);
+    try testing.expect(&analysis.contract_checker.? != &analysis.resolved.?.type_checker.?);
     try testing.expect(analysis.contract_facts == null);
     try testing.expect(analysis.takeExportEffects() == null);
     try testing.expectError(
@@ -2721,7 +2721,7 @@ fn extractContractOnlyForTest(session: Session, expect_refusal: bool) !HandlerCo
     try analysis.initContractOnly(session.allocator, session.parsed, .{ .extraction = .{ .strict = false } });
     defer analysis.deinit();
     try analysis.complete();
-    try testing.expectEqual(expect_refusal, analysis.standalone_checker.?.refusedExpressionCount() > 0);
+    try testing.expectEqual(expect_refusal, analysis.contract_checker.?.refusedExpressionCount() > 0);
     return analysis.extractContract("probe.ts");
 }
 
