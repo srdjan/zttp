@@ -6,6 +6,10 @@
 
 ## Documentation
 
+When a change adds an important feature or improvement, update `../ZTTP-WEBSITE` in the same work session.
+Follow the website's `AGENTS.md` and `CLAUDE.md`. Keep claims tied to checked behavior and distinguish development changes from released features.
+Run `deno task verify` before committing website changes. Commit locally and do not deploy or push without an explicit request.
+
 | File | Purpose |
 |------|---------|
 | `docs/user-guide.md` | The single guide: handler API, routing, virtual modules, CLI options, JS/TS subset, JSX/TSX, local deploy and proof receipts, troubleshooting |
