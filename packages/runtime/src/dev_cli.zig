@@ -220,20 +220,17 @@ fn cmdDoctor(ctx: cli_help.Ctx) anyerror!void {
         try printDoctorHelp();
         return;
     }
-    doctorCommand(ctx.allocator, ctx.args) catch |err| {
-        if (err == error.NoProjectConfig) {
+    doctorCommand(ctx.allocator, ctx.args) catch |err| switch (err) {
+        error.NoProjectConfig => {
             printNoProjectConfigDiagnostic(ctx.command);
             std.process.exit(1);
-        }
-        if (err == error.FileNotFound or
-            err == error.UnsupportedMultipleOutboundHosts or
-            err == error.CheckFailed or
-            err == error.DoctorFailed or
-            err == error.InvalidArgument)
-        {
-            std.process.exit(1);
-        }
-        return err;
+        },
+        error.FileNotFound,
+        error.UnsupportedMultipleOutboundHosts,
+        error.DoctorFailed,
+        error.InvalidArgument,
+        => std.process.exit(1),
+        else => return err,
     };
     return;
 }
