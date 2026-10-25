@@ -10,6 +10,7 @@
 //! - Display formatting for diagnostics
 
 const std = @import("std");
+const parseTypeText = @import("type_syntax_lowering.zig").parseTypeText;
 const type_key = @import("type_key.zig");
 
 // ---------------------------------------------------------------------------
@@ -573,7 +574,7 @@ pub const TypePool = struct {
     /// sixteen, because storing the members raw produces a type whose key is
     /// not canonical - and the corpus says the premise was wrong. Sixteen was
     /// the width of a scratch buffer, never a language limit, and a schema enum
-    /// is routinely wider: `parseTypeExpr keeps unions wider than thirty two
+    /// is routinely wider: `parseTypeText keeps unions wider than thirty two
     /// members` and `TypeChecker tracks schema enum members beyond 32 values`
     /// are both existing tests. Normalizing on the heap removes the buffer and
     /// with it the reason for the cap, so every survivor is deduped by key and
@@ -2128,580 +2129,6 @@ pub const TypePool = struct {
 };
 
 // ---------------------------------------------------------------------------
-// Type Expression Parser
-// ---------------------------------------------------------------------------
-
-/// Parse a type expression string into the TypePool.
-/// Returns the TypeIndex of the parsed type, or null_type_idx on failure.
-pub fn parseTypeExpr(pool: *TypePool, allocator: std.mem.Allocator, source: []const u8) TypeIndex {
-    if (pool.isPoisoned()) return null_type_idx;
-    var parser = TypeExprParser{
-        .pool = pool,
-        .allocator = allocator,
-        .source = source,
-        .pos = 0,
-    };
-    const parsed = parser.parseUnion();
-    parser.skipWs();
-    return if (parser.pos == source.len) parsed else null_type_idx;
-}
-
-const TypeExprParser = struct {
-    pool: *TypePool,
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    pos: usize,
-
-    fn parseUnion(self: *TypeExprParser) TypeIndex {
-        self.skipWs();
-        // Tolerate a leading `|` for the multi-line union layout:
-        //     type T =
-        //         | "a"
-        //         | "b";
-        _ = self.match('|');
-        self.skipWs();
-
-        const first = self.parseIntersection();
-        if (first == null_type_idx) return null_type_idx;
-
-        self.skipWs();
-        if (!self.match('|')) return first;
-
-        var members: std.ArrayListUnmanaged(TypeIndex) = .empty;
-        defer members.deinit(self.allocator);
-        members.append(self.allocator, first) catch return self.pool.failIndex(error.OutOfMemory);
-
-        while (true) {
-            self.skipWs();
-            const member = self.parseIntersection();
-            if (member == null_type_idx) break;
-            members.append(self.allocator, member) catch return self.pool.failIndex(error.OutOfMemory);
-            self.skipWs();
-            if (!self.match('|')) break;
-        }
-
-        // Check for optional shorthand: T | undefined
-        if (members.items.len == 2) {
-            const tag0 = self.pool.getTag(members.items[0]);
-            const tag1 = self.pool.getTag(members.items[1]);
-            if (tag1 == .t_undefined) {
-                return self.pool.addNullable(self.allocator, members.items[0]);
-            }
-            if (tag0 == .t_undefined) {
-                return self.pool.addNullable(self.allocator, members.items[1]);
-            }
-        }
-
-        return self.pool.addUnion(self.allocator, members.items);
-    }
-
-    /// Parse a TypeScript intersection: `A & B & C`. Binds tighter than `|`,
-    /// looser than primary types, so `A | B & C` parses as `A | (B & C)`.
-    /// A leading `|` or `&` is permitted before the first member to support
-    /// the multi-line union/intersection style:
-    ///     type T =
-    ///         | "a"
-    ///         | "b";
-    fn parseIntersection(self: *TypeExprParser) TypeIndex {
-        self.skipWs();
-        // Tolerate a leading `&` for multi-line intersection layouts.
-        _ = self.match('&');
-        self.skipWs();
-
-        const first = self.parsePrimary();
-        if (first == null_type_idx) return null_type_idx;
-
-        self.skipWs();
-        if (!self.match('&')) return first;
-
-        var members: std.ArrayListUnmanaged(TypeIndex) = .empty;
-        defer members.deinit(self.allocator);
-        members.append(self.allocator, first) catch return self.pool.failIndex(error.OutOfMemory);
-
-        while (true) {
-            self.skipWs();
-            const member = self.parsePrimary();
-            if (member == null_type_idx) break;
-            members.append(self.allocator, member) catch return self.pool.failIndex(error.OutOfMemory);
-            self.skipWs();
-            if (!self.match('&')) break;
-        }
-
-        return self.pool.addIntersection(self.allocator, members.items);
-    }
-
-    fn parsePrimary(self: *TypeExprParser) TypeIndex {
-        self.skipWs();
-        if (self.pos >= self.source.len) return null_type_idx;
-
-        const c = self.source[self.pos];
-
-        // Every element form takes the `[]` suffix, not just a named one.
-        //
-        // `maybeArrayWrap` was reached through `resolveIdentType` alone, so
-        // `number[]` and `User[]` were arrays while every other form parsed its
-        // element and left the `[]` for nobody to consume. A declared
-        // `{ name: string }[]` resolved to `{ name: string }`, which then
-        // refused the array it was initialized with and refused `.length` on
-        // it. The alias form was the only spelling that worked, which is why
-        // the persona had to teach it.
-        //
-        // Object type: { ... }
-        if (c == '{') return self.maybeArrayWrap(self.parseRecord());
-
-        // Tuple type: [ ... ]
-        if (c == '[') return self.maybeArrayWrap(self.parseTuple());
-
-        // Parenthesized type or function type: ( ... )
-        if (c == '(') return self.maybeArrayWrap(self.parseFunctionOrParen());
-
-        // String literal type: "..." or '...'
-        if (c == '"' or c == '\'') return self.maybeArrayWrap(self.parseStringLiteral());
-
-        // Template literal type: `...${T}...`
-        if (c == '`') return self.maybeArrayWrap(self.parseTemplateLiteralType());
-
-        // Number literal (including negative)
-        if (std.ascii.isDigit(c) or (c == '-' and self.pos + 1 < self.source.len and std.ascii.isDigit(self.source[self.pos + 1]))) {
-            return self.maybeArrayWrap(self.parseNumberLiteral());
-        }
-
-        // Identifier-based types
-        if (isIdentStart(c)) {
-            const ident = self.scanIdent();
-            // `readonly T[]` is a modifier, not a type name. Applied to
-            // anything but an array it is meaningless and is dropped, which
-            // matches TypeScript.
-            if (std.mem.eql(u8, ident, "readonly")) {
-                const start = self.pos;
-                self.skipWs();
-                if (self.pos > start or self.pos >= self.source.len) {
-                    const inner = self.parsePrimary();
-                    if (self.getTag(inner) == .t_array and !self.isReadonlyArray(inner)) {
-                        return self.pool.addReadonlyArray(self.allocator, self.pool.getArrayElement(inner));
-                    }
-                    // A named type is still a `t_ref` here: this parser has no
-                    // alias map, so `readonly Items` where `type Items =
-                    // string[]` never saw an array and dropped the modifier
-                    // with no diagnostic, handing a declared read-only value to
-                    // a mutating parameter. Defer to `TypeEnv`, which resolves
-                    // the name - the same deferral `Readonly<NamedAlias>`
-                    // already uses.
-                    if (self.getTag(inner) == .t_ref or self.getTag(inner) == .t_generic_app) {
-                        const base = self.pool.addRef(self.allocator, "Readonly");
-                        return self.pool.addGenericApp(self.allocator, base, &.{inner});
-                    }
-                    return inner;
-                }
-            }
-            return self.resolveIdentType(ident);
-        }
-
-        return null_type_idx;
-    }
-
-    fn getTag(self: *const TypeExprParser, idx: TypeIndex) ?TypeTag {
-        return self.pool.getTag(idx);
-    }
-
-    fn isReadonlyArray(self: *const TypeExprParser, idx: TypeIndex) bool {
-        return self.pool.isReadonlyArray(idx);
-    }
-
-    fn parseRecord(self: *TypeExprParser) TypeIndex {
-        if (!self.match('{')) return null_type_idx;
-        self.skipWs();
-
-        var fields: std.ArrayListUnmanaged(RecordField) = .empty;
-        defer fields.deinit(self.allocator);
-
-        while (self.pos < self.source.len and self.source[self.pos] != '}') {
-            self.skipWs();
-            if (self.pos >= self.source.len or self.source[self.pos] == '}') break;
-
-            // Check for readonly modifier
-            var is_readonly = false;
-            const saved_pos = self.pos;
-            const first_ident = self.scanIdent();
-            if (first_ident.len == 0) break;
-            if (std.mem.eql(u8, first_ident, "readonly")) {
-                self.skipWs();
-                // Peek: if next char could start an ident, this was a modifier
-                if (self.pos < self.source.len and isIdentStart(self.source[self.pos])) {
-                    is_readonly = true;
-                } else {
-                    // "readonly" is the field name itself
-                    self.pos = saved_pos + first_ident.len;
-                }
-            }
-
-            // Parse field name (or use first_ident if not readonly)
-            const name_str = if (is_readonly) self.scanIdent() else first_ident;
-            if (name_str.len == 0) break;
-
-            self.skipWs();
-
-            // Optional marker
-            var optional = false;
-            if (self.match('?')) {
-                optional = true;
-            }
-
-            // Expect colon
-            self.skipWs();
-            if (!self.match(':')) break;
-            self.skipWs();
-
-            // Parse field type (stop at ; or } or ,)
-            const field_type = self.parseUnion();
-
-            const n = self.pool.addName(self.allocator, name_str);
-            fields.append(self.allocator, .{
-                .name_start = n.start,
-                .name_len = n.len,
-                .type_idx = field_type,
-                .optional = optional,
-                .readonly = is_readonly,
-            }) catch return self.pool.failIndex(error.OutOfMemory);
-
-            self.skipWs();
-            // Skip separator (; or ,)
-            if (self.pos < self.source.len and (self.source[self.pos] == ';' or self.source[self.pos] == ',')) {
-                self.pos += 1;
-            }
-        }
-        _ = self.match('}');
-        return self.pool.addRecord(self.allocator, fields.items);
-    }
-
-    fn parseTuple(self: *TypeExprParser) TypeIndex {
-        if (!self.match('[')) return null_type_idx;
-        self.skipWs();
-
-        var elements: std.ArrayListUnmanaged(TypeIndex) = .empty;
-        defer elements.deinit(self.allocator);
-
-        while (self.pos < self.source.len and self.source[self.pos] != ']') {
-            self.skipWs();
-            const elem = self.parseUnion();
-            if (elem == null_type_idx) break;
-            elements.append(self.allocator, elem) catch return self.pool.failIndex(error.OutOfMemory);
-            self.skipWs();
-            _ = self.match(',');
-        }
-        _ = self.match(']');
-        return self.pool.addTuple(self.allocator, elements.items);
-    }
-
-    fn parseFunctionOrParen(self: *TypeExprParser) TypeIndex {
-        // Save position to backtrack if this is just a paren group
-        const saved = self.pos;
-        if (!self.match('(')) return null_type_idx;
-        self.skipWs();
-
-        // Try to parse as function params
-        var params: std.ArrayListUnmanaged(FuncParam) = .empty;
-        defer params.deinit(self.allocator);
-        var is_function = false;
-
-        while (self.pos < self.source.len and self.source[self.pos] != ')') {
-            self.skipWs();
-            const param_name = self.scanIdent();
-            if (param_name.len == 0) {
-                // Not a parameter list: these parens group a type. Scanning for
-                // a parameter name found a token that cannot start one, which
-                // is every grouped form that does not begin with an identifier
-                // - `(() => string)`, `("a" | "b")`, `({ a: string } | null)`.
-                //
-                // Breaking here used to fall through to a `)` match that could
-                // not succeed, and the function returned null: the whole
-                // annotation resolved to nothing. An identifier-led group
-                // survived only because it reached the missing-colon backtrack
-                // below, so `(string | number)` parsed and `(() => string)` did
-                // not. Take the same backtrack.
-                self.pos = saved + 1;
-                const grouped = self.parseUnion();
-                self.skipWs();
-                _ = self.match(')');
-                return grouped;
-            }
-
-            self.skipWs();
-            var optional = false;
-            if (self.match('?')) {
-                optional = true;
-                self.skipWs();
-            }
-
-            if (!self.match(':')) {
-                // Not a function type - might be parenthesized
-                self.pos = saved + 1; // after '('
-                const inner = self.parseUnion();
-                self.skipWs();
-                _ = self.match(')');
-                return inner;
-            }
-            self.skipWs();
-            is_function = true;
-
-            const param_type = self.parseUnion();
-            const n = self.pool.addName(self.allocator, param_name);
-            params.append(self.allocator, .{
-                .name_start = n.start,
-                .name_len = n.len,
-                .type_idx = param_type,
-                .optional = optional,
-            }) catch return self.pool.failIndex(error.OutOfMemory);
-            self.skipWs();
-            _ = self.match(',');
-        }
-        _ = self.match(')');
-        self.skipWs();
-
-        if (!is_function and params.items.len == 0) {
-            // Empty parens: () => ... is a zero-param function
-            // Check for =>
-            if (self.matchStr("=>")) {
-                self.skipWs();
-                const ret = self.parseUnion();
-                return self.pool.addFunctionWithReturn(self.allocator, &.{}, ret);
-            }
-            // Just ()
-            return null_type_idx;
-        }
-
-        // Check for => return type
-        if (self.matchStr("=>")) {
-            self.skipWs();
-            const ret = self.parseUnion();
-            return self.pool.addFunctionWithReturn(self.allocator, params.items, ret);
-        }
-
-        // No arrow - this was function params without return type
-        if (is_function) {
-            return self.pool.addFunction(self.allocator, params.items, null_type_idx);
-        }
-
-        return null_type_idx;
-    }
-
-    fn parseStringLiteral(self: *TypeExprParser) TypeIndex {
-        const quote = self.source[self.pos];
-        self.pos += 1;
-        const start = self.pos;
-        while (self.pos < self.source.len and self.source[self.pos] != quote) {
-            if (self.source[self.pos] == '\\') self.pos += 1;
-            self.pos += 1;
-        }
-        const end = self.pos;
-        _ = self.match(quote);
-        return self.pool.addLiteralString(self.allocator, self.source[start..end]);
-    }
-
-    fn parseNumberLiteral(self: *TypeExprParser) TypeIndex {
-        const start = self.pos;
-        if (self.source[self.pos] == '-') self.pos += 1;
-        while (self.pos < self.source.len and std.ascii.isDigit(self.source[self.pos])) {
-            self.pos += 1;
-        }
-        const num_str = self.source[start..self.pos];
-        // Literal-number types store only 16 bits. A literal outside i16 range
-        // would clamp to literal 0, conflating distinct out-of-range literals
-        // (e.g. `100000` and `200000` both compare equal). Fall back to the base
-        // `number` type instead: it loses literal narrowing for large literals
-        // but never reports two different literals as the same type.
-        const value = std.fmt.parseInt(i16, num_str, 10) catch return self.pool.idx_number;
-        return self.pool.addLiteralNumber(self.allocator, value);
-    }
-
-    fn parseTemplateLiteralType(self: *TypeExprParser) TypeIndex {
-        if (!self.match('`')) return null_type_idx;
-
-        var parts: std.ArrayListUnmanaged(TemplatePart) = .empty;
-        defer parts.deinit(self.allocator);
-
-        while (self.pos < self.source.len and self.source[self.pos] != '`') {
-            if (self.source[self.pos] == '$' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '{') {
-                // Type slot: ${T}
-                self.pos += 2; // skip ${
-                self.skipWs();
-                const slot_type = self.parseUnion();
-                self.skipWs();
-                _ = self.match('}');
-                parts.append(self.allocator, .{ .kind = .type_slot, .type_idx = slot_type }) catch return self.pool.failIndex(error.OutOfMemory);
-            } else {
-                // Literal segment: read until ` or ${
-                const seg_start = self.pos;
-                while (self.pos < self.source.len and self.source[self.pos] != '`') {
-                    if (self.source[self.pos] == '$' and self.pos + 1 < self.source.len and self.source[self.pos + 1] == '{') break;
-                    self.pos += 1;
-                }
-                if (self.pos > seg_start) {
-                    const n = self.pool.addName(self.allocator, self.source[seg_start..self.pos]);
-                    parts.append(self.allocator, .{ .kind = .literal, .name_start = n.start, .name_len = n.len }) catch return self.pool.failIndex(error.OutOfMemory);
-                }
-            }
-        }
-        _ = self.match('`');
-        if (parts.items.len == 0) return null_type_idx;
-        return self.pool.addTemplateLiteral(self.allocator, parts.items);
-    }
-
-    /// Consume any trailing `[]` array suffixes (`number[]`, `T[][]`) and wrap
-    /// `base` in an array type for each one.
-    fn maybeArrayWrap(self: *TypeExprParser, base: TypeIndex) TypeIndex {
-        // A failed element parse stays failed. Wrapping it would answer
-        // `never[]` for a type expression nobody could read, which is a worse
-        // answer than none and hides the failure from the caller.
-        if (base == null_type_idx) return base;
-        var result = base;
-        while (true) {
-            self.skipWs();
-            if (self.pos + 1 < self.source.len and self.source[self.pos] == '[' and self.source[self.pos + 1] == ']') {
-                self.pos += 2;
-                result = self.pool.addArray(self.allocator, result);
-            } else {
-                break;
-            }
-        }
-        return result;
-    }
-
-    fn resolveIdentType(self: *TypeExprParser, ident: []const u8) TypeIndex {
-        // Check primitives. Each resolves to a primitive index; the trailing
-        // `[]` suffix (if any) is applied uniformly via maybeArrayWrap so that
-        // `number[]`, `string[]`, etc. produce an array type rather than dropping
-        // the suffix.
-        if (std.mem.eql(u8, ident, "boolean") or std.mem.eql(u8, ident, "bool")) return self.maybeArrayWrap(self.pool.idx_boolean);
-        if (std.mem.eql(u8, ident, "number")) return self.maybeArrayWrap(self.pool.idx_number);
-        if (std.mem.eql(u8, ident, "string")) return self.maybeArrayWrap(self.pool.idx_string);
-        // `Bytes` is a value kind of its own (spec 6.3), not an alias a handler
-        // could shadow, so it resolves here beside the other primitives. It is
-        // capitalized because it is not a JS primitive - the same reason `Dict`
-        // is - and resolving it here is what stops it reaching the checker as
-        // an unresolved name.
-        if (std.mem.eql(u8, ident, "Bytes")) return self.maybeArrayWrap(self.pool.idx_bytes);
-        if (std.mem.eql(u8, ident, "null")) return self.maybeArrayWrap(self.pool.idx_null);
-        if (std.mem.eql(u8, ident, "undefined")) return self.maybeArrayWrap(self.pool.idx_undefined);
-        if (std.mem.eql(u8, ident, "never")) return self.maybeArrayWrap(self.pool.idx_never);
-        if (std.mem.eql(u8, ident, "unknown")) return self.maybeArrayWrap(self.pool.idx_unknown);
-        if (std.mem.eql(u8, ident, "true")) return self.maybeArrayWrap(self.pool.addLiteralBool(self.allocator, true));
-        if (std.mem.eql(u8, ident, "false")) return self.maybeArrayWrap(self.pool.addLiteralBool(self.allocator, false));
-
-        // Check for array suffix: T[]
-        self.skipWs();
-        if (self.pos + 1 < self.source.len and self.source[self.pos] == '[' and self.source[self.pos + 1] == ']') {
-            self.pos += 2;
-            const ref = self.pool.addRef(self.allocator, ident);
-            return self.pool.addArray(self.allocator, ref);
-        }
-
-        // Check for generic application: Foo<T>
-        if (self.pos < self.source.len and self.source[self.pos] == '<') {
-            return self.parseGenericApp(ident);
-        }
-
-        // Named type reference
-        // Also check for array suffix after the ref: `number[]`
-        const ref = self.pool.addRef(self.allocator, ident);
-
-        // Post-fix array brackets on primitive-resolved types
-        if (self.pos + 1 < self.source.len and self.source[self.pos] == '[' and self.source[self.pos + 1] == ']') {
-            self.pos += 2;
-            // For primitives that resolved to an index, wrap in array
-            if (std.mem.eql(u8, ident, "number") or std.mem.eql(u8, ident, "string") or std.mem.eql(u8, ident, "boolean")) {
-                const prim = if (std.mem.eql(u8, ident, "number")) self.pool.idx_number else if (std.mem.eql(u8, ident, "string")) self.pool.idx_string else self.pool.idx_boolean;
-                return self.pool.addArray(self.allocator, prim);
-            }
-            return self.pool.addArray(self.allocator, ref);
-        }
-
-        return ref;
-    }
-
-    fn parseGenericApp(self: *TypeExprParser, base_name: []const u8) TypeIndex {
-        if (!self.match('<')) return null_type_idx;
-
-        var args: std.ArrayListUnmanaged(TypeIndex) = .empty;
-        defer args.deinit(self.allocator);
-
-        while (self.pos < self.source.len and self.source[self.pos] != '>') {
-            self.skipWs();
-            const arg = self.parseUnion();
-            if (arg == null_type_idx) break;
-            args.append(self.allocator, arg) catch return self.pool.failIndex(error.OutOfMemory);
-            self.skipWs();
-            _ = self.match(',');
-        }
-        _ = self.match('>');
-
-        // Dict<K, V> is a value kind of its own (spec 6.2), not a named alias
-        // a user could shadow, so it resolves here rather than through the
-        // alias table.
-        if (std.mem.eql(u8, base_name, "Dict") and args.items.len == 2) {
-            return self.pool.addDict(self.allocator, args.items[0], args.items[1]);
-        }
-
-        // Readonly<{...}> on an INLINE record -> mark all fields readonly here
-        // (no alias resolution needed). Readonly<NamedAlias> must instead build a
-        // generic-app so TypeEnv.tryInstantiateGenericApp resolves the alias to
-        // its record before applying makeReadonly -- applying makeReadonly to a
-        // bare t_ref here is a no-op that silently drops the readonly markers.
-        if (std.mem.eql(u8, base_name, "Readonly") and args.items.len == 1 and
-            self.pool.getTag(args.items[0]) == .t_record)
-        {
-            return self.pool.makeReadonly(self.allocator, args.items[0]);
-        }
-
-        const base = self.pool.addRef(self.allocator, base_name);
-        return self.pool.addGenericApp(self.allocator, base, args.items);
-    }
-
-    // Helpers
-
-    fn skipWs(self: *TypeExprParser) void {
-        while (self.pos < self.source.len and (self.source[self.pos] == ' ' or self.source[self.pos] == '\t' or self.source[self.pos] == '\n' or self.source[self.pos] == '\r')) {
-            self.pos += 1;
-        }
-    }
-
-    fn match(self: *TypeExprParser, expected: u8) bool {
-        if (self.pos < self.source.len and self.source[self.pos] == expected) {
-            self.pos += 1;
-            return true;
-        }
-        return false;
-    }
-
-    fn matchStr(self: *TypeExprParser, expected: []const u8) bool {
-        if (self.pos + expected.len <= self.source.len and
-            std.mem.eql(u8, self.source[self.pos .. self.pos + expected.len], expected))
-        {
-            self.pos += expected.len;
-            return true;
-        }
-        return false;
-    }
-
-    fn scanIdent(self: *TypeExprParser) []const u8 {
-        const start = self.pos;
-        if (self.pos >= self.source.len or !isIdentStart(self.source[self.pos])) return "";
-        while (self.pos < self.source.len and isIdentContinue(self.source[self.pos])) {
-            self.pos += 1;
-        }
-        return self.source[start..self.pos];
-    }
-};
-
-fn isIdentStart(c: u8) bool {
-    return std.ascii.isAlphabetic(c) or c == '_' or c == '$';
-}
-
-fn isIdentContinue(c: u8) bool {
-    return std.ascii.isAlphanumeric(c) or c == '_' or c == '$';
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -2737,14 +2164,14 @@ test "TypePool primitives" {
     try std.testing.expectEqual(TypeTag.t_number, pool.getTag(pool.idx_number).?);
 }
 
-test "parseTypeExpr consumes the complete signature" {
+test "parseTypeText consumes the complete signature" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    try std.testing.expectEqual(pool.idx_boolean, parseTypeExpr(&pool, allocator, " \tboolean\r\n"));
+    try std.testing.expectEqual(pool.idx_boolean, parseTypeText(&pool, allocator, " \tboolean\r\n"));
     for ([_][]const u8{ "boolean junk", "string[] trailing", "{ ok: boolean } extra" }) |source| {
-        try std.testing.expectEqual(null_type_idx, parseTypeExpr(&pool, allocator, source));
+        try std.testing.expectEqual(null_type_idx, parseTypeText(&pool, allocator, source));
     }
 }
 
@@ -2780,7 +2207,7 @@ test "TypePool records type parser scratch allocation failure" {
     defer pool.deinit(allocator);
 
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    const idx = parseTypeExpr(&pool, failing.allocator(), "string | number");
+    const idx = parseTypeText(&pool, failing.allocator(), "string | number");
 
     try std.testing.expectEqual(null_type_idx, idx);
     try std.testing.expectError(error.OutOfMemory, pool.ensureHealthy());
@@ -2803,7 +2230,7 @@ test "TypePool semantic absence does not poison the pool" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    try std.testing.expectEqual(null_type_idx, parseTypeExpr(&pool, allocator, ""));
+    try std.testing.expectEqual(null_type_idx, parseTypeText(&pool, allocator, ""));
     try pool.ensureHealthy();
 }
 
@@ -3083,15 +2510,15 @@ test "isAssignableTo union" {
     try std.testing.expect(!pool.isAssignableTo(pool.idx_boolean, str_or_num));
 }
 
-test "parseTypeExpr primitives" {
+test "parseTypeText primitives" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    try std.testing.expectEqual(pool.idx_number, parseTypeExpr(&pool, allocator, "number"));
-    try std.testing.expectEqual(pool.idx_string, parseTypeExpr(&pool, allocator, "string"));
-    try std.testing.expectEqual(pool.idx_boolean, parseTypeExpr(&pool, allocator, "boolean"));
-    try std.testing.expectEqual(pool.idx_null, parseTypeExpr(&pool, allocator, "null"));
+    try std.testing.expectEqual(pool.idx_number, parseTypeText(&pool, allocator, "number"));
+    try std.testing.expectEqual(pool.idx_string, parseTypeText(&pool, allocator, "string"));
+    try std.testing.expectEqual(pool.idx_boolean, parseTypeText(&pool, allocator, "boolean"));
+    try std.testing.expectEqual(pool.idx_null, parseTypeText(&pool, allocator, "null"));
 }
 
 test "Dict resolves, prints, and keys structurally" {
@@ -3099,7 +2526,7 @@ test "Dict resolves, prints, and keys structurally" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const a = parseTypeExpr(&pool, allocator, "Dict<string, number>");
+    const a = parseTypeText(&pool, allocator, "Dict<string, number>");
     try std.testing.expectEqual(TypeTag.t_dict, pool.getTag(a).?);
     try std.testing.expectEqual(pool.idx_string, pool.getDictKey(a));
     try std.testing.expectEqual(pool.idx_number, pool.getDictValue(a));
@@ -3108,7 +2535,7 @@ test "Dict resolves, prints, and keys structurally" {
     try std.testing.expectEqualStrings("Dict<string, number>", pool.formatType(a, &buf));
 
     // Two independently built dicts of the same shape are one type.
-    const b = parseTypeExpr(&pool, allocator, "Dict<string, number>");
+    const b = parseTypeText(&pool, allocator, "Dict<string, number>");
     try std.testing.expect(a != b);
     try std.testing.expect(pool.isAssignableTo(a, b));
     try std.testing.expect(pool.isAssignableTo(b, a));
@@ -3119,10 +2546,10 @@ test "a Dict is invariant in its key and covariant in its value" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const string_number = parseTypeExpr(&pool, allocator, "Dict<string, number>");
-    const number_number = parseTypeExpr(&pool, allocator, "Dict<number, number>");
+    const string_number = parseTypeText(&pool, allocator, "Dict<string, number>");
+    const number_number = parseTypeText(&pool, allocator, "Dict<number, number>");
     const string_literal = pool.addDict(allocator, pool.idx_string, pool.addLiteralString(allocator, "a"));
-    const string_string = parseTypeExpr(&pool, allocator, "Dict<string, string>");
+    const string_string = parseTypeText(&pool, allocator, "Dict<string, string>");
 
     // The key decides which lookups can be satisfied, so neither direction.
     try std.testing.expect(!pool.isAssignableTo(string_number, number_number));
@@ -3139,13 +2566,13 @@ test "null is admitted only where the type names it" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const string_or_null = parseTypeExpr(&pool, allocator, "string | null");
+    const string_or_null = parseTypeText(&pool, allocator, "string | null");
     try std.testing.expectEqual(TypeTag.t_union, pool.getTag(string_or_null).?);
     try std.testing.expect(pool.isAssignableTo(pool.idx_null, string_or_null));
 
     // `string | undefined` parses to the nullable wrapper, which is exactly
     // `T | undefined`. Spec 5.3 keeps `null` out of it.
-    const string_or_undefined = parseTypeExpr(&pool, allocator, "string | undefined");
+    const string_or_undefined = parseTypeText(&pool, allocator, "string | undefined");
     try std.testing.expectEqual(TypeTag.t_nullable, pool.getTag(string_or_undefined).?);
     try std.testing.expect(!pool.isAssignableTo(pool.idx_null, string_or_undefined));
     try std.testing.expect(pool.isAssignableTo(pool.idx_undefined, string_or_undefined));
@@ -3155,33 +2582,33 @@ test "null is admitted only where the type names it" {
     try std.testing.expect(!pool.isAssignableTo(pool.idx_string, pool.idx_null));
 }
 
-test "parseTypeExpr union" {
+test "parseTypeText union" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const idx = parseTypeExpr(&pool, allocator, "string | number");
+    const idx = parseTypeText(&pool, allocator, "string | number");
     try std.testing.expectEqual(TypeTag.t_union, pool.getTag(idx).?);
     const members = pool.getUnionMembers(idx);
     try std.testing.expectEqual(@as(usize, 2), members.len);
 }
 
-test "parseTypeExpr optional" {
+test "parseTypeText optional" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const idx = parseTypeExpr(&pool, allocator, "string | undefined");
+    const idx = parseTypeText(&pool, allocator, "string | undefined");
     try std.testing.expectEqual(TypeTag.t_nullable, pool.getTag(idx).?);
     try std.testing.expectEqual(pool.idx_string, pool.getNullableInner(idx));
 }
 
-test "parseTypeExpr record" {
+test "parseTypeText record" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const idx = parseTypeExpr(&pool, allocator, "{ ok: boolean; value: string }");
+    const idx = parseTypeText(&pool, allocator, "{ ok: boolean; value: string }");
     try std.testing.expectEqual(TypeTag.t_record, pool.getTag(idx).?);
     const fields = pool.getRecordFields(idx);
     try std.testing.expectEqual(@as(usize, 2), fields.len);
@@ -3189,26 +2616,26 @@ test "parseTypeExpr record" {
     try std.testing.expectEqualStrings("value", pool.getName(fields[1].name_start, fields[1].name_len));
 }
 
-test "parseTypeExpr function" {
+test "parseTypeText function" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const idx = parseTypeExpr(&pool, allocator, "(key: string) => boolean");
+    const idx = parseTypeText(&pool, allocator, "(key: string) => boolean");
     try std.testing.expectEqual(TypeTag.t_function, pool.getTag(idx).?);
 }
 
-test "parseTypeExpr array" {
+test "parseTypeText array" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const idx = parseTypeExpr(&pool, allocator, "number[]");
+    const idx = parseTypeText(&pool, allocator, "number[]");
     try std.testing.expectEqual(TypeTag.t_array, pool.getTag(idx).?);
     try std.testing.expectEqual(pool.idx_number, pool.getArrayElement(idx));
 }
 
-test "parseTypeExpr applies the array suffix to every element form" {
+test "parseTypeText applies the array suffix to every element form" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -3218,63 +2645,63 @@ test "parseTypeExpr applies the array suffix to every element form" {
     // `[]` and resolved to the element. A declared `{ name: string }[]` became
     // `{ name: string }`, which refused the array it was initialized with and
     // then refused `.length` on it.
-    const record = parseTypeExpr(&pool, allocator, "{ name: string }[]");
+    const record = parseTypeText(&pool, allocator, "{ name: string }[]");
     try std.testing.expectEqual(TypeTag.t_array, pool.getTag(record).?);
     try std.testing.expectEqual(TypeTag.t_record, pool.getTag(pool.getArrayElement(record)).?);
 
-    const paren = parseTypeExpr(&pool, allocator, "(string | number)[]");
+    const paren = parseTypeText(&pool, allocator, "(string | number)[]");
     try std.testing.expectEqual(TypeTag.t_array, pool.getTag(paren).?);
     try std.testing.expectEqual(TypeTag.t_union, pool.getTag(pool.getArrayElement(paren)).?);
 
     // A parenthesised group whose body does not start with an identifier used
     // to resolve to nothing at all, so this covers the grouping fix as well as
     // the suffix.
-    const fn_paren = parseTypeExpr(&pool, allocator, "(() => string)");
+    const fn_paren = parseTypeText(&pool, allocator, "(() => string)");
     try std.testing.expectEqual(TypeTag.t_function, pool.getTag(fn_paren).?);
 
-    const func = parseTypeExpr(&pool, allocator, "(() => string)[]");
+    const func = parseTypeText(&pool, allocator, "(() => string)[]");
     try std.testing.expectEqual(TypeTag.t_array, pool.getTag(func).?);
     try std.testing.expectEqual(TypeTag.t_function, pool.getTag(pool.getArrayElement(func)).?);
 
-    const grouped_literals = parseTypeExpr(&pool, allocator, "(\"a\" | \"b\")[]");
+    const grouped_literals = parseTypeText(&pool, allocator, "(\"a\" | \"b\")[]");
     try std.testing.expectEqual(TypeTag.t_array, pool.getTag(grouped_literals).?);
     try std.testing.expectEqual(TypeTag.t_union, pool.getTag(pool.getArrayElement(grouped_literals)).?);
 
-    const literal = parseTypeExpr(&pool, allocator, "\"GET\"[]");
+    const literal = parseTypeText(&pool, allocator, "\"GET\"[]");
     try std.testing.expectEqual(TypeTag.t_array, pool.getTag(literal).?);
     try std.testing.expectEqual(TypeTag.t_literal_string, pool.getTag(pool.getArrayElement(literal)).?);
 
-    const tuple = parseTypeExpr(&pool, allocator, "[string, number][]");
+    const tuple = parseTypeText(&pool, allocator, "[string, number][]");
     try std.testing.expectEqual(TypeTag.t_array, pool.getTag(tuple).?);
     try std.testing.expectEqual(TypeTag.t_tuple, pool.getTag(pool.getArrayElement(tuple)).?);
 
     // Nesting still stacks, and a bare element form is untouched.
-    const nested = parseTypeExpr(&pool, allocator, "{ name: string }[][]");
+    const nested = parseTypeText(&pool, allocator, "{ name: string }[][]");
     try std.testing.expectEqual(TypeTag.t_array, pool.getTag(nested).?);
     try std.testing.expectEqual(TypeTag.t_array, pool.getTag(pool.getArrayElement(nested)).?);
 
-    const bare = parseTypeExpr(&pool, allocator, "{ name: string }");
+    const bare = parseTypeText(&pool, allocator, "{ name: string }");
     try std.testing.expectEqual(TypeTag.t_record, pool.getTag(bare).?);
 
-    const bare_tuple = parseTypeExpr(&pool, allocator, "[string, number]");
+    const bare_tuple = parseTypeText(&pool, allocator, "[string, number]");
     try std.testing.expectEqual(TypeTag.t_tuple, pool.getTag(bare_tuple).?);
 }
 
-test "parseTypeExpr string literal" {
+test "parseTypeText string literal" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const idx = parseTypeExpr(&pool, allocator, "\"GET\"");
+    const idx = parseTypeText(&pool, allocator, "\"GET\"");
     try std.testing.expectEqual(TypeTag.t_literal_string, pool.getTag(idx).?);
 }
 
-test "parseTypeExpr named ref" {
+test "parseTypeText named ref" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const idx = parseTypeExpr(&pool, allocator, "Response");
+    const idx = parseTypeText(&pool, allocator, "Response");
     try std.testing.expectEqual(TypeTag.t_ref, pool.getTag(idx).?);
     try std.testing.expectEqualStrings("Response", pool.getRefName(idx));
 }
@@ -3367,12 +2794,12 @@ test "findUnionMemberByDiscriminant matches correct member" {
     try std.testing.expectEqual(err_member, excluded);
 }
 
-test "parseTypeExpr parses readonly record fields" {
+test "parseTypeText parses readonly record fields" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const idx = parseTypeExpr(&pool, allocator, "{ readonly port: number; host: string }");
+    const idx = parseTypeText(&pool, allocator, "{ readonly port: number; host: string }");
     try std.testing.expectEqual(TypeTag.t_record, pool.getTag(idx).?);
     const fields = pool.getRecordFields(idx);
     try std.testing.expectEqual(@as(usize, 2), fields.len);
@@ -3391,7 +2818,7 @@ test "makeReadonly marks all fields readonly" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const idx = parseTypeExpr(&pool, allocator, "{ port: number; host: string }");
+    const idx = parseTypeText(&pool, allocator, "{ port: number; host: string }");
     const ro = pool.makeReadonly(allocator, idx);
     const fields = pool.getRecordFields(ro);
     try std.testing.expectEqual(@as(usize, 2), fields.len);
@@ -3404,7 +2831,7 @@ test "makePartial marks all fields optional" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const idx = parseTypeExpr(&pool, allocator, "{ id: number; name: string }");
+    const idx = parseTypeText(&pool, allocator, "{ id: number; name: string }");
     const partial = pool.makePartial(allocator, idx);
     const fields = pool.getRecordFields(partial);
     try std.testing.expectEqual(@as(usize, 2), fields.len);
@@ -3417,7 +2844,7 @@ test "makeRequired clears optional on all fields" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const idx = parseTypeExpr(&pool, allocator, "{ id?: number; name?: string }");
+    const idx = parseTypeText(&pool, allocator, "{ id?: number; name?: string }");
     const required = pool.makeRequired(allocator, idx);
     const fields = pool.getRecordFields(required);
     try std.testing.expectEqual(@as(usize, 2), fields.len);
@@ -3430,8 +2857,8 @@ test "pickFields keeps only the named fields" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const rec = parseTypeExpr(&pool, allocator, "{ id: number; name: string; age: number }");
-    const keys = parseTypeExpr(&pool, allocator, "\"id\" | \"name\"");
+    const rec = parseTypeText(&pool, allocator, "{ id: number; name: string; age: number }");
+    const keys = parseTypeText(&pool, allocator, "\"id\" | \"name\"");
     const picked = pool.pickFields(allocator, rec, keys);
     const fields = pool.getRecordFields(picked);
     try std.testing.expectEqual(@as(usize, 2), fields.len);
@@ -3445,8 +2872,8 @@ test "pickFields with a single string-literal key" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const rec = parseTypeExpr(&pool, allocator, "{ id: number; name: string }");
-    const keys = parseTypeExpr(&pool, allocator, "\"id\"");
+    const rec = parseTypeText(&pool, allocator, "{ id: number; name: string }");
+    const keys = parseTypeText(&pool, allocator, "\"id\"");
     const picked = pool.pickFields(allocator, rec, keys);
     const fields = pool.getRecordFields(picked);
     try std.testing.expectEqual(@as(usize, 1), fields.len);
@@ -3459,8 +2886,8 @@ test "omitFields drops the named fields" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const rec = parseTypeExpr(&pool, allocator, "{ id: number; name: string; age: number }");
-    const keys = parseTypeExpr(&pool, allocator, "\"age\"");
+    const rec = parseTypeText(&pool, allocator, "{ id: number; name: string; age: number }");
+    const keys = parseTypeText(&pool, allocator, "\"age\"");
     const omitted = pool.omitFields(allocator, rec, keys);
     const fields = pool.getRecordFields(omitted);
     try std.testing.expectEqual(@as(usize, 2), fields.len);
@@ -3469,12 +2896,12 @@ test "omitFields drops the named fields" {
     try std.testing.expect(pool.lookupRecordField(omitted, "age") == null);
 }
 
-test "parseTypeExpr template literal type" {
+test "parseTypeText template literal type" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const idx = parseTypeExpr(&pool, allocator, "`/api/${string}`");
+    const idx = parseTypeText(&pool, allocator, "`/api/${string}`");
     try std.testing.expectEqual(TypeTag.t_template_literal, pool.getTag(idx).?);
     const parts = pool.getTemplateParts(idx);
     try std.testing.expectEqual(@as(usize, 2), parts.len);
@@ -3489,7 +2916,7 @@ test "matchesTemplateLiteral matches correctly" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const template = parseTypeExpr(&pool, allocator, "`/api/${string}`");
+    const template = parseTypeText(&pool, allocator, "`/api/${string}`");
     const good = pool.addLiteralString(allocator, "/api/users");
     const bad = pool.addLiteralString(allocator, "/other");
 
@@ -3502,7 +2929,7 @@ test "template literal type assignability" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const template = parseTypeExpr(&pool, allocator, "`/api/${string}`");
+    const template = parseTypeText(&pool, allocator, "`/api/${string}`");
     const good = pool.addLiteralString(allocator, "/api/users");
     const bad = pool.addLiteralString(allocator, "/other");
 
@@ -3533,12 +2960,12 @@ test "addIntersection drops duplicate members" {
     try std.testing.expectEqual(pool.idx_number, members[1]);
 }
 
-test "parseTypeExpr intersection two members" {
+test "parseTypeText intersection two members" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const idx = parseTypeExpr(&pool, allocator, "string & number");
+    const idx = parseTypeText(&pool, allocator, "string & number");
     try std.testing.expectEqual(TypeTag.t_intersection, pool.getTag(idx).?);
     const members = pool.getIntersectionMembers(idx);
     try std.testing.expectEqual(@as(usize, 2), members.len);
@@ -3546,23 +2973,23 @@ test "parseTypeExpr intersection two members" {
     try std.testing.expectEqual(pool.idx_number, members[1]);
 }
 
-test "parseTypeExpr intersection three members" {
+test "parseTypeText intersection three members" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const idx = parseTypeExpr(&pool, allocator, "string & number & boolean");
+    const idx = parseTypeText(&pool, allocator, "string & number & boolean");
     try std.testing.expectEqual(TypeTag.t_intersection, pool.getTag(idx).?);
     try std.testing.expectEqual(@as(usize, 3), pool.getIntersectionMembers(idx).len);
 }
 
-test "parseTypeExpr intersection binds tighter than union" {
+test "parseTypeText intersection binds tighter than union" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
     // `string | number & boolean` parses as `string | (number & boolean)`
-    const idx = parseTypeExpr(&pool, allocator, "string | number & boolean");
+    const idx = parseTypeText(&pool, allocator, "string | number & boolean");
     try std.testing.expectEqual(TypeTag.t_union, pool.getTag(idx).?);
     const members = pool.getUnionMembers(idx);
     try std.testing.expectEqual(@as(usize, 2), members.len);
@@ -3570,24 +2997,24 @@ test "parseTypeExpr intersection binds tighter than union" {
     try std.testing.expectEqual(TypeTag.t_intersection, pool.getTag(members[1]).?);
 }
 
-test "parseTypeExpr leading-pipe union" {
+test "parseTypeText leading-pipe union" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
     // Multi-line union style: leading `|` is permitted before the first member.
-    const idx = parseTypeExpr(&pool, allocator, "| \"a\" | \"b\" | \"c\"");
+    const idx = parseTypeText(&pool, allocator, "| \"a\" | \"b\" | \"c\"");
     try std.testing.expectEqual(TypeTag.t_union, pool.getTag(idx).?);
     try std.testing.expectEqual(@as(usize, 3), pool.getUnionMembers(idx).len);
 }
 
-test "parseTypeExpr leading-amp intersection" {
+test "parseTypeText leading-amp intersection" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
     // Multi-line intersection style: leading `&` is permitted before the first member.
-    const idx = parseTypeExpr(&pool, allocator, "& string & number");
+    const idx = parseTypeText(&pool, allocator, "& string & number");
     try std.testing.expectEqual(TypeTag.t_intersection, pool.getTag(idx).?);
     try std.testing.expectEqual(@as(usize, 2), pool.getIntersectionMembers(idx).len);
 }
@@ -3702,13 +3129,13 @@ test "isAssignableTo refuses unresolved names on either side" {
     // string[] -> T[]
     try std.testing.expect(!pool.isAssignableTo(strings, t_array_of_param));
     // tuple of string literals -> T[]
-    const lit = parseTypeExpr(&pool, allocator, "\"alice\"");
+    const lit = parseTypeText(&pool, allocator, "\"alice\"");
     const tuple = pool.addTuple(allocator, &.{ lit, lit });
     try std.testing.expect(!pool.isAssignableTo(tuple, t_array_of_param));
     // T -> string (return-position: `const head: string = first<string>(xs)`)
     try std.testing.expect(!pool.isAssignableTo(t_param, pool.idx_string));
     // Unresolved named ref -> number
-    const ref = parseTypeExpr(&pool, allocator, "SomeAlias");
+    const ref = parseTypeText(&pool, allocator, "SomeAlias");
     try std.testing.expect(!pool.isAssignableTo(ref, pool.idx_number));
     // Concrete mismatches still reject
     try std.testing.expect(!pool.isAssignableTo(pool.idx_number, pool.idx_string));
@@ -3737,7 +3164,7 @@ test "a name nested in a compound type resolves during the comparison" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const todo = parseTypeExpr(&pool, allocator, "{ text: string, done: boolean }");
+    const todo = parseTypeText(&pool, allocator, "{ text: string, done: boolean }");
     const todo_ref = pool.addRef(allocator, "Todo");
     const todos = pool.addArray(allocator, todo_ref);
     const literal_todos = pool.addArray(allocator, todo);
@@ -3783,7 +3210,7 @@ test "readonly array canonical spelling parses and prints" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const modifier = parseTypeExpr(&pool, allocator, "readonly string[]");
+    const modifier = parseTypeText(&pool, allocator, "readonly string[]");
     try std.testing.expect(pool.isReadonlyArray(modifier));
     try std.testing.expectEqual(pool.idx_string, pool.getArrayElement(modifier));
 
@@ -3791,7 +3218,7 @@ test "readonly array canonical spelling parses and prints" {
     try std.testing.expectEqualStrings("readonly string[]", pool.formatType(modifier, &buf));
 
     // The bare spelling is still a mutable array.
-    const plain = parseTypeExpr(&pool, allocator, "string[]");
+    const plain = parseTypeText(&pool, allocator, "string[]");
     try std.testing.expect(!pool.isReadonlyArray(plain));
 }
 
@@ -3800,7 +3227,7 @@ test "Bytes resolves from its identifier and prints as Bytes" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const parsed = parseTypeExpr(&pool, allocator, "Bytes");
+    const parsed = parseTypeText(&pool, allocator, "Bytes");
     try std.testing.expectEqual(pool.idx_bytes, parsed);
     try std.testing.expectEqual(TypeTag.t_bytes, pool.getTag(parsed).?);
 
@@ -3808,7 +3235,7 @@ test "Bytes resolves from its identifier and prints as Bytes" {
     try std.testing.expectEqualStrings("Bytes", pool.formatType(parsed, &buf));
 
     // It is a name, so the array suffix applies to it like any other.
-    const list = parseTypeExpr(&pool, allocator, "Bytes[]");
+    const list = parseTypeText(&pool, allocator, "Bytes[]");
     try std.testing.expectEqual(TypeTag.t_array, pool.getTag(list).?);
     try std.testing.expectEqual(pool.idx_bytes, pool.getArrayElement(list));
 
@@ -3829,7 +3256,7 @@ test "a string is not a Bytes and a Bytes is not a string" {
 
     // Nor is it a number, nor an array of them - the shape an octet list has
     // before `bytesFromOctets` reads it.
-    const octets = parseTypeExpr(&pool, allocator, "number[]");
+    const octets = parseTypeText(&pool, allocator, "number[]");
     try std.testing.expect(!pool.isAssignableTo(octets, pool.idx_bytes));
     try std.testing.expect(!pool.isAssignableTo(pool.idx_bytes, octets));
 
@@ -3915,8 +3342,8 @@ test "two independently parsed Bytes share a canonical digest" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const a = parseTypeExpr(&pool, allocator, "Bytes");
-    const b = parseTypeExpr(&pool, allocator, " Bytes ");
+    const a = parseTypeText(&pool, allocator, "Bytes");
+    const b = parseTypeText(&pool, allocator, " Bytes ");
 
     try std.testing.expectEqualStrings(
         try type_key.typeKey(&pool, allocator, a),
@@ -4082,7 +3509,7 @@ test "instantiate preserves generic app args wider than old stack buffers" {
     }
 }
 
-test "parseTypeExpr keeps unions wider than thirty two members" {
+test "parseTypeText keeps unions wider than thirty two members" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -4094,12 +3521,12 @@ test "parseTypeExpr keeps unions wider than thirty two members" {
         try writer.print("\"k{d}\"", .{i});
     }
 
-    const idx = parseTypeExpr(&pool, allocator, writer.buffer[0..writer.end]);
+    const idx = parseTypeText(&pool, allocator, writer.buffer[0..writer.end]);
     try std.testing.expectEqual(TypeTag.t_union, pool.getTag(idx).?);
     try std.testing.expectEqual(@as(usize, 40), pool.getUnionMembers(idx).len);
 }
 
-test "parseTypeExpr keeps record fields wider than thirty two fields" {
+test "parseTypeText keeps record fields wider than thirty two fields" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -4112,12 +3539,12 @@ test "parseTypeExpr keeps record fields wider than thirty two fields" {
     }
     try writer.writeAll(" }");
 
-    const idx = parseTypeExpr(&pool, allocator, writer.buffer[0..writer.end]);
+    const idx = parseTypeText(&pool, allocator, writer.buffer[0..writer.end]);
     try std.testing.expectEqual(TypeTag.t_record, pool.getTag(idx).?);
     try std.testing.expectEqual(@as(usize, 40), pool.getRecordFields(idx).len);
 }
 
-test "parseTypeExpr keeps generic app args wider than eight args" {
+test "parseTypeText keeps generic app args wider than eight args" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -4131,12 +3558,12 @@ test "parseTypeExpr keeps generic app args wider than eight args" {
     }
     try writer.writeByte('>');
 
-    const idx = parseTypeExpr(&pool, allocator, writer.buffer[0..writer.end]);
+    const idx = parseTypeText(&pool, allocator, writer.buffer[0..writer.end]);
     try std.testing.expectEqual(TypeTag.t_generic_app, pool.getTag(idx).?);
     try std.testing.expectEqual(@as(usize, 12), pool.getGenericAppInfo(idx).args.len);
 }
 
-test "parseTypeExpr keeps template literal parts wider than sixteen parts" {
+test "parseTypeText keeps template literal parts wider than sixteen parts" {
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -4149,7 +3576,7 @@ test "parseTypeExpr keeps template literal parts wider than sixteen parts" {
     }
     try writer.writeByte('`');
 
-    const idx = parseTypeExpr(&pool, allocator, writer.buffer[0..writer.end]);
+    const idx = parseTypeText(&pool, allocator, writer.buffer[0..writer.end]);
     try std.testing.expectEqual(TypeTag.t_template_literal, pool.getTag(idx).?);
     try std.testing.expectEqual(@as(usize, 36), pool.getTemplateParts(idx).len);
 }
@@ -4165,7 +3592,7 @@ test "a template literal type is assignable to string" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const route = parseTypeExpr(&pool, allocator, "`/api/${string}`");
+    const route = parseTypeText(&pool, allocator, "`/api/${string}`");
     try std.testing.expectEqual(TypeTag.t_template_literal, pool.getTag(route).?);
 
     try std.testing.expect(pool.isAssignableTo(route, pool.idx_string));
@@ -4174,7 +3601,7 @@ test "a template literal type is assignable to string" {
     // The rule is about `string` and nothing wider: a pattern type is not a
     // number, and it does not become assignable to some other pattern.
     try std.testing.expect(!pool.isAssignableTo(route, pool.idx_number));
-    const other = parseTypeExpr(&pool, allocator, "`/v2/${string}`");
+    const other = parseTypeText(&pool, allocator, "`/v2/${string}`");
     try std.testing.expect(!pool.isAssignableTo(route, other));
 }
 
@@ -4227,8 +3654,8 @@ test "a union keeps the wider of two records" {
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
 
-    const narrow = parseTypeExpr(&pool, allocator, "{ id: string }");
-    const wide = parseTypeExpr(&pool, allocator, "{ id: string; error: string }");
+    const narrow = parseTypeText(&pool, allocator, "{ id: string }");
+    const wide = parseTypeText(&pool, allocator, "{ id: string; error: string }");
     const joined = pool.addUnion(allocator, &.{ narrow, wide });
 
     try std.testing.expectEqual(TypeTag.t_union, pool.getTag(joined).?);
@@ -4236,7 +3663,7 @@ test "a union keeps the wider of two records" {
 
     // The control: a literal beside its own base still collapses, which is what
     // subsumption is for.
-    const collapsed = pool.addUnion(allocator, &.{ pool.idx_string, parseTypeExpr(&pool, allocator, "\"a\"") });
+    const collapsed = pool.addUnion(allocator, &.{ pool.idx_string, parseTypeText(&pool, allocator, "\"a\"") });
     try std.testing.expectEqual(pool.idx_string, collapsed);
 }
 

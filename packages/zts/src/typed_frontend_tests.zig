@@ -29,7 +29,7 @@ const TypeIndex = type_pool_mod.TypeIndex;
 const TypePool = type_pool_mod.TypePool;
 const TypeTag = type_pool_mod.TypeTag;
 const null_type_idx = type_pool_mod.null_type_idx;
-const parseTypeExpr = type_pool_mod.parseTypeExpr;
+const parseTypeText = @import("type_syntax_lowering.zig").parseTypeText;
 
 fn serializeContractForConsumerTest(
     allocator: std.mem.Allocator,
@@ -8527,7 +8527,7 @@ test "application lowering matches legacy compact node capacity and order" {
             try fillPoolToRemainingNodes(allocator, &pool, necessary_nodes);
             const prior_nodes = pool.nodes.items.len;
             const prior_names = pool.names.items.len;
-            const result = parseTypeExpr(&pool, allocator, type_source);
+            const result = parseTypeText(&pool, allocator, type_source);
             try pool.ensureHealthy();
             try assertApplicationCapacityShape(case, &pool, result, prior_nodes, prior_names);
         }
@@ -8558,7 +8558,7 @@ test "application lowering matches legacy compact node capacity and order" {
             try pool.ensureHealthy();
             try env.ensureHealthy();
             try fillPoolToRemainingNodes(allocator, &pool, necessary_nodes - 1);
-            _ = parseTypeExpr(&pool, allocator, type_source);
+            _ = parseTypeText(&pool, allocator, type_source);
             try std.testing.expectError(error.TypePoolCapacityExceeded, pool.ensureHealthy());
         }
         {

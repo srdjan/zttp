@@ -37,8 +37,8 @@ pub const ReturnKind = sdk.ReturnKind;
 /// export whose type is a literal union, a record, or a named ABI type had to
 /// declare `.object` or `.unknown` and lose the question at the call site.
 /// This is the override: `returnKindToTs` reads the text here before falling
-/// back to the enum, and `parseTypeExpr` - the same parser that already builds
-/// every module signature - turns it into the precise type.
+/// back to the enum, and `parseTypeText` - the same parser authored source uses - turns it
+/// into the precise type.
 ///
 /// It is a channel that already exists, not a new one. The frozen-signature
 /// gate runs the whole pipeline over every export, so a declared signature is

@@ -10,8 +10,8 @@
 //! four sites, and a name that resolves at none of them reaches the checker as
 //! an unresolved reference:
 //!
-//! - `type_pool.TypeExprParser.resolveIdentType`, for the primitives,
-//! - `type_pool.TypeExprParser.parseGenericApp`, for `Dict<K, V>`, which is a
+//! - `parser/type_syntax` primitive names, for the primitives,
+//! - `type_syntax_lowering.lowerOwnedRange`, for `Dict<K, V>`, which is a
 //!   value kind of its own rather than an alias a handler could shadow,
 //! - `type_env.TypeEnv.registerBuiltins`, for the capsule aliases,
 //! - `abi_types.populateHandlerAbiTypes`, for the handler ABI's two nominal

@@ -3,6 +3,7 @@
 const std = @import("std");
 const engine = @import("zts-engine");
 const type_pool_mod = @import("type_pool.zig");
+const type_key = @import("type_key.zig");
 
 const TypeSyntax = engine.parser.type_syntax;
 const TypePool = type_pool_mod.TypePool;
@@ -809,27 +810,45 @@ pub fn primitiveIndex(pool: *const TypePool, primitive: TypeSyntax.Primitive) Ty
     };
 }
 
-fn expectExactPool(left: *const TypePool, right: *const TypePool) !void {
-    try std.testing.expectEqual(left.nodes.items.len, right.nodes.items.len);
-    for (left.nodes.items, right.nodes.items) |a, b| try std.testing.expect(std.meta.eql(a, b));
-    try std.testing.expectEqual(left.fields.items.len, right.fields.items.len);
-    for (left.fields.items, right.fields.items) |a, b| try std.testing.expect(std.meta.eql(a, b));
-    try std.testing.expectEqual(left.params.items.len, right.params.items.len);
-    for (left.params.items, right.params.items) |a, b| try std.testing.expect(std.meta.eql(a, b));
-    try std.testing.expectEqualSlices(TypeIndex, left.members.items, right.members.items);
-    try std.testing.expectEqualSlices(u8, left.names.items, right.names.items);
-    try std.testing.expectEqual(left.template_parts.items.len, right.template_parts.items.len);
-    for (left.template_parts.items, right.template_parts.items) |a, b| {
-        try std.testing.expect(std.meta.eql(a, b));
+/// What the old standalone parser produced for a parity input, recorded before it was removed:
+/// the canonical type key, or that the root is null or has no key, plus the pool name bytes
+/// (which fix the order the constructors interned their names in).
+const ExpectedType = union(enum) {
+    key: []const u8,
+    null_root,
+    key_error,
+};
+
+fn expectLoweredType(pool: *TypePool, root: TypeIndex, expected: ExpectedType, names: []const u8) !void {
+    const allocator = std.testing.allocator;
+    switch (expected) {
+        .null_root => try std.testing.expectEqual(null_type_idx, root),
+        .key => |want| {
+            // The pool caches and owns the key.
+            const key = try type_key.typeKey(pool, allocator, root);
+            try std.testing.expectEqualStrings(want, key);
+        },
+        .key_error => try std.testing.expectError(error.AbsentType, type_key.typeKey(pool, allocator, root)),
     }
+    try std.testing.expectEqualStrings(names, pool.names.items);
 }
 
-fn expectParsedLoweringMatchesLegacy(source: []const u8, rejected_prefix: ?[]const u8) !void {
+fn expectParsedLowering(
+    source: []const u8,
+    expected: ExpectedType,
+    names: []const u8,
+    rejected_prefix: ?[]const u8,
+) !void {
     const allocator = std.testing.allocator;
-    var legacy = TypePool.init(allocator);
-    defer legacy.deinit(allocator);
-    const legacy_root = type_pool_mod.parseTypeExpr(&legacy, allocator, source);
-    try legacy.ensureHealthy();
+    var standalone = TypePool.init(allocator);
+    defer standalone.deinit(allocator);
+    const standalone_root = parseTypeText(&standalone, allocator, source);
+    try standalone.ensureHealthy();
+    if (rejected_prefix == null) {
+        try expectLoweredType(&standalone, standalone_root, expected, names);
+    } else {
+        try std.testing.expectEqual(null_type_idx, standalone_root);
+    }
 
     var store = TypeSyntax.Store.init(allocator, source);
     defer store.deinit();
@@ -868,38 +887,58 @@ fn expectParsedLoweringMatchesLegacy(source: []const u8, rejected_prefix: ?[]con
     const direct_root = try loweredChild(lowered, value.root, lowered.len);
     try direct.ensureHealthy();
     if (rejected_prefix) |name| {
-        try std.testing.expectEqual(null_type_idx, legacy_root);
         try std.testing.expectEqual(type_pool_mod.TypeTag.t_ref, direct.getTag(direct_root).?);
         try std.testing.expectEqualStrings(name, direct.getRefName(direct_root));
+        try std.testing.expectEqualStrings(names, direct.names.items);
     } else {
-        try std.testing.expectEqual(legacy_root, direct_root);
+        try expectLoweredType(&direct, direct_root, expected, names);
     }
-    try expectExactPool(&legacy, &direct);
 }
 
-test "parsed lowering preserves legacy constructor name order" {
-    const cases = [_][]const u8{
-        "(value: T) => Effects<T, \"crypto\">",
-        "(first: Left, second: Right, third: End) => Result",
-        "{ first: Left; second: Right; third: End }",
-        "`a${Left}b${Right}c`",
-        "{ callback: (first: Left, second: `x${Right}y`) => { result: End } }",
-        "(first: Left, second:) =>",
-        "number",
-        "()",
+test "parsed lowering preserves constructor name order" {
+    // Keys and names are what the removed standalone parser produced for each input.
+    const cases = [_]struct { source: []const u8, expected: ExpectedType, names: []const u8 }{
+        .{
+            .source = "(value: T) => Effects<T, \"crypto\">",
+            .expected = .{ .key = "F1.Z1:T->X2Z1:TLs6:crypto7:Effects" },
+            .names = "TvalueTcryptoEffects",
+        },
+        .{
+            .source = "(first: Left, second: Right, third: End) => Result",
+            .expected = .{ .key = "F3.Z4:Left.Z5:Right.Z3:End->Z6:Result" },
+            .names = "LeftfirstRightsecondEndthirdResult",
+        },
+        .{
+            .source = "{ first: Left; second: Right; third: End }",
+            .expected = .{ .key = "R3.5:firstZ4:Left.6:secondZ5:Right.5:thirdZ3:End" },
+            .names = "LeftfirstRightsecondEndthird",
+        },
+        .{
+            .source = "`a${Left}b${Right}c`",
+            .expected = .{ .key = "M5l1:atZ4:Leftl1:btZ5:Rightl1:c" },
+            .names = "aLeftbRightc",
+        },
+        .{
+            .source = "{ callback: (first: Left, second: `x${Right}y`) => { result: End } }",
+            .expected = .{ .key = "R1.8:callbackF2.Z4:Left.M3l1:xtZ5:Rightl1:y->R1.6:resultZ3:End" },
+            .names = "LeftfirstxRightysecondEndresultcallback",
+        },
+        .{ .source = "(first: Left, second:) =>", .expected = .key_error, .names = "Leftfirstsecond" },
+        .{ .source = "number", .expected = .{ .key = "n" }, .names = "" },
+        .{ .source = "()", .expected = .null_root, .names = "" },
     };
-    for (cases) |source| try expectParsedLoweringMatchesLegacy(source, null);
+    for (cases) |case| try expectParsedLowering(case.source, case.expected, case.names, null);
 }
 
 test "admitted malformed groups retain lowering while binding signatures reject their suffix" {
     // Direct admission retains its historical prefix; binding signatures require full consumption.
-    const cases = [_]struct { source: []const u8, prefix: []const u8 }{
-        .{ .source = "(first: Left, Right)", .prefix = "first" },
-        .{ .source = "(first: Left, second: Right, Final)", .prefix = "first" },
-        .{ .source = "((inner: Left, Selected), Outer)", .prefix = "inner" },
-        .{ .source = "(first: Outer<Left>, Selected)", .prefix = "first" },
+    const cases = [_]struct { source: []const u8, prefix: []const u8, names: []const u8 }{
+        .{ .source = "(first: Left, Right)", .prefix = "first", .names = "Leftfirstfirst" },
+        .{ .source = "(first: Left, second: Right, Final)", .prefix = "first", .names = "LeftfirstRightsecondfirst" },
+        .{ .source = "((inner: Left, Selected), Outer)", .prefix = "inner", .names = "Leftinnerinner" },
+        .{ .source = "(first: Outer<Left>, Selected)", .prefix = "first", .names = "LeftOuterfirstfirst" },
     };
-    for (cases) |case| try expectParsedLoweringMatchesLegacy(case.source, case.prefix);
+    for (cases) |case| try expectParsedLowering(case.source, .null_root, case.names, case.prefix);
 }
 
 test "public lowering closes allocation failures and preserves constructor order" {
@@ -946,7 +985,6 @@ test "public lowering closes allocation failures and preserves constructor order
             bases: *const TypeSyntax.Store.ApplicationBasePlan,
             syntax_range: TypeSyntax.Range,
             root: TypeSyntax.Child,
-            type_source: []const u8,
             saw_early_failure: *bool,
             saw_pool_failure: *bool,
             saw_success: *bool,
@@ -985,16 +1023,12 @@ test "public lowering closes allocation failures and preserves constructor order
 
             try pool.ensureHealthy();
             const direct_root = try loweredChild(lowered, root, lowered.len);
-            var legacy = TypePool.init(std.testing.allocator);
-            defer legacy.deinit(std.testing.allocator);
-            const legacy_root = type_pool_mod.parseTypeExpr(
-                &legacy,
-                std.testing.allocator,
-                type_source,
+            try expectLoweredType(
+                &pool,
+                direct_root,
+                .{ .key = "R1.8:callbackF2.Z4:Left.M3l1:xtZ5:Rightl1:y->R1.6:resultZ3:End" },
+                "LeftfirstxRightysecondEndresultcallback",
             );
-            try legacy.ensureHealthy();
-            try std.testing.expectEqual(legacy_root, direct_root);
-            try expectExactPool(&legacy, &pool);
             try std.testing.expect(pool.fields.items.len != 0);
             try std.testing.expect(pool.params.items.len != 0);
             try std.testing.expect(pool.template_parts.items.len != 0);
@@ -1006,7 +1040,6 @@ test "public lowering closes allocation failures and preserves constructor order
         &application_bases,
         annotation.node_range,
         annotation.root,
-        annotation.raw_span.text(source),
         &observed_early_failure,
         &observed_pool_failure,
         &observed_success,

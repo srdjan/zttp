@@ -17,7 +17,7 @@ const type_syntax_lowering = @import("type_syntax_lowering.zig");
 const TypePool = type_pool_mod.TypePool;
 const TypeIndex = type_pool_mod.TypeIndex;
 const null_type_idx = type_pool_mod.null_type_idx;
-const parseTypeExpr = type_pool_mod.parseTypeExpr;
+const parseTypeText = type_syntax_lowering.parseTypeText;
 const TypeSyntax = engine.parser.type_syntax;
 const IrView = engine.parser.IrView;
 const NodeIndex = engine.parser.NodeIndex;
@@ -3453,7 +3453,7 @@ test "TypeEnv reports intersection snapshot allocation failure" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    const intersection = type_pool_mod.parseTypeExpr(&pool, allocator, "string & number");
+    const intersection = parseTypeText(&pool, allocator, "string & number");
     try std.testing.expectEqual(type_pool_mod.TypeTag.t_intersection, pool.getTag(intersection).?);
 
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
@@ -3520,7 +3520,7 @@ test "resolveType Pick<User, keys> keeps only the named fields" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    const user = parseTypeExpr(&pool, allocator, "{ id: number; name: string; age: number }");
+    const user = parseTypeText(&pool, allocator, "{ id: number; name: string; age: number }");
     env.type_aliases.put(allocator, env.internName("User"), user) catch unreachable;
 
     const picked = env.resolveType("Pick<User, \"id\" | \"name\">");
@@ -3538,13 +3538,13 @@ test "resolveType Pick<User, Keys> resolves an aliased key union (not the full s
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    const user = parseTypeExpr(&pool, allocator, "{ id: number; name: string; age: number }");
+    const user = parseTypeText(&pool, allocator, "{ id: number; name: string; age: number }");
     env.type_aliases.put(allocator, env.internName("User"), user) catch unreachable;
     // Keys is a named alias of a string-literal union. Previously the keys
     // argument was not alias-resolved, so collectStringKeys saw a t_ref, found
     // zero keys, and Pick silently returned the full User - an unsound
     // over-accept. It must now resolve to exactly {id, name}.
-    const keys = parseTypeExpr(&pool, allocator, "\"id\" | \"name\"");
+    const keys = parseTypeText(&pool, allocator, "\"id\" | \"name\"");
     env.type_aliases.put(allocator, env.internName("Keys"), keys) catch unreachable;
 
     const picked = env.resolveType("Pick<User, Keys>");
@@ -3565,9 +3565,9 @@ test "resolveType Required<A> follows a forward alias chain to the record" {
     // `structural A = B` (forward) stores A as a t_ref(B); B is the record. Previously
     // resolveRefToRecord returned the t_ref unchanged, so Required<A> no-op'd and
     // accepted any record. It must now chase the chain and clear `host?`.
-    const b = parseTypeExpr(&pool, allocator, "{ host?: string }");
+    const b = parseTypeText(&pool, allocator, "{ host?: string }");
     env.type_aliases.put(allocator, env.internName("B"), b) catch unreachable;
-    const a = parseTypeExpr(&pool, allocator, "B");
+    const a = parseTypeText(&pool, allocator, "B");
     env.type_aliases.put(allocator, env.internName("A"), a) catch unreachable;
 
     const required = env.resolveType("Required<A>");
@@ -3584,7 +3584,7 @@ test "resolveType Omit<User, key> drops the named field" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    const user = parseTypeExpr(&pool, allocator, "{ id: number; name: string; age: number }");
+    const user = parseTypeText(&pool, allocator, "{ id: number; name: string; age: number }");
     env.type_aliases.put(allocator, env.internName("User"), user) catch unreachable;
 
     const omitted = env.resolveType("Omit<User, \"age\">");
@@ -3601,7 +3601,7 @@ test "resolveType Partial<User> makes fields optional and assignable from a subs
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    const user = parseTypeExpr(&pool, allocator, "{ id: number; name: string }");
+    const user = parseTypeText(&pool, allocator, "{ id: number; name: string }");
     env.type_aliases.put(allocator, env.internName("User"), user) catch unreachable;
 
     const partial = env.resolveType("Partial<User>");
@@ -3612,7 +3612,7 @@ test "resolveType Partial<User> makes fields optional and assignable from a subs
 
     // An object missing a field is assignable to Partial<User> but not to the
     // original required type - the transform flows into the assignability check.
-    const subset = parseTypeExpr(&pool, allocator, "{ id: number }");
+    const subset = parseTypeText(&pool, allocator, "{ id: number }");
     try std.testing.expect(pool.isAssignableTo(subset, partial));
     try std.testing.expect(!pool.isAssignableTo(subset, user));
 }
@@ -3624,7 +3624,7 @@ test "resolveType Required<Conf> clears optional and rejects a missing field" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    const conf = parseTypeExpr(&pool, allocator, "{ host?: string; port?: number }");
+    const conf = parseTypeText(&pool, allocator, "{ host?: string; port?: number }");
     env.type_aliases.put(allocator, env.internName("Conf"), conf) catch unreachable;
 
     const req = env.resolveType("Required<Conf>");
@@ -3633,7 +3633,7 @@ test "resolveType Required<Conf> clears optional and rejects a missing field" {
     try std.testing.expect(!fields[0].optional);
     try std.testing.expect(!fields[1].optional);
 
-    const subset = parseTypeExpr(&pool, allocator, "{ host: string }");
+    const subset = parseTypeText(&pool, allocator, "{ host: string }");
     try std.testing.expect(!pool.isAssignableTo(subset, req));
 }
 
@@ -3646,7 +3646,7 @@ test "TypeEnv object assignability accepts non-primitives and resolves known ali
 
     const object_ref = pool.addRef(allocator, "object");
     const optional_object = pool.addNullable(allocator, object_ref);
-    const record = parseTypeExpr(&pool, allocator, "{ id: number }");
+    const record = parseTypeText(&pool, allocator, "{ id: number }");
     const array = pool.addArray(allocator, pool.idx_number);
     const function = pool.addFunctionWithReturn(allocator, &.{}, pool.idx_undefined);
     const request_ref = pool.addRef(allocator, "Request");
