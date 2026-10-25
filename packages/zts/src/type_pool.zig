@@ -1680,20 +1680,6 @@ pub const TypePool = struct {
         // Intersection target: source must be assignable to every member
         if (tgt_tag == .t_intersection) {
             for (self.getIntersectionMembers(target)) |member| {
-                // D1 amendment A1, applied at this site ahead of the global
-                // rule. An unresolved member reaches the blanket-true at the
-                // bottom of this function and discharges the obligation rather
-                // than widening it, so `type AB = A & B` accepted a value
-                // missing B's field while the inline spelling of the same type
-                // rejected it. A dropped intersection member is a dropped
-                // constraint, which is the loss `unionMemberSubsumes` already
-                // refuses for the same reason.
-                //
-                // Kept after A1 closed below, and not redundant with it: the
-                // rule there refuses an unresolved name that reaches a
-                // comparison, and a member of an intersection target is
-                // discharged by this loop without ever reaching one.
-                if (self.firstUnresolvedName(member) != null) return false;
                 if (!self.assignableIn(ctx, source, member)) return false;
             }
             return true;

@@ -8865,6 +8865,28 @@ test "a 2500-alias chain reports no ZTS200" {
     try std.testing.expect(nodes <= 2 * 2500);
 }
 
+test "an intersection over an alias reference reports no ZTS200" {
+    try expectTypeMismatches(
+        \\structural A = { a: number };
+        \\structural B = A & { b: number };
+        \\const value: B = { a: 1, b: 2 };
+    , 0);
+    try expectTypeMismatches(
+        \\structural A = { a: number };
+        \\structural B = A & { b: number };
+        \\const value: B = { b: 2 };
+    , 1);
+    try expectTypeMismatches(
+        \\structural A = { a: number };
+        \\structural B = A & { b: number };
+        \\const value: B = { a: "x", b: 2 };
+    , 1);
+    try expectTypeMismatches(
+        \\structural B = Missing & { b: number };
+        \\const value: B = { b: 2 };
+    , 1);
+}
+
 test "field names that differ after byte 255 are distinct types" {
     const allocator = std.testing.allocator;
     const prefix = try allocator.alloc(u8, 255);
