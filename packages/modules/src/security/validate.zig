@@ -283,7 +283,17 @@ fn isSupportedKeyword(key: []const u8) bool {
     return false;
 }
 
+/// Maximum schema nesting. Compile, deinit, and coerceValue recurse once per
+/// level, so an unbounded schema is a native stack overflow. Same limit as the
+/// JSON parser in packages/zts/src/builtins/json.zig (MAX_JSON_DEPTH).
+const MAX_SCHEMA_DEPTH: u16 = 512;
+
 fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value) !*CompiledSchema {
+    return compileSchemaAt(allocator, json_val, 0);
+}
+
+fn compileSchemaAt(allocator: std.mem.Allocator, json_val: std.json.Value, depth: u16) !*CompiledSchema {
+    if (depth > MAX_SCHEMA_DEPTH) return error.InvalidSchema;
     const schema = try allocator.create(CompiledSchema);
     // deinit frees every sub-allocation already attached to the schema (each
     // field is guarded by `if (self.X)`, so this is idempotent and covers the
@@ -362,7 +372,7 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
             }
             var it = props_obj.iterator();
             while (it.next()) |entry| {
-                const child = try compileSchemaFromJson(allocator, entry.value_ptr.*);
+                const child = try compileSchemaAt(allocator, entry.value_ptr.*, depth + 1);
                 errdefer {
                     child.deinit(allocator);
                     allocator.destroy(child);
@@ -377,7 +387,7 @@ fn compileSchemaFromJson(allocator: std.mem.Allocator, json_val: std.json.Value)
     };
 
     if (obj.get("items")) |items_val| {
-        schema.items = try compileSchemaFromJson(allocator, items_val);
+        schema.items = try compileSchemaAt(allocator, items_val, depth + 1);
     }
 
     if (obj.get("enum")) |enum_val| switch (enum_val) {
@@ -1107,4 +1117,38 @@ test "validateIsoDatetime range-checks clock fields and bounds the suffix" {
     try std.testing.expect(!validateIsoDatetime("2024-01-15T10:30:00ZZZZ"));
     try std.testing.expect(!validateIsoDatetime("2024-01-15T10:30:00 garbage"));
     try std.testing.expect(!validateIsoDatetime("2024-01-15T10:30:00.")); // dot, no digits
+}
+
+/// `{"properties":{"a":` repeated `levels` times around `{}`.
+fn nestedSchemaText(allocator: std.mem.Allocator, levels: usize) ![]u8 {
+    const open = "{\"properties\":{\"a\":";
+    const close = "}}";
+    var text: std.ArrayList(u8) = .empty;
+    errdefer text.deinit(allocator);
+    for (0..levels) |_| try text.appendSlice(allocator, open);
+    try text.appendSlice(allocator, "{}");
+    for (0..levels) |_| try text.appendSlice(allocator, close);
+    return text.toOwnedSlice(allocator);
+}
+
+test "schema nesting past 512 is refused" {
+    const allocator = std.testing.allocator;
+    for ([_]usize{ 513, 100_000 }) |levels| {
+        const text = try nestedSchemaText(allocator, levels);
+        defer allocator.free(text);
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
+        defer parsed.deinit();
+        try std.testing.expectError(error.InvalidSchema, compileSchemaFromJson(allocator, parsed.value));
+    }
+}
+
+test "schema nesting at 511 compiles" {
+    const allocator = std.testing.allocator;
+    const text = try nestedSchemaText(allocator, 511);
+    defer allocator.free(text);
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, text, .{});
+    defer parsed.deinit();
+    const schema = try compileSchemaFromJson(allocator, parsed.value);
+    schema.deinit(allocator);
+    allocator.destroy(schema);
 }
