@@ -59,3 +59,30 @@ Tasks 1, 2, and 3 run in parallel. Each runs in its own detached worktree from l
 ## New findings
 
 - F10 (confirmed by the Task 1 worker's probe): `effect_inference.zig` `includeReachableNodeEffects` recursed about 8000 frames on the 60x400 shape, and Debug `zts check` died with SIGABRT. The fix converts the walk to an explicit work stack.
+
+### F10: committed `909a9704`
+
+- `includeReachableFunctionEffects` and `includeReachableNodeEffects` now walk an explicit `std.ArrayList(NodeIndex)` stack.
+- The test "reachable effects of deeply nested call sites do not recurse natively" covers the 60x400 shape.
+
+### Task 5 (alias and literal chains): committed `87f7530f`
+
+- `type_pool.zig` interns literal number, bool, and string types through `literal_memo`. A flat `+` chain now grows the pool linearly.
+- New tests: "a 511-term addition chain type-checks" and "a 2500-alias chain reports no ZTS200". `cli_abuse_check` adds a 511-term `add_chain` case.
+- The plan's ZTS200 claim for long alias chains did not reproduce. The remaining cost is quadratic time in `type_syntax.Store.validateOwnerRangesDoNotOverlap`. It is open.
+- A separate ZTS200 appears for an intersection over a reference at 2 aliases. It is open and out of scope.
+
+### P1 (names past 255 bytes): committed `766154dd`
+
+- `addName` refuses a name longer than 255 bytes with `TypePoolCapacityExceeded`. Before the fix, the name was truncated, so two long names could share one node.
+- A value string literal longer than 255 bytes widens to `string`.
+- Review finding: the merged Task 5 memo key truncated the literal to 255 bytes and brought P1 back. The reviewer changed `addLiteralString` to key and compare the full value. The test "a literal string past 255 bytes fails closed instead of sharing a node" pins the fix.
+- The Task 6 patch conflicted with Task 5 at the end of `type_checker.zig`. The reviewer resolved the diff3 markers by hand and checked the file with `zig fmt`.
+
+### P3 (schema depth): committed `68c26be9`
+
+- `validate.zig` refuses a schema nested deeper than `MAX_SCHEMA_DEPTH` (512) with `InvalidSchema`.
+
+### Gates after the Task 5 and Task 6 merge
+
+- The reviewer ran these on main: `test-zts`, `test-modules`, `test-proof-swallow`, `test-diagnostic-corpus`, `test-contract-golden`, `test-standin`, `test-cli-abuse`, `test-flow-census` (fail-open 0, over-refusal 0), and `check-spine`. All exit 0.
