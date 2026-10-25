@@ -61,7 +61,7 @@ The consumer must derive its verdict without producer authority. Commit `f2ecf5f
 
 - Status: standing
 - Decided: 2026-10-13
-- Binds: packages/tools/src/precompile.zig, packages/tools/src/precompile_imports.zig, packages/zts/src/path_generator.zig
+- Binds: packages/tools/src/precompile.zig, packages/tools/src/precompile_check_run.zig, packages/tools/src/precompile_imports.zig, packages/zts/src/path_generator.zig
 - Gate: zig build test-precompile
 
 The imported flow and fault traversals have different stopping rules. Their reader paths, calls, order, and revision selection remain compatibility inputs.
