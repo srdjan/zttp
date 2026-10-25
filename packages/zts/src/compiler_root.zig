@@ -77,4 +77,5 @@ pub const api_schema = @import("api_schema.zig");
 test {
     std.testing.refAllDecls(@This());
     _ = @import("typed_frontend_tests.zig");
+    _ = @import("analysis_fuzz.zig");
 }

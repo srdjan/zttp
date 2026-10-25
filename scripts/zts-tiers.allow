@@ -118,6 +118,7 @@ zts trace.zig
 zts value.zig
 
 zts-compiler abi_types.zig
+zts-compiler analysis_fuzz.zig
 zts-compiler ambient_names.zig
 zts-compiler api_schema.zig
 zts-compiler compiler_root.zig

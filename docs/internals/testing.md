@@ -156,6 +156,7 @@ schema bytes, raw JSON retention, dynamic inputs, and JSON binding behavior.
 `std.testing.fuzz`, plus small PRNG stress loops and nesting generators. Set
 `ZTTP_FUZZ_ITERATIONS` to a positive integer to raise the stress iteration
 count for a manual run; the gate uses the defaults in that file.
+`packages/zts/src/analysis_fuzz.zig` runs seeded deep shapes (call chains, flat binary chains, long `if` bodies, alias chains, nested call sites) through type checking and flow analysis. It counts the inputs that reach each stage and fails below a floor.
 `test-precompile` also mutates every `.ts` file under `tests/corpus`
 and `examples` in `packages/tools/src/pipeline_mutation_tests.zig`. Each
 mutant must give a result or a listed error, diagnostic positions inside the
