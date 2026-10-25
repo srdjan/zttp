@@ -2491,24 +2491,52 @@ const ContractProjectionBuilder = struct {
         return summary;
     }
 
+    /// Walks `node`, and every function it reaches, on an explicit stack. The
+    /// summary is a join and `seen_functions` bounds the closure, so visit
+    /// order cannot change the result. Depth costs heap, never native frames.
     fn includeReachableFunctionEffects(
         self: *const ContractProjectionBuilder,
         node: NodeIndex,
         summary: *ContractEffectSummary,
         seen_functions: *std.AutoHashMapUnmanaged(NodeIndex, void),
     ) std.mem.Allocator.Error!void {
+        var stack: std.ArrayList(NodeIndex) = .empty;
+        defer stack.deinit(self.allocator);
+        try self.pushReachableFunction(node, seen_functions, &stack);
+        try self.drainReachableNodes(&stack, summary, seen_functions);
+    }
+
+    fn pushReachableFunction(
+        self: *const ContractProjectionBuilder,
+        node: NodeIndex,
+        seen_functions: *std.AutoHashMapUnmanaged(NodeIndex, void),
+        stack: *std.ArrayList(NodeIndex),
+    ) std.mem.Allocator.Error!void {
         const function_node = self.resolveFunctionNode(node) orelse return;
         const result = try seen_functions.getOrPut(self.allocator, function_node);
         if (result.found_existing) return;
         const function = self.ir_view.getFunction(function_node) orelse return;
-        try self.includeReachableNodeEffects(function.body, summary, seen_functions);
+        try stack.append(self.allocator, function.body);
     }
 
+    fn drainReachableNodes(
+        self: *const ContractProjectionBuilder,
+        stack: *std.ArrayList(NodeIndex),
+        summary: *ContractEffectSummary,
+        seen_functions: *std.AutoHashMapUnmanaged(NodeIndex, void),
+    ) std.mem.Allocator.Error!void {
+        while (stack.pop()) |node| {
+            try self.includeReachableNodeEffects(node, summary, seen_functions, stack);
+        }
+    }
+
+    /// Visits one node and pushes its children. It never recurses.
     fn includeReachableNodeEffects(
         self: *const ContractProjectionBuilder,
         node: NodeIndex,
         summary: *ContractEffectSummary,
         seen_functions: *std.AutoHashMapUnmanaged(NodeIndex, void),
+        stack: *std.ArrayList(NodeIndex),
     ) std.mem.Allocator.Error!void {
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
@@ -2516,92 +2544,80 @@ const ContractProjectionBuilder = struct {
             .program, .block => {
                 const block = self.ir_view.getBlock(node) orelse return;
                 for (0..block.stmts_count) |index| {
-                    try self.includeReachableNodeEffects(
-                        self.ir_view.getListIndex(block.stmts_start, @intCast(index)),
-                        summary,
-                        seen_functions,
-                    );
+                    try stack.append(self.allocator, self.ir_view.getListIndex(block.stmts_start, @intCast(index)));
                 }
             },
             .if_stmt => {
                 const statement = self.ir_view.getIfStmt(node) orelse return;
-                try self.includeReachableNodeEffects(statement.condition, summary, seen_functions);
-                try self.includeReachableNodeEffects(statement.then_branch, summary, seen_functions);
-                try self.includeReachableNodeEffects(statement.else_branch, summary, seen_functions);
+                try stack.append(self.allocator, statement.condition);
+                try stack.append(self.allocator, statement.then_branch);
+                try stack.append(self.allocator, statement.else_branch);
             },
             .for_of_stmt => {
                 const statement = self.ir_view.getForIter(node) orelse return;
-                try self.includeReachableNodeEffects(statement.iterable, summary, seen_functions);
-                try self.includeReachableNodeEffects(statement.body, summary, seen_functions);
+                try stack.append(self.allocator, statement.iterable);
+                try stack.append(self.allocator, statement.body);
             },
             .return_stmt, .expr_stmt => {
                 if (self.ir_view.getOptValue(node)) |value| {
-                    try self.includeReachableNodeEffects(value, summary, seen_functions);
+                    try stack.append(self.allocator, value);
                 }
             },
             .var_decl => {
                 const declaration = self.ir_view.getVarDecl(node) orelse return;
                 if (declaration.init != null_node and !self.isFunctionNode(declaration.init)) {
-                    try self.includeReachableNodeEffects(declaration.init, summary, seen_functions);
+                    try stack.append(self.allocator, declaration.init);
                 }
             },
             .function_decl => {},
             .binary_op => {
                 const binary = self.ir_view.getBinary(node) orelse return;
-                try self.includeReachableNodeEffects(binary.left, summary, seen_functions);
-                try self.includeReachableNodeEffects(binary.right, summary, seen_functions);
+                try stack.append(self.allocator, binary.left);
+                try stack.append(self.allocator, binary.right);
             },
             .unary_op => {
                 const unary = self.ir_view.getUnary(node) orelse return;
-                try self.includeReachableNodeEffects(unary.operand, summary, seen_functions);
+                try stack.append(self.allocator, unary.operand);
             },
             // The parser stores a spread operand in word `a`, read by
             // `getOptValue`. `getUnary` reads word `b` and found nothing.
             .spread => {
                 const operand = self.ir_view.getOptValue(node) orelse return;
-                try self.includeReachableNodeEffects(operand, summary, seen_functions);
+                try stack.append(self.allocator, operand);
             },
             .assert_stmt => {
                 const assertion = self.ir_view.getAssertStmt(node) orelse return;
-                try self.includeReachableNodeEffects(assertion.condition, summary, seen_functions);
-                try self.includeReachableNodeEffects(assertion.error_expr, summary, seen_functions);
+                try stack.append(self.allocator, assertion.condition);
+                try stack.append(self.allocator, assertion.error_expr);
             },
             .ternary => {
                 const ternary = self.ir_view.getTernary(node) orelse return;
-                try self.includeReachableNodeEffects(ternary.condition, summary, seen_functions);
-                try self.includeReachableNodeEffects(ternary.then_branch, summary, seen_functions);
-                try self.includeReachableNodeEffects(ternary.else_branch, summary, seen_functions);
+                try stack.append(self.allocator, ternary.condition);
+                try stack.append(self.allocator, ternary.then_branch);
+                try stack.append(self.allocator, ternary.else_branch);
             },
             .call, .method_call => {
-                try self.includeReachableCallEffects(node, summary, seen_functions);
+                try self.includeReachableCallEffects(node, summary, seen_functions, stack);
                 const call = self.ir_view.getCall(node) orelse return;
-                try self.includeReachableNodeEffects(call.callee, summary, seen_functions);
+                try stack.append(self.allocator, call.callee);
                 for (0..call.args_count) |index| {
-                    try self.includeReachableNodeEffects(
-                        self.ir_view.getListIndex(call.args_start, @intCast(index)),
-                        summary,
-                        seen_functions,
-                    );
+                    try stack.append(self.allocator, self.ir_view.getListIndex(call.args_start, @intCast(index)));
                 }
             },
             .member_access, .optional_chain, .computed_access => {
                 const member = self.ir_view.getMember(node) orelse return;
-                try self.includeReachableNodeEffects(member.object, summary, seen_functions);
-                try self.includeReachableNodeEffects(member.computed, summary, seen_functions);
+                try stack.append(self.allocator, member.object);
+                try stack.append(self.allocator, member.computed);
             },
             .assignment => {
                 const assignment = self.ir_view.getAssignment(node) orelse return;
-                try self.includeReachableNodeEffects(assignment.target, summary, seen_functions);
-                try self.includeReachableNodeEffects(assignment.value, summary, seen_functions);
+                try stack.append(self.allocator, assignment.target);
+                try stack.append(self.allocator, assignment.value);
             },
             .array_literal => {
                 const array = self.ir_view.getArray(node) orelse return;
                 for (0..array.elements_count) |index| {
-                    try self.includeReachableNodeEffects(
-                        self.ir_view.getListIndex(array.elements_start, @intCast(index)),
-                        summary,
-                        seen_functions,
-                    );
+                    try stack.append(self.allocator, self.ir_view.getListIndex(array.elements_start, @intCast(index)));
                 }
             },
             .object_literal => {
@@ -2615,26 +2631,26 @@ const ContractProjectionBuilder = struct {
                     // not in a property value slot.
                     if (self.ir_view.getTag(property_node) == .object_spread) {
                         if (self.ir_view.getOptValue(property_node)) |operand| {
-                            try self.includeReachableNodeEffects(operand, summary, seen_functions);
+                            try stack.append(self.allocator, operand);
                         }
                         continue;
                     }
                     const property = self.ir_view.getProperty(property_node) orelse continue;
-                    try self.includeReachableNodeEffects(property.value, summary, seen_functions);
+                    try stack.append(self.allocator, property.value);
                 }
             },
             .match_expr => {
                 const match = self.ir_view.getMatchExpr(node) orelse return;
-                try self.includeReachableNodeEffects(match.discriminant, summary, seen_functions);
+                try stack.append(self.allocator, match.discriminant);
                 for (0..match.arms_count) |index| {
                     const arm_node = self.ir_view.getListIndex(match.arms_start, @intCast(index));
                     const arm = self.ir_view.getMatchArm(arm_node) orelse continue;
-                    try self.includeReachableNodeEffects(arm.body, summary, seen_functions);
+                    try stack.append(self.allocator, arm.body);
                 }
             },
             .function_expr, .arrow_function => {
                 const function = self.ir_view.getFunction(node) orelse return;
-                try self.includeReachableNodeEffects(function.body, summary, seen_functions);
+                try stack.append(self.allocator, function.body);
             },
             // exhaustive: a tag without an arm above descends into every
             // expression child from the shared map. A leaf has no child and
@@ -2643,7 +2659,7 @@ const ContractProjectionBuilder = struct {
             else => {
                 var children = self.ir_view.expressionChildren(node);
                 while (children.next()) |child| {
-                    try self.includeReachableNodeEffects(child, summary, seen_functions);
+                    try stack.append(self.allocator, child);
                 }
             },
         }
@@ -2654,6 +2670,7 @@ const ContractProjectionBuilder = struct {
         node: NodeIndex,
         summary: *ContractEffectSummary,
         seen_functions: *std.AutoHashMapUnmanaged(NodeIndex, void),
+        stack: *std.ArrayList(NodeIndex),
     ) std.mem.Allocator.Error!void {
         const call = self.ir_view.getCall(node) orelse return;
         const resolver = route_resolution.Resolver.init(self.ir_view, self.atoms, self.facts);
@@ -2662,7 +2679,7 @@ const ContractProjectionBuilder = struct {
             defer targets.deinit(self.allocator);
             if (targets.unresolved) summary.unknown = true;
             for (targets.functions.items) |function| {
-                try self.includeReachableFunctionEffects(function, summary, seen_functions);
+                try self.pushReachableFunction(function, seen_functions, stack);
             }
             return;
         }
@@ -2708,7 +2725,7 @@ const ContractProjectionBuilder = struct {
         }
 
         if (self.findFunctionNodeByBinding(binding.slot)) |function| {
-            try self.includeReachableFunctionEffects(function, summary, seen_functions);
+            try self.pushReachableFunction(function, seen_functions, stack);
         }
     }
 
@@ -5152,4 +5169,46 @@ test "exports of a module with an escaped function value carry the flag" {
         .callable => |row| try testing.expect(row.function_value_escape),
         .data, .blocked => return error.CallableExportExpected,
     }
+}
+
+/// `chain_len` functions, each nesting the call to its predecessor `depth`
+/// array levels deep, with an egress call at the bottom.
+fn nestedChainSummary(allocator: std.mem.Allocator, chain_len: usize, depth: usize) !ContractEffectSummary {
+    var output: std.Io.Writer.Allocating = .init(allocator);
+    defer output.deinit();
+    const writer = &output.writer;
+    try writer.writeAll("function g0(x) { return fetchSync(x); }\n");
+    for (1..chain_len) |index| {
+        try writer.print("function g{d}(x) {{ return ", .{index});
+        for (0..depth) |_| try writer.writeAll("[");
+        try writer.print("g{d}(x)", .{index - 1});
+        for (0..depth) |_| try writer.writeAll("][0]");
+        try writer.writeAll("; }\n");
+    }
+    try writer.print("function handler(req) {{ return g{d}(req); }}\n", .{chain_len - 1});
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.init(allocator, output.written());
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const program = view.getBlock(root) orelse return error.ProgramExpected;
+    const declaration_node = view.getListIndex(program.stmts_start, @intCast(program.stmts_count - 1));
+    const declaration = view.getVarDecl(declaration_node) orelse return error.HandlerExpected;
+    var module_facts = try module_facts_mod.ModuleFacts.build(allocator, view, &atoms, null);
+    defer module_facts.deinit();
+    var effect_facts = try buildEffectFacts(allocator, view, &atoms, root, .{
+        .module_facts = &module_facts,
+        .contract_projection = .{ .complete = .{ .selected_handler = declaration.init } },
+    });
+    defer effect_facts.deinit(allocator);
+    return (try effect_facts.requireContract()).summary;
+}
+
+test "reachable effects of deeply nested call sites do not recurse natively" {
+    const shallow = try nestedChainSummary(testing.allocator, 3, 2);
+    try testing.expect(shallow.has_egress);
+    const deep = try nestedChainSummary(testing.allocator, 60, 400);
+    try testing.expectEqual(shallow, deep);
 }
