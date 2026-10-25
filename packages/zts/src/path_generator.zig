@@ -1527,8 +1527,15 @@ pub const PathGenerator = struct {
                 try self.walkAssertFailure(assert);
             },
 
-            // exhaustive: the parser refuses while, do-while, C-style for, for-in, try, throw, and labeled statements (ZTS001); break, continue, and imports hold no return or branch.
-            else => {},
+            // Any other tag passes each child it holds back to this walk, so a
+            // new node kind is read by default. Today the tags that arrive here
+            // hold nothing to walk: the parser refuses while, do-while, C-style
+            // for, for-in, try, throw, and labeled statements (ZTS001), and
+            // break, continue, and imports hold no return or branch.
+            else => {
+                var children = self.ir_view.expressionChildren(node);
+                while (children.next()) |child| try self.walkPaths(child);
+            },
         }
     }
 
