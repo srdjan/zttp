@@ -154,3 +154,13 @@ Opus measured production on `main`: a handler annotated `bool` fails `zts check`
 
 Before the edit, the worker confirmed that every build route passes the artifact and that no script, workflow, or AGENTS file runs the seven scripts directly.
 Gates on `main`, each exit 0: `test-script-reachability`, `test-capability-audit` (runs the gate-floor probe), `test-agent-determinism`, `test-meta-drift`, `test-zts-layering`, `test-release-workflow`, `test-kernel-safety`, `test-residual-guards-drift`, `test-production-branch-metric`, `test-step-coverage`, `test-docs-drift`, `test-doc-links`, `check-spine`. Fresh-cache aggregate: 211/211 steps, 7805/7811 passed (6 skipped), unchanged. Digests: byte-identical. Protection against `763eb37e`: exit 0.
+
+## R12d-1
+
+| Commit | Phase | Result |
+|---|---|---|
+| `557cb1a5` | R12d-1 | `build/step_coverage.zig#classify` is the one walk of the build graph. It sorts each top-level step as `aggregate`, `verify`, `release`, or `manual`, and `test-step-coverage` reads its facts from it. The task census carries `<name> <route>`, and every `agents.json` task carries a route; a manual task also carries a reason, and only a manual task does. `check-spine` fails a missing route, a value outside the four, a route that differs from the graph, a manual task without a reason, and a reason on another task. |
+
+Route counts over 92 tasks: 66 aggregate, 4 verify, 4 release, 18 manual. The 18 manual tasks are the 18 rows of `scripts/manual-steps.allow`, with the same reason slugs. The worker probed seven scratch edits of `agents.json`; each made `check-spine` exit 1 with a message that names the task and the graph value. `test-spine` adds one test with six rejection scenarios.
+Opus review: the aggregate set is a subset of the verify set, which is a subset of the covered set. So the manual and release-only verdicts equal the old ones, and the output line `step coverage: OK (92 steps, 18 run by hand with a stated reason, 4 run only at release)` is unchanged. A step with no dependency steps counts as aggregate, as it counted as run before.
+Gates on `main`, each exit 0: `test-spine`, `test-step-coverage`, `test-script-reachability`, `test-docs-drift`, `test-doc-links`, `check-spine`. Fresh-cache aggregate: 211/211 steps, 7806/7812 passed (6 skipped); the delta of 1 is the new spine test. Digests: byte-identical. Protection against `e0dc252b`: exit 0.
