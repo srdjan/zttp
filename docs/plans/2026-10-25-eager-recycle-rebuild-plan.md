@@ -7,7 +7,7 @@ Decision 3 (option A), chosen by the owner on 2026-10-25: when a pooled runtime 
 - `zig build bench -Doptimize=fast -- --request-path` (commit `036caa4f`) measured a request on a rebuilt slot at p50 66-68 us and p99 97-106 us. A normal request takes about 1 us. Rebuild requests are 16 of 1024 and set the overall p99.
 - A temporary phase probe measured the rebuild. `Runtime.create` takes about 27 us: `Context.init` about 11 us, `initBuiltins` about 14 us, and the request arena buffer 0.15 us. `HandlerInstance.initFromPool` takes about 39 us, and `loadHandlerCached` about 18 us. Buffer reuse was therefore rejected.
 - The server releases a slot after it sends the body. `server.zig` calls `executeHandlerBorrowedCapturingFault`, and `ResponseHandle.deinit` calls `releaseForRequest` after the send.
-- `server.zig#handleConnection` keeps one worker on a connection. The release runs in `handleSingleRequestSync`, before `waitForNextRequest` reads the next request on that connection.
+- `Server.handleConnection` in `packages/runtime/src/server.zig` keeps one worker on a connection. The release runs in `handleSingleRequestSync`, before `waitForNextRequest` reads the next request on that connection.
 
 ## Expected effect (review finding)
 
