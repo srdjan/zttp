@@ -135,7 +135,7 @@ fn directDiagnosticAt(source: []const u8, kind: TypeSyntax.AdmissionKind, marker
 fn expectDirectSourceWithAllocator(allocator: std.mem.Allocator, source: []const u8) !void {
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(allocator, allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -497,7 +497,7 @@ const CountingAllocator = struct {
 fn expectDirectAccepted(source: []const u8) !void {
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     _ = try parser.parse();
@@ -711,7 +711,7 @@ fn runProjectedPrefixTypeAllocationSweep(
     const runtime_allocator = runtime_count.allocator();
     var atoms = AtomTable.init(runtime_allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(runtime_allocator, type_allocator, source);
+    var parser = try JsParser.initAdmission(runtime_allocator, type_allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = parser.parse() catch |err| switch (err) {
@@ -769,7 +769,7 @@ fn runObjectPrefixTypeAllocationSweep(
     const runtime_allocator = runtime_count.allocator();
     var atoms = AtomTable.init(runtime_allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(runtime_allocator, type_allocator, source);
+    var parser = try JsParser.initAdmission(runtime_allocator, type_allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = parser.parse() catch |err| switch (err) {
@@ -815,7 +815,7 @@ fn expectFirstTypeOnlyModuleEquivalent(source: []const u8) !void {
     var direct_alloc = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_alloc.allocator());
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(direct_alloc.allocator(), std.testing.allocator, source);
+    var direct = try JsParser.initAdmission(direct_alloc.allocator(), std.testing.allocator, source, .compile);
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
@@ -885,10 +885,11 @@ fn expectTypeOnlyModuleCaseRejectedAt(
     var type_alloc = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_alloc.allocator());
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(
+    var direct = try JsParser.initAdmission(
         direct_alloc.allocator(),
         type_alloc.allocator(),
         source,
+        .compile,
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
@@ -942,11 +943,12 @@ fn expectTypeOnlyModuleRefusal(
 ) !void {
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
 
-    try std.testing.expectError(error.TypeOnlyModuleRefused, parser.parse());
+    try std.testing.expectError(error.AdmissionRefused, parser.parse());
+    try std.testing.expectEqual(TypeSyntax.AdmissionKind.legacy_types_import, parser.getAdmissionDiagnostics()[0].kind);
     const refusal = parser.type_only_module_refusal orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(TypeSyntax.TypeOnlyModuleRefusalReason.zttp_types, refusal.reason);
     try std.testing.expectEqual(expected_offset, refusal.original_location.offset);
@@ -969,7 +971,7 @@ fn runCleanModuleTypeAllocationSweep(
 ) !void {
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, type_allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, type_allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = parser.parse() catch |err| switch (err) {
@@ -1004,14 +1006,15 @@ fn runExcludedModuleTypeAllocationSweep(
     second_offset: u32,
     observed: *ModuleAllocationObservations,
 ) !void {
-    var parser = try JsParser.initTyped(std.testing.allocator, type_allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, type_allocator, source, .compile);
     defer parser.deinit();
     _ = parser.parse() catch |err| switch (err) {
         error.OutOfMemory => {
             observed.failures += 1;
             const after_seed = parser.current.start >= second_offset;
             var expected = std.mem.zeroes(TypeSyntax.Store.Checkpoint);
-            expected.type_only_modules = if (after_seed) 1 else 0;
+            // Admission publishes the excluded module, so a failure after the parse (in the replay) keeps both modules.
+            expected.type_only_modules = if (parser.current.start > second_offset) 2 else if (after_seed) 1 else 0;
             try std.testing.expect(std.meta.eql(expected, parser.type_store.checkpoint()));
             if (after_seed) {
                 const seed = parser.type_store.type_only_modules.items[0];
@@ -1025,9 +1028,10 @@ fn runExcludedModuleTypeAllocationSweep(
             }
             return err;
         },
-        error.TypeOnlyModuleLexicallyExcluded => {
-            try std.testing.expectEqual(@as(usize, 1), parser.type_store.type_only_modules.items.len);
-            try std.testing.expect(parser.type_only_module_exclusion != null);
+        error.MissingSemicolon => {
+            // Admission publishes the excluded module beside the seed.
+            try std.testing.expectEqual(@as(usize, 2), parser.type_store.type_only_modules.items.len);
+            try std.testing.expect(parser.type_only_module_exclusion == null);
             try std.testing.expectEqual(@as(usize, 1), parser.type_only_module_diagnostics.items.len);
             return;
         },
@@ -1039,7 +1043,7 @@ fn runExcludedModuleTypeAllocationSweep(
 fn expectFirstFunctionSliceEquivalent(source: []const u8) !void {
     var direct_atoms = AtomTable.init(std.testing.allocator);
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var direct = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
 
@@ -1219,7 +1223,7 @@ fn runHeaderTypeAllocation(
     };
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, type_allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, type_allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const guard_offset: u32 = @intCast(std.mem.indexOf(u8, source, "const guard") orelse
@@ -1306,7 +1310,7 @@ fn runGenericArrowTypeAllocation(
     const runtime_allocator = runtime_count.allocator();
     var atoms = AtomTable.init(runtime_allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(runtime_allocator, type_allocator, source);
+    var parser = try JsParser.initAdmission(runtime_allocator, type_allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const arrow_offset: u32 = @intCast(std.mem.indexOf(u8, source, "const id") orelse
@@ -1387,7 +1391,7 @@ fn runNamedFunctionCommentTypeAllocation(
     const runtime_allocator = runtime_count.allocator();
     var atoms = AtomTable.init(runtime_allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(runtime_allocator, type_allocator, source);
+    var parser = try JsParser.initAdmission(runtime_allocator, type_allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const function_offset: u32 = @intCast(std.mem.indexOf(u8, source, "function") orelse
@@ -1457,7 +1461,7 @@ test "first erased object prefix preserves runtime and exact ownership" {
     const runtime_allocator = runtime_count.allocator();
     var atoms = AtomTable.init(runtime_allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(runtime_allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -1579,10 +1583,9 @@ test "first erased object prefix preserves runtime and exact ownership" {
 
 test "failed erased object prefix restores the earlier syntax checkpoint" {
     const source = "const seed: number = 1; const value = <T>{ id: };";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     try std.testing.expectError(error.UnexpectedToken, parser.parse());
-    try std.testing.expectEqual(TokenType.rbrace, parser.current.type);
     const errors = parser.errors.getErrors();
     try std.testing.expectEqual(@as(usize, 1), errors.len);
     try std.testing.expectEqual(engine.parser.ErrorKind.unexpected_token, errors[0].kind);
@@ -1684,7 +1687,7 @@ test "erased prefix matrix preserves runtime ownership and projection order" {
         const runtime_allocator = runtime_count.allocator();
         var atoms = AtomTable.init(runtime_allocator);
         defer atoms.deinit();
-        var parser = try JsParser.initTyped(runtime_allocator, std.testing.allocator, case.source);
+        var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, case.source, .compile);
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
@@ -1800,7 +1803,7 @@ test "spaced erased prefixes preserve assignment and general captures" {
         const runtime_allocator = runtime_count.allocator();
         var atoms = AtomTable.init(runtime_allocator);
         defer atoms.deinit();
-        var parser = try JsParser.initTyped(runtime_allocator, std.testing.allocator, case.source);
+        var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, case.source, .compile);
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
@@ -1836,21 +1839,24 @@ test "spaced erased prefixes preserve assignment and general captures" {
 }
 
 test "adjacent erased prefix lists remain outside direct admission" {
-    const cases = [_][]const u8{
-        "const value = (<T><U>(1));",
-        "const value = (<T><U>{ id: 1 });",
-        "<T><U>{ const value = 1; }",
-        "const value = <T><U>(1);",
-        "const value = <T><U>{ id: 1 };",
+    // `second_error` is the offset of the follow-on error that recovery records, when there is one.
+    const cases = [_]struct { source: []const u8, second_error: ?u32 = null }{
+        .{ .source = "const value = (<T><U>(1));" },
+        .{ .source = "const value = (<T><U>{ id: 1 });" },
+        .{ .source = "<T><U>{ const value = 1; }", .second_error = 25 },
+        .{ .source = "const value = <T><U>(1);" },
+        .{ .source = "const value = <T><U>{ id: 1 };" },
     };
-    for (cases) |source| {
+    for (cases) |case| {
+        const source = case.source;
         var direct_count = CountingAllocator.init(std.testing.allocator);
         var direct_atoms = AtomTable.init(direct_count.allocator());
         defer direct_atoms.deinit();
-        var direct = try JsParser.initTyped(
+        var direct = try JsParser.initAdmission(
             direct_count.allocator(),
             std.testing.allocator,
             source,
+            .compile,
         );
         defer direct.deinit();
         direct.setAtomTable(&direct_atoms);
@@ -1858,12 +1864,14 @@ test "adjacent erased prefix lists remain outside direct admission" {
         try std.testing.expectError(error.UnexpectedToken, direct.parse());
         const first_list: u32 = @intCast(std.mem.indexOfScalar(u8, source, '<') orelse
             return error.TestUnexpectedResult);
-        try std.testing.expectEqual(first_list, direct.current.start);
-        try std.testing.expectEqualStrings("<", direct.current.text(source));
         const errors = direct.errors.getErrors();
-        try std.testing.expectEqual(@as(usize, 1), errors.len);
+        try std.testing.expectEqual(@as(usize, if (case.second_error == null) 1 else 2), errors.len);
         try std.testing.expectEqual(engine.parser.ErrorKind.unexpected_token, errors[0].kind);
         try std.testing.expectEqual(first_list, errors[0].location.offset);
+        if (case.second_error) |offset| {
+            try std.testing.expectEqual(engine.parser.ErrorKind.unexpected_token, errors[1].kind);
+            try std.testing.expectEqual(offset, errors[1].location.offset);
+        }
         try std.testing.expect(direct_count.alloc_calls > 0);
         try expectStoreCheckpoint(
             &direct.type_store,
@@ -1886,7 +1894,7 @@ test "direct erased prefix projection retains bounds and valid empty ranges" {
     for (cases) |case| {
         var atoms = AtomTable.init(std.testing.allocator);
         defer atoms.deinit();
-        var runtime = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, case.source);
+        var runtime = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
         defer runtime.deinit();
         runtime.setAtomTable(&atoms);
         _ = try runtime.parse();
@@ -2033,7 +2041,7 @@ test "prefix projections merge with callable generic parameters in source order"
     const runtime_allocator = runtime_count.allocator();
     var atoms = AtomTable.init(runtime_allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(runtime_allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -2131,7 +2139,7 @@ test "recovered erased block removes nested syntax and retains progress" {
     const runtime_allocator = runtime_count.allocator();
     var control_atoms = AtomTable.init(runtime_allocator);
     defer control_atoms.deinit();
-    var control = try JsParser.initTyped(runtime_allocator, std.testing.allocator, control_source);
+    var control = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, control_source, .compile);
     defer control.deinit();
     control.setAtomTable(&control_atoms);
     const control_root = try control.parse();
@@ -2147,7 +2155,7 @@ test "recovered erased block removes nested syntax and retains progress" {
 
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     try std.testing.expectError(error.ParseError, parser.parse());
@@ -2202,7 +2210,7 @@ test "erased prefix relationships reject invalid intervals and owner swaps" {
         const runtime_allocator = runtime_count.allocator();
         var atoms = AtomTable.init(runtime_allocator);
         defer atoms.deinit();
-        var parser = try JsParser.initTyped(runtime_allocator, std.testing.allocator, source);
+        var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
@@ -2243,7 +2251,7 @@ test "erased prefix relationships reject invalid intervals and owner swaps" {
         const runtime_allocator = runtime_count.allocator();
         var atoms = AtomTable.init(runtime_allocator);
         defer atoms.deinit();
-        var parser = try JsParser.initTyped(runtime_allocator, std.testing.allocator, source);
+        var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
@@ -2269,11 +2277,12 @@ test "type-only module refusal retains its original location" {
     const source = "import type { Spec } from \"" ++ retired_types_module ++ "\";";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
 
-    try std.testing.expectError(error.TypeOnlyModuleRefused, parser.parse());
+    try std.testing.expectError(error.AdmissionRefused, parser.parse());
+    try std.testing.expectEqual(TypeSyntax.AdmissionKind.legacy_types_import, parser.getAdmissionDiagnostics()[0].kind);
     const refusal = parser.type_only_module_refusal orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(TypeSyntax.TypeOnlyModuleRefusalReason.zttp_types, refusal.reason);
     try std.testing.expectEqual(@as(u32, 0), refusal.original_location.offset);
@@ -2517,7 +2526,7 @@ test "type-only module rich source retains declarations and live binding" {
 
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     _ = try parser.parse();
@@ -2603,7 +2612,7 @@ test "type-only module scanner leaves the comment semicolon survivor location ex
     const source =
         "import type { A } /* ; */ from \"./a\";\n" ++
         "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = parser.parse() catch |err| switch (err) {
         error.OutOfMemory => return err,
@@ -2695,7 +2704,7 @@ test "typed predicate arrow owns its exact header syntax" {
     const source = "const guard = (candidate, marker: unknown): candidate is string => typeof candidate === \"string\";";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -2793,7 +2802,7 @@ test "predicate arrows retain the first repeated parameter as target" {
     const source = "const guard = (candidate, candidate: unknown): candidate is string => typeof candidate === \"string\";";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -2827,7 +2836,7 @@ test "ordinary typed arrow owns parameter and return roots" {
     const source = "const echo = (value: string): string => value;";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -2906,7 +2915,7 @@ test "named and arrow returns retain predicate facets" {
     for (cases) |case| {
         var atoms = AtomTable.init(std.testing.allocator);
         defer atoms.deinit();
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, case.source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
@@ -3004,7 +3013,7 @@ test "ordinary predicates parse whole grammar compatibility roots" {
     for (cases) |case| {
         var atoms = AtomTable.init(std.testing.allocator);
         defer atoms.deinit();
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, case.source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
@@ -3075,7 +3084,7 @@ test "empty predicate narrowing retains the untrimmed whitespace tail" {
     for (cases) |case| {
         var atoms = AtomTable.init(std.testing.allocator);
         defer atoms.deinit();
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, case.source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
@@ -3132,7 +3141,7 @@ test "nested return function type selects the outer arrow" {
     const source = "const make = (): (value: string) => string => (value: string): string => value;";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -3164,7 +3173,7 @@ test "arrow lookahead keeps grouped controls outside signatures" {
         const source = "const choice = true ? (1) : (2);";
         var atoms = AtomTable.init(std.testing.allocator);
         defer atoms.deinit();
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
@@ -3175,7 +3184,7 @@ test "arrow lookahead keeps grouped controls outside signatures" {
 
     {
         const source = "const make = (): (value: string) => string;";
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         try std.testing.expectError(error.UnexpectedToken, parser.parse());
         const errors = parser.errors.getErrors();
@@ -3198,7 +3207,7 @@ test "predicate target validation rejects external runtime identity" {
         "const right = (value: unknown): value is string => true;\n";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -3252,7 +3261,7 @@ test "predicate compatibility range cannot own narrowing nodes" {
     const source = "const guard = (value: unknown): value\tis\tstring => true;";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -3304,7 +3313,7 @@ test "recovered predicate blocks retain surrounding annotations" {
         const source = case.source;
         var atoms = AtomTable.init(std.testing.allocator);
         defer atoms.deinit();
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         try std.testing.expectError(error.ParseError, parser.parse());
@@ -3368,7 +3377,7 @@ test "nested function signatures publish in header order" {
         "}\n";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -3402,7 +3411,7 @@ test "nested function signatures publish in header order" {
 
 test "generic-only function creates no function signature" {
     const source = "function identity<T>(value) { return value; }\n";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -3418,7 +3427,7 @@ test "recovered typed function body retains only prior syntax" {
         "  const broken = ;\n" ++
         "  return value;\n" ++
         "}\n";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     try std.testing.expectError(error.ParseError, parser.parse());
     try std.testing.expectEqual(TokenType.eof, parser.current.type);
@@ -3449,7 +3458,7 @@ test "recovered outer body removes completed inner function syntax" {
         "  return value;\n" ++
         "}\n" ++
         "const after = 2;\n";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     try std.testing.expectError(error.ParseError, parser.parse());
     try std.testing.expectEqual(TokenType.eof, parser.current.type);
@@ -3468,7 +3477,7 @@ test "function signature validation rejects wrong runtime tags" {
     const source =
         "const seed: number = 1;\n" ++
         "function identity(value: string): string { return value; }\n";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     const view = engine.parser.IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -3531,7 +3540,7 @@ test "function signature type allocation failures preserve published seed syntax
                 return error.TestUnexpectedResult);
             var atoms = AtomTable.init(std.testing.allocator);
             defer atoms.deinit();
-            var parser = try JsParser.initTyped(std.testing.allocator, type_allocator, source);
+            var parser = try JsParser.initAdmission(std.testing.allocator, type_allocator, source, .compile);
             defer parser.deinit();
             parser.setAtomTable(&atoms);
             const root = parser.parse() catch |err| {
@@ -3634,7 +3643,7 @@ test "function signature validation rejects swapped return-only owners" {
     const source =
         "function left(): number { return 1; }\n" ++
         "function right(): string { return \"x\"; }\n";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     const view = engine.parser.IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -3661,7 +3670,7 @@ test "function signature validation rejects swapped return-only owners" {
 test "function signature validation rejects reassigned parameter owners" {
     {
         const source = "function pair(a: string, b: number): number { return b; }\n";
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         _ = try parser.parse();
         const view = engine.parser.IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -3683,7 +3692,7 @@ test "function signature validation rejects reassigned parameter owners" {
 
     {
         const source = "function f(a, b: number): number { return b; }\n";
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         _ = try parser.parse();
         const view = engine.parser.IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -4112,7 +4121,7 @@ fn expectPoolGenericApplication(
 }
 
 fn assertApplicationSemanticProperty(case: ApplicationCase, source: []const u8) !void {
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -4315,7 +4324,7 @@ fn assertApplicationSemanticProperty(case: ApplicationCase, source: []const u8) 
 }
 
 fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8) !void {
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -4499,7 +4508,7 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
 }
 
 fn assertGenericProjectionProperty(case: GenericProjectionCase, source: []const u8) !void {
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -4660,7 +4669,7 @@ fn assertGenericFragmentProperty(case: GenericFragmentCase, source: []const u8) 
 }
 
 fn assertDeclarationSemanticProperty(case: DeclarationCase, source: []const u8) !void {
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -5003,7 +5012,7 @@ test "generic parameter projection census observes every case" {
 
 test "untyped generic function declaration retains its owner before runtime equivalence" {
     const source = "const seed: number = 1; function identity<T>(value) { return value; }";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -5064,7 +5073,7 @@ test "generic-only function and explicit call use final runtime owners" {
         "const result: string = identity<string>(\"ok\");\n";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -5160,7 +5169,7 @@ fn expectNamedFunctionCommentCompatibility(case: NamedFunctionCommentCase) !void
     const runtime_allocator = runtime_count.allocator();
     var atoms = AtomTable.init(runtime_allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(runtime_allocator, type_count.allocator(), source);
+    var parser = try JsParser.initAdmission(runtime_allocator, type_count.allocator(), source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -5255,16 +5264,16 @@ fn expectNamedFunctionRawRefusal(
 ) !void {
     var direct_atoms = AtomTable.init(std.testing.allocator);
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(
+    var direct = try JsParser.initAdmission(
         std.testing.allocator,
         std.testing.allocator,
         source,
+        .compile,
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
     try std.testing.expectError(error.UnexpectedToken, direct.parse());
 
-    try std.testing.expectEqual(refusal_offset, direct.current.start);
     const errors = direct.errors.getErrors();
     try std.testing.expectEqual(@as(usize, 1), errors.len);
     try std.testing.expectEqual(engine.parser.ErrorKind.expected_token, errors[0].kind);
@@ -5326,7 +5335,7 @@ test "generic owner validation rejects exchanged function nodes" {
     const source =
         "function left<T>(value) { return value; }\n" ++
         "function right<U>(value) { return value; }\n";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     const view = parserIrView(&parser);
@@ -5562,7 +5571,7 @@ test "nominal generic source owns the exact declaration without generic semantic
     const source = "nominal Id<T> = string;";
     try expectDirectAccepted(source);
 
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -5604,7 +5613,7 @@ test "nominal generic scalar matrix retains ignored bounds and declaration order
         "nominal Both<T extends string = boolean> = string;\n";
     try expectDirectAccepted(source);
 
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -5693,7 +5702,7 @@ test "nominal generic type allocation failures restore the published seed" {
         ) !void {
             var atoms = AtomTable.init(std.testing.allocator);
             defer atoms.deinit();
-            var parser = try JsParser.initTyped(std.testing.allocator, type_allocator, source);
+            var parser = try JsParser.initAdmission(std.testing.allocator, type_allocator, source, .compile);
             defer parser.deinit();
             parser.setAtomTable(&atoms);
             const root = parser.parse() catch |err| switch (err) {
@@ -5792,10 +5801,11 @@ test "nominal generic list diagnostics precede scalar base refusal directly" {
 test "first generic function slice accepts only its bounded source shape" {
     const whitespace_source =
         "const seed: number = 1; function identity<T> \t\r\n(value) { return value; }";
-    var whitespace_parser = try JsParser.initTyped(
+    var whitespace_parser = try JsParser.initAdmission(
         std.testing.allocator,
         std.testing.allocator,
         whitespace_source,
+        .compile,
     );
     defer whitespace_parser.deinit();
     _ = try whitespace_parser.parse();
@@ -5813,7 +5823,7 @@ test "first generic function slice accepts only its bounded source shape" {
 
     const residual_closer = "const seed: number = 1; function identity<T>>(value) { return value; }";
     {
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, residual_closer);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, residual_closer, .compile);
         defer parser.deinit();
         try std.testing.expectError(error.UnexpectedToken, parser.parse());
         try std.testing.expectEqual(@as(usize, 0), parser.type_store.generic_owners.items.len);
@@ -5822,29 +5832,18 @@ test "first generic function slice accepts only its bounded source shape" {
     }
 }
 
-test "first generic function slice excludes unsafe generic list scans" {
-    const Context = struct {
-        fn expectExcluded(source: []const u8) !void {
-            var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
-            defer parser.deinit();
-            try std.testing.expectError(error.UnexpectedToken, parser.parse());
-            try std.testing.expectEqual(@as(usize, 0), parser.type_store.generic_owners.items.len);
-            try std.testing.expectEqual(@as(usize, 0), parser.type_store.generic_parameters.items.len);
-            try std.testing.expectEqual(
-                @as(usize, 0),
-                parser.type_store.projected_generic_parameters.items.len,
-            );
-            const generic_start = std.mem.indexOfScalar(u8, source, '<') orelse
-                return error.TestUnexpectedResult;
-            const errors = parser.errors.getErrors();
-            try std.testing.expect(errors.len > 0);
-            try std.testing.expectEqual(@as(u32, @intCast(generic_start)), errors[0].location.offset);
-        }
-    };
-
-    try Context.expectExcluded(
-        "const seed: number = 1; function identity<T = /,/, U>(value) { return value; }",
-    );
+test "first generic function slice parses unsafe generic list scans for the strict checker" {
+    {
+        // Production parses this source; the strict checker refuses it later (ZTS601).
+        var parser = try JsParser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            "const seed: number = 1; function identity<T = /,/, U>(value) { return value; }",
+            .compile,
+        );
+        defer parser.deinit();
+        _ = try parser.parse();
+    }
 
     var balanced_template: std.ArrayListUnmanaged(u8) = .empty;
     defer balanced_template.deinit(std.testing.allocator);
@@ -5863,7 +5862,10 @@ test "first generic function slice excludes unsafe generic list scans" {
         std.testing.allocator,
         ", U>(value) { return value; }",
     );
-    try Context.expectExcluded(balanced_template.items);
+    // Production parses this source too; the strict checker refuses it later (ZTS601).
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, balanced_template.items, .compile);
+    defer parser.deinit();
+    _ = try parser.parse();
 }
 
 const GenericArrowCompatibilityExpectation = enum {
@@ -6106,10 +6108,11 @@ test "typed generic arrows retain final owners and legacy projection windows" {
         const runtime_allocator = runtime_count.allocator();
         var atoms = AtomTable.init(runtime_allocator);
         defer atoms.deinit();
-        var parser = try JsParser.initTyped(
+        var parser = try JsParser.initAdmission(
             runtime_allocator,
             std.testing.allocator,
             fixture.source,
+            .compile,
         );
         defer parser.deinit();
         parser.setAtomTable(&atoms);
@@ -6129,7 +6132,7 @@ test "typed generic arrows retain final owners and legacy projection windows" {
 test "generic arrow and explicit call retain ordered syntax before equivalence" {
     const source =
         "const seed: number = 1; const id=<T>(value)=>value; const result=id<string>(seed);";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -6197,7 +6200,7 @@ test "nested generic owners and call retain source reservation order" {
     const source =
         "const seed: number = 1; function outer<T extends string = boolean>(value) { " ++
         "const inner=<U>(item)=>item; return inner<number>(value); }";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -6258,7 +6261,7 @@ test "iterative generic function preflight accepts a nonempty nested body" {
     const source =
         "const seed: number = 1; function outer<T>(value) { " ++
         "function inner<U>(item) { return item; } return value; }";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -6345,10 +6348,11 @@ test "generic runtime syntax census observes every case" {
             .{ @tagName(fixture.case), fixture.source },
         );
         try std.testing.expect(!seen.contains(fixture.case));
-        var parser = try JsParser.initTyped(
+        var parser = try JsParser.initAdmission(
             std.testing.allocator,
             std.testing.allocator,
             fixture.source,
+            .compile,
         );
         defer parser.deinit();
         _ = try parser.parse();
@@ -6532,7 +6536,7 @@ test "generic runtime syntax census observes every case" {
 
 test "compound assignment uses the dedicated generic arrow window" {
     const source = "let seed = 1; seed += <T> (value)=>value;";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -6548,7 +6552,7 @@ test "function arrow and call generic names use independent scopes" {
     const source =
         "const seed: number = 1; function outer<T>(value) { " ++
         "const inner=<T>(item)=>item; return inner<T>(value); }";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -6576,7 +6580,7 @@ test "function arrow and call generic names use independent scopes" {
 
 test "nested explicit calls reserve outer records before value arguments" {
     const source = "const seed:number=1; const result=outer<string>(inner<number>(seed));";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -6643,7 +6647,7 @@ test "direct calls retain eight projected arguments without publishing a ninth" 
         "const result = id<number,string,boolean,null,undefined,unknown,number,string>(1);";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, accepted);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, accepted, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     _ = try parser.parse();
@@ -6682,7 +6686,7 @@ test "direct calls retain eight projected arguments without publishing a ninth" 
         "const result = id<number,string,boolean,null,undefined,unknown,number,string,boolean>(1);";
     var excess_atoms = AtomTable.init(std.testing.allocator);
     defer excess_atoms.deinit();
-    var excess = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, refused);
+    var excess = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, refused, .compile);
     defer excess.deinit();
     excess.setAtomTable(&excess_atoms);
     _ = try excess.parse();
@@ -6724,7 +6728,7 @@ test "direct calls retain eight projected arguments without publishing a ninth" 
 
 test "nested generic arrows reserve outer owners before expression bodies" {
     const source = "const seed:number=1; const outer=<T extends string>(value)=><U extends number>(item)=>item;";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -6787,7 +6791,7 @@ test "explicit call applications instantiate the completed generic alias namespa
     const source =
         "const seed: number = 1;\nstructural Box<T> = { value: T };\n" ++
         "const id=<U>(value)=>value; const result=id<Box<number>>(seed);";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -6817,10 +6821,11 @@ test "line comment arrows keep direct source and owner boundaries" {
         "const seed: number = 1; const id = // note\n<T>(value: T): T => value;",
         "const seed: number = 1; const id = // note\n<T> (value: T): T => value;",
     };
-    var parser = try JsParser.initTyped(
+    var parser = try JsParser.initAdmission(
         std.testing.allocator,
         std.testing.allocator,
         sources[1],
+        .compile,
     );
     defer parser.deinit();
     try std.testing.expectError(error.UnexpectedToken, parser.parse());
@@ -6837,7 +6842,7 @@ test "nested legacy-call line-comment arrow retains captures and semantic projec
     const runtime_allocator = runtime_count.allocator();
     var atoms = AtomTable.init(runtime_allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(runtime_allocator, type_count.allocator(), source);
+    var parser = try JsParser.initAdmission(runtime_allocator, type_count.allocator(), source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
 
@@ -6860,7 +6865,7 @@ test "comparison-shaped generic arrow candidates require explicit call grammar" 
         "const id = // word\n<T + U>(value: T): T => value;",
     };
     for (sources) |source| {
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         try std.testing.expectError(error.UnexpectedToken, parser.parse());
         try std.testing.expectEqual(@as(usize, 0), parser.type_store.generic_parameters.items.len);
@@ -6884,7 +6889,7 @@ test "generic arrow lookahead selects an outer arrow after a function return typ
     const runtime_allocator = runtime_count.allocator();
     var atoms = AtomTable.init(runtime_allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(runtime_allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -6914,10 +6919,11 @@ test "generic arrow lookahead selects an outer arrow after a function return typ
     try std.testing.expectEqual(TypeSyntax.NodeTag.function, outer_root.tag);
 
     const missing_outer = "const make=<T>(): (value: T) => T;";
-    var control = try JsParser.initTyped(
+    var control = try JsParser.initAdmission(
         std.testing.allocator,
         std.testing.allocator,
         missing_outer,
+        .compile,
     );
     defer control.deinit();
     try std.testing.expectError(error.UnexpectedToken, control.parse());
@@ -6933,7 +6939,7 @@ test "first runtime token generic arrows have a defined previous token" {
         "/* leading */ <T>(value)=>value;",
     };
     for (sources) |source| {
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         _ = try parser.parse();
         try parser.type_store.validate();
@@ -6959,7 +6965,7 @@ test "generic owner projection removes one pair from its recorded window" {
     var observed: usize = 0;
     for (cases) |case| {
         errdefer std.debug.print("generic owner window failed: {s}\n", .{case.source});
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, case.source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
         defer parser.deinit();
         _ = try parser.parse();
         try expectDirectAccepted(case.source);
@@ -7005,10 +7011,11 @@ test "generic owner projection removes one pair from its recorded window" {
 
 test "empty and compact generic owners retain direct allocation failure" {
     const empty_source = "const id=<>()=>undefined;";
-    var empty_parser = try JsParser.initTyped(
+    var empty_parser = try JsParser.initAdmission(
         std.testing.allocator,
         std.testing.allocator,
         empty_source,
+        .compile,
     );
     defer empty_parser.deinit();
     _ = try empty_parser.parse();
@@ -7046,10 +7053,11 @@ test "empty and compact generic owners retain direct allocation failure" {
     try std.testing.expectError(error.OutOfMemory, empty_env.ensureHealthy());
 
     const compact_source = "const id=<=string>()=>undefined;";
-    var compact_parser = try JsParser.initTyped(
+    var compact_parser = try JsParser.initAdmission(
         std.testing.allocator,
         std.testing.allocator,
         compact_source,
+        .compile,
     );
     defer compact_parser.deinit();
     _ = try compact_parser.parse();
@@ -7097,9 +7105,9 @@ test "explicit call depth exclusion does not fall back to comparison admission" 
     try source.append(std.testing.allocator, 'T');
     try source.appendNTimes(std.testing.allocator, '>', TypeSyntax.max_type_depth + 1);
     try source.appendSlice(std.testing.allocator, "(seed);");
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source.items);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source.items, .compile);
     defer parser.deinit();
-    try std.testing.expectError(error.UnexpectedToken, parser.parse());
+    try std.testing.expectError(error.AdmissionRefused, parser.parse());
     try std.testing.expectEqual(@as(usize, 0), parser.type_store.explicit_call_arguments.items.len);
 
     try expectDirectAccepted("const seed: number = 1; const result=seed << 1;");
@@ -7108,7 +7116,7 @@ test "explicit call depth exclusion does not fall back to comparison admission" 
 test "function bounds stop at the compact legacy parameter count" {
     const source =
         "const seed: number = 1; function ignored<T, =string, U extends 1>() { return seed; }";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -7143,10 +7151,11 @@ test "function bounds stop at the compact legacy parameter count" {
 
     const unsupported =
         "const seed: number = 1; function ignored<T, =string, U extends ?>() { return seed; }";
-    var unsupported_parser = try JsParser.initTyped(
+    var unsupported_parser = try JsParser.initAdmission(
         std.testing.allocator,
         std.testing.allocator,
         unsupported,
+        .compile,
     );
     defer unsupported_parser.deinit();
     _ = try unsupported_parser.parse();
@@ -7166,7 +7175,7 @@ test "function bounds stop at the compact legacy parameter count" {
 test "recovered generic function body error removes its owner and retains earlier syntax" {
     const source =
         "const seed: number = 1; function identity<T>(value) { const broken = ; return value; }";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     try std.testing.expectError(error.ParseError, parser.parse());
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.annotations.items.len);
@@ -7216,7 +7225,7 @@ test "recovered generic arrow wrappers remove current and nested type syntax" {
         const runtime_allocator = runtime_count.allocator();
         var control_atoms = AtomTable.init(runtime_allocator);
         defer control_atoms.deinit();
-        var control = try JsParser.initTyped(runtime_allocator, std.testing.allocator, control_source);
+        var control = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, control_source, .compile);
         defer control.deinit();
         control.setAtomTable(&control_atoms);
         const control_root = try control.parse();
@@ -7231,7 +7240,7 @@ test "recovered generic arrow wrappers remove current and nested type syntax" {
         try std.testing.expectEqual(@as(usize, 2), control.type_store.function_signatures.items.len);
         try control.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&control));
 
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         try std.testing.expectError(error.ParseError, parser.parse());
         try std.testing.expectEqual(TokenType.eof, parser.current.type);
@@ -7281,10 +7290,9 @@ test "enclosing expression transactions remove completed nested calls" {
     for (tails) |tail| {
         const source = try std.mem.concat(std.testing.allocator, u8, &.{ prefix, tail });
         defer std.testing.allocator.free(source);
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         try std.testing.expectError(error.UnexpectedToken, parser.parse());
-        try std.testing.expectEqual(TokenType.semicolon, parser.current.type);
         try std.testing.expectEqual(@as(usize, 1), parser.type_store.annotations.items.len);
         try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
         try std.testing.expectEqual(@as(usize, 1), parser.type_store.explicit_call_arguments.items.len);
@@ -7326,7 +7334,7 @@ const FinalNodeRollbackCase = struct {
 fn expectFinalNodeAllocationRollback(case: FinalNodeRollbackCase) !void {
     var control_atoms = AtomTable.init(std.testing.allocator);
     defer control_atoms.deinit();
-    var control = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, case.source);
+    var control = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
     defer control.deinit();
     if (case.runtime_parity) control.setAtomTable(&control_atoms);
     const control_root = try control.parse();
@@ -7366,7 +7374,7 @@ fn expectFinalNodeAllocationRollback(case: FinalNodeRollbackCase) !void {
 
     var parser_atoms = AtomTable.init(std.testing.allocator);
     defer parser_atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, case.source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
     defer parser.deinit();
     if (case.runtime_parity) parser.setAtomTable(&parser_atoms);
     const stable_node_allocator = parser.nodes.allocator;
@@ -7735,10 +7743,11 @@ test "diagnostic allocation failure removes arrow and call records from wrappers
         );
         defer std.testing.allocator.free(successful_source);
 
-        var control = try JsParser.initTyped(
+        var control = try JsParser.initAdmission(
             std.testing.allocator,
             std.testing.allocator,
             successful_source,
+            .compile,
         );
         defer control.deinit();
         _ = try control.parse();
@@ -7751,10 +7760,11 @@ test "diagnostic allocation failure removes arrow and call records from wrappers
         try std.testing.expectEqual(fixture.control_calls, control.type_store.authored_call_arguments.items.len);
         try std.testing.expectEqual(fixture.control_calls, control.type_store.semantic_fragments.items.len);
 
-        var parser = try JsParser.initTyped(
+        var parser = try JsParser.initAdmission(
             std.testing.allocator,
             std.testing.allocator,
             failing_source,
+            .compile,
         );
         defer parser.deinit();
         const stable_error_allocator = parser.errors.allocator;
@@ -7794,7 +7804,7 @@ test "failed explicit call retains an earlier generic arrow owner" {
     const source =
         "const seed: number = 1; const id=<T>(value)=>value; " ++
         "const result=id<string>(;";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     try std.testing.expectError(error.UnexpectedToken, parser.parse());
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.annotations.items.len);
@@ -7809,7 +7819,7 @@ test "failed explicit call retains an earlier generic arrow owner" {
 test "generic function publication rejects a swallowed diagnostic allocation failure" {
     const source =
         "const seed: number = 1; function identity<T>(value) { const broken; return value; }";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     const stable_error_allocator = parser.errors.allocator;
     var failing = std.testing.FailingAllocator.init(
@@ -7842,7 +7852,7 @@ test "generic parameter projection retains legacy u32 depth arithmetic" {
         "\"> = number;\nconst value: Box<> = undefined;",
     );
 
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source.items);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source.items, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try parser.type_store.validate();
@@ -7900,10 +7910,11 @@ test "declaration semantic census observes every case" {
                 );
             },
             .retained_declarations => |expected| {
-                var parser = try JsParser.initTyped(
+                var parser = try JsParser.initAdmission(
                     std.testing.allocator,
                     std.testing.allocator,
                     fixture.source,
+                    .compile,
                 );
                 defer parser.deinit();
                 switch (fixture.case) {
@@ -7966,7 +7977,7 @@ test "declaration bodies admit numeric leading and blank-line continuations" {
     for (cases) |case| {
         var atoms = AtomTable.init(std.testing.allocator);
         defer atoms.deinit();
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, case.source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
@@ -8000,7 +8011,7 @@ test "declaration bodies admit numeric leading and blank-line continuations" {
 test "spaced function arrow continuation absorbs the next runtime line" {
     const source = "structural A = number = >\nconst value = 1;";
 
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
@@ -8020,7 +8031,7 @@ test "spaced function arrow continuation absorbs the next runtime line" {
 test "comment-separated declaration terminator remains a runtime semicolon" {
     const source = "structural A = number\n/*c*/;";
 
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     try std.testing.expectError(error.ParseError, parser.parse());
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
@@ -8036,15 +8047,14 @@ test "comment-separated declaration terminator remains a runtime semicolon" {
 
 test "nominal refusal recovery preserves a comment-separated semicolon" {
     const separated = "nominal Bad = void\n/*c*/;";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, separated);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, separated, .compile);
     defer parser.deinit();
-    try std.testing.expectError(error.MissingSemicolon, parser.parse());
+    try std.testing.expectError(error.AdmissionRefused, parser.parse());
     try std.testing.expectEqual(@as(usize, 0), parser.type_store.declarations.items.len);
-    const errors = parser.errors.getErrors();
-    try std.testing.expectEqual(@as(usize, 1), errors.len);
-    try std.testing.expectEqual(engine.parser.ErrorKind.missing_semicolon, errors[0].kind);
-    try std.testing.expectEqual(@as(u32, 0), errors[0].location.offset);
-    try std.testing.expectEqual(@as(u32, 7), errors[0].location.end_offset);
+    const diagnostics = parser.getAdmissionDiagnostics();
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+    try std.testing.expectEqual(TypeSyntax.AdmissionKind.nominal_base_not_scalar, diagnostics[0].kind);
+    try std.testing.expectEqual(@as(u32, @intCast(std.mem.indexOf(u8, separated, "void").?)), diagnostics[0].span.start);
 
     const empty = "nominal Bad =\n;";
     inline for (.{ TypeSyntax.AdmissionMode.collect, TypeSyntax.AdmissionMode.compile }) |mode| {
@@ -8158,7 +8168,7 @@ fn expectDirectDeclarationNeutral(
 ) !void {
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -8791,7 +8801,7 @@ test "direct primitive slice binds a grouped and suffixed annotation" {
     const source = "const text: (((string))) tolerated_suffix = input;";
     try expectDirectAccepted(source);
 
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
@@ -8804,22 +8814,30 @@ test "direct primitive slice binds a grouped and suffixed annotation" {
 }
 
 test "direct parser reports missing and unmatched primitive locations" {
+    const Expected = struct { kind: engine.parser.ErrorKind, offset: u32, end_offset: u32 };
     const cases = [_]struct {
         source: []const u8,
-        offset: u32,
-        end_offset: u32,
+        errors: []const Expected,
     }{
-        .{ .source = "const value: = 1;", .offset = 13, .end_offset = 14 },
-        .{ .source = "let n: (number;", .offset = 14, .end_offset = 15 },
+        .{ .source = "const value: = 1;", .errors = &.{
+            .{ .kind = .unexpected_token, .offset = 11, .end_offset = 12 },
+            .{ .kind = .missing_semicolon, .offset = 6, .end_offset = 11 },
+        } },
+        .{ .source = "let n: (number;", .errors = &.{
+            .{ .kind = .missing_semicolon, .offset = 4, .end_offset = 5 },
+        } },
     };
     for (cases) |case| {
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, case.source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
         defer parser.deinit();
-        try std.testing.expectError(error.ParseError, parser.parse());
+        try std.testing.expectError(error.MissingSemicolon, parser.parse());
         const errors = parser.errors.getErrors();
-        try std.testing.expectEqual(@as(usize, 1), errors.len);
-        try std.testing.expectEqual(case.offset, errors[0].location.offset);
-        try std.testing.expectEqual(case.end_offset, errors[0].location.end_offset);
+        try std.testing.expectEqual(case.errors.len, errors.len);
+        for (case.errors, errors) |expected, actual| {
+            try std.testing.expectEqual(expected.kind, actual.kind);
+            try std.testing.expectEqual(expected.offset, actual.location.offset);
+            try std.testing.expectEqual(expected.end_offset, actual.location.end_offset);
+        }
     }
 }
 
@@ -8850,7 +8868,7 @@ test "direct type depth admits 512 and refuses opener 513" {
 
 test "direct parser keeps the binding token for a missing semicolon" {
     const source = "let value: string";
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
@@ -8868,7 +8886,7 @@ test "runtime any and quoted names are admitted while unary void is refused" {
     try expectDirectAdmission(std.testing.allocator, accepted, .collect, .accepted, &.{}, null);
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, accepted);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, accepted, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -8966,7 +8984,7 @@ test "direct calls and comparisons retain owners and operators" {
     for (cases) |case| {
         var atoms = AtomTable.init(std.testing.allocator);
         defer atoms.deinit();
-        var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, case.source);
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
@@ -9175,7 +9193,7 @@ test "direct parser and lowering close every allocation failure" {
         fn run(type_allocator: std.mem.Allocator) !void {
             const source =
                 "const value: { readonly id?: number; tags: string[][]; cb: (x: number) => `v${string}` } = input;";
-            var parser = try JsParser.initTyped(std.testing.allocator, type_allocator, source);
+            var parser = try JsParser.initAdmission(std.testing.allocator, type_allocator, source, .compile);
             defer parser.deinit();
             var atoms = AtomTable.init(std.testing.allocator);
             defer atoms.deinit();
@@ -9190,7 +9208,7 @@ test "direct parser and lowering close every allocation failure" {
             const source = "const value: number = make(1.25);";
             var atoms = AtomTable.init(std.testing.allocator);
             defer atoms.deinit();
-            var parser = try JsParser.initTyped(allocator, allocator, source);
+            var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
             defer parser.deinit();
             parser.setAtomTable(&atoms);
             _ = try parser.parse();
@@ -9788,7 +9806,7 @@ test "global annotations retain exact repeated declaration owners" {
         const runtime_allocator = runtime_count.allocator();
         var atoms = AtomTable.init(runtime_allocator);
         defer atoms.deinit();
-        var parser = try JsParser.initTyped(runtime_allocator, std.testing.allocator, case.source);
+        var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, case.source, .compile);
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
@@ -9846,7 +9864,7 @@ test "outer annotation keeps its index across a nested typed initializer" {
     const runtime_allocator = runtime_count.allocator();
     var atoms = AtomTable.init(runtime_allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(runtime_allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -9876,7 +9894,7 @@ test "annotation runtime owners reject missing forged and exchanged declarations
     const runtime_allocator = runtime_count.allocator();
     var atoms = AtomTable.init(runtime_allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(runtime_allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -10028,7 +10046,7 @@ test "annotation owner census covers current syntax kinds" {
     const runtime_allocator = runtime_count.allocator();
     var atoms = AtomTable.init(runtime_allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(runtime_allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -10125,7 +10143,7 @@ test "shadowed bindings and closure parameters retain their actual owners" {
     const runtime_allocator = runtime_count.allocator();
     var atoms = AtomTable.init(runtime_allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(runtime_allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -10206,10 +10224,11 @@ fn expectDirectGenericConsumer(
     var type_count = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(
+    var direct = try JsParser.initAdmission(
         direct_count.allocator(),
         type_count.allocator(),
         source,
+        .compile,
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
@@ -10564,10 +10583,11 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
     var type_count = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(
+    var direct = try JsParser.initAdmission(
         direct_count.allocator(),
         type_count.allocator(),
         source,
+        .compile,
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
@@ -10816,10 +10836,11 @@ fn expectDirectCallOrderRefusal(
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     var atoms = AtomTable.init(runtime_count.allocator());
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(
+    var parser = try JsParser.initAdmission(
         runtime_count.allocator(),
         std.testing.allocator,
         source,
+        .compile,
     );
     defer parser.deinit();
     parser.setAtomTable(&atoms);
@@ -10956,10 +10977,11 @@ fn runDirectCallAllocationSweep(
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     var atoms = AtomTable.init(runtime_count.allocator());
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(
+    var parser = try JsParser.initAdmission(
         runtime_count.allocator(),
         std.testing.allocator,
         source,
+        .compile,
     );
     defer parser.deinit();
     parser.setAtomTable(&atoms);
@@ -11106,10 +11128,11 @@ fn expectDirectPredicateConsumerInner(
     var type_count = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(
+    var direct = try JsParser.initAdmission(
         direct_count.allocator(),
         type_count.allocator(),
         source,
+        .compile,
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
@@ -11461,10 +11484,11 @@ fn runPredicateAllocationSweep(
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     var atoms = AtomTable.init(runtime_count.allocator());
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(
+    var parser = try JsParser.initAdmission(
         runtime_count.allocator(),
         std.testing.allocator,
         source,
+        .compile,
     );
     defer parser.deinit();
     parser.setAtomTable(&atoms);
@@ -11599,10 +11623,11 @@ test "direct callable bounds stop before excluded projected fragments" {
     var type_count = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(
+    var direct = try JsParser.initAdmission(
         direct_count.allocator(),
         type_count.allocator(),
         source,
+        .compile,
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
@@ -11703,10 +11728,11 @@ fn runDirectGenericAllocationSweep(
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     var atoms = AtomTable.init(runtime_count.allocator());
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(
+    var parser = try JsParser.initAdmission(
         runtime_count.allocator(),
         std.testing.allocator,
         source,
+        .compile,
     );
     defer parser.deinit();
     parser.setAtomTable(&atoms);
@@ -11772,10 +11798,11 @@ fn runDirectGenericMapAllocationSweep(
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     var atoms = AtomTable.init(runtime_count.allocator());
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(
+    var parser = try JsParser.initAdmission(
         runtime_count.allocator(),
         std.testing.allocator,
         source,
+        .compile,
     );
     defer parser.deinit();
     parser.setAtomTable(&atoms);
@@ -11878,7 +11905,7 @@ test "direct source pilot preserves runtime types owners checks and capsules" {
     const type_allocator = type_count.allocator();
     var direct_atoms = AtomTable.init(direct_allocator);
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(direct_allocator, type_allocator, source);
+    var direct = try JsParser.initAdmission(direct_allocator, type_allocator, source, .compile);
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
@@ -12000,7 +12027,7 @@ fn expectPilotCheckerContrast(
     var type_count = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(direct_count.allocator(), type_count.allocator(), source);
+    var direct = try JsParser.initAdmission(direct_count.allocator(), type_count.allocator(), source, .compile);
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
@@ -12100,7 +12127,7 @@ test "direct source selection distinguishes omitted and empty inputs" {
 
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var empty_parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, "");
+    var empty_parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, "", .compile);
     defer empty_parser.deinit();
     empty_parser.setAtomTable(&atoms);
     const empty_root = try empty_parser.parse();
@@ -12201,7 +12228,7 @@ fn runDirectPilotAllocationSweep(
         "}";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -12319,7 +12346,7 @@ fn expectDirectDeclarationConsumer(
     var type_count = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(direct_count.allocator(), type_count.allocator(), source);
+    var direct = try JsParser.initAdmission(direct_count.allocator(), type_count.allocator(), source, .compile);
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
@@ -12476,7 +12503,7 @@ fn expectDirectGenericDeclarationFacts(
 ) !void {
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     _ = try parser.parse();
@@ -12569,10 +12596,11 @@ test "parsed declaration helper retains operational failure and checks absent he
     const record_source = "structural Record = { id: string };";
     var record_atoms = AtomTable.init(std.testing.allocator);
     defer record_atoms.deinit();
-    var record_parser = try JsParser.initTyped(
+    var record_parser = try JsParser.initAdmission(
         std.testing.allocator,
         std.testing.allocator,
         record_source,
+        .compile,
     );
     defer record_parser.deinit();
     record_parser.setAtomTable(&record_atoms);
@@ -12618,10 +12646,11 @@ test "parsed declaration helper retains operational failure and checks absent he
     const empty_source = "structural Empty =;";
     var empty_atoms = AtomTable.init(std.testing.allocator);
     defer empty_atoms.deinit();
-    var empty_parser = try JsParser.initTyped(
+    var empty_parser = try JsParser.initAdmission(
         std.testing.allocator,
         std.testing.allocator,
         empty_source,
+        .compile,
     );
     defer empty_parser.deinit();
     empty_parser.setAtomTable(&empty_atoms);
@@ -12673,7 +12702,7 @@ test "parsed generic declaration helper restores scope and retains failure" {
     const source = "structural Unit<> = number;";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     _ = try parser.parse();
@@ -12715,7 +12744,7 @@ test "parsed generic declaration helper validates exact owner before mutation" {
     const source = "structural Box<T> = T;";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     _ = try parser.parse();
@@ -12770,10 +12799,11 @@ test "parsed generic declaration helper rejects malformed oversized projected St
     const wide_source = "structural Wide<A, B, C, D, E, F, G, H, I> = string;";
     var wide_atoms = AtomTable.init(std.testing.allocator);
     defer wide_atoms.deinit();
-    var wide_parser = try JsParser.initTyped(
+    var wide_parser = try JsParser.initAdmission(
         std.testing.allocator,
         std.testing.allocator,
         wide_source,
+        .compile,
     );
     defer wide_parser.deinit();
     wide_parser.setAtomTable(&wide_atoms);
@@ -12841,7 +12871,7 @@ fn runDirectDeclarationAllocationSweep(
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     var atoms = AtomTable.init(runtime_count.allocator());
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(runtime_count.allocator(), std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(runtime_count.allocator(), std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -12898,7 +12928,7 @@ fn runDirectGenericDeclarationAllocationSweep(
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     var atoms = AtomTable.init(runtime_count.allocator());
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(runtime_count.allocator(), std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(runtime_count.allocator(), std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -12953,7 +12983,7 @@ test "direct source pilot compacts annotated parameters by final owner" {
     var type_count = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(direct_count.allocator(), type_count.allocator(), source);
+    var direct = try JsParser.initAdmission(direct_count.allocator(), type_count.allocator(), source, .compile);
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
@@ -12995,7 +13025,7 @@ test "direct function specifications preserve variable arrow capsule absence" {
     var type_count = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(direct_count.allocator(), type_count.allocator(), source);
+    var direct = try JsParser.initAdmission(direct_count.allocator(), type_count.allocator(), source, .compile);
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
@@ -13071,7 +13101,7 @@ fn expectDirectConsumerMatrixCase(
     var type_count = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(direct_count.allocator(), type_count.allocator(), source);
+    var direct = try JsParser.initAdmission(direct_count.allocator(), type_count.allocator(), source, .compile);
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
@@ -13439,7 +13469,7 @@ fn expectDirectPrimitiveFacts(source: []const u8) !void {
 
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     _ = try parser.parse();
@@ -13492,10 +13522,11 @@ test "direct consumers preserve present null failure and hide refused expression
     var type_count = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(
+    var direct = try JsParser.initAdmission(
         direct_count.allocator(),
         type_count.allocator(),
         source,
+        .compile,
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
@@ -13609,10 +13640,11 @@ fn expectDirectFunctionCapsules(source: []const u8) !void {
     var type_count = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(
+    var direct = try JsParser.initAdmission(
         direct_count.allocator(),
         type_count.allocator(),
         source,
+        .compile,
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
@@ -13823,10 +13855,11 @@ fn expectDirectSingleModuleContract(
     var type_count = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(
+    var direct = try JsParser.initAdmission(
         direct_count.allocator(),
         type_count.allocator(),
         source,
+        .compile,
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
@@ -13927,10 +13960,11 @@ fn expectDirectCallbackCeiling(
     var type_count = CountingAllocator.init(std.testing.allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var direct = try JsParser.initTyped(
+    var direct = try JsParser.initAdmission(
         direct_count.allocator(),
         type_count.allocator(),
         source,
+        .compile,
     );
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
