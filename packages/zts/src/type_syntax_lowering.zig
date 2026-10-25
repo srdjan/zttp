@@ -1015,3 +1015,51 @@ test "public lowering closes allocation failures and preserves constructor order
     try std.testing.expect(observed_pool_failure);
     try std.testing.expect(observed_success);
 }
+
+/// Parse one standalone type text (a binding signature, an ambient name, a census row) into
+/// `pool`. The whole text must be one type: a malformed group that direct admission keeps as a
+/// prefix is refused here, as binding signatures always required. Returns `null_type_idx` for
+/// text that is not a type. Allocation failure poisons the pool, as the type pool constructors do.
+pub fn parseTypeText(pool: *TypePool, allocator: std.mem.Allocator, source: []const u8) TypeIndex {
+    if (pool.failure != null) return null_type_idx;
+    return parseTypeTextChecked(pool, allocator, source) catch |err| {
+        if (err == error.OutOfMemory and pool.failure == null) pool.failure = error.OutOfMemory;
+        return null_type_idx;
+    };
+}
+
+fn parseTypeTextChecked(pool: *TypePool, allocator: std.mem.Allocator, source: []const u8) !TypeIndex {
+    if (source.len > std.math.maxInt(u32)) return null_type_idx;
+    var store = TypeSyntax.Store.init(allocator, source);
+    defer store.deinit();
+    const value = TypeSyntax.parseAdmittedTypeValue(&store, .{
+        .start = 0,
+        .end = @intCast(source.len),
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return null_type_idx,
+    };
+    // Direct admission keeps a prefix of a malformed group; a standalone text must be one whole type.
+    var tail: usize = value.semantic_prefix_end;
+    while (tail < source.len and std.mem.indexOfScalar(u8, " \t\r\n", source[tail]) != null) tail += 1;
+    if (tail != source.len) return null_type_idx;
+    const base_uses = try allocator.alloc(u8, store.nodes.items.len);
+    @memset(base_uses, 0);
+    var application_bases: TypeSyntax.Store.ApplicationBasePlan = .{
+        .allocator = allocator,
+        .uses = base_uses,
+    };
+    defer application_bases.deinit();
+    for (store.nodes.items) |node| switch (node.data) {
+        .generic_application => |application| switch (application.base) {
+            .absent => {},
+            .present => |index| base_uses[@as(usize, index)] = 1,
+        },
+        else => {},
+    };
+    const lowered = try allocator.alloc(TypeIndex, store.nodes.items.len);
+    defer allocator.free(lowered);
+    @memset(lowered, null_type_idx);
+    try lowerOwnedRange(allocator, &store, pool, lowered, &application_bases, value.node_range);
+    return loweredChild(lowered, value.root, lowered.len);
+}

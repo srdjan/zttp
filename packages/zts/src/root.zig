@@ -347,6 +347,7 @@ pub const TypePoolError = type_pool.TypePoolError;
 pub const TypeIndex = type_pool.TypeIndex;
 pub const null_type_idx = type_pool.null_type_idx;
 pub const parseTypeExpr = type_pool.parseTypeExpr;
+pub const parseTypeText = compiler.type_syntax_lowering.parseTypeText;
 /// Structural identity of a type, for a consumer that needs to say two types
 /// are the same without holding a pool index. The frozen-signature gate pins
 /// every virtual-module export by this digest.

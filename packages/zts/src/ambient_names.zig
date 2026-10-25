@@ -253,13 +253,10 @@ test "the two deliberate exclusions are decisions, not drift" {
     const fixture = try Fixture.init(allocator);
     defer fixture.deinit(allocator);
 
-    // `bool` resolves - `resolveIdentType` accepts it beside `boolean` - and is
-    // deliberately unpublished. Spec 6 does not name it, and the two spellings
-    // of one type would teach an agent a choice the canonical form does not
-    // admit. Unpublished-but-accepted is the safe direction: nothing an agent
-    // writes from this table is refused. The reverse would refuse code the
-    // table taught.
-    try testing.expect(fixture.resolves("bool"));
+    // `bool` does not resolve and is unpublished. Authored source and binding
+    // text share one grammar, which spells the type `boolean` only, so `bool`
+    // is refused like any unknown name.
+    try testing.expect(!fixture.resolves("bool"));
     try testing.expect(findType("bool") == null);
 
     // `Readonly<T>` remains a generic modifier rather than a type name. Array

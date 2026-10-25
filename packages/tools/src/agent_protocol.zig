@@ -702,8 +702,8 @@ test "two independently parsed identical types serialize to one digest" {
     defer pool.deinit(a);
 
     const source = "{ id: string, tags: string[] }";
-    const first = zts.parseTypeExpr(&pool, a, source);
-    const second = zts.parseTypeExpr(&pool, a, source);
+    const first = zts.parseTypeText(&pool, a, source);
+    const second = zts.parseTypeText(&pool, a, source);
     try testing.expect(first != second); // the pool does not intern
 
     const digest_a = try zts.typeDigest(&pool, a, first);
@@ -712,7 +712,7 @@ test "two independently parsed identical types serialize to one digest" {
 
     // The floor: a different type gets a different digest, so the equality
     // above is the encoding's doing and not a constant.
-    const other = zts.parseTypeExpr(&pool, a, "{ id: number, tags: string[] }");
+    const other = zts.parseTypeText(&pool, a, "{ id: number, tags: string[] }");
     const digest_c = try zts.typeDigest(&pool, a, other);
     try testing.expect(!std.mem.eql(u8, &digest_a, &digest_c));
 }

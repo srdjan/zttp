@@ -862,7 +862,7 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
         allocator: std.mem.Allocator,
         hasher: *std.crypto.hash.sha2.Sha256,
         /// Duped: `firstUnresolvedName` points into the pool's name storage,
-        /// which the next `parseTypeExpr` may reallocate, so keeping the slice
+        /// which the next `parseTypeText` may reallocate, so keeping the slice
         /// as a hash key crashes on the next compare.
         unresolved: std.ArrayListUnmanaged([]u8) = .empty,
         fallback_unknown: usize = 0,
@@ -876,7 +876,7 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
 
     const visit = struct {
         fn f(c: *Ctx, module: []const u8, export_name: []const u8, position: usize, text: []const u8) anyerror!void {
-            const idx = zts.parseTypeExpr(c.pool, c.allocator, text);
+            const idx = zts.parseTypeText(c.pool, c.allocator, text);
             if (idx == zts.null_type_idx) {
                 c.unparsed += 1;
                 return;
@@ -1004,10 +1004,10 @@ test "binding signature parser rejects trailing type text" {
     var pool = zts.TypePool.init(allocator);
     defer pool.deinit(allocator);
     const valid = returnKindToTs(.boolean);
-    try std.testing.expectEqual(pool.idx_boolean, zts.parseTypeExpr(&pool, allocator, valid));
+    try std.testing.expectEqual(pool.idx_boolean, zts.parseTypeText(&pool, allocator, valid));
     const malformed = try allocator.print("{s} junk", .{valid});
     defer allocator.free(malformed);
-    try std.testing.expectEqual(zts.null_type_idx, zts.parseTypeExpr(&pool, allocator, malformed));
+    try std.testing.expectEqual(zts.null_type_idx, zts.parseTypeText(&pool, allocator, malformed));
     try pool.ensureHealthy();
 }
 
@@ -1025,7 +1025,7 @@ test "every ReturnKind spells a type the pool parses" {
     try std.testing.expect(kinds.len > 0);
     for (kinds) |kind| {
         const text = returnKindToTs(kind);
-        const idx = zts.parseTypeExpr(&pool, allocator, text);
+        const idx = zts.parseTypeText(&pool, allocator, text);
         try std.testing.expect(idx != zts.null_type_idx);
         if (kind != .unknown) {
             try std.testing.expect(pool.getTag(idx) != .t_unknown_type);
@@ -1034,7 +1034,7 @@ test "every ReturnKind spells a type the pool parses" {
 
     // `.bytes` in particular resolves to the primitive rather than to a name
     // the checker would then have to look up and fail to find.
-    const bytes_idx = zts.parseTypeExpr(&pool, allocator, returnKindToTs(.bytes));
+    const bytes_idx = zts.parseTypeText(&pool, allocator, returnKindToTs(.bytes));
     try std.testing.expectEqual(pool.idx_bytes, bytes_idx);
     try std.testing.expect(pool.firstUnresolvedName(bytes_idx) == null);
 }

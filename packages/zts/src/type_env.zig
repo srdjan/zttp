@@ -1564,7 +1564,7 @@ pub const TypeEnv = struct {
             }
         }
         // Fall back to type expression parser
-        const parsed = parseTypeExpr(self.pool, self.allocator, trimmed);
+        const parsed = type_syntax_lowering.parseTypeText(self.pool, self.allocator, trimmed);
 
         // If the parser produced a generic application (e.g. Result<string>),
         // try to instantiate it against a known generic alias.
