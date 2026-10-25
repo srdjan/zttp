@@ -1,12 +1,12 @@
 {
   "schema_version": 1,
   "provenance": {
-    "source_commit": "ec3f98bd2e7452fb3a7e240b0d6f5949d55f7cc3",
+    "source_commit": "f1e607b86e298fec4514c7188b6437944800a028",
     "source_dirty": false,
-    "zig_version": "0.16.0",
+    "zig_version": "0.17.0",
     "host": {
       "os": "Darwin",
-      "os_release": "25.6.0",
+      "os_release": "27.0.0",
       "architecture": "arm64",
       "processor": "Apple M4 Pro"
     },
@@ -18,8 +18,8 @@
       "name": "intArithmetic",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.281,
-      "ops_per_sec": 21920210,
+      "time_ms": 2.177,
+      "ops_per_sec": 22967386,
       "error": null,
       "perf": {
         "backedge_count": 50000,
@@ -45,8 +45,8 @@
       "name": "stringConcat",
       "iterations": 50000,
       "success": true,
-      "time_ms": 7.915,
-      "ops_per_sec": 6317119,
+      "time_ms": 7.877,
+      "ops_per_sec": 6347594,
       "error": null,
       "perf": {
         "backedge_count": 50000,
@@ -72,8 +72,8 @@
       "name": "stringOps",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.427,
-      "ops_per_sec": 20601565,
+      "time_ms": 2.12,
+      "ops_per_sec": 23584905,
       "error": null,
       "perf": {
         "backedge_count": 50000,
@@ -99,8 +99,8 @@
       "name": "objectCreate",
       "iterations": 50000,
       "success": true,
-      "time_ms": 3.362,
-      "ops_per_sec": 14872099,
+      "time_ms": 3.48,
+      "ops_per_sec": 14367816,
       "error": null,
       "perf": {
         "backedge_count": 50000,
@@ -126,8 +126,8 @@
       "name": "propertyAccess",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.601,
-      "ops_per_sec": 19223375,
+      "time_ms": 2.532,
+      "ops_per_sec": 19747235,
       "error": null,
       "perf": {
         "backedge_count": 50000,
@@ -153,8 +153,8 @@
       "name": "arrayOps",
       "iterations": 50000,
       "success": true,
-      "time_ms": 2.979,
-      "ops_per_sec": 16784155,
+      "time_ms": 2.931,
+      "ops_per_sec": 17059024,
       "error": null,
       "perf": {
         "backedge_count": 99995,
@@ -180,8 +180,8 @@
       "name": "functionCalls",
       "iterations": 50000,
       "success": true,
-      "time_ms": 3.792,
-      "ops_per_sec": 13185654,
+      "time_ms": 4.086,
+      "ops_per_sec": 12236906,
       "error": null,
       "perf": {
         "backedge_count": 50000,
@@ -207,8 +207,8 @@
       "name": "recursion",
       "iterations": 25,
       "success": true,
-      "time_ms": 9.11,
-      "ops_per_sec": 2744,
+      "time_ms": 9.371,
+      "ops_per_sec": 2667,
       "error": null,
       "perf": {
         "backedge_count": 0,
@@ -234,8 +234,8 @@
       "name": "jsonOps",
       "iterations": 5000,
       "success": true,
-      "time_ms": 1.245,
-      "ops_per_sec": 4016064,
+      "time_ms": 1.225,
+      "ops_per_sec": 4081632,
       "error": null,
       "perf": {
         "backedge_count": 5000,
@@ -261,8 +261,8 @@
       "name": "gcPressure",
       "iterations": 50000,
       "success": true,
-      "time_ms": 6.306,
-      "ops_per_sec": 7928956,
+      "time_ms": 6.06,
+      "ops_per_sec": 8250825,
       "error": null,
       "perf": {
         "backedge_count": 50000,
@@ -288,8 +288,8 @@
       "name": "httpHandler",
       "iterations": 5000,
       "success": true,
-      "time_ms": 0.723,
-      "ops_per_sec": 6915629,
+      "time_ms": 0.725,
+      "ops_per_sec": 6896551,
       "error": null,
       "perf": {
         "backedge_count": 5000,
@@ -315,8 +315,8 @@
       "name": "httpHandlerHeavy",
       "iterations": 2000,
       "success": true,
-      "time_ms": 1.851,
-      "ops_per_sec": 1080497,
+      "time_ms": 1.937,
+      "ops_per_sec": 1032524,
       "error": null,
       "perf": {
         "backedge_count": 2000,
@@ -342,8 +342,8 @@
       "name": "forOfLoop",
       "iterations": 50000,
       "success": true,
-      "time_ms": 0.749,
-      "ops_per_sec": 66755674,
+      "time_ms": 0.775,
+      "ops_per_sec": 64516129,
       "error": null,
       "perf": {
         "backedge_count": 50600,
