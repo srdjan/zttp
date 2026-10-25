@@ -413,7 +413,9 @@ fn appendChild(
     children_arr: *object.JSObject,
     child_count: *u32,
     child: value.JSValue,
+    depth: u32,
 ) !void {
+    if (depth >= RENDER_MAX_DEPTH) return error.RenderDepthExceeded;
     if (child.isNull() or child.isUndefined()) return;
 
     if (child.isObject()) {
@@ -423,7 +425,7 @@ fn appendChild(
             var i: u32 = 0;
             while (i < len) : (i += 1) {
                 if (obj.getIndex(i)) |nested| {
-                    try appendChild(ctx, children_arr, child_count, nested);
+                    try appendChild(ctx, children_arr, child_count, nested, depth + 1);
                 }
             }
             return;
@@ -455,7 +457,7 @@ pub fn h(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value.JSValue) any
     var child_count: u32 = 0;
     if (args.len > 2) {
         for (args[2..]) |child| {
-            try appendChild(ctx, children_arr, &child_count, child);
+            try appendChild(ctx, children_arr, &child_count, child, 0);
         }
     }
     children_arr.setArrayLength(child_count);
@@ -488,15 +490,20 @@ pub fn renderToString(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value
     // Use per-context reusable buffer to avoid allocation per call
     var aw = &ctx.render_writer;
     aw.clearRetainingCapacity();
-    try renderNode(ctx, args[0], &aw.writer);
+    try renderNode(ctx, args[0], &aw.writer, 0);
     const result = try ctx.createString(aw.written());
     return result;
 }
 
-const RenderError = std.Io.Writer.Error || error{ OutOfMemory, ArenaObjectEscape, NoHiddenClassPool, JsonDepthExceeded };
+const RenderError = std.Io.Writer.Error || error{ OutOfMemory, ArenaObjectEscape, NoHiddenClassPool, JsonDepthExceeded, RenderDepthExceeded };
+
+/// Nesting bound for renderNode, renderRawChildren, and appendChild; matches JSON_MAX_DEPTH.
+const RENDER_MAX_DEPTH: u32 = 512;
 
 /// Render a single node to the writer
-fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer) RenderError!void {
+fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer, depth: u32) RenderError!void {
+    if (depth >= RENDER_MAX_DEPTH) return error.RenderDepthExceeded;
+
     // Handle null/undefined
     if (node.isNull() or node.isUndefined()) return;
 
@@ -526,7 +533,7 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
             var i: u32 = 0;
             while (i < len) : (i += 1) {
                 if (obj.getIndex(i)) |child| {
-                    try renderNode(ctx, child, writer);
+                    try renderNode(ctx, child, writer, depth + 1);
                 }
             }
             return;
@@ -568,14 +575,14 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
             };
 
             // Recursively render the result
-            try renderNode(ctx, component_result, writer);
+            try renderNode(ctx, component_result, writer, depth + 1);
             return;
         }
 
         // Fragment: null tag means render children without wrapper
         if (tag_val.isNull()) {
             if (obj.getProperty(pool, .children)) |children| {
-                try renderChildren(ctx, children, writer);
+                try renderChildren(ctx, children, writer, depth + 1);
             }
             return;
         }
@@ -605,9 +612,9 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
             // Render children - use raw output for style/script elements
             if (obj.getProperty(pool, .children)) |children| {
                 if (isRawTextElement(tag_data)) {
-                    try renderRawChildren(ctx, children, writer);
+                    try renderRawChildren(ctx, children, writer, depth + 1);
                 } else {
-                    try renderChildren(ctx, children, writer);
+                    try renderChildren(ctx, children, writer, depth + 1);
                 }
             }
 
@@ -619,8 +626,8 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
 }
 
 /// Render children value - delegates to renderNode which handles all types.
-fn renderChildren(ctx: *context.Context, children: value.JSValue, writer: *std.Io.Writer) RenderError!void {
-    try renderNode(ctx, children, writer);
+fn renderChildren(ctx: *context.Context, children: value.JSValue, writer: *std.Io.Writer, depth: u32) RenderError!void {
+    try renderNode(ctx, children, writer, depth);
 }
 
 /// Render HTML attributes from props object
@@ -742,7 +749,9 @@ fn isRawTextElement(tag: []const u8) bool {
 }
 
 /// Render children without HTML escaping (for style/script elements)
-fn renderRawChildren(ctx: *context.Context, children: value.JSValue, writer: anytype) !void {
+fn renderRawChildren(ctx: *context.Context, children: value.JSValue, writer: anytype, depth: u32) !void {
+    if (depth >= RENDER_MAX_DEPTH) return error.RenderDepthExceeded;
+
     if (children.isNull() or children.isUndefined()) return;
 
     if (children.isAnyString()) {
@@ -764,7 +773,7 @@ fn renderRawChildren(ctx: *context.Context, children: value.JSValue, writer: any
             var i: u32 = 0;
             while (i < len) : (i += 1) {
                 if (children_obj.getIndex(i)) |child| {
-                    try renderRawChildren(ctx, child, writer);
+                    try renderRawChildren(ctx, child, writer, depth + 1);
                 }
             }
         }
@@ -1563,4 +1572,97 @@ test "Hybrid: h and renderToString accept arena values" {
     const rendered = try renderToString(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{node});
     try std.testing.expect(rendered.isString());
     try std.testing.expectEqualStrings("<div>hello</div>", rendered.toPtr(string.JSString).data());
+}
+
+/// A string wrapped in `levels` single-element arrays.
+fn nestedArray(ctx: *context.Context, levels: u32) !value.JSValue {
+    var v = try ctx.createString("x");
+    var i: u32 = 0;
+    while (i < levels) : (i += 1) {
+        const arr = try ctx.createArray();
+        arr.prototype = ctx.array_prototype;
+        try ctx.setIndexChecked(arr, 0, v);
+        arr.setArrayLength(1);
+        v = arr.toValue();
+    }
+    return v;
+}
+
+test "renderToString refuses nesting past the render limit" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var gc_state = try gc.GC.init(arena.allocator(), .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(arena.allocator(), &gc_state, .{});
+    defer ctx.deinit();
+    const ctx_ptr: *anyopaque = @ptrCast(@alignCast(ctx));
+
+    const too_deep = try nestedArray(ctx, 600);
+    try std.testing.expectError(error.RenderDepthExceeded, renderToString(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{too_deep}));
+}
+
+test "renderToString renders nesting one below the render limit" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var gc_state = try gc.GC.init(arena.allocator(), .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(arena.allocator(), &gc_state, .{});
+    defer ctx.deinit();
+    const ctx_ptr: *anyopaque = @ptrCast(@alignCast(ctx));
+
+    const deep = try nestedArray(ctx, 511);
+    const rendered = try renderToString(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{deep});
+    try std.testing.expectEqualStrings("x", rendered.toPtr(string.JSString).data());
+}
+
+test "h refuses children nested past the render limit" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var gc_state = try gc.GC.init(arena.allocator(), .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(arena.allocator(), &gc_state, .{});
+    defer ctx.deinit();
+    const ctx_ptr: *anyopaque = @ptrCast(@alignCast(ctx));
+
+    const tag_val = try ctx.createString("div");
+    const too_deep = try nestedArray(ctx, 600);
+    try std.testing.expectError(error.RenderDepthExceeded, h(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{ tag_val, value.JSValue.undefined_val, too_deep }));
+}
+
+test "h flattens children nested one below the render limit" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var gc_state = try gc.GC.init(arena.allocator(), .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(arena.allocator(), &gc_state, .{});
+    defer ctx.deinit();
+    const ctx_ptr: *anyopaque = @ptrCast(@alignCast(ctx));
+
+    const tag_val = try ctx.createString("div");
+    const deep = try nestedArray(ctx, 511);
+    const node = try h(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{ tag_val, value.JSValue.undefined_val, deep });
+    const rendered = try renderToString(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{node});
+    try std.testing.expectEqualStrings("<div>x</div>", rendered.toPtr(string.JSString).data());
+}
+
+test "renderToString refuses raw children nested past the render limit" {
+    const gc = @import("gc.zig");
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var gc_state = try gc.GC.init(arena.allocator(), .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(arena.allocator(), &gc_state, .{});
+    defer ctx.deinit();
+    const ctx_ptr: *anyopaque = @ptrCast(@alignCast(ctx));
+
+    // Build the vnode directly: h() would flatten the nesting away.
+    const node = try ctx.createObject(null);
+    try ctx.setPropertyChecked(node, .tag, try ctx.createString("script"));
+    try ctx.setPropertyChecked(node, .props, value.JSValue.null_val);
+    try ctx.setPropertyChecked(node, .children, try nestedArray(ctx, 600));
+    try std.testing.expectError(error.RenderDepthExceeded, renderToString(ctx_ptr, value.JSValue.undefined_val, &[_]value.JSValue{node.toValue()}));
 }
