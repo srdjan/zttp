@@ -5,10 +5,12 @@
 //! allocator and `std.Io` backend are explicit.
 
 const std = @import("std");
+const zts = @import("zts");
 const zts_cli = @import("zts_cli");
 const agent_identity = zts_cli.agent_identity;
 const agent_protocol = zts_cli.agent_protocol;
 const TextBuffer = @import("../text_buffer.zig").TextBuffer;
+const common = @import("common.zig");
 
 /// Operations this read-only client exposes. `apply_repair` is deliberately
 /// absent: writing remains behind Pi's approval and receipt boundary.
@@ -204,6 +206,16 @@ pub fn invokeAtRoot(
     workspace_root: []const u8,
     request: Request,
 ) Outcome {
+    return invokeAtRootWithReader(allocator, io, workspace_root, request, null);
+}
+
+fn invokeAtRootWithReader(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    workspace_root: []const u8,
+    request: Request,
+    reader: ?agent_protocol.RootSourceReader,
+) Outcome {
     const canonical_root = agent_identity.canonicalRoot(allocator, io, workspace_root) catch |err|
         return .{ .transport_or_internal_error = err };
     defer allocator.free(canonical_root);
@@ -214,7 +226,11 @@ pub fn invokeAtRoot(
 
     var response = TextBuffer.init(allocator);
     defer response.deinit();
-    agent_protocol.handleRequest(allocator, io, request_json, response.writer()) catch |err|
+    const handled = if (reader) |source_reader|
+        agent_protocol.handleRequestWithRootReader(allocator, io, request_json, response.writer(), source_reader)
+    else
+        agent_protocol.handleRequest(allocator, io, request_json, response.writer());
+    handled catch |err|
         return .{ .transport_or_internal_error = err };
     return decodeResponse(allocator, request.operation, response.written());
 }
@@ -252,10 +268,37 @@ pub fn invokeForToolAtRoot(
     workspace_root: []const u8,
     request: Request,
 ) anyerror!ToolProjection {
-    var outcome = invokeAtRoot(allocator, io, workspace_root, request);
+    var input = std.json.parseFromSlice(std.json.Value, allocator, request.input_json, .{}) catch
+        return error.InvalidInputJson;
+    defer input.deinit();
+    var reader = ToolSourceReader{
+        .root = workspace_root,
+        .requested = if (input.value == .object) stringField(input.value.object, "file") else null,
+    };
+    var outcome = invokeAtRootWithReader(allocator, io, workspace_root, request, .{
+        .context = &reader,
+        .readFn = ToolSourceReader.read,
+    });
     defer outcome.deinit();
     return projectToolOutcome(allocator, &outcome);
 }
+
+const ToolSourceReader = struct {
+    root: []const u8,
+    requested: ?[]const u8,
+
+    fn read(context: ?*anyopaque, allocator: std.mem.Allocator, _: std.Io, path: []const u8, max_bytes: usize) ![]u8 {
+        const self: *const ToolSourceReader = @ptrCast(@alignCast(context orelse return error.MissingContext));
+        if (self.requested) |requested| {
+            const named = try common.resolveInsideWorkspace(allocator, self.root, requested);
+            allocator.free(named);
+        }
+        // Check the protocol's resolved target too, and read only the checked path.
+        const resolved = try common.resolveInsideWorkspace(allocator, self.root, path);
+        defer allocator.free(resolved);
+        return zts.file_io.readFile(allocator, resolved, max_bytes);
+    }
+};
 
 fn projectToolOutcome(allocator: std.mem.Allocator, outcome: *Outcome) anyerror!ToolProjection {
     return switch (outcome.*) {
@@ -425,4 +468,62 @@ test "zts agent tool projection preserves a stale-identity refusal envelope" {
         "identity_mismatch",
         parsed.value.object.get("error").?.object.get("code").?.string,
     );
+}
+
+test "file-bound agent tools refuse secret paths and aliases before protocol execution" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = ".env.prod.ts",
+        .data = "function handler(req: Request): Response { return Response.text(\"secret\"); }",
+    });
+    try tmp.dir.symLink(testing.io, ".env.prod.ts", "alias.ts", .{});
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+
+    for ([_]Operation{ .modules, .check, .canonicalize, .simulate_edit, .normalize, .verify }) |operation| {
+        for ([_][]const u8{ "{\"file\":\".env.prod.ts\"}", "{\"file\":\"alias.ts\"}" }) |input| {
+            const projection = try invokeForToolAtRoot(testing.allocator, testing.io, root, .{
+                .operation = operation,
+                .input_json = input,
+            });
+            defer testing.allocator.free(projection.llm_text);
+            try testing.expect(!projection.ok);
+            var refusal = try std.json.parseFromSlice(std.json.Value, testing.allocator, projection.llm_text, .{});
+            defer refusal.deinit();
+            try testing.expectEqualStrings("file_unreadable", refusal.value.object.get("error").?.object.get("code").?.string);
+        }
+    }
+}
+
+test "agent tools refuse absolute aliases that the protocol resolves into secrets" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var outside = testing.tmpDir(.{});
+    defer outside.cleanup();
+    try tmp.dir.createDirPath(testing.io, ".env.d/sub");
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = ".env.d/secret.ts",
+        .data = "function handler(req: Request): Response { return Response.text(\"SECRET_MARKER\"); }",
+    });
+    const root = try tmp.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    const secret = try std.fs.path.join(testing.allocator, &.{ root, ".env.d/secret.ts" });
+    defer testing.allocator.free(secret);
+    try outside.dir.symLink(testing.io, secret, "alias.ts", .{});
+    try tmp.dir.symLink(testing.io, ".env.d/sub", "link", .{ .is_directory = true });
+    const outside_root = try outside.dir.realPathFileAlloc(testing.io, ".", testing.allocator);
+    defer testing.allocator.free(outside_root);
+    const outside_alias = try std.fs.path.join(testing.allocator, &.{ outside_root, "alias.ts" });
+    defer testing.allocator.free(outside_alias);
+    const parent_alias = try std.fs.path.join(testing.allocator, &.{ root, "link/../secret.ts" });
+    defer testing.allocator.free(parent_alias);
+    for ([_][]const u8{ outside_alias, parent_alias }) |file| {
+        const input = try testing.allocator.print("{{\"file\":{f}}}", .{std.json.fmt(file, .{})});
+        defer testing.allocator.free(input);
+        const projection = try invokeForToolAtRoot(testing.allocator, testing.io, root, .{ .operation = .normalize, .input_json = input });
+        defer testing.allocator.free(projection.llm_text);
+        try testing.expect(!projection.ok);
+        try testing.expect(std.mem.indexOf(u8, projection.llm_text, "SECRET_MARKER") == null);
+    }
 }

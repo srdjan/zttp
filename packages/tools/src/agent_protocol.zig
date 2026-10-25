@@ -239,7 +239,7 @@ const Identity = struct {
     module_graph_hash: [64]u8,
 };
 
-const RootSourceReader = struct {
+pub const RootSourceReader = struct {
     context: ?*anyopaque,
     readFn: *const fn (
         context: ?*anyopaque,
@@ -439,7 +439,7 @@ pub fn handleRequest(
     });
 }
 
-fn handleRequestWithRootReader(
+pub fn handleRequestWithRootReader(
     allocator: std.mem.Allocator,
     io: std.Io,
     request_json: []const u8,
