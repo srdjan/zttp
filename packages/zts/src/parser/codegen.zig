@@ -1369,7 +1369,7 @@ pub const CodeGen = struct {
         }
 
         // Register new shape
-        const shape_idx: u16 = @intCast(self.shapes.items.len);
+        const shape_idx = std.math.cast(u16, self.shapes.items.len) orelse return error.TooManyShapes;
         const atoms_copy = try self.allocator.dupe(js_object.Atom, atoms);
         try self.shapes.append(self.allocator, atoms_copy);
         try self.shape_dedup.put(self.allocator, hash, shape_idx);
@@ -2446,7 +2446,8 @@ pub const CodeGen = struct {
             const label = self.labels.items[jump.target_label];
             if (!label.resolved) continue;
 
-            const offset: i16 = @intCast(@as(i32, @intCast(label.offset)) - @as(i32, @intCast(jump.instruction_offset)) - 2);
+            const wide = @as(i64, label.offset) - @as(i64, jump.instruction_offset) - 2;
+            const offset = std.math.cast(i16, wide) orelse return error.JumpTooFar;
             const unsigned: u16 = @bitCast(offset);
 
             // Write in little-endian to match interpreter's readI16
@@ -2714,4 +2715,23 @@ test "constant expressions fold inside a handler without changing source IR" {
         if (tag == .binary_op) binary_count += 1;
     }
     try std.testing.expectEqual(@as(usize, 1), binary_count);
+}
+
+test "a jump past the i16 range is refused in codegen" {
+    const allocator = std.testing.allocator;
+    const Parser = @import("parse.zig").Parser;
+    // Each `y = y + 1;` is more than two bytes, so the skip over this body cannot fit an i16.
+    var source: std.ArrayList(u8) = .empty;
+    defer source.deinit(allocator);
+    try source.appendSlice(allocator, "function handler(req) { let y = 0; if (req) {");
+    for (0..15000) |_| try source.appendSlice(allocator, " y = y + 1;");
+    try source.appendSlice(allocator, " } return y; }");
+
+    var parser = try Parser.init(allocator, source.items);
+    defer parser.deinit();
+    const root = try parser.parse();
+    var gen = CodeGen.initWithIRStore(allocator, &parser.nodes, &parser.constants, &parser.scopes, null, null);
+    defer gen.deinit();
+    defer gen.freeOwnedConstantPayloads();
+    try std.testing.expectError(error.JumpTooFar, gen.generate(root));
 }

@@ -482,6 +482,8 @@ const parser_errors = [_][]const u8{
     "StringLineContinuation",
     "TooManyLocals",
     "TooManyConstants",
+    "TooManyShapes",
+    "JumpTooFar",
     "TypeOnlyModuleLexicallyExcluded",
 };
 
