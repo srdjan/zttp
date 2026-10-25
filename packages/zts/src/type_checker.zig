@@ -4467,11 +4467,7 @@ test "TypeChecker init and deinit" {
     var constants = ir.ConstantPool.init(allocator);
     defer constants.deinit();
 
-    _ = try node_list.add(.{
-        .tag = .program,
-        .loc = .{ .line = 1, .column = 1, .offset = 0 },
-        .data = .{ .block = .{ .stmts_start = 0, .stmts_count = 0, .scope_id = ir.null_scope } },
-    });
+    _ = try node_list.addBlock(.program, .{ .line = 1, .column = 1, .offset = 0 }, .{ .stmts_start = 0, .stmts_count = 0, .scope_id = ir.null_scope });
 
     const view = ir.IrView.fromIRStore(&node_list, &constants);
     var checker = TypeChecker.init(allocator, view, null, &env);
@@ -6124,17 +6120,17 @@ test "TypeChecker import policy compares named kind and slot without scope or lo
                 const loc = view.getLoc(call_node).?;
                 // Append a declaration independently of the source spelling so
                 // the exact import-kind and binding-kind policy is exercised.
-                const spec = try parser.nodes.add(.{ .tag = .import_specifier, .loc = loc, .data = .{ .import_spec = .{
+                const spec = try parser.nodes.addImportSpec(.import_specifier, loc, .{
                     .kind = import_kind,
                     .imported_atom = @intCast(@backingInt(try atoms.intern("sha256"))),
                     .local_binding = import_binding,
-                } } });
+                });
                 const specs = try parser.nodes.addIndexList(&.{spec});
-                _ = try parser.nodes.add(.{ .tag = .import_decl, .loc = loc, .data = .{ .import_decl = .{
+                _ = try parser.nodes.addImportDecl(loc, .{
                     .module_idx = try parser.constants.addString("zttp:crypto"),
                     .specifiers_start = specs,
                     .specifiers_count = 1,
-                } } });
+                });
                 var facts = try module_facts_mod.ModuleFacts.build(allocator, view, &atoms, null);
                 defer facts.deinit();
                 var pool = TypePool.init(allocator);

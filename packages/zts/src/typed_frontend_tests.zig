@@ -4606,14 +4606,10 @@ fn assertGenericFragmentProperty(case: GenericFragmentCase, source: []const u8) 
     var constants = engine.parser.ConstantPool.init(std.testing.allocator);
     defer constants.deinit();
     const lparen: u32 = @intCast(source.len + 2);
-    const call = try nodes.add(.{
-        .tag = .call,
-        .loc = .{ .line = 1, .column = lparen + 1, .offset = lparen, .end_offset = lparen + 1 },
-        .data = .{ .call = .{
-            .callee = engine.parser.null_node,
-            .args_start = engine.parser.null_node,
-            .args_count = 0,
-        } },
+    const call = try nodes.addCall(.call, .{ .line = 1, .column = lparen + 1, .offset = lparen, .end_offset = lparen + 1 }, .{
+        .callee = engine.parser.null_node,
+        .args_start = engine.parser.null_node,
+        .args_count = 0,
     });
     const view = engine.parser.IrView.fromIRStore(&nodes, &constants);
     var pending = try store.reserveExplicitCall(.{
@@ -5447,17 +5443,13 @@ test "ignored and legacy-call policies retain syntax without generic declaration
         defer nodes.deinit();
         var constants = engine.parser.ConstantPool.init(std.testing.allocator);
         defer constants.deinit();
-        const function = try nodes.add(.{
-            .tag = .function_expr,
-            .loc = .{ .line = 1, .column = 9, .offset = 8, .end_offset = 9 },
-            .data = .{ .function = .{
-                .scope_id = 0,
-                .name_atom = 0,
-                .params_start = engine.parser.null_node,
-                .params_count = 0,
-                .body = engine.parser.null_node,
-                .flags = .{},
-            } },
+        const function = try nodes.addFunction(.function_expr, .{ .line = 1, .column = 9, .offset = 8, .end_offset = 9 }, .{
+            .scope_id = 0,
+            .name_atom = 0,
+            .params_start = engine.parser.null_node,
+            .params_count = 0,
+            .body = engine.parser.null_node,
+            .flags = .{},
         });
         const view = engine.parser.IrView.fromIRStore(&nodes, &constants);
         var pending = try store.reserveGenericOwner(.{
@@ -7395,7 +7387,7 @@ fn expectFinalNodeAllocationRollback(case: FinalNodeRollbackCase) !void {
         .offset = 0,
     };
     for (0..filler_count) |_| {
-        _ = try parser.nodes.add(engine.parser.Node.litUndefined(filler_loc));
+        _ = try parser.nodes.addPlain(.lit_undefined, filler_loc);
     }
 
     var failing = std.testing.FailingAllocator.init(
@@ -9135,14 +9127,10 @@ test "later semantic fragment rollback closes every allocation failure" {
             var constants = engine.parser.ConstantPool.init(std.testing.allocator);
             defer constants.deinit();
             const lparen: u32 = @intCast(source.len - 1);
-            const call = try nodes.add(.{
-                .tag = .call,
-                .loc = .{ .line = 2, .column = 16, .offset = lparen, .end_offset = lparen + 1 },
-                .data = .{ .call = .{
-                    .callee = engine.parser.null_node,
-                    .args_start = engine.parser.null_node,
-                    .args_count = 0,
-                } },
+            const call = try nodes.addCall(.call, .{ .line = 2, .column = 16, .offset = lparen, .end_offset = lparen + 1 }, .{
+                .callee = engine.parser.null_node,
+                .args_start = engine.parser.null_node,
+                .args_count = 0,
             });
             const view = engine.parser.IrView.fromIRStore(&nodes, &constants);
             var cursor = TypeSyntax.Cursor.init(source);

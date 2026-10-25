@@ -2544,7 +2544,7 @@ test "basic codegen" {
 
     // Create a simple literal node
     const loc = ir.SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-    const lit_node = try nodes.add(Node.litInt(loc, 42));
+    const lit_node = try nodes.addInt(loc, 42);
 
     var gen = CodeGen.initWithIRStore(allocator, &nodes, &constants, &scopes, null, null);
     defer gen.deinit();
@@ -2568,12 +2568,12 @@ test "global binding codegen uses the binding name atom" {
     defer scopes.deinit();
 
     const loc = ir.SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-    const global = try nodes.add(Node.identifier(loc, .{
+    const global = try nodes.addIdentifier(loc, .{
         .scope_id = 0,
         .slot = 7,
         .name_atom = 0x1234,
         .kind = .global,
-    }));
+    });
 
     var gen = CodeGen.initWithIRStore(allocator, &nodes, &constants, &scopes, null, null);
     defer gen.deinit();
@@ -2600,9 +2600,9 @@ test "binary op codegen" {
     const loc = ir.SourceLocation{ .line = 1, .column = 1, .offset = 0 };
 
     // Create 1 + 2 - with constant folding, this should emit push_3 instead of push_1, push_2, add
-    const left = try nodes.add(Node.litInt(loc, 1));
-    const right = try nodes.add(Node.litInt(loc, 2));
-    const add_node = try nodes.add(Node.binaryOp(loc, .add, left, right));
+    const left = try nodes.addInt(loc, 1);
+    const right = try nodes.addInt(loc, 2);
+    const add_node = try nodes.addBinary(loc, .{ .op = .add, .left = left, .right = right });
 
     var gen = CodeGen.initWithIRStore(allocator, &nodes, &constants, &scopes, null, null);
     defer gen.deinit();
@@ -2645,9 +2645,9 @@ test "bytecode constants refuse an unrepresentable index" {
     try std.testing.expectEqual(@as(i32, 42), gen.constants.items[65535].getInt());
 
     const loc: ir.SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
-    const left = try nodes.add(Node.litInt(loc, 7));
-    const right = try nodes.add(Node.litInt(loc, 2));
-    const division = try nodes.add(Node.binaryOp(loc, .div, left, right));
+    const left = try nodes.addInt(loc, 7);
+    const right = try nodes.addInt(loc, 2);
+    const division = try nodes.addBinary(loc, .{ .op = .div, .left = left, .right = right });
     const result = try gen.generate(division);
     // At capacity, emit 7 / 2 normally rather than allocate a folded float.
     try std.testing.expectEqualSlices(u8, &.{ @backingInt(Opcode.push_i8), 7, @backingInt(Opcode.push_2), @backingInt(Opcode.div), @backingInt(Opcode.ret_undefined) }, result.code);
@@ -2667,11 +2667,11 @@ test "a full constant pool refuses a fused modulo instead of emitting the operan
     @memset(gen.constants.items, JSValue.undefined_val);
 
     const loc: ir.SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
-    const a = try nodes.add(Node.identifier(loc, .{ .scope_id = 0, .slot = 1, .name_atom = 0x101, .kind = .global }));
-    const b = try nodes.add(Node.identifier(loc, .{ .scope_id = 0, .slot = 2, .name_atom = 0x102, .kind = .global }));
-    const sum = try nodes.add(Node.binaryOp(loc, .add, a, b));
-    const seven = try nodes.add(Node.litInt(loc, 7));
-    const fused = try nodes.add(Node.binaryOp(loc, .mod, sum, seven));
+    const a = try nodes.addIdentifier(loc, .{ .scope_id = 0, .slot = 1, .name_atom = 0x101, .kind = .global });
+    const b = try nodes.addIdentifier(loc, .{ .scope_id = 0, .slot = 2, .name_atom = 0x102, .kind = .global });
+    const sum = try nodes.addBinary(loc, .{ .op = .add, .left = a, .right = b });
+    const seven = try nodes.addInt(loc, 7);
+    const fused = try nodes.addBinary(loc, .{ .op = .mod, .left = sum, .right = seven });
     try std.testing.expectError(error.TooManyConstants, gen.generate(fused));
 
     // A pattern mismatch still falls back to `mod_const_i8`, which needs no constant.
@@ -2679,7 +2679,7 @@ test "a full constant pool refuses a fused modulo instead of emitting the operan
     defer gen2.deinit();
     try gen2.constants.resize(allocator, std.math.maxInt(u16) + 1);
     @memset(gen2.constants.items, JSValue.undefined_val);
-    const plain = try nodes.add(Node.binaryOp(loc, .mod, a, seven));
+    const plain = try nodes.addBinary(loc, .{ .op = .mod, .left = a, .right = seven });
     const result = try gen2.generate(plain);
     try std.testing.expectEqualSlices(u8, &.{ @backingInt(Opcode.get_global), 0x01, 0x01, @backingInt(Opcode.mod_const_i8), 7, @backingInt(Opcode.ret_undefined) }, result.code);
 }

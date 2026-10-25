@@ -973,6 +973,368 @@ pub const IRStore = struct {
     }
 
     // ============================================================
+    // Typed constructors. Each packs one payload kind into the compact
+    // columns; a tag parameter selects among tags that share an encoding.
+    // ============================================================
+
+    pub fn addInt(self: *IRStore, loc: SourceLocation, value: i32) !NodeIndex {
+        return self.addNode(.lit_int, loc, DataPayload.fromInt(value));
+    }
+
+    pub fn addFloat(self: *IRStore, loc: SourceLocation, float_idx: u16) !NodeIndex {
+        return self.addNode(.lit_float, loc, .{ .a = float_idx, .b = 0 });
+    }
+
+    pub fn addString(self: *IRStore, loc: SourceLocation, string_idx: u16) !NodeIndex {
+        return self.addNode(.lit_string, loc, .{ .a = string_idx, .b = 0 });
+    }
+
+    pub fn addBool(self: *IRStore, loc: SourceLocation, value: bool) !NodeIndex {
+        return self.addNode(.lit_bool, loc, .{ .a = if (value) 1 else 0, .b = 0 });
+    }
+
+    /// Tags that carry no data: the null and undefined literals and the list markers.
+    pub fn addPlain(self: *IRStore, tag: NodeTag, loc: SourceLocation) !NodeIndex {
+        switch (tag) {
+            .lit_null, .lit_undefined, .param_list, .arg_list, .stmt_list => {},
+            else => unreachable,
+        }
+        return self.addNode(tag, loc, .{ .a = 0, .b = 0 });
+    }
+
+    pub fn addIdentifier(self: *IRStore, loc: SourceLocation, b: BindingRef) !NodeIndex {
+        const idx = try self.addNode(.identifier, loc, .{
+            .a = (@as(u32, b.scope_id) << 16) | b.slot,
+            .b = @backingInt(b.kind),
+        });
+        self.setBindingName(idx, b.name_atom);
+        return idx;
+    }
+
+    pub fn addBinary(self: *IRStore, loc: SourceLocation, b: Node.BinaryExpr) !NodeIndex {
+        return self.addNode(.binary_op, loc, try DataPayload.fromBinary(b.op, b.left, b.right));
+    }
+
+    pub fn addUnary(self: *IRStore, loc: SourceLocation, u: Node.UnaryExpr) !NodeIndex {
+        return self.addNode(.unary_op, loc, .{ .a = @backingInt(u.op), .b = u.operand });
+    }
+
+    pub fn addTernary(self: *IRStore, loc: SourceLocation, t: Node.TernaryExpr) !NodeIndex {
+        const extra_start = try self.addExtra(&.{ t.condition, t.then_branch, t.else_branch });
+        return self.addNode(.ternary, loc, .{ .a = extra_start, .b = 0 });
+    }
+
+    /// `call` and `method_call`.
+    pub fn addCall(self: *IRStore, tag: NodeTag, loc: SourceLocation, c: Node.CallExpr) !NodeIndex {
+        switch (tag) {
+            .call, .method_call => {},
+            else => unreachable,
+        }
+        const list_ref = try self.addListRef(c.args_start, c.args_count);
+        return self.addNode(tag, loc, .{ .a = c.callee, .b = list_ref });
+    }
+
+    /// `member_access`, `computed_access` and `optional_chain`.
+    pub fn addMember(self: *IRStore, tag: NodeTag, loc: SourceLocation, m: Node.MemberExpr) !NodeIndex {
+        switch (tag) {
+            .member_access => {
+                // Pack: a = object, b = property(16) | is_optional(1) << 16
+                const b_val = @as(u32, m.property) | (@as(u32, if (m.is_optional) 1 else 0) << 16);
+                return self.addNode(.member_access, loc, .{ .a = m.object, .b = b_val });
+            },
+            .computed_access => return self.addNode(.computed_access, loc, .{ .a = m.object, .b = m.computed }),
+            .optional_chain => {
+                const b_val = @as(u32, m.property) | (@as(u32, 1) << 16);
+                return self.addNode(.optional_chain, loc, .{ .a = m.object, .b = b_val });
+            },
+            else => unreachable,
+        }
+    }
+
+    pub fn addAssignment(self: *IRStore, loc: SourceLocation, a: Node.AssignExpr) !NodeIndex {
+        // Pack: a = target, b = value(24) | op(8) (0 = no op, 1+ = op enum + 1)
+        const op_byte: u8 = if (a.op) |op| @as(u8, @backingInt(op)) + 1 else 0;
+        const b_val = (try packNode24(a.value, false)) | (@as(u32, op_byte) << 24);
+        return self.addNode(.assignment, loc, .{ .a = a.target, .b = b_val });
+    }
+
+    /// `array_literal` and `array_pattern`.
+    pub fn addArray(self: *IRStore, tag: NodeTag, loc: SourceLocation, arr: Node.ArrayExpr) !NodeIndex {
+        switch (tag) {
+            .array_literal, .array_pattern => {},
+            else => unreachable,
+        }
+        // Pack: a = elements_start, b = elements_count(16) | has_spread(1) << 16
+        const b_val = @as(u32, arr.elements_count) | (@as(u32, if (arr.has_spread) 1 else 0) << 16);
+        return self.addNode(tag, loc, .{ .a = arr.elements_start, .b = b_val });
+    }
+
+    /// `sequence_expr` and `comma_expr`.
+    pub fn addSequence(self: *IRStore, tag: NodeTag, loc: SourceLocation, arr: Node.ArrayExpr) !NodeIndex {
+        switch (tag) {
+            .sequence_expr, .comma_expr => {},
+            else => unreachable,
+        }
+        return self.addNode(tag, loc, .{
+            .a = arr.elements_start,
+            .b = @as(u32, arr.elements_count),
+        });
+    }
+
+    pub fn addObject(self: *IRStore, loc: SourceLocation, obj: Node.ObjectExpr) !NodeIndex {
+        return self.addNode(.object_literal, loc, .{ .a = obj.properties_start, .b = obj.properties_count });
+    }
+
+    pub fn addProperty(self: *IRStore, loc: SourceLocation, p: Node.PropertyExpr) !NodeIndex {
+        // Pack: a = key, b = value(24) | is_shorthand(1) << 24.
+        const flags: u32 = @as(u32, if (p.is_shorthand) 1 else 0) << 24;
+        const b_val = (try packNode24(p.value, true)) | flags;
+        return self.addNode(.object_property, loc, .{ .a = p.key, .b = b_val });
+    }
+
+    /// `object_method`, `object_getter` and `object_setter`.
+    pub fn addMethodProperty(self: *IRStore, tag: NodeTag, loc: SourceLocation, p: Node.PropertyExpr) !NodeIndex {
+        switch (tag) {
+            .object_method, .object_getter, .object_setter => {},
+            else => unreachable,
+        }
+        const b_val = try packNode24(p.value, true);
+        return self.addNode(tag, loc, .{ .a = p.key, .b = b_val });
+    }
+
+    /// Tags that hold one optional child: spreads, yield, await, return, throw,
+    /// expression statements and the default and all exports.
+    pub fn addOptValue(self: *IRStore, tag: NodeTag, loc: SourceLocation, value: ?NodeIndex) !NodeIndex {
+        switch (tag) {
+            .object_spread, .spread, .yield_expr, .await_expr, .return_stmt, .throw_stmt, .expr_stmt, .export_default, .export_all => {},
+            else => unreachable,
+        }
+        return self.addNode(tag, loc, .{ .a = value orelse null_node, .b = 0 });
+    }
+
+    /// `break_stmt` and `continue_stmt`.
+    pub fn addLabelJump(self: *IRStore, tag: NodeTag, loc: SourceLocation, label: ?u16) !NodeIndex {
+        switch (tag) {
+            .break_stmt, .continue_stmt => {},
+            else => unreachable,
+        }
+        return self.addNode(tag, loc, .{ .a = label orelse 0, .b = 0 });
+    }
+
+    /// `function_expr` and `arrow_function`.
+    pub fn addFunction(self: *IRStore, tag: NodeTag, loc: SourceLocation, f: Node.FunctionExpr) !NodeIndex {
+        switch (tag) {
+            .function_expr, .arrow_function => {},
+            else => unreachable,
+        }
+        // Store in extra: [scope_id, name_atom, params_start, params_count, body, flags]
+        const flags_u8: u8 = @bitCast(f.flags);
+        const extra_start = try self.addExtra(&.{
+            f.scope_id,
+            f.name_atom,
+            f.params_start,
+            f.params_count,
+            f.body,
+            @as(u32, flags_u8),
+        });
+        return self.addNode(tag, loc, .{ .a = extra_start, .b = 0 });
+    }
+
+    /// `var_decl` and `function_decl` (a function declaration is a binding plus
+    /// its function initializer).
+    pub fn addVarDecl(self: *IRStore, tag: NodeTag, loc: SourceLocation, v: Node.VarDecl) !NodeIndex {
+        switch (tag) {
+            .var_decl, .function_decl => {},
+            else => unreachable,
+        }
+        // Store in extra: [binding_packed, init, kind]
+        const binding_packed = (@as(u32, v.binding.scope_id) << 16) | v.binding.slot;
+        const kind_and_binding_kind = @as(u32, @backingInt(v.kind)) |
+            (@as(u32, @backingInt(v.binding.kind)) << 2);
+        const extra_start = try self.addExtra(&.{ binding_packed, v.init, kind_and_binding_kind });
+        const idx = try self.addNode(tag, loc, .{ .a = extra_start, .b = 0 });
+        self.setBindingName(idx, v.binding.name_atom);
+        return idx;
+    }
+
+    pub fn addIf(self: *IRStore, loc: SourceLocation, i: Node.IfStmt) !NodeIndex {
+        const extra_start = try self.addExtra(&.{ i.condition, i.then_branch, i.else_branch });
+        return self.addNode(.if_stmt, loc, .{ .a = extra_start, .b = 0 });
+    }
+
+    /// `while_stmt`, `do_while_stmt` and `for_stmt`.
+    pub fn addLoop(self: *IRStore, tag: NodeTag, loc: SourceLocation, l: Node.LoopStmt) !NodeIndex {
+        switch (tag) {
+            .while_stmt, .do_while_stmt, .for_stmt => {},
+            else => unreachable,
+        }
+        // Store in extra: [kind, init, condition, update, body]
+        const extra_start = try self.addExtra(&.{
+            @backingInt(l.kind),
+            l.init,
+            l.condition,
+            l.update,
+            l.body,
+        });
+        return self.addNode(tag, loc, .{ .a = extra_start, .b = 0 });
+    }
+
+    /// `for_of_stmt` and `for_in_stmt`.
+    pub fn addForIter(self: *IRStore, tag: NodeTag, loc: SourceLocation, f: Node.ForIterStmt) !NodeIndex {
+        switch (tag) {
+            .for_of_stmt, .for_in_stmt => {},
+            else => unreachable,
+        }
+        const binding_packed = (@as(u32, f.binding.scope_id) << 16) | f.binding.slot;
+        const flags = (@as(u32, if (f.is_for_in) 1 else 0)) |
+            (@as(u32, if (f.is_const) 1 else 0) << 1) |
+            (@as(u32, @backingInt(f.binding.kind)) << 2);
+        // Store: [binding_packed, iterable, flags, body]
+        const extra_start = try self.addExtra(&.{ binding_packed, f.iterable, flags, f.body });
+        const idx = try self.addNode(tag, loc, .{ .a = extra_start, .b = 0 });
+        self.setBindingName(idx, f.binding.name_atom);
+        return idx;
+    }
+
+    pub fn addSwitch(self: *IRStore, loc: SourceLocation, s: Node.SwitchStmt) !NodeIndex {
+        const list_ref = try self.addListRef(s.cases_start, s.cases_count);
+        return self.addNode(.switch_stmt, loc, .{
+            .a = s.discriminant,
+            .b = list_ref,
+        });
+    }
+
+    pub fn addCase(self: *IRStore, loc: SourceLocation, c: Node.CaseClause) !NodeIndex {
+        const list_ref = try self.addListRef(c.body_start, c.body_count);
+        return self.addNode(.case_clause, loc, .{
+            .a = c.test_expr,
+            .b = list_ref,
+        });
+    }
+
+    pub fn addMatch(self: *IRStore, loc: SourceLocation, m: Node.MatchExpr) !NodeIndex {
+        const list_ref = try self.addListRef(m.arms_start, m.arms_count);
+        return self.addNode(.match_expr, loc, .{
+            .a = m.discriminant,
+            .b = list_ref,
+        });
+    }
+
+    pub fn addMatchArm(self: *IRStore, loc: SourceLocation, a: Node.MatchArm) !NodeIndex {
+        return self.addNode(.match_arm, loc, .{
+            .a = a.pattern,
+            .b = a.body,
+        });
+    }
+
+    pub fn addMatchPattern(self: *IRStore, loc: SourceLocation, p: Node.MatchPatternObj) !NodeIndex {
+        return self.addNode(.match_pattern, loc, .{
+            .a = p.props_start,
+            .b = @as(u32, p.props_count),
+        });
+    }
+
+    pub fn addMatchTypeTest(self: *IRStore, loc: SourceLocation, t: Node.MatchTypeTest) !NodeIndex {
+        return self.addNode(.match_type_test, loc, .{
+            .a = @backingInt(t.kind),
+            .b = t.predicate,
+        });
+    }
+
+    pub fn addAssert(self: *IRStore, loc: SourceLocation, a: Node.AssertStmt) !NodeIndex {
+        return self.addNode(.assert_stmt, loc, .{ .a = a.condition, .b = a.error_expr });
+    }
+
+    pub fn addTry(self: *IRStore, loc: SourceLocation, t: Node.TryStmt) !NodeIndex {
+        const binding_packed = (@as(u32, t.catch_binding.scope_id) << 16) | t.catch_binding.slot;
+        const extra_start = try self.addExtra(&.{
+            t.try_block,
+            binding_packed,
+            t.catch_block,
+            t.finally_block,
+        });
+        const idx = try self.addNode(.try_stmt, loc, .{ .a = extra_start, .b = 0 });
+        self.setBindingName(idx, t.catch_binding.name_atom);
+        return idx;
+    }
+
+    /// `block` and `program`.
+    pub fn addBlock(self: *IRStore, tag: NodeTag, loc: SourceLocation, b: Node.BlockData) !NodeIndex {
+        switch (tag) {
+            .block, .program => {},
+            else => unreachable,
+        }
+        return self.addNode(tag, loc, .{
+            .a = b.stmts_start,
+            .b = @as(u32, b.stmts_count) | (@as(u32, b.scope_id) << 16),
+        });
+    }
+
+    /// `pattern_element`, `pattern_rest` and `pattern_default`.
+    pub fn addPatternElem(self: *IRStore, tag: NodeTag, loc: SourceLocation, p: Node.PatternElem) !NodeIndex {
+        switch (tag) {
+            .pattern_element, .pattern_rest, .pattern_default => {},
+            else => unreachable,
+        }
+        const binding_packed = (@as(u32, p.binding.scope_id) << 16) | p.binding.slot;
+        const extra_start = try self.addExtra(&.{
+            patternKindWord(p.kind, p.binding.kind),
+            binding_packed,
+            p.key,
+            p.key_atom,
+            p.default_value,
+        });
+        const idx = try self.addNode(tag, loc, .{ .a = extra_start, .b = 0 });
+        self.setBindingName(idx, p.binding.name_atom);
+        return idx;
+    }
+
+    pub fn addImportDecl(self: *IRStore, loc: SourceLocation, i: Node.ImportDecl) !NodeIndex {
+        const list_ref = try self.addListRef(i.specifiers_start, i.specifiers_count);
+        return self.addNode(.import_decl, loc, .{
+            .a = i.module_idx,
+            .b = list_ref,
+        });
+    }
+
+    /// `import_specifier`, `import_default` and `import_namespace`.
+    pub fn addImportSpec(self: *IRStore, tag: NodeTag, loc: SourceLocation, i: Node.ImportSpec) !NodeIndex {
+        switch (tag) {
+            .import_specifier, .import_default, .import_namespace => {},
+            else => unreachable,
+        }
+        const binding_packed = (@as(u32, i.local_binding.scope_id) << 16) | i.local_binding.slot;
+        const extra_start = try self.addExtra(&.{
+            patternKindWord(i.kind, i.local_binding.kind),
+            i.imported_atom,
+            binding_packed,
+        });
+        const idx = try self.addNode(tag, loc, .{ .a = extra_start, .b = 0 });
+        self.setBindingName(idx, i.local_binding.name_atom);
+        return idx;
+    }
+
+    /// `export_decl` and `export_specifier`.
+    pub fn addExportDecl(self: *IRStore, tag: NodeTag, loc: SourceLocation, e: Node.ExportDecl) !NodeIndex {
+        switch (tag) {
+            .export_decl, .export_specifier => {},
+            else => unreachable,
+        }
+        const extra_start = try self.addExtra(&.{
+            @backingInt(e.kind),
+            e.declaration,
+            e.specifiers_start,
+            e.specifiers_count,
+            e.from_module_idx,
+        });
+        return self.addNode(tag, loc, .{ .a = extra_start, .b = 0 });
+    }
+
+    pub fn addLabeled(self: *IRStore, loc: SourceLocation, l: Node.LabeledStmt) !NodeIndex {
+        return self.addNode(.labeled_stmt, loc, .{ .a = l.label_atom, .b = l.body });
+    }
+
+    // ============================================================
     // Node Adapter: Accept full Node struct for seamless migration
     // ============================================================
 
@@ -1323,61 +1685,7 @@ pub const IRStore = struct {
         if (binding_name) |name_atom| self.setBindingName(idx, name_atom);
         return idx;
     }
-
-    /// Get a Node struct from index (for compatibility during migration)
-    /// Note: This reconstructs the Node from SoA storage, less efficient than direct access
-    pub fn get(self: *const IRStore, idx: NodeIndex) ?Node {
-        if (idx >= self.tags.items.len) return null;
-        const tag = self.tags.items[idx];
-        const loc = self.locs.items[idx];
-        const d = self.data.items[idx];
-
-        return Node{
-            .tag = tag,
-            .loc = loc,
-            .data = switch (tag) {
-                .lit_int => .{ .int_value = d.toInt() },
-                .lit_float => .{ .float_idx = @truncate(d.a) },
-                .lit_string => .{ .string_idx = @truncate(d.a) },
-                .lit_bool => .{ .bool_value = d.a != 0 },
-                .lit_null, .lit_undefined => .{ .none = {} },
-                .identifier => .{ .binding = self.getBinding(idx) },
-                .binary_op => blk: {
-                    const bin = d.toBinary();
-                    break :blk .{ .binary = .{ .op = bin.op, .left = bin.left, .right = bin.right } };
-                },
-                .unary_op => .{ .unary = .{ .op = @fromBackingInt(@intCast(@as(u4, @truncate(d.a)))), .operand = d.b } },
-                .return_stmt,
-                .throw_stmt,
-                .expr_stmt,
-                .spread,
-                .object_spread,
-                .yield_expr,
-                .await_expr,
-                => .{ .opt_value = if (d.a == null_node) null else d.a },
-                .block, .program => .{ .block = .{
-                    .stmts_start = d.a,
-                    .stmts_count = @truncate(d.b),
-                    .scope_id = @truncate(d.b >> 16),
-                } },
-                // For complex types, return minimal data - full reconstruction available via IrView
-                else => .{ .none = {} },
-            },
-        };
-    }
 };
-
-test "node creation" {
-    const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-
-    const int_node = Node.litInt(loc, 42);
-    try std.testing.expectEqual(NodeTag.lit_int, int_node.tag);
-    try std.testing.expectEqual(@as(i32, 42), int_node.data.int_value);
-
-    const bool_node = Node.litBool(loc, true);
-    try std.testing.expectEqual(NodeTag.lit_bool, bool_node.tag);
-    try std.testing.expect(bool_node.data.bool_value);
-}
 
 test "source-backed strings keep borrowing explicit across failures and duplicates" {
     const Probe = struct {
@@ -1448,14 +1756,14 @@ test "IRStore basic operations" {
     const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
 
     // Add integer literal
-    const idx1 = try store.add(Node.litInt(loc, 42));
+    const idx1 = try store.addInt(loc, 42);
     try std.testing.expectEqual(@as(NodeIndex, 0), idx1);
     try std.testing.expectEqual(NodeTag.lit_int, store.getTag(idx1));
     try std.testing.expectEqual(@as(i32, 42), store.getData(idx1).toInt());
 
     // Add binary expression
-    const idx2 = try store.add(Node.litInt(loc, 10));
-    const idx3 = try store.add(Node.binaryOp(loc, .add, idx1, idx2));
+    const idx2 = try store.addInt(loc, 10);
+    const idx3 = try store.addBinary(loc, .{ .op = .add, .left = idx1, .right = idx2 });
 
     try std.testing.expectEqual(NodeTag.binary_op, store.getTag(idx3));
     const bin = store.getData(idx3).toBinary();
@@ -1477,7 +1785,7 @@ test "IRStore identifier binding" {
         .kind = .upvalue,
     };
 
-    const idx = try store.add(Node.identifier(loc, binding));
+    const idx = try store.addIdentifier(loc, binding);
     const unpacked = store.getBinding(idx);
 
     try std.testing.expectEqual(@as(ScopeId, 5), unpacked.scope_id);
@@ -1498,12 +1806,12 @@ test "pattern and import bindings keep a scope at 8192 and above" {
     const binding = BindingRef{ .scope_id = 9000, .slot = 7, .name_atom = 0, .kind = .argument };
 
     const elem: Node.PatternElem = .{ .kind = .simple, .binding = binding, .key = null_node, .key_atom = 0, .default_value = null_node };
-    const param = try store.add(.{ .tag = .pattern_element, .loc = loc, .data = .{ .pattern_elem = elem } });
-    const defaulted = try store.add(.{ .tag = .pattern_default, .loc = loc, .data = .{ .pattern_elem = elem } });
+    const param = try store.addPatternElem(.pattern_element, loc, elem);
+    const defaulted = try store.addPatternElem(.pattern_default, loc, elem);
     var local = binding;
     local.kind = .local;
     const spec: Node.ImportSpec = .{ .kind = .namespace, .imported_atom = 4, .local_binding = local };
-    const import = try store.add(.{ .tag = .import_specifier, .loc = loc, .data = .{ .import_spec = spec } });
+    const import = try store.addImportSpec(.import_specifier, loc, spec);
 
     const view = IrView.fromIRStore(&store, &constants);
     for ([_]NodeIndex{ param, defaulted }) |idx| {
@@ -1553,36 +1861,12 @@ test "IRStore list references preserve offsets above u16" {
     try std.testing.expect(high_start > std.math.maxInt(u16));
 
     const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-    const call_idx = try store.add(.{
-        .tag = .call,
-        .loc = loc,
-        .data = .{ .call = .{ .callee = 10, .args_start = high_start, .args_count = 2 } },
-    });
-    const method_call_idx = try store.add(.{
-        .tag = .method_call,
-        .loc = loc,
-        .data = .{ .call = .{ .callee = 11, .args_start = high_start, .args_count = 3 } },
-    });
-    const switch_idx = try store.add(.{
-        .tag = .switch_stmt,
-        .loc = loc,
-        .data = .{ .switch_stmt = .{ .discriminant = 12, .cases_start = high_start, .cases_count = 4 } },
-    });
-    const case_idx = try store.add(.{
-        .tag = .case_clause,
-        .loc = loc,
-        .data = .{ .case_clause = .{ .test_expr = 13, .body_start = high_start, .body_count = 5 } },
-    });
-    const match_idx = try store.add(.{
-        .tag = .match_expr,
-        .loc = loc,
-        .data = .{ .match_expr = .{ .discriminant = 14, .arms_start = high_start, .arms_count = 6 } },
-    });
-    const import_idx = try store.add(.{
-        .tag = .import_decl,
-        .loc = loc,
-        .data = .{ .import_decl = .{ .module_idx = 15, .specifiers_start = high_start, .specifiers_count = 7 } },
-    });
+    const call_idx = try store.addCall(.call, loc, .{ .callee = 10, .args_start = high_start, .args_count = 2 });
+    const method_call_idx = try store.addCall(.method_call, loc, .{ .callee = 11, .args_start = high_start, .args_count = 3 });
+    const switch_idx = try store.addSwitch(loc, .{ .discriminant = 12, .cases_start = high_start, .cases_count = 4 });
+    const case_idx = try store.addCase(loc, .{ .test_expr = 13, .body_start = high_start, .body_count = 5 });
+    const match_idx = try store.addMatch(loc, .{ .discriminant = 14, .arms_start = high_start, .arms_count = 6 });
+    const import_idx = try store.addImportDecl(loc, .{ .module_idx = 15, .specifiers_start = high_start, .specifiers_count = 7 });
 
     const view = IrView.fromIRStore(&store, &constants);
     try std.testing.expectEqual(high_start, view.getCall(call_idx).?.args_start);
@@ -1609,31 +1893,34 @@ test "packed node operands reject overflow and preserve nullable sentinels" {
     const view = IrView.fromIRStore(&store, &constants);
     const loc: SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
     const max = std.math.maxInt(u24);
-    const binary = try store.add(Node.binaryOp(loc, .mul, max, 0x1000000));
+    const binary = try store.addBinary(loc, .{ .op = .mul, .left = max, .right = 0x1000000 });
     try std.testing.expectEqual(@as(NodeIndex, max), view.getBinary(binary).?.left);
     try std.testing.expectEqual(@as(NodeIndex, 0x1000000), view.getBinary(binary).?.right);
-    try std.testing.expectError(error.NodeIndexOverflow, store.add(Node.binaryOp(loc, .add, max + 1, 0)));
-    try std.testing.expectError(error.NodeIndexOverflow, store.add(Node.binaryOp(loc, .add, null_node, 0)));
-    const assignment = Node{ .tag = .assignment, .loc = loc, .data = .{ .assignment = .{ .target = 0, .value = max, .op = .add } } };
-    const assigned = try store.add(assignment);
+    try std.testing.expectError(error.NodeIndexOverflow, store.addBinary(loc, .{ .op = .add, .left = max + 1, .right = 0 }));
+    try std.testing.expectError(error.NodeIndexOverflow, store.addBinary(loc, .{ .op = .add, .left = null_node, .right = 0 }));
+    const assignment: Node.AssignExpr = .{ .target = 0, .value = max, .op = .add };
+    const assigned = try store.addAssignment(loc, assignment);
     try std.testing.expectEqual(@as(NodeIndex, max), view.getAssignment(assigned).?.value);
     var overflow_assignment = assignment;
-    overflow_assignment.data.assignment.value = max + 1;
-    try std.testing.expectError(error.NodeIndexOverflow, store.add(overflow_assignment));
-    const property = Node{ .tag = .object_property, .loc = loc, .data = .{ .property = .{ .key = 0, .value = max - 1, .is_shorthand = true } } };
-    const prop = try store.add(property);
+    overflow_assignment.value = max + 1;
+    try std.testing.expectError(error.NodeIndexOverflow, store.addAssignment(loc, overflow_assignment));
+    const property: Node.PropertyExpr = .{ .key = 0, .value = max - 1, .is_shorthand = true };
+    const prop = try store.addProperty(loc, property);
     try std.testing.expectEqual(@as(NodeIndex, max - 1), view.getProperty(prop).?.value);
     try std.testing.expect(view.getProperty(prop).?.is_shorthand);
     var null_property = property;
-    null_property.data.property.value = null_node;
-    const absent = try store.add(null_property);
+    null_property.value = null_node;
+    const absent = try store.addProperty(loc, null_property);
     try std.testing.expectEqual(null_node, view.getProperty(absent).?.value);
     for ([_]NodeTag{ .object_property, .object_method, .object_getter, .object_setter }) |tag| {
         var overflow_property = property;
-        overflow_property.tag = tag;
         for ([_]NodeIndex{ max, max + 1 }) |value| {
-            overflow_property.data.property.value = value;
-            try std.testing.expectError(error.NodeIndexOverflow, store.add(overflow_property));
+            overflow_property.value = value;
+            const result = if (tag == .object_property)
+                store.addProperty(loc, overflow_property)
+            else
+                store.addMethodProperty(tag, loc, overflow_property);
+            try std.testing.expectError(error.NodeIndexOverflow, result);
         }
     }
     try std.testing.expectEqual(@as(usize, 4), store.len());
@@ -1649,7 +1936,7 @@ test "failed node append preserves the complete parallel prefix" {
             // Cross several growth boundaries, including the initially empty
             // store, so failure is tested for each independently growing column.
             for (0..64) |i| {
-                _ = store.add(Node.litInt(loc, @intCast(i))) catch |err| {
+                _ = store.addInt(loc, @intCast(i)) catch |err| {
                     try std.testing.expectEqual(i, store.tags.items.len);
                     try std.testing.expectEqual(i, store.locs.items.len);
                     try std.testing.expectEqual(i, store.data.items.len);
@@ -2731,11 +3018,11 @@ test "IrView IRStore basic operations" {
 
     const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
 
-    const int_idx = try store.add(Node.litInt(loc, 42));
-    const bool_idx = try store.add(Node.litBool(loc, true));
-    const left = try store.add(Node.litInt(loc, 10));
-    const right = try store.add(Node.litInt(loc, 20));
-    const binary_idx = try store.add(Node.binaryOp(loc, .add, left, right));
+    const int_idx = try store.addInt(loc, 42);
+    const bool_idx = try store.addBool(loc, true);
+    const left = try store.addInt(loc, 10);
+    const right = try store.addInt(loc, 20);
+    const binary_idx = try store.addBinary(loc, .{ .op = .add, .left = left, .right = right });
 
     // Create view
     const view = IrView.fromIRStore(&store, &constants);
@@ -2763,34 +3050,34 @@ test "IrView IRStore basic operations" {
 /// expression as its `init`. `getFunction` must not read it as a function.
 fn buildDeclFixture(store: *IRStore) !struct { decl: NodeIndex, func: NodeIndex, body: NodeIndex } {
     const loc = SourceLocation{ .line = 1, .column = 1, .offset = 0 };
-    const body = try store.add(.{ .tag = .block, .loc = loc, .data = .{ .block = .{
+    const body = try store.addBlock(.block, loc, .{
         .stmts_start = 0,
         .stmts_count = 0,
         .scope_id = null_scope,
-    } } });
-    const func = try store.add(.{ .tag = .function_expr, .loc = loc, .data = .{ .function = .{
+    });
+    const func = try store.addFunction(.function_expr, loc, .{
         .scope_id = 3,
         .name_atom = 9,
         .params_start = 0,
         .params_count = 0,
         .body = body,
         .flags = .{},
-    } } });
-    const decl = try store.add(.{ .tag = .function_decl, .loc = loc, .data = .{ .var_decl = .{
+    });
+    const decl = try store.addVarDecl(.function_decl, loc, .{
         .binding = .{ .scope_id = 1, .slot = 2, .name_atom = 9, .kind = .local },
         .init = func,
         .kind = .let,
-    } } });
+    });
     // A second function after the declaration: on the IRStore the misread
     // of the declaration then finds enough extra slots to return garbage.
-    _ = try store.add(.{ .tag = .function_expr, .loc = loc, .data = .{ .function = .{
+    _ = try store.addFunction(.function_expr, loc, .{
         .scope_id = 4,
         .name_atom = 10,
         .params_start = 0,
         .params_count = 0,
         .body = body,
         .flags = .{},
-    } } });
+    });
     return .{ .decl = decl, .func = func, .body = body };
 }
 
@@ -3134,24 +3421,16 @@ fn testLoc() SourceLocation {
 }
 
 fn addOpt(store: *IRStore, tag: NodeTag, operand: NodeIndex) !NodeIndex {
-    return store.add(.{
-        .tag = tag,
-        .loc = testLoc(),
-        .data = .{ .opt_value = if (operand == null_node) null else operand },
-    });
+    return store.addOptValue(tag, testLoc(), if (operand == null_node) null else operand);
 }
 
 fn addPatternNode(store: *IRStore, tag: NodeTag, default_value: NodeIndex) !NodeIndex {
-    return store.add(.{
-        .tag = tag,
-        .loc = testLoc(),
-        .data = .{ .pattern_elem = .{
-            .kind = .simple,
-            .binding = BindingRef.global(3),
-            .key = null_node,
-            .key_atom = 0,
-            .default_value = default_value,
-        } },
+    return store.addPatternElem(tag, testLoc(), .{
+        .kind = .simple,
+        .binding = BindingRef.global(3),
+        .key = null_node,
+        .key_atom = 0,
+        .default_value = default_value,
     });
 }
 
@@ -3162,7 +3441,7 @@ test "expressionChildren reads the operand of the operand-carrying tags from pay
     defer constants.deinit();
     const view = IrView.fromIRStore(&store, &constants);
 
-    const operand = try store.add(Node.litInt(testLoc(), 9));
+    const operand = try store.addInt(testLoc(), 9);
     const tags = [_]NodeTag{
         .spread,      .object_spread, .await_expr,     .yield_expr, .throw_stmt,
         .return_stmt, .expr_stmt,     .export_default, .export_all,
@@ -3182,7 +3461,7 @@ test "expressionChildren of a pattern with a default is the default value only" 
     defer constants.deinit();
     const view = IrView.fromIRStore(&store, &constants);
 
-    const default_value = try store.add(Node.litInt(testLoc(), 4));
+    const default_value = try store.addInt(testLoc(), 4);
     for ([_]NodeTag{ .pattern_element, .pattern_rest, .pattern_default }) |tag| {
         const with_default = try addPatternNode(&store, tag, default_value);
         try expectViewChildren(view, with_default, &.{.{ .tag = .lit_int, .int = 4 }});
@@ -3198,36 +3477,24 @@ test "expressionChildren of a loop reads init condition update and body in sourc
     defer constants.deinit();
     const view = IrView.fromIRStore(&store, &constants);
 
-    const init_node = try store.add(Node.litInt(testLoc(), 1));
-    const condition = try store.add(Node.litInt(testLoc(), 2));
-    const update = try store.add(Node.litInt(testLoc(), 3));
-    const body = try store.add(Node.litInt(testLoc(), 4));
-    const for_node = try store.add(.{
-        .tag = .for_stmt,
-        .loc = testLoc(),
-        .data = .{ .loop = .{ .kind = .for_loop, .init = init_node, .condition = condition, .update = update, .body = body } },
-    });
+    const init_node = try store.addInt(testLoc(), 1);
+    const condition = try store.addInt(testLoc(), 2);
+    const update = try store.addInt(testLoc(), 3);
+    const body = try store.addInt(testLoc(), 4);
+    const for_node = try store.addLoop(.for_stmt, testLoc(), .{ .kind = .for_loop, .init = init_node, .condition = condition, .update = update, .body = body });
     try expectViewChildren(view, for_node, &.{
         .{ .tag = .lit_int, .int = 1 },
         .{ .tag = .lit_int, .int = 2 },
         .{ .tag = .lit_int, .int = 3 },
         .{ .tag = .lit_int, .int = 4 },
     });
-    const while_node = try store.add(.{
-        .tag = .while_stmt,
-        .loc = testLoc(),
-        .data = .{ .loop = .{ .kind = .while_loop, .init = null_node, .condition = condition, .update = null_node, .body = body } },
-    });
+    const while_node = try store.addLoop(.while_stmt, testLoc(), .{ .kind = .while_loop, .init = null_node, .condition = condition, .update = null_node, .body = body });
     try expectViewChildren(view, while_node, &.{
         .{ .tag = .lit_int, .int = 2 },
         .{ .tag = .lit_int, .int = 4 },
     });
     // A do-while runs its body before it tests its condition.
-    const do_node = try store.add(.{
-        .tag = .do_while_stmt,
-        .loc = testLoc(),
-        .data = .{ .loop = .{ .kind = .do_while, .init = null_node, .condition = condition, .update = null_node, .body = body } },
-    });
+    const do_node = try store.addLoop(.do_while_stmt, testLoc(), .{ .kind = .do_while, .init = null_node, .condition = condition, .update = null_node, .body = body });
     try expectViewChildren(view, do_node, &.{
         .{ .tag = .lit_int, .int = 4 },
         .{ .tag = .lit_int, .int = 2 },
@@ -3241,18 +3508,14 @@ test "expressionChildren of a for-in are the iterable then the body" {
     defer constants.deinit();
     const view = IrView.fromIRStore(&store, &constants);
 
-    const iterable = try store.add(Node.litInt(testLoc(), 1));
-    const body = try store.add(Node.litInt(testLoc(), 2));
-    const node = try store.add(.{
-        .tag = .for_in_stmt,
-        .loc = testLoc(),
-        .data = .{ .for_iter = .{
-            .is_for_in = true,
-            .binding = BindingRef.global(3),
-            .iterable = iterable,
-            .body = body,
-            .is_const = true,
-        } },
+    const iterable = try store.addInt(testLoc(), 1);
+    const body = try store.addInt(testLoc(), 2);
+    const node = try store.addForIter(.for_in_stmt, testLoc(), .{
+        .is_for_in = true,
+        .binding = BindingRef.global(3),
+        .iterable = iterable,
+        .body = body,
+        .is_const = true,
     });
     try expectViewChildren(view, node, &.{
         .{ .tag = .lit_int, .int = 1 },
@@ -3267,21 +3530,13 @@ test "expressionChildren of a switch and its case clauses read the test and the 
     defer constants.deinit();
     const view = IrView.fromIRStore(&store, &constants);
 
-    const discriminant = try store.add(Node.litInt(testLoc(), 1));
-    const test_expr = try store.add(Node.litInt(testLoc(), 2));
-    const stmt_a = try store.add(Node.litInt(testLoc(), 3));
-    const stmt_b = try store.add(Node.litInt(testLoc(), 4));
+    const discriminant = try store.addInt(testLoc(), 1);
+    const test_expr = try store.addInt(testLoc(), 2);
+    const stmt_a = try store.addInt(testLoc(), 3);
+    const stmt_b = try store.addInt(testLoc(), 4);
     const body_list = try store.addIndexList(&.{ stmt_a, stmt_b });
-    const clause = try store.add(.{
-        .tag = .case_clause,
-        .loc = testLoc(),
-        .data = .{ .case_clause = .{ .test_expr = test_expr, .body_start = body_list, .body_count = 2 } },
-    });
-    const default_clause = try store.add(.{
-        .tag = .case_clause,
-        .loc = testLoc(),
-        .data = .{ .case_clause = .{ .test_expr = null_node, .body_start = body_list, .body_count = 1 } },
-    });
+    const clause = try store.addCase(testLoc(), .{ .test_expr = test_expr, .body_start = body_list, .body_count = 2 });
+    const default_clause = try store.addCase(testLoc(), .{ .test_expr = null_node, .body_start = body_list, .body_count = 1 });
     try expectViewChildren(view, clause, &.{
         .{ .tag = .lit_int, .int = 2 },
         .{ .tag = .lit_int, .int = 3 },
@@ -3290,16 +3545,16 @@ test "expressionChildren of a switch and its case clauses read the test and the 
     try expectViewChildren(view, default_clause, &.{.{ .tag = .lit_int, .int = 3 }});
 
     const case_list = try store.addIndexList(&.{ clause, default_clause });
-    const switch_node = try store.add(.{
-        .tag = .switch_stmt,
-        .loc = testLoc(),
-        .data = .{ .switch_stmt = .{ .discriminant = discriminant, .cases_start = case_list, .cases_count = 2 } },
-    });
+    const switch_node = try store.addSwitch(testLoc(), .{ .discriminant = discriminant, .cases_start = case_list, .cases_count = 2 });
     try expectViewChildren(view, switch_node, &.{
         .{ .tag = .lit_int, .int = 1 },
         .{ .tag = .case_clause },
         .{ .tag = .case_clause },
     });
+}
+
+fn addPropertyTagged(store: *IRStore, tag: NodeTag, loc: SourceLocation, p: Node.PropertyExpr) !NodeIndex {
+    return if (tag == .object_property) store.addProperty(loc, p) else store.addMethodProperty(tag, loc, p);
 }
 
 test "expressionChildren of an object method yields a non-string key before the value" {
@@ -3309,21 +3564,13 @@ test "expressionChildren of an object method yields a non-string key before the 
     defer constants.deinit();
     const view = IrView.fromIRStore(&store, &constants);
 
-    const string_key = try store.add(Node.litString(testLoc(), 0));
-    const computed_key = try store.add(Node.litInt(testLoc(), 5));
-    const value = try store.add(Node.litInt(testLoc(), 6));
+    const string_key = try store.addString(testLoc(), 0);
+    const computed_key = try store.addInt(testLoc(), 5);
+    const value = try store.addInt(testLoc(), 6);
     for ([_]NodeTag{ .object_property, .object_method, .object_getter, .object_setter }) |tag| {
-        const literal_keyed = try store.add(.{
-            .tag = tag,
-            .loc = testLoc(),
-            .data = .{ .property = .{ .key = string_key, .value = value, .is_shorthand = false } },
-        });
+        const literal_keyed = try addPropertyTagged(&store, tag, testLoc(), .{ .key = string_key, .value = value, .is_shorthand = false });
         try expectViewChildren(view, literal_keyed, &.{.{ .tag = .lit_int, .int = 6 }});
-        const computed = try store.add(.{
-            .tag = tag,
-            .loc = testLoc(),
-            .data = .{ .property = .{ .key = computed_key, .value = value, .is_shorthand = false } },
-        });
+        const computed = try addPropertyTagged(&store, tag, testLoc(), .{ .key = computed_key, .value = value, .is_shorthand = false });
         try expectViewChildren(view, computed, &.{
             .{ .tag = .lit_int, .int = 5 },
             .{ .tag = .lit_int, .int = 6 },
@@ -3338,43 +3585,31 @@ test "expressionChildren of try and labeled statements reads the blocks and the 
     defer constants.deinit();
     const view = IrView.fromIRStore(&store, &constants);
 
-    const try_block = try store.add(Node.litInt(testLoc(), 1));
-    const catch_block = try store.add(Node.litInt(testLoc(), 2));
-    const finally_block = try store.add(Node.litInt(testLoc(), 3));
-    const try_node = try store.add(.{
-        .tag = .try_stmt,
-        .loc = testLoc(),
-        .data = .{ .try_stmt = .{
-            .try_block = try_block,
-            .catch_binding = BindingRef.global(3),
-            .catch_block = catch_block,
-            .finally_block = finally_block,
-        } },
+    const try_block = try store.addInt(testLoc(), 1);
+    const catch_block = try store.addInt(testLoc(), 2);
+    const finally_block = try store.addInt(testLoc(), 3);
+    const try_node = try store.addTry(testLoc(), .{
+        .try_block = try_block,
+        .catch_binding = BindingRef.global(3),
+        .catch_block = catch_block,
+        .finally_block = finally_block,
     });
     try expectViewChildren(view, try_node, &.{
         .{ .tag = .lit_int, .int = 1 },
         .{ .tag = .lit_int, .int = 2 },
         .{ .tag = .lit_int, .int = 3 },
     });
-    const no_catch = try store.add(.{
-        .tag = .try_stmt,
-        .loc = testLoc(),
-        .data = .{ .try_stmt = .{
-            .try_block = try_block,
-            .catch_binding = BindingRef.global(3),
-            .catch_block = null_node,
-            .finally_block = finally_block,
-        } },
+    const no_catch = try store.addTry(testLoc(), .{
+        .try_block = try_block,
+        .catch_binding = BindingRef.global(3),
+        .catch_block = null_node,
+        .finally_block = finally_block,
     });
     try expectViewChildren(view, no_catch, &.{
         .{ .tag = .lit_int, .int = 1 },
         .{ .tag = .lit_int, .int = 3 },
     });
-    const labeled = try store.add(.{
-        .tag = .labeled_stmt,
-        .loc = testLoc(),
-        .data = .{ .labeled = .{ .label_atom = 7, .body = try_block } },
-    });
+    const labeled = try store.addLabeled(testLoc(), .{ .label_atom = 7, .body = try_block });
     try expectViewChildren(view, labeled, &.{.{ .tag = .lit_int, .int = 1 }});
 }
 
@@ -3385,18 +3620,14 @@ test "expressionChildren of an export specifier is its declaration word only" {
     defer constants.deinit();
     const view = IrView.fromIRStore(&store, &constants);
 
-    const declaration = try store.add(Node.litInt(testLoc(), 8));
+    const declaration = try store.addInt(testLoc(), 8);
     const specifier_list = try store.addIndexList(&.{declaration});
-    const specifier = try store.add(.{
-        .tag = .export_specifier,
-        .loc = testLoc(),
-        .data = .{ .export_decl = .{
-            .kind = .named,
-            .declaration = null_node,
-            .specifiers_start = specifier_list,
-            .specifiers_count = 1,
-            .from_module_idx = 0,
-        } },
+    const specifier = try store.addExportDecl(.export_specifier, testLoc(), .{
+        .kind = .named,
+        .declaration = null_node,
+        .specifiers_start = specifier_list,
+        .specifiers_count = 1,
+        .from_module_idx = 0,
     });
     try expectViewChildren(view, specifier, &.{});
 }

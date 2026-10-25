@@ -151,10 +151,10 @@ test "folding is bounded and leaves calls in short circuits" {
     const loc: ir.SourceLocation = .{ .line = 1, .column = 1, .offset = 0 };
     const yes = try store.addNode(.lit_bool, loc, .{ .a = 1, .b = 0 });
     const call = try store.addNode(.call, loc, .{ .a = 0, .b = 0 });
-    const expr = try store.add(ir.Node.binaryOp(loc, .or_op, yes, call));
+    const expr = try store.addBinary(loc, .{ .op = .or_op, .left = yes, .right = call });
     try std.testing.expect(fold(ir.IrView.fromIRStore(&store, &constants), expr) == null);
     var nested = yes;
-    for (0..1000) |_| nested = try store.add(ir.Node.unaryOp(loc, .not, nested));
+    for (0..1000) |_| nested = try store.addUnary(loc, .{ .op = .not, .operand = nested });
     const count = store.tags.items.len;
     try std.testing.expect(fold(ir.IrView.fromIRStore(&store, &constants), nested) == null);
     try std.testing.expectEqual(count, store.tags.items.len);

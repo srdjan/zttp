@@ -751,14 +751,10 @@ pub const Parser = struct {
         // Create program node
         const stmts_count = try self.checkedU16Count(.{ .line = 1, .column = 1, .offset = 0 }, stmts.slice().len, "too many top-level statements; limit is 65535");
         const stmts_start = try self.addStmtList(stmts.slice());
-        return try self.nodes.add(.{
-            .tag = .program,
-            .loc = .{ .line = 1, .column = 1, .offset = 0 },
-            .data = .{ .block = .{
-                .stmts_start = stmts_start,
-                .stmts_count = stmts_count,
-                .scope_id = 0,
-            } },
+        return try self.nodes.addBlock(.program, .{ .line = 1, .column = 1, .offset = 0 }, .{
+            .stmts_start = stmts_start,
+            .stmts_count = stmts_count,
+            .scope_id = 0,
         });
     }
 
@@ -2012,14 +2008,10 @@ pub const Parser = struct {
 
         try self.expectSemicolon();
 
-        const declaration = try self.nodes.add(.{
-            .tag = .var_decl,
-            .loc = loc,
-            .data = .{ .var_decl = .{
-                .binding = binding,
-                .init = init_node,
-                .kind = kind,
-            } },
+        const declaration = try self.nodes.addVarDecl(.var_decl, loc, .{
+            .binding = binding,
+            .init = init_node,
+            .kind = kind,
         });
         if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) return declaration;
         if (annotation_index) |index| {
@@ -2321,14 +2313,10 @@ pub const Parser = struct {
 
         // Create function declaration node
         // Note: function declarations use .let for binding (no var support)
-        const declaration = try self.nodes.add(.{
-            .tag = .function_decl,
-            .loc = loc,
-            .data = .{ .var_decl = .{
-                .binding = binding,
-                .init = func_node,
-                .kind = .let,
-            } },
+        const declaration = try self.nodes.addVarDecl(.function_decl, loc, .{
+            .binding = binding,
+            .init = func_node,
+            .kind = .let,
         });
         if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
             if (pending_owner) |*pending| self.type_store.cancelGenericOwner(pending);
@@ -3598,16 +3586,12 @@ pub const Parser = struct {
                         return error.ParseError;
                     }
                 }
-                const param_node = try self.nodes.add(.{
-                    .tag = .pattern_element,
-                    .loc = param_name.location(),
-                    .data = .{ .pattern_elem = .{
-                        .kind = if (flags.has_rest_param) .rest else .simple,
-                        .binding = param_binding,
-                        .key = null_node,
-                        .key_atom = 0,
-                        .default_value = null_node,
-                    } },
+                const param_node = try self.nodes.addPatternElem(.pattern_element, param_name.location(), .{
+                    .kind = if (flags.has_rest_param) .rest else .simple,
+                    .binding = param_binding,
+                    .key = null_node,
+                    .key_atom = 0,
+                    .default_value = null_node,
                 });
                 try params.append(param_node);
                 if (parameter_type) |value| {
@@ -3736,17 +3720,13 @@ pub const Parser = struct {
         else
             null_node;
 
-        const function_node = try self.nodes.add(.{
-            .tag = .function_expr,
-            .loc = loc,
-            .data = .{ .function = .{
-                .scope_id = scope_id,
-                .name_atom = name_atom,
-                .params_start = params_start,
-                .params_count = params_count,
-                .body = body,
-                .flags = param_flags,
-            } },
+        const function_node = try self.nodes.addFunction(.function_expr, loc, .{
+            .scope_id = scope_id,
+            .name_atom = name_atom,
+            .params_start = params_start,
+            .params_count = params_count,
+            .body = body,
+            .flags = param_flags,
         });
         const transferred_signature = pending_signature;
         pending_signature = null;
@@ -3771,14 +3751,10 @@ pub const Parser = struct {
             else_branch = try self.parseStatement();
         }
 
-        return try self.nodes.add(.{
-            .tag = .if_stmt,
-            .loc = loc,
-            .data = .{ .if_stmt = .{
-                .condition = condition,
-                .then_branch = then_branch,
-                .else_branch = else_branch,
-            } },
+        return try self.nodes.addIf(loc, .{
+            .condition = condition,
+            .then_branch = then_branch,
+            .else_branch = else_branch,
         });
     }
 
@@ -3854,16 +3830,12 @@ pub const Parser = struct {
 
                     self.scopes.popScope();
 
-                    return try self.nodes.add(.{
-                        .tag = .for_of_stmt,
-                        .loc = loc,
-                        .data = .{ .for_iter = .{
-                            .is_for_in = false,
-                            .binding = binding,
-                            .iterable = iterable,
-                            .body = body,
-                            .is_const = is_const,
-                        } },
+                    return try self.nodes.addForIter(.for_of_stmt, loc, .{
+                        .is_for_in = false,
+                        .binding = binding,
+                        .iterable = iterable,
+                        .body = body,
+                        .is_const = is_const,
                     });
                 }
 
@@ -3873,14 +3845,10 @@ pub const Parser = struct {
                     var_init = try self.parseExpression(.assignment);
                 }
 
-                init_node = try self.nodes.add(.{
-                    .tag = .var_decl,
-                    .loc = name.location(),
-                    .data = .{ .var_decl = .{
-                        .binding = binding,
-                        .init = var_init,
-                        .kind = kind,
-                    } },
+                init_node = try self.nodes.addVarDecl(.var_decl, name.location(), .{
+                    .binding = binding,
+                    .init = var_init,
+                    .kind = kind,
                 });
             } else {
                 init_node = try self.parseExpression(.none);
@@ -3913,11 +3881,7 @@ pub const Parser = struct {
         }
         try self.expectSemicolon();
 
-        return try self.nodes.add(.{
-            .tag = .return_stmt,
-            .loc = loc,
-            .data = .{ .opt_value = value },
-        });
+        return try self.nodes.addOptValue(.return_stmt, loc, value);
     }
 
     fn parseBreakStatement(self: *Parser) anyerror!NodeIndex {
@@ -3936,11 +3900,7 @@ pub const Parser = struct {
         }
         try self.expectSemicolon();
 
-        return try self.nodes.add(.{
-            .tag = .break_stmt,
-            .loc = loc,
-            .data = .{ .opt_label = null },
-        });
+        return try self.nodes.addLabelJump(.break_stmt, loc, null);
     }
 
     fn parseContinueStatement(self: *Parser) anyerror!NodeIndex {
@@ -3959,11 +3919,7 @@ pub const Parser = struct {
         }
         try self.expectSemicolon();
 
-        return try self.nodes.add(.{
-            .tag = .continue_stmt,
-            .loc = loc,
-            .data = .{ .opt_label = null },
-        });
+        return try self.nodes.addLabelJump(.continue_stmt, loc, null);
     }
 
     fn parseAssertStatement(self: *Parser) anyerror!NodeIndex {
@@ -3979,13 +3935,9 @@ pub const Parser = struct {
         }
 
         try self.expectSemicolon();
-        return try self.nodes.add(.{
-            .tag = .assert_stmt,
-            .loc = loc,
-            .data = .{ .assert_stmt = .{
-                .condition = condition,
-                .error_expr = error_expr,
-            } },
+        return try self.nodes.addAssert(loc, .{
+            .condition = condition,
+            .error_expr = error_expr,
         });
     }
 
@@ -4050,13 +4002,9 @@ pub const Parser = struct {
             const body = try self.parseExpression(.none);
             self.scopes.popScope();
 
-            const arm_node = try self.nodes.add(.{
-                .tag = .match_arm,
-                .loc = arm_loc,
-                .data = .{ .match_arm = .{
-                    .pattern = pattern,
-                    .body = body,
-                } },
+            const arm_node = try self.nodes.addMatchArm(arm_loc, .{
+                .pattern = pattern,
+                .body = body,
             });
             if (arms_len >= arms.len) {
                 self.errorAt(arm_loc, "too many match arms; limit is 255");
@@ -4079,14 +4027,10 @@ pub const Parser = struct {
 
         const arms_start = try self.addNodeList(arms[0..arms_len]);
 
-        return try self.nodes.add(.{
-            .tag = .match_expr,
-            .loc = loc,
-            .data = .{ .match_expr = .{
-                .discriminant = discriminant,
-                .arms_start = arms_start,
-                .arms_count = arms_len,
-            } },
+        return try self.nodes.addMatch(loc, .{
+            .discriminant = discriminant,
+            .arms_start = arms_start,
+            .arms_count = arms_len,
         });
     }
 
@@ -4183,26 +4127,14 @@ pub const Parser = struct {
             .boolean, .number, .string => try self.buildTypeofTest(loc, scrutinee, @tagName(kind)),
         };
 
-        return try self.nodes.add(.{
-            .tag = .match_type_test,
-            .loc = loc,
-            .data = .{ .match_type_test = .{ .kind = kind, .predicate = predicate } },
-        });
+        return try self.nodes.addMatchTypeTest(loc, .{ .kind = kind, .predicate = predicate });
     }
 
     fn buildTypeofTest(self: *Parser, loc: SourceLocation, scrutinee: NodeIndex, name: []const u8) anyerror!NodeIndex {
-        const typeof_node = try self.nodes.add(.{
-            .tag = .unary_op,
-            .loc = loc,
-            .data = .{ .unary = .{ .op = .typeof_op, .operand = scrutinee } },
-        });
+        const typeof_node = try self.nodes.addUnary(loc, .{ .op = .typeof_op, .operand = scrutinee });
         const str_idx = try self.constants.addString(name);
-        const literal = try self.nodes.add(Node.litString(loc, str_idx));
-        return try self.nodes.add(.{
-            .tag = .binary_op,
-            .loc = loc,
-            .data = .{ .binary = .{ .op = .strict_eq, .left = typeof_node, .right = literal } },
-        });
+        const literal = try self.nodes.addString(loc, str_idx);
+        return try self.nodes.addBinary(loc, .{ .op = .strict_eq, .left = typeof_node, .right = literal });
     }
 
     /// `isDict(s)` - the intrinsic guard spec 5.7 names, called as a global
@@ -4223,43 +4155,31 @@ pub const Parser = struct {
     fn buildGlobalGuardCall(self: *Parser, loc: SourceLocation, scrutinee: NodeIndex, name: []const u8) anyerror!NodeIndex {
         const name_atom = try self.addAtom(name);
         const binding = try self.scopes.resolveBinding(name, name_atom);
-        const callee = try self.nodes.add(Node.identifier(loc, binding));
+        const callee = try self.nodes.addIdentifier(loc, binding);
         const args_start = try self.addNodeList(&[_]NodeIndex{scrutinee});
-        return try self.nodes.add(.{
-            .tag = .call,
-            .loc = loc,
-            .data = .{ .call = .{
-                .callee = callee,
-                .args_start = args_start,
-                .args_count = 1,
-            } },
+        return try self.nodes.addCall(.call, loc, .{
+            .callee = callee,
+            .args_start = args_start,
+            .args_count = 1,
         });
     }
 
     fn buildIsArrayCall(self: *Parser, loc: SourceLocation, scrutinee: NodeIndex) anyerror!NodeIndex {
         const array_atom = try self.addAtom("Array");
         const array_binding = try self.scopes.resolveBinding("Array", array_atom);
-        const array_ref = try self.nodes.add(Node.identifier(loc, array_binding));
+        const array_ref = try self.nodes.addIdentifier(loc, array_binding);
         const method_atom = try self.addAtom("isArray");
-        const callee = try self.nodes.add(.{
-            .tag = .member_access,
-            .loc = loc,
-            .data = .{ .member = .{
-                .object = array_ref,
-                .property = method_atom,
-                .computed = null_node,
-                .is_optional = false,
-            } },
+        const callee = try self.nodes.addMember(.member_access, loc, .{
+            .object = array_ref,
+            .property = method_atom,
+            .computed = null_node,
+            .is_optional = false,
         });
         const args_start = try self.addNodeList(&[_]NodeIndex{scrutinee});
-        return try self.nodes.add(.{
-            .tag = .call,
-            .loc = loc,
-            .data = .{ .call = .{
-                .callee = callee,
-                .args_start = args_start,
-                .args_count = 1,
-            } },
+        return try self.nodes.addCall(.call, loc, .{
+            .callee = callee,
+            .args_start = args_start,
+            .args_count = 1,
         });
     }
 
@@ -4275,7 +4195,7 @@ pub const Parser = struct {
             .variable,
             true,
         ) catch |err| return self.bindingFailure(err);
-        return try self.nodes.add(Node.identifier(loc, binding));
+        return try self.nodes.addIdentifier(loc, binding);
     }
 
     fn parseMatchObjectPattern(self: *Parser) anyerror!NodeIndex {
@@ -4297,7 +4217,7 @@ pub const Parser = struct {
                     key_name = text;
                     const str_idx = try self.constants.addString(text);
                     self.advance();
-                    break :blk try self.nodes.add(Node.litString(prop_loc, str_idx));
+                    break :blk try self.nodes.addString(prop_loc, str_idx);
                 },
                 .string_literal => try self.parseString(),
                 else => {
@@ -4334,14 +4254,10 @@ pub const Parser = struct {
                 break :blk try self.parseMatchPattern(true);
             };
 
-            const prop_node = try self.nodes.add(.{
-                .tag = .object_property,
-                .loc = prop_loc,
-                .data = .{ .property = .{
-                    .key = key,
-                    .value = value,
-                    .is_shorthand = shorthand,
-                } },
+            const prop_node = try self.nodes.addProperty(prop_loc, .{
+                .key = key,
+                .value = value,
+                .is_shorthand = shorthand,
             });
             if (props_len >= props.len) {
                 self.errorAt(prop_loc, "too many match-pattern properties; limit is 255");
@@ -4362,13 +4278,9 @@ pub const Parser = struct {
         else
             null_node;
 
-        return try self.nodes.add(.{
-            .tag = .match_pattern,
-            .loc = loc,
-            .data = .{ .match_pattern = .{
-                .props_start = props_start,
-                .props_count = props_len,
-            } },
+        return try self.nodes.addMatchPattern(loc, .{
+            .props_start = props_start,
+            .props_count = props_len,
         });
     }
 
@@ -4398,14 +4310,10 @@ pub const Parser = struct {
 
         const elements_count = try self.checkedU16Count(loc, elements.slice().len, "too many array pattern elements; limit is 65535");
         const elements_start = try self.addNodeList(elements.slice());
-        return try self.nodes.add(.{
-            .tag = .array_pattern,
-            .loc = loc,
-            .data = .{ .array = .{
-                .elements_start = elements_start,
-                .elements_count = elements_count,
-                .has_spread = false,
-            } },
+        return try self.nodes.addArray(.array_pattern, loc, .{
+            .elements_start = elements_start,
+            .elements_count = elements_count,
+            .has_spread = false,
         });
     }
 
@@ -4509,14 +4417,10 @@ pub const Parser = struct {
         else
             null_node;
 
-        return try self.nodes.add(.{
-            .tag = .block,
-            .loc = loc,
-            .data = .{ .block = .{
-                .stmts_start = stmts_start,
-                .stmts_count = stmts_count,
-                .scope_id = scope_id,
-            } },
+        return try self.nodes.addBlock(.block, loc, .{
+            .stmts_start = stmts_start,
+            .stmts_count = stmts_count,
+            .scope_id = scope_id,
         });
     }
 
@@ -4591,14 +4495,10 @@ pub const Parser = struct {
                 },
             };
 
-            const spec_node = try self.nodes.add(.{
-                .tag = .import_specifier,
-                .loc = spec_loc,
-                .data = .{ .import_spec = .{
-                    .kind = .named,
-                    .imported_atom = imported_atom,
-                    .local_binding = binding,
-                } },
+            const spec_node = try self.nodes.addImportSpec(.import_specifier, spec_loc, .{
+                .kind = .named,
+                .imported_atom = imported_atom,
+                .local_binding = binding,
             });
 
             try specifiers.append(spec_node);
@@ -4631,14 +4531,10 @@ pub const Parser = struct {
         else
             null_node;
 
-        return try self.nodes.add(.{
-            .tag = .import_decl,
-            .loc = loc,
-            .data = .{ .import_decl = .{
-                .module_idx = module_idx,
-                .specifiers_start = specs_start,
-                .specifiers_count = specifiers_count,
-            } },
+        return try self.nodes.addImportDecl(loc, .{
+            .module_idx = module_idx,
+            .specifiers_start = specs_start,
+            .specifiers_count = specifiers_count,
         });
     }
 
@@ -4733,16 +4629,12 @@ pub const Parser = struct {
         // export function X() {}
         if (self.check(.kw_function)) {
             const decl = try self.parseFunctionDeclaration();
-            const export_node = try self.nodes.add(.{
-                .tag = .export_decl,
-                .loc = loc,
-                .data = .{ .export_decl = .{
-                    .kind = .named,
-                    .declaration = decl,
-                    .specifiers_start = null_node,
-                    .specifiers_count = 0,
-                    .from_module_idx = 0,
-                } },
+            const export_node = try self.nodes.addExportDecl(.export_decl, loc, .{
+                .kind = .named,
+                .declaration = decl,
+                .specifiers_start = null_node,
+                .specifiers_count = 0,
+                .from_module_idx = 0,
             });
             retain_type_records = self.typeSyntaxPublicationHealthy(publication_checkpoint);
             return export_node;
@@ -4758,16 +4650,12 @@ pub const Parser = struct {
         // export const X = ...
         if (self.check(.kw_const)) {
             const decl = try self.parseVarDeclaration();
-            const export_node = try self.nodes.add(.{
-                .tag = .export_decl,
-                .loc = loc,
-                .data = .{ .export_decl = .{
-                    .kind = .named,
-                    .declaration = decl,
-                    .specifiers_start = null_node,
-                    .specifiers_count = 0,
-                    .from_module_idx = 0,
-                } },
+            const export_node = try self.nodes.addExportDecl(.export_decl, loc, .{
+                .kind = .named,
+                .declaration = decl,
+                .specifiers_start = null_node,
+                .specifiers_count = 0,
+                .from_module_idx = 0,
             });
             retain_type_records = self.typeSyntaxPublicationHealthy(publication_checkpoint);
             return export_node;
@@ -4781,11 +4669,7 @@ pub const Parser = struct {
         const loc = self.current.location();
         const expr = try self.parseExpression(.none);
         try self.expectSemicolon();
-        return try self.nodes.add(.{
-            .tag = .expr_stmt,
-            .loc = loc,
-            .data = .{ .opt_value = expr },
-        });
+        return try self.nodes.addOptValue(.expr_stmt, loc, expr);
     }
 
     // ============ Expression Parsing (Pratt) ============
@@ -5009,7 +4893,7 @@ pub const Parser = struct {
                 if (self.expression_profile) {
                     self.advance();
                     const right = try self.parseExpression(prec);
-                    return try self.nodes.add(Node.binaryOp(loc, .loose_eq, left, right));
+                    return try self.nodes.addBinary(loc, .{ .op = .loose_eq, .left = left, .right = right });
                 }
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'==' is not supported; use '===' for strict equality instead");
                 return error.ParseError;
@@ -5018,7 +4902,7 @@ pub const Parser = struct {
                 if (self.expression_profile) {
                     self.advance();
                     const right = try self.parseExpression(prec);
-                    return try self.nodes.add(Node.binaryOp(loc, .loose_neq, left, right));
+                    return try self.nodes.addBinary(loc, .{ .op = .loose_neq, .left = left, .right = right });
                 }
                 self.errors.addErrorAt(.unsupported_feature, self.current, "'!=' is not supported; use '!==' for strict inequality instead");
                 return error.ParseError;
@@ -5064,7 +4948,7 @@ pub const Parser = struct {
                 else
                     prec;
                 const right = try self.parseExpression(right_prec);
-                return try self.nodes.add(Node.binaryOp(loc, self.tokenToBinaryOp(op_tok.type), left, right));
+                return try self.nodes.addBinary(loc, .{ .op = self.tokenToBinaryOp(op_tok.type), .left = left, .right = right });
             },
 
             // `|>` keeps its precedence row so it is recognized here rather
@@ -5086,14 +4970,10 @@ pub const Parser = struct {
             .assign => {
                 self.advance();
                 const right = try self.parseExpression(@fromBackingInt(@intCast(@backingInt(prec) - 1)));
-                return try self.nodes.add(.{
-                    .tag = .assignment,
-                    .loc = loc,
-                    .data = .{ .assignment = .{
-                        .target = left,
-                        .value = right,
-                        .op = null,
-                    } },
+                return try self.nodes.addAssignment(loc, .{
+                    .target = left,
+                    .value = right,
+                    .op = null,
                 });
             },
 
@@ -5114,14 +4994,10 @@ pub const Parser = struct {
                 const binary_op = self.tokenToBinaryOp(op_tok.type);
                 self.advance();
                 const right = try self.parseExpression(@fromBackingInt(@intCast(@backingInt(prec) - 1)));
-                return try self.nodes.add(.{
-                    .tag = .assignment,
-                    .loc = loc,
-                    .data = .{ .assignment = .{
-                        .target = left,
-                        .value = right,
-                        .op = binary_op,
-                    } },
+                return try self.nodes.addAssignment(loc, .{
+                    .target = left,
+                    .value = right,
+                    .op = binary_op,
                 });
             },
 
@@ -5150,14 +5026,10 @@ pub const Parser = struct {
                 const then_expr = try self.parseExpression(.comma);
                 try self.expect(.colon, "':'");
                 const else_expr = try self.parseExpression(.comma);
-                return try self.nodes.add(.{
-                    .tag = .ternary,
-                    .loc = loc,
-                    .data = .{ .ternary = .{
-                        .condition = left,
-                        .then_branch = then_expr,
-                        .else_branch = else_expr,
-                    } },
+                return try self.nodes.addTernary(loc, .{
+                    .condition = left,
+                    .then_branch = then_expr,
+                    .else_branch = else_expr,
                 });
             },
 
@@ -5168,37 +5040,31 @@ pub const Parser = struct {
                 const prop_name = prop.text(self.source);
 
                 // Check for removed Object methods
-                if (self.nodes.get(left)) |left_node| {
-                    if (left_node.tag == .identifier) {
-                        const binding = left_node.data.binding;
-                        // Check if it's the builtin Object global (undeclared)
-                        if (binding.kind == .undeclared_global and binding.name_atom == @backingInt(object.Atom.Object)) {
-                            if (std.mem.eql(u8, prop_name, "assign")) {
-                                self.errors.addErrorAt(.unsupported_feature, prop, "'Object.assign' is not supported; use object spread {...obj1, ...obj2} instead");
-                                return error.ParseError;
-                            }
-                            if (std.mem.eql(u8, prop_name, "freeze")) {
-                                self.errors.addErrorAt(.unsupported_feature, prop, "'Object.freeze' is not supported; objects are mutable by design");
-                                return error.ParseError;
-                            }
-                            if (std.mem.eql(u8, prop_name, "isFrozen")) {
-                                self.errors.addErrorAt(.unsupported_feature, prop, "'Object.isFrozen' is not supported; objects are mutable by design");
-                                return error.ParseError;
-                            }
+                if (self.nodes.getTag(left) == .identifier) {
+                    const binding = self.nodes.getBinding(left);
+                    // Check if it's the builtin Object global (undeclared)
+                    if (binding.kind == .undeclared_global and binding.name_atom == @backingInt(object.Atom.Object)) {
+                        if (std.mem.eql(u8, prop_name, "assign")) {
+                            self.errors.addErrorAt(.unsupported_feature, prop, "'Object.assign' is not supported; use object spread {...obj1, ...obj2} instead");
+                            return error.ParseError;
+                        }
+                        if (std.mem.eql(u8, prop_name, "freeze")) {
+                            self.errors.addErrorAt(.unsupported_feature, prop, "'Object.freeze' is not supported; objects are mutable by design");
+                            return error.ParseError;
+                        }
+                        if (std.mem.eql(u8, prop_name, "isFrozen")) {
+                            self.errors.addErrorAt(.unsupported_feature, prop, "'Object.isFrozen' is not supported; objects are mutable by design");
+                            return error.ParseError;
                         }
                     }
                 }
 
                 const prop_atom = try self.addAtom(prop_name);
-                return try self.nodes.add(.{
-                    .tag = .member_access,
-                    .loc = loc,
-                    .data = .{ .member = .{
-                        .object = left,
-                        .property = prop_atom,
-                        .computed = null_node,
-                        .is_optional = false,
-                    } },
+                return try self.nodes.addMember(.member_access, loc, .{
+                    .object = left,
+                    .property = prop_atom,
+                    .computed = null_node,
+                    .is_optional = false,
                 });
             },
 
@@ -5207,15 +5073,11 @@ pub const Parser = struct {
                 self.advance();
                 const index = try self.parseExpression(.none);
                 try self.expect(.rbracket, "']'");
-                return try self.nodes.add(.{
-                    .tag = .computed_access,
-                    .loc = loc,
-                    .data = .{ .member = .{
-                        .object = left,
-                        .property = 0,
-                        .computed = index,
-                        .is_optional = false,
-                    } },
+                return try self.nodes.addMember(.computed_access, loc, .{
+                    .object = left,
+                    .property = 0,
+                    .computed = index,
+                    .is_optional = false,
                 });
             },
 
@@ -5232,15 +5094,11 @@ pub const Parser = struct {
                 }
                 const prop = try self.expectPropertyIdentifier("property name");
                 const prop_atom = try self.addAtom(prop.text(self.source));
-                return try self.nodes.add(.{
-                    .tag = .optional_chain,
-                    .loc = loc,
-                    .data = .{ .member = .{
-                        .object = left,
-                        .property = prop_atom,
-                        .computed = null_node,
-                        .is_optional = true,
-                    } },
+                return try self.nodes.addMember(.optional_chain, loc, .{
+                    .object = left,
+                    .property = prop_atom,
+                    .computed = null_node,
+                    .is_optional = true,
                 });
             },
 
@@ -5281,11 +5139,7 @@ pub const Parser = struct {
                 progress.iteration(self);
                 if (self.match(.spread)) {
                     const spread_expr = try self.parseExpression(.assignment);
-                    const spread_node = try self.nodes.add(.{
-                        .tag = .spread,
-                        .loc = loc,
-                        .data = .{ .opt_value = spread_expr },
-                    });
+                    const spread_node = try self.nodes.addOptValue(.spread, loc, spread_expr);
                     try args.append(spread_node);
                 } else {
                     const arg = try self.parseExpression(.assignment);
@@ -5303,14 +5157,10 @@ pub const Parser = struct {
         else
             null_node;
 
-        const call = try self.nodes.add(.{
-            .tag = .call,
-            .loc = loc,
-            .data = .{ .call = .{
-                .callee = callee,
-                .args_start = args_start,
-                .args_count = args_count,
-            } },
+        const call = try self.nodes.addCall(.call, loc, .{
+            .callee = callee,
+            .args_start = args_start,
+            .args_count = args_count,
         });
         if (pending_call) |pending| {
             if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
@@ -5357,7 +5207,7 @@ pub const Parser = struct {
 
         // Try to parse as integer first
         if (std.fmt.parseInt(i32, text, 0)) |int_val| {
-            return try self.nodes.add(Node.litInt(loc, int_val));
+            return try self.nodes.addInt(loc, int_val);
         } else |_| {}
 
         // Radix literals above i32 and decimal floats: one parser, which refuses
@@ -5436,11 +5286,7 @@ pub const Parser = struct {
         };
 
         const float_idx = try self.constants.addFloat(value);
-        return try self.nodes.add(.{
-            .tag = .lit_float,
-            .loc = loc,
-            .data = .{ .float_idx = float_idx },
-        });
+        return try self.nodes.addFloat(loc, float_idx);
     }
 
     fn parseString(self: *Parser) anyerror!NodeIndex {
@@ -5455,7 +5301,7 @@ pub const Parser = struct {
         const text = token.text(self.source);
         const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
         const str_idx = try self.unescapedStringOrDiagnostic(content, loc, token.has_escape);
-        return try self.nodes.add(Node.litString(loc, str_idx));
+        return try self.nodes.addString(loc, str_idx);
     }
 
     fn addExpressionStringNode(self: *Parser, token: Token) anyerror!NodeIndex {
@@ -5467,25 +5313,25 @@ pub const Parser = struct {
         }
 
         const str_idx = try self.unescapedStringOrDiagnostic(text[1 .. text.len - 1], loc, token.has_escape);
-        return try self.nodes.add(Node.litString(loc, str_idx));
+        return try self.nodes.addString(loc, str_idx);
     }
 
     fn parseBoolLiteral(self: *Parser, value: bool) anyerror!NodeIndex {
         const loc = self.current.location();
         self.advance();
-        return try self.nodes.add(Node.litBool(loc, value));
+        return try self.nodes.addBool(loc, value);
     }
 
     fn parseNullLiteral(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
         self.advance();
-        return try self.nodes.add(Node.litNull(loc));
+        return try self.nodes.addPlain(.lit_null, loc);
     }
 
     fn parseUndefinedLiteral(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
         self.advance();
-        return try self.nodes.add(Node.litUndefined(loc));
+        return try self.nodes.addPlain(.lit_undefined, loc);
     }
 
     fn parseTemplateLiteral(self: *Parser) anyerror!NodeIndex {
@@ -5508,7 +5354,7 @@ pub const Parser = struct {
         }
         const content = if (text.len >= 2) text[1 .. text.len - 1] else "";
         const str_idx = try self.unescapedStringOrDiagnostic(content, loc, token.has_escape);
-        return try self.nodes.add(Node.litString(loc, str_idx));
+        return try self.nodes.addString(loc, str_idx);
     }
 
     fn parseIdentifier(self: *Parser) anyerror!NodeIndex {
@@ -5547,21 +5393,21 @@ pub const Parser = struct {
         }
 
         self.advance();
-        return try self.nodes.add(Node.identifier(loc, binding));
+        return try self.nodes.addIdentifier(loc, binding);
     }
 
     fn parseUnaryOp(self: *Parser, op: UnaryOp) anyerror!NodeIndex {
         const loc = self.current.location();
         self.advance();
         const operand = try self.parseExpression(.unary);
-        return try self.nodes.add(Node.unaryOp(loc, op, operand));
+        return try self.nodes.addUnary(loc, .{ .op = op, .operand = operand });
     }
 
     fn parseUnaryKeyword(self: *Parser, op: UnaryOp) anyerror!NodeIndex {
         const loc = self.current.location();
         self.advance();
         const operand = try self.parseExpression(.unary);
-        return try self.nodes.add(Node.unaryOp(loc, op, operand));
+        return try self.nodes.addUnary(loc, .{ .op = op, .operand = operand });
     }
 
     fn parseAsyncExpression(self: *Parser) anyerror!NodeIndex {
@@ -5581,7 +5427,7 @@ pub const Parser = struct {
         // Just 'async' as identifier
         const name_atom = try self.addAtom("async");
         const binding = try self.scopes.resolveBinding("async", name_atom);
-        return try self.nodes.add(Node.identifier(loc, binding));
+        return try self.nodes.addIdentifier(loc, binding);
     }
 
     fn parseAwaitExpression(self: *Parser) anyerror!NodeIndex {
@@ -5626,11 +5472,7 @@ pub const Parser = struct {
                 } else if (self.match(.spread)) {
                     has_spread = true;
                     const spread_expr = try self.parseExpression(.assignment);
-                    const spread_node = try self.nodes.add(.{
-                        .tag = .spread,
-                        .loc = loc,
-                        .data = .{ .opt_value = spread_expr },
-                    });
+                    const spread_node = try self.nodes.addOptValue(.spread, loc, spread_expr);
                     try elements.append(spread_node);
                 } else {
                     const elem = try self.parseExpression(.assignment);
@@ -5648,14 +5490,10 @@ pub const Parser = struct {
         else
             null_node;
 
-        return try self.nodes.add(.{
-            .tag = .array_literal,
-            .loc = loc,
-            .data = .{ .array = .{
-                .elements_start = elements_start,
-                .elements_count = elements_count,
-                .has_spread = has_spread,
-            } },
+        return try self.nodes.addArray(.array_literal, loc, .{
+            .elements_start = elements_start,
+            .elements_count = elements_count,
+            .has_spread = has_spread,
         });
     }
 
@@ -5675,11 +5513,7 @@ pub const Parser = struct {
                 // Check for spread
                 if (self.match(.spread)) {
                     const spread_expr = try self.parseExpression(.assignment);
-                    const spread_node = try self.nodes.add(.{
-                        .tag = .object_spread,
-                        .loc = prop_loc,
-                        .data = .{ .opt_value = spread_expr },
-                    });
+                    const spread_node = try self.nodes.addOptValue(.object_spread, prop_loc, spread_expr);
                     try properties.append(spread_node);
                 } else {
                     // Check for getter/setter
@@ -5711,7 +5545,7 @@ pub const Parser = struct {
                         }
 
                         const key_idx = try self.addString(key.text(self.source));
-                        key_node = try self.nodes.add(Node.litString(key.location(), key_idx));
+                        key_node = try self.nodes.addString(key.location(), key_idx);
                     } else if (self.check(.number)) {
                         // One keyed-collection model: a record has string keys.
                         // A numeric key parses to the same string key, so the
@@ -5728,7 +5562,7 @@ pub const Parser = struct {
                             const text = key.text(self.source);
                             const content = if (text.len >= 2) text[1 .. text.len - 1] else text;
                             const key_idx = try self.addString(content);
-                            key_node = try self.nodes.add(Node.litString(key.location(), key_idx));
+                            key_node = try self.nodes.addString(key.location(), key_idx);
                         }
                     } else if (self.isKeyword(self.current.type)) {
                         // JavaScript allows reserved keywords as property names
@@ -5736,7 +5570,7 @@ pub const Parser = struct {
                         const key = self.current;
                         self.advance();
                         const key_idx = try self.addString(key.text(self.source));
-                        key_node = try self.nodes.add(Node.litString(key.location(), key_idx));
+                        key_node = try self.nodes.addString(key.location(), key_idx);
                     } else {
                         self.errorAtCurrent("expected property name");
                         break;
@@ -5759,14 +5593,10 @@ pub const Parser = struct {
                     try self.expect(.colon, "':'");
                     const value = try self.parseExpression(.assignment);
 
-                    const prop_node = try self.nodes.add(.{
-                        .tag = .object_property,
-                        .loc = prop_loc,
-                        .data = .{ .property = .{
-                            .key = key_node,
-                            .value = value,
-                            .is_shorthand = false,
-                        } },
+                    const prop_node = try self.nodes.addProperty(prop_loc, .{
+                        .key = key_node,
+                        .value = value,
+                        .is_shorthand = false,
                     });
                     try properties.append(prop_node);
                 }
@@ -5783,13 +5613,9 @@ pub const Parser = struct {
         else
             null_node;
 
-        return try self.nodes.add(.{
-            .tag = .object_literal,
-            .loc = loc,
-            .data = .{ .object = .{
-                .properties_start = props_start,
-                .properties_count = properties_count,
-            } },
+        return try self.nodes.addObject(loc, .{
+            .properties_start = props_start,
+            .properties_count = properties_count,
         });
     }
 
@@ -5909,16 +5735,12 @@ pub const Parser = struct {
                 false,
             ) catch |err| return self.bindingFailure(err);
 
-            const param_node = try self.nodes.add(.{
-                .tag = .pattern_element,
-                .loc = param_name.location(),
-                .data = .{ .pattern_elem = .{
-                    .kind = .simple,
-                    .binding = param_binding,
-                    .key = null_node,
-                    .key_atom = 0,
-                    .default_value = null_node,
-                } },
+            const param_node = try self.nodes.addPatternElem(.pattern_element, param_name.location(), .{
+                .kind = .simple,
+                .binding = param_binding,
+                .key = null_node,
+                .key_atom = 0,
+                .default_value = null_node,
             });
             try params.append(param_node);
         } else {
@@ -5945,11 +5767,7 @@ pub const Parser = struct {
         } else {
             // Expression body
             const expr = try self.parseExpression(.assignment);
-            body = try self.nodes.add(.{
-                .tag = .return_stmt,
-                .loc = loc,
-                .data = .{ .opt_value = expr },
-            });
+            body = try self.nodes.addOptValue(.return_stmt, loc, expr);
         }
         if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
             if (pending_signature) |*pending| self.type_store.cancelFunctionSignature(pending);
@@ -5967,17 +5785,13 @@ pub const Parser = struct {
         else
             null_node;
 
-        const arrow = try self.nodes.add(.{
-            .tag = .arrow_function,
-            .loc = loc,
-            .data = .{ .function = .{
-                .scope_id = scope_id,
-                .name_atom = 0,
-                .params_start = params_start,
-                .params_count = params_count,
-                .body = body,
-                .flags = flags,
-            } },
+        const arrow = try self.nodes.addFunction(.arrow_function, loc, .{
+            .scope_id = scope_id,
+            .name_atom = 0,
+            .params_start = params_start,
+            .params_count = params_count,
+            .body = body,
+            .flags = flags,
         });
         if (pending_signature) |*pending| {
             try self.type_store.finishFunctionSignature(
@@ -11564,17 +11378,16 @@ test "admission captures absent structural aliases before comments" {
                 .accepted => |value| value,
                 else => return error.TestUnexpectedResult,
             };
-            const program = parser.nodes.get(root).?;
-            try std.testing.expectEqual(NodeTag.program, program.tag);
-            try std.testing.expectEqual(@as(u16, 1), program.data.block.stmts_count);
-            const surviving_index = parser.nodes.getListIndex(program.data.block.stmts_start, 0);
-            const surviving = parser.nodes.get(surviving_index).?;
-            try std.testing.expectEqual(NodeTag.var_decl, surviving.tag);
-            try std.testing.expectEqual(@as(u32, @intCast(std.mem.indexOf(u8, source, "const live").?)), surviving.loc.offset);
             const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
-            const initializer = parser.nodes.get(view.getVarDecl(surviving_index).?.init).?;
-            try std.testing.expectEqual(NodeTag.lit_int, initializer.tag);
-            try std.testing.expectEqual(@as(i32, 1), initializer.data.int_value);
+            const program = view.getBlock(root).?;
+            try std.testing.expectEqual(NodeTag.program, view.getTag(root).?);
+            try std.testing.expectEqual(@as(u16, 1), program.stmts_count);
+            const surviving_index = parser.nodes.getListIndex(program.stmts_start, 0);
+            try std.testing.expectEqual(NodeTag.var_decl, view.getTag(surviving_index).?);
+            try std.testing.expectEqual(@as(u32, @intCast(std.mem.indexOf(u8, source, "const live").?)), view.getLoc(surviving_index).?.offset);
+            const initializer = view.getVarDecl(surviving_index).?.init;
+            try std.testing.expectEqual(NodeTag.lit_int, view.getTag(initializer).?);
+            try std.testing.expectEqual(@as(i32, 1), view.getIntValue(initializer).?);
 
             try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
             try std.testing.expect(parser.getLastAdmissionObservation() == null);
@@ -11798,9 +11611,9 @@ test "admission spaced function lists retain call arguments and runtime headers"
             else => return error.TestUnexpectedResult,
         };
         const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
-        const program = parser.nodes.get(root).?;
-        try std.testing.expectEqual(@as(u16, 1), program.data.block.stmts_count);
-        const wrapper = parser.nodes.getListIndex(program.data.block.stmts_start, 0);
+        const program = view.getBlock(root).?;
+        try std.testing.expectEqual(@as(u16, 1), program.stmts_count);
+        const wrapper = parser.nodes.getListIndex(program.stmts_start, 0);
         try std.testing.expectEqual(NodeTag.function_decl, view.getTag(wrapper).?);
         const function = view.getVarDecl(wrapper).?.init;
 
@@ -11867,10 +11680,11 @@ test "admission declaration names retain the existing keyword vocabulary" {
             };
             try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
             try std.testing.expectEqualStrings(name, parser.type_store.declarations.items[0].name_span.text(source));
-            const program = parser.nodes.get(root).?;
-            try std.testing.expectEqual(@as(u16, 1), program.data.block.stmts_count);
-            try std.testing.expectEqual(NodeTag.var_decl, parser.nodes.getTag(parser.nodes.getListIndex(program.data.block.stmts_start, 0)));
-            try parser.type_store.validateRuntimeOwners(std.testing.allocator, ir.IrView.fromIRStore(&parser.nodes, &parser.constants));
+            const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
+            const program = view.getBlock(root).?;
+            try std.testing.expectEqual(@as(u16, 1), program.stmts_count);
+            try std.testing.expectEqual(NodeTag.var_decl, parser.nodes.getTag(parser.nodes.getListIndex(program.stmts_start, 0)));
+            try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
         }
     }
 }
