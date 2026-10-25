@@ -213,7 +213,7 @@ Gates on `main`, each exit 0: `test-diagnostic-corpus`, `test-expert-golden`, `t
 
 | Commit | Phase | Result |
 |---|---|---|
-| `ebcf5c97` | R13a-1 | `AGENTS.md` names `server_static.zig#resolveStaticFile` for the path traversal checks, the three CHECK files of the proof-swallow list, and thirty-two files. The architecture, testing, protocol, and area documents describe the reset design. |
+| `ebcf5c97` | R13a-1 | `AGENTS.md` names `resolveStaticFile` in `packages/runtime/src/server_static.zig` for the path traversal checks, the three CHECK files of the proof-swallow list, and thirty-two files. The architecture, testing, protocol, and area documents describe the reset design. |
 | `3eb976df` | R13a-2 | Decisions D-010 (tests use the production parse mode), D-011 (each analyzer fact has one producer), and D-012 (model-visible changes wait for one re-record window). The D-005 amendment from R12b is present. |
 | `e58b46df` | R13a-3 | `.agents/skills/zttp-models/SKILL.md` is a link to `../../../.claude/skills/zttp-models/SKILL.md`. The two copies were the same blob before the change. |
 | `1d156b41` | R10b | `IrView.expressionChildren` already names all 69 node tags with no `else` arm. `parser/ir_children_tests.zig` adds one decision row per tag (27 yield children, 15 leaf with a reason, 27 not produced by the parser) and checks the yielded children against parsed witnesses. |
