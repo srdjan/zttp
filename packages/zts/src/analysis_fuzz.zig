@@ -199,7 +199,7 @@ fn analyze(src: []const u8, stats: *ShapeStats) !void {
 
     var atoms = engine.atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = engine.parser.JsParser.initTyped(allocator, allocator, src) catch |err| {
+    var parser = engine.parser.JsParser.initAdmission(allocator, allocator, src, .compile) catch |err| {
         try expectKnown(&parser_errors, "parser", err);
         return;
     };

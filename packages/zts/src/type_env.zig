@@ -4598,10 +4598,11 @@ fn growthExpectTraceCase(case: GrowthCase) ![2]usize {
     var direct_count = GrowthCountingAllocator.init(allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var direct_parser = try engine.parser.JsParser.initTyped(
+    var direct_parser = try engine.parser.JsParser.initAdmission(
         direct_count.allocator(),
         allocator,
         growthSource(case),
+        .compile,
     );
     defer direct_parser.deinit();
     direct_parser.setAtomTable(&direct_atoms);
@@ -4685,7 +4686,7 @@ test "direct signature replay retains exact nested generic arrow and same-line o
     var direct_count = GrowthCountingAllocator.init(allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var direct_parser = try engine.parser.JsParser.initTyped(direct_count.allocator(), allocator, source);
+    var direct_parser = try engine.parser.JsParser.initAdmission(direct_count.allocator(), allocator, source, .compile);
     defer direct_parser.deinit();
     direct_parser.setAtomTable(&direct_atoms);
     const direct_root = try direct_parser.parse();
@@ -4795,7 +4796,7 @@ fn growthExpectSignatureKind(
     var direct_count = GrowthCountingAllocator.init(allocator);
     var direct_atoms = AtomTable.init(direct_count.allocator());
     defer direct_atoms.deinit();
-    var direct_parser = try engine.parser.JsParser.initTyped(direct_count.allocator(), allocator, source);
+    var direct_parser = try engine.parser.JsParser.initAdmission(direct_count.allocator(), allocator, source, .compile);
     defer direct_parser.deinit();
     direct_parser.setAtomTable(&direct_atoms);
     const direct_root = try direct_parser.parse();
@@ -4862,7 +4863,7 @@ test "direct signature replay covers parameter return guard generic-only and ato
         "const arrow = (value: number): number => value;";
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try engine.parser.JsParser.initTyped(allocator, allocator, source);
+    var parser = try engine.parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     _ = try parser.parse();
@@ -4941,7 +4942,7 @@ fn growthPublicAllocationSweep(
     const source = "function value(item: string): string { return item; }";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try engine.parser.JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try engine.parser.JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     _ = try parser.parse();
@@ -5043,7 +5044,7 @@ test "direct signature replay allocation failures poison incomplete publication"
     const source = "function value(item: string): string { return item; }";
     var atoms = AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
-    var parser = try engine.parser.JsParser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try engine.parser.JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     _ = try parser.parse();
@@ -5090,10 +5091,11 @@ test "direct signature replay allocation failures poison incomplete publication"
     const injected = failing.allocator();
     var growth_atoms = AtomTable.init(std.testing.allocator);
     defer growth_atoms.deinit();
-    var growth_parser = try engine.parser.JsParser.initTyped(
+    var growth_parser = try engine.parser.JsParser.initAdmission(
         std.testing.allocator,
         std.testing.allocator,
         growth_source_plain,
+        .compile,
     );
     defer growth_parser.deinit();
     growth_parser.setAtomTable(&growth_atoms);
@@ -5259,7 +5261,7 @@ test "direct signature replay preserves existing entries after failed growth" {
         const allocator = std.testing.allocator;
         var atoms = AtomTable.init(allocator);
         defer atoms.deinit();
-        var parser = try engine.parser.JsParser.initTyped(allocator, allocator, growth_source_plain);
+        var parser = try engine.parser.JsParser.initAdmission(allocator, allocator, growth_source_plain, .compile);
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();

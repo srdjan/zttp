@@ -4577,7 +4577,7 @@ fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u3
     const allocator = std.testing.allocator;
     var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -4614,7 +4614,7 @@ fn checkTypedSourceSaying(source: []const u8, expect_errors: u32, needle: []cons
     const allocator = std.testing.allocator;
     var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
 
@@ -4657,7 +4657,7 @@ fn formatFirstTernaryType(source: []const u8, buf: []u8) ![]const u8 {
     const allocator = std.testing.allocator;
     var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
 
@@ -5459,7 +5459,7 @@ fn typedDiagnosticsImpl(
 ) ![]SeenDiagnostic {
     var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
 
@@ -6606,7 +6606,7 @@ test "TypeChecker tracks schema enum members beyond 32 values" {
 
     var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, aw.writer.buffered());
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, aw.writer.buffered(), .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
 
@@ -6756,7 +6756,7 @@ fn formatCallType(source: []const u8, callee: []const u8, buf: []u8) ![]const u8
     const allocator = std.testing.allocator;
     var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
 
@@ -7944,7 +7944,7 @@ test "a call that merely carries a callback keeps its mismatch at the outer retu
 
     var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -8809,7 +8809,7 @@ fn checkTypedSourceNodes(source: []const u8, nodes: *usize) !u32 {
     const allocator = std.testing.allocator;
     var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -8906,7 +8906,7 @@ test "field names that differ after byte 255 are distinct types" {
 
     var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     _ = try parser.parse();

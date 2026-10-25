@@ -1909,7 +1909,7 @@ fn runWithImportedFunction(
 ) !bool {
     var imported_atoms = atom_table.AtomTable.init(allocator);
     defer imported_atoms.deinit();
-    var imported_parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, imported_source);
+    var imported_parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, imported_source, .compile);
     defer imported_parser.deinit();
     imported_parser.setAtomTable(&imported_atoms);
     const imported_root = try imported_parser.parse();

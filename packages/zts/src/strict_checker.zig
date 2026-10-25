@@ -2364,7 +2364,7 @@ test "canonical profile counts reused arrow helper after typed arrow" {
     ;
     var atoms = @import("zts-engine").atom_table.AtomTable.init(testing.allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(testing.allocator, testing.allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -2602,7 +2602,7 @@ fn checkDirectWithSections(
     errdefer testing.allocator.destroy(h);
     h.atoms = @import("zts-engine").atom_table.AtomTable.init(testing.allocator);
     errdefer h.atoms.deinit();
-    h.parser = try @import("zts-engine").parser.JsParser.initTyped(testing.allocator, testing.allocator, source);
+    h.parser = try @import("zts-engine").parser.JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
     errdefer h.parser.deinit();
     h.parser.setAtomTable(&h.atoms);
     const root = try h.parser.parse();
@@ -2690,24 +2690,24 @@ test "a computed SQL statement at module scope is accepted" {
 
 test "a computed SQL statement registered by a helper function is refused" {
     try expectRegistrationVerdict(sql_import ++
-        "function reg(s: string): void { sql(\"q\", s); }\nfunction handler(req: Request): Response { reg(req.url); return Response.json({}); }\n", true);
+        "function reg(s: string): undefined { sql(\"q\", s); }\nfunction handler(req: Request): Response { reg(req.url); return Response.json({}); }\n", true);
 }
 
 test "a computed SQL statement in an arrow body or callback is refused" {
     try expectRegistrationVerdict(sql_import ++
-        "const reg = (s: string): void => { sql(\"q\", s); };\nfunction handler(req: Request): Response { reg(req.url); return Response.json({}); }\n", true);
+        "const reg = (s: string): undefined => { sql(\"q\", s); };\nfunction handler(req: Request): Response { reg(req.url); return Response.json({}); }\n", true);
     try expectRegistrationVerdict(sql_import ++
         "function handler(req: Request): Response { const ids = [1].map((n: number): number => { sql(\"q\", req.url); return n; }); return Response.json({ ids: ids }); }\n", true);
 }
 
 test "a function declaration does not leak function scope to later module code" {
     try expectRegistrationVerdict(sql_import ++
-        "function noop(): void { return; }\nconst statement = JSON.stringify({});\nsql(\"q\", statement);\nfunction handler(req: Request): Response { return Response.json({}); }\n", false);
+        "function noop(): undefined { return; }\nconst statement = JSON.stringify({});\nsql(\"q\", statement);\nfunction handler(req: Request): Response { return Response.json({}); }\n", false);
 }
 
 test "a nested function body keeps function scope after an inner function ends" {
     try expectRegistrationVerdict(sql_import ++
-        "function handler(req: Request): Response {\n  function inner(): void { return; }\n  sql(\"q\", req.url);\n  return Response.json({});\n}\n", true);
+        "function handler(req: Request): Response {\n  function inner(): undefined { return; }\n  sql(\"q\", req.url);\n  return Response.json({});\n}\n", true);
 }
 
 test "a static constant statement inside a handler is accepted" {

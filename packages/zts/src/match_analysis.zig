@@ -1290,7 +1290,7 @@ fn expectCoverage(decls: []const u8, param_type: []const u8, arms: []const u8, w
 
     var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     _ = try parser.parse();

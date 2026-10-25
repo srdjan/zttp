@@ -2039,7 +2039,7 @@ fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32) !void {
     const allocator = std.testing.allocator;
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
 
@@ -2081,7 +2081,7 @@ fn countUnusedVariableWarnings(source: []const u8) !u32 {
     const allocator = std.testing.allocator;
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
 
@@ -2113,7 +2113,7 @@ fn routeVerifierCounts(source: []const u8) !RouteVerifierCounts {
     const allocator = std.testing.allocator;
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -2630,7 +2630,7 @@ test "missing_return_path diagnostic carries repair_intent = add_trailing_return
 
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
 
@@ -2680,7 +2680,7 @@ fn optionalAccessHelp(
 
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
 
@@ -2782,7 +2782,7 @@ test "ZTS309 stays silent once the optional is narrowed" {
 
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
 

@@ -7095,7 +7095,7 @@ test "typed block consumes a declaration without a runtime node" {
         "structural Alias = number;\n" ++
         "const value: Alias = 1;\n" ++
         "}";
-    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
 
@@ -7237,22 +7237,6 @@ test "list scratch unwinds on allocation failure and parser refusal" {
     defer refused.deinit();
     try std.testing.expectError(error.ParseError, refused.parse());
     try std.testing.expectEqual(@as(usize, 0), refused.scratch_nodes.items.len);
-}
-
-test "plain typed parser does not enable admission collection" {
-    const source = "const value: any = 1;\n";
-    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
-    defer parser.deinit();
-    _ = try parser.parse();
-    try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
-}
-
-test "plain typed parser does not recover an invalid nominal declaration" {
-    const source = "nominal Box = T;\n";
-    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
-    defer parser.deinit();
-    try std.testing.expectError(error.MissingSemicolon, parser.parse());
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.declarations.items.len);
 }
 
 test "admission parser recovers var annotations without hiding ordinary var errors" {
@@ -8383,7 +8367,7 @@ test "parse arrow function" {
 test "failed generic speculation restores the complete parser cursor" {
     {
         const source = "left < right && other > (value);";
-        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         _ = try parser.parsePrefixExpr();
         try std.testing.expectEqual(TokenType.lt, parser.current.type);
@@ -8395,7 +8379,7 @@ test "failed generic speculation restores the complete parser cursor" {
     }
     {
         const source = "(<T> /* gap */ (value)=>value);";
-        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         parser.advance();
         try std.testing.expectEqual(TokenType.lt, parser.current.type);
@@ -8413,7 +8397,7 @@ test "failed generic speculation restores the complete parser cursor" {
 test "named function comment with spaced opener restores generic speculation" {
     const source =
         "function /* gap */ identity<T> (value) { return value; }";
-    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     try std.testing.expectEqual(TokenType.kw_function, parser.current.type);
     parser.advance();
@@ -8438,7 +8422,7 @@ test "named function comment call grammar refusal restores seeded speculation" {
         "const seed: number = 1; function /* gap */ identity<T + U>(value) { return value; }",
     };
     for (sources) |source| {
-        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         _ = try parser.parseStatement();
         try std.testing.expectEqual(TokenType.kw_function, parser.current.type);
@@ -10802,7 +10786,7 @@ test "type-only module speculation restores the complete cursor and store" {
         const source =
             "import type { Seed } from \"./seed\";\n" ++
             "import { live } from \"./live\";";
-        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         try std.testing.expect(try parser.tryConsumeTypeOnlyModule());
         const cursor_checkpoint = parser.cursorCheckpoint();
@@ -10819,7 +10803,7 @@ test "type-only module speculation restores the complete cursor and store" {
         const source =
             "import type { Seed } from \"./seed\";\n" ++
             "import type { Spec } from \"" ++ retired_types_module ++ "\";";
-        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         try std.testing.expect(try parser.tryConsumeTypeOnlyModule());
         const cursor_checkpoint = parser.cursorCheckpoint();
@@ -10842,7 +10826,7 @@ test "type-only module append failure retains a prior full checkpoint" {
         try source.appendSlice(std.testing.allocator, "import type { A } from \"./a\";\n");
     }
 
-    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source.items);
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source.items, .compile);
     defer parser.deinit();
     while (parser.type_store.type_only_modules.items.len == 0 or
         parser.type_store.type_only_modules.items.len < parser.type_store.type_only_modules.capacity)
@@ -10879,10 +10863,11 @@ test "type-only module scan failure restores prior diagnostics" {
     }
     try source.appendSlice(std.testing.allocator, "value");
 
-    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source.items);
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source.items, .compile);
     defer parser.deinit();
     try std.testing.expect(try parser.tryConsumeTypeOnlyModule());
-    try std.testing.expect(parser.type_only_module_exclusion != null);
+    // Admission records the excluded module as a diagnostic and publishes it; only the typed-only mode sets the exclusion field.
+    try std.testing.expect(parser.type_only_module_exclusion == null);
     try std.testing.expectEqual(@as(usize, 1), parser.type_only_module_diagnostics.items.len);
     const prior_diagnostic = parser.type_only_module_diagnostics.items[0];
     const cursor_checkpoint = parser.cursorCheckpoint();
@@ -10909,11 +10894,13 @@ test "type-only module lexical exclusion and refusal keep root priority" {
         const source =
             "import type \"open\n" ++
             "import type { Spec } from \"" ++ retired_types_module ++ "\";";
-        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
-        try std.testing.expectError(error.TypeOnlyModuleRefused, parser.parse());
-        try std.testing.expect(parser.type_only_module_exclusion != null);
+        try std.testing.expectError(error.AdmissionRefused, parser.parse());
+        try std.testing.expect(parser.type_only_module_exclusion == null);
         try std.testing.expect(parser.type_only_module_refusal != null);
+        try std.testing.expect(parser.getAdmissionDiagnostics().len > 0);
+        try std.testing.expectEqual(type_syntax.AdmissionKind.legacy_types_import, parser.getAdmissionDiagnostics()[parser.getAdmissionDiagnostics().len - 1].kind);
         try std.testing.expectEqual(@as(usize, 1), parser.type_only_module_diagnostics.items.len);
         try std.testing.expectEqual(@as(usize, 0), parser.errors.getErrors().len);
     }
@@ -10923,11 +10910,15 @@ test "type-only module lexical exclusion and refusal keep root priority" {
             "import type \"open\n" ++
             "const broken = ;\n" ++
             "import type { Spec } from \"" ++ retired_types_module ++ "\";";
-        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
-        try std.testing.expectError(error.TypeOnlyModuleLexicallyExcluded, parser.parse());
-        try std.testing.expect(parser.type_only_module_exclusion != null);
-        try std.testing.expect(parser.type_only_module_refusal == null);
+        try std.testing.expectError(error.AdmissionRefused, parser.parse());
+        try std.testing.expect(parser.type_only_module_exclusion == null);
+        // Admission records the refusal beside the lexical exclusion; the typed-only mode dropped it.
+        try std.testing.expect(parser.type_only_module_refusal != null);
+        try std.testing.expectEqual(type_syntax.AdmissionKind.legacy_types_import, parser.getAdmissionDiagnostics()[0].kind);
+        // The retired import is line 3 of the source.
+        try std.testing.expectEqual(@as(u32, 3), parser.getAdmissionDiagnostics()[0].positionIn(source).line);
         try std.testing.expect(parser.errors.getErrors().len > 0);
         // `const broken = ;` is line 2 of the source.
         try std.testing.expectEqual(@as(u32, 2), parser.errors.getErrors()[0].location.line);
@@ -10936,7 +10927,7 @@ test "type-only module lexical exclusion and refusal keep root priority" {
 
 test "retained type-only module refusal outranks a later ordinary error" {
     const source = "const broken = ;";
-    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.type_only_module_refusal = .{
         .reason = .zttp_types,
@@ -10959,7 +10950,7 @@ test "native allocation failure outranks a retained type-only module refusal" {
     const source = "const live = { value: 1 };";
     const Context = struct {
         fn run(allocator: std.mem.Allocator, observed_native_oom: *usize) !void {
-            var parser = try Parser.initTyped(allocator, std.testing.allocator, source);
+            var parser = try Parser.initAdmission(allocator, std.testing.allocator, source, .compile);
             defer parser.deinit();
             parser.type_only_module_refusal = .{
                 .reason = .zttp_types,
@@ -10993,7 +10984,7 @@ test "native allocation failure outranks a retained type-only module refusal" {
 
 test "error-list allocation failure outranks a retained type-only module refusal" {
     const source = "const broken = ;";
-    var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     parser.type_only_module_refusal = .{
         .reason = .zttp_types,
@@ -11032,9 +11023,9 @@ test "nested type-only module refusal removes enclosing type syntax" {
             &.{ "const seed: number = 1;\n", tail },
         );
         defer std.testing.allocator.free(source);
-        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
-        try std.testing.expectError(error.TypeOnlyModuleRefused, parser.parse());
+        try std.testing.expectError(error.AdmissionRefused, parser.parse());
         const refusal = parser.type_only_module_refusal orelse return error.TestUnexpectedResult;
         const refusal_offset = std.mem.indexOf(u8, source, "import type") orelse
             return error.TestUnexpectedResult;
@@ -11052,6 +11043,12 @@ test "nested type-only module refusal removes enclosing type syntax" {
         try std.testing.expectEqual(@as(u32, @intCast(refusal_offset + "import".len)), refusal.original_location.end_offset);
         try std.testing.expectEqual(refusal_line, refusal.original_location.line);
         try std.testing.expectEqual(refusal_column, refusal.original_location.column);
+        const diagnostics = parser.getAdmissionDiagnostics();
+        try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+        try std.testing.expectEqual(type_syntax.AdmissionKind.legacy_types_import, diagnostics[0].kind);
+        const diagnostic_position = diagnostics[0].positionIn(source);
+        try std.testing.expectEqual(refusal_line, diagnostic_position.line);
+        try std.testing.expectEqual(refusal_column, diagnostic_position.column);
         try std.testing.expectEqual(@as(usize, 1), parser.type_store.nodes.items.len);
         try std.testing.expectEqual(@as(usize, 1), parser.type_store.annotations.items.len);
         try std.testing.expectEqualStrings(
@@ -11084,7 +11081,7 @@ test "later wrapper failures remove nested type-only module records" {
         defer std.testing.allocator.free(control_source);
         var control_atoms = atom_table.AtomTable.init(std.testing.allocator);
         defer control_atoms.deinit();
-        var control = try Parser.initTyped(std.testing.allocator, std.testing.allocator, control_source);
+        var control = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, control_source, .compile);
         defer control.deinit();
         control.setAtomTable(&control_atoms);
         _ = try control.parse();
@@ -11108,7 +11105,7 @@ test "later wrapper failures remove nested type-only module records" {
         defer std.testing.allocator.free(source);
         var atoms = atom_table.AtomTable.init(std.testing.allocator);
         defer atoms.deinit();
-        var parser = try Parser.initTyped(std.testing.allocator, std.testing.allocator, source);
+        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         try std.testing.expectError(error.UnexpectedToken, parser.parse());

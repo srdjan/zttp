@@ -4338,7 +4338,7 @@ test "sound extraction sessions preserve source selection and direct ownership" 
     ;
     var direct_atoms = AtomTable.init(allocator);
     defer direct_atoms.deinit();
-    var direct_parser = try JsParser.initTyped(allocator, allocator, source);
+    var direct_parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     defer direct_parser.deinit();
     direct_parser.setAtomTable(&direct_atoms);
     const direct_root = try direct_parser.parse();
@@ -4629,7 +4629,7 @@ test "an empty parser-owned Store selects direct and remains distinct from omitt
     const source = "function handler(req) { return Response.text(\"ok\"); }\n";
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(allocator, allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -4877,7 +4877,7 @@ test "direct session population closes allocation failures without retry" {
     const allocator = testing.allocator;
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(allocator, allocator, directCallbackSource);
+    var parser = try JsParser.initAdmission(allocator, allocator, directCallbackSource, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -4927,7 +4927,7 @@ test "direct callback effect projection closes every allocation failure" {
     const allocator = testing.allocator;
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(allocator, allocator, directCallbackSource);
+    var parser = try JsParser.initAdmission(allocator, allocator, directCallbackSource, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -5045,7 +5045,7 @@ test "direct extraction keeps attempted state across allocation failures" {
     const allocator = testing.allocator;
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(allocator, allocator, directCallbackSource);
+    var parser = try JsParser.initAdmission(allocator, allocator, directCallbackSource, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -5153,7 +5153,7 @@ test "serialization failure preserves a completed direct extraction" {
     const allocator = testing.allocator;
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.initTyped(allocator, allocator, directCallbackSource);
+    var parser = try JsParser.initAdmission(allocator, allocator, directCallbackSource, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
