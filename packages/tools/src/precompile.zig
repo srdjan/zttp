@@ -127,7 +127,7 @@ pub const runGenTests = precompile_gen_tests_mod.runGenTests;
 const validateVirtualModuleImports = precompile_virtual_imports_mod.validateVirtualModuleImports;
 const analyzeAot = precompile_contract_mod.analyzeAot;
 const extractContractFromAnalysis = precompile_contract_mod.extractContractFromAnalysis;
-const projectCompletedFlow = precompile_contract_mod.projectCompletedFlow;
+const reportCompletedFlow = precompile_contract_mod.reportCompletedFlow;
 const validateContractPolicyInputs = precompile_contract_mod.validateContractPolicyInputs;
 const buildMultiModuleContract = precompile_contract_mod.buildMultiModuleContract;
 
@@ -389,7 +389,7 @@ pub fn compileHandler(
 
     // Unified violations list: collects from FlowChecker, HandlerVerifier, and
     // FaultCoverageChecker. Declared here so it spans the verifier block,
-    // projectCompletedFlow (flow violations), and the PathGenerator block (fault violations).
+    // reportCompletedFlow (flow violations), and the PathGenerator block (fault violations).
     var all_violations: std.ArrayList(zts.property_diagnostics.PropertyViolation) = .empty;
     defer {
         zts.property_diagnostics.deinitViolations(allocator, all_violations.items);
@@ -607,19 +607,16 @@ pub fn compileHandler(
             filename,
             .{ .aot = route_analysis, .verification = verify_info },
         );
-        if (handler_fn) |hf| {
-            const flow_errors = try analysis.runFlow(hf);
-            try projectCompletedFlow(
+        // `extractContract` ran the flow pass and applied it to the contract.
+        if (handler_fn != null) {
+            try reportCompletedFlow(
                 allocator,
-                &contract.?,
                 try analysis.completedFlow(),
-                flow_errors,
+                analysis.flowErrorCount(),
                 true,
                 &all_violations,
                 ir_view_check,
             );
-        } else {
-            try projectCompletedFlow(allocator, &contract.?, null, 0, true, &all_violations, ir_view_check);
         }
         try validateContractPolicyInputs(allocator, filename, &contract.?, sql_schema_path, policy);
 

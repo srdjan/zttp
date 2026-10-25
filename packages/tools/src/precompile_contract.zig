@@ -103,38 +103,35 @@ pub fn extractContractFromAnalysis(
     return analysis.extractContract(filename);
 }
 
-pub fn projectCompletedFlow(
+/// Print the completed flow pass diagnostics and collect its violations. The contract already
+/// carries the flow results: `ModuleAnalysisSession.extractContract` applied them.
+pub fn reportCompletedFlow(
     allocator: std.mem.Allocator,
-    contract: *HandlerContract,
-    flow: ?*const zts.FlowChecker,
+    completed: *const zts.FlowChecker,
     flow_errors: u32,
     fresh: bool,
     violations_out: ?*std.ArrayList(zts.property_diagnostics.PropertyViolation),
     ir_view: zts.IrView,
 ) !void {
-    if (flow) |completed| {
-        const flow_diags = completed.getDiagnostics();
-        if (fresh and flow_diags.len > 0 and !builtin.is_test) {
-            debugPrint("\n", .{});
-            var flow_output: std.ArrayList(u8) = .empty;
-            defer flow_output.deinit(allocator);
-            var flow_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &flow_output);
-            completed.formatDiagnostics(zts.SourceView.of(""), &flow_aw.writer) catch {};
-            flow_output = flow_aw.toArrayList();
-            if (flow_output.items.len > 0) debugPrint("{s}", .{flow_output.items});
-            debugPrint("{d} flow error(s), {d} warning(s)\n", .{
-                flow_errors,
-                flow_diags.len - flow_errors,
-            });
-        }
-
-        const flow_props = completed.getProperties();
-        zts.pipeline.projectFlowProperties(contract, flow_props);
-        if (violations_out) |vout| {
-            zts.property_diagnostics.collectFlowViolations(allocator, vout, flow_diags, ir_view);
-        }
-        if (fresh and !builtin.is_test and flow_errors == 0) debugPrint("Flow analysis passed\n", .{});
+    const flow_diags = completed.getDiagnostics();
+    if (fresh and flow_diags.len > 0 and !builtin.is_test) {
+        debugPrint("\n", .{});
+        var flow_output: std.ArrayList(u8) = .empty;
+        defer flow_output.deinit(allocator);
+        var flow_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &flow_output);
+        completed.formatDiagnostics(zts.SourceView.of(""), &flow_aw.writer) catch {};
+        flow_output = flow_aw.toArrayList();
+        if (flow_output.items.len > 0) debugPrint("{s}", .{flow_output.items});
+        debugPrint("{d} flow error(s), {d} warning(s)\n", .{
+            flow_errors,
+            flow_diags.len - flow_errors,
+        });
     }
+
+    if (violations_out) |vout| {
+        zts.property_diagnostics.collectFlowViolations(allocator, vout, flow_diags, ir_view);
+    }
+    if (fresh and !builtin.is_test and flow_errors == 0) debugPrint("Flow analysis passed\n", .{});
 }
 
 pub fn validateContractPolicyInputs(
@@ -175,20 +172,16 @@ fn buildContractOnlyFromParsed(
     );
     errdefer contract.deinit(allocator);
 
-    const handler_func = findHandlerFunction(parsed.ir_view, parsed.root);
-    if (handler_func) |hf| {
-        const flow_errors = try analysis.runFlow(hf);
-        try projectCompletedFlow(
+    // `extractContract` ran the flow pass and applied it to the contract.
+    if (findHandlerFunction(parsed.ir_view, parsed.root) != null) {
+        try reportCompletedFlow(
             allocator,
-            &contract,
             try analysis.completedFlow(),
-            flow_errors,
+            analysis.flowErrorCount(),
             true,
             null,
             parsed.ir_view,
         );
-    } else {
-        try projectCompletedFlow(allocator, &contract, null, 0, true, null, parsed.ir_view);
     }
     try validateContractPolicyInputs(allocator, filename, &contract, sql_schema_path, null);
     return contract;

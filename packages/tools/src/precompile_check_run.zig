@@ -31,7 +31,6 @@ const VirtualImportDiagnostic = virtual_imports_mod.VirtualImportDiagnostic;
 const validateVirtualModuleImports = virtual_imports_mod.validateVirtualModuleImports;
 const contract_mod = @import("precompile_contract.zig");
 const extractContractFromAnalysis = contract_mod.extractContractFromAnalysis;
-const projectCompletedFlow = contract_mod.projectCompletedFlow;
 const validateContractPolicyInputs = contract_mod.validateContractPolicyInputs;
 const appendPolicyDiagnostics = contract_mod.appendPolicyDiagnostics;
 
@@ -742,9 +741,6 @@ fn runCheckOnParsedSource(
                 }
             }
         }
-        // Non-JSON stderr output is emitted by projectCompletedFlow from the
-        // same FlowChecker instance; avoid printing twice.
-
     }
 
     // Stage 8: Contract. Untyped full analysis creates a separate real type
@@ -757,19 +753,6 @@ fn runCheckOnParsedSource(
             .imported_effects = if (imported_graph) |*graph| graph.imported_effects.items else &.{},
         },
     );
-    if (handler_fn != null) {
-        try projectCompletedFlow(
-            allocator,
-            &result.contract.?,
-            try analysis.completedFlow(),
-            0,
-            false,
-            null,
-            ir_view,
-        );
-    } else {
-        try projectCompletedFlow(allocator, &result.contract.?, null, 0, false, null, ir_view);
-    }
     try validateContractPolicyInputs(allocator, handler_path, &result.contract.?, sql_schema_path, null);
     result.stages_run.insert(.contract);
 

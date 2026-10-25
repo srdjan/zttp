@@ -53,6 +53,7 @@ const ModuleSourceTypeInput = pipeline_mod.ModuleSourceTypeInput;
 const EffectFacts = pipeline_mod.EffectFacts;
 const extractPreparedEvalContract = pipeline_mod.extractPreparedEvalContract;
 const projectFlowProperties = pipeline_mod.projectFlowProperties;
+const FlowWithoutHandler = pipeline_mod.FlowWithoutHandler;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1069,7 +1070,7 @@ test "ModuleAnalysisSession explicit refusal stops selected passes and extractio
     try testing.expectError(error.AnalysisNotResolved, session.extractContract("refused.ts"));
 }
 
-test "ModuleAnalysisSession contract-only flow can run after extraction" {
+test "ModuleAnalysisSession extraction runs the selected flow pass once" {
     const allocator = testing.allocator;
     var parsed_state = try parseSourceForTest(
         allocator,
@@ -1087,8 +1088,9 @@ test "ModuleAnalysisSession contract-only flow can run after extraction" {
     try session.complete();
     var contract = try session.extractContract("flow-after.ts");
     defer contract.deinit(allocator);
-    try testing.expectEqual(@as(u32, 0), try session.runFlow(handler));
+    try testing.expectEqual(@as(u32, 0), session.flowErrorCount());
     _ = try session.completedFlow();
+    try testing.expectError(error.AnalysisPassUnavailable, session.runFlow(handler));
 }
 
 fn extractOwnedSessionResultsForTest(allocator: std.mem.Allocator) !ContractExtraction {
@@ -3714,4 +3716,25 @@ test "flow projection preserves independent determinism and retry constraints" {
     projectFlowProperties(&contract, .{});
     try testing.expect(contract.properties.?.deterministic);
     try testing.expect(!contract.properties.?.idempotent);
+}
+
+test "ModuleAnalysisSession applies the flow rule for a module with no handler" {
+    const allocator = testing.allocator;
+    inline for (.{ FlowWithoutHandler.keep_defaults, FlowWithoutHandler.unproven }) |rule| {
+        var parsed_state = try parseSourceForTest(allocator, "const value = 1;\n");
+        defer parsed_state.js_parser.deinit();
+        const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+        const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+
+        var session: ModuleAnalysisSession = .{};
+        try session.initSoundExtraction(allocator, parsed, .{ .strict = false, .flow = rule });
+        defer session.deinit();
+        try session.complete();
+        var contract = try session.extractContract("no-handler.ts");
+        defer contract.deinit(allocator);
+        const properties = contract.properties orelse return error.PropertiesMissing;
+        try testing.expectEqual(rule == .keep_defaults, properties.no_secret_leakage);
+        try testing.expectEqual(rule == .keep_defaults, properties.injection_safe);
+        try testing.expect(!properties.deterministic);
+    }
 }

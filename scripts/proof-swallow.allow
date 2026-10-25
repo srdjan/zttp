@@ -432,7 +432,7 @@ packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@1
 packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-value
 packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-value@2
 packages/tools/src/precompile_contract.zig appendPolicyDiagnostics catch-block
-packages/tools/src/precompile_contract.zig projectCompletedFlow catch-block
+packages/tools/src/precompile_contract.zig reportCompletedFlow catch-block
 
 # Each of these converts an error into a counted refusal (parse_errors = 1 or
 # policy_errors += 1) or propagates it: an unreadable handler, a strip
