@@ -772,6 +772,30 @@ test "an error inside a map callback fails the call" {
     ));
 }
 
+test "a request timeout inside a map callback remains RequestTimeout" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+    const timeout = struct {
+        fn call(_: *anyopaque, _: zq.JSValue, _: []const zq.JSValue) anyerror!zq.JSValue {
+            return error.RequestTimeout;
+        }
+    };
+    const timeout_atom = try rt.ctx.atoms.intern("requestTimeout");
+    try rt.ctx.registerGlobalFunction(timeout_atom, timeout.call, 0);
+    try rt.loadHandler(
+        "function handler(req) { const r = [1].map((x) => requestTimeout()); return Response.json(r); }",
+        "<callback-timeout>",
+    );
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+    try std.testing.expectError(error.RequestTimeout, rt.executeHandler(request.asView()));
+}
+
 test "an error inside a filter callback fails the call" {
     try std.testing.expectError(error.HandlerError, runFailingCallbackHandler(
         "function boom(n) { const o = { a: n }; const f = o.missing; return f(); }" ++
