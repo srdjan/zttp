@@ -33,6 +33,7 @@ pub const ClassId = enum(u8) {
 };
 
 pub const ImplFn = *const fn (*context.Context, value.JSValue, []const value.JSValue) value.JSValue;
+pub const ImplFnTry = *const fn (*context.Context, value.JSValue, []const value.JSValue) anyerror!value.JSValue;
 
 /// Create a native function wrapper from an implementation function.
 /// Eliminates boilerplate wrapper functions by generating them at compile time.
@@ -42,6 +43,21 @@ pub fn wrap(comptime impl: ImplFn) object.NativeFn {
         fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
             const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
             const result = impl(ctx, this, args);
+            if (ctx.hasException()) {
+                return error.NativeFunctionError;
+            }
+            return result;
+        }
+    }.call;
+}
+
+/// Like `wrap`, for an implementation that can fail. The error reaches the
+/// interpreter's native-call handler unchanged.
+pub fn wrapTry(comptime impl: ImplFnTry) object.NativeFn {
+    return struct {
+        fn call(ctx_ptr: *anyopaque, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+            const ctx: *context.Context = @ptrCast(@alignCast(ctx_ptr));
+            const result = try impl(ctx, this, args);
             if (ctx.hasException()) {
                 return error.NativeFunctionError;
             }
@@ -116,9 +132,10 @@ pub fn getCallFn(ctx: *context.Context) ?http.CallFunctionFn {
     return ctx.call_function_callback;
 }
 
-/// Invoke a JS callback via a cached call function pointer.
-pub fn invokeCallback(ctx: *context.Context, call_fn: http.CallFunctionFn, func_obj: *object.JSObject, call_args: []const value.JSValue) ?value.JSValue {
-    return call_fn(ctx, func_obj, call_args) catch return null;
+/// Invoke a JS callback via a cached call function pointer. The callback's
+/// error is returned unchanged: a caller must not continue with a made-up value.
+pub fn invokeCallback(ctx: *context.Context, call_fn: http.CallFunctionFn, func_obj: *object.JSObject, call_args: []const value.JSValue) !value.JSValue {
+    return call_fn(ctx, func_obj, call_args);
 }
 
 /// Create an array with the proper prototype set (enables method chaining).

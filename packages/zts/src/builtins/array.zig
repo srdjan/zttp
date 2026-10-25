@@ -67,7 +67,7 @@ pub fn arrayIsArray(ctx: *context.Context, this: value.JSValue, args: []const va
 }
 
 /// Array.from(arrayLike, mapFn?, thisArg?) - Create array from array-like or iterable
-pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     if (args.len == 0) return value.JSValue.undefined_val;
 
     const source = args[0];
@@ -80,7 +80,7 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
     const call_fn = if (map_fn != null) getCallFn(ctx) else null;
 
     // Create result array
-    const result = ctx.createArray() catch return value.JSValue.undefined_val;
+    const result = try ctx.createArray();
     result.prototype = ctx.array_prototype;
 
     // Handle string - convert to array of characters
@@ -93,13 +93,13 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
         while (i < data.len) {
             const char_len = std.unicode.utf8ByteSequenceLength(data[i]) catch 1;
             const char_slice = data[i..@min(i + char_len, data.len)];
-            const char_str = string.createString(allocator, char_slice) catch return result.toValue();
+            const char_str = try string.createString(allocator, char_slice);
             var elem = value.JSValue.fromPtr(char_str);
             if (map_fn) |mfn| if (call_fn) |cfn| {
                 const call_args = [2]value.JSValue{ elem, value.JSValue.fromInt(@intCast(idx)) };
-                elem = invokeCallback(ctx, cfn, mfn, &call_args) orelse elem;
+                elem = try invokeCallback(ctx, cfn, mfn, &call_args);
             };
-            ctx.setIndexChecked(result, idx, elem) catch return result.toValue();
+            try ctx.setIndexChecked(result, idx, elem);
             idx += 1;
             i += char_len;
         }
@@ -120,14 +120,14 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
                     else blk: {
                         var idx_buf: [32]u8 = undefined;
                         const idx_slice = std.fmt.bufPrint(&idx_buf, "{d}", .{idx}) catch break :blk value.JSValue.undefined_val;
-                        const idx_atom = ctx.atoms.intern(idx_slice) catch break :blk value.JSValue.undefined_val;
+                        const idx_atom = try ctx.atoms.intern(idx_slice);
                         break :blk src_obj.getProperty(pool, idx_atom) orelse value.JSValue.undefined_val;
                     };
                     if (map_fn) |mfn| if (call_fn) |cfn| {
                         const call_args = [2]value.JSValue{ elem, value.JSValue.fromInt(idx) };
-                        elem = invokeCallback(ctx, cfn, mfn, &call_args) orelse elem;
+                        elem = try invokeCallback(ctx, cfn, mfn, &call_args);
                     };
-                    ctx.setIndexChecked(result, @intCast(idx), elem) catch return result.toValue();
+                    try ctx.setIndexChecked(result, @intCast(idx), elem);
                 }
                 return result.toValue();
             }
@@ -657,48 +657,48 @@ pub fn arrayConcat(ctx: *context.Context, this: value.JSValue, args: []const val
 }
 
 /// Array.prototype.map(callback, thisArg?) - Map to new array
-pub fn arrayMap(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn arrayMap(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
     const call_fn = getCallFn(ctx) orelse return value.JSValue.undefined_val;
     const len = getArrayLength(obj, ctx.hidden_class_pool);
-    if (len <= 0) return (createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val).toValue();
+    if (len <= 0) return (createArrayWithPrototype(ctx) orelse return error.OutOfMemory).toValue();
 
-    const result = createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val;
+    const result = createArrayWithPrototype(ctx) orelse return error.OutOfMemory;
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const mapped = invokeCallback(ctx, call_fn, callback, &call_args) orelse value.JSValue.undefined_val;
-        result.arrayPush(ctx.allocator, mapped) catch return value.JSValue.undefined_val;
+        const mapped = try invokeCallback(ctx, call_fn, callback, &call_args);
+        try result.arrayPush(ctx.allocator, mapped);
     }
     return result.toValue();
 }
 
 /// Array.prototype.filter(callback, thisArg?) - Filter to new array
-pub fn arrayFilter(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn arrayFilter(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
     const call_fn = getCallFn(ctx) orelse return value.JSValue.undefined_val;
     const len = getArrayLength(obj, ctx.hidden_class_pool);
-    if (len <= 0) return (createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val).toValue();
+    if (len <= 0) return (createArrayWithPrototype(ctx) orelse return error.OutOfMemory).toValue();
 
-    const result = createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val;
+    const result = createArrayWithPrototype(ctx) orelse return error.OutOfMemory;
     var i: u32 = 0;
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const keep = invokeCallback(ctx, call_fn, callback, &call_args) orelse return value.JSValue.exception_val;
+        const keep = try invokeCallback(ctx, call_fn, callback, &call_args);
         const keep_bool = predicateBool(ctx, keep) orelse return value.JSValue.exception_val;
         if (keep_bool) {
-            result.arrayPush(ctx.allocator, elem) catch return value.JSValue.undefined_val;
+            try result.arrayPush(ctx.allocator, elem);
         }
     }
     return result.toValue();
 }
 
 /// Array.prototype.reduce(callback, initialValue?) - Reduce to single value
-pub fn arrayReduce(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn arrayReduce(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
     const len = getArrayLength(obj, ctx.hidden_class_pool);
@@ -723,13 +723,13 @@ pub fn arrayReduce(ctx: *context.Context, this: value.JSValue, args: []const val
     while (i < len_u32) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ accumulator, elem, value.JSValue.fromInt(@intCast(i)), this };
-        accumulator = invokeCallback(ctx, call_fn, callback, &call_args) orelse value.JSValue.undefined_val;
+        accumulator = try invokeCallback(ctx, call_fn, callback, &call_args);
     }
     return accumulator;
 }
 
 /// Array.prototype.forEach(callback, thisArg?) - Execute callback for each element
-pub fn arrayForEach(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn arrayForEach(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
     const call_fn = getCallFn(ctx) orelse return value.JSValue.undefined_val;
@@ -739,13 +739,13 @@ pub fn arrayForEach(ctx: *context.Context, this: value.JSValue, args: []const va
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        _ = invokeCallback(ctx, call_fn, callback, &call_args);
+        _ = try invokeCallback(ctx, call_fn, callback, &call_args);
     }
     return value.JSValue.undefined_val;
 }
 
 /// Array.prototype.every(callback, thisArg?) - Test if all elements pass
-pub fn arrayEvery(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn arrayEvery(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     const callback = getCallbackArg(args) orelse return value.JSValue.true_val;
     const call_fn = getCallFn(ctx) orelse return value.JSValue.true_val;
@@ -755,7 +755,7 @@ pub fn arrayEvery(ctx: *context.Context, this: value.JSValue, args: []const valu
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const result = invokeCallback(ctx, call_fn, callback, &call_args) orelse return value.JSValue.exception_val;
+        const result = try invokeCallback(ctx, call_fn, callback, &call_args);
         const result_bool = predicateBool(ctx, result) orelse return value.JSValue.exception_val;
         if (!result_bool) return value.JSValue.false_val;
     }
@@ -763,7 +763,7 @@ pub fn arrayEvery(ctx: *context.Context, this: value.JSValue, args: []const valu
 }
 
 /// Array.prototype.some(callback, thisArg?) - Test if any element passes
-pub fn arraySome(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn arraySome(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     const callback = getCallbackArg(args) orelse return value.JSValue.false_val;
     const call_fn = getCallFn(ctx) orelse return value.JSValue.false_val;
@@ -773,7 +773,7 @@ pub fn arraySome(ctx: *context.Context, this: value.JSValue, args: []const value
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const result = invokeCallback(ctx, call_fn, callback, &call_args) orelse return value.JSValue.exception_val;
+        const result = try invokeCallback(ctx, call_fn, callback, &call_args);
         const result_bool = predicateBool(ctx, result) orelse return value.JSValue.exception_val;
         if (result_bool) return value.JSValue.true_val;
     }
@@ -781,7 +781,7 @@ pub fn arraySome(ctx: *context.Context, this: value.JSValue, args: []const value
 }
 
 /// Array.prototype.find(callback, thisArg?) - Find first matching element
-pub fn arrayFind(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn arrayFind(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     const callback = getCallbackArg(args) orelse return value.JSValue.undefined_val;
     const call_fn = getCallFn(ctx) orelse return value.JSValue.undefined_val;
@@ -791,7 +791,7 @@ pub fn arrayFind(ctx: *context.Context, this: value.JSValue, args: []const value
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const result = invokeCallback(ctx, call_fn, callback, &call_args) orelse return value.JSValue.exception_val;
+        const result = try invokeCallback(ctx, call_fn, callback, &call_args);
         const result_bool = predicateBool(ctx, result) orelse return value.JSValue.exception_val;
         if (result_bool) return elem;
     }
@@ -799,7 +799,7 @@ pub fn arrayFind(ctx: *context.Context, this: value.JSValue, args: []const value
 }
 
 /// Array.prototype.findIndex(callback, thisArg?) - Find index of first matching element
-pub fn arrayFindIndex(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn arrayFindIndex(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     const callback = getCallbackArg(args) orelse return value.JSValue.fromInt(-1);
     const call_fn = getCallFn(ctx) orelse return value.JSValue.fromInt(-1);
@@ -809,7 +809,7 @@ pub fn arrayFindIndex(ctx: *context.Context, this: value.JSValue, args: []const 
     while (i < @as(u32, @intCast(len))) : (i += 1) {
         const elem = obj.getIndex(i) orelse value.JSValue.undefined_val;
         const call_args = [_]value.JSValue{ elem, value.JSValue.fromInt(@intCast(i)), this };
-        const result = invokeCallback(ctx, call_fn, callback, &call_args) orelse return value.JSValue.exception_val;
+        const result = try invokeCallback(ctx, call_fn, callback, &call_args);
         const result_bool = predicateBool(ctx, result) orelse return value.JSValue.exception_val;
         if (result_bool) return value.JSValue.fromInt(@intCast(i));
     }
@@ -820,7 +820,7 @@ pub fn arrayFindIndex(ctx: *context.Context, this: value.JSValue, args: []const 
 /// With a compare function, orders by the sign of its numeric return value (per JS
 /// spec: <0 keeps a before b, >0 puts b before a, 0/NaN treats them as equal).
 /// Without one, falls back to default lexicographic string comparison.
-pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     if (obj.class_id != .array) return value.JSValue.undefined_val;
 
@@ -828,13 +828,13 @@ pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const v
 
     const len = obj.getArrayLength();
     if (len == 0) {
-        const result = ctx.createArray() catch return value.JSValue.undefined_val;
+        const result = try ctx.createArray();
         result.prototype = ctx.array_prototype;
         return result.toValue();
     }
 
     // Copy elements to temporary buffer
-    const temp = ctx.allocator.alloc(value.JSValue, len) catch return value.JSValue.undefined_val;
+    const temp = try ctx.allocator.alloc(value.JSValue, len);
     defer ctx.allocator.free(temp);
 
     var i: u32 = 0;
@@ -849,17 +849,25 @@ pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const v
             ctx: *context.Context,
             call_fn: http.CallFunctionFn,
             callback: *object.JSObject,
+            // std.mem.sort cannot propagate: keep the first callback error here and return it after the sort.
+            first_error: *?anyerror,
             pub fn lessThan(self: @This(), a: value.JSValue, b: value.JSValue) bool {
+                if (self.first_error.* != null) return false;
                 // undefined values sort to the end without invoking the comparator (per spec).
                 if (a.isUndefined()) return false;
                 if (b.isUndefined()) return true;
                 const call_args = [_]value.JSValue{ a, b };
-                const result = invokeCallback(self.ctx, self.call_fn, self.callback, &call_args) orelse return false;
+                const result = invokeCallback(self.ctx, self.call_fn, self.callback, &call_args) catch |err| {
+                    self.first_error.* = err;
+                    return false;
+                };
                 const n = result.toNumber() orelse return false;
                 return n < 0;
             }
         };
-        std.mem.sort(value.JSValue, temp, CompareCtx{ .ctx = ctx, .call_fn = call_fn, .callback = callback }, CompareCtx.lessThan);
+        var first_error: ?anyerror = null;
+        std.mem.sort(value.JSValue, temp, CompareCtx{ .ctx = ctx, .call_fn = call_fn, .callback = callback, .first_error = &first_error }, CompareCtx.lessThan);
+        if (first_error) |err| return err;
     } else {
         // Default: lexicographic string comparison (per JS spec).
         std.mem.sort(value.JSValue, temp, ctx.allocator, struct {
@@ -890,11 +898,11 @@ pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const v
     }
 
     // Create result array with sorted elements
-    const result = ctx.createArray() catch return value.JSValue.undefined_val;
+    const result = try ctx.createArray();
     result.prototype = ctx.array_prototype;
 
     for (temp, 0..) |val, idx| {
-        ctx.setIndexChecked(result, @intCast(idx), val) catch return value.JSValue.undefined_val;
+        try ctx.setIndexChecked(result, @intCast(idx), val);
     }
     result.setArrayLength(len);
     return result.toValue();
@@ -930,7 +938,7 @@ test "arrayToSorted sorts non-string elements without an allocator mismatch" {
     try ctx.setIndexChecked(arr, 2, value.JSValue.fromInt(2));
     arr.setArrayLength(3);
 
-    const sorted = arrayToSorted(ctx, arr.toValue(), &.{});
+    const sorted = try arrayToSorted(ctx, arr.toValue(), &.{});
     const sorted_obj = getObject(sorted) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, 3), sorted_obj.getArrayLength());
     try std.testing.expectEqual(@as(i32, 1), (sorted_obj.getIndex(0) orelse value.JSValue.undefined_val).getInt());
@@ -962,11 +970,11 @@ test "arrayReduce throws on empty array without initial value" {
     arr.prototype = ctx.array_prototype;
     arr.setArrayLength(0);
 
-    const with_initial = arrayReduce(ctx, arr.toValue(), &.{ callback.toValue(), value.JSValue.fromInt(42) });
+    const with_initial = try arrayReduce(ctx, arr.toValue(), &.{ callback.toValue(), value.JSValue.fromInt(42) });
     try std.testing.expect(!ctx.hasException());
     try std.testing.expectEqual(@as(i32, 42), with_initial.getInt());
 
-    const without_initial = arrayReduce(ctx, arr.toValue(), &.{callback.toValue()});
+    const without_initial = try arrayReduce(ctx, arr.toValue(), &.{callback.toValue()});
     try std.testing.expect(without_initial.isException());
     try std.testing.expect(ctx.hasException());
 }
@@ -997,7 +1005,7 @@ test "arrayFilter rejects a non-boolean predicate result" {
     try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(1));
     arr.setArrayLength(1);
 
-    const result = arrayFilter(ctx, arr.toValue(), &.{callback.toValue()});
+    const result = try arrayFilter(ctx, arr.toValue(), &.{callback.toValue()});
     try std.testing.expect(result.isException());
     try std.testing.expect(ctx.hasException());
 }
@@ -1045,7 +1053,7 @@ test "arrayToSorted ascending numeric comparator ENG5" {
     try ctx.setIndexChecked(arr, 4, value.JSValue.fromInt(4));
     arr.setArrayLength(5);
 
-    const sorted = arrayToSorted(ctx, arr.toValue(), &.{cmp.toValue()});
+    const sorted = try arrayToSorted(ctx, arr.toValue(), &.{cmp.toValue()});
     const sorted_obj = getObject(sorted) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u32, 5), sorted_obj.getArrayLength());
     const expected = [_]i32{ 1, 2, 4, 10, 33 };
@@ -1053,4 +1061,34 @@ test "arrayToSorted ascending numeric comparator ENG5" {
         const got = (sorted_obj.getIndex(@intCast(idx)) orelse value.JSValue.undefined_val).getInt();
         try std.testing.expectEqual(want, got);
     }
+}
+
+test "arrayToSorted returns the comparator's error" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const stub = struct {
+        fn call(_: *context.Context, _: *object.JSObject, _: []const value.JSValue) anyerror!value.JSValue {
+            return error.CallStackOverflow;
+        }
+    };
+    http.setCallFunctionCallback(ctx, stub.call);
+    defer http.clearCallFunctionCallback(ctx);
+
+    const cmp = try ctx.createObject(null);
+    cmp.flags.is_callable = true;
+    const arr = try ctx.createArray();
+    arr.prototype = ctx.array_prototype;
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(2));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(1));
+    arr.setArrayLength(2);
+
+    try std.testing.expectError(error.CallStackOverflow, arrayToSorted(ctx, arr.toValue(), &.{cmp.toValue()}));
 }

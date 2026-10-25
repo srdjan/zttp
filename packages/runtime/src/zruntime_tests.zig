@@ -745,6 +745,47 @@ test "runtime type fault is preserved as HandlerTypeFault for proof-explained 50
     try std.testing.expectError(error.HandlerTypeFault, rt.executeHandler(request.asView()));
 }
 
+/// Runs the handler source against a fresh runtime. The tests below use it
+/// with callbacks that fail, and expect the handler call to fail with them.
+fn runFailingCallbackHandler(handler_code: []const u8) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+    try rt.loadHandler(handler_code, "<callback-fault>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    response.deinit();
+}
+
+test "an error inside a map callback fails the call" {
+    // `boom` calls an undefined member, so the callback fails. The call must
+    // fail too, not hand the handler an array of undefined.
+    try std.testing.expectError(error.HandlerError, runFailingCallbackHandler(
+        "function boom(n) { const o = { a: n }; const f = o.missing; return f(); }" ++
+            "function handler(req) { const r = [1, 2].map((x) => boom(0)); return Response.json(r); }",
+    ));
+}
+
+test "an error inside a filter callback fails the call" {
+    try std.testing.expectError(error.HandlerError, runFailingCallbackHandler(
+        "function boom(n) { const o = { a: n }; const f = o.missing; return f(); }" ++
+            "function handler(req) { const r = [1, 2].filter((x) => boom(0)); return Response.json(r); }",
+    ));
+}
+
+test "an error inside a reduce callback fails the call" {
+    try std.testing.expectError(error.HandlerError, runFailingCallbackHandler(
+        "function boom(n) { const o = { a: n }; const f = o.missing; return f(); }" ++
+            "function handler(req) { const r = [1, 2].reduce((a, x) => boom(0), 0); return Response.json(r); }",
+    ));
+}
+
 test "non-Response return 500 is proof-explained against exhaustive_returns" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

@@ -64,10 +64,10 @@ fn invokeResultCallback(
     ctx: *context.Context,
     callback: *object.JSObject,
     arg: value.JSValue,
-) ?value.JSValue {
+) anyerror!?value.JSValue {
     const call_fn = getCallFn(ctx) orelse return null;
     const call_args = [_]value.JSValue{arg};
-    return invokeCallback(ctx, call_fn, callback, &call_args);
+    return try invokeCallback(ctx, call_fn, callback, &call_args);
 }
 
 /// Create a Result.ok(value)
@@ -126,32 +126,32 @@ pub fn resultUnwrapErr(_: *context.Context, this: value.JSValue, _: []const valu
 }
 
 /// Result.prototype.map(fn) - transform ok value, pass through err
-pub fn resultMap(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn resultMap(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const obj = getNativeResult(this) orelse return this;
     if (!obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK].isTrue()) return this;
     const callback = getCallbackArg(args) orelse return this;
     const payload = obj.inline_slots[object.JSObject.Slots.RESULT_VALUE];
-    const mapped = invokeResultCallback(ctx, callback, payload) orelse return value.JSValue.undefined_val;
+    const mapped = (try invokeResultCallback(ctx, callback, payload)) orelse return value.JSValue.undefined_val;
     return createResultOk(ctx, mapped);
 }
 
 /// Result.prototype.mapErr(fn) - transform err value, pass through ok
-pub fn resultMapErr(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn resultMapErr(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const obj = getNativeResult(this) orelse return this;
     if (obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK].isTrue()) return this;
     const callback = getCallbackArg(args) orelse return this;
     const payload = obj.inline_slots[object.JSObject.Slots.RESULT_VALUE];
-    const mapped = invokeResultCallback(ctx, callback, payload) orelse return value.JSValue.undefined_val;
+    const mapped = (try invokeResultCallback(ctx, callback, payload)) orelse return value.JSValue.undefined_val;
     return createResultErrWithField(ctx, mapped, resultErrorFieldAtom(obj));
 }
 
 /// Result.prototype.andThen(fn) - transform ok value to another Result
-pub fn resultAndThen(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn resultAndThen(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const obj = getNativeResult(this) orelse return this;
     if (!obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK].isTrue()) return this;
     const callback = getCallbackArg(args) orelse return this;
     const payload = obj.inline_slots[object.JSObject.Slots.RESULT_VALUE];
-    const next = invokeResultCallback(ctx, callback, payload) orelse return value.JSValue.undefined_val;
+    const next = (try invokeResultCallback(ctx, callback, payload)) orelse return value.JSValue.undefined_val;
     return coerceResultLike(ctx, next) orelse value.JSValue.undefined_val;
 }
 
@@ -160,17 +160,17 @@ pub fn resultAndThen(ctx: *context.Context, this: value.JSValue, args: []const v
 /// spec 6.1 names. Not installed as a prototype method: the profile imports the
 /// combinators as free functions from `zttp:result`, and adding a method here
 /// would publish a second spelling of it.
-pub fn resultOrElse(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn resultOrElse(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const obj = getNativeResult(this) orelse return this;
     if (obj.inline_slots[object.JSObject.Slots.RESULT_IS_OK].isTrue()) return this;
     const callback = getCallbackArg(args) orelse return this;
     const payload = obj.inline_slots[object.JSObject.Slots.RESULT_VALUE];
-    const next = invokeResultCallback(ctx, callback, payload) orelse return value.JSValue.undefined_val;
+    const next = (try invokeResultCallback(ctx, callback, payload)) orelse return value.JSValue.undefined_val;
     return coerceResultLike(ctx, next) orelse value.JSValue.undefined_val;
 }
 
 /// Result.prototype.match({ok: fn, err: fn}) - pattern match on result
-pub fn resultMatch(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
+pub fn resultMatch(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
     const obj = getNativeResult(this) orelse return value.JSValue.undefined_val;
     if (args.len == 0) return value.JSValue.undefined_val;
 
@@ -189,7 +189,7 @@ pub fn resultMatch(ctx: *context.Context, this: value.JSValue, args: []const val
 
     const callback = case_val orelse return value.JSValue.undefined_val;
     if (!callback.isCallable()) return value.JSValue.undefined_val;
-    return invokeResultCallback(ctx, callback.toPtr(object.JSObject), payload) orelse value.JSValue.undefined_val;
+    return (try invokeResultCallback(ctx, callback.toPtr(object.JSObject), payload)) orelse value.JSValue.undefined_val;
 }
 
 var active_test_ctx: ?*context.Context = null;
@@ -270,7 +270,7 @@ test "native Result map mapErr and andThen use callback support" {
 
     const ok_result = createResultOk(ctx, value.JSValue.fromInt(41));
     defer object.JSObject.fromValue(ok_result).destroy(allocator);
-    const mapped = resultMap(ctx, ok_result, &.{add_one.toValue()});
+    const mapped = try resultMap(ctx, ok_result, &.{add_one.toValue()});
     defer object.JSObject.fromValue(mapped).destroy(allocator);
     try std.testing.expect(resultIsOk(ctx, mapped, &.{}).isTrue());
     try std.testing.expectEqual(@as(i32, 42), resultUnwrap(ctx, mapped, &.{}).getInt());
@@ -279,12 +279,12 @@ test "native Result map mapErr and andThen use callback support" {
     defer string.freeString(allocator, err_payload.toPtr(string.JSString));
     const err_result = createResultErr(ctx, err_payload);
     defer object.JSObject.fromValue(err_result).destroy(allocator);
-    const mapped_err = resultMapErr(ctx, err_result, &.{return_payload.toValue()});
+    const mapped_err = try resultMapErr(ctx, err_result, &.{return_payload.toValue()});
     defer object.JSObject.fromValue(mapped_err).destroy(allocator);
     try std.testing.expect(resultIsErr(ctx, mapped_err, &.{}).isTrue());
     try std.testing.expect(mapped_err.toPtr(object.JSObject).getProperty(pool, .@"error").?.isString());
 
-    const chained = resultAndThen(ctx, ok_result, &.{wrap_err.toValue()});
+    const chained = try resultAndThen(ctx, ok_result, &.{wrap_err.toValue()});
     defer object.JSObject.fromValue(chained).destroy(allocator);
     try std.testing.expect(resultIsErr(ctx, chained, &.{}).isTrue());
 
@@ -292,7 +292,7 @@ test "native Result map mapErr and andThen use callback support" {
     defer cases.destroy(allocator);
     try ctx.setPropertyChecked(cases, .ok, return_payload.toValue());
     try ctx.setPropertyChecked(cases, .err, return_payload.toValue());
-    const matched = resultMatch(ctx, chained, &.{cases.toValue()});
+    const matched = try resultMatch(ctx, chained, &.{cases.toValue()});
     try std.testing.expect(matched.isInt());
     try std.testing.expectEqual(@as(i32, 41), matched.getInt());
 }

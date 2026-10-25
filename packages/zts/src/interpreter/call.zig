@@ -1,6 +1,7 @@
 //! Function-call dispatch: native vs bytecode vs generator.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const value = @import("../value.zig");
 const object = @import("../object.zig");
 const builtins = @import("../builtins/root.zig");
@@ -78,7 +79,7 @@ pub fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!vo
             .none => blk: {
                 break :blk native_data.func(self.ctx, this_val, args[0..argc]) catch |err| {
                     const func_name = if (native_data.name.toPredefinedName()) |name| name else "<native>";
-                    std.log.err("Native function '{s}' error: {}", .{ func_name, err });
+                    if (!builtin.is_test) std.log.err("Native function '{s}' error: {}", .{ func_name, err });
                     self.ctx.throwException(value.JSValue.exception_val);
                     return error.NativeFunctionError;
                 };

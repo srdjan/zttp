@@ -247,8 +247,7 @@ fn dictMapValuesNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) a
     var i: u32 = 0;
     while (i < total) : (i += 1) {
         const key = dict.keyAt(d, i);
-        const mapped = helpers.invokeCallback(ctx, call_fn, callback, &.{ dict.valueAt(d, i), key }) orelse
-            return JSValue.undefined_val;
+        const mapped = try helpers.invokeCallback(ctx, call_fn, callback, &.{ dict.valueAt(d, i), key });
         out = try dict.set(ctx, out, key, mapped);
     }
     return JSValue.fromPtr(out);
@@ -266,8 +265,7 @@ fn dictFilterNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) anye
     while (i < total) : (i += 1) {
         const key = dict.keyAt(d, i);
         const val = dict.valueAt(d, i);
-        const keep = helpers.invokeCallback(ctx, call_fn, callback, &.{ val, key }) orelse
-            return JSValue.undefined_val;
+        const keep = try helpers.invokeCallback(ctx, call_fn, callback, &.{ val, key });
         const keep_bool = keep.toConditionBool() orelse
             return util.throwError(ctx, "TypeError", "dictFilter predicate must return boolean");
         if (keep_bool) {
@@ -287,8 +285,7 @@ fn dictFoldNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) anyerr
     const total = dict.count(d);
     var i: u32 = 0;
     while (i < total) : (i += 1) {
-        acc = helpers.invokeCallback(ctx, call_fn, callback, &.{ acc, dict.valueAt(d, i), dict.keyAt(d, i) }) orelse
-            return JSValue.undefined_val;
+        acc = try helpers.invokeCallback(ctx, call_fn, callback, &.{ acc, dict.valueAt(d, i), dict.keyAt(d, i) });
     }
     return acc;
 }
