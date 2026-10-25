@@ -105,3 +105,12 @@ Tasks 1, 2, and 3 run in parallel. Each runs in its own detached worktree from l
 - Probe: raising the span floor to 1000 made the test fail with exit 1.
 - No crash and no unlisted error was found.
 - Gates on main: `test-zts`, `test-zts-layering`, `test-docs-drift`, `test-doc-links`, `test-proof-swallow`, and `check-spine`. All exit 0.
+
+### Quiet-host steps (2026-10-25)
+
+- The load never fell below 4 during the runs (4.1 to 5.3), so no run qualifies as quiet.
+- Request path, 3 runs in a clean worktree at `f11c475a`: rebuild request p50 66-68 us and p99 97-106 us. Recycle request p99 11-18 us. Normal request p50 about 1 us. Allocator calls are 14.0 for a rebuild and 4.16 per request overall. These values agree with the earlier runs.
+- `bench-check` failed again: `functionCalls` 8.96% against an 8% limit.
+- A/B, alternating runs, best of 5 for `functionCalls`: the commit before this session gave 12.16M ops/s and HEAD gave 12.16M ops/s. The baseline commit `ec3f98bd`, built with Zig 0.16.0, gave 12.07M ops/s against its own recorded 13.19M. HEAD on 0.17.0 gave 12.05M ops/s in the same runs.
+- Conclusion: host load causes the miss. Neither this session's commits nor the toolchain change causes it.
+- The baseline was not re-recorded, because a baseline recorded under load lowers the bar.
