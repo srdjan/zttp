@@ -114,3 +114,10 @@ Tasks 1, 2, and 3 run in parallel. Each runs in its own detached worktree from l
 - A/B, alternating runs, best of 5 for `functionCalls`: the commit before this session gave 12.16M ops/s and HEAD gave 12.16M ops/s. The baseline commit `ec3f98bd`, built with Zig 0.16.0, gave 12.07M ops/s against its own recorded 13.19M. HEAD on 0.17.0 gave 12.05M ops/s in the same runs.
 - Conclusion: host load causes the miss. Neither this session's commits nor the toolchain change causes it.
 - The baseline was not re-recorded, because a baseline recorded under load lowers the bar.
+
+### Recycle cost (decisions 2 and 3)
+
+- Decision 2 (buffer reuse) was withdrawn after measurement: the request arena buffer costs 0.15 us of a 67 us rebuild. The rebuild is `Context.init`, `initBuiltins`, `HandlerInstance.initFromPool`, and `loadHandlerCached`.
+- Decision 3 option A is committed in `5370e86a`, `f125e2c5`, and `0cb7f54b`. A policy recycle builds the replacement at release. The plan is `docs/plans/2026-10-25-eager-recycle-rebuild-plan.md`.
+- The `request_path` bench, 5 alternating runs each at load 5-8: the request after a recycle went from p99 95-102 us to 1.6-1.7 us. All requests went from p99 60-62 us to 0.92-0.96 us. The release on a recycle request went from p50 2.8-3.0 us to 63-67 us.
+- `bash scripts/verify.sh` passed in a clean worktree at `0cb7f54b`.
