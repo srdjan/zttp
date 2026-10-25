@@ -38,6 +38,7 @@ pub const Command = union(enum) {
 pub const FailureKind = enum {
     completion_floor,
     task_classification,
+    task_route,
     command_policy,
     area_contract,
     decision_ledger,
@@ -51,6 +52,8 @@ pub const FailureKind = enum {
 };
 
 const Intent = enum { verify, build, run, measure, operate };
+/// How the live build graph reaches a task; `build/step_coverage.zig#classify` decides it.
+const Route = enum { aggregate, verify, release, manual };
 const Effect = enum { none, @"local-write", @"remote-read", @"remote-write" };
 const Approval = enum { none, @"explicit-user" };
 const DocsPolicy = enum { off, strict };
@@ -76,6 +79,11 @@ const SpineCommand = struct {
     effect: Effect,
     approval: Approval,
     does: []const u8,
+    /// How the build graph reaches the task: aggregate, verify, release, or manual. Checked against the
+    /// census, so it is read as text and validated there.
+    route: ?[]const u8 = null,
+    /// Why a human asks for a manual task. Only a manual task carries one.
+    reason: ?[]const u8 = null,
     requiredWhen: ?[]const u8 = null,
     always: ?bool = null,
     seconds: ?f64 = null,
@@ -138,6 +146,8 @@ const Context = struct {
     spine: Spine,
     tracked: []const []const u8,
     tasks: []const []const u8,
+    /// The graph route of each census task, empty when the census line gave none.
+    task_routes: []const []const u8,
     areas: []const Area,
     decisions: []const Decision,
     solutions: []const Solution,
@@ -346,10 +356,10 @@ fn loadContext(
     };
 
     const tracked = try trackedPaths(a, io, root_path, root_dir);
-    const tasks = if (tasks_file) |path| readTasks(root_dir, io, a, path) catch |err| {
+    const census = if (tasks_file) |path| readTasks(root_dir, io, a, path) catch |err| {
         try reportLoadFailure(diagnostics, "task census", path, err, "pass the readable graph file through --tasks");
         return error.DiagnosticReported;
-    } else &.{};
+    } else Census{ .names = &.{}, .routes = &.{} };
     const areas = try loadAreas(root_dir, io, a, spine, tracked, diagnostics);
     const decision_source = readFile(root_dir, io, a, spine.docs.decisions) catch |err| {
         try reportLoadFailure(diagnostics, "decision ledger", spine.docs.decisions, err, "restore the configured ledger path");
@@ -365,7 +375,8 @@ fn loadContext(
         .arena = arena,
         .spine = spine,
         .tracked = tracked,
-        .tasks = tasks,
+        .tasks = census.names,
+        .task_routes = census.routes,
         .areas = areas,
         .decisions = decisions,
         .solutions = solutions,
@@ -443,18 +454,24 @@ fn trackedPaths(
     return paths.toOwnedSlice(allocator);
 }
 
-fn readTasks(dir: std.Io.Dir, io: std.Io, allocator: std.mem.Allocator, path: []const u8) ![]const []const u8 {
+const Census = struct { names: []const []const u8, routes: []const []const u8 };
+
+/// One census line per task: `<name> <route>`. A line without a route leaves it empty.
+fn readTasks(dir: std.Io.Dir, io: std.Io, allocator: std.mem.Allocator, path: []const u8) !Census {
     const source = if (std.fs.path.isAbsolute(path))
         try std.Io.Dir.cwd().readFileAllocOptions(io, path, allocator, .limited(max_file_bytes), .of(u8), 0)
     else
         try readFile(dir, io, allocator, path);
     var tasks: std.ArrayList([]const u8) = .empty;
+    var task_routes: std.ArrayList([]const u8) = .empty;
     var lines = std.mem.splitScalar(u8, source, '\n');
     while (lines.next()) |line| {
-        const task = std.mem.trim(u8, line, " \t\r");
-        if (task.len != 0) try tasks.append(allocator, task);
+        var fields = std.mem.tokenizeAny(u8, line, " \t\r");
+        const task = fields.next() orelse continue;
+        try tasks.append(allocator, task);
+        try task_routes.append(allocator, fields.next() orelse "");
     }
-    return tasks.toOwnedSlice(allocator);
+    return .{ .names = try tasks.toOwnedSlice(allocator), .routes = try task_routes.toOwnedSlice(allocator) };
 }
 
 fn loadAreas(
@@ -751,6 +768,7 @@ fn checkAll(ctx: *Context, write: bool, failures: *std.ArrayList(Failure)) !void
     try checkFloors(ctx, failures);
     if (failures.items.len != 0) return;
     try checkTasks(ctx, failures);
+    try checkRoutes(ctx, failures);
     try checkCommands(ctx, failures);
     try checkAreas(ctx, failures);
     try checkLedger(ctx, failures);
@@ -805,6 +823,44 @@ fn checkTasks(ctx: *Context, failures: *std.ArrayList(Failure)) !void {
     for (ctx.spine.commands) |command| {
         const name = try commandName(ctx.a(), command);
         if (!containsString(ctx.tasks, name)) try addFailure(ctx, failures, .task_classification, "agents.json classifies stale task {s}; remove it or restore the build task", .{name});
+    }
+}
+
+/// Each task names how the live graph reaches it, and the route must match the census the build
+/// computed from the graph. A manual task states why a human asks for it.
+fn checkRoutes(ctx: *Context, failures: *std.ArrayList(Failure)) !void {
+    for (ctx.tasks, ctx.task_routes) |task, graph_text| {
+        var matches: usize = 0;
+        var found: ?SpineCommand = null;
+        for (ctx.spine.commands) |command| if (std.mem.eql(u8, command.task, task)) {
+            matches += 1;
+            found = command;
+        };
+        // A task with no row or with several rows is already reported by checkTasks.
+        if (matches != 1) continue;
+        const command = found.?;
+        const graph = std.meta.stringToEnum(Route, graph_text) orelse {
+            try addFailure(ctx, failures, .task_route, "the task census gives task {s} no graph route (got '{s}'); the build must pass how the graph reaches each task through --tasks", .{ task, graph_text });
+            continue;
+        };
+        const declared_text = command.route orelse {
+            try addFailure(ctx, failures, .task_route, "agents.json sets no route for task {s}; set route to {s}", .{ task, @tagName(graph) });
+            continue;
+        };
+        const declared = std.meta.stringToEnum(Route, declared_text) orelse {
+            try addFailure(ctx, failures, .task_route, "agents.json routes task {s} as {s}, which is not aggregate, verify, release, or manual; set route to {s}", .{ task, declared_text, @tagName(graph) });
+            continue;
+        };
+        if (declared != graph) {
+            try addFailure(ctx, failures, .task_route, "agents.json routes task {s} as {s}, but the build graph reaches it as {s}; set route to {s}", .{ task, @tagName(declared), @tagName(graph), @tagName(graph) });
+        }
+        const has_reason = if (command.reason) |reason| reason.len != 0 else false;
+        if (declared == .manual and !has_reason) {
+            try addFailure(ctx, failures, .task_route, "agents.json routes task {s} as manual without a reason; add the reason a human asks for it", .{task});
+        }
+        if (declared != .manual and command.reason != null) {
+            try addFailure(ctx, failures, .task_route, "agents.json gives task {s} a reason but routes it as {s}; only manual tasks carry a reason", .{ task, @tagName(declared) });
+        }
     }
 }
 
@@ -1434,6 +1490,12 @@ const FixtureMutation = enum {
     write_refuses_other_failure,
     ledger_missing_gate,
     ledger_self_supersession,
+    route_missing,
+    route_aggregate_marked_manual,
+    route_manual_without_reason,
+    route_invalid_value,
+    route_reason_on_non_manual,
+    route_missing_from_census,
 };
 
 const RejectionScenario = struct {
@@ -1478,6 +1540,12 @@ const rejection_scenarios = [_]RejectionScenario{
     .{ .mutation = .write_refuses_other_failure, .kind = .generated_drift, .diagnostic = "spine[command_policy]: agents.json lets verify mutate a remote store without explicit-user approval; change approval\n", .write = true },
     .{ .mutation = .ledger_missing_gate, .kind = .decision_ledger, .diagnostic = "spine[decision_ledger]: docs/decisions.md: D-001 has no Gate field; name a task or explicitly use none\n" },
     .{ .mutation = .ledger_self_supersession, .kind = .decision_ledger, .diagnostic = "spine[decision_ledger]: docs/decisions.md: D-001 Supersedes D-001, which is not an older decision; add a new ascending entry\n" },
+    .{ .mutation = .route_missing, .kind = .task_route, .diagnostic = "spine[task_route]: agents.json sets no route for task verify; set route to aggregate\n" },
+    .{ .mutation = .route_aggregate_marked_manual, .kind = .task_route, .diagnostic = "spine[task_route]: agents.json routes task verify as manual, but the build graph reaches it as aggregate; set route to aggregate\n" },
+    .{ .mutation = .route_manual_without_reason, .kind = .task_route, .diagnostic = "spine[task_route]: agents.json routes task verify as manual without a reason; add the reason a human asks for it\n" },
+    .{ .mutation = .route_invalid_value, .kind = .task_route, .diagnostic = "spine[task_route]: agents.json routes task verify as sometimes, which is not aggregate, verify, release, or manual; set route to aggregate\n" },
+    .{ .mutation = .route_reason_on_non_manual, .kind = .task_route, .diagnostic = "spine[task_route]: agents.json gives task verify a reason but routes it as aggregate; only manual tasks carry a reason\n" },
+    .{ .mutation = .route_missing_from_census, .kind = .task_route, .diagnostic = "spine[task_route]: the task census gives task verify no graph route (got ''); the build must pass how the graph reaches each task through --tasks\n" },
 };
 
 comptime {
@@ -1510,7 +1578,11 @@ test "public rejection census observes symbol policy and marker failures" {
 }
 
 test "public rejection census observes marker drift and guarded write failures" {
-    try runRejectionScenarios(rejection_scenarios[29..]);
+    try runRejectionScenarios(rejection_scenarios[29..34]);
+}
+
+test "public rejection census observes task route failures" {
+    try runRejectionScenarios(rejection_scenarios[34..]);
 }
 
 fn runRejectionScenarios(scenarios: []const RejectionScenario) !void {
@@ -1715,7 +1787,7 @@ fn writeCommandFixture(io: std.Io, tmp: *std.testing.TmpDir, safe_approval: bool
     try tmp.dir.createDirPath(io, "docs/solutions");
     try tmp.dir.createDirPath(io, "src");
     try tmp.dir.writeFile(io, .{ .sub_path = "build.zig", .data = "pub fn build() void {}\n" });
-    try tmp.dir.writeFile(io, .{ .sub_path = "tasks.txt", .data = "verify\n" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "tasks.txt", .data = "verify aggregate\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "src/main.zig", .data = "pub fn main() void { const nested = 1; _ = nested; }\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "src/handler.ts", .data = "export const handler = () => 1;\n" });
     try tmp.dir.writeFile(io, .{ .sub_path = "AGENTS.md", .data =
@@ -1790,7 +1862,7 @@ fn writeCommandManifest(io: std.Io, tmp: *std.testing.TmpDir, safe_approval: boo
         \\  "vendored": [],
         \\  "skipDirs": [],
         \\  "docs": {{"decisions":"docs/decisions.md","solutions":"docs/solutions","canonicalGate":"zig build verify"}},
-        \\  "commands": [{{"task":"verify","intent":"verify","effect":"remote-write","approval":"{s}","does":"checks the fixture","always":true}}]
+        \\  "commands": [{{"task":"verify","route":"aggregate","intent":"verify","effect":"remote-write","approval":"{s}","does":"checks the fixture","always":true}}]
         \\}}
         \\
     , .{approval});
@@ -1835,6 +1907,10 @@ fn applyFixtureMutation(
         .remote_write_without_approval,
         .generated_drift,
         .write_refuses_other_failure,
+        .route_missing,
+        .route_aggregate_marked_manual,
+        .route_invalid_value,
+        .route_reason_on_non_manual,
         => try writeMutatedManifest(io, tmp, mutation),
         .strict_undeclared_document => {
             try writeMutatedManifest(io, tmp, mutation);
@@ -1854,7 +1930,12 @@ fn applyFixtureMutation(
         .ledger_missing_gate,
         .ledger_self_supersession,
         => try writeMutatedLedger(io, tmp, mutation),
-        .missing_task_classification => try tmp.dir.writeFile(io, .{ .sub_path = "tasks.txt", .data = "verify\nextra\n" }),
+        .missing_task_classification => try tmp.dir.writeFile(io, .{ .sub_path = "tasks.txt", .data = "verify aggregate\nextra aggregate\n" }),
+        .route_missing_from_census => try tmp.dir.writeFile(io, .{ .sub_path = "tasks.txt", .data = "verify\n" }),
+        .route_manual_without_reason => {
+            try tmp.dir.writeFile(io, .{ .sub_path = "tasks.txt", .data = "verify manual\n" });
+            try writeMutatedManifest(io, tmp, mutation);
+        },
         .stale_solution_binding,
         .inline_line_range,
         .link_line_anchor,
@@ -1880,13 +1961,18 @@ fn writeMutatedManifest(io: std.Io, tmp: *std.testing.TmpDir, mutation: FixtureM
         "[{\"manifest\":\"build.zig\",\"cwd\":\"\",\"kind\":\"zig-build\"}]";
     const policy = if (mutation == .strict_undeclared_document) "strict" else "off";
     const commands = switch (mutation) {
-        .no_verify => "[{\"task\":\"verify\",\"intent\":\"build\",\"effect\":\"none\",\"approval\":\"none\",\"does\":\"checks the fixture\",\"always\":true}]",
-        .duplicate_task_classification => "[{\"task\":\"verify\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"explicit-user\",\"does\":\"checks the fixture\",\"always\":true},{\"task\":\"verify\",\"intent\":\"run\",\"effect\":\"none\",\"approval\":\"none\",\"does\":\"duplicates the fixture\"}]",
-        .stale_task_classification => "[{\"task\":\"verify\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"explicit-user\",\"does\":\"checks the fixture\",\"always\":true},{\"task\":\"stale\",\"intent\":\"run\",\"effect\":\"none\",\"approval\":\"none\",\"does\":\"is stale\"}]",
-        .remote_write_without_approval => "[{\"task\":\"verify\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"none\",\"does\":\"checks the fixture\",\"always\":true}]",
-        .generated_drift => "[{\"task\":\"verify\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"explicit-user\",\"does\":\"checks changed fixture text\",\"always\":true}]",
-        .write_refuses_other_failure => "[{\"task\":\"verify\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"none\",\"does\":\"checks changed fixture text\",\"always\":true}]",
-        else => "[{\"task\":\"verify\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"explicit-user\",\"does\":\"checks the fixture\",\"always\":true}]",
+        .no_verify => "[{\"task\":\"verify\",\"route\":\"aggregate\",\"intent\":\"build\",\"effect\":\"none\",\"approval\":\"none\",\"does\":\"checks the fixture\",\"always\":true}]",
+        .duplicate_task_classification => "[{\"task\":\"verify\",\"route\":\"aggregate\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"explicit-user\",\"does\":\"checks the fixture\",\"always\":true},{\"task\":\"verify\",\"route\":\"aggregate\",\"intent\":\"run\",\"effect\":\"none\",\"approval\":\"none\",\"does\":\"duplicates the fixture\"}]",
+        .stale_task_classification => "[{\"task\":\"verify\",\"route\":\"aggregate\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"explicit-user\",\"does\":\"checks the fixture\",\"always\":true},{\"task\":\"stale\",\"intent\":\"run\",\"effect\":\"none\",\"approval\":\"none\",\"does\":\"is stale\"}]",
+        .remote_write_without_approval => "[{\"task\":\"verify\",\"route\":\"aggregate\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"none\",\"does\":\"checks the fixture\",\"always\":true}]",
+        .generated_drift => "[{\"task\":\"verify\",\"route\":\"aggregate\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"explicit-user\",\"does\":\"checks changed fixture text\",\"always\":true}]",
+        .write_refuses_other_failure => "[{\"task\":\"verify\",\"route\":\"aggregate\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"none\",\"does\":\"checks changed fixture text\",\"always\":true}]",
+        .route_missing => "[{\"task\":\"verify\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"explicit-user\",\"does\":\"checks the fixture\",\"always\":true}]",
+        .route_aggregate_marked_manual => "[{\"task\":\"verify\",\"route\":\"manual\",\"reason\":\"interactive\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"explicit-user\",\"does\":\"checks the fixture\",\"always\":true}]",
+        .route_manual_without_reason => "[{\"task\":\"verify\",\"route\":\"manual\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"explicit-user\",\"does\":\"checks the fixture\",\"always\":true}]",
+        .route_invalid_value => "[{\"task\":\"verify\",\"route\":\"sometimes\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"explicit-user\",\"does\":\"checks the fixture\",\"always\":true}]",
+        .route_reason_on_non_manual => "[{\"task\":\"verify\",\"route\":\"aggregate\",\"reason\":\"interactive\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"explicit-user\",\"does\":\"checks the fixture\",\"always\":true}]",
+        else => "[{\"task\":\"verify\",\"route\":\"aggregate\",\"intent\":\"verify\",\"effect\":\"remote-write\",\"approval\":\"explicit-user\",\"does\":\"checks the fixture\",\"always\":true}]",
     };
     var manifest: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer manifest.deinit();

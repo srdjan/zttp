@@ -29,6 +29,11 @@ The aggregate test step runs both the installed check and its tests.
 The live Zig build graph supplies task names, including implicit install and uninstall steps.
 The build completes that graph before writing the census file that the native command reads.
 The command does not start a nested build or infer tasks from source text.
+Each census line names a task and how the graph reaches it: `aggregate` when `zig build test` reaches it, `verify` when only the sequential verification routes do, `release` when only the release-only routes do, and `manual` when none does.
+The build computes that reach with `build/step_coverage.zig#classify`, the same walk that `test-step-coverage` uses.
+Each `agents.json` command carries a `route` with one of those four values.
+The spine fails when the value is missing, outside the four, or different from the graph reach.
+A `manual` command also carries a `reason`, and no other command does.
 The workspace kind `zig-build` records this native contract.
 
 [`AGENTS.md`](../../AGENTS.md) holds repository instructions and generated area and gate tables.
@@ -51,7 +56,7 @@ The native checker validates declared bindings and proving tasks.
 The spine proves structural consistency, rather than semantic relevance or behavior correctness.
 The existing behavior suites remain the authority for the behavior named in a contract.
 Task effects require source review because Zig tasks do not declare Deno permission flags.
-An unclassified, duplicate, or stale task fails the spine check.
+An unclassified, duplicate, or stale task fails the spine check, and so does a task whose route disagrees with the graph.
 A remote write always requires explicit user authorization in the manifest.
 
 `docsPolicy` remains off because the repository keeps product documentation, plans, and historical reports.

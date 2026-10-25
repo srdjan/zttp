@@ -111,8 +111,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(spine.test_step);
     const coverage_step = step_coverage.register(b);
     step_coverage.attachScriptCensus(b, test_step, proofs.script_reachability, tools.repo_gate_exe);
-    agent_spine.attachTaskCensus(b, spine);
-    step_coverage.add(b, test_step, coverage_step);
+    const reach = step_coverage.classify(b, test_step);
+    agent_spine.attachTaskCensus(b, spine, reach);
+    step_coverage.add(b, test_step, coverage_step, reach);
     const test_selection = @import("build/test_selection.zig");
     if (ctx.test_filters.len == 0) {
         // A fixed filter such as the stand-in suite's must also select a test.

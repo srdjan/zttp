@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const Context = @import("Context.zig");
+const step_coverage = @import("step_coverage.zig");
 
 pub const Result = struct {
     check_run: *std.Build.Step.Run,
@@ -70,19 +71,18 @@ pub fn add(ctx: Context) Result {
     return .{ .check_run = check_run, .stream_probe = stream_probe, .check_step = check_step, .test_step = test_step };
 }
 
-/// Call after every top-level step exists, before the coverage walk.
-pub fn attachTaskCensus(b: *std.Build, spine: Result) void {
-    const names = b.allocator.alloc([]const u8, b.top_level_steps.count()) catch @panic("OOM");
-    for (b.top_level_steps.values(), 0..) |step, i| names[i] = step.step.name;
-    std.mem.sort([]const u8, names, {}, struct {
-        fn lessThan(_: void, left: []const u8, right: []const u8) bool {
-            return std.mem.lessThan(u8, left, right);
+/// Call after every top-level step exists. One census line per task: `<name> <route>`, where the
+/// route is how the live graph reaches the task, taken from `step_coverage.classify`.
+pub fn attachTaskCensus(b: *std.Build, spine: Result, classified: []const step_coverage.Classified) void {
+    const sorted = b.allocator.dupe(step_coverage.Classified, classified) catch @panic("OOM");
+    std.mem.sort(step_coverage.Classified, sorted, {}, struct {
+        fn lessThan(_: void, left: step_coverage.Classified, right: step_coverage.Classified) bool {
+            return std.mem.lessThan(u8, left.name, right.name);
         }
     }.lessThan);
     var census: std.ArrayList(u8) = .empty;
-    for (names) |name| {
-        census.appendSlice(b.allocator, name) catch @panic("OOM");
-        census.append(b.allocator, '\n') catch @panic("OOM");
+    for (sorted) |task| {
+        census.print(b.allocator, "{s} {s}\n", .{ task.name, @tagName(task.reach) }) catch @panic("OOM");
     }
     const generated = b.addWriteFiles();
     const path = generated.add("agent-spine-tasks.txt", census.items);

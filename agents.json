@@ -33,6 +33,7 @@
   "commands": [
     {
       "task": "install",
+      "route": "aggregate",
       "intent": "build",
       "effect": "local-write",
       "approval": "none",
@@ -41,6 +42,7 @@
     },
     {
       "task": "uninstall",
+      "route": "aggregate",
       "intent": "operate",
       "effect": "local-write",
       "approval": "none",
@@ -49,6 +51,7 @@
     },
     {
       "task": "test-zts",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -57,6 +60,7 @@
     },
     {
       "task": "test-sdk",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -65,6 +69,7 @@
     },
     {
       "task": "test-modules",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -73,6 +78,7 @@
     },
     {
       "task": "test-proof-checker",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -81,6 +87,8 @@
     },
     {
       "task": "test-proof-checker-mutants",
+      "route": "manual",
+      "reason": "slow-mutation-probe",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -89,6 +97,7 @@
     },
     {
       "task": "test-proof-checker-purity",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -97,6 +106,7 @@
     },
     {
       "task": "test-script-reachability",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -105,6 +115,7 @@
     },
     {
       "task": "test-diagnostic-producers",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -113,6 +124,7 @@
     },
     {
       "task": "test-proof-ratchet-drift",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -121,6 +133,7 @@
     },
     {
       "task": "test-residual-guards-drift",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -129,6 +142,7 @@
     },
     {
       "task": "test-proof-ratchet",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -137,6 +151,8 @@
     },
     {
       "task": "test-precompile",
+      "route": "manual",
+      "reason": "subset-of-test-agent-protocol",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -145,6 +161,8 @@
     },
     {
       "task": "test-canonicalize",
+      "route": "manual",
+      "reason": "subset-of-test-agent-protocol",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -153,6 +171,7 @@
     },
     {
       "task": "test-expert",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -161,6 +180,7 @@
     },
     {
       "task": "test-zts-cli",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -169,6 +189,7 @@
     },
     {
       "task": "test-deploy-manifest",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -177,6 +198,7 @@
     },
     {
       "task": "test-agent-identity",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -185,6 +207,7 @@
     },
     {
       "task": "test-module-graph-record",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -193,6 +216,7 @@
     },
     {
       "task": "test-agent-protocol",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -201,6 +225,7 @@
     },
     {
       "task": "test-module-audit",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -209,6 +234,7 @@
     },
     {
       "task": "test-verify-paths-core",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -217,6 +243,7 @@
     },
     {
       "task": "test-project-config",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -225,6 +252,7 @@
     },
     {
       "task": "test-instruction-counter",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -233,6 +261,7 @@
     },
     {
       "task": "test-expert-app",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -241,6 +270,8 @@
     },
     {
       "task": "test-cassette",
+      "route": "manual",
+      "reason": "subset-of-test-expert-app",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -249,6 +280,7 @@
     },
     {
       "task": "test-recorder-smoke",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -257,6 +289,8 @@
     },
     {
       "task": "test-simulator",
+      "route": "manual",
+      "reason": "subset-of-test-expert-app",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -265,6 +299,7 @@
     },
     {
       "task": "test-standin",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -273,6 +308,8 @@
     },
     {
       "task": "test-expert-mlx-e2e",
+      "route": "manual",
+      "reason": "needs-local-server",
       "intent": "verify",
       "effect": "local-write",
       "approval": "explicit-user",
@@ -281,6 +318,7 @@
     },
     {
       "task": "test-diagnostic-corpus",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -289,6 +327,8 @@
     },
     {
       "task": "diagnostic-corpus-write",
+      "route": "manual",
+      "reason": "regeneration",
       "intent": "operate",
       "effect": "local-write",
       "approval": "explicit-user",
@@ -297,6 +337,7 @@
     },
     {
       "task": "test-flow-census",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -305,6 +346,7 @@
     },
     {
       "task": "test-capability-audit",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -313,6 +355,7 @@
     },
     {
       "task": "test-native-gates",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -321,6 +364,8 @@
     },
     {
       "task": "evidence-publish",
+      "route": "manual",
+      "reason": "release-operation",
       "intent": "operate",
       "effect": "local-write",
       "approval": "explicit-user",
@@ -329,6 +374,7 @@
     },
     {
       "task": "test-evidence-publish",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -337,6 +383,7 @@
     },
     {
       "task": "release-provenance",
+      "route": "release",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -345,6 +392,7 @@
     },
     {
       "task": "test-release-provenance",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -353,6 +401,8 @@
     },
     {
       "task": "coverage-union",
+      "route": "manual",
+      "reason": "release-operation",
       "intent": "operate",
       "effect": "local-write",
       "approval": "explicit-user",
@@ -361,6 +411,7 @@
     },
     {
       "task": "test-coverage-union",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -369,6 +420,7 @@
     },
     {
       "task": "release-check",
+      "route": "release",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -377,6 +429,7 @@
     },
     {
       "task": "test-release-check",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -385,6 +438,7 @@
     },
     {
       "task": "production-branch-metric",
+      "route": "aggregate",
       "intent": "measure",
       "effect": "local-write",
       "approval": "none",
@@ -393,6 +447,8 @@
     },
     {
       "task": "production-branch-metric-json",
+      "route": "manual",
+      "reason": "measurement",
       "intent": "measure",
       "effect": "local-write",
       "approval": "none",
@@ -401,6 +457,7 @@
     },
     {
       "task": "test-production-branch-metric",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -409,6 +466,8 @@
     },
     {
       "task": "zttp-standin",
+      "route": "manual",
+      "reason": "interactive-server",
       "intent": "run",
       "effect": "local-write",
       "approval": "none",
@@ -417,6 +476,7 @@
     },
     {
       "task": "test-kernel-safety",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -425,6 +485,7 @@
     },
     {
       "task": "test-module-boundary",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -433,6 +494,7 @@
     },
     {
       "task": "test-release-workflow",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -441,6 +503,7 @@
     },
     {
       "task": "test-proof-swallow",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -449,6 +512,7 @@
     },
     {
       "task": "test-zts-layering",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -457,6 +521,7 @@
     },
     {
       "task": "test-convergence-emitter",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -465,6 +530,7 @@
     },
     {
       "task": "test-evidence-marker",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -473,6 +539,7 @@
     },
     {
       "task": "test-docs-drift",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -481,6 +548,7 @@
     },
     {
       "task": "test-idiom-table",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -489,6 +557,7 @@
     },
     {
       "task": "test-canonical-style",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -497,6 +566,7 @@
     },
     {
       "task": "test-grammar-drift",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -505,6 +575,7 @@
     },
     {
       "task": "test-decision-registry",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -513,6 +584,7 @@
     },
     {
       "task": "test-meta-drift",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -521,6 +593,7 @@
     },
     {
       "task": "test-doc-links",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -529,6 +602,7 @@
     },
     {
       "task": "test-runtime-purity",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -537,6 +611,7 @@
     },
     {
       "task": "test-module-governance",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -545,6 +620,7 @@
     },
     {
       "task": "test-contract-golden",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -553,6 +629,7 @@
     },
     {
       "task": "test-generic-intersection-cli-matrix",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -561,6 +638,7 @@
     },
     {
       "task": "test-expert-golden",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -569,6 +647,8 @@
     },
     {
       "task": "run",
+      "route": "manual",
+      "reason": "interactive",
       "intent": "run",
       "effect": "local-write",
       "approval": "explicit-user",
@@ -577,6 +657,8 @@
     },
     {
       "task": "cli",
+      "route": "manual",
+      "reason": "interactive",
       "intent": "run",
       "effect": "local-write",
       "approval": "explicit-user",
@@ -585,6 +667,7 @@
     },
     {
       "task": "test-cli",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -593,6 +676,7 @@
     },
     {
       "task": "test",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -602,6 +686,7 @@
     },
     {
       "task": "test-zruntime",
+      "route": "verify",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -610,6 +695,7 @@
     },
     {
       "task": "test-server",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -618,6 +704,7 @@
     },
     {
       "task": "test-examples",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -626,6 +713,7 @@
     },
     {
       "task": "test-cli-abuse",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -634,6 +722,7 @@
     },
     {
       "task": "release",
+      "route": "aggregate",
       "intent": "build",
       "effect": "local-write",
       "approval": "none",
@@ -642,6 +731,8 @@
     },
     {
       "task": "bench",
+      "route": "manual",
+      "reason": "measurement",
       "intent": "measure",
       "effect": "local-write",
       "approval": "none",
@@ -650,6 +741,7 @@
     },
     {
       "task": "bench-check",
+      "route": "release",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -658,6 +750,8 @@
     },
     {
       "task": "bench-record",
+      "route": "manual",
+      "reason": "release-operation",
       "intent": "measure",
       "effect": "local-write",
       "approval": "explicit-user",
@@ -666,6 +760,7 @@
     },
     {
       "task": "test-bench-diff",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -674,6 +769,7 @@
     },
     {
       "task": "smoke-v1",
+      "route": "verify",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -682,6 +778,7 @@
     },
     {
       "task": "test-module-scope-panic",
+      "route": "verify",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -690,6 +787,7 @@
     },
     {
       "task": "test-panic-isolation",
+      "route": "verify",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -698,6 +796,7 @@
     },
     {
       "task": "smoke-getting-started",
+      "route": "release",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -706,6 +805,8 @@
     },
     {
       "task": "compile-bench",
+      "route": "manual",
+      "reason": "measurement",
       "intent": "measure",
       "effect": "local-write",
       "approval": "none",
@@ -714,6 +815,7 @@
     },
     {
       "task": "test-compile-bench",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -722,6 +824,7 @@
     },
     {
       "task": "test-step-coverage",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -730,6 +833,8 @@
     },
     {
       "task": "brief",
+      "route": "manual",
+      "reason": "repository-navigation",
       "intent": "operate",
       "effect": "local-write",
       "approval": "none",
@@ -738,6 +843,7 @@
     },
     {
       "task": "check-spine",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -747,6 +853,7 @@
     },
     {
       "task": "test-spine",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -755,6 +862,8 @@
     },
     {
       "task": "verify",
+      "route": "manual",
+      "reason": "sequential-verification-driver",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
@@ -763,6 +872,7 @@
     },
     {
       "task": "test-agent-determinism",
+      "route": "aggregate",
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
