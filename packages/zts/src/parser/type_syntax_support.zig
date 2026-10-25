@@ -32,30 +32,22 @@ pub const TestRuntime = struct {
     }
 
     pub fn addCall(self: *TestRuntime, offset: u32) !ir.NodeIndex {
-        return self.nodes.add(.{
-            .tag = .call,
-            .loc = .{ .line = 1, .column = offset + 1, .offset = offset, .end_offset = offset + 1 },
-            .data = .{ .call = .{
-                .callee = ir.null_node,
-                .args_start = ir.null_node,
-                .args_count = 0,
-            } },
+        return self.nodes.addCall(.call, .{ .line = 1, .column = offset + 1, .offset = offset, .end_offset = offset + 1 }, .{
+            .callee = ir.null_node,
+            .args_start = ir.null_node,
+            .args_count = 0,
         });
     }
 
     pub fn addFunction(self: *TestRuntime, tag: ir.NodeTag, offset: u32) !ir.NodeIndex {
         if (tag != .function_expr and tag != .arrow_function) return error.TestUnexpectedResult;
-        return self.nodes.add(.{
-            .tag = tag,
-            .loc = .{ .line = 1, .column = offset + 1, .offset = offset, .end_offset = offset + 1 },
-            .data = .{ .function = .{
-                .scope_id = 0,
-                .name_atom = 0,
-                .params_start = ir.null_node,
-                .params_count = 0,
-                .body = ir.null_node,
-                .flags = .{},
-            } },
+        return self.nodes.addFunction(tag, .{ .line = 1, .column = offset + 1, .offset = offset, .end_offset = offset + 1 }, .{
+            .scope_id = 0,
+            .name_atom = 0,
+            .params_start = ir.null_node,
+            .params_count = 0,
+            .body = ir.null_node,
+            .flags = .{},
         });
     }
 };
