@@ -27,6 +27,7 @@ const std = @import("std");
 const mb = @import("zts-engine").module_binding;
 const json_utils = @import("zts-base").json_utils;
 const status_check = @import("status_check.zig");
+const HandlerProperties = @import("zts-contracts").contract_types.HandlerProperties;
 
 // TODO: these types intentionally stay close to `path_generator.Constraint`
 // / `StubInfo`; a future extraction into a shared `witness_types.zig` lets
@@ -107,11 +108,9 @@ pub const ConcreteRequest = struct {
     body: ?[]const u8,
 };
 
-/// Subset of FlowChecker diagnostic kinds that the MVP solver handles.
-/// Kept as a separate enum (rather than importing `flow_checker.DiagnosticKind`)
-/// because flow_checker imports this module and the import cannot run both ways, and because
-/// downstream consumers may want to
-/// synthesize witnesses for properties that don't originate in flow_checker.
+/// The `HandlerProperties` that the solver can build a witness for: the data-flow properties.
+/// `flow_checker` imports this module, so the tag is declared here and not borrowed from
+/// `flow_checker.DiagnosticKind`. `property_coverage` below names every other property.
 pub const PropertyTag = enum {
     no_secret_leakage,
     no_credential_leakage,
@@ -123,6 +122,15 @@ pub const PropertyTag = enum {
         return @tagName(self);
     }
 };
+
+const property_coverage = HandlerProperties.exclusions(
+    &.{ "pure", "read_only", "stateless", "retry_safe", "deterministic", "has_egress", "idempotent", "max_io_depth", "state_isolated", "fault_covered", "result_safe", "optional_safe", "post_only", "canonical", "cost_bounded" },
+    "the solver builds witnesses for data-flow properties only",
+);
+
+comptime {
+    if (HandlerProperties.coverageProblem(PropertyTag, &property_coverage)) |problem| @compileError(problem);
+}
 
 /// A representative falsifying input for a property, used to narrate a
 /// *passing* proof: "the prover tried this and the code resisted it." This is

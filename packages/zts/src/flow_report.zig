@@ -3,6 +3,7 @@
 
 const NodeIndex = @import("zts-engine").parser.ir.NodeIndex;
 const counterexample = @import("counterexample.zig");
+const HandlerProperties = @import("zts-contracts").contract_types.HandlerProperties;
 pub const RepairIntent = @import("repair_intent.zig").RepairIntent;
 
 pub const Severity = enum {
@@ -128,3 +129,32 @@ pub const FlowProperties = struct {
     /// replacing the other.
     deterministic: bool = true,
 };
+
+// `FlowProperties` is the part of `HandlerProperties` that the flow checker decides. A new
+// `HandlerProperties` field must be a flow property or be named here with its owner.
+const not_flow_properties = HandlerProperties.exclusions(
+    &.{ "pure", "read_only", "stateless", "retry_safe", "has_egress", "idempotent" },
+    "derived from the effect of the virtual module calls, not from data-flow labels",
+) ++ HandlerProperties.exclusions(
+    &.{ "max_io_depth", "cost_bounded" },
+    "derived from path enumeration and the cost envelope",
+) ++ HandlerProperties.exclusions(
+    &.{"state_isolated"},
+    "derived from module-scope mutation, not from data-flow labels",
+) ++ HandlerProperties.exclusions(
+    &.{"fault_covered"},
+    "decided by the fault coverage checker",
+) ++ HandlerProperties.exclusions(
+    &.{ "result_safe", "optional_safe" },
+    "decided by the handler verifier",
+) ++ HandlerProperties.exclusions(
+    &.{"post_only"},
+    "decided by the route table analysis",
+) ++ HandlerProperties.exclusions(
+    &.{"canonical"},
+    "decided by the strict checker's ZTS6xx gate",
+);
+
+comptime {
+    if (HandlerProperties.coverageProblem(FlowProperties, &not_flow_properties)) |problem| @compileError(problem);
+}

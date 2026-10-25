@@ -28,6 +28,7 @@
 //! the same commit as the checker.
 
 const std = @import("std");
+const zts = @import("zts");
 
 pub const Label = enum { secret, credential, user_input, clean };
 pub const Sink = enum { log, egress_url, egress_body, egress_headers, egress_opaque, response, response_html };
@@ -46,6 +47,17 @@ pub const Property = enum {
         };
     }
 };
+
+// The census probes claim only the leak properties they refute. A new `HandlerProperties` field
+// is claimed above or named here.
+const unclaimed_properties = zts.HandlerProperties.exclusions(
+    &.{ "pure", "read_only", "stateless", "retry_safe", "deterministic", "has_egress", "input_validated", "pii_contained", "idempotent", "max_io_depth", "state_isolated", "fault_covered", "result_safe", "optional_safe", "post_only", "canonical", "cost_bounded" },
+    "the flow census refutes secret, credential, and injection leaks only",
+);
+
+comptime {
+    if (zts.HandlerProperties.coverageProblem(Property, &unclaimed_properties)) |problem| @compileError(problem);
+}
 
 /// What the documented promise says the checker must do with a probe.
 pub const Expect = enum {

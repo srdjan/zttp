@@ -90,6 +90,23 @@ pub const PropertyField = enum {
     }
 };
 
+// Every `HandlerProperties` field that `PropertyField` leaves out, with the reason. A new field is
+// a spec name or appears here.
+const not_spec_fields = HandlerProperties.exclusions(
+    &.{"has_egress"},
+    "an inverse fact that the proof ratchets leave out on purpose",
+) ++ HandlerProperties.exclusions(
+    &.{"max_io_depth"},
+    "a number, not a boolean spec",
+) ++ HandlerProperties.exclusions(
+    &.{"post_only"},
+    "no proof spec names it",
+);
+
+comptime {
+    if (HandlerProperties.coverageProblem(PropertyField, &not_spec_fields)) |problem| @compileError(problem);
+}
+
 /// Per-property HUD suggestion strings. Mandatory for cause-only specs so
 /// the proof card never renders an anemic single-line failure.
 pub fn suggestionFor(name: []const u8) ?[]const u8 {

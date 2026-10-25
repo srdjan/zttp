@@ -64,6 +64,17 @@ const Property = enum {
 
 const Set = std.EnumSet(Property);
 
+// The precision table records the five data-flow labels. A new `HandlerProperties` field is
+// recorded above or named here.
+const unrecorded_properties = zts.HandlerProperties.exclusions(
+    &.{ "pure", "read_only", "stateless", "retry_safe", "deterministic", "has_egress", "idempotent", "max_io_depth", "state_isolated", "fault_covered", "result_safe", "optional_safe", "post_only", "canonical", "cost_bounded" },
+    "the precision table records the five data-flow properties only",
+);
+
+comptime {
+    if (zts.HandlerProperties.coverageProblem(Property, &unrecorded_properties)) |problem| @compileError(problem);
+}
+
 const all: Set = Set.full;
 const none: Set = Set.empty;
 const all_but_secret: Set = Set.initMany(&.{ .no_credential_leakage, .input_validated, .pii_contained, .injection_safe });

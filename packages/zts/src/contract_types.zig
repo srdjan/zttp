@@ -564,10 +564,72 @@ pub const HandlerProperties = struct {
         }
         return null;
     }
+
+    /// A property left out of a list that covers only part of `HandlerProperties`, with the reason.
+    pub const Exclusion = struct {
+        name: []const u8,
+        reason: []const u8,
+    };
+
+    /// One `Exclusion` per name, all with the same reason.
+    pub fn exclusions(comptime names: []const []const u8, comptime reason: []const u8) [names.len]Exclusion {
+        var out: [names.len]Exclusion = undefined;
+        for (names, 0..) |name, index| out[index] = .{ .name = name, .reason = reason };
+        return out;
+    }
+
+    /// The first problem in how `Members` covers `HandlerProperties`, or null. `Members` is an
+    /// enum or a struct whose field names are property names. Every `HandlerProperties` field is a
+    /// member or is excluded with a reason, every member is a `HandlerProperties` field (of the
+    /// same type, for a struct), and no name is both. A list that covers only part of the
+    /// properties spells the rest out, so a new field forces a decision in every list. Use it
+    /// in a `comptime` block: `if (HandlerProperties.coverageProblem(List, &excluded)) |problem|
+    /// @compileError(problem);`. It checks names, never order: a registry hash depends on
+    /// the order of an enum, and `test-meta-drift` owns that.
+    pub fn coverageProblem(comptime Members: type, comptime excluded: []const Exclusion) ?[]const u8 {
+        comptime {
+            @setEvalBranchQuota(100_000);
+            const label = @typeName(Members);
+            const member_names = switch (@typeInfo(Members)) {
+                .@"enum" => |info| info.field_names,
+                .@"struct" => |info| info.field_names,
+                else => @compileError(label ++ " is neither an enum nor a struct"),
+            };
+            for (excluded) |entry| {
+                if (!@hasField(HandlerProperties, entry.name)) return label ++ ": exclusion names no HandlerProperties field: " ++ entry.name;
+                if (entry.reason.len == 0) return label ++ ": exclusion has no reason: " ++ entry.name;
+                if (containsName(member_names, entry.name)) return label ++ ": property is both a member and excluded: " ++ entry.name;
+            }
+            for (member_names) |name| {
+                if (!@hasField(HandlerProperties, name)) return label ++ ": member is not a HandlerProperties field: " ++ name;
+                if (@typeInfo(Members) == .@"struct" and @FieldType(Members, name) != @FieldType(HandlerProperties, name))
+                    return label ++ ": field type differs from HandlerProperties: " ++ name;
+            }
+            for (@typeInfo(HandlerProperties).@"struct".field_names) |field| {
+                if (containsName(member_names, field) or isExcludedName(excluded, field)) continue;
+                return label ++ ": HandlerProperties field is neither a member nor excluded: " ++ field;
+            }
+            return null;
+        }
+    }
 };
 
 fn isMonotonicProvenSpec(comptime field_name: []const u8) bool {
     return !std.mem.eql(u8, field_name, "has_egress");
+}
+
+fn containsName(comptime names: []const [:0]const u8, comptime name: []const u8) bool {
+    for (names) |candidate| {
+        if (std.mem.eql(u8, candidate, name)) return true;
+    }
+    return false;
+}
+
+fn isExcludedName(comptime excluded: []const HandlerProperties.Exclusion, comptime name: []const u8) bool {
+    for (excluded) |entry| {
+        if (std.mem.eql(u8, entry.name, name)) return true;
+    }
+    return false;
 }
 
 /// Compile-time snake_case -> camelCase, e.g. "no_secret_leakage" -> "noSecretLeakage".
@@ -615,6 +677,25 @@ test "HandlerProperties.provenSpecNames excludes inverse-polarity facts" {
     try std.testing.expect(found_no_secret_leakage);
     try std.testing.expect(!HandlerProperties.isMonotonicProvenSpecName("has_egress"));
     try std.testing.expect(HandlerProperties.isMonotonicProvenSpecName("no_secret_leakage"));
+}
+
+test "coverageProblem names each way a property list can drift from HandlerProperties" {
+    const Unknown = enum { pure, nonsense };
+    const Partial = enum { pure };
+    const WrongType = struct { max_io_depth: bool };
+    const none = [_]HandlerProperties.Exclusion{};
+    try std.testing.expect(std.mem.endsWith(u8, comptime HandlerProperties.coverageProblem(Unknown, &none).?, "member is not a HandlerProperties field: nonsense"));
+    try std.testing.expect(std.mem.endsWith(u8, comptime HandlerProperties.coverageProblem(Partial, &none).?, "HandlerProperties field is neither a member nor excluded: read_only"));
+    try std.testing.expect(std.mem.endsWith(u8, comptime HandlerProperties.coverageProblem(WrongType, &none).?, "field type differs from HandlerProperties: max_io_depth"));
+    const missing = [_]HandlerProperties.Exclusion{.{ .name = "gone", .reason = "x" }};
+    try std.testing.expect(std.mem.endsWith(u8, comptime HandlerProperties.coverageProblem(Partial, &missing).?, "exclusion names no HandlerProperties field: gone"));
+    const no_reason = [_]HandlerProperties.Exclusion{.{ .name = "read_only", .reason = "" }};
+    try std.testing.expect(std.mem.endsWith(u8, comptime HandlerProperties.coverageProblem(Partial, &no_reason).?, "exclusion has no reason: read_only"));
+    const both = [_]HandlerProperties.Exclusion{.{ .name = "pure", .reason = "x" }};
+    try std.testing.expect(std.mem.endsWith(u8, comptime HandlerProperties.coverageProblem(Partial, &both).?, "property is both a member and excluded: pure"));
+    const two = HandlerProperties.exclusions(&.{ "pure", "read_only" }, "why");
+    try std.testing.expectEqual(@as(usize, 2), two.len);
+    try std.testing.expectEqualStrings("why", two[1].reason);
 }
 
 test "Bound.addBorrowed degrades mixed linear sources to unbounded" {
