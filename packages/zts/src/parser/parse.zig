@@ -302,21 +302,12 @@ pub const Parser = struct {
         self.constants.borrowed_source = self.source;
     }
 
-    /// Private migration initializer. Production callers remain on `init`.
-    pub fn initTyped(
-        allocator: std.mem.Allocator,
-        type_allocator: std.mem.Allocator,
-        source: []const u8,
-    ) !Parser {
-        return initWithProfile(allocator, type_allocator, source, false, true, null, false);
-    }
-
     pub fn initExpression(allocator: std.mem.Allocator, source: []const u8) !Parser {
         return initWithProfile(allocator, allocator, source, true, false, null, false);
     }
 
     /// Private direct-source admission parser. It owns the syntax collector and
-    /// never changes the behavior of `init` or `initTyped`.
+    /// never changes the behavior of `init`.
     pub fn initAdmission(
         allocator: std.mem.Allocator,
         type_allocator: std.mem.Allocator,
@@ -435,19 +426,7 @@ pub const Parser = struct {
                 },
             };
         }
-        if (!self.parse_type_syntax) return self.parseProgram();
-        return self.parseProgram() catch |err| {
-            switch (err) {
-                error.OutOfMemory => return err,
-                else => {},
-            }
-            if (self.errors.outOfMemory()) return error.OutOfMemory;
-            if (self.type_only_module_refusal != null) return error.TypeOnlyModuleRefused;
-            if (self.type_only_module_exclusion != null) {
-                return error.TypeOnlyModuleLexicallyExcluded;
-            }
-            return err;
-        };
+        return self.parseProgram();
     }
 
     pub fn parseAdmission(self: *Parser) anyerror!AdmissionParseOutcome {
