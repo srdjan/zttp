@@ -50,6 +50,9 @@ pub const HandlerPool = struct {
     persistent_escape_failures: std.atomic.Value(u64),
     /// Runtimes recycled (destroyed, not returned to pool) by policy.
     recycles: std.atomic.Value(u64),
+    /// Eager replacement builds at a policy recycle that failed. The slot stays
+    /// empty and the next acquire builds on demand. Exposed via getMetrics().
+    prebuild_failures: std.atomic.Value(u64),
     /// Handler panics isolated via setjmp recovery. Each quarantines the slot.
     panics: std.atomic.Value(u64),
     /// Requests that exceeded the per-request timeout deadline.
@@ -228,6 +231,7 @@ pub const HandlerPool = struct {
             .arena_audit_failures = std.atomic.Value(u64).init(0),
             .persistent_escape_failures = std.atomic.Value(u64).init(0),
             .recycles = std.atomic.Value(u64).init(0),
+            .prebuild_failures = std.atomic.Value(u64).init(0),
             .panics = std.atomic.Value(u64).init(0),
             .timeouts = std.atomic.Value(u64).init(0),
             .pool = pool,
@@ -680,7 +684,31 @@ pub const HandlerPool = struct {
         );
     }
 
+    /// Build the replacement for a runtime that a policy recycle just dropped, so the
+    /// next request finds a ready runtime. The replacement is built fresh by
+    /// `createRuntime` and `ensureRuntime`: no state passes from the dropped runtime.
+    /// `release` counts one request on it, so it recycles after `max_requests - 1`
+    /// real requests; `prewarm` has the same effect. On failure the slot stays empty
+    /// and the next acquire builds on demand, which reports the error to its request.
+    fn prebuildReplacement(self: *Self) void {
+        const fresh = self.pool.createRuntime() catch |err| {
+            _ = self.prebuild_failures.fetchAdd(1, .monotonic);
+            std.log.warn("eager runtime build failed: {s}", .{@errorName(err)});
+            return;
+        };
+        _ = self.ensureRuntime(fresh) catch |err| {
+            _ = self.prebuild_failures.fetchAdd(1, .monotonic);
+            std.log.warn("eager handler load failed: {s}", .{@errorName(err)});
+            self.pool.dropRuntime(fresh);
+            return;
+        };
+        self.pool.release(fresh);
+    }
+
     fn releaseForRequest(self: *Self, rt: *zq.LockFreePool.Runtime) void {
+        // Read before dropRuntime frees `rt`. A slot whose build failed in
+        // ensureRuntime also reaches here, and it must not be built a second time.
+        const was_built = rt.user_data != null;
         if (rt.user_data) |ptr| {
             const runtime: *HandlerInstance = @ptrCast(@alignCast(ptr));
             runtime.prepareForPoolRelease();
@@ -724,6 +752,10 @@ pub const HandlerPool = struct {
         if (audit_poisoned or policy_recycle) {
             _ = self.recycles.fetchAdd(1, .monotonic);
             self.pool.dropRuntime(rt);
+            // Build before the in_use decrement: this worker still holds the slot's
+            // capacity, and Server.shutdown, which drains getInUse(), waits for the build.
+            // A failed audit keeps the on-demand rebuild.
+            if (policy_recycle and !audit_poisoned and was_built) self.prebuildReplacement();
             _ = self.in_use.fetchSub(1, .monotonic);
             return;
         }
@@ -738,6 +770,7 @@ pub const HandlerPool = struct {
         arena_audit_failures: u64,
         persistent_escape_failures: u64,
         recycles: u64,
+        prebuild_failures: u64,
         panics: u64,
         timeouts: u64,
         pooling_policy: contract_runtime.PoolingPolicy,
@@ -748,6 +781,7 @@ pub const HandlerPool = struct {
             .arena_audit_failures = self.arena_audit_failures.load(.acquire),
             .persistent_escape_failures = self.persistent_escape_failures.load(.acquire),
             .recycles = self.recycles.load(.acquire),
+            .prebuild_failures = self.prebuild_failures.load(.acquire),
             .panics = self.panics.load(.acquire),
             .timeouts = self.timeouts.load(.acquire),
             .pooling_policy = self.pooling_policy,
@@ -1009,6 +1043,9 @@ test "WorkerRuntimeLease deinit is a no-op after quarantine" {
     pool.quarantineLeasedRuntime(&lease);
     try testing.expectEqual(@as(usize, 0), pool.getInUse());
     try testing.expect(!lease.active);
+    // A quarantine keeps the on-demand rebuild: no eager replacement.
+    try testing.expectEqual(@as(usize, 0), pool.pool.getAvailable());
+    try testing.expectEqual(@as(u64, 0), pool.getMetrics().prebuild_failures);
 
     lease.deinit();
     try testing.expectEqual(@as(usize, 0), pool.getInUse());
@@ -1020,6 +1057,71 @@ test "WorkerRuntimeLease deinit is a no-op after quarantine" {
     const metrics = pool.getMetrics();
     try testing.expectEqual(@as(u64, 1), metrics.panics);
     try testing.expectEqual(@as(u64, 1), metrics.recycles);
+}
+
+test "a policy recycle leaves a built runtime in the pool" {
+    const allocator = std.testing.allocator;
+    var pool = try HandlerPool.init(allocator, .{}, "function handler(req) { return Response.text('ok'); }", "<runtime-pool-test>", 1, 0);
+    defer pool.deinit();
+    try testing.expectEqual(contract_runtime.PoolingPolicy.reuse_bounded_by_count, pool.pooling_policy);
+    pool.pooling_thresholds.max_requests = 3;
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    // Prewarm already counted one request, so the slot recycles within max_requests requests.
+    var served: usize = 0;
+    while (pool.getMetrics().recycles == 0 and served < 3) : (served += 1) {
+        var response = try pool.executeHandler(request.asView());
+        response.deinit();
+    }
+    const metrics = pool.getMetrics();
+    try testing.expectEqual(@as(u64, 1), metrics.recycles);
+    try testing.expectEqual(@as(u64, 0), metrics.prebuild_failures);
+    try testing.expectEqual(@as(usize, 1), pool.pool.getAvailable());
+    try testing.expectEqual(@as(usize, 1), pool.pool.getSize());
+    try testing.expectEqual(@as(usize, 0), pool.getInUse());
+    const pooled = pool.pool.slots[0].load(.acquire) orelse return error.TestExpectedPooledRuntime;
+    try testing.expect(pooled.user_data != null);
+
+    var response = try pool.executeHandler(request.asView());
+    defer response.deinit();
+    try testing.expectEqualStrings("ok", response.body);
+    try testing.expectEqual(@as(usize, 1), pool.pool.getSize());
+    try testing.expectEqual(@as(u64, 1), pool.getMetrics().recycles);
+}
+
+test "a failed handler build does not prebuild" {
+    const allocator = std.testing.allocator;
+    var pool = try HandlerPool.init(allocator, .{}, "function handler(req) { return Response.text('ok'); }", "<runtime-pool-test>", 1, 0);
+    defer pool.deinit();
+    pool.pooling_policy = .ephemeral;
+    // HandlerPool.init prewarms, so switch to source that fails to load afterwards.
+    _ = try pool.reloadSourceGeneration("function handler(req) { return ; ", "<broken>", null, null);
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    for (0..2) |_| {
+        if (pool.executeHandler(request.asView())) |ok| {
+            var response = ok;
+            response.deinit();
+            return error.TestExpectedHandlerLoadFailure;
+        } else |_| {}
+        try testing.expectEqual(@as(usize, 0), pool.pool.getAvailable());
+        try testing.expectEqual(@as(usize, 0), pool.getInUse());
+    }
+    try testing.expectEqual(@as(u64, 0), pool.getMetrics().prebuild_failures);
 }
 
 test "acquireForRequest waits out contention up to the timeout, not a retry cap" {

@@ -367,6 +367,12 @@ pub const LockFreePool = struct {
         }
 
         // Create new runtime (slow path)
+        return self.createRuntime();
+    }
+
+    /// Build a fresh runtime that the caller owns (`in_use`), counted in `size`.
+    /// Give it back with `release` or `dropRuntime`.
+    pub fn createRuntime(self: *LockFreePool) !*Runtime {
         const runtime = try Runtime.create(self.allocator, self.config);
         runtime.in_use = true;
         _ = self.size.fetchAdd(1, .monotonic);
