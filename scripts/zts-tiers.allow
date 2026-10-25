@@ -139,6 +139,7 @@ zts-compiler diagnostic_projection.zig
 zts-compiler effect_inference.zig
 zts-compiler fault_coverage.zig
 zts-compiler flow_checker.zig
+zts-compiler flow_checker_tests.zig
 zts-compiler flow_report.zig
 zts-compiler flow_evidence.zig
 zts-compiler flow_interp.zig
@@ -159,6 +160,7 @@ zts-compiler module_types.zig
 zts-compiler ok_record.zig
 zts-compiler path_generator.zig
 zts-compiler pipeline.zig
+zts-compiler pipeline_tests.zig
 zts-compiler proof_ir.zig
 zts-compiler proof_trace.zig
 zts-compiler property_diagnostics.zig
