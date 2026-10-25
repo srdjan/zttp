@@ -105,6 +105,10 @@ zts parser/token.zig
 zts parser/tokenizer.zig
 zts parser/trivia.zig
 zts parser/type_syntax.zig
+zts parser/type_syntax_parser.zig
+zts parser/type_syntax_scan.zig
+zts parser/type_syntax_store.zig
+zts parser/type_syntax_support.zig
 zts policy.zig
 zts printer.zig
 zts pool.zig
