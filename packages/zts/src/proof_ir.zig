@@ -545,9 +545,9 @@ pub fn deriveTotality(
         const node = proof.nodes[index];
         total[index] = switch (node.tag) {
             .return_node => true,
-            .function => firstChildTotal(total, node),
-            .sequence => anyChildTotal(total, node),
-            .branch => node.child_count == 2 and allChildrenTotal(total, node),
+            .function => firstChildTotal(proof, total, node),
+            .sequence => anyChildTotal(proof, total, node),
+            .branch => node.child_count == 2 and allChildrenTotal(proof, total, node),
             .loop_node, .plain, .capability_call => false,
         };
         for (declared) |declared_id| {
@@ -557,24 +557,27 @@ pub fn deriveTotality(
     return total;
 }
 
-fn firstChildTotal(total: []const bool, node: Node) bool {
+fn firstChildTotal(proof: ProofIr, total: []const bool, node: Node) bool {
     if (node.child_count == 0) return false;
-    return total[node.first_child];
+    return proof.nodes[node.first_child].tag != .function and total[node.first_child];
 }
 
-fn anyChildTotal(total: []const bool, node: Node) bool {
+fn anyChildTotal(proof: ProofIr, total: []const bool, node: Node) bool {
     var i: u32 = 0;
     while (i < node.child_count) : (i += 1) {
-        if (total[node.first_child + i]) return true;
+        const child = proof.nodes[node.first_child + i];
+        // A function's body returns only when called, not when declared.
+        if (child.tag != .function and total[child.id]) return true;
     }
     return false;
 }
 
-fn allChildrenTotal(total: []const bool, node: Node) bool {
+fn allChildrenTotal(proof: ProofIr, total: []const bool, node: Node) bool {
     if (node.child_count == 0) return false;
     var i: u32 = 0;
     while (i < node.child_count) : (i += 1) {
-        if (!total[node.first_child + i]) return false;
+        const child = proof.nodes[node.first_child + i];
+        if (child.tag == .function or !total[child.id]) return false;
     }
     return true;
 }
@@ -584,8 +587,8 @@ pub fn ruleAt(proof: ProofIr, total: []const bool, id: u32) ?Rule {
     const node = proof.nodes[id];
     return switch (node.tag) {
         .return_node => .return_total,
-        .sequence => if (anyChildTotal(total, node)) .sequence_member_total else null,
-        .branch => if (node.child_count == 2 and allChildrenTotal(total, node))
+        .sequence => if (anyChildTotal(proof, total, node)) .sequence_member_total else null,
+        .branch => if (node.child_count == 2 and allChildrenTotal(proof, total, node))
             .branch_both_arms_total
         else
             null,
@@ -847,6 +850,25 @@ test "an if without an else does not establish totality" {
     const total = try deriveTotality(allocator, proof, &.{});
     defer allocator.free(total);
     try testing.expect(!total[function_id]);
+}
+
+test "declaring a returning helper does not return from its enclosing handler" {
+    for ([_][]const u8{
+        "function handler(req) { function helper() { return Response.text(\"helper\"); } }",
+        "function handler(req) { if (req.method === \"GET\") { function a() { return Response.text(\"a\"); } } else { function b() { return Response.text(\"b\"); } } }",
+    }) |source| {
+        var lowered = try parseAndLower(testing.allocator, source);
+        defer lowered.deinit();
+        const proof = lowered.proof;
+        const total = try deriveTotality(testing.allocator, proof, &.{});
+        defer testing.allocator.free(total);
+        const handler = proof.handler_function orelse return error.TestUnexpectedResult;
+        try testing.expect(!total[handler]);
+        try testing.expectEqual(@as(?Rule, null), ruleAt(proof, total, proof.nodes[handler].first_child));
+        for (proof.nodes) |node| {
+            if (node.tag == .function and node.id != handler) try testing.expect(total[node.id]);
+        }
+    }
 }
 
 test "an if with both arms returning is total" {

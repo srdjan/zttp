@@ -670,9 +670,11 @@ const Session = struct {
             const node = try self.certificate.ir.get(index);
             const value = switch (node.tag) {
                 .return_node => true,
-                .function => node.child_count > 0 and self.total.get(node.first_child),
-                .sequence => self.anyChildTotal(node),
-                .branch => node.child_count == 2 and self.allChildrenTotal(node),
+                .function => node.child_count > 0 and
+                    (try self.certificate.ir.get(node.first_child)).tag != .function and
+                    self.total.get(node.first_child),
+                .sequence => try self.anyChildTotal(node),
+                .branch => node.child_count == 2 and try self.allChildrenTotal(node),
                 // A guarded call returns a value; it never returns a Response
                 // from the handler, so it establishes no totality.
                 .loop_node, .plain, .capability_call => false,
@@ -681,32 +683,35 @@ const Session = struct {
         }
     }
 
-    fn anyChildTotal(self: *Session, node: cert_mod.IrNode) bool {
+    fn anyChildTotal(self: *Session, node: cert_mod.IrNode) SessionError!bool {
         @setRuntimeSafety(true);
         var i: u32 = 0;
         while (i < node.child_count) : (i += 1) {
-            if (self.total.get(node.first_child + i)) return true;
+            const child = try self.certificate.ir.get(node.first_child + i);
+            // A function's body returns only when called, not when declared.
+            if (child.tag != .function and self.total.get(child.id)) return true;
         }
         return false;
     }
 
-    fn allChildrenTotal(self: *Session, node: cert_mod.IrNode) bool {
+    fn allChildrenTotal(self: *Session, node: cert_mod.IrNode) SessionError!bool {
         @setRuntimeSafety(true);
         if (node.child_count == 0) return false;
         var i: u32 = 0;
         while (i < node.child_count) : (i += 1) {
-            if (!self.total.get(node.first_child + i)) return false;
+            const child = try self.certificate.ir.get(node.first_child + i);
+            if (child.tag == .function or !self.total.get(child.id)) return false;
         }
         return true;
     }
 
     /// The rule that closes totality at `node`, derived here rather than read.
-    fn ruleAt(self: *Session, node: cert_mod.IrNode) ?ps.Rule {
+    fn ruleAt(self: *Session, node: cert_mod.IrNode) SessionError!?ps.Rule {
         @setRuntimeSafety(true);
         return switch (node.tag) {
             .return_node => .return_total,
-            .sequence => if (self.anyChildTotal(node)) .sequence_member_total else null,
-            .branch => if (node.child_count == 2 and self.allChildrenTotal(node))
+            .sequence => if (try self.anyChildTotal(node)) .sequence_member_total else null,
+            .branch => if (node.child_count == 2 and try self.allChildrenTotal(node))
                 .branch_both_arms_total
             else
                 null,
@@ -867,7 +872,7 @@ const Session = struct {
             },
             .proved => |rule| {
                 const node = try self.certificate.ir.get(entry.node_id);
-                const derived = self.ruleAt(node) orelse
+                const derived = (try self.ruleAt(node)) orelse
                     return .{ .rejected = reject(.evidence_check, .rule_premise_unmet, .{ .rule = rule }) };
                 if (derived != rule) {
                     return .{ .rejected = reject(.evidence_check, .rule_premise_unmet, .{ .rule = rule }) };
@@ -2417,6 +2422,59 @@ test "a graded totality claim on a nonreturning handler is fabricated" {
     const result = check(fixture.inputs(), policy_mod.production);
     try expectAt(result, .evidence_check, .fabricated_property);
     try testing.expect(!result.rejection().?.recertifiable);
+}
+
+test "returning nested declarations cannot establish sequence or branch totality" {
+    const sequence = [_]cert_mod.IrNode{
+        .{ .id = 0, .tag = .function, .is_handler = true, .parent = 0, .first_child = 1, .child_count = 1, .digest = test_support.digest(20) },
+        .{ .id = 1, .tag = .sequence, .parent = 0, .first_child = 2, .child_count = 1, .digest = test_support.digest(21) },
+        .{ .id = 2, .tag = .function, .parent = 1, .first_child = 3, .child_count = 1, .digest = test_support.digest(22) },
+        .{ .id = 3, .tag = .sequence, .parent = 2, .first_child = 4, .child_count = 1, .digest = test_support.digest(23) },
+        .{ .id = 4, .tag = .return_node, .parent = 3, .first_child = 0, .child_count = 0, .digest = test_support.digest(24) },
+    };
+    const branch = [_]cert_mod.IrNode{
+        .{ .id = 0, .tag = .function, .is_handler = true, .parent = 0, .first_child = 1, .child_count = 1, .digest = test_support.digest(20) },
+        .{ .id = 1, .tag = .branch, .parent = 0, .first_child = 2, .child_count = 2, .digest = test_support.digest(21) },
+        .{ .id = 2, .tag = .function, .parent = 1, .first_child = 4, .child_count = 1, .digest = test_support.digest(22) },
+        .{ .id = 3, .tag = .function, .parent = 1, .first_child = 5, .child_count = 1, .digest = test_support.digest(23) },
+        .{ .id = 4, .tag = .return_node, .parent = 2, .first_child = 0, .child_count = 0, .digest = test_support.digest(24) },
+        .{ .id = 5, .tag = .return_node, .parent = 3, .first_child = 0, .child_count = 0, .digest = test_support.digest(25) },
+    };
+    const function_body = [_]cert_mod.IrNode{
+        .{ .id = 0, .tag = .function, .is_handler = true, .parent = 0, .first_child = 1, .child_count = 1, .digest = test_support.digest(20) },
+        .{ .id = 1, .tag = .function, .parent = 0, .first_child = 2, .child_count = 1, .digest = test_support.digest(21) },
+        .{ .id = 2, .tag = .return_node, .parent = 1, .first_child = 0, .child_count = 0, .digest = test_support.digest(22) },
+    };
+    const sibling_return = [_]cert_mod.IrNode{
+        .{ .id = 0, .tag = .sequence, .parent = 0, .first_child = 1, .child_count = 2, .digest = test_support.digest(20) },
+        .{ .id = 1, .tag = .function, .is_handler = true, .parent = 0, .first_child = 2, .child_count = 0, .digest = test_support.digest(21) },
+        .{ .id = 2, .tag = .return_node, .parent = 0, .first_child = 0, .child_count = 0, .digest = test_support.digest(22) },
+    };
+    for ([_][]const cert_mod.IrNode{ &sequence, &branch, &function_body, &sibling_return }) |nodes| {
+        var fixture = try test_support.build();
+        for (nodes) |node| {
+            if (!node.is_handler) continue;
+            for (&fixture.obligations) |*obligation| obligation.* = reconstructed(obligation.property, node.id);
+        }
+        var parts = fixture.parts();
+        parts.ir = nodes;
+        parts.identity.ir_root = cert_mod.irRootFromNodes(nodes);
+        parts.translation = &.{};
+        parts.rewrites = &.{};
+        var evidence: [8]cert_mod.Evidence = undefined;
+        evidence[0] = fixture.evidence[0];
+        evidence[0].rule = if (nodes[1].tag == .branch) .branch_both_arms_total else .sequence_member_total;
+        @memcpy(evidence[1..], fixture.evidence[3..10]);
+        parts.evidence = &evidence;
+        for (&fixture.members) |*member| {
+            if (member.kind == .proof_ir) member.digest = parts.identity.ir_root;
+        }
+        try fixture.encodeParts(parts);
+        try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .rule_premise_unmet);
+        evidence[0] = test_support.testedFor(0);
+        try fixture.encodeParts(parts);
+        try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .fabricated_property);
+    }
 }
 
 test "one branch arm cannot establish totality" {
