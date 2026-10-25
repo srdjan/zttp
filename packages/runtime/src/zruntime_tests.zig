@@ -786,6 +786,14 @@ test "an error inside a reduce callback fails the call" {
     ));
 }
 
+test "an error inside a component fails the render" {
+    try std.testing.expectError(error.HandlerError, runFailingCallbackHandler(
+        "function boom(n) { const o = { a: n }; const f = o.missing; return f(); }" ++
+            "function Comp(props) { return boom(0); }" ++
+            "function handler(req) { return Response.html(renderToString(h(Comp, {}))); }",
+    ));
+}
+
 test "non-Response return 500 is proof-explained against exhaustive_returns" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
