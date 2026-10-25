@@ -2869,106 +2869,46 @@ pub const Store = struct {
     }
 
     fn validateOwnerRangesDoNotOverlap(self: *const Store) !void {
-        for (self.annotations.items, 0..) |annotation, annotation_index| {
-            for (self.annotations.items[annotation_index + 1 ..]) |other| {
-                if (rangesOverlap(annotation.node_range, other.node_range)) {
-                    return error.OverlappingTypeNodeOwnership;
-                }
-            }
-            for (self.declarations.items) |declaration| switch (declaration.body) {
-                .absent => {},
-                .present => |body| if (rangesOverlap(annotation.node_range, body.node_range)) {
-                    return error.OverlappingTypeNodeOwnership;
-                },
-            };
-        }
-        for (self.declarations.items, 0..) |declaration, declaration_index| {
-            const range = switch (declaration.body) {
-                .absent => continue,
-                .present => |body| body.node_range,
-            };
-            for (self.declarations.items[declaration_index + 1 ..]) |other| switch (other.body) {
-                .absent => {},
-                .present => |body| if (rangesOverlap(range, body.node_range)) {
-                    return error.OverlappingTypeNodeOwnership;
-                },
-            };
-            for (self.semantic_fragments.items) |fragment| {
-                if (rangesOverlap(range, fragment.node_range)) return error.OverlappingTypeNodeOwnership;
-            }
-        }
+        const owners = try self.allocator.alloc(u8, self.nodes.items.len);
+        defer self.allocator.free(owners);
+        @memset(owners, 0);
         for (self.annotations.items) |annotation| {
-            for (self.semantic_fragments.items) |fragment| {
-                if (rangesOverlap(annotation.node_range, fragment.node_range)) {
-                    return error.OverlappingTypeNodeOwnership;
-                }
-            }
+            try claimRange(owners, annotation.node_range, error.OverlappingTypeNodeOwnership);
         }
-        for (self.semantic_fragments.items, 0..) |fragment, index| {
-            for (self.semantic_fragments.items[index + 1 ..]) |other| {
-                if (rangesOverlap(fragment.node_range, other.node_range)) {
-                    return error.OverlappingTypeNodeOwnership;
-                }
-            }
+        for (self.declarations.items) |declaration| switch (declaration.body) {
+            .absent => {},
+            .present => |body| try claimRange(
+                owners,
+                body.node_range,
+                error.OverlappingTypeNodeOwnership,
+            ),
+        };
+        for (self.semantic_fragments.items) |fragment| {
+            try claimRange(owners, fragment.node_range, error.OverlappingTypeNodeOwnership);
         }
-        for (self.parameter_annotations.items, 0..) |parameter, parameter_index| {
-            const range = parameter.value.node_range;
-            for (self.annotations.items) |annotation| {
-                if (rangesOverlap(range, annotation.node_range)) {
-                    return error.OverlappingTypeNodeOwnership;
-                }
-            }
-            for (self.declarations.items) |declaration| switch (declaration.body) {
-                .absent => {},
-                .present => |body| if (rangesOverlap(range, body.node_range)) {
-                    return error.OverlappingTypeNodeOwnership;
-                },
-            };
-            for (self.semantic_fragments.items) |fragment| {
-                if (rangesOverlap(range, fragment.node_range)) {
-                    return error.OverlappingTypeNodeOwnership;
-                }
-            }
-            for (self.parameter_annotations.items[parameter_index + 1 ..]) |other| {
-                if (rangesOverlap(range, other.value.node_range)) {
-                    return error.OverlappingTypeNodeOwnership;
-                }
-            }
-            for (self.function_signatures.items) |signature| {
-                if (signature.return_syntax) |return_syntax| {
-                    if (returnSyntaxOverlapsRange(return_syntax, range)) {
-                        return error.OverlappingTypeNodeOwnership;
-                    }
-                }
-            }
+        for (self.parameter_annotations.items) |parameter| {
+            try claimRange(owners, parameter.value.node_range, error.OverlappingTypeNodeOwnership);
         }
-        for (self.function_signatures.items, 0..) |signature, signature_index| {
+        for (self.function_signatures.items) |signature| {
             const return_syntax = signature.return_syntax orelse continue;
-            if (returnSyntaxHasInternalOverlap(return_syntax)) {
-                return error.OverlappingTypeNodeOwnership;
+            switch (return_syntax.structure) {
+                .value => |value| try claimRange(
+                    owners,
+                    value.node_range,
+                    error.OverlappingTypeNodeOwnership,
+                ),
+                .predicate => |predicate| try claimRange(
+                    owners,
+                    predicate.narrowed.node_range,
+                    error.OverlappingTypeNodeOwnership,
+                ),
             }
-            for (self.annotations.items) |annotation| {
-                if (returnSyntaxOverlapsRange(return_syntax, annotation.node_range)) {
-                    return error.OverlappingTypeNodeOwnership;
-                }
-            }
-            for (self.declarations.items) |declaration| switch (declaration.body) {
-                .absent => {},
-                .present => |body| if (returnSyntaxOverlapsRange(return_syntax, body.node_range)) {
-                    return error.OverlappingTypeNodeOwnership;
-                },
-            };
-            for (self.semantic_fragments.items) |fragment| {
-                if (returnSyntaxOverlapsRange(return_syntax, fragment.node_range)) {
-                    return error.OverlappingTypeNodeOwnership;
-                }
-            }
-            for (self.function_signatures.items[signature_index + 1 ..]) |other| {
-                if (other.return_syntax) |other_return| {
-                    if (returnSyntaxesOverlap(return_syntax, other_return)) {
-                        return error.OverlappingTypeNodeOwnership;
-                    }
-                }
+            if (return_syntax.legacy_ordinary_prefix) |compatibility| {
+                try claimRange(
+                    owners,
+                    compatibility.node_range,
+                    error.OverlappingTypeNodeOwnership,
+                );
             }
         }
     }
@@ -2999,39 +2939,6 @@ fn spansOverlap(left: Span, right: Span) bool {
 
 fn spanStrictlyContains(outer: Span, inner: Span) bool {
     return outer.start < inner.start and inner.end < outer.end;
-}
-
-fn returnSyntaxOverlapsRange(value: ReturnSyntax, range: Range) bool {
-    const structure_overlap = switch (value.structure) {
-        .value => |type_value| rangesOverlap(type_value.node_range, range),
-        .predicate => |predicate| rangesOverlap(predicate.narrowed.node_range, range),
-    };
-    if (structure_overlap) return true;
-    return if (value.legacy_ordinary_prefix) |compatibility|
-        rangesOverlap(compatibility.node_range, range)
-    else
-        false;
-}
-
-fn returnSyntaxHasInternalOverlap(value: ReturnSyntax) bool {
-    const compatibility = value.legacy_ordinary_prefix orelse return false;
-    const structure_range = switch (value.structure) {
-        .value => |type_value| type_value.node_range,
-        .predicate => |predicate| predicate.narrowed.node_range,
-    };
-    return rangesOverlap(structure_range, compatibility.node_range);
-}
-
-fn returnSyntaxesOverlap(left: ReturnSyntax, right: ReturnSyntax) bool {
-    const left_structure = switch (left.structure) {
-        .value => |type_value| type_value.node_range,
-        .predicate => |predicate| predicate.narrowed.node_range,
-    };
-    if (returnSyntaxOverlapsRange(right, left_structure)) return true;
-    if (left.legacy_ordinary_prefix) |compatibility| {
-        if (returnSyntaxOverlapsRange(right, compatibility.node_range)) return true;
-    }
-    return false;
 }
 
 fn claimSemanticFragment(owners: []u8, fragment_index: u32) !void {
@@ -7750,7 +7657,7 @@ test "annotation publication failure preserves its cursor and prior syntax" {
                 try std.testing.expectEqual(fail_index, failing.alloc_index);
                 try std.testing.expect(std.meta.eql(before, second));
                 try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
-                try store.validate();
+                try validateAfterAllocationFailure(&store);
             } else {
                 switch (try outcome) {
                     .parsed => {},
@@ -7761,7 +7668,7 @@ test "annotation publication failure preserves its cursor and prior syntax" {
                 try std.testing.expectEqual(@as(usize, 2), store.nodes.items.len);
                 try std.testing.expectEqual(@as(usize, 2), store.annotations.items.len);
                 try std.testing.expectEqualStrings("string", store.annotations.items[1].raw_span.text(source));
-                try store.validate();
+                try validateAfterAllocationFailure(&store);
             }
             return failing.alloc_index;
         }
@@ -8151,6 +8058,7 @@ test "second generic application rolls back every allocation failure" {
 }
 
 test "explicit call reservation owns its record and rolls back every array" {
+    var no_resize = std.testing.FailingAllocator.init(std.testing.allocator, .{ .resize_fail_index = 0 });
     const source =
         "first<Outer<number>>(a); " ++
         "second<Proof<Readonly<{ data: Dict<string, number> }>>, \"pure\">(b);";
@@ -8175,11 +8083,8 @@ test "explicit call reservation owns its record and rolls back every array" {
             });
             try store.finishExplicitCall(&first, first_call, runtime.view());
             try std.testing.expect(!first.active);
-            try store.validate();
-            var first_bases = try store.planApplicationBasesWithIr(
-                std.testing.allocator,
-                runtime.view(),
-            );
+            try validateAfterAllocationFailure(&store);
+            var first_bases = try planApplicationBasesAfterAllocationFailure(&store, runtime.view());
             first_bases.deinit();
             const prior = store.checkpoint();
             try std.testing.expect(prior.nodes > 0);
@@ -8198,22 +8103,16 @@ test "explicit call reservation owns its record and rolls back every array" {
                 error.OutOfMemory => {
                     observed_later_failures.* += 1;
                     try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
-                    try store.validate();
-                    var retained_bases = try store.planApplicationBasesWithIr(
-                        std.testing.allocator,
-                        runtime.view(),
-                    );
+                    try validateAfterAllocationFailure(&store);
+                    var retained_bases = try planApplicationBasesAfterAllocationFailure(&store, runtime.view());
                     retained_bases.deinit();
                     return error.OutOfMemory;
                 },
                 else => return err,
             };
             try store.finishExplicitCall(&second, second_call, runtime.view());
-            try store.validate();
-            var completed_bases = try store.planApplicationBasesWithIr(
-                std.testing.allocator,
-                runtime.view(),
-            );
+            try validateAfterAllocationFailure(&store);
+            var completed_bases = try planApplicationBasesAfterAllocationFailure(&store, runtime.view());
             completed_bases.deinit();
             const completed = store.checkpoint();
             try std.testing.expect(completed.nodes > prior.nodes);
@@ -8241,7 +8140,7 @@ test "explicit call reservation owns its record and rolls back every array" {
     };
     var observed_later_failures: usize = 0;
     try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
+        no_resize.allocator(),
         Context.run,
         .{&observed_later_failures},
     );
@@ -9317,6 +9216,58 @@ test "type owners reject direct indirect and overlapping cross-owner ranges" {
             },
         }
     }
+}
+
+fn appendTypeOwnersForTest(store: *Store, owner_count: usize) !void {
+    const allocator = store.allocator;
+    try store.nodes.ensureTotalCapacity(allocator, owner_count);
+    try store.annotations.ensureTotalCapacity(allocator, owner_count);
+    for (0..owner_count) |index| {
+        store.nodes.appendAssumeCapacity(.{
+            .tag = .primitive,
+            .semantic_span = .{ .start = 0, .end = 0 },
+            .data = .{ .primitive = .number },
+        });
+        store.annotations.appendAssumeCapacity(.{
+            .binding = .global(0),
+            .root = .{ .present = @intCast(index) },
+            .node_range = .{ .start = @intCast(index), .count = 1 },
+            .raw_span = .{ .start = 0, .end = 0 },
+            .admission_end = 0,
+            .semantic_prefix_end = 0,
+        });
+    }
+}
+
+test "validating 2500 disjoint type owners succeeds" {
+    var store = Store.init(std.testing.allocator, "");
+    defer store.deinit();
+    try appendTypeOwnersForTest(&store, 2500);
+    try store.validate();
+}
+
+test "type owner validation rejects invalid ranges and allocation failure" {
+    const allocator = std.testing.allocator;
+    var store = Store.init(allocator, "");
+    defer store.deinit();
+    try appendTypeOwnersForTest(&store, 2);
+
+    std.mem.swap(Annotation, &store.annotations.items[0], &store.annotations.items[1]);
+    try store.validate();
+    std.mem.swap(Annotation, &store.annotations.items[0], &store.annotations.items[1]);
+
+    store.annotations.items[1].node_range.start = 0;
+    store.annotations.items[1].root = .{ .present = 0 };
+    try std.testing.expectError(error.OverlappingTypeNodeOwnership, store.validate());
+    store.annotations.items[1].node_range.start = 2;
+    store.annotations.items[1].root = .{ .present = 1 };
+    try std.testing.expectError(error.InvalidTypeRange, store.validate());
+    store.annotations.items[1].node_range.start = 1;
+
+    var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
+    store.allocator = failing.allocator();
+    try std.testing.expectError(error.OutOfMemory, store.validate());
+    store.allocator = allocator;
 }
 
 test "application base plan rejects nonexclusive base nodes" {
@@ -10656,7 +10607,24 @@ test "admitted annotation failure preserves a published seed" {
     );
     try std.testing.expect(failing.has_induced_failure);
     try std.testing.expect(std.meta.eql(prior, store.checkpoint()));
+    try validateAfterAllocationFailure(&store);
+}
+
+fn validateAfterAllocationFailure(store: *Store) !void {
+    const allocator = store.allocator;
+    store.allocator = std.testing.allocator;
+    defer store.allocator = allocator;
     try store.validate();
+}
+
+fn planApplicationBasesAfterAllocationFailure(
+    store: *Store,
+    view: ir.IrView,
+) !Store.ApplicationBasePlan {
+    const allocator = store.allocator;
+    store.allocator = std.testing.allocator;
+    defer store.allocator = allocator;
+    return store.planApplicationBasesWithIr(std.testing.allocator, view);
 }
 
 /// Publish one `number` annotation so a test starts from prior syntax.
