@@ -950,6 +950,29 @@ test "parseServeArgs parses internal debug panic path flag" {
     try std.testing.expectEqualStrings("/flag", config.runtime_config.debug_panic_path.?);
 }
 
+test "every serve_value_flags entry is a value flag in applyServeFlags" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    for (shared.serve_value_flags) |flag| {
+        var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
+        var handler_set = false;
+        // A value flag with no value fails in takeArg; an unknown flag fails
+        // with UnknownOption and a flag without a value succeeds.
+        if (applyServeFlags(arena.allocator(), &.{flag}, &config, &handler_set, null)) |_| {
+            return error.FlagTakesNoValue;
+        } else |err| try std.testing.expect(err != error.UnknownOption);
+    }
+}
+
+test "parseServeArgs finds the handler path after --_debug-panic-path" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const config = try parseServeArgs(arena.allocator(), &.{ "--_debug-panic-path", "/x", "handler.ts" });
+    try std.testing.expectEqualStrings("handler.ts", config.handler.file_path);
+}
+
 test "debug panic path flag is refused in ReleaseFast and ReleaseSmall configurations" {
     var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
     const argv = [_][]const u8{ "--_debug-panic-path", "/x" };

@@ -115,6 +115,42 @@ pub fn writeStderrLine(s: []const u8) void {
     _ = std.c.write(std.c.STDERR_FILENO, "\n", 1);
 }
 
+/// The serve flags that consume the next argument. `findPositionalPath` skips
+/// these values; `runtime_cli.zig` `applyServeFlags` parses them, and its test
+/// checks that each entry is a value flag there.
+pub const serve_value_flags = [_][]const u8{
+    "-p",
+    "--port",
+    "-h",
+    "--host",
+    "-e",
+    "--eval",
+    "-m",
+    "--memory",
+    "-n",
+    "--pool",
+    "--static",
+    "--outbound-host",
+    "--outbound-timeout-ms",
+    "--outbound-max-response",
+    "--max-body-size",
+    "--security-log",
+    "--lifecycle",
+    "--sqlite",
+    "--trace",
+    "--incident-log",
+    "--replay",
+    "--test",
+    "--_debug-panic-path",
+};
+
+fn isServeValueFlag(arg: []const u8) bool {
+    for (serve_value_flags) |flag| {
+        if (std.mem.eql(u8, arg, flag)) return true;
+    }
+    return false;
+}
+
 pub fn findPositionalPath(argv: []const []const u8) ?[]const u8 {
     var skip_next = false;
     for (argv) |arg| {
@@ -122,29 +158,7 @@ pub fn findPositionalPath(argv: []const []const u8) ?[]const u8 {
             skip_next = false;
             continue;
         }
-        if (std.mem.eql(u8, arg, "-p") or
-            std.mem.eql(u8, arg, "--port") or
-            std.mem.eql(u8, arg, "-h") or
-            std.mem.eql(u8, arg, "--host") or
-            std.mem.eql(u8, arg, "-e") or
-            std.mem.eql(u8, arg, "--eval") or
-            std.mem.eql(u8, arg, "-m") or
-            std.mem.eql(u8, arg, "--memory") or
-            std.mem.eql(u8, arg, "-n") or
-            std.mem.eql(u8, arg, "--pool") or
-            std.mem.eql(u8, arg, "--static") or
-            std.mem.eql(u8, arg, "--outbound-host") or
-            std.mem.eql(u8, arg, "--outbound-timeout-ms") or
-            std.mem.eql(u8, arg, "--outbound-max-response") or
-            std.mem.eql(u8, arg, "--max-body-size") or
-            std.mem.eql(u8, arg, "--security-log") or
-            std.mem.eql(u8, arg, "--lifecycle") or
-            std.mem.eql(u8, arg, "--sqlite") or
-            std.mem.eql(u8, arg, "--trace") or
-            std.mem.eql(u8, arg, "--incident-log") or
-            std.mem.eql(u8, arg, "--replay") or
-            std.mem.eql(u8, arg, "--test"))
-        {
+        if (isServeValueFlag(arg)) {
             skip_next = true;
             continue;
         }
@@ -275,6 +289,13 @@ pub fn foldPathIntoHash(io: std.Io, hash: *std.hash.Wyhash, path: []const u8) !v
         hash.update(std.mem.asBytes(&entry_stat.mtime.nanoseconds));
         hash.update(std.mem.asBytes(&entry_stat.size));
     }
+}
+
+test "findPositionalPath skips the value of --_debug-panic-path" {
+    try std.testing.expectEqualStrings(
+        "handler.ts",
+        findPositionalPath(&.{ "--_debug-panic-path", "/x", "handler.ts" }).?,
+    );
 }
 
 test "parse size" {
