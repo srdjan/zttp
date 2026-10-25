@@ -111,7 +111,7 @@ Every operation in the closed set is implemented as of 2026-08-03. The
 and a future member may land deferred: such an operation answers
 `operation_not_implemented`, never `unknown_operation`, since it is a named
 member of the spec's set and saying otherwise would be false. Read the status
-column from `agent_protocol.zig` rather than from here - this table was stale for
+column from `agent_protocol_envelope.zig` rather than from here - this table was stale for
 three operations until it was reconciled.
 
 The protocol is read-only. Source writes belong to PI's aggregate change-set

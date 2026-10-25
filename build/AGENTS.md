@@ -8,8 +8,8 @@ Build modules may compose repository packages. No import boundary applies becaus
 
 ## Invariants
 
-- **Every build task has a declared execution route or an explicit manual classification.**
-  An unreachable task can appear healthy while no aggregate runs it. Proved by `zig build test-step-coverage`.
+- **Every build task has a route in `agents.json`, and a task that nothing runs states why.**
+  An unreachable task can appear healthy while no aggregate runs it. `check-spine` holds each route against the live graph. Proved by `zig build check-spine`.
 
 - **The live build graph supplies one completed task census to the spine checker.**
   Source spelling must not become a second task authority. Proved by `zig build check-spine`.

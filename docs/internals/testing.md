@@ -64,6 +64,14 @@ test in that root whose name omits the token never runs.
 A gate in `packages/pi/src/standin_range_tests.zig` enforces the naming rule the
 filter depends on. See "Adding A Test Root" for the rule behind it.
 
+Typed analyzer tests parse through the production mode, `JsParser.initAdmission(..., .compile)`. A test
+whose expectation depends on a parse mode that no user runs proves nothing about production.
+
+Some production files keep their tests in a sibling file so that the production code stays readable:
+`flow_checker_tests.zig`, `pipeline_tests.zig`, `precompile_check_tests.zig`, and the test-bearing
+files of the `type_syntax` and `agent_protocol` splits. A `comptime` block in the facade imports
+each sibling, so the test roots collect the same tests.
+
 Two of those roots exist because of how modules are wired rather than because
 of what they test. `canonicalize.zig` and `zts_cli.zig` are reached only
 through the `zts_cli` named module, so a test root that imports them by
@@ -315,6 +323,9 @@ would re-enter the build graph - and `zig build test` depends on it, so
 its suite count, because a run that lost its calls printed "Suites: 0 total, 0
 passed, 0 failed" and exited 0.
 
+Each shell gate that wraps a built tool takes the tool as an argument and refuses to run without it,
+with a usage message and a non-zero exit. The build steps pass the tool. No script rebuilds it.
+
 The general form now has an execution-route gate.
 `scripts/check-script-reachability.sh` receives a census of scripts executed
 by covered build Run steps and the canonical driver. It compares these with
@@ -446,6 +457,11 @@ when it consumes the shared tool cores through the `zts_cli` named module.
 Reaching a new `zts` internal module from `runtime`, `tools`, or `pi` also
 needs a row in `scripts/module-boundary.allow`, and a row
 that nothing uses fails the same gate. Run `zig build test-module-boundary`.
+
+`zig build test-module-boundary` runs `zts-graph-gate module-boundary`
+(`tooling/module_boundary_gate.zig`). Its Zig tests carry the rejection probes: an unlisted reach,
+a stale row, an alias that leaks between files, a failed file listing, a failed scan, and a layout
+that parses too few internals.
 
 `packages/proof-checker` is the consumer acceptance kernel and the only thing
 in the repository whose word decides whether an artifact may serve production

@@ -14,7 +14,7 @@ share the same `zts` engine and contract logic.
 
 | Path | Role |
 |---|---|
-| `packages/runtime/` | HTTP server, runtime adapter, CLI, local deploy, proof ledger. |
+| `packages/runtime/` | HTTP server, runtime adapter, CLI, local deploy, proof ledger, and the proof review and card types in `src/proofs/`. |
 | `packages/zts/` | Parser, type checker, verifier, bytecode, interpreter, contracts, virtual-module registry. |
 | `packages/tools/` | Precompile pipeline and analyzer command registry shared by `zttp` and `zts`. |
 | `packages/modules/` | SDK-pure virtual modules and module spec JSON. |
@@ -24,6 +24,30 @@ share the same `zts` engine and contract logic.
 
 `build.zig` and the files under `build/` wire the packages, build options, tests, smoke checks, and release
 steps.
+
+### Split modules
+
+A few large modules are a facade plus files that each own one responsibility. The facade
+re-exports every public name, so a caller imports the same file as before.
+
+- `packages/tools/src/precompile.zig` keeps the compile pipeline and the shared types.
+  `precompile_cli.zig` holds the `-Dhandler` command line and the generated Zig writers.
+  `precompile_check_run.zig` is the CHECK facade, and `precompile_contract.zig` builds the
+  contract and policy. `precompile_sql.zig`, `precompile_reports.zig`,
+  `precompile_virtual_imports.zig`, and `precompile_stderr.zig` hold the smaller parts.
+- `packages/tools/src/agent_protocol.zig` re-exports the protocol. One file owns each operation:
+  `agent_protocol_envelope.zig` (operation table, schema hash, envelope), `_request`, `_dispatch`,
+  `_meta`, `_simulate`, `_verify`, `_check`, `_canon`, and `_cli`.
+- `packages/zts/src/parser/type_syntax.zig` re-exports the type syntax. `type_syntax_store.zig`
+  holds the records and the store, `type_syntax_scan.zig` the admission scanners, and
+  `type_syntax_parser.zig` the type parser.
+- `packages/runtime/src/server_connection_pool.zig` holds `ConnectionPool` and the access-log
+  helpers. The static path checks stay in `server_static.zig`.
+- `flow_checker.zig`, `pipeline.zig`, and the CHECK facade keep their tests in sibling files
+  (`flow_checker_tests.zig`, `pipeline_tests.zig`, `precompile_check_tests.zig`).
+- Four leaf modules in `packages/zts/src` hold helpers that several analyzers share, so no analyzer
+  imports a peer for one function: `binding_key.zig`, `handler_function.zig`, `ok_record.zig`, and
+  `source_line.zig`.
 
 ## Request Flow
 
@@ -141,6 +165,9 @@ no runtime statement or binding. Store records retain original source spans
 and refer to final runtime owners when a type belongs to a runtime node.
 Failed speculation rolls back the syntax it attempted.
 
+Nodes enter `IRStore` through typed constructors (`addInt`, `addCall`, `addVarDecl`, and so on).
+Each constructor packs one payload kind into the compact columns. There is no struct adapter.
+
 `DirectCheckSource` owns source admission and the parser result used by CHECK
 and compilation. It keeps parser diagnostics on original source coordinates.
 The file-path admission boundary accepts `.ts`; it refuses `.js`, `.jsx`,
@@ -154,7 +181,9 @@ lowers validated store ranges through `TypePool` and binds semantic types
 to final declaration and runtime owners. It retains the authored type
 namespace, alias construction order, generic scope, and function signatures.
 Omitted typing is used where a contract is extracted without authored source
-annotations. Consumers must receive the matching source selection and a
+annotations. A standalone type text, such as a binding signature or an ambient name, goes through
+`type_syntax_lowering.parseTypeText`, the same grammar as authored source. `TypePool` holds no
+second type parser. Consumers must receive the matching source selection and a
 healthy environment and pool.
 
 `ParsedModule.fromTypedExisting` binds a borrowed syntax store to runtime IR
@@ -183,6 +212,15 @@ They run across two pipeline phases (`bool` and `strict` during resolve,
 and thread analysis state through descent, so adding a new IR node type requires
 updating each relevant walker. A full single-pass visitor unification is
 intentionally not attempted: the traversals are not the same traversal.
+
+The checkers share three outputs. Every checker renders its diagnostics through
+`diagnostic_projection.writeAll`, which projects each diagnostic and writes it with
+`SourceView.writeDiagnostic` under the scope word of its source (`verify `, `strict `, `type `,
+or none). Fault coverage keeps its own text form. The property lists that name
+`HandlerProperties` fields (`FlowProperties`, `counterexample.PropertyTag`,
+`spec_discharge.PropertyField`, the loss-severity and suggestion tables, and others) each call
+`HandlerProperties.coverageProblem` or `namesCoverageProblem` in a `comptime` block. A new field
+fails the build until every list includes it or excludes it with a reason.
 
 ### Module analysis ownership
 
@@ -221,7 +259,7 @@ Contract analysis failures stop extraction and do not become unavailable path fa
 
 The `full` profile runs resolution for CHECK and single-module compilation.
 The `contract_only` profile builds contracts without source annotations.
-It can run flow after contract extraction for the tools helper.
+`extractContract` runs the selected flow pass when it has not run and applies its properties to the contract. A caller cannot publish the default flow properties by forgetting a second step. A source with no handler keeps the defaults for the tools callers, and the one-shot pipeline entry points report every flow property false.
 The `sound_extraction` profile resolves soundness before contract extraction.
 
 Each selected pass has one attempt.
