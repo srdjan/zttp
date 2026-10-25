@@ -1,7 +1,7 @@
 # Roadmap
 
-This document owns work status and scheduling. Reviewed against local `main`
-at `a0181c16` on 2026-09-21. Shipped changes live in
+This document owns work status and scheduling. The reset status was updated
+on 2026-10-25; reset phase R13 reviews the whole document. Shipped changes live in
 [CHANGELOG.md](../CHANGELOG.md); current behavior lives in the
 [User Guide](user-guide.md). The [plan index](plans/README.md) separates open
 work from reference designs. Product proposals (`pre-rebase:docs/zttp-next/README.md`) and
@@ -9,15 +9,12 @@ work from reference designs. Product proposals (`pre-rebase:docs/zttp-next/READM
 
 ## Milestones
 
-The owner selected all eight items in the [hardening and pruning plan](plans/2026-10-20-hardening-pruning-plan.md)
-on 2026-10-20. Its ownership fixes, executable verification routes, transport
-and binding consolidation, and remaining compiler/flow convergence precede
-further feature work. The existing flow redesign remains the authority for
-its semantic phases and cutover criteria.
+The [2026-10-25 reset plan](plans/2026-10-25-reset-implementation-plan.md) owns the active reset design, phase order, and acceptance.
+The owner approved phases R0 to R13 on 2026-10-25.
+The [reset worklog](plans/2026-10-25-reset-worklog.md) records current work and verification evidence.
+The reset precedes further feature work. Model-visible changes wait for one later re-record window (the plan's Decision 2).
 
-The [reset implementation plan](plans/2026-10-14-reset-implementation-plan.md) owns the active reset design, phase order, and acceptance.
-The owner approved implementation on 2026-10-15.
-The [reset worklog](plans/2026-10-15-reset-worklog.md) records current work and verification evidence.
+The [2026-10-14 reset plan](plans/2026-10-14-reset-implementation-plan.md) is complete: U1 to U20 are committed. It is no longer the reset authority.
 
 M1, M2, and M3 are complete.
 M4 is complete: T1a to T7 were delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 2 later removed both runtime products. No release date is assigned.
@@ -236,13 +233,14 @@ The reset ledger (`pre-rebase:docs/archive/plans/2026-07-28-001-reset-simplifica
 The shared import and binding index shipped. The old parser-deletion estimate
 is obsolete.
 
-The [reset implementation plan](plans/2026-10-14-reset-implementation-plan.md)
-governs the direct typed parser, shared analysis, workspace owner, and retired
-state removal. U1–U20 are committed locally. The
+The [2026-10-14 reset plan](plans/2026-10-14-reset-implementation-plan.md)
+records the direct typed parser, shared analysis, workspace owner, and retired
+state removal. U1 to U20 are complete. Its
 [worklog](plans/2026-10-15-reset-worklog.md) records test receipts, sandbox
-limits, and the unresolved advisory benchmark result. The historical phase
-plans remain evidence of their own
-completed work, not a second implementation authority.
+limits, and the unresolved advisory benchmark result. The
+[2026-10-25 reset plan](plans/2026-10-25-reset-implementation-plan.md) is the
+current reset authority. The historical phase plans remain evidence of their
+own completed work, not a second implementation authority.
 
 | Work | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|

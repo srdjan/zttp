@@ -29,3 +29,11 @@ This worklog records execution, commands, exit statuses, and stop-rule results.
 - Limits: the test reads handler sources at run time, so a cached pass after an edit to `examples/` or the corpus can be stale. The test walks directories, so an untracked `.ts` file under those roots fails it. Five aggregate roots analyze `precompile.zig`, so the aggregate runs the test five times (7765 to 7770 tests). The aggregate took 131 seconds after the change, inside the 124 to 177 second range at the base.
 - After the cherry-pick: fresh-cache `zig build test` exit 0 (7770/7776 passed, 6 skipped); `zig build check-spine` exit 0; the protection check against `315559e8` exit 0.
 - R0 exit: complete. The bytecode golden joins the protection list from R1 on.
+
+## R1. Authority documents
+
+- `docs/roadmap.md`: the stale review header and the reset paragraphs now name the 2026-10-25 plan as the reset authority and the 2026-10-14 reset as complete. The paragraph about the completed 2026-10-20 hardening plan was removed.
+- `docs/plans/README.md`: added this plan and worklog. The 2026-10-14 row and the archive note now say that plan is complete and no longer the authority.
+- `advisor-plans/README.md`: plan 005 Phase 4 is closed by the 2026-10-14 reset (`ad1aa961` to `10115d98`).
+- Exit check: `git grep -i 'reset authority|active reset'` finds only rows that name the 2026-10-25 plan as the authority.
+- Gates, staged tree: `test-doc-links`, `test-docs-drift`, `check-spine`, `zig build test` all exit 0. The protection check against `e1ed0d34`, including the bytecode golden, exit 0.

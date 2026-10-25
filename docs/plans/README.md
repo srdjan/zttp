@@ -6,6 +6,8 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Reset implementation, 2026-10-25](2026-10-25-reset-implementation-plan.md) | Active reset authority; R0 complete 2026-10-25; R1 to R13 in progress | Owner approved R0 to R13 with "as recommended" (Decisions 1 to 5, option a) and chose Decision 6 (a) |
+| [Reset worklog, 2026-10-25](2026-10-25-reset-worklog.md) | Execution record, commands, exit statuses, and stop-rule results for the 2026-10-25 reset | Records the owner decisions of the 2026-10-25 reset plan |
 | [Hardening and pruning implementation, round 4](2026-10-24-hardening-pruning-plan.md) | Implemented and verified 2026-10-24; U12 deferred, U13 retained for compatibility | Owner authorized execution with `go ahead`; full unrestricted verification passed |
 | [Hardening and pruning, round 4](2026-10-24-hardening-pruning-list.md) | Selected audit list: 16 findings; implementation and dispositions are in the worklog | Owner authorized the bounded implementation plan |
 | [Hardening and pruning worklog, round 4](2026-10-24-hardening-pruning-worklog.md) | Local commits, passing full verification and benchmark gate, and deferred scope | The final unrestricted verification supersedes the earlier sandbox failures |
@@ -31,7 +33,7 @@ index when a plan starts, closes, or moves to the archive.
 | [P5 operation edges and callbacks](2026-10-19-flow-interp-p5-spec.md) | Specification 2026-10-19, revised after three Codex astra rounds | Owner approved P5 on 2026-10-19 (D20 A) |
 | Fail-closed guard for flow checker writes (`pre-round-2-archive:docs/plans/2026-10-18-callback-iteration-writes-plan.md`) | Superseded 2026-10-18 before implementation; records the observed false proofs F1 to F6 | Superseded by the redesign plan |
 | Weak test assertion census (`pre-round-2-archive:docs/plans/2026-10-17-weak-assertion-census-plan.md`) | Complete 2026-10-17; 576 rows classified, 127 weak assertions fixed with sabotage evidence; results in the worklog (`pre-round-2-archive:docs/plans/2026-10-17-weak-assertion-census-worklog.md`) | Owner set the goal to finish Item 4 (the census) |
-| [Reset implementation](2026-10-14-reset-implementation-plan.md) | U1–U20 committed locally; final gate and benchmark limits are in the [worklog](2026-10-15-reset-worklog.md) | Owner reviewed the plan and authorized implementation with subagents and Astra verification |
+| [Reset implementation, 2026-10-14](2026-10-14-reset-implementation-plan.md) | Complete; no longer the reset authority (superseded by the 2026-10-25 plan); U1–U20 committed locally; final gate and benchmark limits are in the [worklog](2026-10-15-reset-worklog.md) | Owner reviewed the plan and authorized implementation with subagents and Astra verification |
 | [Zig agent spine](2026-10-14-agent-spine-plan.md) | Complete 2026-10-14; full local gate passed, with evidence in the [worklog](2026-10-14-agent-spine-worklog.md) | Owner selected Option A and approved the full local gate |
 | [Plan 005 Phase 3: language and orchestration removal](2026-10-12-1444-refactor-feature-removal-phase-three-plan.md) | Complete 2026-10-12 to 2026-10-13 (the Phase 4 worklog and the advisor plan 005 row record Phase 3 as complete); reviewed sequence and evidence in the worklog (`pre-round-2-archive:docs/plans/2026-10-12-feature-removal-phase-3-worklog.md`) | Owner authorized Phase 3 and its complete DeepSeek recording with "go ahead with phase 3" |
 | [Plan 005 Phase 2: runtime and artifact removal](2026-10-12-1109-refactor-feature-removal-phase-two-plan.md) | Complete 2026-10-12; scope, decisions, and evidence in the worklog (`pre-round-2-archive:docs/plans/2026-10-12-feature-removal-phase-2-worklog.md`) | Owner selected Decision 10, "Execute Phase 2" |
@@ -78,7 +80,7 @@ Pruning round 2 (decision 5A) deleted 15 completed or superseded plans and workl
 Each stays readable at the local `pre-round-2-archive` tag, for example
 `pre-round-2-archive:docs/plans/2026-10-11-feature-removal-worklog.md`. The tag marks the commit before the deletion.
 The round 2 worklog (`2026-10-21-pruning-round-2-worklog.md`, section "U8 archive") lists every deleted file.
-The reset plan and worklog stay, because the roadmap still names them as the reset authority and the benchmark result is open.
+The 2026-10-14 reset plan and worklog stay as the record of U1 to U20 and of the open benchmark result. The 2026-10-25 reset plan is the active authority.
 
 Pruning round 3 (decision D7) deleted six completed plans that no tracked file outside `docs/plans/` cites, and advisor plan 006.
 Each stays readable at the local `pre-round-3-archive` tag, for example

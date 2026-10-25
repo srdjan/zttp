@@ -16,7 +16,7 @@ overlapping plans at the same time.
 | 002 | Complete the local LFM measurement and default cutover (`pre-rebase:advisor-plans/002-local-lfm-default-cutover-plan.md`) | P1 | L | SUPERSEDED; historical measurement evidence only |
 | [003](003-zttp-zts-simplification-audit.md) | Simplify the zttp and zts foundation | P1 | L | DIRECTION ACCEPTED; preserve features and initial wire formats; shared analysis first |
 | 004 | Share single-module analysis between check and compile (`pre-round-2-archive:advisor-plans/004-shared-analysis-first-unit.md`) | P1 | M | ACCEPTED 2026-10-11; promoted to docs/plans, completed |
-| [005](005-feature-removal-rebase.md) | Remove the features that do not carry the agent-compiler | P1 | XL | Phases 1 to 3 complete; first Phase 4 source unit complete; offline evidence and final release check follow source closure |
+| [005](005-feature-removal-rebase.md) | Remove the features that do not carry the agent-compiler | P1 | XL | Phases 1 to 3 complete; Phase 4 closed by the 2026-10-14 reset (`ad1aa961` to `10115d98`); the 2026-10-25 reset plan is the active authority |
 | 006 (`pre-round-3-archive:advisor-plans/006-modular-boundaries.md`) | Make analysis and runtime ownership explicit | P1 | L | COMPLETE 2026-10-22; five phases reviewed, aggregate/full gate passed; isolated `codex/modular-boundaries` worktree |
 
 Plan 002's cutover half is superseded: the default provider moved to DeepSeek on
