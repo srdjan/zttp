@@ -38,6 +38,8 @@ const over_cap_bytes: usize = 10 * 1024 * 1024 + 1;
 const nest_depth: usize = 600;
 /// Functions in the call chain input. The flow interpreter caps activation depth at 64.
 const chain_length: usize = 2000;
+/// Terms in the addition chain input: the longest chain the parser admits (512 is refused).
+const add_chain_terms: usize = 511;
 /// Per-invocation deadline. The slowest case reads 10 MiB and finishes in well
 /// under a second; the deadline only has to separate "slow" from "hung".
 const deadline_seconds: i64 = 30;
@@ -51,6 +53,7 @@ const Input = enum {
     nul_byte,
     deep_nesting,
     call_chain,
+    add_chain,
     unknown_flag,
     wrong_extension,
     no_argument,
@@ -95,6 +98,8 @@ const cases = [_]Case{
     .{ .name = "nesting past the limit, json", .input = .deep_nesting, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS044" },
     .{ .name = "call chain past the activation limit, text", .input = .call_chain, .mode = .text, .exit_code = 1 },
     .{ .name = "call chain past the activation limit, json", .input = .call_chain, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS500" },
+    .{ .name = "511-term addition chain, text", .input = .add_chain, .mode = .text, .exit_code = 1 },
+    .{ .name = "511-term addition chain, json", .input = .add_chain, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS500" },
     .{ .name = "unknown flag, text", .input = .unknown_flag, .mode = .text, .exit_code = 1 },
     .{ .name = "unknown flag, json", .input = .unknown_flag, .mode = .json, .exit_code = 1 },
     .{ .name = "wrong extension, text", .input = .wrong_extension, .mode = .text, .exit_code = 1, .stderr_contains = "ZTS052 source files must use the .ts extension", .stderr_excludes = "error.UnsupportedSourceExtension" },
@@ -237,6 +242,16 @@ fn populate(gpa: std.mem.Allocator, io: Io, work: []const u8) !void {
     }
     try chain.print(gpa, "function handler(req: Request): Leak<Response> {{ return Response.text(g{d}(\"a\")); }}\n", .{chain_length - 1});
     try writeInput(gpa, io, work, "chain.ts", chain.items);
+
+    // The type checker once built a pool node per prefix of the chain and ran out of u16 indices at
+    // a few hundred terms. The handler has no Proof capsule, so a clean check exits 1 with
+    // ZTS500; the failure this pins is ZTS000 (the analyzer stopped).
+    var add: std.ArrayList(u8) = .empty;
+    defer add.deinit(gpa);
+    try add.appendSlice(gpa, "function handler(req: Request): Response {\n  const x = 1");
+    for (1..add_chain_terms) |_| try add.appendSlice(gpa, "+1");
+    try add.appendSlice(gpa, ";\n  return Response.text(String(x));\n}\n");
+    try writeInput(gpa, io, work, "add-chain.ts", add.items);
 }
 
 fn writeInput(gpa: std.mem.Allocator, io: Io, dir: []const u8, name: []const u8, data: []const u8) !void {
@@ -255,6 +270,7 @@ fn fileFor(input: Input) []const u8 {
         .nul_byte => "nul.ts",
         .deep_nesting => "nest.ts",
         .call_chain => "chain.ts",
+        .add_chain => "add-chain.ts",
         // A valid, empty file: the flag is the hostile part.
         .unknown_flag => "empty.ts",
         .wrong_extension => "handler.js",

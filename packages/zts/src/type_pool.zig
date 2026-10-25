@@ -158,6 +158,8 @@ pub const TypePool = struct {
     /// Canonical type keys (`type_key.zig`): the pool's structural identity
     /// function, computed on demand and owned until `deinit`.
     key_memo: std.AutoHashMapUnmanaged(TypeIndex, []const u8),
+    /// Literal-type nodes by value, so equal literals share one node.
+    literal_memo: std.AutoHashMapUnmanaged(u64, TypeIndex) = .empty,
     /// Operational failure is separate from `null_type_idx`, which remains a
     /// semantic absence sentinel. Once poisoned, the pool must be discarded.
     failure: ?TypePoolError = null,
@@ -212,6 +214,7 @@ pub const TypePool = struct {
         var keys = self.key_memo.valueIterator();
         while (keys.next()) |key| allocator.free(key.*);
         self.key_memo.deinit(allocator);
+        self.literal_memo.deinit(allocator);
     }
 
     // -------------------------------------------------------------------
@@ -772,29 +775,49 @@ pub const TypePool = struct {
         });
     }
 
-    /// Create a literal string type.
+    /// Create a literal string type. Equal literals share one node: the checker
+    /// re-infers a prefix once per enclosing expression, so a fresh node per
+    /// call grew the pool quadratically with chain length.
     pub fn addLiteralString(self: *TypePool, allocator: std.mem.Allocator, value: []const u8) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
+        const stored = value[0..@min(value.len, 255)];
+        const key = std.hash.Wyhash.hash(0, stored) | (3 << 62);
+        if (self.literal_memo.get(key)) |found| {
+            const node = self.nodes.items[found];
+            if (node.tag == .t_literal_string and
+                std.mem.eql(u8, self.getName(node.data.a, @intCast(node.data.b)), stored)) return found;
+        }
         const n = self.addName(allocator, value);
-        return self.addNode(allocator, .{
+        const idx = self.addNode(allocator, .{
             .tag = .t_literal_string,
             .data = .{ .a = n.start, .b = @as(u16, n.len) },
         });
+        return self.memoLiteral(allocator, key, idx);
     }
 
-    /// Create a literal number type.
+    /// Create a literal number type. Equal literals share one node.
     pub fn addLiteralNumber(self: *TypePool, allocator: std.mem.Allocator, value: i16) TypeIndex {
-        return self.addNode(allocator, .{
-            .tag = .t_literal_number,
-            .data = .{ .a = @bitCast(value), .b = 0 },
-        });
+        const a: u16 = @bitCast(value);
+        return self.addScalarLiteral(allocator, .t_literal_number, a, 1);
     }
 
-    /// Create a literal boolean type.
+    /// Create a literal boolean type. Equal literals share one node.
     pub fn addLiteralBool(self: *TypePool, allocator: std.mem.Allocator, value: bool) TypeIndex {
-        return self.addNode(allocator, .{
-            .tag = .t_literal_bool,
-            .data = .{ .a = if (value) 1 else 0, .b = 0 },
-        });
+        return self.addScalarLiteral(allocator, .t_literal_bool, if (value) 1 else 0, 2);
+    }
+
+    fn addScalarLiteral(self: *TypePool, allocator: std.mem.Allocator, tag: TypeTag, a: u16, kind: u64) TypeIndex {
+        if (self.isPoisoned()) return null_type_idx;
+        const key = (kind << 32) | a;
+        if (self.literal_memo.get(key)) |found| return found;
+        const idx = self.addNode(allocator, .{ .tag = tag, .data = .{ .a = a, .b = 0 } });
+        return self.memoLiteral(allocator, key, idx);
+    }
+
+    fn memoLiteral(self: *TypePool, allocator: std.mem.Allocator, key: u64, idx: TypeIndex) TypeIndex {
+        if (idx == null_type_idx) return idx;
+        self.literal_memo.put(allocator, key, idx) catch return self.failIndex(error.OutOfMemory);
+        return idx;
     }
 
     /// Create a generic type parameter.
@@ -2692,6 +2715,26 @@ fn isIdentContinue(c: u8) bool {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+test "equal literal types share one node and distinct ones do not" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const one = pool.addLiteralNumber(allocator, 1);
+    try std.testing.expectEqual(one, pool.addLiteralNumber(allocator, 1));
+    try std.testing.expect(one != pool.addLiteralNumber(allocator, -1));
+    const yes = pool.addLiteralBool(allocator, true);
+    try std.testing.expectEqual(yes, pool.addLiteralBool(allocator, true));
+    try std.testing.expect(yes != pool.addLiteralBool(allocator, false));
+    const get = pool.addLiteralString(allocator, "GET");
+    try std.testing.expectEqual(get, pool.addLiteralString(allocator, "GET"));
+    try std.testing.expect(get != pool.addLiteralString(allocator, "POST"));
+    try std.testing.expect(one != pool.addLiteralNumber(allocator, 2));
+    const before = pool.nodes.items.len;
+    for (0..1000) |_| _ = pool.addLiteralString(allocator, "GET");
+    try std.testing.expectEqual(before, pool.nodes.items.len);
+}
 
 test "TypePool primitives" {
     const allocator = std.testing.allocator;

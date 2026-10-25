@@ -8800,3 +8800,64 @@ test "call kill: a closure that is declared and never called leaves a later read
         \\}
     , accepted);
 }
+
+/// Check `source` and return the checker's error count and the pool node count.
+fn checkTypedSourceNodes(source: []const u8, nodes: *usize) !u32 {
+    const allocator = std.testing.allocator;
+    var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    @import("module_types.zig").populateModuleTypes(&env, &pool, allocator);
+    abi_types.populateHandlerAbiTypes(&env, &pool, allocator);
+    try env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = ir_view,
+        .atoms = &atoms,
+    } });
+    var checker = TypeChecker.init(allocator, ir_view, &atoms, &env);
+    checker.scopes = &parser.scopes;
+    defer checker.deinit();
+    const errors = try checker.check(root);
+    try checker.ensureHealthy();
+    nodes.* = pool.nodes.items.len;
+    return errors;
+}
+
+fn additionChainSource(allocator: std.mem.Allocator, terms: usize) ![]u8 {
+    var buf: std.ArrayList(u8) = .empty;
+    errdefer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "function handler(req: Request): Response {\n  const x = 1");
+    for (1..terms) |_| try buf.appendSlice(allocator, "+1");
+    try buf.appendSlice(allocator, ";\n  return Response.text(String(x));\n}\n");
+    return buf.toOwnedSlice(allocator);
+}
+
+test "a 511-term addition chain type-checks" {
+    const allocator = std.testing.allocator;
+    const source = try additionChainSource(allocator, 511);
+    defer allocator.free(source);
+    var nodes: usize = 0;
+    try std.testing.expectEqual(@as(u32, 0), try checkTypedSourceNodes(source, &nodes));
+    // Measured: 83 nodes at 1, 100, and 300 terms. A fresh literal node per prefix gave n(n+1)/2.
+    try std.testing.expect(nodes <= 2 * 511);
+}
+
+test "a 2500-alias chain reports no ZTS200" {
+    const allocator = std.testing.allocator;
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    try buf.appendSlice(allocator, "structural T0 = { a: number };\n");
+    for (1..2500) |i| try buf.print(allocator, "structural T{d} = T{d};\n", .{ i, i - 1 });
+    try buf.appendSlice(allocator, "function handler(req: Request): Response {\n  const v: T1 = { a: 1 };\n  return Response.text(String(v.a));\n}\n");
+    var nodes: usize = 0;
+    try std.testing.expectEqual(@as(u32, 0), try checkTypedSourceNodes(buf.items, &nodes));
+    try std.testing.expect(nodes <= 2 * 2500);
+}
