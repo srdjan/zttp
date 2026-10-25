@@ -26,7 +26,7 @@ Tasks 1, 2, and 3 run in parallel. Each runs in its own detached worktree from l
 
 ## New findings
 
-- F9 (confirmed by reading): `http.zig:572`. When a function component call fails, the error is logged, `renderNode` returns success, and the component renders as empty. This is the F8 class. The fix follows Task 4.
+- F9 (confirmed by reading): `http.zig`. When a function component call fails, the error is logged, `renderNode` returns success, and the component renders as empty. This is the F8 class. The fix follows Task 4.
 
 ### Task 2 (F3, F4 edge): committed `1c6c6835`, `d00cd03b`
 
