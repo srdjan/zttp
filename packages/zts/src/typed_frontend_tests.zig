@@ -4676,6 +4676,16 @@ fn assertDeclarationSemanticProperty(case: DeclarationCase, source: []const u8) 
     defer env.deinit();
     module_types.populateModuleTypes(&env, &pool, std.testing.allocator);
     abi_types.populateHandlerAbiTypes(&env, &pool, std.testing.allocator);
+    if (case == .nominal_long_name) {
+        // A name past 255 bytes is refused, not cut: two nominals that share
+        // their first 255 bytes would otherwise be the same type.
+        try std.testing.expect(long_nominal_name.len > std.math.maxInt(u8));
+        try std.testing.expectError(
+            error.TypePoolCapacityExceeded,
+            lowerSyntaxStore(std.testing.allocator, &parser.type_store, &pool, &env, parserIrView(&parser)),
+        );
+        return;
+    }
     try lowerSyntaxStore(std.testing.allocator, &parser.type_store, &pool, &env, parserIrView(&parser));
     try pool.ensureHealthy();
     try env.ensureHealthy();
@@ -4821,11 +4831,7 @@ fn assertDeclarationSemanticProperty(case: DeclarationCase, source: []const u8) 
             pool.idx_string,
             try requireAlias(&env, "Id"),
         )),
-        .nominal_long_name => {
-            try std.testing.expect(long_nominal_name.len > std.math.maxInt(u8));
-            const alias = try requireAlias(&env, long_nominal_name);
-            try std.testing.expectEqual(@as(usize, std.math.maxInt(u8)), pool.nominalName(alias).len);
-        },
+        .nominal_long_name => unreachable, // returned above
         .direct_cycle, .union_cycle, .intersection_cycle, .nullable_cycle, .function_cycle => {
             try std.testing.expect(env.isNonContractiveAlias("A"));
         },

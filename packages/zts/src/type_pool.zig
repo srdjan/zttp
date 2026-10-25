@@ -372,9 +372,12 @@ pub const TypePool = struct {
         if (self.names.items.len > std.math.maxInt(u16)) {
             return self.failName(error.TypePoolCapacityExceeded);
         }
+        // A longer name used to be cut to 255 bytes, so two names that differ only
+        // after byte 255 stored identically and compared equal. Fail closed instead.
+        if (name.len > std.math.maxInt(u8)) return self.failName(error.TypePoolCapacityExceeded);
         const start: u16 = @intCast(self.names.items.len);
-        const len: u8 = @intCast(@min(name.len, 255));
-        self.names.appendSlice(allocator, name[0..len]) catch return self.failName(error.OutOfMemory);
+        const len: u8 = @intCast(name.len);
+        self.names.appendSlice(allocator, name) catch return self.failName(error.OutOfMemory);
         return .{ .start = start, .len = len };
     }
 
@@ -780,12 +783,12 @@ pub const TypePool = struct {
     /// call grew the pool quadratically with chain length.
     pub fn addLiteralString(self: *TypePool, allocator: std.mem.Allocator, value: []const u8) TypeIndex {
         if (self.isPoisoned()) return null_type_idx;
-        const stored = value[0..@min(value.len, 255)];
-        const key = std.hash.Wyhash.hash(0, stored) | (3 << 62);
+        // Key and compare the whole value: a name past 255 bytes fails closed in addName.
+        const key = std.hash.Wyhash.hash(0, value) | (3 << 62);
         if (self.literal_memo.get(key)) |found| {
             const node = self.nodes.items[found];
             if (node.tag == .t_literal_string and
-                std.mem.eql(u8, self.getName(node.data.a, @intCast(node.data.b)), stored)) return found;
+                std.mem.eql(u8, self.getName(node.data.a, @intCast(node.data.b)), value)) return found;
         }
         const n = self.addName(allocator, value);
         const idx = self.addNode(allocator, .{
@@ -4271,4 +4274,16 @@ test "instantiate keeps the readonly flag on an array" {
     const plain = pool.addArray(allocator, t_param);
     const plain_out = pool.instantiate(allocator, plain, &.{"T"}, &.{pool.idx_string}, 0);
     try std.testing.expect(!pool.isReadonlyArray(plain_out));
+}
+
+test "a literal string past 255 bytes fails closed instead of sharing a node" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var long_a: [300]u8 = @splat('a');
+    var long_b: [300]u8 = @splat('a');
+    long_b[299] = 'b';
+    try std.testing.expectEqual(null_type_idx, pool.addLiteralString(allocator, &long_a));
+    try std.testing.expectEqual(null_type_idx, pool.addLiteralString(allocator, &long_b));
+    try std.testing.expectError(error.TypePoolCapacityExceeded, pool.ensureHealthy());
 }

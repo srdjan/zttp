@@ -1554,6 +1554,9 @@ pub const TypeChecker = struct {
             .lit_string => blk: {
                 const str_idx = self.ir_view.getStringIdx(node) orelse break :blk pool.idx_string;
                 const str = self.ir_view.getString(str_idx) orelse break :blk pool.idx_string;
+                // A value literal too long for the name arena widens to `string`
+                // (sound for a value). The pool refuses a longer literal type.
+                if (str.len > std.math.maxInt(u8)) break :blk pool.idx_string;
                 break :blk pool.addLiteralString(self.allocator, str);
             },
             .lit_null => pool.idx_null,
@@ -8860,4 +8863,42 @@ test "a 2500-alias chain reports no ZTS200" {
     var nodes: usize = 0;
     try std.testing.expectEqual(@as(u32, 0), try checkTypedSourceNodes(buf.items, &nodes));
     try std.testing.expect(nodes <= 2 * 2500);
+}
+
+test "field names that differ after byte 255 are distinct types" {
+    const allocator = std.testing.allocator;
+    const prefix = try allocator.alloc(u8, 255);
+    defer allocator.free(prefix);
+    @memset(prefix, 'a');
+    var xs: [45]u8 = @splat('x');
+    var ys: [45]u8 = @splat('y');
+    const source = try std.fmt.allocPrint(allocator,
+        \\structural A = {{ {s}{s}: number }};
+        \\structural B = {{ {s}{s}: number }};
+        \\function f(a: A): B {{
+        \\  const b: B = a;
+        \\  return b;
+        \\}}
+    , .{ prefix, &xs, prefix, &ys });
+    defer allocator.free(source);
+
+    var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initTyped(allocator, allocator, source);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    _ = try parser.parse();
+    const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+    var env = TypeEnv.init(allocator, &pool);
+    defer env.deinit();
+    // Before the fix both names were cut to the same 255 bytes and `a` was
+    // assignable to `B`. Now the pool refuses the name and the pipeline stops.
+    if (env.populateSourceTypes(.{ .direct = .{
+        .store = &parser.type_store,
+        .ir_view = ir_view,
+        .atoms = &atoms,
+    } })) |_| {} else |err| try std.testing.expectEqual(error.TypePoolCapacityExceeded, err);
+    try std.testing.expectError(error.TypePoolCapacityExceeded, pool.ensureHealthy());
 }
