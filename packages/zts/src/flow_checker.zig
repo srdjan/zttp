@@ -9,6 +9,7 @@ const type_checker = @import("type_checker.zig");
 const ir = engine.parser.ir;
 const atom_table = engine.atom_table;
 const counterexample = @import("counterexample.zig");
+const handler_function_mod = @import("handler_function.zig");
 const NodeIndex = ir.NodeIndex;
 const IrView = ir.IrView;
 const mb = engine.module_binding;
@@ -155,7 +156,7 @@ test "candidate facade owns captures and retains warning diagnostics" {
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
     const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler = @import("handler_verifier.zig").findHandlerFunction(view, root) orelse return error.HandlerNotFound;
+    const handler = handler_function_mod.findHandlerFunction(view, root) orelse return error.HandlerNotFound;
     var checker = FlowChecker.init(allocator, view, &atoms);
     defer checker.deinit();
     checker.scopes = &parser.scopes;
@@ -178,7 +179,7 @@ test "FlowChecker fails closed when taint state cannot allocate" {
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = @import("handler_verifier.zig").findHandlerFunction(view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(view, root) orelse
         return error.HandlerNotFound;
 
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
@@ -198,7 +199,7 @@ test "FlowChecker fails closed when diagnostic storage cannot allocate" {
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = @import("handler_verifier.zig").findHandlerFunction(view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, view, &atoms);
@@ -214,7 +215,7 @@ test "FlowChecker fails closed when diagnostic storage cannot allocate" {
     defer leaking.deinit();
     const leaking_root = try leaking.parse();
     const leaking_view = IrView.fromIRStore(&leaking.nodes, &leaking.constants);
-    const leaking_handler = @import("handler_verifier.zig").findHandlerFunction(leaking_view, leaking_root) orelse
+    const leaking_handler = handler_function_mod.findHandlerFunction(leaking_view, leaking_root) orelse
         return error.HandlerNotFound;
     const Probe = struct {
         fn run(probe_allocator: std.mem.Allocator, input: IrView, handler: NodeIndex, input_atoms: *atom_table.AtomTable, scopes: *const @import("zts-engine").parser.ScopeAnalyzer) !void {
@@ -255,8 +256,7 @@ test "FlowChecker captures witness constraints on secret-in-response" {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -312,8 +312,7 @@ test "FlowChecker does not leak sibling-branch I/O calls into the witness" {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -359,8 +358,7 @@ test "FlowChecker captures stub_present on if-else with absent condition" {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -402,8 +400,7 @@ test "FlowChecker captures req_method constraint from literal comparison" {
     defer parser.deinit();
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -446,8 +443,7 @@ test "FlowChecker captures AND chain as multiple constraints" {
     defer parser.deinit();
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -506,8 +502,7 @@ test "FlowChecker captures one concrete negated request constraint for else AND 
     defer parser.deinit();
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -564,8 +559,7 @@ test "FlowChecker keeps repeated module call constraints tied to call index" {
     defer parser.deinit();
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -637,8 +631,7 @@ test "FlowChecker captures result_ok constraint on validated path" {
     defer parser.deinit();
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -673,8 +666,7 @@ fn secretWitnessJsonl(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
     defer parser.deinit();
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -949,8 +941,7 @@ test "FlowChecker records validated defended path reaching egress body" {
     defer parser.deinit();
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -997,8 +988,7 @@ test "FlowChecker flags a secret reaching a module fetch body" {
     defer parser.deinit();
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -1033,8 +1023,7 @@ test "FlowChecker flags a secret reaching a var-bound module fetch body" {
     defer parser.deinit();
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -1068,8 +1057,7 @@ test "FlowChecker flags a secret reaching a module fetch query field" {
     defer parser.deinit();
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -1104,8 +1092,7 @@ test "FlowChecker flags a secret reaching egress via an options spread" {
     defer parser.deinit();
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -1135,8 +1122,7 @@ test "FlowChecker proves no_secret_leakage for a benign module fetch" {
     defer parser.deinit();
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -1165,8 +1151,7 @@ test "FlowChecker records validated defended path reaching an HTML response" {
     defer parser.deinit();
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -1494,7 +1479,7 @@ test "FlowChecker names the guard of a validated value under a unary operator" {
         defer parser.deinit();
         const root = try parser.parse();
         const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-        const handler_fn = @import("handler_verifier.zig").findHandlerFunction(ir_view, root) orelse
+        const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
             return error.HandlerNotFound;
 
         var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -1531,8 +1516,7 @@ test "FlowChecker records never_reached defended path for unused secret" {
     defer parser.deinit();
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -1570,8 +1554,7 @@ test "FlowChecker records no defended path for a leaking secret" {
     defer parser.deinit();
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -1723,8 +1706,7 @@ test "a real secret leak offers no repair intent" {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -1763,8 +1745,7 @@ test "FlowChecker flags secret returned through a variable-held response" {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -1797,8 +1778,7 @@ test "FlowChecker flags unvalidated input in a variable-held Response.html" {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -1832,8 +1812,7 @@ test "FlowChecker flags secret returned through a ternary response" {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -1869,8 +1848,7 @@ test "FlowChecker keeps taint through a user-defined wrapper call" {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -1907,8 +1885,7 @@ test "FlowChecker keeps validated label through a wrapper returning a validator 
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -1962,8 +1939,7 @@ fn runWithImportedFunction(
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -2201,8 +2177,7 @@ fn runNoSecretLeakage(allocator: std.mem.Allocator, source: []const u8) !bool {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -2223,8 +2198,7 @@ fn runNoCredentialLeakage(allocator: std.mem.Allocator, source: []const u8) !boo
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -2247,8 +2221,7 @@ fn runInputValidated(allocator: std.mem.Allocator, source: []const u8) !bool {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -2269,8 +2242,7 @@ fn runFlowProperties(allocator: std.mem.Allocator, source: []const u8) !FlowProp
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -2482,8 +2454,7 @@ fn runFlowDiagnostics(
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -3929,7 +3900,7 @@ test "FlowChecker isolates route witness IO from other roots" {
     defer parser.deinit();
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = @import("handler_verifier.zig").findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
     checker.scopes = &parser.scopes;
@@ -4566,7 +4537,7 @@ test "imported functions preserve secret provenance in both atom modes" {
         var checker = FlowChecker.init(allocator, ir_view, if (use_atoms) &atoms else null);
         checker.scopes = &parser.scopes;
         defer checker.deinit();
-        const handler = @import("handler_verifier.zig").findHandlerFunction(ir_view, root) orelse
+        const handler = handler_function_mod.findHandlerFunction(ir_view, root) orelse
             return error.HandlerNotFound;
         try std.testing.expectEqual(@as(u32, 1), try checker.check(handler));
         try std.testing.expect(!checker.getProperties().no_secret_leakage);
@@ -4592,7 +4563,7 @@ test "an aliased env import preserves secrets beside an unresolved import" {
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
     checker.scopes = &parser.scopes;
     defer checker.deinit();
-    const handler = @import("handler_verifier.zig").findHandlerFunction(ir_view, root) orelse
+    const handler = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
     try std.testing.expectEqual(@as(u32, 1), try checker.check(handler));
     try std.testing.expect(!checker.getProperties().no_secret_leakage);
@@ -4622,8 +4593,7 @@ test "FlowChecker flags a secret carried in an array literal" {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -4661,8 +4631,7 @@ test "FlowChecker taints the base object through a member-access assignment" {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -4701,8 +4670,7 @@ test "FlowChecker taints the base object through a computed-access assignment" {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -4735,8 +4703,7 @@ test "a clock-reading export labels its result nondeterministic" {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -4764,8 +4731,7 @@ test "a capability-free export is not labelled nondeterministic" {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -4787,8 +4753,7 @@ fn runDeterministic(allocator: std.mem.Allocator, source: []const u8) !bool {
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
@@ -5532,8 +5497,7 @@ fn collectFlowDiagnosticKinds(
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
 
-    const handler_verifier = @import("handler_verifier.zig");
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);

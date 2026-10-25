@@ -19,7 +19,7 @@ const type_checker_mod = @import("type_checker.zig");
 const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
 const flow_checker_mod = @import("flow_checker.zig");
-const handler_verifier_mod = @import("handler_verifier.zig");
+const handler_function_mod = @import("handler_function.zig");
 const module_types = @import("module_types.zig");
 const abi_types = @import("abi_types.zig");
 
@@ -248,7 +248,7 @@ fn analyze(src: []const u8, stats: *ShapeStats) !void {
         if (try expectSpanInside(src, view, diagnostic.node)) stats.spans += 1;
     }
 
-    const handler = handler_verifier_mod.findHandlerFunction(view, root) orelse return;
+    const handler = handler_function_mod.findHandlerFunction(view, root) orelse return;
     var flow = FlowChecker.init(allocator, view, &atoms);
     defer flow.deinit();
     flow.scopes = &parser.scopes;

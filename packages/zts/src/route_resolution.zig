@@ -10,14 +10,13 @@ const std = @import("std");
 const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
 const context = @import("zts-engine").context;
-const bool_checker_mod = @import("bool_checker.zig");
 const module_facts_mod = @import("module_facts.zig");
 
 const Node = ir.Node;
 pub const NodeIndex = ir.NodeIndex;
 const IrView = ir.IrView;
 const null_node = ir.null_node;
-const packBindingKey = bool_checker_mod.packBindingKey;
+const packBindingKey = @import("binding_key.zig").packBindingKey;
 const max_resolution_depth = 8;
 
 pub const FunctionSet = struct {

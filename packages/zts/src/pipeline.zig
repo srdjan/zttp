@@ -41,6 +41,7 @@ const bool_checker_mod = @import("bool_checker.zig");
 const type_checker_mod = @import("type_checker.zig");
 const strict_checker_mod = @import("strict_checker.zig");
 const handler_verifier_mod = @import("handler_verifier.zig");
+const handler_function_mod = @import("handler_function.zig");
 const flow_checker_mod = @import("flow_checker.zig");
 const module_facts_mod = @import("module_facts.zig");
 const context_mod = @import("zts-engine").context;
@@ -546,7 +547,7 @@ fn projectParsedFlow(allocator: std.mem.Allocator, parsed: ParsedModule, contrac
     var flow = FlowChecker.init(allocator, parsed.ir_view, parsed.atoms);
     defer flow.deinit();
     flow.scopes = parsed.scopes;
-    if (handler_verifier_mod.findHandlerFunction(parsed.ir_view, parsed.root)) |handler| {
+    if (handler_function_mod.findHandlerFunction(parsed.ir_view, parsed.root)) |handler| {
         _ = try flow.check(handler);
         projectFlowProperties(contract, flow.getProperties());
     } else {
@@ -1315,7 +1316,7 @@ pub const ModuleAnalysisSession = struct {
         opts.has_default_response = self.contract_context.has_default_response;
         opts.verification = self.contract_context.verification;
         opts.imported_effects = self.contract_context.imported_effects;
-        const handler_fn = handler_verifier_mod.findHandlerFunction(
+        const handler_fn = handler_function_mod.findHandlerFunction(
             self.parsed.ir_view,
             self.parsed.root,
         );
@@ -2570,7 +2571,7 @@ test "ModuleAnalysisSession keeps skipped passes distinct" {
     defer parsed_state.js_parser.deinit();
     const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
     const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
-    const handler = handler_verifier_mod.findHandlerFunction(view, parsed.root) orelse
+    const handler = handler_function_mod.findHandlerFunction(view, parsed.root) orelse
         return error.HandlerNotFound;
 
     var session: ModuleAnalysisSession = .{};
@@ -2593,7 +2594,7 @@ test "ModuleAnalysisSession refuses publication after failed selected passes" {
     defer parsed_state.js_parser.deinit();
     const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
     const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
-    const handler = handler_verifier_mod.findHandlerFunction(view, parsed.root) orelse
+    const handler = handler_function_mod.findHandlerFunction(view, parsed.root) orelse
         return error.HandlerNotFound;
 
     inline for (.{ true, false }) |select_verifier| {
@@ -2634,7 +2635,7 @@ test "ModuleAnalysisSession explicit refusal stops selected passes and extractio
     defer parsed_state.js_parser.deinit();
     const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
     const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
-    const handler = handler_verifier_mod.findHandlerFunction(view, parsed.root) orelse
+    const handler = handler_function_mod.findHandlerFunction(view, parsed.root) orelse
         return error.HandlerNotFound;
 
     var session: ModuleAnalysisSession = .{};
@@ -2661,7 +2662,7 @@ test "ModuleAnalysisSession contract-only flow can run after extraction" {
     defer parsed_state.js_parser.deinit();
     const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
     const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
-    const handler = handler_verifier_mod.findHandlerFunction(view, parsed.root) orelse
+    const handler = handler_function_mod.findHandlerFunction(view, parsed.root) orelse
         return error.HandlerNotFound;
 
     var session: ModuleAnalysisSession = .{};
@@ -2805,7 +2806,7 @@ test "pipeline.check does not emit a module after verifier allocation failure" {
     const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
     var resolved = try resolve(allocator, parsed, .{ .strict = false });
     defer resolved.deinit();
-    const handler_func = handler_verifier_mod.findHandlerFunction(view, parsed_state.root) orelse
+    const handler_func = handler_function_mod.findHandlerFunction(view, parsed_state.root) orelse
         return error.HandlerNotFound;
 
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
@@ -2825,7 +2826,7 @@ test "pipeline.check rejects a TypePool poisoned after resolve" {
 
     var resolved = try resolve(allocator, parsed, .{ .type_env = storage.envPtr(), .strict = false });
     defer resolved.deinit();
-    const handler_func = handler_verifier_mod.findHandlerFunction(view, parsed_state.root) orelse
+    const handler_func = handler_function_mod.findHandlerFunction(view, parsed_state.root) orelse
         return error.HandlerNotFound;
 
     const record = storage.pool.addRecord(allocator, &.{.{
@@ -2850,7 +2851,7 @@ test "CheckedModule runs verifier and flow independently or together" {
     const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
     var resolved = try resolve(allocator, parsed, .{ .strict = false });
     defer resolved.deinit();
-    const handler_func = handler_verifier_mod.findHandlerFunction(view, parsed_state.root) orelse
+    const handler_func = handler_function_mod.findHandlerFunction(view, parsed_state.root) orelse
         return error.HandlerNotFound;
 
     var verifier_only = try CheckedModule.init(allocator, &resolved, .{});
@@ -2883,7 +2884,7 @@ test "CheckedModule rejects completed and failed pass retries" {
     const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
     var resolved = try resolve(allocator, parsed, .{ .strict = false });
     defer resolved.deinit();
-    const handler_func = handler_verifier_mod.findHandlerFunction(view, parsed_state.root) orelse
+    const handler_func = handler_function_mod.findHandlerFunction(view, parsed_state.root) orelse
         return error.HandlerNotFound;
 
     var completed = try CheckedModule.init(allocator, &resolved, .{});
@@ -2919,7 +2920,7 @@ test "missing handler leaves checked passes incomplete" {
     var resolved = try resolve(allocator, parsed, .{ .strict = false });
     defer resolved.deinit();
 
-    try testing.expect(handler_verifier_mod.findHandlerFunction(view, parsed_state.root) == null);
+    try testing.expect(handler_function_mod.findHandlerFunction(view, parsed_state.root) == null);
     var checked = try CheckedModule.init(allocator, &resolved, .{});
     defer checked.deinit();
     try testing.expect(!checked.verifierCompleted());
@@ -2943,7 +2944,7 @@ test "flow projection requires completion and preserves leaking and safe results
     const leaking_parsed = ParsedModule.fromExisting(leaking_view, leaking_state.root, null);
     var leaking_resolved = try resolve(allocator, leaking_parsed, .{ .strict = false });
     defer leaking_resolved.deinit();
-    const leaking_handler = handler_verifier_mod.findHandlerFunction(leaking_view, leaking_state.root) orelse
+    const leaking_handler = handler_function_mod.findHandlerFunction(leaking_view, leaking_state.root) orelse
         return error.HandlerNotFound;
     var leaking = try CheckedModule.init(allocator, &leaking_resolved, .{});
     defer leaking.deinit();
@@ -2959,7 +2960,7 @@ test "flow projection requires completion and preserves leaking and safe results
     const safe_parsed = ParsedModule.fromExisting(safe_view, safe_state.root, null);
     var safe_resolved = try resolve(allocator, safe_parsed, .{ .strict = false });
     defer safe_resolved.deinit();
-    const safe_handler = handler_verifier_mod.findHandlerFunction(safe_view, safe_state.root) orelse
+    const safe_handler = handler_function_mod.findHandlerFunction(safe_view, safe_state.root) orelse
         return error.HandlerNotFound;
     var safe = try CheckedModule.init(allocator, &safe_resolved, .{});
     defer safe.deinit();
@@ -3424,7 +3425,7 @@ test "the three index consumers reuse an injected index" {
     try std.testing.expectEqual(&facts, resolved.strict_checker.?.facts.?);
     try std.testing.expect(resolved.strict_checker.?.owned_facts == null);
 
-    const handler_func = handler_verifier_mod.findHandlerFunction(view, parsed_state.root).?;
+    const handler_func = handler_function_mod.findHandlerFunction(view, parsed_state.root).?;
     var checked = try check(allocator, &resolved, handler_func, .{ .module_facts = &facts });
     defer checked.deinit();
 
@@ -3464,7 +3465,7 @@ fn runCompilePhasesForTest(allocator: std.mem.Allocator, source: []const u8) !vo
     const view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const parsed = ParsedModule.fromExisting(view, root, null);
 
-    const handler_func = handler_verifier_mod.findHandlerFunction(view, root) orelse
+    const handler_func = handler_function_mod.findHandlerFunction(view, root) orelse
         return error.HandlerNotFound;
 
     var session: ModuleAnalysisSession = .{};
@@ -3551,7 +3552,7 @@ fn withSession(
         .allocator = allocator,
         .resolved = &resolved,
         .parsed = parsed,
-        .handler = handler_verifier_mod.findHandlerFunction(view, accepted.root),
+        .handler = handler_function_mod.findHandlerFunction(view, accepted.root),
     });
 }
 
@@ -4977,7 +4978,7 @@ test "direct callback effect projection closes every allocation failure" {
     } });
     var module_facts = try ModuleFacts.build(allocator, view, &atoms, null);
     defer module_facts.deinit();
-    const handler = handler_verifier_mod.findHandlerFunction(view, root);
+    const handler = handler_function_mod.findHandlerFunction(view, root);
     const Run = struct {
         fn project(
             run_allocator: std.mem.Allocator,

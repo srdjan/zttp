@@ -20,7 +20,7 @@ const atom_table = @import("zts-engine").atom_table;
 const parser_mod = @import("zts-engine").parser;
 const path_gen = @import("path_generator.zig");
 const effect_inference = @import("effect_inference.zig");
-const handler_verifier = @import("handler_verifier.zig");
+const handler_function_mod = @import("handler_function.zig");
 
 const Constraint = path_gen.Constraint;
 const StubInfo = path_gen.StubInfo;
@@ -384,7 +384,7 @@ fn analyzeSourceFaultCoverage(allocator: std.mem.Allocator, source: []const u8) 
 
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});

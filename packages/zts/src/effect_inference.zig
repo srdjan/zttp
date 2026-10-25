@@ -21,7 +21,7 @@ const module_facts_mod = @import("module_facts.zig");
 const route_resolution = @import("route_resolution.zig");
 const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
-const bool_checker = @import("bool_checker.zig");
+const packBindingKey = @import("binding_key.zig").packBindingKey;
 const known_globals = @import("zts-base").known_globals;
 
 const NodeIndex = ir.NodeIndex;
@@ -462,7 +462,7 @@ pub const Analyzer = struct {
     /// another such binding. One row and one function set per binding, built
     /// by `computeModuleBindings` before any function body is walked.
     module_bindings: std.ArrayListUnmanaged(ModuleBinding),
-    /// `bool_checker.packBindingKey` of a declaration -> index in
+    /// `packBindingKey` of a declaration -> index in
     /// `module_bindings`.
     module_by_key: std.AutoHashMapUnmanaged(u32, usize),
     /// Set while the module-scope pass walks one initializer. Edges and
@@ -763,7 +763,7 @@ pub const Analyzer = struct {
     ) !void {
         const func = self.ir_view.getFunction(fn_node) orelse return;
         const name = self.resolveAtomName(binding.name_atom) orelse return;
-        const key = bool_checker.packBindingKey(binding.scope_id, binding.slot);
+        const key = packBindingKey(binding.scope_id, binding.slot);
         const idx = self.functions.items.len;
         try self.functions.append(self.allocator, .{
             .name = name,
@@ -879,7 +879,7 @@ pub const Analyzer = struct {
                 // A function-valued initializer is a unit with its own row;
                 // `userFnOf` already resolves a reference to it.
                 if (decl.init == null_node or self.isFunctionNode(decl.init)) return;
-                const key = bool_checker.packBindingKey(decl.binding.scope_id, decl.binding.slot);
+                const key = packBindingKey(decl.binding.scope_id, decl.binding.slot);
                 const idx = self.module_bindings.items.len;
                 try self.module_bindings.append(self.allocator, .{
                     .key = key,
@@ -959,7 +959,7 @@ pub const Analyzer = struct {
     /// The module-level binding a reference names, or null.
     fn moduleBindingOf(self: *const Analyzer, binding: ir.BindingRef) ?usize {
         if (!slotIsAtom(binding)) return null;
-        return self.module_by_key.get(bool_checker.packBindingKey(binding.scope_id, binding.slot));
+        return self.module_by_key.get(packBindingKey(binding.scope_id, binding.slot));
     }
 
     /// Charge a reference to a function-holding module binding: its row joins
@@ -2037,7 +2037,7 @@ pub const Analyzer = struct {
                     if (self.ir_view.getTag(decl.init) != .object_literal) continue;
                     if (self.moduleBindingOf(decl.binding) == null) continue;
                     try candidates.append(self.allocator, .{
-                        .key = bool_checker.packBindingKey(decl.binding.scope_id, decl.binding.slot),
+                        .key = packBindingKey(decl.binding.scope_id, decl.binding.slot),
                         .table = decl.init,
                     });
                 },
@@ -2058,7 +2058,7 @@ pub const Analyzer = struct {
             if (self.ir_view.getTag(node) != .identifier) continue;
             const binding = self.ir_view.getBinding(node) orelse continue;
             if (!slotIsAtom(binding)) continue;
-            const key = bool_checker.packBindingKey(binding.scope_id, binding.slot);
+            const key = packBindingKey(binding.scope_id, binding.slot);
             for (candidates.items) |*candidate| {
                 if (candidate.key == key and !table_args.contains(node)) candidate.disqualified = true;
             }

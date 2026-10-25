@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const token = @import("token.zig");
+const source_line = @import("zts-base").source_line;
 
 pub const SourceLocation = token.SourceLocation;
 pub const Token = token.Token;
@@ -121,29 +122,7 @@ pub const ParseError = struct {
     }
 
     fn getSourceLine(self: ParseError, source: []const u8) ?[]const u8 {
-        var current_line: u32 = 1;
-        var line_start: usize = 0;
-
-        for (source, 0..) |c, i| {
-            if (current_line == self.location.line) {
-                var line_end = i;
-                while (line_end < source.len and source[line_end] != '\n') {
-                    line_end += 1;
-                }
-                return source[line_start..line_end];
-            }
-            if (c == '\n') {
-                current_line += 1;
-                line_start = i + 1;
-            }
-        }
-
-        // Handle last line without newline
-        if (current_line == self.location.line and line_start < source.len) {
-            return source[line_start..];
-        }
-
-        return null;
+        return source_line.get(source, self.location.line);
     }
 };
 

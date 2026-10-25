@@ -4440,7 +4440,7 @@ pub const TypeChecker = struct {
 
 /// Binding identity for this checker's flow maps.
 ///
-/// `bool_checker.packBindingKey` folds only (scope, slot), and a captured
+/// `binding_key.packBindingKey` folds only (scope, slot), and a captured
 /// upvalue shares both with a parameter of the capturing function: the upvalue
 /// indexes the closure's upvalue array, the parameter indexes its own argument
 /// array, and both start at zero in the same function scope. A narrowing

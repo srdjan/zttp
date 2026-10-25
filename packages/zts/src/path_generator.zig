@@ -21,10 +21,10 @@ const module_facts_mod = @import("module_facts.zig");
 const route_resolution = @import("route_resolution.zig");
 const effect_inference = @import("effect_inference.zig");
 const mb = @import("zts-engine").module_binding;
-const bool_checker_mod = @import("bool_checker.zig");
 const type_pool_mod = @import("type_pool.zig");
 const type_env_mod = @import("type_env.zig");
 const status_check = @import("status_check.zig");
+const ok_record_mod = @import("ok_record.zig");
 const handler_contract = @import("zts-contracts").handler_contract;
 const contract_types = @import("zts-contracts").contract_types;
 
@@ -32,7 +32,7 @@ const Node = ir.Node;
 pub const NodeIndex = ir.NodeIndex;
 const IrView = ir.IrView;
 pub const null_node = ir.null_node;
-const packBindingKey = bool_checker_mod.packBindingKey;
+const packBindingKey = @import("binding_key.zig").packBindingKey;
 
 // ---------------------------------------------------------------------------
 // Path constraints
@@ -1335,7 +1335,7 @@ pub const PathGenerator = struct {
                 .func = entry.func.name,
                 .returns = entry.func.returns,
                 .severity = entry.func.failure_severity,
-                .ok_record = try isOkRecordExport(allocator, entry.func),
+                .ok_record = try ok_record_mod.isOkRecordExport(allocator, entry.func),
             });
         }
     }
@@ -3100,46 +3100,6 @@ pub const PathGenerator = struct {
 // Stub value synthesis
 // ---------------------------------------------------------------------------
 
-/// Whether `x.ok` and `x.status` fork the result of a call to this export: it is
-/// failable, does not return a `Result`, and declares an `ok`-record response
-/// (`fetch`). The flow checker's witness search asks the same question, so the
-/// generated tests and the counterexamples fork the same calls.
-pub fn isOkRecordExport(allocator: std.mem.Allocator, func: *const mb.FunctionBinding) error{OutOfMemory}!bool {
-    return func.failure_severity != .none and func.returns != .result and
-        try declaresOkRecord(allocator, func);
-}
-
-/// Whether the export is forked by `x.ok` on its result because it declares an
-/// `ok: boolean` response record. The rule reads the parsed return type, not the
-/// signature text: `returnsOkRecord` resolves it through the type environment.
-/// The caller applies it only to exports with a failure severity.
-fn declaresOkRecord(allocator: std.mem.Allocator, func: *const mb.FunctionBinding) error{OutOfMemory}!bool {
-    const sig = func.signature orelse return false;
-    return returnsOkRecord(allocator, sig.returns);
-}
-
-/// True when `return_text` parses to a record that has a top-level, required
-/// field `ok` of type `boolean`. A nested `ok`, an optional `ok`, a union that
-/// holds such a record, and a function type all give false.
-pub fn returnsOkRecord(allocator: std.mem.Allocator, return_text: []const u8) error{OutOfMemory}!bool {
-    var pool = type_pool_mod.TypePool.init(allocator);
-    defer pool.deinit(allocator);
-    var env = type_env_mod.TypeEnv.init(allocator, &pool);
-    defer env.deinit();
-
-    const parsed = env.resolveType(return_text);
-    try env.ensureHealthy();
-    if (parsed == type_pool_mod.null_type_idx) return false;
-    const resolved = env.resolveRef(parsed);
-    if (pool.getTag(resolved) != .t_record) return false;
-    for (pool.getRecordFields(resolved)) |field| {
-        if (field.optional) continue;
-        if (!std.mem.eql(u8, pool.getName(field.name_start, field.name_len), "ok")) continue;
-        if (field.type_idx == pool.idx_boolean) return true;
-    }
-    return false;
-}
-
 /// The stub for a call forked by `x.ok`. A `Result` export gets the Result
 /// shape. An `ok`-record export (`fetch`) gets a response the replay reads:
 /// `status` decides `ok` (replay derives it from the status, never from a stub
@@ -3239,7 +3199,7 @@ test "scanImports tracks virtual module functions with binding names" {
 }
 
 const parser_mod = @import("zts-engine").parser;
-const handler_verifier = @import("handler_verifier.zig");
+const handler_function_mod = @import("handler_function.zig");
 const module_manifest_mod = @import("zts-engine").module_manifest;
 const manifest_registry_mod = @import("manifest_registry.zig");
 
@@ -3343,7 +3303,7 @@ fn expectGenerationFailsOnFirstAllocation(source: []const u8) !void {
 
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
     var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
     defer effect_facts.deinit(allocator);
     var failing = FailNextAllocation.init(allocator);
@@ -3387,7 +3347,7 @@ fn expectWalkFailsOnNextAllocation(source: []const u8) !void {
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
     const function = ir_view.getFunction(handler_fn) orelse return error.HandlerNotFound;
     var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
     defer effect_facts.deinit(allocator);
@@ -3446,7 +3406,7 @@ test "emitTestCase keeps argument signature allocation failure conservative" {
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
     var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
     defer effect_facts.deinit(allocator);
 
@@ -3512,7 +3472,7 @@ test "generate cleans every fatal allocation failure" {
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
     var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
     defer effect_facts.deinit(allocator);
 
@@ -3652,7 +3612,7 @@ fn generateFixtureScanned(
 
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
 
     const effect_facts = try allocator.create(effect_inference.EffectFacts);
     errdefer allocator.destroy(effect_facts);
@@ -3784,7 +3744,7 @@ test "unavailable effect facts conservatively report recursion" {
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var generator = PathGenerator.init(allocator, ir_view, &atoms, .unavailable);
@@ -4539,7 +4499,7 @@ test "a partner import is unseen even when an answer calls it clean" {
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
 
     var facts = try module_facts_mod.ModuleFacts.build(allocator, ir_view, &atoms, &registry);
     defer facts.deinit();
@@ -4641,33 +4601,6 @@ test "a summarized path set is not a complete fault analysis" {
     try std.testing.expect(!fixture.generator.faultAnalysisComplete());
 }
 
-test "returnsOkRecord reads the parsed return type, not the text" {
-    const allocator = std.testing.allocator;
-    const cases = [_]struct { text: []const u8, expected: bool }{
-        .{ .text = "{ ok: boolean; status: number }", .expected = true },
-        .{ .text = "{ status: number; ok: boolean; body: string }", .expected = true },
-        .{ .text = "{ ok: boolean; headers: { get: (name: string) => string | undefined } }", .expected = true },
-        // A nested `ok` is not the record's own.
-        .{ .text = "{ meta: { ok: boolean }; status: number }", .expected = false },
-        // Optional, or another type, or a function type.
-        .{ .text = "{ ok?: boolean; status: number }", .expected = false },
-        .{ .text = "{ ok: string; status: number }", .expected = false },
-        .{ .text = "{ check: (ok: boolean) => boolean }", .expected = false },
-        // A text scan would match this: the text holds `ok: boolean` and the
-        // type is a union, not a record.
-        .{ .text = "{ ok: boolean } | undefined", .expected = false },
-        .{ .text = "string", .expected = false },
-        .{ .text = "", .expected = false },
-    };
-    for (cases) |case| {
-        const actual = try returnsOkRecord(allocator, case.text);
-        if (actual != case.expected) {
-            std.debug.print("returnsOkRecord(\"{s}\"): expected {}, got {}\n", .{ case.text, case.expected, actual });
-            return error.WrongOkRecordVerdict;
-        }
-    }
-}
-
 test "fetch and fetchWithRetry fork on ok" {
     const allocator = std.testing.allocator;
     const fetch_source =
@@ -4698,27 +4631,6 @@ test "fetch and fetchWithRetry fork on ok" {
         for (tests) |test_case| try std.testing.expectEqual(@as(usize, 1), test_case.constraints.len);
         try std.testing.expectEqual(@as(usize, 0), fixture.generator.unseenFailableCalls().len);
     }
-}
-
-test "an ok record with no severity, or a Result return, is not forked on ok" {
-    const allocator = std.testing.allocator;
-    const base = mb.FunctionBinding{
-        .name = "probe",
-        .arg_count = 0,
-        .effect = .write,
-        .returns = .object,
-        .signature = .{ .params = &.{}, .returns = "{ ok: boolean; status: number }" },
-        .failure_severity = .upstream,
-    };
-    try std.testing.expect(try isOkRecordExport(allocator, &base));
-
-    var no_severity = base;
-    no_severity.failure_severity = .none;
-    try std.testing.expect(!(try isOkRecordExport(allocator, &no_severity)));
-
-    var result_return = base;
-    result_return.returns = .result;
-    try std.testing.expect(!(try isOkRecordExport(allocator, &result_return)));
 }
 
 test "a failing fetch path stubs a response the replay reads as a 503" {
@@ -4983,7 +4895,7 @@ test "generate cleans every fatal allocation failure through short-circuit cases
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse return error.HandlerNotFound;
     var effect_facts = try effect_inference.buildEffectFacts(allocator, ir_view, &atoms, root, .{});
     defer effect_facts.deinit(allocator);
 

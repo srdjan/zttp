@@ -71,3 +71,4 @@ test {
 }
 
 pub const source_diagnostics = @import("source_diagnostics.zig");
+pub const source_line = @import("source_line.zig");

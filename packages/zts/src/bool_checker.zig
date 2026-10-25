@@ -27,6 +27,7 @@ const NodeIndex = ir.NodeIndex;
 const NodeTag = ir.NodeTag;
 const IrView = ir.IrView;
 const null_node = ir.null_node;
+const packBindingKey = @import("binding_key.zig").packBindingKey;
 
 // ---------------------------------------------------------------------------
 // Expression type inference
@@ -72,10 +73,6 @@ fn mergeReturnType(current: ?ExprType, new: ExprType) ?ExprType {
         return if (unified == .unknown) null else unified;
     }
     return new;
-}
-
-pub fn packBindingKey(scope_id: ir.ScopeId, slot: u16) u32 {
-    return (@as(u32, scope_id) << 16) | @as(u32, slot);
 }
 
 fn bindingKey(binding: ir.BindingRef) u32 {
@@ -1661,35 +1658,6 @@ pub const BoolChecker = struct {
         self.allocation_failed = true;
     }
 };
-
-// ---------------------------------------------------------------------------
-// Utility
-// ---------------------------------------------------------------------------
-
-pub fn getSourceLine(source: []const u8, target_line: u32) ?[]const u8 {
-    var current_line: u32 = 1;
-    var line_start: usize = 0;
-
-    for (source, 0..) |c, i| {
-        if (current_line == target_line) {
-            var line_end = i;
-            while (line_end < source.len and source[line_end] != '\n') {
-                line_end += 1;
-            }
-            return source[line_start..line_end];
-        }
-        if (c == '\n') {
-            current_line += 1;
-            line_start = i + 1;
-        }
-    }
-
-    if (current_line == target_line and line_start < source.len) {
-        return source[line_start..];
-    }
-
-    return null;
-}
 
 // ---------------------------------------------------------------------------
 // Tests

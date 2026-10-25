@@ -60,8 +60,9 @@ const builtin_modules = @import("zts-engine").builtin_modules;
 const atom_table = @import("zts-engine").atom_table;
 const parser_mod = @import("zts-engine").parser;
 const path_gen = @import("path_generator.zig");
+const ok_record_mod = @import("ok_record.zig");
 const effect_inference = @import("effect_inference.zig");
-const handler_verifier = @import("handler_verifier.zig");
+const handler_function_mod = @import("handler_function.zig");
 const fault_coverage = @import("fault_coverage.zig");
 
 const IrView = parser_mod.IrView;
@@ -533,7 +534,7 @@ fn observe(
 
     const root = parser.parse() catch return observed;
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = handler_verifier.findHandlerFunction(ir_view, root) orelse return observed;
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse return observed;
 
     var effect_facts: ?effect_inference.EffectFacts = effect_inference.buildEffectFacts(
         allocator,
@@ -953,7 +954,7 @@ test "exactly the fetch response-record exports are probed as ok records" {
             // The census's text oracle and the generator's parsed rule must
             // agree on every export, or one of them reads a record the other
             // does not.
-            const generator_rule = try path_gen.returnsOkRecord(allocator, if (export_fn.signature) |sig| sig.returns else "");
+            const generator_rule = try ok_record_mod.returnsOkRecord(allocator, if (export_fn.signature) |sig| sig.returns else "");
             if (export_fn.returns != .result and generator_rule != probed) {
                 std.debug.print("ok-record oracles disagree on {s}.{s}\n", .{ binding.name, export_fn.name });
                 return error.OkRecordOraclesDisagree;

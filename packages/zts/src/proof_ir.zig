@@ -25,7 +25,7 @@
 const std = @import("std");
 const ir = @import("zts-engine").parser.ir;
 const translation_witness = @import("zts-engine").translation_witness;
-const handler_verifier = @import("handler_verifier.zig");
+const handler_function_mod = @import("handler_function.zig");
 
 const IrView = ir.IrView;
 const NodeIndex = ir.NodeIndex;
@@ -810,7 +810,7 @@ fn parseAndLowerWith(
     errdefer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_source = handler_verifier.findHandlerFunction(view, root);
+    const handler_source = handler_function_mod.findHandlerFunction(view, root);
     const proof = try lower(allocator, view, root, handler_source, resolver);
     return .{ .allocator = allocator, .parser = parser, .proof = proof };
 }

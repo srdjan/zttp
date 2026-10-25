@@ -14,7 +14,7 @@ const type_env_mod = @import("type_env.zig");
 const type_checker_mod = @import("type_checker.zig");
 const type_pool_mod = @import("type_pool.zig");
 const match_analysis_mod = @import("match_analysis.zig");
-const bool_checker = @import("bool_checker.zig");
+const packBindingKey = @import("binding_key.zig").packBindingKey;
 const repair_intent_mod = @import("repair_intent.zig");
 const module_facts_mod = @import("module_facts.zig");
 const abi_types = @import("abi_types.zig");
@@ -2214,7 +2214,7 @@ fn stripOuterParens(annotation: []const u8) ?[]const u8 {
 }
 
 fn bindingKey(binding: ir.BindingRef) u32 {
-    return bool_checker.packBindingKey(binding.scope_id, binding.slot);
+    return packBindingKey(binding.scope_id, binding.slot);
 }
 
 const testing = std.testing;

@@ -245,7 +245,7 @@ pub fn parsedModuleFromDirectCheck(
 /// Return the borrowed contents of a 1-based source line without its newline.
 /// Empty input and the empty line after a trailing newline are not lines.
 pub fn sourceLine(source: []const u8, line: u32) ?[]const u8 {
-    return bool_checker.getSourceLine(source, line);
+    return base.source_line.get(source, line);
 }
 
 test "stable sourceLine preserves source line boundaries" {
@@ -338,7 +338,7 @@ pub const optimizeBytecode = bytecode_opt.optimizeBytecode;
 pub const OptStats = bytecode_opt.OptStats;
 pub const HandlerAnalyzer = handler_analyzer.HandlerAnalyzer;
 pub const HandlerVerifier = handler_verifier.HandlerVerifier;
-pub const findHandlerFunction = handler_verifier.findHandlerFunction;
+pub const findHandlerFunction = compiler.handler_function.findHandlerFunction;
 pub const BoolChecker = bool_checker.BoolChecker;
 pub const FlowChecker = flow_checker.FlowChecker;
 pub const PathGenerator = path_generator.PathGenerator;

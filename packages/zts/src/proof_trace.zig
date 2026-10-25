@@ -16,6 +16,7 @@ const handler_contract = @import("zts-contracts").handler_contract;
 const flow_checker = @import("flow_checker.zig");
 const counterexample = @import("counterexample.zig");
 const flow_evidence = @import("flow_evidence.zig");
+const handler_function_mod = @import("handler_function.zig");
 const ir = @import("zts-engine").parser.ir;
 const json_utils = @import("zts-base").json_utils;
 const spec_discharge = @import("spec_discharge.zig");
@@ -1101,7 +1102,7 @@ fn checkPublicFlowTrace(source: []const u8, tag: counterexample.PropertyTag, con
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
     const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler = @import("handler_verifier.zig").findHandlerFunction(view, root) orelse return error.MissingHandler;
+    const handler = handler_function_mod.findHandlerFunction(view, root) orelse return error.MissingHandler;
     var checker = flow_checker.FlowChecker.init(allocator, view, &atoms);
     defer checker.deinit();
     checker.scopes = &parser.scopes;

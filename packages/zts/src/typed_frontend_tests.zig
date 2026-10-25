@@ -12,7 +12,7 @@ const module_types = @import("module_types.zig");
 const abi_types = @import("abi_types.zig");
 const effect_inference = @import("effect_inference.zig");
 const function_specs = @import("function_specs.zig");
-const handler_verifier_mod = @import("handler_verifier.zig");
+const handler_function_mod = @import("handler_function.zig");
 const pipeline_mod = @import("pipeline.zig");
 const handler_contract_mod = @import("zts-contracts").handler_contract;
 const contract_types = @import("zts-contracts").contract_types;
@@ -13963,7 +13963,7 @@ fn expectDirectCallbackCeiling(
         null,
     );
     defer direct_module_facts.deinit();
-    const direct_handler = handler_verifier_mod.findHandlerFunction(
+    const direct_handler = handler_function_mod.findHandlerFunction(
         direct_view,
         direct_root,
     ) orelse return error.TestUnexpectedResult;

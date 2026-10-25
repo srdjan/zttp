@@ -29,12 +29,11 @@ const ir = engine.parser.ir;
 const object = engine.object;
 const atom_table = engine.atom_table;
 const mb = engine.module_binding;
-const bool_checker_mod = @import("bool_checker.zig");
 const known_globals = @import("zts-base").known_globals;
 const report_types = @import("flow_report.zig");
 const flow_evidence = @import("flow_evidence.zig");
 const counterexample = @import("counterexample.zig");
-const path_generator = @import("path_generator.zig");
+const ok_record_mod = @import("ok_record.zig");
 
 const NodeIndex = ir.NodeIndex;
 const NodeTag = ir.NodeTag;
@@ -42,7 +41,7 @@ const IrView = ir.IrView;
 const null_node = ir.null_node;
 const LabelSet = mb.LabelSet;
 
-const packBindingKey = bool_checker_mod.packBindingKey;
+const packBindingKey = @import("binding_key.zig").packBindingKey;
 
 const tag_count = @typeInfo(NodeTag).@"enum".field_names.len;
 
@@ -3433,7 +3432,7 @@ pub const FlowInterp = struct {
             @memcpy(calls[0..st.path.io_calls.len], st.path.io_calls);
             calls[index] = .{ .module = resolved.binding.name, .func = resolved.func.name, .returns = resolved.func.returns };
             st.path.io_calls = calls;
-            origin = .{ .module = resolved.binding.name, .func = resolved.func.name, .returns = resolved.func.returns, .call_index = index, .ok_record = try path_generator.isOkRecordExport(self.mem(), resolved.func) };
+            origin = .{ .module = resolved.binding.name, .func = resolved.func.name, .returns = resolved.func.returns, .call_index = index, .ok_record = try ok_record_mod.isOkRecordExport(self.mem(), resolved.func) };
         }
         var result = try self.evalExportValues(node, c, resolved, args, st);
         result.io_origin = origin;

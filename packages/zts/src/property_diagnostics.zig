@@ -22,6 +22,7 @@ const effect_inference = @import("effect_inference.zig");
 const fault_cov = @import("fault_coverage.zig");
 const flow_checker_mod = @import("flow_checker.zig");
 const handler_verifier_mod = @import("handler_verifier.zig");
+const handler_function_mod = @import("handler_function.zig");
 const handler_contract = @import("zts-contracts").handler_contract;
 const json_utils = @import("zts-base").json_utils;
 
@@ -629,7 +630,7 @@ test "routed Result violation cannot borrow a handler counterexample" {
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
     const ir_view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    const handler_fn = handler_verifier_mod.findHandlerFunction(ir_view, root) orelse
+    const handler_fn = handler_function_mod.findHandlerFunction(ir_view, root) orelse
         return error.HandlerNotFound;
 
     var verifier = handler_verifier_mod.HandlerVerifier.init(

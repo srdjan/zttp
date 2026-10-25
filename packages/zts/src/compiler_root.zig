@@ -25,6 +25,7 @@ pub const flow_report = @import("flow_report.zig");
 pub const flow_interp = @import("flow_interp.zig");
 pub const flow_evidence = @import("flow_evidence.zig");
 pub const handler_verifier = @import("handler_verifier.zig");
+pub const handler_function = @import("handler_function.zig");
 pub const proof_ir = @import("proof_ir.zig");
 
 pub const type_pool = @import("type_pool.zig");

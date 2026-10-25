@@ -20,6 +20,7 @@ zts-base profile_identity.zig
 zts-base route_match.zig
 zts-base status_text.zig
 zts-base source_diagnostics.zig
+zts-base source_line.zig
 
 zts-contracts contract_census.zig
 zts-contracts contract_json_parser.zig
@@ -122,6 +123,7 @@ zts-compiler analysis_fuzz.zig
 zts-compiler ambient_names.zig
 zts-compiler api_schema.zig
 zts-compiler compiler_root.zig
+zts-compiler binding_key.zig
 zts-compiler behavior_canonical.zig
 zts-compiler bool_checker.zig
 zts-compiler compiler.zig
@@ -138,6 +140,7 @@ zts-compiler flow_evidence.zig
 zts-compiler flow_interp.zig
 zts-compiler function_specs.zig
 zts-compiler grammar_registry.zig
+zts-compiler handler_function.zig
 zts-compiler handler_verifier.zig
 zts-compiler idiom_registry.zig
 zts-compiler ir_identity.zig
@@ -149,6 +152,7 @@ zts-compiler match_analysis.zig
 zts-compiler module_facts.zig
 zts-compiler module_spec_render.zig
 zts-compiler module_types.zig
+zts-compiler ok_record.zig
 zts-compiler path_generator.zig
 zts-compiler pipeline.zig
 zts-compiler proof_ir.zig
