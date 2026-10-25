@@ -34,6 +34,7 @@ The build computes that reach with `build/step_coverage.zig#classify`, the same 
 Each `agents.json` command carries a `route` with one of those four values.
 The spine fails when the value is missing, outside the four, or different from the graph reach.
 A `manual` command also carries a `reason`, and no other command does.
+`agents.json` is the only place that declares a build step manual; there is no separate allowlist for steps.
 The workspace kind `zig-build` records this native contract.
 
 [`AGENTS.md`](../../AGENTS.md) holds repository instructions and generated area and gate tables.

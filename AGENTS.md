@@ -160,7 +160,7 @@ The native port and its limits are described in `docs/internals/agent-spine.md`.
 | `zig build test-panic-isolation` | runs handler panic isolation end to end | after handler isolation or panic recovery changes |
 | `zig build smoke-getting-started` | runs the Getting Started guide in a temporary directory | after the guide or first-run workflow changes |
 | `zig build test-compile-bench` | runs compile benchmark harness tests | after compile benchmark changes |
-| `zig build test-step-coverage` | checks that every build step has an execution route | after build task or aggregate changes |
+| `zig build test-step-coverage` | reports how the build graph reaches every build step | after build task or aggregate changes |
 | `zig build check-spine` | checks the installed agent spine against the live repository graph | before any repository change is complete |
 | `zig build test-spine` | runs agent-spine behavior tests and rejection probes | after agent-spine policy or tooling changes |
 | `zig build verify` | runs the full local gate in separate sequential processes | before the full local verification gate is claimed |

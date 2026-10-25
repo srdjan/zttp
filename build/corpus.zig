@@ -2,7 +2,7 @@
 //!
 //! `test-diagnostic-corpus` runs the gate over every case, then the gate's own
 //! unit tests. `diagnostic-corpus-write` rewrites the goldens and is a human
-//! action, listed in scripts/manual-steps.allow. Arguments after `--` filter
+//! action, a manual route in agents.json. Arguments after `--` filter
 //! both by path substring; a filter that matches no case fails the gate.
 //!
 //! The gate also reads `instruction_counter.zig` (same module root, so no

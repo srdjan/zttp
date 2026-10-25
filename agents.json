@@ -828,7 +828,7 @@
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
-      "does": "checks that every build step has an execution route",
+      "does": "reports how the build graph reaches every build step",
       "requiredWhen": "after build task or aggregate changes"
     },
     {

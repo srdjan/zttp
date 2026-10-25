@@ -323,15 +323,20 @@ the NUL-delimited tracked script inventory. Other scripts require a reason in
 authorize running their live publication commands. The gate bounds direct
 execution routes; it does not infer arbitrary shell control flow.
 
-`zig build test-step-coverage` walks the live dependency graph and asks whether
-every named task's work is reached by aggregate `test`, an executable command
-in `tooling/verification_routes.zig`, or a row in `scripts/manual-steps.allow`.
-The same route data drives the native sequential verifier behind
-`scripts/verify.sh`. Labels, comments, and filename mentions supply no coverage.
-Release-only routes remain separate from per-commit routes, and the two runtime
-test roots still run in separate processes. Both allowlists ratchet in both
-directions. Input floors reject an empty inventory, route set, or declaration
-set. Native rejection probes remove execution while retaining explanatory text.
+`zig build test-step-coverage` walks the live dependency graph and classifies
+every named task by how its work is reached: by aggregate `test` (`aggregate`),
+by an executable command in `tooling/verification_routes.zig` (`verify`), by a
+release-only command (`release`), or by nothing (`manual`). The same route data
+drives the native sequential verifier behind `scripts/verify.sh`. Labels,
+comments, and filename mentions supply no coverage. `check-spine` holds each
+task's `route` and, for a manual task, its `reason` in `agents.json` against that
+classification, in both directions, so a step that nothing runs fails the
+aggregate until it is routed or declared manual with a reason. Release-only
+routes remain separate from per-commit routes, and the two runtime test roots
+still run in separate processes. The script allowlist ratchets in both
+directions. Input floors reject an empty inventory, route set, or task
+classification. Native rejection probes remove execution while retaining
+explanatory text.
 The zts source census includes tracked and untracked nonignored source files,
 so a new module is checked before staging; ignored generated files stay out.
 
@@ -473,7 +478,7 @@ change. It applies each row of `packages/tools/src/proof_checker_mutants.zon`
 to a private copy of the kernel, compiles the suite with a fresh cache, and
 fails when a mutant survives, when a row no longer applies, or when a row
 marked equivalent is killed. An equivalent row states the mechanism that makes
-the change invisible. The step is manual (`scripts/manual-steps.allow`): it
+the change invisible. The step is manual (route `manual` in `agents.json`): it
 takes about 100 seconds. Run it after any change to `packages/proof-checker`.
 A reused cache gave stale verdicts during the review that introduced it, so the
 fresh cache is not optional.

@@ -1,7 +1,10 @@
-//! Every live build task must have executable work covered by the aggregate,
-//! the shared sequential verification routes, or a stated manual reason.
+//! How the live build graph reaches every build task: the aggregate, the shared
+//! sequential verification routes, the release-only routes, or none (manual).
 //! The graph supplies task identity; verification_routes supplies executable
 //! external argv. Comments, labels and command fragments grant no coverage.
+//! `check-spine` holds each task's declared route and manual reason in agents.json
+//! against this classification, so that file is the one owner of "this step is
+//! manual, and why".
 const std = @import("std");
 const routes = @import("../tooling/verification_routes.zig");
 
@@ -75,53 +78,16 @@ pub fn classify(b: *std.Build, test_step: *std.Build.Step) []const Classified {
 }
 
 pub fn add(b: *std.Build, test_step: *std.Build.Step, step_coverage_step: *std.Build.Step, classified: []const Classified) void {
-    const manual_src = @embedFile("../scripts/manual-steps.allow");
-    var report: std.ArrayList(u8) = .empty;
-    var violations: usize = 0;
-    var manual_rows: usize = 0;
-    var step_count: usize = 0;
-    var release_only: usize = 0;
-
-    for (classified) |step| {
-        step_count += 1;
-        const declared_manual = allowNames(manual_src, step.name);
-        const unrun = step.reach == .manual; // nothing runs it
-        if (unrun and !declared_manual) {
-            report.print(b.allocator, "  {s}: {d} of {d} dependency steps are run by nothing\n", .{ step.name, step.unrun, step.own }) catch @panic("OOM");
-            violations += 1;
-        }
-        if (!unrun and declared_manual) {
-            report.print(b.allocator, "  {s}: listed in scripts/manual-steps.allow, but something runs it now - delete the row\n", .{step.name}) catch @panic("OOM");
-            violations += 1;
-        }
-        if (step.reach == .release) release_only += 1;
+    var counts = std.EnumArray(Reach, usize).initFill(0);
+    for (classified) |step| counts.set(step.reach, counts.get(step.reach) + 1);
+    // A walk that finds no aggregate step or too few steps is a broken census, and a census
+    // that reads nothing would let every step pass as covered.
+    if (classified.len < 50 or counts.get(.aggregate) == 0) {
+        @panic("step coverage: the task classification is implausibly small; the graph walk is broken");
     }
-
-    // A row naming a step that no longer exists is a claim about nothing.
-    var lines = std.mem.splitScalar(u8, manual_src, '\n');
-    while (lines.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \t\r");
-        if (line.len == 0 or line[0] == '#') continue;
-        var fields = std.mem.tokenizeAny(u8, line, " \t");
-        const name = fields.next() orelse continue;
-        manual_rows += 1;
-        if (b.top_level_steps.get(name) == null) {
-            report.print(b.allocator, "  {s}: listed in scripts/manual-steps.allow, but no such build step exists\n", .{name}) catch @panic("OOM");
-            violations += 1;
-        }
-    }
-    if (manual_rows == 0) {
-        @panic("step coverage: scripts/manual-steps.allow parsed zero rows; the allowlist read is broken");
-    }
-
-    if (violations > 0) {
-        const message = b.allocator.print("step coverage: {d} problem(s)\n{s}\nRun the step from scripts/verify.sh, scripts/release.sh, or `zig build test`; or add a row to scripts/manual-steps.allow with the reason a human asks for it.", .{ violations, report.items }) catch @panic("OOM");
-        step_coverage_step.dependOn(&b.addFail(message).step);
-    } else {
-        const ok = b.addSystemCommand(&.{ "/bin/echo", b.fmt("step coverage: OK ({d} steps, {d} run by hand with a stated reason, {d} run only at release)", .{ step_count, manual_rows, release_only }) });
-        ok.has_side_effects = true;
-        step_coverage_step.dependOn(&ok.step);
-    }
+    const ok = b.addSystemCommand(&.{ "/bin/echo", b.fmt("step coverage: OK ({d} steps: {d} aggregate, {d} verify, {d} release-only, {d} manual; check-spine holds each route)", .{ classified.len, counts.get(.aggregate), counts.get(.verify), counts.get(.release), counts.get(.manual) }) });
+    ok.has_side_effects = true;
+    step_coverage_step.dependOn(&ok.step);
     test_step.dependOn(step_coverage_step);
 }
 
@@ -208,17 +174,4 @@ pub fn attachScriptCensus(b: *std.Build, test_step: *std.Build.Step, run: *std.B
     const generated = b.addWriteFiles();
     run.addArtifactArg(repo_gate);
     run.addFileArg(generated.add("script-execution-routes.txt", census.items));
-}
-
-/// True when `allow_src` has a row whose first field is `name`.
-fn allowNames(allow_src: []const u8, name: []const u8) bool {
-    var lines = std.mem.splitScalar(u8, allow_src, '\n');
-    while (lines.next()) |raw| {
-        const line = std.mem.trim(u8, raw, " \t\r");
-        if (line.len == 0 or line[0] == '#') continue;
-        var fields = std.mem.tokenizeAny(u8, line, " \t");
-        const first = fields.next() orelse continue;
-        if (std.mem.eql(u8, first, name)) return true;
-    }
-    return false;
 }
