@@ -198,3 +198,44 @@ Gates on `main`, each exit 0: `test-diagnostic-corpus`, `test-expert-golden`, `t
 
 The census was repeated after the whole-text rule was added, with the same result: 0 disagreements except `bool` and `bool[]`. For four malformed groups the old parser returned null but left stray names in the pool; `parseTypeText` leaves the pool unchanged.
 Gates on `main`, each exit 0: `test-modules`, `test-zts`, `test-precompile`, `test-flow-census`, `test-zts-layering`, `test-proof-swallow`, `test-meta-drift`, `test-contract-golden`, `test-diagnostic-corpus`, `test-module-boundary`, `test-agent-protocol`, `test-cli`, `test-zruntime`, `check-spine`. Fresh-cache aggregate: 211/211 steps, 7807/7813 passed (6 skipped), unchanged. Digests: byte-identical. Protection against `4cf853d5`: exit 0. `git grep -n TypeExprParser -- packages` prints nothing.
+
+## R9b
+
+| Commit | Phase | Result |
+|---|---|---|
+| `c2b5e4c1` | R9b-1 | `diagnostic_projection` gains `scopeText`, `writeProjected`, and `writeAll`. The bool, flow, verifier, strict, and type `formatDiagnostics` are each one `writeAll` call. Fault coverage keeps its own formatter. |
+| `c31846ba` | R9b-2 | `HandlerProperties.namesCoverageProblem` checks lists that name properties as data: `contract_diff.propertyLossSeverity`, `spec_discharge.suggestionFor`, `proof_trace.property_info`, the attestation header chip list, and the precompile properties report. The loss-severity and suggestion chains become tables read by the same functions. |
+
+Extended census before the merge: 134 synthetic diagnostics over every severity, four help shapes, and three positions, with 0 differences against the projection path. The 982-line formatter dumps before and after the merge are byte-identical. Opus checked R9b-2 by diff: the 12 suggestion names and texts are identical, the loss-severity map is unchanged, and the report rows keep their order and text. A scratch field added to `HandlerProperties` fails each of the ten property lists.
+Gates on `main`, each exit 0: `test-diagnostic-corpus`, `test-expert-golden`, `test-cassette`, `test-expert-app`, `test-standin`, `test-meta-drift`, `test-zts`, `test-precompile`, `test-zts-cli`, `test-proof-swallow`, `test-contract-golden`, `test-flow-census`, `test-cli`, `test-zruntime`, `test-zts-layering`, `test-module-boundary`, `test-docs-drift`, `check-spine`. Fresh-cache aggregate: 211/211 steps, 7807/7813 passed (6 skipped), unchanged. Digests: byte-identical. Protection against `89882288`: exit 0.
+
+## R13a and R10a, R10b
+
+| Commit | Phase | Result |
+|---|---|---|
+| `ebcf5c97` | R13a-1 | `AGENTS.md` names `server_static.zig#resolveStaticFile` for the path traversal checks, the three CHECK files of the proof-swallow list, and thirty-two files. The architecture, testing, protocol, and area documents describe the reset design. |
+| `3eb976df` | R13a-2 | Decisions D-010 (tests use the production parse mode), D-011 (each analyzer fact has one producer), and D-012 (model-visible changes wait for one re-record window). The D-005 amendment from R12b is present. |
+| `e58b46df` | R13a-3 | `.agents/skills/zttp-models/SKILL.md` is a link to `../../../.claude/skills/zttp-models/SKILL.md`. The two copies were the same blob before the change. |
+| `1d156b41` | R10b | `IrView.expressionChildren` already names all 69 node tags with no `else` arm. `parser/ir_children_tests.zig` adds one decision row per tag (27 yield children, 15 leaf with a reason, 27 not produced by the parser) and checks the yielded children against parsed witnesses. |
+| this commit | R13a review fix | D-010 states the measured count: 199 test sites, from the R4 census. |
+
+R10a census (96 node-tag switches in the 32 proof-swallow files): 4 name every tag, 8 descend through the child visitor, and the rest return a constant, delegate, or carry an `// exhaustive:` reason. Of 30 walk-like switches with a non-descending default, 27 carry a reason. Two delegate to their expression walk. `proof_ir.build` maps unlisted tags to a leaf; its module header states that the lowering keeps the six node kinds that totality depends on, so this is the design and not a skip.
+R10a route probe: 22 route shapes, each returning `env("SECRET_KEY")` from the route body. 19 are refused, 1 clean control proves clean, and 5 stop at an earlier stage with no contract. No shape proves a leak clean. Limit: one leak form, typed `.ts` sources only.
+Opus scope ruling for R10c: classifiers and recognizers that return a conservative constant keep their defaults. R10c migrates only fact-collecting walks whose default drops a child.
+Gates on `main`, each exit 0: `test-zts`, `test-flow-census` (734 match, 0 fail-open, 0 over-refusal), `test-standin`, `test-diagnostic-corpus`, `test-proof-swallow`, `test-contract-golden`, `test-zts-layering`, `test-module-boundary`, `test-doc-links`, `test-docs-drift`, `test-spine`, `check-spine`. Fresh-cache aggregate: 211/211 steps, 7809/7815 passed (6 skipped); the delta of 2 is the R10b tests. Digests: byte-identical. Protection against `c31846ba`: exit 0.
+Follow-up for the R13 final pass: `docs/contracts-and-sandboxing.md` names `server.zig:updateContract`, which no longer exists. That reference was stale before the reset.
+
+## R5 bench-check
+
+`zig build bench-check -Doptimize=ReleaseFast` on `main` at `1d156b41`, load 2.06 to 2.19: exit 1, `intArithmetic` 11.76% below the committed baseline (limit 8%). Every other row passed.
+Interleaved runs of `bench-check` on R0 (`f52d8e4a`) and `main`, load 2.2: R0 failed once (8.30%) and passed twice; `main` failed three times (10.08%, 10.45%, 11.36%).
+21 alternating runs of the two bench binaries, load 1.9, operations per second:
+
+| Row | R0 median | `main` median | Change |
+|---|---|---|---|
+| `intArithmetic` | 19,944,156 | 19,546,520 | -2.0% |
+| `propertyAccess` | 18,274,853 | 18,301,610 | +0.1% |
+| `functionCalls` | 11,720,581 | 11,715,089 | 0.0% |
+| `httpHandler` | 6,443,298 | 6,393,861 | -0.8% |
+
+The `intArithmetic` row runs for about 2.4 ms, and the two ranges overlap (R0 19.07M to 23.07M, `main` 18.72M to 20.06M). Both medians are 13% to 15% below the baseline of 22,967,386, so R0 also misses the 8% limit on this host in its median. The measured reset effect is -2.0% on one row and no change beyond 0.8% on the others. The R5 exit condition ("`bench-check` stays within its limits") is not met on this host, and it is not met at R0 either. No baseline file is changed (`benchmarks/perf-baseline.json` is protected).

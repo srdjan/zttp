@@ -119,7 +119,7 @@ Fourth (D14), the Linux gate runs `scripts/verify.sh --release` in a native arm6
 - Binds: packages/zts/src/parser/parse.zig, packages/zts/src/typed_frontend_tests.zig
 - Gate: zig build test-zts
 
-Typed analyzer tests parse through `JsParser.initAdmission(allocator, type_allocator, source, .compile)`, the mode that every typed source takes in production. Before the 2026-10-25 reset, about 190 tests used a typed mode without admission. That mode proved behavior that no user runs. The reset moved those tests to the production mode, ruled each changed expectation, and deleted `JsParser.initTyped`. A new test does not add a parse mode that production does not use.
+Typed analyzer tests parse through `JsParser.initAdmission(allocator, type_allocator, source, .compile)`, the mode that every typed source takes in production. Before the 2026-10-25 reset, 199 test sites used a typed mode without admission. That mode proved behavior that no user runs. The reset moved those tests to the production mode, ruled each changed expectation, and deleted `JsParser.initTyped`. A new test does not add a parse mode that production does not use.
 
 ### D-011 Each analyzer fact has one producer
 
