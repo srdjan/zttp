@@ -81,6 +81,8 @@ proof_files=(
   packages/proof-checker/src/capability_policy.zig
   packages/proof-checker/src/wire.zig
   packages/runtime/src/proof_activation.zig
+  packages/tools/src/precompile_check_run.zig
+  packages/tools/src/precompile_contract.zig
   packages/tools/src/precompile_imports.zig
 )
 

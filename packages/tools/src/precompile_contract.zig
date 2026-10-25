@@ -76,6 +76,7 @@ fn countAotPatterns(dispatch: *const zts.PatternDispatchTable) usize {
         switch (pattern.pattern_type) {
             .exact => count += 1,
             .prefix => {},
+            // exhaustive: .dynamic routes are not ahead-of-time patterns; this count only reports them.
             else => {},
         }
     }

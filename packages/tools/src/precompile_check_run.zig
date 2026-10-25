@@ -258,6 +258,7 @@ pub fn summarizeGeneratedPaths(
         analysis.cost_envelope = try generator.buildCostEnvelope(output_allocator);
         analysis.max_io_depth = switch (analysis.cost_envelope.?.total) {
             .constant => |count| count,
+            // exhaustive: .linear and .unbounded have no fixed I/O depth, so the report leaves it null.
             else => null,
         };
         // Not conjoined with `exhaustive`: a summarized loop loses path

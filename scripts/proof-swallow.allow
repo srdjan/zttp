@@ -408,3 +408,40 @@ packages/zts/src/strict_checker.zig recordCall catch-block
 packages/zts/src/strict_checker.zig recordCall catch-block@2
 packages/zts/src/strict_checker.zig resolveFacts catch-block
 packages/zts/src/strict_checker.zig scanImports catch-poison
+
+# --- CHECK facade (precompile_check_run.zig, precompile_contract.zig) ---
+# Reviewed 2026-10-25 when reset R6b moved this code out of precompile.zig,
+# which the gate never listed. The CHECK verdict is CheckResult.totalErrors(),
+# the sum of the per-stage counters; it never reads json_diagnostics or the
+# rendered text. Each stage sets its counter before it appends or formats, so
+# a failed append or format drops presentation only and cannot turn a refusal
+# into a pass.
+packages/tools/src/precompile_check_run.zig appendCheckAdmissionDiagnostic catch-block
+packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block
+packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@2
+packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@3
+packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@4
+packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@5
+packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@6
+packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@7
+packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@8
+packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@9
+packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@10
+packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@11
+packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@12
+packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-value
+packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-value@2
+packages/tools/src/precompile_contract.zig appendPolicyDiagnostics catch-block
+packages/tools/src/precompile_contract.zig projectCompletedFlow catch-block
+
+# Each of these converts an error into a counted refusal (parse_errors = 1 or
+# policy_errors += 1) or propagates it: an unreadable handler, a strip
+# allocation failure, a parse failure, a virtual-import failure, an analyzer
+# error mapped to ZTS000, and an invalid capability policy. None returns a
+# result with a zero error count.
+packages/tools/src/precompile_check_run.zig runCheckOnlyWithOptions catch-block
+packages/tools/src/precompile_check_run.zig runCheckOnlyWithOptions catch-block@2
+packages/tools/src/precompile_check_run.zig runCheckOnlyWithOptions catch-block@3
+packages/tools/src/precompile_check_run.zig runCheckOnlyFromSourceWithPathAllocator catch-switch
+packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-switch
+packages/tools/src/precompile_contract.zig enforcePolicyForContract catch-block

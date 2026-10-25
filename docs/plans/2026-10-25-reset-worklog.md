@@ -61,3 +61,28 @@ Analyzer digests: byte-identical to R0 (`cmp` exit 0). Protection check against 
 
 The dry-run census substituted 199 test sites. Then 22 of 3042 `test-zts` tests failed. The real `zts check` confirms that production refuses `void` ("write `undefined`") and `any`, and that it parses `identity<T = /,/, U>` and refuses it with ZTS601. No row showed a user-visible production difference.
 - 2026-10-25: the owner chose Decision 7 (a). Rows 1 and 2 are deleted. Rows 19 to 22 change `: void` to `: undefined`. The G1, G3, G4, G5, and G6 rows expect the production value and assert refusal locations through admission diagnostics.
+
+## R4
+
+| Commit | Phase | Result |
+|---|---|---|
+| `0db65951` | R4a | 53 test sites outside `typed_frontend_tests.zig` use `initAdmission(.compile)`. Rows 1 and 2 (tests of the removed typed-only mode) are deleted. Rows 19 to 22 use `: undefined` and keep their assertions. |
+| `bd8f1658` | R4b | The worker's mechanical commit (`initTyped(` 146 to 0, `initAdmission(` 7 to 153) and its expectation commit are squashed, so `main` has no commit with failing tests. No test is deleted; one is renamed (row 14). |
+| `201c63e9` | R4c | `JsParser.initTyped` is deleted, together with the tail of `Parser.parse` that ran only for a typed parse without admission. `init` and `initExpression` do not parse type syntax, and `initAdmission` returns earlier, so the tail was unreachable. |
+
+Row 18 needed a ruling during R4b. Production reports `const value: = 1;` as `unexpected_token` at offset 11 and `missing_semicolon` at offset 6, while the typed-only mode reported offset 13. Production output does not change, so this is the G3 and G4 ruling: the test asserts the exact production counts and locations. The reported location of a missing type (the colon, not the `=`) is a diagnostic-quality candidate for the Decision 2 window.
+
+Gates on `main`, each exit 0: `test-zts`, `test-zts-cli`, `test-diagnostic-corpus`, `test-standin`, `test-precompile`, `check-spine`. Fresh-cache aggregate: 7771/7777 passed (6 skipped); the delta of 2 is the two deleted tests. Digests: byte-identical. Protection against `ea02c3f7`: exit 0. `git grep -n 'JsParser.initTyped' -- packages` prints nothing.
+
+## R6b, R6c, R6d
+
+| Commit | Phase | Result |
+|---|---|---|
+| `2ebf2e33` | R6b | `precompile.zig` goes from 12,647 to 1,768 lines. Nine sibling files hold the CLI, the CHECK facade (`precompile_check_run.zig`), contract and policy building, SQL validation, reports, test generation, virtual-import validation, stderr helpers, and the CHECK tests. D-006 now also binds `precompile_check_run.zig`. |
+| `07625ffc` | R6c | `agent_protocol.zig` goes from 6,327 to 727 lines across ten operation files. `schemaHash` and the meta payload moved unchanged. |
+| `3a71cedb` | R6d | `ConnectionPool` moves to `server_connection_pool.zig`. `check-runtime-purity.sh` checks both files; a probe with an added zts import failed the gate. |
+| this commit | R6b review fix | `precompile.zig` was never in the proof-swallow list. `precompile_check_run.zig` and `precompile_contract.zig` are added. Opus reviewed all 23 sites: the verdict is `CheckResult.totalErrors()`, the sum of the stage counters. Each site either drops presentation after its counter is set, or converts the error into a counted refusal. Two silent `else` arms got `// exhaustive:` reasons. The gate reports 32 files, 185 reviewed swallows, 0 unreviewed. |
+
+`git show --color-moved=plain` agrees with the motion claim: the non-moved added lines are headers, imports, re-exports, and signatures that gained `pub` (195, 255, and 60 lines).
+Gates on `main`, each exit 0: `test-precompile`, `test-agent-protocol`, `test-contract-golden`, `test-proof-swallow`, `test-module-boundary`, `test-cli`, `test-production-branch-metric`, `test-expert-golden`, `test-agent-determinism`, `test-meta-drift`, `test-server`, `test-zruntime`, `test-panic-isolation`, `test-runtime-purity`, `test-docs-drift`, `check-spine`. Fresh-cache aggregate: 7771/7777 passed (6 skipped). Digests: byte-identical. Protection against `201c63e9`: exit 0.
+`AGENTS.md` says that `server.zig` holds the path traversal checks; they live in `server_static.zig` (`resolveStaticFile`). R13 corrects that sentence.
