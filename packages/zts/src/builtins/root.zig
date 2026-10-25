@@ -322,7 +322,7 @@ pub fn initBuiltins(ctx: *context.Context) !void {
     try addMethodDynamic(ctx, array_proto, "includes", wrap(array.arrayIncludes), 1);
     try addMethodDynamic(ctx, array_proto, "join", wrap(array.arrayJoin), 1);
     try addMethodDynamic(ctx, array_proto, "slice", wrap(array.arraySlice), 2);
-    try addMethodDynamic(ctx, array_proto, "concat", wrap(array.arrayConcat), 1);
+    try addMethodDynamic(ctx, array_proto, "concat", wrapTry(array.arrayConcat), 1);
     try addMethodDynamic(ctx, array_proto, "map", wrapTry(array.arrayMap), 1);
     try addMethodDynamic(ctx, array_proto, "filter", wrapTry(array.arrayFilter), 1);
     try addMethodDynamic(ctx, array_proto, "reduce", wrapTry(array.arrayReduce), 2);

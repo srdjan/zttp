@@ -620,26 +620,24 @@ pub fn arraySlice(ctx: *context.Context, this: value.JSValue, args: []const valu
 }
 
 /// Array.prototype.concat(...items) - Merge arrays
-/// Append every element of `src` (an array object) onto `dst`. Returns false
-/// if a push allocation fails. Shared by arrayConcat's receiver and array-arg
-/// copies.
-fn appendArrayElements(ctx: *context.Context, dst: *object.JSObject, src: *object.JSObject) bool {
+/// Append every element of `src` (an array object) onto `dst`.
+fn appendArrayElements(ctx: *context.Context, dst: *object.JSObject, src: *object.JSObject) !void {
     const len = getArrayLength(src, ctx.hidden_class_pool);
     const ulen: u32 = if (len > 0) @intCast(len) else 0;
     var i: u32 = 0;
     while (i < ulen) : (i += 1) {
         const elem = src.getIndex(i) orelse value.JSValue.undefined_val;
-        dst.arrayPush(ctx.allocator, elem) catch return false;
+        try dst.arrayPush(ctx.allocator, elem);
     }
-    return true;
 }
 
-pub fn arrayConcat(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const result = createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val;
+pub fn arrayConcat(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) anyerror!value.JSValue {
+    const result = try ctx.createArray();
+    result.prototype = ctx.array_prototype;
 
     // Copy the receiver's elements first.
     if (getObject(this)) |obj| {
-        if (!appendArrayElements(ctx, result, obj)) return value.JSValue.undefined_val;
+        try appendArrayElements(ctx, result, obj);
     }
 
     // Per spec: array arguments are flattened one level; every other value is
@@ -647,9 +645,9 @@ pub fn arrayConcat(ctx: *context.Context, this: value.JSValue, args: []const val
     for (args) |arg| {
         const maybe_arr = getObject(arg);
         if (maybe_arr != null and maybe_arr.?.class_id == .array) {
-            if (!appendArrayElements(ctx, result, maybe_arr.?)) return value.JSValue.undefined_val;
+            try appendArrayElements(ctx, result, maybe_arr.?);
         } else {
-            result.arrayPush(ctx.allocator, arg) catch return value.JSValue.undefined_val;
+            try result.arrayPush(ctx.allocator, arg);
         }
     }
 
@@ -870,18 +868,28 @@ pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const v
         if (first_error) |err| return err;
     } else {
         // Default: lexicographic string comparison (per JS spec).
-        std.mem.sort(value.JSValue, temp, ctx.allocator, struct {
-            pub fn lessThan(allocator: std.mem.Allocator, a: value.JSValue, b: value.JSValue) bool {
+        const CompareCtx = struct {
+            allocator: std.mem.Allocator,
+            first_error: *?anyerror,
+
+            pub fn lessThan(self: @This(), a: value.JSValue, b: value.JSValue) bool {
+                if (self.first_error.* != null) return false;
                 // undefined values go to the end
                 if (a.isUndefined() and b.isUndefined()) return false;
                 if (a.isUndefined()) return false;
                 if (b.isUndefined()) return true;
 
                 // Convert to strings and compare lexicographically (JS default)
-                const str_a = valueToStringSimple(allocator, a) catch return false;
-                defer if (!a.isString()) string.freeString(allocator, str_a);
-                const str_b = valueToStringSimple(allocator, b) catch return false;
-                defer if (!b.isString()) string.freeString(allocator, str_b);
+                const str_a = valueToStringSimple(self.allocator, a) catch |err| {
+                    self.first_error.* = err;
+                    return false;
+                };
+                defer if (!a.isString()) string.freeString(self.allocator, str_a);
+                const str_b = valueToStringSimple(self.allocator, b) catch |err| {
+                    self.first_error.* = err;
+                    return false;
+                };
+                defer if (!b.isString()) string.freeString(self.allocator, str_b);
 
                 const slice_a = str_a.data();
                 const slice_b = str_b.data();
@@ -894,7 +902,10 @@ pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const v
                 }
                 return slice_a.len < slice_b.len;
             }
-        }.lessThan);
+        };
+        var first_error: ?anyerror = null;
+        std.mem.sort(value.JSValue, temp, CompareCtx{ .allocator = ctx.allocator, .first_error = &first_error }, CompareCtx.lessThan);
+        if (first_error) |err| return err;
     }
 
     // Create result array with sorted elements
@@ -944,6 +955,82 @@ test "arrayToSorted sorts non-string elements without an allocator mismatch" {
     try std.testing.expectEqual(@as(i32, 1), (sorted_obj.getIndex(0) orelse value.JSValue.undefined_val).getInt());
     try std.testing.expectEqual(@as(i32, 2), (sorted_obj.getIndex(1) orelse value.JSValue.undefined_val).getInt());
     try std.testing.expectEqual(@as(i32, 3), (sorted_obj.getIndex(2) orelse value.JSValue.undefined_val).getInt());
+}
+
+const OneShotFailAllocator = struct {
+    child: std.mem.Allocator,
+    remaining_successes: usize,
+    failed: bool = false,
+
+    fn asAllocator(self: *@This()) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = alloc,
+            .resize = std.mem.Allocator.noResize,
+            .remap = std.mem.Allocator.noRemap,
+            .free = free,
+        } };
+    }
+
+    fn alloc(raw: *anyopaque, len: usize, alignment: std.mem.Alignment, return_address: usize) ?[*]u8 {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        if (!self.failed and self.remaining_successes == 0) {
+            self.failed = true;
+            return null;
+        }
+        if (!self.failed) self.remaining_successes -= 1;
+        return self.child.rawAlloc(len, alignment, return_address);
+    }
+
+    fn free(raw: *anyopaque, memory: []u8, alignment: std.mem.Alignment, return_address: usize) void {
+        const self: *@This() = @ptrCast(@alignCast(raw));
+        self.child.rawFree(memory, alignment, return_address);
+    }
+};
+
+test "arrayConcat reports allocation failure while copying elements" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const arr = try ctx.createArray();
+    for (0..object.JSObject.INLINE_SLOT_COUNT) |index| {
+        try ctx.setIndexChecked(arr, @intCast(index), value.JSValue.fromInt(@intCast(index)));
+    }
+    var failing = OneShotFailAllocator{ .child = allocator, .remaining_successes = 1 };
+    ctx.allocator = failing.asAllocator();
+
+    try std.testing.expectError(error.OutOfMemory, arrayConcat(ctx, arr.toValue(), &.{}));
+}
+
+test "arrayToSorted default comparator reports allocation failure" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const arr = try ctx.createArray();
+    try ctx.setIndexChecked(arr, 0, value.JSValue.fromInt(2));
+    try ctx.setIndexChecked(arr, 1, value.JSValue.fromInt(1));
+    arr.setArrayLength(2);
+
+    var failing = OneShotFailAllocator{ .child = allocator, .remaining_successes = 1 };
+    ctx.allocator = failing.asAllocator();
+    _ = arrayToSorted(ctx, arr.toValue(), &.{}) catch |err| {
+        try std.testing.expectEqual(error.OutOfMemory, err);
+        return;
+    };
+    return error.ExpectedOutOfMemory;
 }
 
 test "arrayReduce throws on empty array without initial value" {
