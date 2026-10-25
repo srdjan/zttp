@@ -247,7 +247,11 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
             std.debug.print("Next: check the handler path, or run `check` with no argument inside a project.\n", .{});
             std.process.exit(1);
         },
-        else => return err,
+        // An error no arm maps becomes one ZTS000, not a Zig error trace; OutOfMemory propagates.
+        else => {
+            try writeUnmappedAnalyzerError(allocator, json_mode, target, err);
+            std.process.exit(1);
+        },
     };
     defer result.deinit(allocator);
 
@@ -360,14 +364,18 @@ fn writePolicyLoadFailureJson(allocator: std.mem.Allocator, target: []const u8) 
 }
 
 fn writePolicyLoadFailureJsonToWriter(writer: anytype, target: []const u8) !void {
+    try writeDriverFailureJson(writer, target, "configured capability policy could not be loaded", "repair the policy entry in zttp.json or restore the policy file");
+}
+
+fn writeDriverFailureJson(writer: anytype, target: []const u8, message: []const u8, suggestion: []const u8) !void {
     const diagnostics = [_]json_diag.JsonDiagnostic{.{
         .code = zts.DiagnosticCatalog.driverCode(.compiler_io_failure),
         .severity = "error",
-        .message = "configured capability policy could not be loaded",
+        .message = message,
         .file = target,
         .line = 1,
         .column = 1,
-        .suggestion = "repair the policy entry in zttp.json or restore the policy file",
+        .suggestion = suggestion,
     }};
     try json_diag.writeErrorJson(writer, null, diagnostics[0..], null);
 }
@@ -386,13 +394,44 @@ fn writePolicyLoadFailureText(allocator: std.mem.Allocator, target: []const u8) 
 }
 
 fn writePolicyLoadFailureTextToWriter(writer: anytype, target: []const u8) !void {
+    try writeDriverFailureText(writer, target, "Capability policy diagnostics", "configured capability policy could not be loaded", "repair the policy entry in zttp.json or restore the policy file");
+}
+
+fn writeDriverFailureText(writer: anytype, target: []const u8, heading: []const u8, message: []const u8, suggestion: []const u8) !void {
     try writer.print(
-        "\ncheck: {s}\n\n  Capability policy diagnostics:\n" ++
-            "    ZTS000 (error) {s}:1:1  configured capability policy could not be loaded\n" ++
-            "      help: repair the policy entry in zttp.json or restore the policy file\n\n" ++
+        "\ncheck: {s}\n\n  {s}:\n" ++
+            "    ZTS000 (error) {s}:1:1  {s}\n" ++
+            "      help: {s}\n\n" ++
             "  1 errors, 0 warnings\n",
-        .{ target, target },
+        .{ target, heading, target, message, suggestion },
     );
+}
+
+/// Writes the ZTS000 diagnostic for an analyzer error that no code maps.
+/// OutOfMemory is no verdict: it returns before any output.
+fn writeUnmappedAnalyzerErrorToWriter(allocator: std.mem.Allocator, writer: anytype, json_mode: bool, target: []const u8, err: anyerror) !void {
+    if (err == error.OutOfMemory) return err;
+    const message = try std.fmt.allocPrint(allocator, "the analyzer stopped with error.{s}", .{@errorName(err)});
+    defer allocator.free(message);
+    const suggestion = "report the handler that triggers this error";
+    if (json_mode) {
+        try writeDriverFailureJson(writer, target, message, suggestion);
+    } else {
+        try writeDriverFailureText(writer, target, "Analyzer diagnostics", message, suggestion);
+    }
+}
+
+fn writeUnmappedAnalyzerError(allocator: std.mem.Allocator, json_mode: bool, target: []const u8, err: anyerror) !void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    try writeUnmappedAnalyzerErrorToWriter(allocator, &aw.writer, json_mode, target, err);
+    buf = aw.toArrayList();
+    if (json_mode) {
+        try writeAllFd(std.c.STDOUT_FILENO, buf.items);
+    } else {
+        _ = std.c.write(std.c.STDERR_FILENO, buf.items.ptr, buf.items.len);
+    }
 }
 
 fn writeMissingSqlSchemaJsonToWriter(writer: anytype, target: []const u8) !void {
@@ -748,6 +787,40 @@ test "policy load failures are actionable in json and text modes" {
     try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "Capability policy diagnostics") != null);
     try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "ZTS000") != null);
     try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "handler.ts") != null);
+}
+
+test "an unmapped analyzer error is one ZTS000 diagnostic" {
+    const allocator = std.testing.allocator;
+
+    var json_buf: std.ArrayList(u8) = .empty;
+    defer json_buf.deinit(allocator);
+    var json_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &json_buf);
+    try writeUnmappedAnalyzerErrorToWriter(allocator, &json_aw.writer, true, "handler.ts", error.JumpTooFar);
+    json_buf = json_aw.toArrayList();
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_buf.items, .{});
+    defer parsed.deinit();
+    try std.testing.expectEqual(false, parsed.value.object.get("success").?.bool);
+    const diagnostics = parsed.value.object.get("diagnostics").?.array.items;
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS000", diagnostics[0].object.get("code").?.string);
+    try std.testing.expect(std.mem.indexOf(u8, diagnostics[0].object.get("message").?.string, "JumpTooFar") != null);
+
+    var text_buf: std.ArrayList(u8) = .empty;
+    defer text_buf.deinit(allocator);
+    var text_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &text_buf);
+    try writeUnmappedAnalyzerErrorToWriter(allocator, &text_aw.writer, false, "handler.ts", error.JumpTooFar);
+    text_buf = text_aw.toArrayList();
+    try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, text_buf.items, "ZTS000"));
+    try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "JumpTooFar") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text_buf.items, "1 errors, 0 warnings") != null);
+
+    // Out of memory is not an analyzer verdict: it propagates and writes nothing.
+    var none_buf: std.ArrayList(u8) = .empty;
+    defer none_buf.deinit(allocator);
+    var none_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &none_buf);
+    try std.testing.expectError(error.OutOfMemory, writeUnmappedAnalyzerErrorToWriter(allocator, &none_aw.writer, true, "handler.ts", error.OutOfMemory));
+    none_buf = none_aw.toArrayList();
+    try std.testing.expectEqual(@as(usize, 0), none_buf.items.len);
 }
 
 test {
