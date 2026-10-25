@@ -109,3 +109,34 @@ The owner now verifies, builds, smoke-tests, and publishes each release with `sc
 Three choices follow from this. First (D9), releases publish no Intel macOS binary (`x86_64-macos-none`). Second (D12), `.github/workflows/ci.yml` and `.github/workflows/release.yml` are deleted, so no workflow builds or tests the repository. Third (D13), `proof-gate.yml` moves to `docs/examples/proof-gate.yml`, because `docs/proofs-and-receipts.md` documents it as a template that users copy. No workflow runs in this repository.
 
 Fourth (D14), the Linux gate runs `scripts/verify.sh --release` in a native arm64 container. The first local run of the gate under Rosetta failed 28 compile steps. Rosetta refuses the `translate-c` helper that Zig 0.16 builds with its x86_64 backend ("bss_size overflow"). Only the Rosetta smoke test of the shipped tarball checks x86_64 Linux. That smoke test cannot catch a crash that occurs only in x86_64 Debug builds, such as the 0.22.2 crash.
+
+## Analyzer structure
+
+### D-010 Tests use the production parse mode
+
+- Status: standing
+- Decided: 2026-10-25
+- Binds: packages/zts/src/parser/parse.zig, packages/zts/src/typed_frontend_tests.zig
+- Gate: zig build test-zts
+
+Typed analyzer tests parse through `JsParser.initAdmission(allocator, type_allocator, source, .compile)`, the mode that every typed source takes in production. Before the 2026-10-25 reset, about 190 tests used a typed mode without admission. That mode proved behavior that no user runs. The reset moved those tests to the production mode, ruled each changed expectation, and deleted `JsParser.initTyped`. A new test does not add a parse mode that production does not use.
+
+### D-011 Each analyzer fact has one producer
+
+- Status: standing
+- Decided: 2026-10-25
+- Binds: packages/zts/src/pipeline.zig, packages/zts/src/type_syntax_lowering.zig, packages/zts/src/diagnostic_projection.zig, packages/zts/src/contract_types.zig
+- Gate: zig build test-contract-golden
+
+The reset removed second copies that could drift. `ModuleAnalysisSession.extractContract` runs the selected flow pass and applies its properties to the contract, so no caller applies flow results in a second step. A standalone type text goes through `type_syntax_lowering.parseTypeText`, the grammar of authored source, and the type pool holds no second parser. The five checkers render diagnostics through `diagnostic_projection.writeAll`. Every list that names a `HandlerProperties` field calls `HandlerProperties.coverageProblem` or `namesCoverageProblem`, so a new property fails the build until each list decides. `zig build test-diagnostic-corpus` holds the diagnostic output.
+
+## Model-visible output
+
+### D-012 Model-visible changes wait for one batched re-record window
+
+- Status: standing
+- Decided: 2026-10-25
+- Binds: packages/pi/src/prompts, packages/pi/src/simulator/testdata, policy-hash.txt, docs/convergence.json
+- Gate: zig build test-expert-app
+
+A change to a prompt, a seed, a tool output, or a wire byte moves the corpus identity and the recorded cassettes. It forces a paid DeepSeek re-record. The reset therefore stays offline: each phase proves that no golden, cassette, pin, or published evidence file moved. A change that would move one is recorded and held for one later re-record window, and no phase regenerates a golden to make a gate pass. This is Decision 2 of the reset plan, option (a), which the owner chose on 2026-10-25.
