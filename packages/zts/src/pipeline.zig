@@ -78,8 +78,6 @@ const VerificationInfo = handler_contract_mod.VerificationInfo;
 const ContractBuilder = contract_builder_mod.ContractBuilder;
 const PatternDispatchTable = bytecode_mod.PatternDispatchTable;
 
-const pipeline_tests_mod = @import("pipeline_tests.zig");
-const JsParser = pipeline_tests_mod.JsParser;
 /// Public because `buildModuleFacts` returns one and callers outside the
 /// package need to name it. Reaching `zts.module_facts` directly for the same
 /// type would widen the internal surface the boundary gate pins.

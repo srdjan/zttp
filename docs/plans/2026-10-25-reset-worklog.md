@@ -86,3 +86,18 @@ Gates on `main`, each exit 0: `test-zts`, `test-zts-cli`, `test-diagnostic-corpu
 `git show --color-moved=plain` agrees with the motion claim: the non-moved added lines are headers, imports, re-exports, and signatures that gained `pub` (195, 255, and 60 lines).
 Gates on `main`, each exit 0: `test-precompile`, `test-agent-protocol`, `test-contract-golden`, `test-proof-swallow`, `test-module-boundary`, `test-cli`, `test-production-branch-metric`, `test-expert-golden`, `test-agent-determinism`, `test-meta-drift`, `test-server`, `test-zruntime`, `test-panic-isolation`, `test-runtime-purity`, `test-docs-drift`, `check-spine`. Fresh-cache aggregate: 7771/7777 passed (6 skipped). Digests: byte-identical. Protection against `201c63e9`: exit 0.
 `AGENTS.md` says that `server.zig` holds the path traversal checks; they live in `server_static.zig` (`resolveStaticFile`). R13 corrects that sentence.
+
+## R6a, R6e, R5
+
+| Commit | Phase | Result |
+|---|---|---|
+| `5f9d44a4` | R6a | `type_syntax.zig` (12,697 lines) becomes a facade of 2,727 lines over `type_syntax_store.zig`, `type_syntax_scan.zig`, `type_syntax_parser.zig`, and `type_syntax_support.zig` (the test runtime). |
+| `612505ae` | R6e | The tests of `flow_checker.zig` (5,536 to 152 lines) and `pipeline.zig` (5,288 to 1,636 lines) move to `flow_checker_tests.zig` and `pipeline_tests.zig`. The R6a and R6e diffs remove 313 tests and add 313 tests. |
+| `08f459bf` | R5a | Typed `IRStore` constructors (`addCall`, `addFunction`, `addMember`, and the others) replace `IRStore.add(Node)` at every call site. Each constructor packs the same fields as the old adapter arm. |
+| `27301601` | R5b | `IRStore.add`, `IRStore.get`, and the struct form of `Node` are deleted. `Node` stays only as the namespace of the payload types. The test `node creation` tested the deleted adapter and is deleted. The cherry-pick conflicted with R6a, because R6a moved `TestRuntime` to `type_syntax_support.zig`; the R5b hunk is applied there. |
+| this commit | R6e review fix | `pipeline.zig` imported `pipeline_tests.zig` at the top level for an unused `JsParser` alias. The two lines are deleted. |
+
+Gates on `main` at `27301601`, each exit 0: `test-zts`, `test-zruntime`, `test-examples`, `test-contract-golden`, `test-meta-drift`, `test-proof-checker`, `test-zts-layering`, `test-diagnostic-corpus`, `test-step-coverage`, `test-proof-swallow`, `test-module-boundary`, `test-docs-drift`, `test-standin`, `test-cli`, `check-spine`, and a fresh-cache `test-precompile` (bytecode golden).
+Fresh-cache aggregate: 7770/7776 passed (6 skipped). The delta of 1 from R4 is the deleted `node creation` test. Digests: byte-identical. Protection against `a7a4462f`: exit 0. After the review fix, `test-zts` exits 0.
+`git grep` for `nodes.add(` and `IRStore.get` prints nothing.
+Open: the R5 `bench-check -Doptimize=fast` gate waits for a host with load under 4. Two workers run in parallel now, and the load was 3.91 to 9.01 at the gate run.
