@@ -101,3 +101,14 @@ Gates on `main` at `27301601`, each exit 0: `test-zts`, `test-zruntime`, `test-e
 Fresh-cache aggregate: 7770/7776 passed (6 skipped). The delta of 1 from R4 is the deleted `node creation` test. Digests: byte-identical. Protection against `a7a4462f`: exit 0. After the review fix, `test-zts` exits 0.
 `git grep` for `nodes.add(` and `IRStore.get` prints nothing.
 Open: the R5 `bench-check -Doptimize=fast` gate waits for a host with load under 4. Two workers run in parallel now, and the load was 3.91 to 9.01 at the gate run.
+
+## R12a
+
+| Commit | Phase | Result |
+|---|---|---|
+| `e4621702` | R12a | `review.zig`, `printer.zig`, `json_util.zig`, and `spec_diagnostic.zig` move from `packages/proof-review/src/` to `packages/runtime/src/proofs/` as renames with unchanged content. The package, its zon dependency, the double-instantiation comment in `build/Context.zig`, and the `test-proof-review` step are deleted. `main.zig` collects the 28 moved tests in the counted runtime root. `runtime_main_tests` and `zruntime` gain the `zts_cli` import that `review.zig` needs. No module-boundary row changes: the moved code reaches no zts internal. |
+| this commit | R12a review fix | One line in `docs/internals/testing.md` is rewrapped. |
+
+The 28 moved tests also run in `test-cli` (621 to 649) and `test-zruntime` (239 to 266), because those roots import the moved files. Those counts do not enter the aggregate summary.
+Gates on `main` with the review fix staged, each exit 0: `test-cli`, `test-step-coverage`, `test-docs-drift`, `test-module-boundary` (71 internals, 53 allowed reaches, unchanged), `test-production-branch-metric`, `test-zruntime`, `test-doc-links`, `test-server`, `test-runtime-purity`, `check-spine`, and a fresh-cache `test-precompile`.
+Fresh-cache aggregate: 211/211 steps, 7770/7776 passed (6 skipped). The count is unchanged; the two deleted steps are the compile and run steps of `test-proof-review`. Digests: byte-identical. Protection against `fe84f8fc`: exit 0.
