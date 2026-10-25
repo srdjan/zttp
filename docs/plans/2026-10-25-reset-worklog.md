@@ -164,3 +164,17 @@ Gates on `main`, each exit 0: `test-script-reachability`, `test-capability-audit
 Route counts over 92 tasks: 66 aggregate, 4 verify, 4 release, 18 manual. The 18 manual tasks are the 18 rows of `scripts/manual-steps.allow`, with the same reason slugs. The worker probed seven scratch edits of `agents.json`; each made `check-spine` exit 1 with a message that names the task and the graph value. `test-spine` adds one test with six rejection scenarios.
 Opus review: the aggregate set is a subset of the verify set, which is a subset of the covered set. So the manual and release-only verdicts equal the old ones, and the output line `step coverage: OK (92 steps, 18 run by hand with a stated reason, 4 run only at release)` is unchanged. A step with no dependency steps counts as aggregate, as it counted as run before.
 Gates on `main`, each exit 0: `test-spine`, `test-step-coverage`, `test-script-reachability`, `test-docs-drift`, `test-doc-links`, `check-spine`. Fresh-cache aggregate: 211/211 steps, 7806/7812 passed (6 skipped); the delta of 1 is the new spine test. Digests: byte-identical. Protection against `e0dc252b`: exit 0.
+
+## R12d-2
+
+| Commit | Phase | Result |
+|---|---|---|
+| `29a843fc` | R12d-2a | `scripts/manual-steps.allow` (18 rows) is deleted. `agents.json` and `check-spine` own the manual-step declarations. `test-step-coverage` reports the classification and keeps its census floors. |
+
+Parity probe on scratch copies, before the deletion: a deleted row for `run`, a row for the covered `test-zts`, and a row for a missing step each made the old `test-step-coverage` and the new `check-spine` fail on the same task. A scratch build step that nothing reaches fails `check-spine` and `zig build test`; `test-step-coverage` alone now passes it, by design.
+Deviations from R12 step 5, for the owner report:
+- `scripts/manual-scripts.allow` stays (10 rows). Scripts are not build tasks, so the route field has no successor for it.
+- Unit 2b is not done. The table that `check-docs-drift.sh` compares is the host test roots table, and its Root column comes from `build/host_tests.zig#host_test_roots`, which `agents.json` does not carry. The table stays hand-kept, and the comparison stays as its link to the build.
+
+R12 exit numbers, R0 (`f52d8e4a`) to now: build steps 93 to 92, files under `scripts/` 54 to 50, shell scripts 43 to 40, allowlist rows 458 to 472. The allowlist exit condition is not met (Decision 9 in the owner report). `manual-steps.allow` (18) is gone and `manual-scripts.allow` went from 11 to 10. `proof-swallow.allow` grew from 162 to 185, because R2 and R6b brought moved analysis code under that gate. `zts-tiers.allow` grew from 171 to 181, because each new zts file from the R2 and R6 splits needs a tier row.
+Gates on `main`, each exit 0: `test-spine`, `test-step-coverage`, `test-script-reachability`, `test-docs-drift`, `test-doc-links`, `check-spine`. Fresh-cache aggregate: 211/211 steps, 7806/7812 passed (6 skipped). Digests: byte-identical. Protection against `f0249694`: exit 0.
