@@ -50,6 +50,7 @@ packages/pi/
       selection.zig       # pure launch, persisted identity, and default resolver
       tool_catalog.zig    # provider-neutral ordered model-tool catalog
       chat_completions.zig # Chat Completions body writer shared by local and deepseek
+      response_sanitize.zig # response parse, inspection, and reasoning removal shared by local and deepseek
       local/              # MLX-LM Chat Completions decoder, readiness
       deepseek/           # DeepSeek Chat Completions client, decoder, endpoint policy
     registry/
