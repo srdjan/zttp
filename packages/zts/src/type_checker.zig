@@ -1029,12 +1029,12 @@ pub const TypeChecker = struct {
                 self.walkExpr(node);
             },
 
-            // exhaustive: the remaining tags hold no sub-expression this
-            // checker types. Not descending costs a type error that would have
-            // been reported, never a proof: an untyped value reaches the
-            // lattice top, and `TypePool.isAssignableTo` skips rather than
-            // rejects against it.
-            else => {},
+            // Any other tag passes each child it holds back to this walk, so a
+            // new node kind is read by default.
+            else => {
+                var children = self.ir_view.expressionChildren(node);
+                while (children.next()) |child| self.walkStmt(child);
+            },
         }
     }
 
@@ -1913,10 +1913,16 @@ pub const TypeChecker = struct {
                 self.admitTypePredicates(export_decl.declaration, depth + 1);
             },
             .function_decl => self.admitOneTypePredicate(node),
-            // exhaustive: a type predicate is a named function declaration, so
-            // only the forms that can carry one are descended into. Anything
-            // else declares no predicate and needs no visit.
-            else => {},
+            // Scope boundary: a type predicate is a named module-level function
+            // declaration. One declared inside a block, an `if` or loop body, or
+            // a function body is not visited here.
+            .if_stmt, .for_of_stmt, .function_expr, .arrow_function => {},
+            // Any other tag passes each child it holds back to this walk, so a
+            // new node kind is read by default.
+            else => {
+                var children = self.ir_view.expressionChildren(node);
+                while (children.next()) |child| self.admitTypePredicates(child, depth + 1);
+            },
         }
     }
 
