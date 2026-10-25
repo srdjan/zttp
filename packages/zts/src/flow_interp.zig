@@ -2772,67 +2772,7 @@ pub const FlowInterp = struct {
         return .{ .heap = try st.heap.clone(self.mem()), .top_cell = st.top_cell, .path = st.path };
     }
 
-    /// The argument values of a call, in source order, and whether one of them
-    /// is a call-site spread.
-    const CallArgs = struct { values: []const Value, has_spread: bool };
-
-    fn evalArgs(self: *FlowInterp, c: ir.Node.CallExpr, st: *State) Error!CallArgs {
-        const arena = self.mem();
-        var args: std.ArrayList(Value) = .empty;
-        var has_spread = false;
-        var i: u16 = 0;
-        while (i < c.args_count) : (i += 1) {
-            const arg = self.ir_view.getListIndex(c.args_start, i);
-            if ((self.ir_view.getTag(arg) orelse .stmt_list) == .spread) {
-                // The runtime does not evaluate the operand (it pushes
-                // `undefined`) and the strict checker refuses the call.
-                self.noteVisited(.spread);
-                try self.record(arg, .spread, .refused_by_strict);
-                has_spread = true;
-                continue;
-            }
-            try args.append(arena, try self.eval(arg, st));
-        }
-        return .{ .values = args.items, .has_spread = has_spread };
-    }
-
-    fn evalCall(self: *FlowInterp, node: NodeIndex, st: *State) Error!Value {
-        const previous_call_node = self.current_call_node;
-        self.current_call_node = self.functionHandle(node);
-        defer self.current_call_node = previous_call_node;
-        const previous_callsite = self.root_callsite;
-        if (self.active_module == 0 and self.activations.items.len == 0) self.root_callsite = node;
-        defer self.root_callsite = previous_callsite;
-        const c = self.ir_view.getCall(node) orelse return self.missing(node);
-        const callee_tag = self.ir_view.getTag(c.callee) orelse .stmt_list;
-
-        // The runtime dispatches a call through a property to a builtin method
-        // of a string, an array, or another builtin value, and a value cannot
-        // exclude a primitive alternative after a join.
-        if (callee_tag == .member_access or callee_tag == .optional_chain or callee_tag == .computed_access) {
-            return self.evalPropertyCall(node, c, callee_tag, st);
-        }
-
-        // A call of an imported export is evaluated before its callee, which
-        // is a native function that no body stands behind.
-        const callee_binding = if (callee_tag == .identifier) self.ir_view.getBinding(c.callee) else null;
-        const overwritten = if (callee_binding) |binding| self.persistent_globals and (try self.loadGlobal(st, binding.name_atom)) != null else false;
-        if (!overwritten) if (try self.exportCallee(c.callee)) |resolved| return self.evalExportCall(node, c, resolved, st);
-
-        // A call of a builtin global function uses its row and never reads
-        // the callee.
-        if (if (overwritten) null else try self.globalFunction(c.callee)) |global| {
-            const args = try self.evalArgs(c, st);
-            if (args.has_spread) return Value.top;
-            return self.applyRule(st, node, global.row, try self.nativeFunction(global.atom), args.values);
-        }
-
-        const callee = try self.eval(c.callee, st);
-        if (!callee.callee_exact) st.path = .{ .complete = false };
-        if (callee.native_export) |resolved| return self.evalExportCall(node, c, resolved, st);
-        const args = try self.evalArgs(c, st);
-        if (args.has_spread) return Value.top;
-
+    fn applyOrdinaryCall(self: *FlowInterp, node: NodeIndex, callee: Value, args: []const Value, st: *State) Error!Value {
         if (callee.callables_top) {
             try self.record(node, .call, .unknown_callee);
             return Value.top;
@@ -2846,7 +2786,7 @@ pub const FlowInterp = struct {
         // Which callee runs is control flow, so every one of them does and the
         // results join. A result chosen through a labelled callee carries its
         // labels, as a read through a labelled key does.
-        const joined = try self.runCallables(callee.callables, args.values, st);
+        const joined = try self.runCallables(callee.callables, args, st);
         return self.takeSummary(st, joined, callee.flow());
     }
 
@@ -3071,46 +3011,8 @@ pub const FlowInterp = struct {
         return false;
     }
 
-    /// A call through a property: `r.name(args)`, `r?.name(args)`, or
-    /// `r["name"](args)`. An optional call skips the read, the arguments, and
-    /// the call when the receiver is nullish, so the state after the receiver
-    /// joins the state after the call.
-    fn evalPropertyCall(self: *FlowInterp, node: NodeIndex, c: ir.Node.CallExpr, callee_tag: NodeTag, st: *State) Error!Value {
+    fn dispatchPropertyCallValues(self: *FlowInterp, node: NodeIndex, r: Value, key: Key, args: []const Value, st: *State) Error!Value {
         const arena = self.mem();
-        const m = self.ir_view.getMember(c.callee) orelse return self.missing(node);
-        self.noteVisited(callee_tag);
-
-        if (self.isMathOpcode(callee_tag, m, c.args_count)) {
-            const args = try self.evalArgs(c, st);
-            if (args.has_spread) return Value.top;
-            return Value.flowing(try self.deepFlow(st, args.values));
-        }
-
-        const receiver = try self.eval(m.object, st);
-        const key: Key = if (callee_tag == .computed_access)
-            try self.evalKey(m.computed, st)
-        else
-            .{ .name = m.property };
-        const skipped: ?State = if (callee_tag == .optional_chain) try cloneState(arena, st.*) else null;
-        if (skipped != null) st.path.complete = false;
-
-        const value = try self.dispatchPropertyCall(node, c, receiver, key, st);
-        if (skipped) |skip| {
-            st.* = try joinStates(arena, skip, st.*);
-            return joinValue(arena, value, Value.clean);
-        }
-        return value;
-    }
-
-    /// The candidates of a call `r.name(args)`: the user functions stored
-    /// under the name, then each builtin operation the receiver may reach
-    /// under it. Every candidate runs from the state after the arguments, and
-    /// the results and states join.
-    fn dispatchPropertyCall(self: *FlowInterp, node: NodeIndex, c: ir.Node.CallExpr, r: Value, key: Key, st: *State) Error!Value {
-        const arena = self.mem();
-        const args = try self.evalArgs(c, st);
-        if (args.has_spread) return Value.top;
-
         // A computed key that is a string literal is a static name, and the
         // runtime reads the same property. Any other key may name a method.
         const atom = switch (key) {
@@ -3161,22 +3063,22 @@ pub const FlowInterp = struct {
         var joined = Summary.bottom;
         var candidates: usize = 0;
         if (user.callables.len > 0) {
-            joined = try self.runCallables(user.callables, args.values, candidate_entry);
+            joined = try self.runCallables(user.callables, args, candidate_entry);
             candidates += 1;
         }
         if (findRow(&operation_rows, "String.prototype", text)) |row| {
-            joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args.values));
+            joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args));
             candidates += 1;
         }
         if (self.mayBeArray(r)) {
             if (findRow(&operation_rows, "Array.prototype", text)) |row| {
-                joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args.values));
+                joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args));
                 candidates += 1;
             }
         }
         if (mayBeResult(r)) {
             if (findRow(&operation_rows, "Result.prototype", text)) |row| {
-                joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args.values));
+                joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args));
                 candidates += 1;
             }
         }
@@ -3188,18 +3090,18 @@ pub const FlowInterp = struct {
                     const scope = self.heapName(@truncate(site.node)) orelse "";
                     const found = if (nameIn(&namespace_names, scope)) findRow(&operation_rows, scope, text) else null;
                     const row = found orelse OperationRow{ .scope = scope, .name = text, .rule = .no_rule, .defense = .keep, .reason = "no member row" };
-                    joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args.values));
+                    joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args));
                     candidates += 1;
                 },
                 .native => {
                     const row: OperationRow = .{ .scope = "native", .name = text, .rule = .no_rule, .defense = .keep, .reason = "a native method" };
-                    joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args.values));
+                    joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args));
                     candidates += 1;
                 },
                 .request, .headers, .response, .response_headers => {
                     const scope = if (site.kind == .request or site.kind == .response) "Request.prototype" else "Headers.prototype";
                     if (findRow(&runtime_prototype_rows, scope, text)) |row| {
-                        joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args.values));
+                        joined = try joinSummary(arena, joined, try self.candidate(node, candidate_entry, row, r, args));
                     } else {
                         try self.record(node, .call, .prototype_method_unmodeled);
                         joined = try joinSummary(arena, joined, .{ .value = Value.top, .state = try self.heapState(candidate_entry) });
@@ -3520,9 +3422,7 @@ pub const FlowInterp = struct {
     /// such a row holds no origin, callable, or flag of `R`. The callback
     /// results lose their defenses in every case, because an export may
     /// transform them or choose among them. Nothing here removes a label.
-    fn evalExportCall(self: *FlowInterp, node: NodeIndex, c: ir.Node.CallExpr, resolved: ModuleExport, st: *State) Error!Value {
-        const args = try self.evalArgs(c, st);
-        if (args.has_spread) return Value.top;
+    fn applyExportCall(self: *FlowInterp, node: NodeIndex, c: ir.Node.CallExpr, resolved: ModuleExport, args: []const Value, st: *State) Error!Value {
         self.observed_sources = LabelSet.mergeValues(self.observed_sources, self.declaredLabels(resolved, c));
         var origin: ?flow_evidence.Origin = null;
         // Replay-pure exports run for real. Stubbing them would erase
@@ -3535,7 +3435,7 @@ pub const FlowInterp = struct {
             st.path.io_calls = calls;
             origin = .{ .module = resolved.binding.name, .func = resolved.func.name, .returns = resolved.func.returns, .call_index = index, .ok_record = try path_generator.isOkRecordExport(self.mem(), resolved.func) };
         }
-        var result = try self.evalExportValues(node, c, resolved, args.values, st);
+        var result = try self.evalExportValues(node, c, resolved, args, st);
         result.io_origin = origin;
         if (resolved.func.replay_pure and resolved.func.returns == .result and resolved.func.failure_severity != .none) result.witness_complete = false;
         if (origin != null and result.origins.len > 0) result.io_view = try self.watchSchema(st, result);
@@ -3544,17 +3444,15 @@ pub const FlowInterp = struct {
 
     fn evalExportValues(self: *FlowInterp, node: NodeIndex, c: ir.Node.CallExpr, resolved: ModuleExport, values: []const Value, st: *State) Error!Value {
         const arena = self.mem();
-        const args: CallArgs = .{ .values = values, .has_spread = false };
-
         if (std.mem.eql(u8, resolved.binding.specifier, "zttp:collections")) {
             if (std.mem.eql(u8, resolved.func.name, "dictEntries")) {
-                const read = withoutDefenses(try self.reach(st, args.values));
+                const read = withoutDefenses(try self.reach(st, values));
                 // The runtime makes arrays of [key,value] pairs. Entry values
                 // are data; these constructors never invoke them as callbacks.
                 return self.allocate(st, .allocated_array, node, &.{read}, read.flow());
             }
             if (std.mem.eql(u8, resolved.func.name, "dictFromEntries")) {
-                const read = withoutDefenses(try self.reach(st, args.values));
+                const read = withoutDefenses(try self.reach(st, values));
                 const dict_site: SiteKey = .{ .kind = .literal, .node = node, .context = self.active_module, .call = self.allocation_context };
                 const result_site: SiteKey = .{ .kind = .allocated_any, .node = node, .context = self.active_module, .call = self.allocation_context };
                 try self.weakWriteSite(st, dict_site, null, read);
@@ -3567,19 +3465,19 @@ pub const FlowInterp = struct {
         }
 
         if (std.mem.eql(u8, resolved.binding.specifier, "zttp:validate") and std.mem.eql(u8, resolved.func.name, "validateObject")) {
-            var payload = argAt(args.values, 1);
+            var payload = argAt(values, 1);
             payload.schema_view = try self.watchSchema(st, payload);
             if (payload.schema_view) |*view| view.guard = .{ .module = self.active_module, .node = node, .func = resolved.func.name };
             const site: SiteKey = .{ .kind = .allocated_any, .node = node, .context = self.active_module, .call = self.allocation_context };
             try self.weakWriteSite(st, site, @backingInt(object.Atom.value), payload);
-            const flow = try self.deepFlow(st, &.{argAt(args.values, 1)});
+            const flow = try self.deepFlow(st, &.{argAt(values, 1)});
             try self.weakWriteSite(st, site, @backingInt(object.Atom.ok), Value.flowing(.{ .labels = flow.labels }));
             try self.weakWriteSite(st, site, try self.atomOf("error", 0), Value.flowing(.{ .labels = flow.labels }));
             return self.siteValue(site, null);
         }
 
         if (std.mem.eql(u8, resolved.binding.specifier, "zttp:router") and std.mem.eql(u8, resolved.func.name, "routerMatch")) {
-            const routes = argAt(args.values, 0);
+            const routes = argAt(values, 0);
             const handler = try self.storedRead(st, routes, .index);
             if (handler.callables_top or routes.origins_top) try self.record(node, .call, .unknown_callee);
             const match_site: SiteKey = .{ .kind = .router_result, .node = node, .context = self.active_module, .call = self.allocation_context };
@@ -3593,16 +3491,16 @@ pub const FlowInterp = struct {
             return self.siteValue(match_site, null);
         }
         if (std.mem.eql(u8, resolved.binding.specifier, "zttp:log")) {
-            try self.observeSink(node, st, .log, try self.deepFlow(st, args.values));
+            try self.observeSink(node, st, .log, try self.deepFlow(st, values));
         }
         if (std.mem.eql(u8, resolved.binding.specifier, "zttp:fetch") and
             (std.mem.eql(u8, resolved.func.name, "fetch") or std.mem.eql(u8, resolved.func.name, "fetchWithRetry")))
         {
-            try self.observeEgress(node, st, args.values);
+            try self.observeEgress(node, st, values);
             return self.makeFetchResponse(st, node, resolved);
         }
 
-        const read = try self.reach(st, args.values);
+        const read = try self.reach(st, values);
         // The labels an export declassifies leave what it read, not what it
         // declares, and they leave the summary too, so no later read of the
         // result restores them.
@@ -3630,11 +3528,11 @@ pub const FlowInterp = struct {
         // function that the analysis cannot name may be anything.
         var results: ?Value = null;
         if (findCallbackExport(&callback_exports, resolved.binding.specifier, resolved.func.name)) |row| {
-            results = try self.exportCallback(node, row.shape, args.values, st);
+            results = try self.exportCallback(node, row.shape, values, st);
         } else {
             if (read.callables_top) try self.record(node, .call, .unknown_callee);
             if (read.callables.len > 0) {
-                results = try self.runCallbackLoop(node, read, .{ .presumed = args.values }, st);
+                results = try self.runCallbackLoop(node, read, .{ .presumed = values }, st);
             }
         }
         if (results) |passed| results = withoutDefenses(passed);
@@ -4452,122 +4350,431 @@ pub const FlowInterp = struct {
 
     // --- expressions ---
 
-    pub fn eval(self: *FlowInterp, node: NodeIndex, st: *State) Error!Value {
-        const tag = self.ir_view.getTag(node) orelse return self.missing(node);
-        self.noteVisited(tag);
-        try self.tick(node, tag);
-        try self.enter(node, tag);
-        defer self.native_depth -= 1;
-        switch (tag) {
-            .lit_string => {
-                const text = self.ir_view.getString(self.ir_view.getStringIdx(node) orelse return self.missing(node)) orelse return self.missing(node);
-                return .{ .html_type = containsIgnoreCase(text, "text/html") or containsIgnoreCase(text, "application/xhtml+xml") };
-            },
-            .lit_int, .lit_float, .lit_bool, .lit_null, .lit_undefined => return Value.clean,
-            .identifier => return self.evalIdentifier(node, st),
-            .binary_op => return self.evalBinary(node, st),
-            .unary_op => {
-                const unary = self.ir_view.getUnary(node) orelse return self.missing(node);
-                const operand = try self.eval(unary.operand, st);
-                return Value.flowing(operand.flow());
-            },
-            .ternary => {
-                st.path.complete = false;
-                const t = self.ir_view.getTernary(node) orelse return self.missing(node);
-                _ = try self.eval(t.condition, st);
-                var then_state = try cloneState(self.mem(), st.*);
-                const then_value = try self.eval(t.then_branch, &then_state);
-                const else_value = try self.eval(t.else_branch, st);
-                st.* = try joinStates(self.mem(), then_state, st.*);
-                return joinValue(self.mem(), then_value, else_value);
-            },
-            .member_access => {
-                const m = self.ir_view.getMember(node) orelse return self.missing(node);
-                const o = try self.eval(m.object, st);
-                return self.readValue(st, o, .{ .name = m.property });
-            },
-            .optional_chain => {
-                st.path.complete = false;
-                // The receiver is evaluated on both paths and a read changes
-                // no state, so the join of the states before and after the
-                // read is the state after the receiver.
-                const m = self.ir_view.getMember(node) orelse return self.missing(node);
-                const o = try self.eval(m.object, st);
-                const read = try self.readValue(st, o, .{ .name = m.property });
-                return joinValue(self.mem(), read, Value.clean);
-            },
-            .computed_access => {
-                const m = self.ir_view.getMember(node) orelse return self.missing(node);
-                const o = try self.eval(m.object, st);
-                const key = try self.evalKey(m.computed, st);
-                return self.readValue(st, o, key);
-            },
-            .assignment => return self.evalAssignment(node, st),
-            .array_literal => return self.evalArray(node, st),
-            .object_literal => return self.evalObject(node, st),
-            .function_expr, .arrow_function => {
-                // The body is not executed here. A call runs it, so a function
-                // value is a name for its body and a mutable object.
-                const site: SiteKey = .{ .kind = .function, .node = node, .context = self.active_module, .call = self.allocation_context };
-                return self.siteValue(site, node);
-            },
-            .call => return self.evalCall(node, st),
-            .match_expr => return self.evalMatch(node, st),
+    const EvalFrame = union(enum) {
+        unary,
+        binary_left: ir.Node.BinaryExpr,
+        binary_right: Value,
+        short_left: struct { binary: ir.Node.BinaryExpr, state: *State },
+        short_right: struct { left: Value, state: *State, right: *State, entry_path: PathEvidence },
+        ternary_condition: struct { ternary: ir.Node.TernaryExpr, state: *State },
+        ternary_then: struct { ternary: ir.Node.TernaryExpr, state: *State, then_state: *State },
+        ternary_else: struct { then_value: Value, state: *State, then_state: *State },
+        access_object: struct { tag: NodeTag, member: ir.Node.MemberExpr, state: *State },
+        access_key: struct { object: Value, key_node: NodeIndex, state: *State },
+        array_item: *PendingArray,
+        object_item: *PendingObject,
+        call_callee: *PendingCall,
+        call_receiver: *PendingCall,
+        call_key: *PendingCall,
+        call_arg: *PendingCall,
+        match_discriminant: *PendingMatch,
+        match_arm: *PendingMatch,
+    };
 
-            // The parser produces none of these, or produces them only inside
-            // a parent whose rule reads them through an accessor, or refuses
-            // them. Reached here they are unresolved.
-            .method_call,
-            .object_property,
-            .object_method,
-            .object_getter,
-            .object_setter,
-            .object_spread,
-            .spread,
-            .await_expr,
-            .yield_expr,
-            .sequence_expr,
-            .comma_expr,
-            .match_arm,
-            .match_pattern,
-            .match_type_test,
-            .expr_stmt,
-            .var_decl,
-            .if_stmt,
-            .for_stmt,
-            .for_of_stmt,
-            .for_in_stmt,
-            .while_stmt,
-            .do_while_stmt,
-            .switch_stmt,
-            .case_clause,
-            .return_stmt,
-            .assert_stmt,
-            .throw_stmt,
-            .break_stmt,
-            .continue_stmt,
-            .try_stmt,
-            .block,
-            .labeled_stmt,
-            .function_decl,
-            .array_pattern,
-            .pattern_element,
-            .pattern_rest,
-            .pattern_default,
-            .import_decl,
-            .import_specifier,
-            .import_default,
-            .import_namespace,
-            .export_decl,
-            .export_specifier,
-            .export_default,
-            .export_all,
-            .program,
-            .param_list,
-            .arg_list,
-            .stmt_list,
-            => return self.unresolvedNode(node, tag),
+    const PendingArray = struct { node: NodeIndex, site: SiteKey, start: u32, count: u16, index: u16 = 0, spread: bool = false };
+    const PendingObject = struct { node: NodeIndex, site: SiteKey, start: u32, count: u16, index: u16 = 0, property: NodeIndex = null_node, spread: bool = false };
+    const PendingMatch = struct {
+        node: NodeIndex,
+        expression: ir.Node.MatchExpr,
+        state: *State,
+        discriminant: Value = Value.clean,
+        result: ?Value = null,
+        joined: State = .bottom,
+        index: u8 = 0,
+        has_default: bool = false,
+        arm_state: *State = undefined,
+    };
+    const CallMode = union(enum) {
+        ordinary,
+        global: struct { row: OperationRow, atom: u16 },
+        export_call: ModuleExport,
+        property: struct { tag: NodeTag, member: ir.Node.MemberExpr },
+        math,
+    };
+    const PendingCall = struct {
+        node: NodeIndex,
+        call: ir.Node.CallExpr,
+        mode: CallMode,
+        state: *State,
+        callee: Value = Value.clean,
+        receiver: Value = Value.clean,
+        key: Key = .index,
+        args: std.ArrayList(Value) = .empty,
+        index: u16 = 0,
+        has_spread: bool = false,
+        skipped: ?State = null,
+        previous_call_node: NodeIndex,
+        previous_callsite: ?NodeIndex,
+    };
+
+    pub fn eval(self: *FlowInterp, node: NodeIndex, st: *State) Error!Value {
+        const root_tag = self.ir_view.getTag(node) orelse return self.missing(node);
+        try self.enter(node, root_tag);
+        defer self.native_depth -= 1;
+        const saved_call_node = self.current_call_node;
+        const saved_callsite = self.root_callsite;
+        defer {
+            self.current_call_node = saved_call_node;
+            self.root_callsite = saved_callsite;
         }
+        var frames: std.ArrayList(EvalFrame) = .empty;
+        var current = node;
+        var state = st;
+        var result: ?Value = null;
+        while (true) {
+            if (result == null) {
+                const tag = self.ir_view.getTag(current) orelse return self.missing(current);
+                self.noteVisited(tag);
+                try self.tick(current, tag);
+                if (frames.items.len >= self.max_steps) {
+                    try self.record(current, tag, .budget_limit);
+                    return error.BudgetExhausted;
+                }
+                switch (tag) {
+                    .lit_string => {
+                        const text = self.ir_view.getString(self.ir_view.getStringIdx(current) orelse return self.missing(current)) orelse return self.missing(current);
+                        result = .{ .html_type = containsIgnoreCase(text, "text/html") or containsIgnoreCase(text, "application/xhtml+xml") };
+                    },
+                    .lit_int, .lit_float, .lit_bool, .lit_null, .lit_undefined => result = Value.clean,
+                    .identifier => result = try self.evalIdentifier(current, state),
+                    .binary_op => {
+                        const binary = self.ir_view.getBinary(current) orelse return self.missing(current);
+                        switch (binary.op) {
+                            .and_op, .or_op, .nullish => try frames.append(self.mem(), .{ .short_left = .{ .binary = binary, .state = state } }),
+                            else => try frames.append(self.mem(), .{ .binary_left = binary }),
+                        }
+                        current = binary.left;
+                    },
+                    .unary_op => {
+                        const unary = self.ir_view.getUnary(current) orelse return self.missing(current);
+                        try frames.append(self.mem(), .unary);
+                        current = unary.operand;
+                    },
+                    .ternary => {
+                        state.path.complete = false;
+                        const ternary = self.ir_view.getTernary(current) orelse return self.missing(current);
+                        try frames.append(self.mem(), .{ .ternary_condition = .{ .ternary = ternary, .state = state } });
+                        current = ternary.condition;
+                    },
+                    .member_access, .optional_chain, .computed_access => {
+                        if (tag == .optional_chain) state.path.complete = false;
+                        const member = self.ir_view.getMember(current) orelse return self.missing(current);
+                        try frames.append(self.mem(), .{ .access_object = .{ .tag = tag, .member = member, .state = state } });
+                        current = member.object;
+                    },
+                    .assignment => result = try self.evalAssignment(current, state),
+                    .array_literal => {
+                        const array = self.ir_view.getArray(current) orelse return self.missing(current);
+                        const pending = try self.mem().create(PendingArray);
+                        pending.* = .{ .node = current, .site = .{ .kind = .literal, .node = current, .context = self.active_module, .call = self.allocation_context }, .start = array.elements_start, .count = array.elements_count };
+                        if (!try self.scheduleArrayItem(pending, &frames, &current)) result = try self.siteValue(pending.site, null);
+                    },
+                    .object_literal => {
+                        const object_expr = self.ir_view.getObject(current) orelse return self.missing(current);
+                        const pending = try self.mem().create(PendingObject);
+                        pending.* = .{ .node = current, .site = .{ .kind = .literal, .node = current, .context = self.active_module, .call = self.allocation_context }, .start = object_expr.properties_start, .count = object_expr.properties_count };
+                        if (!try self.scheduleObjectItem(pending, &frames, &current)) result = try self.siteValue(pending.site, null);
+                    },
+                    .function_expr, .arrow_function => {
+                        const site: SiteKey = .{ .kind = .function, .node = current, .context = self.active_module, .call = self.allocation_context };
+                        result = try self.siteValue(site, current);
+                    },
+                    .call => try self.scheduleCall(current, state, &frames, &current, &result),
+                    .match_expr => {
+                        state.path.complete = false;
+                        const expression = self.ir_view.getMatchExpr(current) orelse return self.missing(current);
+                        const pending = try self.mem().create(PendingMatch);
+                        pending.* = .{ .node = current, .expression = expression, .state = state };
+                        try frames.append(self.mem(), .{ .match_discriminant = pending });
+                        current = expression.discriminant;
+                    },
+                    else => result = try self.unresolvedNode(current, tag), // exhaustive: non-expression tags are refused here.
+                }
+                continue;
+            }
+
+            const value = result.?;
+            const frame = frames.pop() orelse return value;
+            result = null;
+            switch (frame) {
+                .unary => result = Value.flowing(value.flow()),
+                .binary_left => |binary| {
+                    try frames.append(self.mem(), .{ .binary_right = value });
+                    current = binary.right;
+                },
+                .binary_right => |left| result = Value.flowing(combineFlows(left.flow(), value.flow())),
+                .short_left => |pending| {
+                    const right_state = try self.mem().create(State);
+                    right_state.* = try cloneState(self.mem(), pending.state.*);
+                    const entry_path = pending.state.path;
+                    if (pending.binary.op == .nullish) right_state.path.complete = false else try self.branchEvidence(right_state, pending.binary.left, pending.binary.op == .or_op);
+                    try frames.append(self.mem(), .{ .short_right = .{ .left = value, .state = pending.state, .right = right_state, .entry_path = entry_path } });
+                    state = right_state;
+                    current = pending.binary.right;
+                },
+                .short_right => |pending| {
+                    const unchanged = stateEql(pending.state.*, pending.right.*) and pending.entry_path.io_calls.len == pending.right.path.io_calls.len and
+                        (pending.entry_path.io_calls.len == 0 or pending.entry_path.io_calls.ptr == pending.right.path.io_calls.ptr);
+                    pending.state.* = try joinStates(self.mem(), pending.state.*, pending.right.*);
+                    if (unchanged) pending.state.path = pending.entry_path;
+                    state = pending.state;
+                    var selected = try joinValue(self.mem(), pending.left, value);
+                    selected.witness_complete = false;
+                    result = selected;
+                },
+                .ternary_condition => |pending| {
+                    const then_state = try self.mem().create(State);
+                    then_state.* = try cloneState(self.mem(), pending.state.*);
+                    try frames.append(self.mem(), .{ .ternary_then = .{ .ternary = pending.ternary, .state = pending.state, .then_state = then_state } });
+                    state = then_state;
+                    current = pending.ternary.then_branch;
+                },
+                .ternary_then => |pending| {
+                    try frames.append(self.mem(), .{ .ternary_else = .{ .then_value = value, .state = pending.state, .then_state = pending.then_state } });
+                    state = pending.state;
+                    current = pending.ternary.else_branch;
+                },
+                .ternary_else => |pending| {
+                    pending.state.* = try joinStates(self.mem(), pending.then_state.*, pending.state.*);
+                    state = pending.state;
+                    result = try joinValue(self.mem(), pending.then_value, value);
+                },
+                .access_object => |pending| switch (pending.tag) {
+                    .member_access => result = try self.readValue(pending.state, value, .{ .name = pending.member.property }),
+                    .optional_chain => result = try joinValue(self.mem(), try self.readValue(pending.state, value, .{ .name = pending.member.property }), Value.clean),
+                    .computed_access => {
+                        try frames.append(self.mem(), .{ .access_key = .{ .object = value, .key_node = pending.member.computed, .state = pending.state } });
+                        state = pending.state;
+                        current = pending.member.computed;
+                    },
+                    // exhaustive: only the three access tags create this frame.
+                    else => unreachable,
+                },
+                .access_key => |pending| {
+                    state = pending.state;
+                    result = try self.readValue(state, pending.object, try self.keyFromValue(pending.key_node, value));
+                },
+                .array_item => |pending| {
+                    if (pending.spread) try self.spreadInto(state, pending.site, value, false) else try self.weakWriteSite(state, pending.site, null, value);
+                    pending.index += 1;
+                    if (!try self.scheduleArrayItem(pending, &frames, &current)) result = try self.siteValue(pending.site, null);
+                },
+                .object_item => |pending| {
+                    if (pending.spread) {
+                        try self.spreadInto(state, pending.site, value, true);
+                    } else {
+                        const property = self.ir_view.getProperty(pending.property) orelse return self.missing(pending.node);
+                        if (try self.literalKey(property.key)) |name| {
+                            try self.weakWriteSite(state, pending.site, name, value);
+                        } else {
+                            try self.record(pending.property, .object_property, .refused_by_parser);
+                            try self.weakWriteSite(state, pending.site, null, value);
+                        }
+                    }
+                    pending.index += 1;
+                    if (!try self.scheduleObjectItem(pending, &frames, &current)) result = try self.siteValue(pending.site, null);
+                },
+                .call_callee => |pending| {
+                    pending.callee = value;
+                    if (!value.callee_exact) pending.state.path = .{ .complete = false };
+                    if (value.native_export) |resolved| pending.mode = .{ .export_call = resolved };
+                    try self.scheduleCallArg(pending, &frames, &current, &result);
+                },
+                .call_receiver => |pending| {
+                    pending.receiver = value;
+                    const property = pending.mode.property;
+                    if (property.tag == .computed_access) {
+                        try frames.append(self.mem(), .{ .call_key = pending });
+                        current = property.member.computed;
+                    } else {
+                        pending.key = .{ .name = property.member.property };
+                        if (property.tag == .optional_chain) {
+                            pending.skipped = try cloneState(self.mem(), pending.state.*);
+                            pending.state.path.complete = false;
+                        }
+                        try self.scheduleCallArg(pending, &frames, &current, &result);
+                    }
+                },
+                .call_key => |pending| {
+                    pending.key = try self.keyFromValue(pending.mode.property.member.computed, value);
+                    try self.scheduleCallArg(pending, &frames, &current, &result);
+                },
+                .call_arg => |pending| {
+                    try pending.args.append(self.mem(), value);
+                    pending.index += 1;
+                    try self.scheduleCallArg(pending, &frames, &current, &result);
+                },
+                .match_discriminant => |pending| {
+                    pending.discriminant = value;
+                    if (try self.scheduleMatchArm(pending, &frames, &current, &result)) {
+                        state = pending.arm_state;
+                    } else {
+                        state = pending.state;
+                    }
+                },
+                .match_arm => |pending| {
+                    pending.result = try joinOpt(self.mem(), pending.result, value);
+                    pending.joined = try joinStates(self.mem(), pending.joined, pending.arm_state.*);
+                    pending.index += 1;
+                    if (try self.scheduleMatchArm(pending, &frames, &current, &result)) {
+                        state = pending.arm_state;
+                    } else {
+                        state = pending.state;
+                    }
+                },
+            }
+        }
+    }
+
+    fn scheduleArrayItem(self: *FlowInterp, pending: *PendingArray, frames: *std.ArrayList(EvalFrame), current: *NodeIndex) Error!bool {
+        if (pending.index >= pending.count) return false;
+        const element = self.ir_view.getListIndex(pending.start, pending.index);
+        pending.spread = (self.ir_view.getTag(element) orelse .stmt_list) == .spread;
+        current.* = if (pending.spread) blk: {
+            self.noteVisited(.spread);
+            break :blk self.ir_view.getOptValue(element) orelse {
+                _ = try self.missing(pending.node);
+                return false;
+            };
+        } else element;
+        try frames.append(self.mem(), .{ .array_item = pending });
+        return true;
+    }
+
+    fn scheduleObjectItem(self: *FlowInterp, pending: *PendingObject, frames: *std.ArrayList(EvalFrame), current: *NodeIndex) Error!bool {
+        while (pending.index < pending.count) {
+            const property = self.ir_view.getListIndex(pending.start, pending.index);
+            const tag = self.ir_view.getTag(property) orelse .stmt_list;
+            switch (tag) {
+                .object_property => {
+                    self.noteVisited(.object_property);
+                    pending.property = property;
+                    pending.spread = false;
+                    const data = self.ir_view.getProperty(property) orelse {
+                        _ = try self.missing(pending.node);
+                        return false;
+                    };
+                    current.* = data.value;
+                    try frames.append(self.mem(), .{ .object_item = pending });
+                    return true;
+                },
+                .object_spread => {
+                    self.noteVisited(.object_spread);
+                    pending.property = property;
+                    pending.spread = true;
+                    current.* = self.ir_view.getOptValue(property) orelse {
+                        _ = try self.missing(pending.node);
+                        return false;
+                    };
+                    try frames.append(self.mem(), .{ .object_item = pending });
+                    return true;
+                },
+                else => {
+                    _ = try self.unresolvedNode(property, tag); // exhaustive: parser-refused object members have no value to evaluate.
+                    pending.index += 1;
+                },
+            }
+        }
+        return false;
+    }
+
+    fn scheduleCall(self: *FlowInterp, node: NodeIndex, state: *State, frames: *std.ArrayList(EvalFrame), current: *NodeIndex, result: *?Value) Error!void {
+        const call = self.ir_view.getCall(node) orelse {
+            result.* = try self.missing(node);
+            return;
+        };
+        const callee_tag = self.ir_view.getTag(call.callee) orelse .stmt_list;
+        const pending = try self.mem().create(PendingCall);
+        pending.* = .{ .node = node, .call = call, .mode = .ordinary, .state = state, .previous_call_node = self.current_call_node, .previous_callsite = self.root_callsite };
+        self.current_call_node = self.functionHandle(node);
+        if (self.active_module == 0 and self.activations.items.len == 0) self.root_callsite = node;
+
+        if (callee_tag == .member_access or callee_tag == .optional_chain or callee_tag == .computed_access) {
+            const member = self.ir_view.getMember(call.callee) orelse {
+                result.* = try self.finishPendingCall(pending);
+                return;
+            };
+            self.noteVisited(callee_tag);
+            pending.mode = if (self.isMathOpcode(callee_tag, member, call.args_count)) .math else .{ .property = .{ .tag = callee_tag, .member = member } };
+            if (pending.mode == .math) return self.scheduleCallArg(pending, frames, current, result);
+            try frames.append(self.mem(), .{ .call_receiver = pending });
+            current.* = member.object;
+            return;
+        }
+
+        const binding = if (callee_tag == .identifier) self.ir_view.getBinding(call.callee) else null;
+        const overwritten = if (binding) |b| self.persistent_globals and (try self.loadGlobal(state, b.name_atom)) != null else false;
+        if (!overwritten) if (try self.exportCallee(call.callee)) |resolved| {
+            pending.mode = .{ .export_call = resolved };
+            return self.scheduleCallArg(pending, frames, current, result);
+        };
+        if (if (overwritten) null else try self.globalFunction(call.callee)) |global| {
+            pending.mode = .{ .global = .{ .row = global.row, .atom = global.atom } };
+            return self.scheduleCallArg(pending, frames, current, result);
+        }
+        try frames.append(self.mem(), .{ .call_callee = pending });
+        current.* = call.callee;
+    }
+
+    fn scheduleCallArg(self: *FlowInterp, pending: *PendingCall, frames: *std.ArrayList(EvalFrame), current: *NodeIndex, result: *?Value) Error!void {
+        while (pending.index < pending.call.args_count) {
+            const argument = self.ir_view.getListIndex(pending.call.args_start, pending.index);
+            if ((self.ir_view.getTag(argument) orelse .stmt_list) == .spread) {
+                self.noteVisited(.spread);
+                try self.record(argument, .spread, .refused_by_strict);
+                pending.has_spread = true;
+                pending.index += 1;
+                continue;
+            }
+            try frames.append(self.mem(), .{ .call_arg = pending });
+            current.* = argument;
+            return;
+        }
+        result.* = try self.finishPendingCall(pending);
+    }
+
+    fn finishPendingCall(self: *FlowInterp, pending: *PendingCall) Error!Value {
+        defer {
+            self.current_call_node = pending.previous_call_node;
+            self.root_callsite = pending.previous_callsite;
+        }
+        var value = if (pending.has_spread) Value.top else switch (pending.mode) {
+            .ordinary => try self.applyOrdinaryCall(pending.node, pending.callee, pending.args.items, pending.state),
+            .global => |global| try self.applyRule(pending.state, pending.node, global.row, try self.nativeFunction(global.atom), pending.args.items),
+            .export_call => |resolved| try self.applyExportCall(pending.node, pending.call, resolved, pending.args.items, pending.state),
+            .math => Value.flowing(try self.deepFlow(pending.state, pending.args.items)),
+            .property => try self.dispatchPropertyCallValues(pending.node, pending.receiver, pending.key, pending.args.items, pending.state),
+        };
+        if (pending.skipped) |skipped| {
+            pending.state.* = try joinStates(self.mem(), skipped, pending.state.*);
+            value = try joinValue(self.mem(), value, Value.clean);
+        }
+        return value;
+    }
+
+    fn scheduleMatchArm(self: *FlowInterp, pending: *PendingMatch, frames: *std.ArrayList(EvalFrame), current: *NodeIndex, result: *?Value) Error!bool {
+        if (pending.index < pending.expression.arms_count) {
+            const arm_node = self.ir_view.getListIndex(pending.expression.arms_start, pending.index);
+            const arm = self.ir_view.getMatchArm(arm_node) orelse {
+                result.* = try self.missing(pending.node);
+                return false;
+            };
+            self.noteVisited(.match_arm);
+            if (arm.pattern == null_node) pending.has_default = true;
+            pending.arm_state = try self.mem().create(State);
+            pending.arm_state.* = try cloneState(self.mem(), pending.state.*);
+            try self.bindPattern(arm.pattern, pending.discriminant, pending.arm_state);
+            try frames.append(self.mem(), .{ .match_arm = pending });
+            current.* = arm.body;
+            return true;
+        }
+        if (!pending.has_default) {
+            pending.result = try joinOpt(self.mem(), pending.result, Value.clean);
+            pending.joined = try joinStates(self.mem(), pending.joined, pending.state.*);
+        }
+        pending.state.* = pending.joined;
+        result.* = pending.result orelse Value.clean;
+        return false;
     }
 
     fn evalIdentifier(self: *FlowInterp, node: NodeIndex, st: *State) Error!Value {
@@ -4619,41 +4826,14 @@ pub const FlowInterp = struct {
         }
     }
 
-    fn evalBinary(self: *FlowInterp, node: NodeIndex, st: *State) Error!Value {
-        const bin = self.ir_view.getBinary(node) orelse return self.missing(node);
-        switch (bin.op) {
-            .and_op, .or_op, .nullish => {
-                // The right operand runs only on some paths, so it runs in a
-                // copy and its writes join with the paths that skip it.
-                const left = try self.eval(bin.left, st);
-                const entry_path = st.path;
-                var right_state = try cloneState(self.mem(), st.*);
-                if (bin.op == .nullish) right_state.path.complete = false else try self.branchEvidence(&right_state, bin.left, bin.op == .or_op);
-                const right = try self.eval(bin.right, &right_state);
-                const unchanged = stateEql(st.*, right_state) and entry_path.io_calls.len == right_state.path.io_calls.len and
-                    (entry_path.io_calls.len == 0 or entry_path.io_calls.ptr == right_state.path.io_calls.ptr);
-                st.* = try joinStates(self.mem(), st.*, right_state);
-                // Pure predicate evaluation adds no conditional state or I/O.
-                // The enclosing branch can then constrain the whole AND/OR.
-                if (unchanged) st.path = entry_path;
-                var selected = try joinValue(self.mem(), left, right);
-                selected.witness_complete = false;
-                return selected;
-            },
-            else => {
-                // Left, then right, as code generation does. The result of an
-                // arithmetic or comparison operator is a fresh primitive.
-                const left = try self.eval(bin.left, st);
-                const right = try self.eval(bin.right, st);
-                return Value.flowing(combineFlows(left.flow(), right.flow()));
-            },
-        }
-    }
-
     /// Evaluate a computed key once. A string literal is a static name, and a
     /// numeric literal names an element.
     fn evalKey(self: *FlowInterp, key_node: NodeIndex, st: *State) Error!Key {
         const value = try self.eval(key_node, st);
+        return self.keyFromValue(key_node, value);
+    }
+
+    fn keyFromValue(self: *FlowInterp, key_node: NodeIndex, value: Value) Error!Key {
         if (try self.literalKey(key_node)) |name| return .{ .name = name };
         const tag = self.ir_view.getTag(key_node) orelse return .{ .dynamic = value };
         if (tag == .lit_int or tag == .lit_float) return .index;
@@ -4755,92 +4935,6 @@ pub const FlowInterp = struct {
         // A shared runtime object is shared by every request.
         if (hasBuiltinSite(o) and !self.persistent_globals) try self.record(node, .assignment, .module_state_unmodeled);
         return assigned;
-    }
-
-    fn evalArray(self: *FlowInterp, node: NodeIndex, st: *State) Error!Value {
-        const arr = self.ir_view.getArray(node) orelse return self.missing(node);
-        const site: SiteKey = .{ .kind = .literal, .node = node, .context = self.active_module, .call = self.allocation_context };
-        var i: u16 = 0;
-        while (i < arr.elements_count) : (i += 1) {
-            const element = self.ir_view.getListIndex(arr.elements_start, i);
-            if ((self.ir_view.getTag(element) orelse .stmt_list) == .spread) {
-                self.noteVisited(.spread);
-                const operand = self.ir_view.getOptValue(element) orelse return self.missing(node);
-                const src = try self.eval(operand, st);
-                try self.spreadInto(st, site, src, false);
-            } else {
-                const v = try self.eval(element, st);
-                try self.weakWriteSite(st, site, null, v);
-            }
-        }
-        return self.siteValue(site, null);
-    }
-
-    fn evalObject(self: *FlowInterp, node: NodeIndex, st: *State) Error!Value {
-        const obj = self.ir_view.getObject(node) orelse return self.missing(node);
-        const site: SiteKey = .{ .kind = .literal, .node = node, .context = self.active_module, .call = self.allocation_context };
-        var i: u16 = 0;
-        while (i < obj.properties_count) : (i += 1) {
-            const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
-            const prop_tag = self.ir_view.getTag(prop_idx) orelse .stmt_list;
-            switch (prop_tag) {
-                .object_property => {
-                    self.noteVisited(.object_property);
-                    const prop = self.ir_view.getProperty(prop_idx) orelse return self.missing(node);
-                    const v = try self.eval(prop.value, st);
-                    if (try self.literalKey(prop.key)) |name| {
-                        try self.weakWriteSite(st, site, name, v);
-                    } else {
-                        // A computed record key is refused. If one arrives the
-                        // value may sit under any name.
-                        try self.record(prop_idx, .object_property, .refused_by_parser);
-                        try self.weakWriteSite(st, site, null, v);
-                    }
-                },
-                .object_spread => {
-                    self.noteVisited(.object_spread);
-                    const operand = self.ir_view.getOptValue(prop_idx) orelse return self.missing(node);
-                    const src = try self.eval(operand, st);
-                    try self.spreadInto(st, site, src, true);
-                },
-                // A method, getter, or setter: the parser refuses all three.
-                else => _ = try self.unresolvedNode(prop_idx, prop_tag),
-            }
-        }
-        return self.siteValue(site, null);
-    }
-
-    fn evalMatch(self: *FlowInterp, node: NodeIndex, st: *State) Error!Value {
-        st.path.complete = false;
-        const m = self.ir_view.getMatchExpr(node) orelse return self.missing(node);
-        const disc = try self.eval(m.discriminant, st);
-        const arena = self.mem();
-
-        var result: ?Value = null;
-        var joined = State.bottom;
-        var has_default = false;
-        var i: u8 = 0;
-        while (i < m.arms_count) : (i += 1) {
-            const arm_idx = self.ir_view.getListIndex(m.arms_start, i);
-            const arm = self.ir_view.getMatchArm(arm_idx) orelse return self.missing(node);
-            self.noteVisited(.match_arm);
-            if (arm.pattern == null_node) has_default = true;
-
-            var arm_state = try cloneState(arena, st.*);
-            try self.bindPattern(arm.pattern, disc, &arm_state);
-            const v = try self.eval(arm.body, &arm_state);
-            result = try joinOpt(arena, result, v);
-            joined = try joinStates(arena, joined, arm_state);
-        }
-        // Code generation pushes `undefined` when no arm matches and there is
-        // no default, so that path exists and keeps the state after the
-        // discriminant.
-        if (!has_default) {
-            result = try joinOpt(arena, result, Value.clean);
-            joined = try joinStates(arena, joined, st.*);
-        }
-        st.* = joined;
-        return result orelse Value.clean;
     }
 
     /// Bind the names a pattern holds. A binding gets the static read of its
@@ -6169,6 +6263,27 @@ test "a local call returns the callee's value" {
     try expectSecret("function f(s) { function id(x) { return x; } return id(\"c\"); }", &.{secret_value}, false);
 }
 
+test "call operands keep runtime evaluation order" {
+    try expectSecret(
+        "function f(s) { let g = () => \"c\"; function replace() { g = () => s; return 0; } return g(replace()); }",
+        &.{secret_value},
+        false,
+    );
+    try expectSecret(
+        "function f(s) { const o = { m: () => \"c\" }; function replace() { o.m = () => s; return 0; } return o.m(replace()); }",
+        &.{secret_value},
+        true,
+    );
+}
+
+test "nested call sites keep allocated results distinct" {
+    try expectSecret(
+        "function f(s) { function make(x) { return [x]; } function pass(x) { return x; } const a = pass(make(\"c\")); const b = pass(make(s)); b[0] = s; return a[0]; }",
+        &.{secret_value},
+        false,
+    );
+}
+
 test "a call joins every return of the callee" {
     try expectSecret(
         "function f(c, s) { function g(c) { if (c) { return \"c\"; } return s; } return g(c); }",
@@ -6616,6 +6731,24 @@ test "call-site spread is refused by the strict checker" {
     defer local.deinit();
     try expectUnresolved(local.result, .spread, .refused_by_strict);
     try expectSecret("function f(xs) { function id(y) { return y; } return id(xs); }", &.{Value.clean}, false);
+
+    const later = try analyzeSource(
+        "function f(s) { let x = s; function g(a, b) { return 0; } g(...[], (x = \"c\")); return x; }",
+        "f",
+        &.{secret_value},
+    );
+    defer later.deinit();
+    try expectUnresolved(later.result, .spread, .refused_by_strict);
+    try testing.expect(!later.returnedLabels().secret);
+
+    const optional = try analyzeSource(
+        "function f(s) { let x = s; const o = { slice: () => \"c\" }; o?.slice(...[], (x = \"c\")); return x; }",
+        "f",
+        &.{secret_value},
+    );
+    defer optional.deinit();
+    try expectUnresolved(optional.result, .spread, .refused_by_strict);
+    try testing.expect(optional.returnedLabels().secret);
 }
 
 test "a nested root seeds the cells of the bindings it captures with top" {
@@ -6724,7 +6857,23 @@ test "a 32-function call chain keeps its verdict" {
     try testing.expect(r.returnedLabels().secret);
 }
 
-test "nested call sites in a call chain exhaust the native depth and fail closed" {
+test "activation depth accepts 64 frames and refuses 65" {
+    const accepted_source = try callChainSource(testing.allocator, 64);
+    defer testing.allocator.free(accepted_source);
+    const accepted = try analyzeSource(accepted_source, "f", &.{secret_value});
+    defer accepted.deinit();
+    try testing.expect(!accepted.result.cleared);
+    try testing.expect(accepted.returnedLabels().secret);
+
+    const refused_source = try callChainSource(testing.allocator, 65);
+    defer testing.allocator.free(refused_source);
+    const refused = try analyzeSource(refused_source, "f", &.{secret_value});
+    defer refused.deinit();
+    try testing.expect(refused.result.cleared);
+    try expectUnresolved(refused.result, .function_expr, .budget_limit);
+}
+
+test "nested call sites in a call chain evaluate without native recursion" {
     var aw: std.Io.Writer.Allocating = .init(testing.allocator);
     defer aw.deinit();
     try aw.writer.writeAll("function g0(x) { return x; }\n");
@@ -6738,12 +6887,9 @@ test "nested call sites in a call chain exhaust the native depth and fail closed
     try aw.writer.writeAll("function f(s) { return g59(s); }\n");
     const r = try analyzeSource(aw.written(), "f", &.{secret_value});
     defer r.deinit();
-    try testing.expect(r.result.cleared);
-    var budget_entries: usize = 0;
-    for (r.result.unresolved) |entry| {
-        if (entry.owner == .budget_limit) budget_entries += 1;
-    }
-    try testing.expectEqual(@as(usize, 1), budget_entries);
+    try testing.expect(!r.result.cleared);
+    try testing.expectEqual(@as(usize, 0), r.result.unresolved.len);
+    try testing.expect(r.returnedLabels().secret);
 }
 
 test "the recursion cap clears the result and convergence beats the cap" {
@@ -6964,6 +7110,11 @@ test "an optional call keeps the state of the skip path" {
         "function f(s) { let x = s; const o = { slice: () => \"c\" }; o.slice((x = \"c\")); return x; }",
         &.{secret_value},
         false,
+    );
+    try expectSecret(
+        "function f(s) { const box = { x: s }; const o = { slice: () => \"c\" }; o?.slice((box.x = \"c\")); return box.x; }",
+        &.{secret_value},
+        true,
     );
 }
 
@@ -9127,6 +9278,80 @@ fn probeReport(source: []const u8) !ReportProbe {
         .events = result.events.len,
         .first_kind = if (result.diagnostics.len > 0) result.diagnostics[0].kind else null,
     };
+}
+
+fn additiveHandlerSource(allocator: std.mem.Allocator, first: []const u8, terms: usize) ![]u8 {
+    var source: std.Io.Writer.Allocating = .init(allocator);
+    errdefer source.deinit();
+    try source.writer.writeAll("import { env } from \"zttp:env\"; function handler(req) { return Response.text(");
+    try source.writer.writeAll(first);
+    for (1..terms) |_| try source.writer.writeAll(" + \"\"");
+    try source.writer.writeAll("); }");
+    return source.toOwnedSlice();
+}
+
+const DeepExpressionShape = enum { unary, member, array, short_circuit, mixed, call, ternary, object, match };
+
+fn deepHandlerSource(allocator: std.mem.Allocator, shape: DeepExpressionShape, first: []const u8, depth: usize) ![]u8 {
+    var source: std.Io.Writer.Allocating = .init(allocator);
+    errdefer source.deinit();
+    try source.writer.writeAll("import { env } from \"zttp:env\"; function id(x) { return x; } function handler(req) { return Response.json(");
+    switch (shape) {
+        .unary => for (0..depth) |_| try source.writer.writeAll("!"),
+        .array => for (0..depth) |_| try source.writer.writeAll("["),
+        .mixed => for (0..depth) |_| try source.writer.writeAll("["),
+        .call => for (0..depth) |_| try source.writer.writeAll("id("),
+        .ternary => for (0..depth) |_| try source.writer.writeAll("true ? "),
+        .object => for (0..depth) |_| try source.writer.writeAll("{v:"),
+        .match => for (0..depth) |_| try source.writer.writeAll("match (\"a\") { default: "),
+        .member, .short_circuit => {},
+    }
+    try source.writer.writeAll(first);
+    switch (shape) {
+        .unary => {},
+        .member => for (0..depth) |_| try source.writer.writeAll(".x"),
+        .array => for (0..depth) |_| try source.writer.writeAll("]"),
+        .short_circuit => for (0..depth) |_| try source.writer.writeAll(" && \"public\""),
+        .mixed => for (0..depth) |_| try source.writer.writeAll("][0]"),
+        .call => for (0..depth) |_| try source.writer.writeAll(")"),
+        .ternary => for (0..depth) |_| try source.writer.writeAll(" : \"public\""),
+        .object => for (0..depth) |_| try source.writer.writeAll("}"),
+        .match => for (0..depth) |_| try source.writer.writeAll(" }"),
+    }
+    try source.writer.writeAll("); }");
+    return source.toOwnedSlice();
+}
+
+test "deep eager binary expressions keep clean and secret flow verdicts" {
+    const clean_source = try additiveHandlerSource(testing.allocator, "\"public\"", 300);
+    defer testing.allocator.free(clean_source);
+    const clean = try probeReport(clean_source);
+    try testing.expect(!clean.cleared);
+    try testing.expect(clean.properties.no_secret_leakage);
+
+    const leak_source = try additiveHandlerSource(testing.allocator, "env(\"API_TOKEN\") ?? \"\"", 300);
+    defer testing.allocator.free(leak_source);
+    const leak = try probeReport(leak_source);
+    try testing.expect(!leak.cleared);
+    try testing.expect(!leak.properties.no_secret_leakage);
+}
+
+test "deep expression shapes keep clean and secret flow verdicts" {
+    for (std.enums.values(DeepExpressionShape)) |shape| {
+        const clean_first = if (shape == .member) "req.body" else "\"public\"";
+        const depth: usize = 300;
+        const clean_source = try deepHandlerSource(testing.allocator, shape, clean_first, depth);
+        defer testing.allocator.free(clean_source);
+        const clean = try probeReport(clean_source);
+        try testing.expect(!clean.cleared);
+        try testing.expect(clean.properties.no_secret_leakage);
+
+        const leak_source = try deepHandlerSource(testing.allocator, shape, "env(\"API_TOKEN\")", depth);
+        defer testing.allocator.free(leak_source);
+        const leak = try probeReport(leak_source);
+        try testing.expect(!leak.cleared);
+        try testing.expect(!leak.properties.no_secret_leakage);
+    }
 }
 
 test "global request readers inspect the body without authorization provenance" {

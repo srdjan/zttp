@@ -280,7 +280,7 @@ const iterations_per_shape = 8;
 /// analysis. A generator whose output the parser always refuses fails here.
 const type_check_floor = 4;
 const flow_floor = 4;
-/// Inputs of a deep call shape whose flow analysis must hit a depth limit.
+/// Call-chain inputs whose flow analysis must hit the activation-depth limit.
 const unresolved_floor = 2;
 
 test "analysis stages hold their contract on deep generated shapes" {
@@ -311,8 +311,10 @@ test "analysis stages hold their contract on deep generated shapes" {
         const index = @backingInt(shape);
         const s = stats[index];
         const shape_floor = switch (shape) {
-            // Chains past the activation and native depth limits must reach them.
-            .call_chain, .nested_calls => s.unresolved >= unresolved_floor,
+            // A call chain still reaches the activation limit.
+            .call_chain => s.unresolved >= unresolved_floor,
+            // Explicit expression frames keep accepted nested call sites complete.
+            .nested_calls => s.flowed == iterations_per_shape and s.failed_closed == 0 and s.unresolved == 0,
             // A name past 255 bytes must fail closed in the type pool.
             .alias_chain => s.failed_closed >= 1,
             // The planted mismatch must reach the span oracle.
