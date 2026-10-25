@@ -744,13 +744,19 @@ pub const Analyzer = struct {
                     try self.recordNamedFunction(decl.binding, node, decl.init, exported);
                 }
             },
-            // exhaustive: this descends only through the statement kinds that
-            // can hold a top-level declaration. A function declared inside an
-            // `if` or loop body is missed, and that is caught downstream rather
-            // than ignored: a call to an uncollected function resolves to no
-            // user function, which sets `EffectRow.lower_bound` and refuses the
-            // ceiling. Missing it costs precision, never soundness.
-            else => {},
+            // Scope boundary: a declaration inside an `if` or loop body, or in
+            // a function body, is not module-level, so it is not collected
+            // here. It is caught downstream rather than ignored: a call to an
+            // uncollected function resolves to no user function, which sets
+            // `EffectRow.lower_bound` and refuses the ceiling. Missing it costs
+            // precision, never soundness.
+            .if_stmt, .for_of_stmt, .function_expr, .arrow_function => {},
+            // Any other tag passes each child it holds back to this walk, so a
+            // new node kind is read by default.
+            else => {
+                var children = self.ir_view.expressionChildren(node);
+                while (children.next()) |child| try self.collectFunctionsIn(child, false);
+            },
         }
     }
 
@@ -889,9 +895,17 @@ pub const Analyzer = struct {
                 });
                 try self.module_by_key.put(self.allocator, key, idx);
             },
-            // exhaustive: only a top-level `var_decl` binds a module value.
-            // Statements at module scope run at load, not per request.
-            else => {},
+            // Scope boundary: only a top-level `var_decl` binds a module value.
+            // A binding inside a block, an `if` or loop body, or a function
+            // body is local to it. Statements at module scope run at load, not
+            // per request.
+            .block, .if_stmt, .for_of_stmt, .function_expr, .arrow_function => {},
+            // Any other tag passes each child it holds back to this walk, so a
+            // new node kind is read by default.
+            else => {
+                var children = self.ir_view.expressionChildren(node);
+                while (children.next()) |child| try self.registerModuleBindings(child, false);
+            },
         }
     }
 
