@@ -178,3 +178,23 @@ Deviations from R12 step 5, for the owner report:
 
 R12 exit numbers, R0 (`f52d8e4a`) to now: build steps 93 to 92, files under `scripts/` 54 to 50, shell scripts 43 to 40, allowlist rows 458 to 472. The allowlist exit condition is not met (Decision 9 in the owner report). `manual-steps.allow` (18) is gone and `manual-scripts.allow` went from 11 to 10. `proof-swallow.allow` grew from 162 to 185, because R2 and R6b brought moved analysis code under that gate. `zts-tiers.allow` grew from 171 to 181, because each new zts file from the R2 and R6 splits needs a tier row.
 Gates on `main`, each exit 0: `test-spine`, `test-step-coverage`, `test-script-reachability`, `test-docs-drift`, `test-doc-links`, `check-spine`. Fresh-cache aggregate: 211/211 steps, 7806/7812 passed (6 skipped). Digests: byte-identical. Protection against `f0249694`: exit 0.
+
+## R9a
+
+| Commit | Phase | Result |
+|---|---|---|
+| `4cf853d5` | R9a | `HandlerProperties.coverageProblem` checks a property list by name: every `HandlerProperties` field is a member or is excluded with a reason, every member is a field (of the same type, for a struct), and no name is both. `FlowProperties`, `counterexample.PropertyTag`, `spec_discharge.PropertyField`, and the flow census and precision enums call it at compile time. Each list is an explicit subset. No enum order changes. |
+
+Exit probes on scratch copies: removing `cost_bounded` from `HandlerProperties` fails `test-zts` (exit 1) and `test-flow-census` (exit 1) with "exclusion names no HandlerProperties field: cost_bounded" in each list. Adding `probe_new_property` fails both with "HandlerProperties field is neither a member nor excluded: probe_new_property".
+R9b census: six `formatDiagnostics` exist. Five (bool, flow, verifier, strict, type) are one function that differs only in the scope text and the kind-to-code mapping. A throwaway test over six sources found 0 byte differences between each formatter and the projection with one shared writer. Fault coverage prints another shape and stays separate. The merge is class A on this evidence.
+Gates on `main`, each exit 0: `test-diagnostic-corpus`, `test-expert-golden`, `test-cassette`, `test-meta-drift`, `test-zts`, `test-proof-swallow`, `test-contract-golden`, `test-flow-census`, `test-module-boundary`, `test-zts-layering`, `check-spine`. Fresh-cache aggregate: 211/211 steps, 7807/7813 passed (6 skipped); the delta of 1 is the `coverageProblem` test. Digests: byte-identical. Protection against `8e366ac2`: exit 0.
+
+## R8
+
+| Commit | Phase | Result |
+|---|---|---|
+| `d6c6e0a4` | R8a | `type_syntax_lowering.parseTypeText` parses one whole standalone type text with the authored-source parser and lowers it into the pool. `TypeEnv.resolveType` (and so `module_types`, `ambient_names`, and `ok_record`), the signature census, and the agent protocol digest test call it. The ambient test asserts that `bool` does not resolve. |
+| `e05e9231` | R8b | `TypeExprParser`, `parseTypeExpr`, and their two identifier helpers are deleted (`type_pool.zig` loses about 700 lines). 44 `type_pool` tests, 11 `type_env` tests, and one typed-frontend test call `parseTypeText` with unchanged assertions; none is deleted. The three parity tests assert the canonical keys and pool names that the old parser produced, recorded before its removal. |
+
+The census was repeated after the whole-text rule was added, with the same result: 0 disagreements except `bool` and `bool[]`. For four malformed groups the old parser returned null but left stray names in the pool; `parseTypeText` leaves the pool unchanged.
+Gates on `main`, each exit 0: `test-modules`, `test-zts`, `test-precompile`, `test-flow-census`, `test-zts-layering`, `test-proof-swallow`, `test-meta-drift`, `test-contract-golden`, `test-diagnostic-corpus`, `test-module-boundary`, `test-agent-protocol`, `test-cli`, `test-zruntime`, `check-spine`. Fresh-cache aggregate: 211/211 steps, 7807/7813 passed (6 skipped), unchanged. Digests: byte-identical. Protection against `4cf853d5`: exit 0. `git grep -n TypeExprParser -- packages` prints nothing.
