@@ -97,6 +97,7 @@ zts object.zig
 zts parser/codegen.zig
 zts parser/error.zig
 zts parser/ir.zig
+zts parser/ir_children_tests.zig
 zts parser/ir_opt.zig
 zts parser/parse.zig
 zts parser/root.zig

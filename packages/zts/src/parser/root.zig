@@ -420,6 +420,7 @@ test "parse result owns permanent lists after scratch teardown" {
 test {
     _ = @import("ir_opt.zig");
     _ = @import("trivia.zig");
+    _ = @import("ir_children_tests.zig");
 }
 
 test "legacy Parser API" {
