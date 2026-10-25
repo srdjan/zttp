@@ -37,3 +37,27 @@ This worklog records execution, commands, exit statuses, and stop-rule results.
 - `advisor-plans/README.md`: plan 005 Phase 4 is closed by the 2026-10-14 reset (`ad1aa961` to `10115d98`).
 - Exit check: `git grep -i 'reset authority|active reset'` finds only rows that name the 2026-10-25 plan as the authority.
 - Gates, staged tree: `test-doc-links`, `test-docs-drift`, `check-spine`, `zig build test` all exit 0. The protection check against `e1ed0d34`, including the bytecode golden, exit 0.
+
+## R2, R3, R11a, R11b, R11d
+
+Two Sonnet workers ran these phases in separate worktrees from `eb30c586`. Opus reviewed each commit and cherry-picked them onto `main`.
+
+| Commit | Phase | Result |
+|---|---|---|
+| `90ddf21e` | R2 | `binding_key.zig`, `handler_function.zig`, `ok_record.zig`, and `source_line.zig` hold the moved helpers. `root.zig` keeps each export name. `flow_interp.zig` no longer imports `path_generator.zig`. Only `parser/error.zig` takes the shared source-line body; the copies in `repair_validator.zig` and `canonicalize.zig` differ and stay. |
+| `de2e086b` | R3 | `pipeline.check` deleted. It had five test call sites, not three; they now run `CheckedModule.init`, `runVerifier`, and `runFlow` with the same allocation-failure assertions. Stale comments and the `legacy_parser` and `legacy_atoms` names corrected. |
+| `6fbee685` | R11a | The F10 defect is confirmed: the new regression test failed before the fix (expected `handler.ts`, found `/x`). `cli_shared.serve_value_flags` is the one table. Limit: the parser still dispatches by hand, so a value flag added only to the parser is not caught. |
+| `972fd065` | R11b | `providers/response_sanitize.zig` holds the shared parse, depth check, inspection, and reasoning removal. `ReasoningRule` selects the provider rule. `decodeResponseValue` stays in each client, because tool-call ids and raw tool envelopes differ. Request building is unchanged. |
+| `c8eeed94` | R11d | `check-meta-drift.sh` reads the policy pin from `policy-hash.txt`. A scratch probe showed that the new read fails on a changed hash. |
+| this commit | R2 review fix | The moved `findHandlerFunction` and `returnsOkRecord` left the files that `check-proof-swallow.sh` lists. `handler_function.zig` and `ok_record.zig` are added to that list, and `AGENTS.md` now says thirty files. |
+
+Integrated gates on `main` with the review fix staged, each exit 0: `test-proof-swallow`, `test-zts`, `test-zts-layering`, `test-module-boundary`, `test-precompile`, `test-cli`, `test-zruntime`, `test-cassette`, `test-expert-app`, `test-recorder-smoke`, `test-meta-drift`, `test-expert-golden`, `check-spine`, `test-docs-drift`.
+Fresh-cache `zig build test --summary all`: exit 0, 7773/7779 passed (6 skipped). The three added tests are the R11a regression tests.
+Analyzer digests: byte-identical to R0 (`cmp` exit 0). Protection check against `eb30c586`: exit 0.
+
+`release-provenance` fails at `eb30c586`, before any reset change: `docs/coverage.json` is stale against sourceCommit `56433c50`. It is a release-readiness gate, not a per-commit gate. The offline republish rewrites protected evidence files, so it waits until after R13 and needs its own owner step.
+
+## R4 owner checkpoint
+
+The dry-run census substituted 199 test sites. Then 22 of 3042 `test-zts` tests failed. The real `zts check` confirms that production refuses `void` ("write `undefined`") and `any`, and that it parses `identity<T = /,/, U>` and refuses it with ZTS601. No row showed a user-visible production difference.
+- 2026-10-25: the owner chose Decision 7 (a). Rows 1 and 2 are deleted. Rows 19 to 22 change `: void` to `: undefined`. The G1, G3, G4, G5, and G6 rows expect the production value and assert refusal locations through admission diagnostics.

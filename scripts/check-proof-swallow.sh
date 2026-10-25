@@ -62,10 +62,12 @@ proof_files=(
   packages/zts/src/flow_interp.zig
   packages/zts/src/function_specs.zig
   packages/zts/src/handler_contract.zig
+  packages/zts/src/handler_function.zig
   packages/zts/src/handler_verifier.zig
   packages/zts/src/intent_extractor.zig
   packages/zts/src/ir_identity.zig
   packages/zts/src/match_analysis.zig
+  packages/zts/src/ok_record.zig
   packages/zts/src/path_generator.zig
   packages/zts/src/pipeline.zig
   packages/zts/src/proof_ir.zig
