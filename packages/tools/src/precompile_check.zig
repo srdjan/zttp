@@ -403,6 +403,16 @@ fn preserveDuringSpecRefresh(diag: zts.SpecDiagnostic) bool {
 pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const u8) void {
     writer.print("\ncheck: {s}\n\n", .{filename}) catch return;
 
+    for (r.json_diagnostics.items) |d| {
+        if (!std.mem.eql(u8, d.code, diagnostic_catalog.driverCode(.compiler_io_failure))) continue;
+        writer.print("    {s} ({s}) {s}:{d}:{d}  {s}\n", .{
+            d.code, d.severity, d.file, d.line, d.column, d.message,
+        }) catch return;
+        if (d.suggestion) |suggestion| {
+            writer.print("      help: {s}\n", .{suggestion}) catch return;
+        }
+    }
+
     // Parse
     writeDotted(writer, "Parse", 24);
     if (r.parse_errors > 0) {

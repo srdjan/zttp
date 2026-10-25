@@ -410,14 +410,12 @@ fn writeDriverFailureText(writer: anytype, target: []const u8, heading: []const 
 /// Writes the ZTS000 diagnostic for an analyzer error that no code maps.
 /// OutOfMemory is no verdict: it returns before any output.
 fn writeUnmappedAnalyzerErrorToWriter(allocator: std.mem.Allocator, writer: anytype, json_mode: bool, target: []const u8, err: anyerror) !void {
-    if (err == error.OutOfMemory) return err;
-    const message = try std.fmt.allocPrint(allocator, "the analyzer stopped with error.{s}", .{@errorName(err)});
-    defer allocator.free(message);
-    const suggestion = "report the handler that triggers this error";
+    var diagnostic = try json_diagnostics.fromAnalyzerError(allocator, target, err);
+    defer diagnostic.deinit(allocator);
     if (json_mode) {
-        try writeDriverFailureJson(writer, target, message, suggestion);
+        try json_diag.writeErrorJson(writer, null, &.{diagnostic}, null);
     } else {
-        try writeDriverFailureText(writer, target, "Analyzer diagnostics", message, suggestion);
+        try writeDriverFailureText(writer, target, "Analyzer diagnostics", diagnostic.message, diagnostic.suggestion.?);
     }
 }
 

@@ -58,6 +58,24 @@ pub const JsonDiagnostic = struct {
     }
 };
 
+/// An unexpected analyzer error refuses analysis. Allocation failure propagates.
+pub fn fromAnalyzerError(allocator: std.mem.Allocator, file: []const u8, err: anyerror) !JsonDiagnostic {
+    switch (err) {
+        error.OutOfMemory => return err,
+        else => {},
+    }
+    return .{
+        .code = diagnostic_catalog.driverCode(.compiler_io_failure),
+        .severity = "error",
+        .message = try allocator.print("the analyzer stopped with error.{s}", .{@errorName(err)}),
+        .message_owned = true,
+        .file = file,
+        .line = 1,
+        .column = 1,
+        .suggestion = "report the handler that triggers this error",
+    };
+}
+
 // -------------------------------------------------------------------------
 // Diagnostic code mapping
 // -------------------------------------------------------------------------

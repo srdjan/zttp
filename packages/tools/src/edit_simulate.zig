@@ -853,6 +853,40 @@ test "simulate refuses a configured policy it cannot load" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "missing-policy.json") == null);
 }
 
+test "simulate reports an unmapped analyzer failure as ZTS000" {
+    const source =
+        \\import { sql } from "zttp:sql";
+        \\sql("getUser", "SELECT id FROM users");
+        \\function handler(req: Request): Response { return Response.text("ok"); }
+    ;
+    var result = try simulate(std.testing.allocator, .{
+        .file = "handler.ts",
+        .content = source,
+        .sql_schema_path = "/nonexistent/zttp-unmapped-schema.sql",
+    });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 1), result.total);
+    try std.testing.expectEqualStrings("ZTS000", result.violations.items[0].code);
+    try std.testing.expect(result.properties == null);
+}
+
+test "simulate reports type resolution failures as ZTS000" {
+    const source =
+        \\structural Empty<T> = ();
+        \\const value: Empty<string> = "x";
+        \\function handler(req: Request): Response { return Response.text("ok"); }
+    ;
+    var result = try simulate(std.testing.allocator, .{
+        .file = "handler.ts",
+        .content = source,
+    });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 1), result.total);
+    try std.testing.expectEqualStrings("ZTS000", result.violations.items[0].code);
+    try std.testing.expectEqualStrings("the analyzer stopped with error.UnresolvedTypeBinding", result.violations.items[0].message);
+    try std.testing.expect(result.properties == null);
+}
+
 test "simulate vetoes a nonexistent virtual module export" {
     const source =
         \\import { requireJWT } from "zttp:auth";

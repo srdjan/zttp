@@ -680,14 +680,23 @@ fn runCheckOnlyFromSourceWithPathAllocator(
 ) !CheckResult {
     var already_mapped: usize = 0;
 
-    var result = try runCheckOnParsedSource(
+    var result = runCheckOnParsedSource(
         allocator,
         path_allocator,
         source,
         handler_path,
         opts,
         &already_mapped,
-    );
+    ) catch |err| switch (err) {
+        error.OutOfMemory, error.MissingSqlSchema => return err,
+        else => {
+            var diagnostic = try json_diag.fromAnalyzerError(allocator, handler_path, err);
+            errdefer diagnostic.deinit(allocator);
+            var refused = CheckResult{ .parse_errors = 1 };
+            try refused.json_diagnostics.append(allocator, diagnostic);
+            return refused;
+        },
+    };
     errdefer result.deinit(allocator);
     if (result.is_typescript and result.stages_run.contains(.parse)) {
         remapDiagnosticsToSource(&result, .{ .text = source, .normalize_positions = true }, already_mapped);
@@ -3378,6 +3387,38 @@ test "contract construction propagates type-check allocation failure" {
     defer analysis.deinit();
     try analysis.complete();
     try std.testing.expectError(error.OutOfMemory, analysis.extractContract("<contract-type-oom>"));
+}
+
+test "shared check reports an unmapped analyzer failure as ZTS000" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sql } from "zttp:sql";
+        \\sql("getUser", "SELECT id FROM users");
+        \\function handler(req: Request): Response { return Response.text("ok"); }
+    ;
+    for ([_]bool{ false, true }) |json_mode| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+            .json_mode = json_mode,
+            .sql_schema_path = "/nonexistent/zttp-unmapped-schema.sql",
+        });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expect(result.contract == null);
+        try std.testing.expect(result.properties == null);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        const diagnostic = result.json_diagnostics.items[0];
+        try std.testing.expectEqualStrings("ZTS000", diagnostic.code);
+        try std.testing.expectEqualStrings("error", diagnostic.severity);
+        try std.testing.expectEqualStrings("handler.ts", diagnostic.file);
+        try std.testing.expect(std.mem.indexOf(u8, diagnostic.message, "FileNotFound") != null);
+        if (!json_mode) {
+            var writer: std.Io.Writer.Allocating = .init(allocator);
+            defer writer.deinit();
+            formatProofCard(&writer.writer, &result, "handler.ts");
+            try std.testing.expectEqual(@as(usize, 1), std.mem.count(u8, writer.written(), "ZTS000"));
+            try std.testing.expect(std.mem.indexOf(u8, writer.written(), "FileNotFound") != null);
+        }
+    }
 }
 
 test "runCheckOnly propagates path analysis allocation failure" {
@@ -8937,7 +8978,7 @@ test "CHECK preserves validation allocation failure projection" {
     try std.testing.expect(result.contract == null);
 }
 
-test "CHECK preserves legacy absent compound propagated errors" {
+test "CHECK reports absent compound analysis failures as ZTS000" {
     const allocator = std.testing.allocator;
     const annotations = [_][]const u8{
         "``",
@@ -8952,30 +8993,34 @@ test "CHECK preserves legacy absent compound propagated errors" {
     for (annotations) |annotation| {
         const source = try legacyCompoundSource(allocator, annotation);
         defer allocator.free(source);
-        try std.testing.expectError(
-            error.UnresolvedTypeBinding,
-            runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
-                .json_mode = true,
-                .skip_contract = true,
-            }),
-        );
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+            .json_mode = true,
+            .skip_contract = true,
+        });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try std.testing.expectEqualStrings("ZTS000", result.json_diagnostics.items[0].code);
+        try std.testing.expectEqualStrings("the analyzer stopped with error.UnresolvedTypeBinding", result.json_diagnostics.items[0].message);
         observed += 1;
     }
     try std.testing.expectEqual(@as(usize, 4), annotations.len);
     try std.testing.expectEqual(annotations.len, observed);
 }
-test "CHECK preserves present generic bodies with absent semantic types" {
+test "CHECK reports absent generic semantic types as ZTS000" {
     const source =
         "structural Empty<T> = ();\n" ++
         "const bare: Empty = \"x\";\n" ++
         "const applied: Empty<string> = \"x\";\n" ++
         "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
-    try std.testing.expectError(
-        error.UnresolvedTypeBinding,
-        runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
-            .json_mode = true,
-        }),
-    );
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS000", result.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("the analyzer stopped with error.UnresolvedTypeBinding", result.json_diagnostics.items[0].message);
 }
 
 test "CHECK preserves declaration admission and named type outcomes" {
