@@ -51,7 +51,7 @@ const precompile = @import("precompile.zig");
 ///   TypePoolCapacityExceeded  `pipeline.resolve` and `TypeEnvStorage.init` raise
 ///                           it when a source defines more types than the pool
 ///                           holds.
-///   UnresolvedTypeBinding   `pipeline.resolve` and `pipeline.check` raise it for
+///   UnresolvedTypeBinding   `pipeline.resolve` and `CheckedModule.runVerifier` raise it for
 ///                           a type name the pass cannot bind.
 ///   MissingSqlSchema        `validateSqlContractNative` raises it for a `sql`
 ///                           query when `sql_schema_path` is null.

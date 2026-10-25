@@ -109,7 +109,7 @@ pub const ConcreteRequest = struct {
 
 /// Subset of FlowChecker diagnostic kinds that the MVP solver handles.
 /// Kept as a separate enum (rather than importing `flow_checker.DiagnosticKind`)
-/// because the solver runs before flow_checker is wired in, and because
+/// because flow_checker imports this module and the import cannot run both ways, and because
 /// downstream consumers may want to
 /// synthesize witnesses for properties that don't originate in flow_checker.
 pub const PropertyTag = enum {

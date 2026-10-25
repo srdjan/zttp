@@ -87,7 +87,7 @@ The original fix had three parts and one wiring change.
 
 **A call to a function value that cannot be resolved carries `.unknown`.** `isUnresolvedFunctionValueCallee` (`packages/zts/src/flow_checker.zig`) applies to a parameter, an unresolved member, a computed element, a call result, or a selector such as a ternary. It does not apply to a known builtin member call (`isKnownBuiltinMemberCall`, `packages/zts/src/flow_checker.zig`).
 
-**The type checker reaches the flow checker.** Some builtin receivers cannot be identified from the stripped IR, for example a parameter declared `string`. `checkedBuiltinReceiverKind` (`packages/zts/src/flow_checker.zig`) asks the type checker, and only a string or array type proves a builtin receiver. Records and functions stay unresolved, so an arbitrary object method still carries `.unknown`. `pipeline.check` (`packages/zts/src/pipeline.zig`) and both flow-checker call sites in `packages/tools/src/precompile.zig` (`packages/tools/src/precompile.zig` and `packages/tools/src/precompile.zig`) pass the type checker in.
+**The type checker reaches the flow checker.** Some builtin receivers cannot be identified from the stripped IR, for example a parameter declared `string`. `checkedBuiltinReceiverKind` (`packages/zts/src/flow_checker.zig`) asks the type checker, and only a string or array type proves a builtin receiver. Records and functions stay unresolved, so an arbitrary object method still carries `.unknown`. `CheckedModule.init` (`packages/zts/src/pipeline.zig`) and both flow-checker call sites in `packages/tools/src/precompile.zig` (`packages/tools/src/precompile.zig` and `packages/tools/src/precompile.zig`) pass the type checker in.
 
 The tests pin each direction:
 

@@ -14,7 +14,7 @@
 //!   defer p.deinit();
 //!   const ast = try p.parse();
 //!
-//!   // Or use legacy API for compatibility with zruntime.zig:
+//!   // Or use the stable `zts.Parser` wrapper:
 //!   var p = parser.Parser.init(allocator, source, &strings, &atoms);
 //!   defer p.deinit();
 //!   const bytecode = try p.parse();
@@ -142,10 +142,10 @@ pub fn parse(
 }
 
 // ============================================================================
-// Legacy Parser API - Compatible with zruntime.zig
+// Parser wrapper - the stable `zts.Parser`
 // ============================================================================
 
-/// Legacy Parser wrapper that provides the old API for zruntime.zig compatibility
+/// Parser wrapper behind the stable `zts.Parser` that zruntime.zig and embedders use
 /// Usage:
 ///   var p = Parser.init(allocator, source, &strings, &atoms);
 ///   defer p.deinit();

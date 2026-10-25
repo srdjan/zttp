@@ -763,10 +763,10 @@ fn runCheckOnParsedSource(
     var source_owner_initialized = false;
     defer if (source_owner_initialized) source_owner.deinit();
 
-    var legacy_atoms = zts.AtomTable.init(allocator);
-    defer legacy_atoms.deinit();
-    var legacy_parser: ?zts.parser.JsParser = null;
-    defer if (legacy_parser) |*parser| parser.deinit();
+    var virtual_atoms = zts.AtomTable.init(allocator);
+    defer virtual_atoms.deinit();
+    var virtual_parser: ?zts.parser.JsParser = null;
+    defer if (virtual_parser) |*parser| parser.deinit();
 
     const parsed_input: struct {
         parser: *zts.parser.JsParser,
@@ -838,9 +838,9 @@ fn runCheckOnParsedSource(
             }
         },
         .virtual_javascript => virtual: {
-            legacy_parser = try zts.parser.JsParser.init(allocator, source);
-            const parser = &legacy_parser.?;
-            parser.setAtomTable(&legacy_atoms);
+            virtual_parser = try zts.parser.JsParser.init(allocator, source);
+            const parser = &virtual_parser.?;
+            parser.setAtomTable(&virtual_atoms);
             result.stages_run.insert(.parse);
             const root = parser.parse() catch {
                 const errors = parser.errors.getErrors();
@@ -857,7 +857,7 @@ fn runCheckOnParsedSource(
             };
             break :virtual .{
                 .parser = parser,
-                .atoms = &legacy_atoms,
+                .atoms = &virtual_atoms,
                 .root = root,
             };
         },

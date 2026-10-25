@@ -573,19 +573,6 @@ pub const CheckOptions = struct {
     flow_modules_complete: bool = true,
 };
 
-pub fn check(
-    allocator: std.mem.Allocator,
-    resolved: *ResolvedModule,
-    handler_func: NodeIndex,
-    opts: CheckOptions,
-) !CheckedModule {
-    var checked = try CheckedModule.init(allocator, resolved, opts);
-    errdefer checked.deinit();
-    _ = try checked.runVerifier(handler_func);
-    _ = try checked.runFlow(handler_func);
-    return checked;
-}
-
 // ---------------------------------------------------------------------------
 // TypeEnvStorage - bundle of TypePool + TypeEnv with a stable address.
 // `TypeEnv.init` captures `*TypePool`, so the pool must outlive the environment.
@@ -2798,7 +2785,7 @@ test "ModuleAnalysisSession keeps resolution and contract facts distinct" {
     try testing.expectEqual(@as(usize, 1), explicit_facts.imports.items.len);
 }
 
-test "pipeline.check does not emit a module after verifier allocation failure" {
+test "CheckedModule does not complete a verifier pass after allocation failure" {
     const allocator = testing.allocator;
     var parsed_state = try parseSourceForTest(allocator, "function handler(req) {}\n");
     defer parsed_state.js_parser.deinit();
@@ -2810,10 +2797,13 @@ test "pipeline.check does not emit a module after verifier allocation failure" {
         return error.HandlerNotFound;
 
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
-    try testing.expectError(error.OutOfMemory, check(failing.allocator(), &resolved, handler_func, .{}));
+    var checked = try CheckedModule.init(failing.allocator(), &resolved, .{});
+    defer checked.deinit();
+    try testing.expectError(error.OutOfMemory, checked.runVerifier(handler_func));
+    try testing.expect(!checked.verifierCompleted());
 }
 
-test "pipeline.check rejects a TypePool poisoned after resolve" {
+test "CheckedModule rejects a TypePool poisoned after resolve" {
     const allocator = testing.allocator;
     var parsed_state = try parseSourceForTest(allocator, "function handler(req) { return Response.text('ok'); }\n");
     defer parsed_state.js_parser.deinit();
@@ -2839,7 +2829,9 @@ test "pipeline.check rejects a TypePool poisoned after resolve" {
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 0 });
     _ = storage.pool.makeReadonly(failing.allocator(), record);
 
-    try testing.expectError(error.OutOfMemory, check(allocator, &resolved, handler_func, .{}));
+    var checked = try CheckedModule.init(allocator, &resolved, .{});
+    defer checked.deinit();
+    try testing.expectError(error.OutOfMemory, checked.runVerifier(handler_func));
 }
 
 test "CheckedModule runs verifier and flow independently or together" {
@@ -2866,8 +2858,10 @@ test "CheckedModule runs verifier and flow independently or together" {
     try testing.expect(!flow_only.verifierCompleted());
     try testing.expect(flow_only.flowCompleted());
 
-    var both = try check(allocator, &resolved, handler_func, .{});
+    var both = try CheckedModule.init(allocator, &resolved, .{});
     defer both.deinit();
+    _ = try both.runVerifier(handler_func);
+    _ = try both.runFlow(handler_func);
     try testing.expect(both.verifierCompleted());
     try testing.expect(both.flowCompleted());
 }
@@ -3426,8 +3420,10 @@ test "the three index consumers reuse an injected index" {
     try std.testing.expect(resolved.strict_checker.?.owned_facts == null);
 
     const handler_func = handler_function_mod.findHandlerFunction(view, parsed_state.root).?;
-    var checked = try check(allocator, &resolved, handler_func, .{ .module_facts = &facts });
+    var checked = try CheckedModule.init(allocator, &resolved, .{ .module_facts = &facts });
     defer checked.deinit();
+    _ = try checked.runVerifier(handler_func);
+    _ = try checked.runFlow(handler_func);
 
     try std.testing.expectEqual(&facts, checked.verifier.facts.?);
     try std.testing.expect(checked.verifier.owned_facts == null);
@@ -3738,8 +3734,10 @@ test "an error-typed receiver does not make the flow checker or the verifier cle
     try withSession(testing.allocator, refused_flow_source, struct {
         fn run(session: Session) anyerror!void {
             try testing.expectEqual(@as(usize, 1), session.resolved.typeDiagnostics().len);
-            var checked = try check(session.allocator, session.resolved, session.handler.?, .{});
+            var checked = try CheckedModule.init(session.allocator, session.resolved, .{});
             defer checked.deinit();
+            _ = try checked.runVerifier(session.handler.?);
+            _ = try checked.runFlow(session.handler.?);
             try testing.expectEqual(
                 @as(usize, 1),
                 countKind(checked.flowDiagnostics(), flow_checker_mod.DiagnosticKind.secret_in_response),
