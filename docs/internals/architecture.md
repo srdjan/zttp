@@ -19,7 +19,6 @@ share the same `zts` engine and contract logic.
 | `packages/tools/` | Precompile pipeline and analyzer command registry shared by `zttp` and `zts`. |
 | `packages/modules/` | SDK-pure virtual modules and module spec JSON. |
 | `packages/zttp-sdk/` | Extension SDK types and helpers for native modules. |
-| `packages/proof-review/` | Proof-review verdict types and rendering helpers. |
 | `packages/proof-checker/` | The consumer acceptance kernel. A leaf: it imports `std` and its own siblings, allocates nothing, and reaches no filesystem, clock, process, network, or signer. It decides whether an artifact may serve. |
 | `packages/pi/` | Compiler-in-the-loop expert agent linked into `zttp` only. |
 

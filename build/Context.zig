@@ -32,7 +32,6 @@ pi_zts_cli_host_mod: *std.Build.Module,
 zttp_sdk_dep: *std.Build.Dependency,
 zttp_modules_dep: *std.Build.Dependency,
 proof_checker_dep: *std.Build.Dependency,
-proof_review_pkg_dep: *std.Build.Dependency,
 
 /// The `-D` options that drive handler precompilation (`-Dhandler`).
 pub const PrecompileOptions = struct {
@@ -143,16 +142,6 @@ pub fn init(b: *std.Build) Context {
         .optimize = optimize,
     });
 
-    // Pass perf_histogram so the build-graph dedups this dep with the one
-    // runtime threads through its own modules. Without it the option-set
-    // hashes diverge and Zig instantiates zttp_proof_review twice, splitting
-    // type identity across the proof-review/runtime boundary.
-    const proof_review_pkg_dep = b.dependency("zttp_proof_review", .{
-        .target = target,
-        .optimize = optimize,
-        .perf_histogram = perf_histogram_enabled,
-    });
-
     // Host-side builds of tools and pi, for the host test roots and the
     // repository-only executables that run on the build machine.
     const pi_host_tools_dep = b.dependency("zttp_tools", .{
@@ -191,7 +180,6 @@ pub fn init(b: *std.Build) Context {
         .zttp_sdk_dep = zttp_sdk_dep,
         .zttp_modules_dep = zttp_modules_dep,
         .proof_checker_dep = proof_checker_dep,
-        .proof_review_pkg_dep = proof_review_pkg_dep,
     };
 }
 

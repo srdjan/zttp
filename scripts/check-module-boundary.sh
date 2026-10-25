@@ -119,7 +119,7 @@ names_used_in() {
 # zts internals from code `zig build bench` compiles - one of them reached an
 # internal no row allowed while the gate still printed OK.
 used_pairs="$(
-  for pkg in runtime tools pi modules proof-review zttp-sdk; do
+  for pkg in runtime tools pi modules zttp-sdk; do
     [[ -d "packages/$pkg" ]] || continue
 
     package_list="$work_dir/$pkg.zig-files"

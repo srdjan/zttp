@@ -138,7 +138,7 @@ pub fn add(ctx: Context) Result {
     const modules_test_step = b.step("test-modules", "Run zttp-modules tests");
     modules_test_step.dependOn(&run_modules_tests.step);
 
-    // Consumer acceptance kernel. Declared before proof-review so the module is
+    // Consumer acceptance kernel. Declared first so the module is
     // available to every consumer below it, and wired with no imports of its
     // own: the package is a leaf, and `scripts/check-proof-checker.sh` fails
     // when that stops being true. Context.zig states why a release build keeps

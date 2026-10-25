@@ -136,14 +136,6 @@
       "requiredWhen": "after proof-ratchet changes"
     },
     {
-      "task": "test-proof-review",
-      "intent": "verify",
-      "effect": "local-write",
-      "approval": "none",
-      "does": "runs proof-review package tests",
-      "requiredWhen": "after proof-review changes"
-    },
-    {
       "task": "test-precompile",
       "intent": "verify",
       "effect": "local-write",

@@ -82,7 +82,6 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(pkgs.zts_test_step);
     test_step.dependOn(&pkgs.run_sdk_tests.step);
     test_step.dependOn(&pkgs.run_modules_tests.step);
-    test_step.dependOn(&proofs.run_proof_review_pkg_tests.step);
     test_step.dependOn(&pkgs.run_proof_checker_tests.step);
     test_step.dependOn(&proofs.run_proof_ratchet_tests.step);
     test_step.dependOn(&proofs.proof_ratchet_drift.step);

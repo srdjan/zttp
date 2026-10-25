@@ -1,6 +1,5 @@
 //! Gates over the acceptance kernel and the proof boundary: mutation probes,
-//! kernel purity, the trusted-boundary ratchet, residual guards,
-//! and the proof-review package tests.
+//! kernel purity, the trusted-boundary ratchet, and residual guards.
 
 const std = @import("std");
 const Context = @import("Context.zig");
@@ -13,7 +12,6 @@ pub const Result = struct {
     residual_guards_drift: *std.Build.Step.Run,
     residual_guards_drift_step: *std.Build.Step,
     run_proof_ratchet_tests: *std.Build.Step.Run,
-    run_proof_review_pkg_tests: *std.Build.Step.Run,
 };
 
 pub fn add(ctx: Context) Result {
@@ -112,25 +110,6 @@ pub fn add(ctx: Context) Result {
     const proof_ratchet_step = b.step("test-proof-ratchet", "Check the disclosed trusted boundary against what the kernel re-derives");
     proof_ratchet_step.dependOn(&run_proof_ratchet_tests.step);
 
-    // zttp proof-review package tests. Context.zig states why its dependency
-    // carries perf_histogram.
-    const proof_review_pkg_tests = ctx.addTest(.{
-        .filters = test_filters,
-        .root_module = b.createModule(.{
-            .root_source_file = ctx.proof_review_pkg_dep.path("src/test_root.zig"),
-            .target = target,
-            .optimize = optimize,
-            .link_libc = true,
-            .imports = &.{
-                .{ .name = "zts", .module = ctx.zts_dep.module("zts") },
-                .{ .name = "zts_cli", .module = ctx.zts_cli_mod },
-            },
-        }),
-    });
-    const run_proof_review_pkg_tests = ctx.addRunTest(proof_review_pkg_tests);
-    const proof_review_pkg_test_step = b.step("test-proof-review", "Run zttp proof-review package tests");
-    proof_review_pkg_test_step.dependOn(&run_proof_review_pkg_tests.step);
-
     return .{
         .proof_checker_purity = proof_checker_purity.run,
         .script_reachability = script_reachability.run,
@@ -139,6 +118,5 @@ pub fn add(ctx: Context) Result {
         .residual_guards_drift = residual_guards_drift.run,
         .residual_guards_drift_step = residual_guards_drift.step,
         .run_proof_ratchet_tests = run_proof_ratchet_tests,
-        .run_proof_review_pkg_tests = run_proof_review_pkg_tests,
     };
 }

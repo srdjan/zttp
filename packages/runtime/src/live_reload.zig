@@ -24,11 +24,11 @@ const upgrade_verifier = zts_cli.upgrade_verifier;
 const HandlerContract = zts.HandlerContract;
 const HandlerPolicy = zts.HandlerPolicy;
 const deploy_manifest = zts_cli.deploy_manifest;
-const review_facts_mod = @import("zttp_proof_review").review;
-const spec_diagnostic = @import("zttp_proof_review").spec_diagnostic;
+const review_facts_mod = @import("proofs/review.zig");
+const spec_diagnostic = @import("proofs/spec_diagnostic.zig");
 const proof_ledger = @import("proof_ledger.zig");
 const proof_card_tui = @import("proof_card_tui.zig");
-const printer_mod = @import("zttp_proof_review").printer;
+const printer_mod = @import("proofs/printer.zig");
 const counterexample_pipeline = @import("counterexample_pipeline.zig");
 const json_diag = precompile.json_diag;
 

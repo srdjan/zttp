@@ -7,7 +7,7 @@
 
 const std = @import("std");
 const zts = @import("zts");
-const review = @import("zttp_proof_review").review;
+const review = @import("proofs/review.zig");
 const PropertyProvenance = zts.handler_contract.PropertyProvenance;
 
 pub const Preview = review.CounterexamplePreview;

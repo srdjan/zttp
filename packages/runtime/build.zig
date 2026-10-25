@@ -37,13 +37,6 @@ pub fn build(b: *std.Build) void {
     });
     const pi_app_mod = pi_dep.module("pi_app");
 
-    const proof_review_dep = b.dependency("zttp_proof_review", .{
-        .target = target,
-        .optimize = optimize,
-        .perf_histogram = perf_histogram,
-    });
-    const proof_review_mod = proof_review_dep.module("zttp_proof_review");
-
     // Match the outer mode so this dependency dedups across build declarations.
     // Each kernel function enables runtime safety; test-kernel-safety checks it.
     const proof_checker_dep = b.dependency("zttp_proof_checker", .{
@@ -78,7 +71,7 @@ pub fn build(b: *std.Build) void {
     runtime_main_tests.addImport("zts", zts_mod);
     runtime_main_tests.addImport("zttp_proof_checker", proof_checker_mod);
     runtime_main_tests.addImport("project_config", project_config_mod);
-    runtime_main_tests.addImport("zttp_proof_review", proof_review_mod);
+    runtime_main_tests.addImport("zts_cli", zts_cli_mod);
     runtime_main_tests.addOptions("runtime_feature_options", runtime_features);
 
     const cli_main = b.addModule("cli_main", .{
@@ -92,7 +85,6 @@ pub fn build(b: *std.Build) void {
     cli_main.addImport("zts_cli", zts_cli_mod);
     cli_main.addImport("pi_app", pi_app_mod);
     cli_main.addImport("project_config", project_config_mod);
-    cli_main.addImport("zttp_proof_review", proof_review_mod);
     cli_main.addOptions("runtime_feature_options", cli_features);
 
     const cli_main_tests = b.addModule("cli_main_tests", .{
@@ -105,7 +97,6 @@ pub fn build(b: *std.Build) void {
     cli_main_tests.addImport("zts_cli", zts_cli_mod);
     cli_main_tests.addImport("pi_app", pi_app_mod);
     cli_main_tests.addImport("project_config", project_config_mod);
-    cli_main_tests.addImport("zttp_proof_review", proof_review_mod);
     cli_main_tests.addOptions("runtime_feature_options", cli_features);
 
     // Named `zruntime` for the `test-zruntime` step it backs. The root is the
@@ -118,8 +109,8 @@ pub fn build(b: *std.Build) void {
     });
     zruntime.addImport("zts", zts_mod);
     zruntime.addImport("zttp_proof_checker", proof_checker_mod);
+    zruntime.addImport("zts_cli", zts_cli_mod);
     zruntime.addImport("project_config", project_config_mod);
-    zruntime.addImport("zttp_proof_review", proof_review_mod);
     zruntime.addOptions("runtime_feature_options", runtime_features);
 
     // test-server: integration suite rooted at server_test.zig. It pulls in

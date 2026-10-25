@@ -17,7 +17,7 @@
 //!     +----------------------------+-------------------------------+
 
 const std = @import("std");
-const review = @import("zttp_proof_review").review;
+const review = @import("proofs/review.zig");
 
 pub const FrameOptions = struct {
     /// Total visible width in columns. Min 60, max 200.

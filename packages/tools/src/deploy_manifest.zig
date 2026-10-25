@@ -5,7 +5,7 @@
 //! vars, egress hosts, cache namespaces, routes) as proven facts - not
 //! heuristic guesses.
 //!
-//! `proof-review`, `live_reload`, and `build_command` consume
+//! `proofs/review`, `live_reload`, and `build_command` consume
 //! `extractProvenFacts`, the fact types, and `default_cost_body_limit`.
 
 const std = @import("std");

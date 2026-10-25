@@ -139,7 +139,7 @@ for the base work on the instruction sources. On the CPU-time fallback the test
 asserts only growth.
 
 The package suites: `test-zts`, `test-sdk`, `test-modules`,
-`test-proof-review`, `test-proof-checker`, `test-release-check`, `test-server`,
+`test-proof-checker`, `test-release-check`, `test-server`,
 `test-compile-bench`, `test-bench-diff`.
 
 `test-sdk` also runs a separate standard-library-only descriptor root. Its tests
@@ -438,8 +438,7 @@ it to the aggregate in one place. Set `project_config` when the root resolves a
 project SQL schema through the shared `project_config` module, and `pi_modules`
 when it consumes the shared tool cores through the `zts_cli` named module.
 
-Reaching a new `zts` internal module from `runtime`, `tools`, `pi`, or
-`proof-review` also needs a row in `scripts/module-boundary.allow`, and a row
+Reaching a new `zts` internal module from `runtime`, `tools`, or `pi` also needs a row in `scripts/module-boundary.allow`, and a row
 that nothing uses fails the same gate. Run `zig build test-module-boundary`.
 
 `packages/proof-checker` is the consumer acceptance kernel and the only thing

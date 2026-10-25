@@ -30,4 +30,10 @@ test {
     _ = @import("server.zig");
     _ = @import("server_connection_pool.zig");
     _ = @import("proof_adapter.zig");
+    // The proof review files are shared by the developer CLI and the proofs
+    // commands. Their tests are collected here, where the runner counts them.
+    _ = @import("proofs/json_util.zig");
+    _ = @import("proofs/printer.zig");
+    _ = @import("proofs/review.zig");
+    _ = @import("proofs/spec_diagnostic.zig");
 }

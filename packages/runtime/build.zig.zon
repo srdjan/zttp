@@ -13,9 +13,6 @@
         .zttp_pi = .{
             .path = "../pi",
         },
-        .zttp_proof_review = .{
-            .path = "../proof-review",
-        },
         .zttp_proof_checker = .{
             .path = "../proof-checker",
         },

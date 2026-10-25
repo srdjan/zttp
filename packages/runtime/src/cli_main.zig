@@ -16,15 +16,6 @@ test {
     // `pre-rebase:packages/runtime/src/witnesses_cli.zig` moved the collected
     // count by zero.
 
-    // Force-link the proof-review submodules used by the developer CLI.
-    // Lazy analysis through the package boundary won't reach decls that
-    // are only declared but never referenced; the explicit refs below
-    // ensure every relevant proof-review file is compiled and its `test`
-    // blocks collected.
-    const proof_review = @import("zttp_proof_review");
-    _ = proof_review.printer;
-    _ = proof_review.review;
-
     _ = @import("proof_ledger.zig");
     _ = @import("proofs_cli.zig");
     // `proofs_cli` imports the bundle path, which imports this, and neither
