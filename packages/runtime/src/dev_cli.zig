@@ -164,6 +164,8 @@ fn cmdInit(ctx: cli_help.Ctx) anyerror!void {
             try init_command.printInitHelp();
             std.process.exit(1);
         }
+        // The scaffold already printed which file blocks it.
+        if (err == error.ScaffoldTargetExists) std.process.exit(1);
         return err;
     };
     if (outcome.enter_expert) {

@@ -80,10 +80,7 @@ pub fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !Init
 
     if (parsed.extension_name) |name| {
         try validateProjectName(name);
-        scaffoldExtension(allocator, name) catch |err| {
-            if (err == error.ScaffoldTargetExists) std.process.exit(1);
-            return err;
-        };
+        try scaffoldExtension(allocator, name);
         printInitExtensionNextSteps(name);
         return .{};
     }
@@ -92,10 +89,7 @@ pub fn initCommand(allocator: std.mem.Allocator, argv: []const []const u8) !Init
     try validateProjectName(name);
     const template = parseTemplate(parsed.template_name) orelse return error.InvalidTemplate;
 
-    scaffoldProject(allocator, name, template) catch |err| {
-        if (err == error.ScaffoldTargetExists) std.process.exit(1);
-        return err;
-    };
+    try scaffoldProject(allocator, name, template);
     if (parsed.enter_expert) {
         printInitExpertHandoff(name);
         return .{ .enter_expert = true, .project_name = name };
@@ -751,6 +745,27 @@ test "initCommand validates arguments before writing files" {
     try std.testing.expectError(error.MissingTemplate, initCommand(std.testing.allocator, &.{ "demo", "--template" }));
     try std.testing.expectError(error.InvalidTemplate, initCommand(std.testing.allocator, &.{ "demo", "--template", "react" }));
     try std.testing.expectError(error.UnknownOption, initCommand(std.testing.allocator, &.{ "demo", "--bad" }));
+}
+
+test "init into an existing target returns ScaffoldTargetExists" {
+    const testing = std.testing;
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try @import("proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try std.Io.Dir.cwd().createDirPath(io, "demo");
+    try zts.file_io.writeFileCreateExclusive(testing.allocator, "demo/README.md", "user readme\n");
+    try testing.expectError(error.ScaffoldTargetExists, initCommand(testing.allocator, &.{"demo"}));
+
+    try std.Io.Dir.cwd().createDirPath(io, "alpha");
+    try zts.file_io.writeFileCreateExclusive(testing.allocator, "alpha/build.zig", "user build\n");
+    try testing.expectError(error.ScaffoldTargetExists, initCommand(testing.allocator, &.{ "--extension", "alpha" }));
 }
 
 test "validateProjectName accepts simple safe names" {
