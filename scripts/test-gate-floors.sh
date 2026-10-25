@@ -3,7 +3,8 @@
 # check-docs-drift.sh. Each gate must fail when rg is unusable. A gate that
 # treats a broken scanner as "no match" reports a pass over a corpus it never
 # read. Two stubs exercise the two floors: one fails the up-front self-test,
-# the other passes the self-test and then exits 2 on every scan.
+# the other passes the self-test and then exits 2 on every scan. The input-floor probes
+# for check-kernel-safety.sh take the built kernel-safety gate as their one argument.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -12,6 +13,14 @@ fail() {
   printf 'gate floor test: %s\n' "$1" >&2
   exit 1
 }
+
+# The kernel-safety probes run a copy of check-kernel-safety.sh with the built tool, as the
+# build runs it. A missing tool must fail the probe, not skip it.
+if [[ $# -ne 1 ]]; then
+  fail "usage: bash scripts/test-gate-floors.sh <kernel-safety-gate-executable>; run zig build test-capability-audit"
+fi
+[[ -x "$1" ]] || fail "kernel safety gate tool $1 is not an executable"
+kernel_safety_tool="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 
 work="$(mktemp -d)"
 trap 'command rm -rf "$work"' EXIT
@@ -92,8 +101,9 @@ make_scratch() {
 
 expect_floor_failure() {
   local label="$1" dir="$2" script="$3"
+  shift 3
   local output
-  if output="$(cd "$dir" && bash "scripts/$script" 2>&1)"; then
+  if output="$(cd "$dir" && bash "scripts/$script" "$@" 2>&1)"; then
     fail "$label: $script passed with too few input files"
   fi
   case "$output" in
@@ -107,8 +117,8 @@ make_scratch "$work/k12" 12 packages/proof-checker/src
 make_scratch "$work/c0" 0 packages/modules/src
 make_scratch "$work/c29" 29 packages/modules/src
 make_scratch "$work/c30" 30 packages/modules/src
-expect_floor_failure "kernel safety, empty list" "$work/k0" check-kernel-safety.sh
-expect_floor_failure "kernel safety, 12 files" "$work/k12" check-kernel-safety.sh
+expect_floor_failure "kernel safety, empty list" "$work/k0" check-kernel-safety.sh "$kernel_safety_tool"
+expect_floor_failure "kernel safety, 12 files" "$work/k12" check-kernel-safety.sh "$kernel_safety_tool"
 expect_floor_failure "capability helpers, empty list" "$work/c0" check-capability-helpers.sh
 expect_floor_failure "capability helpers, 29 files" "$work/c29" check-capability-helpers.sh
 if control_output="$(cd "$work/c30" && bash scripts/check-capability-helpers.sh 2>&1)"; then

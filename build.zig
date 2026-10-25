@@ -33,7 +33,7 @@ pub fn build(b: *std.Build) void {
     const flow_census_gate = flow_census.add(ctx);
     const capability_audit = repo_gates.addCapabilityAudit(ctx);
     const gates = repo_gates.add(ctx, tools);
-    const gate_floor_probe = repo_gates.addGateFloorProbe(ctx);
+    const gate_floor_probe = repo_gates.addGateFloorProbe(ctx, gates.kernel_safety_gate);
     capability_audit.step.dependOn(&gate_floor_probe.step);
     gates.docs_drift_step.dependOn(&gate_floor_probe.step);
     const bins = artifacts.add(ctx, gates);

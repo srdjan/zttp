@@ -11,14 +11,17 @@ pub fn addCapabilityAudit(ctx: Context) *std.Build.Step.Run {
 
 /// Rejection probes for the ripgrep floors of the capability audit and the docs
 /// drift gate. Both gates depend on this one Run step, so each gate step runs it.
-pub fn addGateFloorProbe(ctx: Context) *std.Build.Step.Run {
+pub fn addGateFloorProbe(ctx: Context, kernel_safety_gate: *std.Build.Step.Compile) *std.Build.Step.Run {
     const probe = ctx.b.addSystemCommand(&.{ "/bin/bash", "scripts/test-gate-floors.sh" });
+    // The kernel-safety floor probes run check-kernel-safety.sh with this tool, as the build does.
+    probe.addArtifactArg(kernel_safety_gate);
     probe.has_side_effects = true;
     return probe;
 }
 
 pub const Result = struct {
     kernel_safety_step: *std.Build.Step,
+    kernel_safety_gate: *std.Build.Step.Compile,
     module_boundary: *std.Build.Step.Run,
     release_workflow: *std.Build.Step.Run,
     proof_swallow: *std.Build.Step.Run,
@@ -117,6 +120,7 @@ pub fn add(ctx: Context, tools: tooling.Result) Result {
 
     return .{
         .kernel_safety_step = kernel_safety.step,
+        .kernel_safety_gate = kernel_safety_gate,
         .module_boundary = module_boundary,
         .release_workflow = release_workflow.run,
         .proof_swallow = proof_swallow.run,
