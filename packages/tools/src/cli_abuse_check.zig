@@ -8,7 +8,7 @@
 //!
 //! Hostile inputs: an empty file, a missing path, a directory given as the
 //! file, a file past the 10 MiB read cap, invalid UTF-8, a NUL byte, nesting
-//! past the parser limit, and unknown flags.
+//! past the parser limit, a 2000-function call chain, and unknown flags.
 //!
 //! Each input runs twice, once in text mode and once with `--json`. Unknown
 //! flags are a usage error that prints stderr text and no JSON, so those cases
@@ -36,6 +36,8 @@ const Io = std.Io;
 const over_cap_bytes: usize = 10 * 1024 * 1024 + 1;
 /// Parenthesis depth past the parser nesting limit (512).
 const nest_depth: usize = 600;
+/// Functions in the call chain input. The flow interpreter caps activation depth at 64.
+const chain_length: usize = 2000;
 /// Per-invocation deadline. The slowest case reads 10 MiB and finishes in well
 /// under a second; the deadline only has to separate "slow" from "hung".
 const deadline_seconds: i64 = 30;
@@ -48,6 +50,7 @@ const Input = enum {
     invalid_utf8,
     nul_byte,
     deep_nesting,
+    call_chain,
     unknown_flag,
     wrong_extension,
     no_argument,
@@ -90,6 +93,8 @@ const cases = [_]Case{
     .{ .name = "NUL byte, json", .input = .nul_byte, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS002" },
     .{ .name = "nesting past the limit, text", .input = .deep_nesting, .mode = .text, .exit_code = 1 },
     .{ .name = "nesting past the limit, json", .input = .deep_nesting, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS044" },
+    .{ .name = "call chain past the activation limit, text", .input = .call_chain, .mode = .text, .exit_code = 1 },
+    .{ .name = "call chain past the activation limit, json", .input = .call_chain, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS500" },
     .{ .name = "unknown flag, text", .input = .unknown_flag, .mode = .text, .exit_code = 1 },
     .{ .name = "unknown flag, json", .input = .unknown_flag, .mode = .json, .exit_code = 1 },
     .{ .name = "wrong extension, text", .input = .wrong_extension, .mode = .text, .exit_code = 1, .stderr_contains = "ZTS052 source files must use the .ts extension", .stderr_excludes = "error.UnsupportedSourceExtension" },
@@ -220,6 +225,18 @@ fn populate(gpa: std.mem.Allocator, io: Io, work: []const u8) !void {
     try nest.appendNTimes(gpa, ')', nest_depth);
     try nest.appendSlice(gpa, ";\n");
     try writeInput(gpa, io, work, "nest.ts", nest.items);
+
+    // The handler asks for `no_secret_leakage`, so the flow interpreter walks
+    // the chain. A chain it cannot follow leaves the property undischarged (ZTS500).
+    var chain: std.ArrayList(u8) = .empty;
+    defer chain.deinit(gpa);
+    try chain.appendSlice(gpa, "structural Leak<T> = Proof<T, \"no_secret_leakage\">;\n");
+    try chain.appendSlice(gpa, "function g0(x: string): string { return x; }\n");
+    for (1..chain_length) |i| {
+        try chain.print(gpa, "function g{d}(x: string): string {{ return g{d}(x); }}\n", .{ i, i - 1 });
+    }
+    try chain.print(gpa, "function handler(req: Request): Leak<Response> {{ return Response.text(g{d}(\"a\")); }}\n", .{chain_length - 1});
+    try writeInput(gpa, io, work, "chain.ts", chain.items);
 }
 
 fn writeInput(gpa: std.mem.Allocator, io: Io, dir: []const u8, name: []const u8, data: []const u8) !void {
@@ -237,6 +254,7 @@ fn fileFor(input: Input) []const u8 {
         .invalid_utf8 => "bad-utf8.ts",
         .nul_byte => "nul.ts",
         .deep_nesting => "nest.ts",
+        .call_chain => "chain.ts",
         // A valid, empty file: the flag is the hostile part.
         .unknown_flag => "empty.ts",
         .wrong_extension => "handler.js",

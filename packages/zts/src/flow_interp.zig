@@ -49,6 +49,13 @@ const tag_count = @typeInfo(NodeTag).@"enum".field_names.len;
 /// The default for `FlowInterp.max_steps`.
 const default_max_steps: u32 = 100_000;
 
+/// The deepest stack of nested callee activations. A deeper call chain fails
+/// closed with `budget_limit`, because each activation holds native stack.
+const max_activation_depth: usize = 64;
+
+/// The deepest stack of nested `eval` and `exec` calls, across every activation.
+const max_native_depth: u32 = 256;
+
 /// Every allocation is an arena allocation, so the only failures are memory
 /// and the step budget. `analyzeFunction` turns the second into a cleared
 /// result, so it never reaches a caller of the public entry point.
@@ -864,7 +871,8 @@ pub const TagPlan = union(enum) {
 ///   table was given, so the binding's cell is unknown.
 /// - `capture_unseeded`: the analyzed function itself captures bindings that
 ///   no activation in this analysis created.
-/// - `budget_limit`: the root analysis reached `max_steps`.
+/// - `budget_limit`: the root analysis reached `max_steps`, the activation
+///   depth limit, or the native depth limit.
 /// - `refused_by_strict`: the strict checker refuses the construct (call-site
 ///   spread, ZTS616, or a global the strict checker does not know).
 /// - `no_operation_rule`: an operation that has no transfer rule: a method of
@@ -1642,6 +1650,8 @@ pub const FlowInterp = struct {
     max_steps: u32 = default_max_steps,
     /// The visits counted so far in the current root analysis.
     steps: u32 = 0,
+    /// The `eval` and `exec` calls on the native stack now.
+    native_depth: u32 = 0,
     /// The most passes any recursive function needed in the last analysis.
     recursion_passes_peak: u32 = 0,
     /// How often each tag reached `eval`, `exec`, or a parent rule that reads
@@ -2520,6 +2530,17 @@ pub const FlowInterp = struct {
             try self.record(node, tag, .budget_limit);
             return error.BudgetExhausted;
         }
+    }
+
+    /// Take one level of native stack for an `eval` or `exec` call. The caller
+    /// gives it back with `defer self.native_depth -= 1`. The level is not
+    /// taken when this fails.
+    fn enter(self: *FlowInterp, node: NodeIndex, tag: NodeTag) Error!void {
+        if (self.native_depth >= max_native_depth) {
+            try self.record(node, tag, .budget_limit);
+            return error.BudgetExhausted;
+        }
+        self.native_depth += 1;
     }
 
     // --- bindings and capture cells (P4) ---
@@ -3945,6 +3966,10 @@ pub const FlowInterp = struct {
         const arena = self.mem();
         const entry = try self.heapState(st);
         const depth = self.activations.items.len;
+        if (depth >= max_activation_depth) {
+            try self.record(func_node, tag, .budget_limit);
+            return error.BudgetExhausted;
+        }
         try self.activations.append(arena, .{
             .func = func_node,
             .entry_args = args,
@@ -4431,6 +4456,8 @@ pub const FlowInterp = struct {
         const tag = self.ir_view.getTag(node) orelse return self.missing(node);
         self.noteVisited(tag);
         try self.tick(node, tag);
+        try self.enter(node, tag);
+        defer self.native_depth -= 1;
         switch (tag) {
             .lit_string => {
                 const text = self.ir_view.getString(self.ir_view.getStringIdx(node) orelse return self.missing(node)) orelse return self.missing(node);
@@ -4894,6 +4921,8 @@ pub const FlowInterp = struct {
         };
         self.noteVisited(tag);
         try self.tick(node, tag);
+        try self.enter(node, tag);
+        defer self.native_depth -= 1;
         switch (tag) {
             .block => {
                 const b = self.ir_view.getBlock(node) orelse {
@@ -6656,6 +6685,60 @@ test "calls that double at every level exhaust the default budget and fail close
     defer r.deinit();
     try testing.expect(r.result.cleared);
     try testing.expect(r.harness.interp.steps > default_max_steps);
+    var budget_entries: usize = 0;
+    for (r.result.unresolved) |entry| {
+        if (entry.owner == .budget_limit) budget_entries += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), budget_entries);
+}
+
+/// `f` returns `g{n-1}(s)`, and each `g{i}` returns `g{i-1}(x)`, down to `g0`.
+fn callChainSource(allocator: std.mem.Allocator, n: usize) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    try aw.writer.writeAll("function g0(x) { return x; }\n");
+    for (1..n) |i| try aw.writer.print("function g{d}(x) {{ return g{d}(x); }}\n", .{ i, i - 1 });
+    try aw.writer.print("function f(s) {{ return g{d}(s); }}\n", .{n - 1});
+    return aw.toOwnedSlice();
+}
+
+test "a call chain past the activation limit records budget_limit" {
+    const source = try callChainSource(testing.allocator, 2000);
+    defer testing.allocator.free(source);
+    const r = try analyzeSource(source, "f", &.{secret_value});
+    defer r.deinit();
+    try testing.expect(r.result.cleared);
+    var budget_entries: usize = 0;
+    for (r.result.unresolved) |entry| {
+        if (entry.owner == .budget_limit) budget_entries += 1;
+    }
+    try testing.expectEqual(@as(usize, 1), budget_entries);
+}
+
+test "a 32-function call chain keeps its verdict" {
+    const source = try callChainSource(testing.allocator, 32);
+    defer testing.allocator.free(source);
+    const r = try analyzeSource(source, "f", &.{secret_value});
+    defer r.deinit();
+    try testing.expect(!r.result.cleared);
+    try testing.expect(r.returnedLabels().secret);
+}
+
+test "nested call sites in a call chain exhaust the native depth and fail closed" {
+    var aw: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer aw.deinit();
+    try aw.writer.writeAll("function g0(x) { return x; }\n");
+    for (1..60) |i| {
+        try aw.writer.print("function g{d}(x) {{ return ", .{i});
+        for (0..400) |_| try aw.writer.writeAll("[");
+        try aw.writer.print("g{d}(x)", .{i - 1});
+        for (0..400) |_| try aw.writer.writeAll("][0]");
+        try aw.writer.writeAll("; }\n");
+    }
+    try aw.writer.writeAll("function f(s) { return g59(s); }\n");
+    const r = try analyzeSource(aw.written(), "f", &.{secret_value});
+    defer r.deinit();
+    try testing.expect(r.result.cleared);
     var budget_entries: usize = 0;
     for (r.result.unresolved) |entry| {
         if (entry.owner == .budget_limit) budget_entries += 1;
