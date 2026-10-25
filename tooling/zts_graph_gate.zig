@@ -4,6 +4,8 @@
 //! build module names and roots from `build/packages.zig` during each run.
 
 const std = @import("std");
+const module_boundary = @import("module_boundary_gate.zig");
+const kernel_leaf = @import("kernel_leaf_gate.zig");
 
 const prefix = "packages/zts/src/";
 const manifest_path = "scripts/zts-tiers.allow";
@@ -824,7 +826,7 @@ fn reportImportGraph(allocator: std.mem.Allocator, graph: *Graph, writer: *std.I
 }
 
 fn usage() noreturn {
-    std.debug.print("usage: zts-graph-gate <layering|import-graph>\n", .{});
+    std.debug.print("usage: zts-graph-gate <layering|import-graph|module-boundary|kernel-leaf>\n", .{});
     std.process.exit(2);
 }
 
@@ -841,6 +843,22 @@ pub fn main(init: std.process.Init.Minimal) !void {
     _ = args.next();
     const command = args.next() orelse usage();
     if (args.next() != null) usage();
+
+    // The two package-boundary checks read their own inputs and need no zts graph.
+    if (std.mem.eql(u8, command, "module-boundary") or std.mem.eql(u8, command, "kernel-leaf")) {
+        var boundary_buffer: [4096]u8 = undefined;
+        var boundary_output = std.Io.File.stdout().writerStreaming(io, &boundary_buffer);
+        const code = (if (std.mem.eql(u8, command, "module-boundary"))
+            module_boundary.run(io, allocator, &boundary_output.interface)
+        else
+            kernel_leaf.run(io, allocator, &boundary_output.interface)) catch |failure| {
+            std.debug.print("zts graph: {s} failed: {s}\n", .{ command, @errorName(failure) });
+            std.process.exit(1);
+        };
+        try boundary_output.interface.flush();
+        if (code != 0) std.process.exit(code);
+        return;
+    }
 
     const build_source = readFile(io, allocator, build_path) catch |failure| {
         std.debug.print("zts graph: cannot read {s}: {s}\n", .{ build_path, @errorName(failure) });
@@ -876,6 +894,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
         usage();
     }
     try output.interface.flush();
+}
+
+test {
+    _ = module_boundary;
+    _ = kernel_leaf;
 }
 
 test "build roots parser reads five module names and source roots" {
