@@ -11,6 +11,16 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# The build step passes the built residual-guard extractor. No other route runs this script.
+if [[ "$#" -ne 1 ]]; then
+  echo 'usage: check-residual-guards.sh <extractor-executable>; run zig build test-residual-guards-drift' >&2
+  exit 2
+fi
+[[ -x "$1" ]] || {
+  echo "residual guards: $1 is not an executable" >&2
+  exit 2
+}
+
 checker="packages/proof-checker/src/residual.zig"
 mirror="packages/zts/src/guard_catalog.zig"
 strict="packages/zts/src/strict_checker.zig"
@@ -40,18 +50,10 @@ doc_catalog="$tmp_dir/doc-catalog"
 doc_enabled="$tmp_dir/doc-enabled"
 doc_evidence="$tmp_dir/doc-evidence"
 
-# Bind the typed imports to the two declared inputs. Pass the same checker path
-# for the AST scan that recovers each published guard_impl constant name.
-if [[ "$#" -eq 0 ]]; then
-  extractor=("${ZIG:-zig}" run --dep residual --dep guard_catalog
-    -Mroot=scripts/residual_guard_extract.zig
-    -Mresidual="$checker" -Mguard_catalog="$mirror" --)
-elif [[ "$#" -eq 1 ]]; then
-  extractor=("$1")
-else
-  echo 'usage: check-residual-guards.sh [extractor-executable]' >&2
-  exit 2
-fi
+# The built extractor binds the typed imports to the two declared inputs. The checker
+# path is passed again for the AST scan that recovers each published guard_impl
+# constant name.
+extractor=("$1")
 if ! "${extractor[@]}" \
   "$checker" \
   "$checker_catalog" "$checker_doc_catalog" "$mirror_catalog" "$checker_enabled" "$enabled"

@@ -10,19 +10,14 @@ fail() {
   exit 1
 }
 
-# A build step passes the native reader first and this build's zts second.
-# A direct invocation uses zig run and the installed development binary.
-if [[ $# -eq 2 ]]; then
-  REPO_GATE="$1"
-  ZTS="$2"
-  [[ -x "$REPO_GATE" ]] || fail "$REPO_GATE is not executable"
-elif [[ $# -eq 0 ]]; then
-  REPO_GATE=""
-  ZTS=./zig-out/bin/zts
-else
-  fail "usage: bash scripts/check-meta-drift.sh [repo-gate zts]"
+# The build step passes the native reader first and this build's zts second.
+if [[ $# -ne 2 ]]; then
+  fail "usage: bash scripts/check-meta-drift.sh <repo-gate> <zts>; run zig build test-meta-drift"
 fi
-[[ -x "$ZTS" ]] || fail "$ZTS not built. Run: zig build"
+REPO_GATE="$1"
+ZTS="$2"
+[[ -x "$REPO_GATE" ]] || fail "$REPO_GATE is not executable"
+[[ -x "$ZTS" ]] || fail "$ZTS is not executable"
 
 EXPECTED_PROFILE="zts-model-1"
 # The public meta operation supplies these measured Phase 3 identities.
@@ -35,14 +30,6 @@ EXPECTED_BUILTIN_HASH="95f3733d78ea9446e840ec5119582961de47b160f3c78081a8113c1d6
 
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-
-if [[ -z "$REPO_GATE" ]]; then
-  REPO_GATE="$work/repo-gate"
-  zig build-exe tooling/repo_gate.zig \
-    -femit-bin="$REPO_GATE" \
-    --cache-dir "$work/cache" \
-    --global-cache-dir "$work/global-cache"
-fi
 
 # policy-hash.txt is the committed copy of the same policy identity.
 rule_hash="$("$ZTS" describe-rule --hash)" || fail "describe-rule --hash failed"

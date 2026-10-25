@@ -282,8 +282,8 @@ manifest is authenticated yet, so every extension specifier is reported under
 
 Response JSON on stdout, one object, trailing newline. Logs on stderr. Array
 order, diagnostic order, and rewrite order are deterministic for identical
-inputs. `scripts/check-agent-determinism.sh` runs every operation twice against
-the built binary and compares bytes; it is wired into `scripts/verify.sh`.
+inputs. `zig build test-agent-determinism` runs every operation twice against
+the built binary and compares bytes; `zig build test` reaches it.
 
 ## Example
 

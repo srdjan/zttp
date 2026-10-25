@@ -10,29 +10,18 @@ fail() {
   exit 1
 }
 
-if [[ $# -eq 2 ]]; then
-  REPO_GATE="$1"
-  ZTS="$2"
-  [[ -x "$REPO_GATE" ]] || fail "$REPO_GATE is not executable"
-elif [[ $# -eq 0 ]]; then
-  REPO_GATE=""
-  ZTS=./zig-out/bin/zts
-else
-  fail "usage: bash scripts/check-agent-determinism.sh [repo-gate zts]"
+# The build step passes the built native reader first and this build's zts second.
+if [[ $# -ne 2 ]]; then
+  fail "usage: bash scripts/check-agent-determinism.sh <repo-gate> <zts>; run zig build test-agent-determinism"
 fi
-[[ -x "$ZTS" ]] || fail "$ZTS is missing; run zig build first"
+REPO_GATE="$1"
+ZTS="$2"
+[[ -x "$REPO_GATE" ]] || fail "$REPO_GATE is not executable"
+[[ -x "$ZTS" ]] || fail "$ZTS is not executable"
 
 FIXTURE=packages/tools/tests/fixtures/contract/plain_ts.ts
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
-
-if [[ -z "$REPO_GATE" ]]; then
-  REPO_GATE="$work/repo-gate"
-  zig build-exe tooling/repo_gate.zig \
-    -femit-bin="$REPO_GATE" \
-    --cache-dir "$work/cache" \
-    --global-cache-dir "$work/global-cache"
-fi
 
 validate_envelope() {
   local label="$1" path="$2"

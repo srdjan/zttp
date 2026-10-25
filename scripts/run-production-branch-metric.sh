@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# `zig build test` reaches this script, so it must resolve the toolchain the
-# same way the rest of scripts/ does. A bare `zig` fails the whole gate for a
-# caller who invoked the compiler by absolute path or a versioned name.
-ZIG="${ZIG:-zig}"
-if [[ "${1:-}" == --tool ]]; then
-  metric=("$2")
-  shift 2
-else
-  metric=("$ZIG" run tooling/production_branch_metric.zig --)
+# The build steps pass the built metric tool: `--tool <path> [metric arguments]`.
+# No other route runs this script.
+if [[ "${1:-}" != --tool || -z "${2:-}" ]]; then
+  echo 'usage: run-production-branch-metric.sh --tool <metric-executable> [metric arguments]; run zig build production-branch-metric' >&2
+  exit 2
 fi
+[[ -x "$2" ]] || {
+  echo "production branch metric: $2 is not an executable" >&2
+  exit 2
+}
+metric=("$2")
+shift 2
 
 # Enumerate tracked sources with NUL delimiters so paths containing spaces or
 # shell metacharacters remain single arguments. Exclude the metric itself so

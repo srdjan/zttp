@@ -5,6 +5,16 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
+# The build step passes the built kernel-safety gate. No other route runs this script.
+if [[ "$#" -ne 1 ]]; then
+  echo 'usage: check-kernel-safety.sh <gate-executable>; run zig build test-kernel-safety' >&2
+  exit 2
+fi
+[[ -x "$1" ]] || {
+  echo "FAIL: kernel safety gate $1 is not an executable" >&2
+  exit 2
+}
+
 # Measured 2026-10-23: 13 kernel source files. BSD xargs runs nothing and exits
 # 0 on empty input, so an empty list would pass without a scan. The Zig gate
 # keeps its own file floor for a partial list.
@@ -24,11 +34,4 @@ if [ "$count" -lt "$minimum_files" ]; then
   exit 1
 fi
 
-if [[ "$#" -eq 1 ]]; then
-  xargs -0 "$1" < "$list"
-elif [[ "$#" -eq 0 ]]; then
-  xargs -0 "${ZIG:-zig}" run scripts/kernel_safety_gate.zig -- < "$list"
-else
-  echo 'usage: check-kernel-safety.sh [gate-executable]' >&2
-  exit 2
-fi
+xargs -0 "$1" < "$list"
