@@ -508,6 +508,26 @@ test "parseTestFile: single test with status assertion" {
     try std.testing.expectEqual(@as(u16, 200), tests[0].assertions.status.?);
 }
 
+test "tab-separated fixture assertions still reject a mismatching response" {
+    const source =
+        "{\"type\":\"test\",\"name\":\"tab assertions\"}\n" ++
+        "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\"}\n" ++
+        "{\"type\":\"expect\",\"status\":\t500,\"body\":\t\"WRONG\",\"bodyContains\":\t\"missing\",\"headers\":\t{\"x-test\":\"required\"}}\n";
+    var suite = try parseTestFile(std.testing.allocator, source);
+    defer suite.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), suite.tests.len);
+    var response = HttpResponse.init(std.testing.allocator);
+    defer response.deinit();
+    response.body = "ok";
+    var failures: std.ArrayList([]const u8) = .empty;
+    defer {
+        for (failures.items) |message| std.testing.allocator.free(message);
+        failures.deinit(std.testing.allocator);
+    }
+    try checkAssertions(std.testing.allocator, &response, &suite.tests[0].assertions, &failures);
+    try std.testing.expectEqual(@as(usize, 4), failures.items.len);
+}
+
 test "parseTestFile: multiple tests" {
     const source =
         \\{"type":"test","name":"first"}

@@ -516,12 +516,12 @@ pub fn parseTraceLine(line: []const u8) !TraceEntry {
 
 /// Find an object KEY at the top level (depth 1) of a JSON object, ignoring
 /// occurrences of the key token inside nested structures or string values. `key`
-/// is the quoted token (e.g. `"\"result\""`). Returns the index just past the
-/// matched key, or null. Replaces a naive std.mem.indexOf that matched the first
+/// is the quoted token (e.g. `"\"result\""`). Returns the first value byte after
+/// the colon and whitespace, or null. Replaces a naive std.mem.indexOf that matched the first
 /// substring anywhere — which corrupted extraction when an earlier sibling value
 /// (e.g. an io arg equal to "result", or a header literally named "body")
 /// contained the key token, silently feeding wrong values into replay verification.
-fn findTopLevelKeyEnd(json: []const u8, key: []const u8) ?usize {
+fn findTopLevelValueStart(json: []const u8, key: []const u8) ?usize {
     if (key.len == 0) return null;
     var depth: u32 = 0;
     var pos: usize = 0;
@@ -552,8 +552,8 @@ fn findTopLevelKeyEnd(json: []const u8, key: []const u8) ?usize {
                     std.mem.eql(u8, json[pos .. pos + key.len], key))
                 {
                     var after = pos + key.len;
-                    while (after < json.len and (json[after] == ' ' or json[after] == '\t')) : (after += 1) {}
-                    if (after < json.len and json[after] == ':') return pos + key.len;
+                    after = skipWhitespace(json, after);
+                    if (after < json.len and json[after] == ':') return skipWhitespace(json, after + 1);
                 }
                 // Otherwise it is a non-matching key or a string value: skip it.
                 in_string = true;
@@ -566,8 +566,7 @@ fn findTopLevelKeyEnd(json: []const u8, key: []const u8) ?usize {
 }
 
 pub fn findJsonStringValue(json: []const u8, key: []const u8) ?[]const u8 {
-    var pos = findTopLevelKeyEnd(json, key) orelse return null;
-    while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}
+    var pos = findTopLevelValueStart(json, key) orelse return null;
     if (pos >= json.len) return null;
     if (pos + 4 <= json.len and std.mem.eql(u8, json[pos .. pos + 4], "null")) return null;
     if (json[pos] != '"') return null;
@@ -584,8 +583,7 @@ pub fn findJsonStringValue(json: []const u8, key: []const u8) ?[]const u8 {
 }
 
 pub fn findJsonIntValue(json: []const u8, key: []const u8) ?i64 {
-    var pos = findTopLevelKeyEnd(json, key) orelse return null;
-    while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}
+    var pos = findTopLevelValueStart(json, key) orelse return null;
     if (pos >= json.len) return null;
     const start = pos;
     if (pos < json.len and json[pos] == '-') pos += 1;
@@ -595,22 +593,19 @@ pub fn findJsonIntValue(json: []const u8, key: []const u8) ?i64 {
 }
 
 pub fn findJsonObjectValue(json: []const u8, key: []const u8) ?[]const u8 {
-    var pos = findTopLevelKeyEnd(json, key) orelse return null;
-    while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}
+    const pos = findTopLevelValueStart(json, key) orelse return null;
     if (pos >= json.len or json[pos] != '{') return null;
     return findMatchingBrace(json, pos, '{', '}');
 }
 
 pub fn findJsonArrayValue(json: []const u8, key: []const u8) ?[]const u8 {
-    var pos = findTopLevelKeyEnd(json, key) orelse return null;
-    while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}
+    const pos = findTopLevelValueStart(json, key) orelse return null;
     if (pos >= json.len or json[pos] != '[') return null;
     return findMatchingBrace(json, pos, '[', ']');
 }
 
 pub fn findJsonAnyValue(json: []const u8, key: []const u8) ?[]const u8 {
-    var pos = findTopLevelKeyEnd(json, key) orelse return null;
-    while (pos < json.len and (json[pos] == ':' or json[pos] == ' ')) : (pos += 1) {}
+    var pos = findTopLevelValueStart(json, key) orelse return null;
     if (pos >= json.len) return null;
     return switch (json[pos]) {
         '"' => blk: {
@@ -1244,6 +1239,15 @@ test "findJsonStringValue" {
     try std.testing.expectEqualStrings("GET", findJsonStringValue(line, "\"method\"").?);
     try std.testing.expectEqualStrings("/api/test", findJsonStringValue(line, "\"url\"").?);
     try std.testing.expect(findJsonStringValue(line, "\"missing\"") == null);
+}
+
+test "trace field readers accept all JSON whitespace around colons" {
+    const line = "{\"type\"\t\r\n :\t\r\n \"response\",\"status\"\t:\t500,\"headers\"\r:\r{},\"args\"\n:\n[],\"result\" :\ttrue}";
+    try std.testing.expectEqualStrings("response", findJsonStringValue(line, "\"type\"") orelse return error.TestExpectedTraceField);
+    try std.testing.expectEqual(@as(?i64, 500), findJsonIntValue(line, "\"status\""));
+    try std.testing.expectEqualStrings("{}", findJsonObjectValue(line, "\"headers\"") orelse return error.TestExpectedTraceField);
+    try std.testing.expectEqualStrings("[]", findJsonArrayValue(line, "\"args\"") orelse return error.TestExpectedTraceField);
+    try std.testing.expectEqualStrings("true", findJsonAnyValue(line, "\"result\"") orelse return error.TestExpectedTraceField);
 }
 
 test "provider trace phase is a closed optional transport marker" {
