@@ -86,3 +86,22 @@ Tasks 1, 2, and 3 run in parallel. Each runs in its own detached worktree from l
 ### Gates after the Task 5 and Task 6 merge
 
 - The reviewer ran these on main: `test-zts`, `test-modules`, `test-proof-swallow`, `test-diagnostic-corpus`, `test-contract-golden`, `test-standin`, `test-cli-abuse`, `test-flow-census` (fail-open 0, over-refusal 0), and `check-spine`. All exit 0.
+
+### Task 9 (request path benchmark): committed `036caa4f`
+
+- `zig build bench -Doptimize=fast -- --request-path` drives 1024 requests through `HandlerPool.executeHandler` with one slot and the default policy (recycle every 64 requests).
+- The section exits 1 unless 1024 requests complete and at least 16 recycles occur. The run observes exactly 16.
+- The section runs only with the flag, so `bench-check` and `benchmarks/perf-baseline.json` do not change.
+- Reviewer rerun under load 5.5 (provisional): normal request p50 about 1 us and about 4.2 allocator calls. Recycle request p50 4 us and p99 15-19 us. Rebuild request p50 70 us, p99 120 us, and 14 allocator calls.
+- Rebuild requests are 1.6% of the requests, so they set the overall p99 (70 us). Slot-buffer reuse would move the overall p99, not only a rare tail.
+- Limit: `compat.Instant` reads whole microseconds on macOS. A comment in the code names the fix.
+- Open: the worker's `bench-check -Doptimize=fast` under load 5.8 failed on `functionCalls` (9.15% against an 8% limit). The baseline is from Zig 0.16.0. The probable cause is host load and the toolchain change. A run with load under 4 confirms it.
+
+### Task 7 (analysis fuzz): committed `3e30b386`
+
+- `packages/zts/src/analysis_fuzz.zig` runs 8 seeded inputs for each of 5 deep shapes through `TypeEnv`, `TypeChecker`, and `FlowChecker`. It is in the compiler tier, because the engine tier cannot import the checkers.
+- Floors for each shape: inputs reach type checking and flow analysis, the call shapes reach the depth limits, a long alias name fails closed, and a planted type mismatch reaches the span oracle.
+- Review findings fixed: the span oracle saw 0 diagnostics, so a planted mismatch now feeds it (3 spans observed). The statistics now print only when a floor fails. The iterations went from 20 to 8 to shorten the run.
+- Probe: raising the span floor to 1000 made the test fail with exit 1.
+- No crash and no unlisted error was found.
+- Gates on main: `test-zts`, `test-zts-layering`, `test-docs-drift`, `test-doc-links`, `test-proof-swallow`, and `check-spine`. All exit 0.
