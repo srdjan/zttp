@@ -104,16 +104,40 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     };
     defer allocator.free(after_src);
 
-    var before_result = try precompile.runCheckOnlyFromSourceWithOptions(allocator, before_src, before, .{
+    var before_result = precompile.runCheckOnlyFromSourceWithOptions(allocator, before_src, before, .{
         .sql_schema_path = sql_schema_path,
         .json_mode = true,
-    });
+    }) catch |err| switch (err) {
+        error.MissingSqlSchema => std.process.exit(2),
+        else => return err,
+    };
     defer before_result.deinit(allocator);
-    var after_result = try precompile.runCheckOnlyFromSourceWithOptions(allocator, after_src, after, .{
+    var after_result = precompile.runCheckOnlyFromSourceWithOptions(allocator, after_src, after, .{
         .sql_schema_path = sql_schema_path,
         .json_mode = true,
-    });
+    }) catch |err| switch (err) {
+        error.MissingSqlSchema => std.process.exit(2),
+        else => return err,
+    };
     defer after_result.deinit(allocator);
+
+    for ([_]*const precompile.CheckResult{ &before_result, &after_result }) |result| {
+        if (result.analyzer_error != null) {
+            var output: std.Io.Writer.Allocating = .init(allocator);
+            defer output.deinit();
+            if (json_mode) {
+                try precompile.json_diag.writeErrorJson(&output.writer, null, result.json_diagnostics.items, null);
+            } else {
+                for (result.json_diagnostics.items) |diagnostic| {
+                    try output.writer.print("{s}:{d}:{d}: {s} {s}\n", .{
+                        diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.code, diagnostic.message,
+                    });
+                }
+            }
+            try writeAllFd(if (json_mode) std.c.STDOUT_FILENO else std.c.STDERR_FILENO, output.written());
+            std.process.exit(2);
+        }
+    }
 
     const before_contract = if (before_result.contract) |*c| c else {
         std.debug.print("Error: could not extract a contract from {s}\n", .{before});

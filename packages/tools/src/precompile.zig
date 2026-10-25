@@ -692,7 +692,7 @@ fn runCheckOnlyFromSourceWithPathAllocator(
         else => {
             var diagnostic = try json_diag.fromAnalyzerError(allocator, handler_path, err);
             errdefer diagnostic.deinit(allocator);
-            var refused = CheckResult{ .parse_errors = 1 };
+            var refused = CheckResult{ .parse_errors = 1, .analyzer_error = err };
             try refused.json_diagnostics.append(allocator, diagnostic);
             return refused;
         },
@@ -1321,7 +1321,10 @@ pub fn runGenTests(
                 else
                     null;
                 debugPrintStripError(handler_path, err, diagnostic);
-                return err;
+                return switch (err) {
+                    error.OutOfMemory => err,
+                    else => error.AdmissionRefused,
+                };
             },
             .recovered_admission_refused => return error.AdmissionRefused,
         };

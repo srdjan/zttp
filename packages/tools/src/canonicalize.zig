@@ -133,6 +133,8 @@ pub fn collectFromSource(
     });
     defer check.deinit(allocator);
 
+    if (check.analyzer_error) |err| return err;
+
     var result = Result{ .file = virtual_path };
     errdefer result.deinit(allocator);
 
@@ -975,6 +977,8 @@ pub fn applyStatementIntent(
     });
     defer check.deinit(allocator);
 
+    if (check.analyzer_error) |err| return err;
+
     var stmt_result = Result{ .file = "" };
     defer stmt_result.deinit(allocator);
     try buildSpanRepairs(allocator, source, check.json_diagnostics.items, &stmt_result);
@@ -1700,6 +1704,7 @@ pub fn normalizeSourceWithOptions(
             .json_mode = true,
         });
         defer check.deinit(allocator);
+        if (check.analyzer_error) |err| return err;
         const cur_band = countBand(check.json_diagnostics.items);
 
         // Line-keyed single-line refactors take priority each pass; they are
@@ -1772,6 +1777,12 @@ pub fn normalizeSourceWithOptions(
             .sql_schema_path = sql_schema_path,
             .json_mode = true,
         });
+        if (next_check.analyzer_error) |err| {
+            next_check.deinit(allocator);
+            allocator.free(next);
+            if (s.intents_owned) allocator.free(s.intents);
+            return err;
+        }
         const hard_errors = next_check.parse_errors + next_check.type_errors + next_check.bool_errors;
         const next_band = countBand(next_check.json_diagnostics.items);
         next_check.deinit(allocator);
@@ -1869,6 +1880,8 @@ fn collectCanonicalResidualDiagnostics(
         .json_mode = true,
     });
     defer check.deinit(allocator);
+
+    if (check.analyzer_error) |err| return err;
 
     var out: std.ArrayListUnmanaged(ResidualDiagnostic) = .empty;
     errdefer {
@@ -2008,6 +2021,9 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
     var nr = try normalizeWithSchema(allocator, path, sql_schema_path);
     defer nr.deinit(allocator);
 
+    const written = write_mode and nr.fully_canonical and nr.converged and nr.printed;
+    if (written) try zts.file_io.writeFile(allocator, path, nr.canonical_source);
+
     if (json_mode) {
         var buf: std.ArrayList(u8) = .empty;
         defer buf.deinit(allocator);
@@ -2020,7 +2036,7 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
             &aw.writer,
             path,
             &nr,
-            write_mode and nr.fully_canonical and nr.converged and nr.printed,
+            written,
         );
         buf = aw.toArrayList();
         if (buf.items.len > 0) try writeAllFd(std.c.STDOUT_FILENO, buf.items);
@@ -2070,7 +2086,6 @@ pub fn runNormalizeWithArgs(allocator: std.mem.Allocator, argv: []const []const 
             }
             std.process.exit(1);
         }
-        try zts.file_io.writeFile(allocator, path, nr.canonical_source);
         return;
     }
 
@@ -2335,6 +2350,16 @@ fn collectAndWriteJson(source: []const u8) !struct { json: []u8, file: []const u
     // Dupe so callers can keep their `defer free(out.file)` symmetry.
     const file = try std.testing.allocator.dupe(u8, virtual_path);
     return .{ .json = json, .file = file };
+}
+
+test "repair APIs refuse an analyzer failure" {
+    const source =
+        \\structural Empty<T> = ();
+        \\const value: Empty<string> = "x";
+        \\function handler(req: Request): Response { return Response.text("ok"); }
+    ;
+    try std.testing.expectError(error.UnresolvedTypeBinding, collectFromSource(std.testing.allocator, source, "handler.ts"));
+    try std.testing.expectError(error.UnresolvedTypeBinding, normalizeSource(std.testing.allocator, source, "handler.ts"));
 }
 
 test "writeJson envelope is stable with no refactors" {

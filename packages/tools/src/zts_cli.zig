@@ -137,13 +137,57 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
         precompile.runCompileWithArgs(allocator, argv[1..]) catch |err| switch (err) {
             // precompile already printed the file and the plain reason.
             error.HandlerReadFailed, error.PolicyReadFailed => std.process.exit(1),
-            else => return err,
+            error.OutOfMemory,
+            error.WriteFailed,
+            error.NoProjectConfig,
+            error.InvalidArgument,
+            error.InvalidArguments,
+            error.MissingArgument,
+            error.UnknownArgument,
+            error.UnknownOption,
+            error.UnknownFlag,
+            error.TooManyArguments,
+            => return err,
+            error.SoundModeViolation,
+            error.VerificationFailed,
+            error.PolicyViolation,
+            error.ParseError,
+            error.AdmissionRefused,
+            error.UnsupportedSourceExtension,
+            error.InvalidImportSpecifier,
+            error.UnknownVirtualModule,
+            error.UnsupportedRuntimeAuthority,
+            => std.process.exit(1),
+            else => {
+                inline for (@typeInfo(zts.PrepareSourceError).error_set.error_names.?) |source_error| {
+                    if (std.mem.eql(u8, @errorName(err), source_error)) std.process.exit(1);
+                }
+                try writeCommandAnalyzerError(allocator, "compile", argv[1..], err);
+                std.process.exit(1);
+            },
         };
         return;
     }
     for (commands) |c| {
         if (std.mem.eql(u8, command, c.name)) {
-            try c.run(allocator, argv[1..]);
+            c.run(allocator, argv[1..]) catch |err| switch (err) {
+                error.OutOfMemory,
+                error.WriteFailed,
+                error.NoProjectConfig,
+                error.InvalidArgument,
+                error.InvalidArguments,
+                error.MissingArgument,
+                error.UnknownArgument,
+                error.UnknownOption,
+                error.UnknownFlag,
+                error.TooManyArguments,
+                => return err,
+                else => {
+                    if (c.category != .analyze) return err;
+                    try writeCommandAnalyzerError(allocator, c.name, argv[1..], err);
+                    std.process.exit(1);
+                },
+            };
             return;
         }
     }
@@ -152,6 +196,30 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     // that IDE/CI integrations parsing stderr cannot read.
     std.debug.print("Unknown command: {s}\nRun `zts --help` for the command list.\n", .{command});
     std.process.exit(1);
+}
+
+fn writeCommandAnalyzerError(allocator: std.mem.Allocator, command: []const u8, argv: []const []const u8, err: anyerror) !void {
+    var target = command;
+    var found_target = false;
+    var skip_value = false;
+    var json_mode = std.mem.eql(u8, command, "edit-simulate");
+    for (argv) |arg| {
+        if (skip_value) {
+            skip_value = false;
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--json") or std.mem.eql(u8, arg, "--stdin-json")) json_mode = true;
+        if (std.mem.eql(u8, arg, "--sql-schema") or std.mem.eql(u8, arg, "--before") or
+            std.mem.eql(u8, arg, "--policy") or std.mem.eql(u8, arg, "--module-manifest") or
+            std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output"))
+        {
+            skip_value = true;
+        } else if (!found_target and !std.mem.startsWith(u8, arg, "-")) {
+            target = arg;
+            found_target = true;
+        }
+    }
+    try writeUnmappedAnalyzerError(allocator, json_mode, target, err);
 }
 
 /// Writes the `check --json` envelope. A writer failure propagates so that the
@@ -699,6 +767,7 @@ fn runGenTestsCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
     defer buf.deinit(allocator);
     var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
     const count = precompile.runGenTests(allocator, target, &aw.writer) catch |err| switch (err) {
+        error.ParseError, error.AdmissionRefused, error.UnsupportedSourceExtension => std.process.exit(1),
         error.FileNotFound, error.AccessDenied, error.IsDir => {
             // precompile already printed `Error reading handler file`.
             std.debug.print("Next: check the handler path, or run `gen-tests` with no argument inside a project.\n", .{});

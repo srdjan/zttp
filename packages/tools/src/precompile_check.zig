@@ -38,6 +38,8 @@ pub const Stage = enum {
 pub const StageSet = std.EnumSet(Stage);
 
 pub const CheckResult = struct {
+    /// A stopped analyzer has no verdict. Repair consumers propagate this error.
+    analyzer_error: ?anyerror = null,
     /// Which stages ran. Internal record for the corpus gate; never part of
     /// the `--json` output.
     stages_run: StageSet = StageSet.empty,

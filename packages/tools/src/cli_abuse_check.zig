@@ -18,7 +18,7 @@
 //! `zttp.json`. A stray `zttp.json` above the temporary directory would change
 //! what `zts` does, so the check refuses to run when it finds one.
 //!
-//! The exit code is 1 for every case today. That is the observed contract,
+//! The expected exit code belongs to each command. That is the observed contract,
 //! not a design statement: `zts_main.zig` maps usage errors to 1, the analyzer
 //! returns 1 when it reports an error or an unproven property, and an I/O
 //! failure in text mode leaves `main` through an error return, which also
@@ -40,6 +40,7 @@ const nest_depth: usize = 600;
 const chain_length: usize = 2000;
 /// Terms in the addition chain input: the longest chain the parser admits (512 is refused).
 const add_chain_terms: usize = 511;
+const deep_expression_depth: usize = 300;
 /// Per-invocation deadline. The slowest case reads 10 MiB and finishes in well
 /// under a second; the deadline only has to separate "slow" from "hung".
 const deadline_seconds: i64 = 30;
@@ -54,6 +55,11 @@ const Input = enum {
     deep_nesting,
     call_chain,
     add_chain,
+    unmapped_type,
+    readonly_file,
+    admission_refusal,
+    deep_clean,
+    deep_leak,
     unknown_flag,
     wrong_extension,
     no_argument,
@@ -63,6 +69,7 @@ const Mode = enum { text, json };
 
 const Case = struct {
     name: []const u8,
+    command: []const u8 = "check",
     input: Input,
     mode: Mode,
     /// The exit code the CLI uses for this input today.
@@ -100,6 +107,17 @@ const cases = [_]Case{
     .{ .name = "call chain past the activation limit, json", .input = .call_chain, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS500" },
     .{ .name = "511-term addition chain, text", .input = .add_chain, .mode = .text, .exit_code = 1 },
     .{ .name = "511-term addition chain, json", .input = .add_chain, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS500" },
+    .{ .name = "unmapped type failure, json", .input = .unmapped_type, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS000" },
+    .{ .name = "canonicalize analyzer failure, json", .command = "canonicalize", .input = .unmapped_type, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS000" },
+    .{ .name = "normalize analyzer failure, json", .command = "normalize", .input = .unmapped_type, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS000" },
+    .{ .name = "normalize analyzer failure, text", .command = "normalize", .input = .unmapped_type, .mode = .text, .exit_code = 1, .stderr_contains = "ZTS000", .stderr_excludes = " in assignableIn" },
+    .{ .name = "behavior analyzer failure, json", .command = "prove-behavior", .input = .unmapped_type, .mode = .json, .exit_code = 2, .diagnostic_code = "ZTS000" },
+    .{ .name = "normalize write failure emits one json document", .command = "normalize", .input = .readonly_file, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS000" },
+    .{ .name = "gen-tests source refusal is not an internal error", .command = "gen-tests", .input = .deep_nesting, .mode = .text, .exit_code = 1, .stderr_excludes = "ZTS000" },
+    .{ .name = "compile source refusal is not an internal error", .command = "compile", .input = .admission_refusal, .mode = .text, .exit_code = 1, .stderr_excludes = "ZTS000" },
+    .{ .name = "compile analyzer failure reports ZTS000", .command = "compile", .input = .unmapped_type, .mode = .text, .exit_code = 1, .stderr_contains = "ZTS000" },
+    .{ .name = "deep clean expression proves through the public CLI", .input = .deep_clean, .mode = .json, .exit_code = 0, .success = true },
+    .{ .name = "deep secret expression is refused through the public CLI", .input = .deep_leak, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS400" },
     .{ .name = "unknown flag, text", .input = .unknown_flag, .mode = .text, .exit_code = 1 },
     .{ .name = "unknown flag, json", .input = .unknown_flag, .mode = .json, .exit_code = 1 },
     .{ .name = "wrong extension, text", .input = .wrong_extension, .mode = .text, .exit_code = 1, .stderr_contains = "ZTS052 source files must use the .ts extension", .stderr_excludes = "error.UnsupportedSourceExtension" },
@@ -114,6 +132,7 @@ const Check = struct {
     work: []const u8,
     passed: usize = 0,
     failed: usize = 0,
+    skipped: usize = 0,
 
     fn pass(self: *Check, name: []const u8) void {
         self.passed += 1;
@@ -172,8 +191,8 @@ pub fn main(init: std.process.Init) !void {
     for (cases) |case| runCase(&check, case);
     runUnwritableStdout(&check);
 
-    const ran = check.passed + check.failed;
-    std.debug.print("cli abuse: {d} of {d} cases passed\n", .{ check.passed, ran });
+    const ran = check.passed + check.failed + check.skipped;
+    std.debug.print("cli abuse: {d} passed, {d} failed, {d} skipped ({d} cases)\n", .{ check.passed, check.failed, check.skipped, ran });
     // Floor on the check's own input: a harness that ran fewer cases than it
     // defines checked less than its name says.
     if (ran != cases.len + unwritable_stdout_cases) {
@@ -252,6 +271,25 @@ fn populate(gpa: std.mem.Allocator, io: Io, work: []const u8) !void {
     for (1..add_chain_terms) |_| try add.appendSlice(gpa, "+1");
     try add.appendSlice(gpa, ";\n  return Response.text(String(x));\n}\n");
     try writeInput(gpa, io, work, "add-chain.ts", add.items);
+    try writeInput(gpa, io, work, "unmapped.ts", "structural Empty<T> = ();\n" ++
+        "const value: Empty<string> = \"x\";\n" ++
+        "function handler(req: Request): Response { return Response.text(\"ok\"); }\n");
+    const readonly_path = try std.fs.path.join(gpa, &.{ work, "readonly" });
+    defer gpa.free(readonly_path);
+    try cwd.createDirPath(io, readonly_path);
+    try writeInput(gpa, io, work, "readonly/handler.ts", "function handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n");
+    try writeInput(gpa, io, work, "admission.ts", "const value: any = 1;\n");
+    for ([_]bool{ false, true }) |leaks| {
+        var deep: std.ArrayList(u8) = .empty;
+        defer deep.deinit(gpa);
+        if (leaks) try deep.appendSlice(gpa, "import { env } from \"zttp:env\";\n");
+        try deep.appendSlice(gpa, "function handler(req: Request): Proof<Response, \"no_secret_leakage\"> { return Response.json(");
+        for (0..deep_expression_depth) |_| try deep.append(gpa, '[');
+        try deep.appendSlice(gpa, if (leaks) "env(\"API_TOKEN\")" else "\"public\"");
+        for (0..deep_expression_depth) |_| try deep.append(gpa, ']');
+        try deep.appendSlice(gpa, "); }\n");
+        try writeInput(gpa, io, work, if (leaks) "deep-leak.ts" else "deep-clean.ts", deep.items);
+    }
 }
 
 fn writeInput(gpa: std.mem.Allocator, io: Io, dir: []const u8, name: []const u8, data: []const u8) !void {
@@ -271,6 +309,11 @@ fn fileFor(input: Input) []const u8 {
         .deep_nesting => "nest.ts",
         .call_chain => "chain.ts",
         .add_chain => "add-chain.ts",
+        .unmapped_type => "unmapped.ts",
+        .readonly_file => "readonly/handler.ts",
+        .admission_refusal => "admission.ts",
+        .deep_clean => "deep-clean.ts",
+        .deep_leak => "deep-leak.ts",
         // A valid, empty file: the flag is the hostile part.
         .unknown_flag => "empty.ts",
         .wrong_extension => "handler.js",
@@ -279,18 +322,64 @@ fn fileFor(input: Input) []const u8 {
 }
 
 fn runCase(check: *Check, case: Case) void {
+    var readonly_dir: ?Io.Dir = null;
+    defer if (readonly_dir) |dir| {
+        dir.setPermissions(check.io, Io.File.Permissions.default_dir) catch |err| {
+            check.fail(case.name, "cannot restore fixture permissions: {s}", .{@errorName(err)});
+        };
+        dir.close(check.io);
+    };
+    if (case.input == .readonly_file) {
+        const path = std.fs.path.join(check.gpa, &.{ check.work, "readonly" }) catch {
+            check.fail(case.name, "cannot allocate the read-only fixture path", .{});
+            return;
+        };
+        defer check.gpa.free(path);
+        readonly_dir = Io.Dir.cwd().openDir(check.io, path, .{}) catch |err| {
+            check.fail(case.name, "cannot open the read-only fixture: {s}", .{@errorName(err)});
+            return;
+        };
+        readonly_dir.?.setPermissions(check.io, Io.File.Permissions.default_dir.setReadOnly(true)) catch |err| {
+            check.fail(case.name, "cannot set fixture permissions: {s}", .{@errorName(err)});
+            return;
+        };
+        if (readonly_dir.?.createFile(check.io, "write-probe", .{ .exclusive = true })) |file| {
+            file.close(check.io);
+            check.skipped += 1;
+            std.debug.print("  SKIP  {s}: this host bypasses read-only directory permissions\n", .{case.name});
+            return;
+        } else |err| switch (err) {
+            error.AccessDenied => {},
+            else => {
+                check.fail(case.name, "cannot inspect the read-only fixture: {s}", .{@errorName(err)});
+                return;
+            },
+        }
+    }
     var argv: [5][]const u8 = undefined;
     var argc: usize = 0;
     argv[argc] = check.zts;
     argc += 1;
-    argv[argc] = "check";
+    argv[argc] = case.command;
     argc += 1;
     if (case.input != .no_argument) {
         argv[argc] = fileFor(case.input);
         argc += 1;
     }
+    if (std.mem.eql(u8, case.command, "prove-behavior")) {
+        argv[argc] = fileFor(case.input);
+        argc += 1;
+    }
+    if (std.mem.eql(u8, case.command, "compile")) {
+        argv[argc] = "generated.zig";
+        argc += 1;
+    }
     if (case.mode == .json) {
         argv[argc] = "--json";
+        argc += 1;
+    }
+    if (case.input == .readonly_file) {
+        argv[argc] = "--write";
         argc += 1;
     }
     if (case.input == .unknown_flag) {
@@ -352,6 +441,10 @@ fn runCase(check: *Check, case: Case) void {
 
     if (case.mode == .json) {
         if (result.stdout.len == 0) {
+            if (case.diagnostic_code != null or case.success) {
+                check.fail(case.name, "expected a diagnostic JSON document, received no stdout", .{});
+                return;
+            }
             check.pass(case.name);
             return;
         }
