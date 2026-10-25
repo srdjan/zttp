@@ -28,5 +28,6 @@ test {
     // on macOS. Compile coverage of the instance itself is unaffected either
     // way, because `test_runner.zig` above imports `handler_instance.zig`.
     _ = @import("server.zig");
+    _ = @import("server_connection_pool.zig");
     _ = @import("proof_adapter.zig");
 }

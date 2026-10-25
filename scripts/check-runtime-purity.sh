@@ -98,17 +98,18 @@ done
 #    `if [ -f ... ]` with no else, so renaming or moving the file made the
 #    "enforced boundary" silently stop being enforced - in the very script
 #    a-gate-that-counts-nothing-still-reports-a-pass.md cites as the model.
-server_src="packages/runtime/src/server.zig"
-if [ ! -f "$server_src" ]; then
-  echo "error: '$server_src' does not exist - the engine-import boundary this gate enforces has no input; point the gate at the file's new location" >&2
-  exit 1
-fi
-server_boundary_hits="$(grep -nE '@import\("zts"\)|(^|[^[:alnum:]_])zts\.' "$server_src" || true)"
-if [ -n "$server_boundary_hits" ]; then
-  echo "error: server.zig imports zts directly; use packages/runtime/src/engine_adapter.zig" >&2
-  echo "$server_boundary_hits" >&2
-  fail=1
-fi
+for server_src in packages/runtime/src/server.zig packages/runtime/src/server_connection_pool.zig; do
+  if [ ! -f "$server_src" ]; then
+    echo "error: '$server_src' does not exist - the engine-import boundary this gate enforces has no input; point the gate at the file's new location" >&2
+    exit 1
+  fi
+  server_boundary_hits="$(grep -nE '@import\("zts"\)|(^|[^[:alnum:]_])zts\.' "$server_src" || true)"
+  if [ -n "$server_boundary_hits" ]; then
+    echo "error: $(basename "$server_src") imports zts directly; use packages/runtime/src/engine_adapter.zig" >&2
+    echo "$server_boundary_hits" >&2
+    fail=1
+  fi
+done
 
 if [ "$fail" -eq 0 ]; then
   echo "runtime purity OK: no agent/provider surface in $(basename "$runtime_bin") or $(basename "$zts_bin")"
