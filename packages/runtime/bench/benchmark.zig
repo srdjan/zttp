@@ -9,6 +9,7 @@ const compat = @import("zts").compat;
 const runtime_instance = @import("runtime_instance");
 const zq = @import("zts");
 const HandlerInstance = runtime_instance.HandlerInstance;
+const HandlerPool = runtime_instance.HandlerPool;
 const RuntimeConfig = runtime_instance.RuntimeConfig;
 const PerfStats = zq.interpreter.PerfStats;
 const OptStats = zq.OptStats;
@@ -33,6 +34,7 @@ const Options = struct {
     quiet: bool = false,
     script_path: ?[]const u8 = null,
     bench: bool = false,
+    request_path: bool = false,
     bench_fn: []const u8 = "run",
     bench_iterations: u32 = 200000,
     warmup_rounds: u32 = 120,
@@ -40,7 +42,7 @@ const Options = struct {
 };
 
 const usage =
-    "Usage: zttp-bench [--json] [--quiet] [--script <path>] [--bench]\n" ++
+    "Usage: zttp-bench [--json] [--quiet] [--script <path>] [--bench] [--request-path]\n" ++
     "                   [--bench-fn <name>] [--iterations <n>] [--warmup <n>] [--warmup-iters <n>]\n";
 
 fn writeStdout(data: []const u8) void {
@@ -80,6 +82,8 @@ fn parseOptions() Options {
             options.script_path = path;
         } else if (std.mem.eql(u8, arg, "--bench")) {
             options.bench = true;
+        } else if (std.mem.eql(u8, arg, "--request-path")) {
+            options.request_path = true;
         } else if (std.mem.eql(u8, arg, "--bench-fn")) {
             const name = args.next() orelse {
                 writeStdout("Missing value for --bench-fn\n");
@@ -424,6 +428,197 @@ const benchmarks = [_]struct { name: []const u8, iterations: u32, code: []const 
     },
 };
 
+// ---------------------------------------------------------------------------
+// request_path: HandlerPool.executeHandler under the default pooling policy
+// ---------------------------------------------------------------------------
+
+const request_path_requests: usize = 1024;
+const request_path_min_recycles: u64 = 16;
+const request_path_handler = "examples/handler/handler.ts";
+
+/// Counts every call that reaches the backing allocator. The driver is single
+/// threaded, but pool prewarm may use threads, so the counters are atomic.
+const CountingAllocator = struct {
+    backing: std.mem.Allocator,
+    alloc_calls: std.atomic.Value(u64) = .init(0),
+    free_calls: std.atomic.Value(u64) = .init(0),
+
+    const vtable: std.mem.Allocator.VTable = .{
+        .alloc = alloc,
+        .resize = resize,
+        .remap = remap,
+        .free = free,
+    };
+
+    fn allocator(self: *CountingAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    fn alloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        _ = self.alloc_calls.fetchAdd(1, .monotonic);
+        return self.backing.rawAlloc(len, alignment, ret_addr);
+    }
+
+    fn resize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        _ = self.alloc_calls.fetchAdd(1, .monotonic);
+        return self.backing.rawResize(memory, alignment, new_len, ret_addr);
+    }
+
+    fn remap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        _ = self.alloc_calls.fetchAdd(1, .monotonic);
+        return self.backing.rawRemap(memory, alignment, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *CountingAllocator = @ptrCast(@alignCast(ctx));
+        _ = self.free_calls.fetchAdd(1, .monotonic);
+        self.backing.rawFree(memory, alignment, ret_addr);
+    }
+};
+
+/// Nearest-rank percentile of an ascending slice. With fewer than 100 samples
+/// p99 is the maximum.
+fn percentileSorted(sorted: []const u64, pct: usize) u64 {
+    if (sorted.len == 0) return 0;
+    const rank = (pct * sorted.len + 99) / 100; // ceil(pct * n / 100)
+    return sorted[@max(rank, 1) - 1];
+}
+
+const LatencyGroup = struct {
+    count: usize = 0,
+    p50_ns: u64 = 0,
+    p99_ns: u64 = 0,
+};
+
+fn latencyGroup(allocator: std.mem.Allocator, samples: []const u64) !LatencyGroup {
+    const sorted = try allocator.dupe(u64, samples);
+    defer allocator.free(sorted);
+    std.mem.sort(u64, sorted, {}, std.sort.asc(u64));
+    return .{
+        .count = sorted.len,
+        .p50_ns = percentileSorted(sorted, 50),
+        .p99_ns = percentileSorted(sorted, 99),
+    };
+}
+
+fn requestPathFail(comptime fmt: []const u8, args: anytype) noreturn {
+    printFmt("request_path FAILED: " ++ fmt, args);
+    std.process.exit(1);
+}
+
+/// Drives 1024 requests through one HandlerPool slot at the default
+/// count-bounded policy. A request is a "recycle" request when the pool's
+/// `recycles` counter rises across its call: the slot is dropped while the
+/// request is released. The cost of building the replacement slot lands on the
+/// next request, which is reported as the "rebuild" request.
+/// shortcut: compat.Instant reads CLOCK_MONOTONIC, which is whole microseconds on macOS, so a
+/// sub-microsecond request reports 0 or 1000ns; switch to CLOCK_UPTIME_RAW if p50 must resolve.
+fn runRequestPath(options: Options) !void {
+    const backing = std.heap.c_allocator;
+    var counter = CountingAllocator{ .backing = backing };
+    const allocator = counter.allocator();
+
+    const source = readFilePosix(backing, request_path_handler, 1024 * 1024) catch |err| {
+        requestPathFail("cannot read {s}: {s}", .{ request_path_handler, @errorName(err) });
+    };
+    defer backing.free(source);
+
+    // Default RuntimeConfig, so the arena and value stack keep their shipped sizes.
+    var pool = try HandlerPool.init(allocator, RuntimeConfig{}, source, request_path_handler, 1, 0);
+    defer pool.deinit();
+
+    // The section reports the default policy, so refuse a drifted default.
+    if (pool.pooling_policy != .reuse_bounded_by_count) requestPathFail("pooling policy is not reuse_bounded_by_count", .{});
+    const max_requests = pool.pooling_thresholds.max_requests;
+    if (max_requests != 64) requestPathFail("default max_requests is {d}, expected 64", .{max_requests});
+
+    var latencies: [request_path_requests]u64 = undefined;
+    var call_allocs: [request_path_requests]u64 = undefined;
+    var recycled: [request_path_requests]bool = undefined;
+
+    const alloc_base = counter.alloc_calls.load(.monotonic);
+    const free_base = counter.free_calls.load(.monotonic);
+    var completed: usize = 0;
+    while (completed < request_path_requests) : (completed += 1) {
+        const request = runtime_instance.HttpRequestView{
+            .method = "GET",
+            .url = "/",
+            .path = "/",
+            .headers = .empty,
+            .body = null,
+        };
+        const recycles_before = pool.getMetrics().recycles;
+        const allocs_before = counter.alloc_calls.load(.monotonic);
+        const start = try compat.Instant.now();
+        var response = pool.executeHandler(request) catch |err| {
+            requestPathFail("request {d} failed: {s}", .{ completed, @errorName(err) });
+        };
+        const end = try compat.Instant.now();
+        response.deinit();
+        latencies[completed] = end.since(start);
+        call_allocs[completed] = counter.alloc_calls.load(.monotonic) - allocs_before;
+        recycled[completed] = pool.getMetrics().recycles > recycles_before;
+    }
+
+    // Floor: no number is reported unless the run did the work it names.
+    const recycles = pool.getMetrics().recycles;
+    if (completed != request_path_requests) requestPathFail("completed {d} of {d} requests", .{ completed, request_path_requests });
+    if (recycles < request_path_min_recycles) requestPathFail("observed {d} recycles, need at least {d}", .{ recycles, request_path_min_recycles });
+
+    var drop_samples: std.ArrayList(u64) = .empty;
+    defer drop_samples.deinit(backing);
+    var rebuild_samples: std.ArrayList(u64) = .empty;
+    defer rebuild_samples.deinit(backing);
+    var rebuild_allocs: u64 = 0;
+    for (0..request_path_requests) |i| {
+        if (recycled[i]) try drop_samples.append(backing, latencies[i]);
+        if (i > 0 and recycled[i - 1]) {
+            try rebuild_samples.append(backing, latencies[i]);
+            rebuild_allocs += call_allocs[i];
+        }
+    }
+    // Floor on the groups: a recycle on the final request has no rebuild successor.
+    if (drop_samples.items.len != recycles) requestPathFail("{d} recycle requests for {d} recycles", .{ drop_samples.items.len, recycles });
+    if (rebuild_samples.items.len + 1 < drop_samples.items.len) requestPathFail("only {d} rebuild requests", .{rebuild_samples.items.len});
+
+    const all = try latencyGroup(backing, &latencies);
+    const drop = try latencyGroup(backing, drop_samples.items);
+    const rebuild = try latencyGroup(backing, rebuild_samples.items);
+    const n: f64 = @floatFromInt(request_path_requests);
+    const allocs_per_request = @as(f64, @floatFromInt(counter.alloc_calls.load(.monotonic) - alloc_base)) / n;
+    const frees_per_request = @as(f64, @floatFromInt(counter.free_calls.load(.monotonic) - free_base)) / n;
+    const rebuild_allocs_per_request = if (rebuild.count > 0)
+        @as(f64, @floatFromInt(rebuild_allocs)) / @as(f64, @floatFromInt(rebuild.count))
+    else
+        0;
+
+    if (options.json) {
+        var buf: [1024]u8 = undefined;
+        const json = try std.fmt.bufPrint(&buf, "{{\"schema_version\":1,\"request_path\":{{\"requests\":{d},\"recycles\":{d},\"max_requests\":{d}," ++
+            "\"p50_ns\":{d},\"p99_ns\":{d}," ++
+            "\"recycle\":{{\"count\":{d},\"p50_ns\":{d},\"p99_ns\":{d}}}," ++
+            "\"rebuild\":{{\"count\":{d},\"p50_ns\":{d},\"p99_ns\":{d},\"alloc_calls_per_request\":{d:.2}}}," ++
+            "\"alloc_calls_per_request\":{d:.2},\"free_calls_per_request\":{d:.2}}}}}\n", .{
+            completed,          recycles,          max_requests,
+            all.p50_ns,         all.p99_ns,        drop.count,
+            drop.p50_ns,        drop.p99_ns,       rebuild.count,
+            rebuild.p50_ns,     rebuild.p99_ns,    rebuild_allocs_per_request,
+            allocs_per_request, frees_per_request,
+        });
+        writeStdout(json);
+        return;
+    }
+
+    printFmt("request_path: requests={d} recycles={d} policy=reuse_bounded_by_count max_requests={d} pool=1", .{ completed, recycles, max_requests });
+    printFmt("request_path all: p50={d}ns p99={d}ns", .{ all.p50_ns, all.p99_ns });
+    printFmt("request_path recycle (recycles counter rose): n={d} p50={d}ns p99={d}ns", .{ drop.count, drop.p50_ns, drop.p99_ns });
+    printFmt("request_path rebuild (request after a recycle): n={d} p50={d}ns p99={d}ns allocator-calls={d:.1}", .{ rebuild.count, rebuild.p50_ns, rebuild.p99_ns, rebuild_allocs_per_request });
+    printFmt("request_path allocator calls per request: alloc={d:.2} free={d:.2}", .{ allocs_per_request, frees_per_request });
+}
+
 pub fn main(init: std.process.Init.Minimal) !void {
     g_args = init.args;
     const options = parseOptions();
@@ -431,6 +626,11 @@ pub fn main(init: std.process.Init.Minimal) !void {
     // - Proper memory freeing (unlike page_allocator)
     // - No tracking overhead (unlike GPA which is 20x slower)
     const allocator = std.heap.c_allocator;
+
+    if (options.request_path) {
+        try runRequestPath(options);
+        return;
+    }
 
     const config = RuntimeConfig{
         .memory_limit = 64 * 1024 * 1024, // 64MB for benchmarks

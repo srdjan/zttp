@@ -60,7 +60,7 @@ fn fetchCredentialOuter(
     }
     return inner;
 }
-const HttpRequestView = http_types.HttpRequestView;
+pub const HttpRequestView = http_types.HttpRequestView;
 const HttpResponse = http_types.HttpResponse;
 
 fn fetchSyncNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []const zq.JSValue) anyerror!zq.JSValue {
@@ -118,6 +118,10 @@ const cost_meter = zq.CostMeter;
 /// consumes it in one module, so no consumer analyzes `runtime_config.zig`
 /// a second time and ends up with an incompatible `RuntimeConfig`.
 pub const RuntimeConfig = runtime_config_mod.RuntimeConfig;
+
+/// Public for the benchmark harness, which drives the pool request path through
+/// this module so it shares one `RuntimeConfig` type with the pool.
+pub const HandlerPool = @import("runtime_pool.zig").HandlerPool;
 
 const openTraceFile = runtime_config_mod.openTraceFile;
 const applyRuntimeConfig = runtime_config_mod.applyRuntimeConfig;
