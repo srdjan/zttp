@@ -144,3 +144,13 @@ Gates on `main`, each exit 0: `test-module-boundary`, `test-proof-checker-purity
 
 The R8 census compared 352 type texts between `TypeExprParser` and the standalone annotation entry: 239 signature census rows, 16 declared module signatures (5 returns, which are the `returnsOkRecord` inputs, and 11 parameters), 13 ambient rows, and 84 literal texts from tests. Two disagree: `bool` and `bool[]`. The old parser reads `bool` as `boolean`; the one grammar reads it as an unresolved name. No binding, ambient row, or census row uses `bool`.
 Opus measured production on `main`: a handler annotated `bool` fails `zts check` with ZTS203 ("expected bool, got true") and ZTS100, and the same handler with `boolean` passes the type stages. Authored `bool` is already refused, so the change moves no production output. Ruling: the ambient test asserts that `bool` does not resolve, and its comment is corrected. `resolveType` keeps its name and calls the one grammar. Tests of the old grammar are deleted with it, pool tests move to the new entry, and parity tests become exact canonical-key assertions.
+
+## R12c
+
+| Commit | Phase | Result |
+|---|---|---|
+| `4d469b52` | R12c-1 | `scripts/test-gate-floors.sh` takes the built kernel-safety gate as its argument, and `addGateFloorProbe` passes it. The empty-list and 12-file probes fail with the same exit status and text as before. |
+| `4440f1df` | R12c-2 | The no-argument rebuild branches of `check-agent-determinism.sh`, `check-meta-drift.sh`, `check-zts-layering.sh`, `test-release-workflow.sh`, `check-kernel-safety.sh`, `check-residual-guards.sh`, and `run-production-branch-metric.sh` are deleted (452 to 419 lines). Each script refuses a missing argument or a non-executable path with a usage message and a non-zero exit. `docs/internals/agent-protocol-v2.md` said that `verify.sh` runs the determinism gate; it now names `zig build test-agent-determinism`. |
+
+Before the edit, the worker confirmed that every build route passes the artifact and that no script, workflow, or AGENTS file runs the seven scripts directly.
+Gates on `main`, each exit 0: `test-script-reachability`, `test-capability-audit` (runs the gate-floor probe), `test-agent-determinism`, `test-meta-drift`, `test-zts-layering`, `test-release-workflow`, `test-kernel-safety`, `test-residual-guards-drift`, `test-production-branch-metric`, `test-step-coverage`, `test-docs-drift`, `test-doc-links`, `check-spine`. Fresh-cache aggregate: 211/211 steps, 7805/7811 passed (6 skipped), unchanged. Digests: byte-identical. Protection against `763eb37e`: exit 0.
