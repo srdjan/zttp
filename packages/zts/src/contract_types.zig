@@ -595,6 +595,22 @@ pub const HandlerProperties = struct {
                 .@"struct" => |info| info.field_names,
                 else => @compileError(label ++ " is neither an enum nor a struct"),
             };
+            if (@typeInfo(Members) == .@"struct") {
+                for (member_names) |name| {
+                    if (@hasField(HandlerProperties, name) and @FieldType(Members, name) != @FieldType(HandlerProperties, name))
+                        return label ++ ": field type differs from HandlerProperties: " ++ name;
+                }
+            }
+            if (namesCoverageProblem(label, member_names, excluded)) |problem| return problem;
+            return null;
+        }
+    }
+
+    /// `coverageProblem` for a table that names properties as data: `label` names the table in the
+    /// message, `member_names` are the names it carries.
+    pub fn namesCoverageProblem(comptime label: []const u8, comptime member_names: []const []const u8, comptime excluded: []const Exclusion) ?[]const u8 {
+        comptime {
+            @setEvalBranchQuota(100_000);
             for (excluded) |entry| {
                 if (!@hasField(HandlerProperties, entry.name)) return label ++ ": exclusion names no HandlerProperties field: " ++ entry.name;
                 if (entry.reason.len == 0) return label ++ ": exclusion has no reason: " ++ entry.name;
@@ -602,8 +618,6 @@ pub const HandlerProperties = struct {
             }
             for (member_names) |name| {
                 if (!@hasField(HandlerProperties, name)) return label ++ ": member is not a HandlerProperties field: " ++ name;
-                if (@typeInfo(Members) == .@"struct" and @FieldType(Members, name) != @FieldType(HandlerProperties, name))
-                    return label ++ ": field type differs from HandlerProperties: " ++ name;
             }
             for (@typeInfo(HandlerProperties).@"struct".field_names) |field| {
                 if (containsName(member_names, field) or isExcludedName(excluded, field)) continue;
@@ -618,7 +632,7 @@ fn isMonotonicProvenSpec(comptime field_name: []const u8) bool {
     return !std.mem.eql(u8, field_name, "has_egress");
 }
 
-fn containsName(comptime names: []const [:0]const u8, comptime name: []const u8) bool {
+fn containsName(comptime names: anytype, comptime name: []const u8) bool {
     for (names) |candidate| {
         if (std.mem.eql(u8, candidate, name)) return true;
     }
@@ -693,6 +707,8 @@ test "coverageProblem names each way a property list can drift from HandlerPrope
     try std.testing.expect(std.mem.endsWith(u8, comptime HandlerProperties.coverageProblem(Partial, &no_reason).?, "exclusion has no reason: read_only"));
     const both = [_]HandlerProperties.Exclusion{.{ .name = "pure", .reason = "x" }};
     try std.testing.expect(std.mem.endsWith(u8, comptime HandlerProperties.coverageProblem(Partial, &both).?, "property is both a member and excluded: pure"));
+    try std.testing.expect(std.mem.endsWith(u8, comptime HandlerProperties.namesCoverageProblem("table", &.{ "pure", "nonsense" }, &none).?, "member is not a HandlerProperties field: nonsense"));
+    try std.testing.expect(std.mem.endsWith(u8, comptime HandlerProperties.namesCoverageProblem("table", &.{"pure"}, &none).?, "HandlerProperties field is neither a member nor excluded: read_only"));
     const two = HandlerProperties.exclusions(&.{ "pure", "read_only" }, "why");
     try std.testing.expectEqual(@as(usize, 2), two.len);
     try std.testing.expectEqualStrings("why", two[1].reason);

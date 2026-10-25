@@ -13,6 +13,7 @@
 //! the handler's I/O surface.
 
 const std = @import("std");
+const zts = @import("zts");
 
 /// Wire names for the two HTTP headers slice 1 emits. Single source of truth
 /// so the writer (`server.zig:appendAttestationHeaders`) and the reader
@@ -37,6 +38,20 @@ pub const chip_field_names = [_][]const u8{
     "result_safe",
     "optional_safe",
 };
+
+// `chip_field_names` is the header's fixed field set. A new `HandlerProperties` field is a chip or
+// is named here.
+const not_chips = zts.HandlerProperties.exclusions(
+    &.{ "has_egress", "max_io_depth" },
+    "the header advertises positive proof claims, not facts about the I/O surface",
+) ++ zts.HandlerProperties.exclusions(
+    &.{ "post_only", "canonical", "cost_bounded" },
+    "outside the header's fixed field set",
+);
+
+comptime {
+    if (zts.HandlerProperties.namesCoverageProblem("header_strings.chip_field_names", &chip_field_names, &not_chips)) |problem| @compileError(problem);
+}
 
 pub const HeaderStrings = struct {
     /// Empty slice means the runtime should not emit `Zttp-Proofs` at all

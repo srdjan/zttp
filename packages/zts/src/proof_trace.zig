@@ -266,17 +266,20 @@ const default_info = PropertyInfo{
     .failing = generic_failing,
 };
 
-// Every `HandlerProperties` bool field must have a `property_info` row, so
-// adding a property cannot silently fall through to generic text.
+// Every `HandlerProperties` field must have a `property_info` row or an exclusion, and every row
+// must name a field, so adding a property cannot silently fall through to generic text.
+const property_info_names = blk: {
+    var names: [property_info.len][]const u8 = undefined;
+    for (property_info, 0..) |row, index| names[index] = row.name;
+    break :blk names;
+};
+
 comptime {
-    for (@typeInfo(HandlerProperties).@"struct".field_names) |field| {
-        if (@FieldType(HandlerProperties, field) != bool) continue;
-        var found = false;
-        for (property_info) |p| {
-            if (std.mem.eql(u8, p.name, field)) found = true;
-        }
-        if (!found) @compileError("proof_trace: HandlerProperties field has no property_info row: " ++ field);
-    }
+    if (handler_contract.HandlerProperties.namesCoverageProblem(
+        "proof_trace.property_info",
+        &property_info_names,
+        &handler_contract.HandlerProperties.exclusions(&.{"max_io_depth"}, "a number, not a pass or fail property"),
+    )) |problem| @compileError(problem);
 }
 
 /// One field of a `verify` result's `evidence` object.

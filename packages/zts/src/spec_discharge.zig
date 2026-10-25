@@ -107,47 +107,52 @@ comptime {
     if (HandlerProperties.coverageProblem(PropertyField, &not_spec_fields)) |problem| @compileError(problem);
 }
 
+const SuggestionRow = struct { name: []const u8, text: []const u8 };
+
+/// One row per property that has a suggestion. `namesCoverageProblem` below fails the build when a
+/// `HandlerProperties` field has neither a row nor an exclusion with its reason.
+const suggestion_rows = [_]SuggestionRow{
+    .{ .name = "deterministic", .text = "remove Date.now(), Math.random(), and performance.now() from the response path." },
+    .{ .name = "read_only", .text = "remove writing calls to zttp:cache / zttp:sql, or drop `read_only` from your proof-property set." },
+    .{ .name = "retry_safe", .text = "remove writes from the handler, or drop `retry_safe` from the proof-property set." },
+    .{ .name = "idempotent", .text = "remove varying reads and writes, or drop `idempotent` from the proof-property set." },
+    .{ .name = "state_isolated", .text = "move module-scope mutations into the handler body or behind zttp:cache." },
+    .{ .name = "fault_covered", .text = "add an explicit failure path for every failable I/O call: bind the call to a const in the handler body and branch on its failure before its value is used." },
+    .{ .name = "pure", .text = "remove side effects (virtual-module calls, Date.now, Math.random) from the handler body." },
+    .{ .name = "stateless", .text = "move module-scope mutable state into the handler body or behind zttp:cache." },
+    .{ .name = "result_safe", .text = "match every Result before unwrapping (no `.value` on an unchecked Result)." },
+    .{ .name = "optional_safe", .text = "guard every optional access with `?? fallback` or an explicit `if (x != undefined)` check." },
+    .{ .name = "canonical", .text = "run `zts normalize <file> --write` to rewrite the handler into Canonical Normal Form, or fix the flagged ZTS6xx constructs by hand." },
+    .{ .name = "cost_bounded", .text = "bound the loop source: iterate a literal array / range(n) / .slice(0, k), add LIMIT n to the SQL statement, or declare maxItems on the validated schema field." },
+};
+
+const suggestion_names = blk: {
+    var names: [suggestion_rows.len][]const u8 = undefined;
+    for (suggestion_rows, 0..) |row, index| names[index] = row.name;
+    break :blk names;
+};
+
+const no_suggestion = HandlerProperties.exclusions(
+    &.{ "no_secret_leakage", "no_credential_leakage", "input_validated", "pii_contained", "injection_safe" },
+    "not a cause-only spec: the counterexample witness explains the failure",
+) ++ HandlerProperties.exclusions(
+    &.{ "has_egress", "max_io_depth", "post_only" },
+    "not a spec name, so no diagnostic asks for a suggestion",
+);
+
+comptime {
+    if (HandlerProperties.namesCoverageProblem("spec_discharge.suggestion_rows", &suggestion_names, &no_suggestion)) |problem| @compileError(problem);
+}
+
 /// Per-property HUD suggestion strings. Mandatory for cause-only specs so
 /// the proof card never renders an anemic single-line failure.
 pub fn suggestionFor(name: []const u8) ?[]const u8 {
-    if (std.mem.eql(u8, name, "deterministic")) {
-        return "remove Date.now(), Math.random(), and performance.now() from the response path.";
-    }
-    if (std.mem.eql(u8, name, "read_only")) {
-        return "remove writing calls to zttp:cache / zttp:sql, or drop `read_only` from your proof-property set.";
-    }
-    if (std.mem.eql(u8, name, "retry_safe")) {
-        return "remove writes from the handler, or drop `retry_safe` from the proof-property set.";
-    }
-    if (std.mem.eql(u8, name, "idempotent")) {
-        return "remove varying reads and writes, or drop `idempotent` from the proof-property set.";
-    }
-    if (std.mem.eql(u8, name, "state_isolated")) {
-        return "move module-scope mutations into the handler body or behind zttp:cache.";
-    }
-    if (std.mem.eql(u8, name, "fault_covered")) {
-        return "add an explicit failure path for every failable I/O call: bind the call to a const in the handler body and branch on its failure before its value is used.";
-    }
-    if (std.mem.eql(u8, name, "pure")) {
-        return "remove side effects (virtual-module calls, Date.now, Math.random) from the handler body.";
-    }
-    if (std.mem.eql(u8, name, "stateless")) {
-        return "move module-scope mutable state into the handler body or behind zttp:cache.";
-    }
-    if (std.mem.eql(u8, name, "result_safe")) {
-        return "match every Result before unwrapping (no `.value` on an unchecked Result).";
-    }
-    if (std.mem.eql(u8, name, "optional_safe")) {
-        return "guard every optional access with `?? fallback` or an explicit `if (x != undefined)` check.";
-    }
-    if (std.mem.eql(u8, name, "canonical")) {
-        return "run `zts normalize <file> --write` to rewrite the handler into Canonical Normal Form, or fix the flagged ZTS6xx constructs by hand.";
-    }
-    if (std.mem.eql(u8, name, "cost_bounded")) {
-        return "bound the loop source: iterate a literal array / range(n) / .slice(0, k), add LIMIT n to the SQL statement, or declare maxItems on the validated schema field.";
+    for (suggestion_rows) |row| {
+        if (std.mem.eql(u8, name, row.name)) return row.text;
     }
     return null;
 }
+
 /// ZTS501 suggestion: actionable copy for `read_only` colliding with a
 /// stateful module import. The current check is import-level, so keeping the
 /// same module specifier will continue to fail even if only read functions are

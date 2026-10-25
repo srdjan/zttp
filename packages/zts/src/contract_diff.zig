@@ -169,6 +169,43 @@ pub const Severity = enum {
     }
 };
 
+const LossRow = struct { name: []const u8, severity: Severity };
+
+/// One row per `HandlerProperties` field. `coverageProblem` below fails the build when a field has no
+/// row, so a new property is classified on purpose and not by the null default.
+const loss_severity_rows = [_]LossRow{
+    .{ .name = "retry_safe", .severity = .critical },
+    .{ .name = "injection_safe", .severity = .critical },
+    .{ .name = "state_isolated", .severity = .critical },
+    .{ .name = "no_secret_leakage", .severity = .critical },
+    .{ .name = "no_credential_leakage", .severity = .critical },
+    .{ .name = "fault_covered", .severity = .critical },
+    .{ .name = "result_safe", .severity = .critical },
+    .{ .name = "optional_safe", .severity = .critical },
+    .{ .name = "idempotent", .severity = .warning },
+    .{ .name = "deterministic", .severity = .warning },
+    .{ .name = "read_only", .severity = .warning },
+    .{ .name = "input_validated", .severity = .warning },
+    .{ .name = "pii_contained", .severity = .warning },
+    .{ .name = "pure", .severity = .info },
+    .{ .name = "stateless", .severity = .info },
+    .{ .name = "has_egress", .severity = .info },
+    .{ .name = "post_only", .severity = .info },
+    .{ .name = "canonical", .severity = .info },
+    .{ .name = "cost_bounded", .severity = .info },
+    .{ .name = "max_io_depth", .severity = .info },
+};
+
+const loss_severity_names = blk: {
+    var names: [loss_severity_rows.len][]const u8 = undefined;
+    for (loss_severity_rows, 0..) |row, index| names[index] = row.name;
+    break :blk names;
+};
+
+comptime {
+    if (handler_contract.HandlerProperties.namesCoverageProblem("contract_diff.loss_severity_rows", &loss_severity_names, &.{})) |problem| @compileError(problem);
+}
+
 /// Classify the loss of the proven property `field` (true to false).
 /// Critical: properties whose loss indicates a safety regression.
 /// Warning: properties whose loss changes operational characteristics.
@@ -177,30 +214,11 @@ pub const Severity = enum {
 /// Null: a name that has no entry. Callers treat null as critical, so a new
 /// property is never classified as informational by default.
 pub fn propertyLossSeverity(field: []const u8) ?Severity {
-    if (std.mem.eql(u8, field, "retry_safe")) return .critical;
-    if (std.mem.eql(u8, field, "injection_safe")) return .critical;
-    if (std.mem.eql(u8, field, "state_isolated")) return .critical;
-    if (std.mem.eql(u8, field, "no_secret_leakage")) return .critical;
-    if (std.mem.eql(u8, field, "no_credential_leakage")) return .critical;
-    if (std.mem.eql(u8, field, "fault_covered")) return .critical;
-    if (std.mem.eql(u8, field, "result_safe")) return .critical;
-    if (std.mem.eql(u8, field, "optional_safe")) return .critical;
-
-    if (std.mem.eql(u8, field, "idempotent")) return .warning;
-    if (std.mem.eql(u8, field, "deterministic")) return .warning;
-    if (std.mem.eql(u8, field, "read_only")) return .warning;
-    if (std.mem.eql(u8, field, "input_validated")) return .warning;
-    if (std.mem.eql(u8, field, "pii_contained")) return .warning;
-
-    if (std.mem.eql(u8, field, "pure")) return .info;
-    if (std.mem.eql(u8, field, "stateless")) return .info;
-    if (std.mem.eql(u8, field, "has_egress")) return .info;
-    if (std.mem.eql(u8, field, "post_only")) return .info;
-    if (std.mem.eql(u8, field, "canonical")) return .info;
-    if (std.mem.eql(u8, field, "cost_bounded")) return .info;
-    if (std.mem.eql(u8, field, "max_io_depth")) return .info;
+    // `cost_class` is a row `diffContracts` emits that is not a `HandlerProperties` field.
     if (std.mem.eql(u8, field, "cost_class")) return .info;
-
+    for (loss_severity_rows) |row| {
+        if (std.mem.eql(u8, field, row.name)) return row.severity;
+    }
     return null;
 }
 

@@ -23,26 +23,48 @@ pub fn printSandboxReport(contract: *const HandlerContract) void {
     printSqlSandboxSection(contract);
 }
 
+const ReportedProperty = struct { name: []const u8, desc: []const u8 };
+
+/// The rows of `printPropertiesReport`, one per boolean property it reports.
+const reported_properties = [_]ReportedProperty{
+    .{ .name = "pure", .desc = "handler is a deterministic function of the request" },
+    .{ .name = "read_only", .desc = "no state mutations via virtual modules" },
+    .{ .name = "stateless", .desc = "independent of mutable state" },
+    .{ .name = "retry_safe", .desc = "safe for Lambda auto-retry on timeout" },
+    .{ .name = "deterministic", .desc = "no Date.now(), Math.random(), or performance.now()" },
+    .{ .name = "injection_safe", .desc = "no unvalidated input in sinks" },
+    .{ .name = "idempotent", .desc = "safe for at-least-once delivery" },
+    .{ .name = "state_isolated", .desc = "no cross-request data leakage" },
+    .{ .name = "result_safe", .desc = "all result.ok accesses guarded (requires -Dverify)" },
+    .{ .name = "optional_safe", .desc = "all optionals narrowed before use (requires -Dverify)" },
+};
+
+const reported_names = blk: {
+    var names: [reported_properties.len][]const u8 = undefined;
+    for (reported_properties, 0..) |row, index| names[index] = row.name;
+    break :blk names;
+};
+
+// A new `HandlerProperties` field is a row above or is named here.
+const unreported_properties = zts.HandlerProperties.exclusions(
+    &.{ "has_egress", "no_secret_leakage", "no_credential_leakage", "input_validated", "pii_contained", "fault_covered", "post_only", "canonical", "cost_bounded" },
+    "outside this report's ten boolean rows",
+) ++ zts.HandlerProperties.exclusions(
+    &.{"max_io_depth"},
+    "printed on its own line after the rows, because it is a number",
+);
+
+comptime {
+    if (zts.HandlerProperties.namesCoverageProblem("precompile_reports.reported_properties", &reported_names, &unreported_properties)) |problem| @compileError(problem);
+}
+
 pub fn printPropertiesReport(contract: *const HandlerContract) void {
     const props = contract.properties orelse return;
 
     debugPrint("Handler Properties:\n", .{});
 
-    const fields = [_]struct { name: []const u8, value: bool, desc: []const u8 }{
-        .{ .name = "pure", .value = props.pure, .desc = "handler is a deterministic function of the request" },
-        .{ .name = "read_only", .value = props.read_only, .desc = "no state mutations via virtual modules" },
-        .{ .name = "stateless", .value = props.stateless, .desc = "independent of mutable state" },
-        .{ .name = "retry_safe", .value = props.retry_safe, .desc = "safe for Lambda auto-retry on timeout" },
-        .{ .name = "deterministic", .value = props.deterministic, .desc = "no Date.now(), Math.random(), or performance.now()" },
-        .{ .name = "injection_safe", .value = props.injection_safe, .desc = "no unvalidated input in sinks" },
-        .{ .name = "idempotent", .value = props.idempotent, .desc = "safe for at-least-once delivery" },
-        .{ .name = "state_isolated", .value = props.state_isolated, .desc = "no cross-request data leakage" },
-        .{ .name = "result_safe", .value = props.result_safe, .desc = "all result.ok accesses guarded (requires -Dverify)" },
-        .{ .name = "optional_safe", .value = props.optional_safe, .desc = "all optionals narrowed before use (requires -Dverify)" },
-    };
-
-    for (fields) |f| {
-        const label = if (f.value) "PROVEN" else "---   ";
+    inline for (reported_properties) |f| {
+        const label = if (@field(props, f.name)) "PROVEN" else "---   ";
         debugPrint("  {s} {s: <15} {s}\n", .{ label, f.name, f.desc });
     }
 
