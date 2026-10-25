@@ -17,6 +17,7 @@
 const std = @import("std");
 const SourceView = @import("zts-base").source_diagnostics.SourceView;
 const diagnostic_catalog = @import("diagnostic_catalog.zig");
+const diagnostic_projection = @import("diagnostic_projection.zig");
 const ir = @import("zts-engine").parser.ir;
 const object = @import("zts-engine").object;
 const context = @import("zts-engine").context;
@@ -596,21 +597,7 @@ pub const HandlerVerifier = struct {
 
     /// Format diagnostics to a writer. Requires source text for context lines.
     pub fn formatDiagnostics(self: *const HandlerVerifier, source: SourceView, writer: anytype) !void {
-        for (self.diagnostics.items) |diag| {
-            const loc = self.ir_view.getLoc(diag.node) orelse continue;
-            const span = loc.span();
-            try source.writeDiagnostic(.{
-                .scope = "verify ",
-                .severity = diag.severity.label(),
-                .code = diagnostic_catalog.verifierCode(diag.kind),
-                .message = diag.message,
-                .line = loc.line,
-                .column = loc.column,
-                .start_offset = span.start,
-                .end_offset = span.end,
-                .help = diag.help,
-            }, writer);
-        }
+        try diagnostic_projection.writeAll(.verifier, source, self.diagnostics.items, self.ir_view, writer);
     }
 
     /// Returns true if there are any error-severity diagnostics.

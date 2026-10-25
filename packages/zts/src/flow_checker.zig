@@ -3,6 +3,7 @@ const std = @import("std");
 const engine = @import("zts-engine");
 const SourceView = @import("zts-base").source_diagnostics.SourceView;
 const diagnostic_catalog = @import("diagnostic_catalog.zig");
+const diagnostic_projection = @import("diagnostic_projection.zig");
 const evaluator = @import("flow_interp.zig");
 const report_types = @import("flow_report.zig");
 const type_checker = @import("type_checker.zig");
@@ -112,20 +113,7 @@ pub const FlowChecker = struct {
     }
 
     pub fn formatDiagnostics(self: *const FlowChecker, source: SourceView, writer: anytype) !void {
-        for (self.diagnostics) |diagnostic| {
-            const loc = self.ir_view.getLoc(diagnostic.node) orelse continue;
-            const span = loc.span();
-            try source.writeDiagnostic(.{
-                .severity = diagnostic.severity.label(),
-                .code = diagnostic_catalog.flowCode(diagnostic.kind),
-                .message = diagnostic.message,
-                .line = loc.line,
-                .column = loc.column,
-                .start_offset = span.start,
-                .end_offset = span.end,
-                .help = diagnostic.help,
-            }, writer);
-        }
+        try diagnostic_projection.writeAll(.flow, source, self.diagnostics, self.ir_view, writer);
     }
 
     fn clearEvaluation(self: *FlowChecker) void {

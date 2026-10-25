@@ -142,6 +142,42 @@ pub fn projectFlowWitness(diagnostic: anytype, ir_view: anytype) ?FlowWitness {
     };
 }
 
+/// The scope word a checker's human diagnostics start with: the producer name for the verifier,
+/// the strict checker, and the type checker, and nothing for the boolean and flow checkers.
+pub fn scopeText(source: Source) []const u8 {
+    return switch (source) {
+        .boolean, .flow => "",
+        .verifier => "verify ",
+        .strict => "strict ",
+        .type => "type ",
+    };
+}
+
+/// Render one projected diagnostic through `SourceView.writeDiagnostic`: the scope word, the
+/// severity word, `[code]`, the message, the `-->` location, the source block, and the help line.
+pub fn writeProjected(view: SourceView, source: Source, projected: Diagnostic, writer: anytype) !void {
+    try view.writeDiagnostic(.{
+        .scope = scopeText(source),
+        .severity = projected.severity.label(),
+        .code = projected.code,
+        .message = projected.message,
+        .line = projected.line,
+        .column = projected.column,
+        .start_offset = projected.start_offset,
+        .end_offset = projected.end_offset,
+        .help = projected.suggestion,
+    }, writer);
+}
+
+/// Render every diagnostic one checker produced, in order. A diagnostic whose node has no IR
+/// location is skipped, as `project` returns null for it.
+pub fn writeAll(comptime source: Source, view: SourceView, diagnostics: anytype, ir_view: anytype, writer: anytype) !void {
+    for (diagnostics) |diagnostic| {
+        const projected = project(source, diagnostic, ir_view) orelse continue;
+        try writeProjected(view, source, projected, writer);
+    }
+}
+
 /// Render one parse error for a human through the same renderer the checkers
 /// use: the ZTS code, `file:line:column`, the source line, and an underline
 /// under the token the parser stopped at. `view` is the prepared source's

@@ -17,6 +17,7 @@
 const std = @import("std");
 const SourceView = @import("zts-base").source_diagnostics.SourceView;
 const diagnostic_catalog = @import("diagnostic_catalog.zig");
+const diagnostic_projection = @import("diagnostic_projection.zig");
 const ir = @import("zts-engine").parser.ir;
 const ScopeAnalyzer = @import("zts-engine").parser.ScopeAnalyzer;
 const json_utils = @import("zts-base").json_utils;
@@ -424,21 +425,7 @@ pub const TypeChecker = struct {
     // -------------------------------------------------------------------
 
     pub fn formatDiagnostics(self: *const TypeChecker, source: SourceView, writer: anytype) !void {
-        for (self.diagnostics.items) |diag| {
-            const loc = self.ir_view.getLoc(diag.node) orelse continue;
-            const span = loc.span();
-            try source.writeDiagnostic(.{
-                .scope = "type ",
-                .severity = diag.severity.label(),
-                .code = diagnostic_catalog.typeCode(diag.kind),
-                .message = diag.message,
-                .line = loc.line,
-                .column = loc.column,
-                .start_offset = span.start,
-                .end_offset = span.end,
-                .help = diag.help,
-            }, writer);
-        }
+        try diagnostic_projection.writeAll(.type, source, self.diagnostics.items, self.ir_view, writer);
     }
 
     // -------------------------------------------------------------------
