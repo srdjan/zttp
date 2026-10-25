@@ -49,7 +49,6 @@ const defaultPoolSize = io_mod.defaultPoolSize;
 const initIoBackend = io_mod.initIoBackend;
 const etagMatchesIfNoneMatch = http_types.etagMatchesIfNoneMatch;
 const findHeaderValue = http_types.findHeaderValue;
-const formatStaticError = response_mod.formatStaticError;
 const formatHttpError = response_mod.formatHttpError;
 const formatStaticNotModified = response_mod.formatStaticNotModified;
 const formatStaticOkHeader = response_mod.formatStaticOkHeader;
@@ -365,18 +364,19 @@ const ConnectionPool = struct {
         if (guard_contract) self.server.contract_lock.lockShared();
         defer if (guard_contract) self.server.contract_lock.unlockShared();
 
-        const request_data = self.readRequestData(fd, req_allocator, pending) catch |err| {
+        var is_head = false;
+        const request_data = self.readRequestData(fd, req_allocator, pending, &is_head) catch |err| {
             if (err == error.EndOfStream or err == error.ConnectionResetByPeer or err == error.WouldBlock) return .close;
             if (err == error.UnsupportedTransferEncoding) {
-                self.sendErrorSync(fd, 501, "Not Implemented") catch {};
+                self.sendErrorSync(fd, 501, "Not Implemented", is_head) catch {};
                 return .close;
             }
             if (err == error.FileTooBig) {
-                self.sendErrorSync(fd, 413, "Payload Too Large") catch {};
+                self.sendErrorSync(fd, 413, "Payload Too Large", is_head) catch {};
                 return .close;
             }
             if (err == error.RequestTimeout) {
-                self.sendErrorSync(fd, 408, "Request Timeout") catch {};
+                self.sendErrorSync(fd, 408, "Request Timeout", is_head) catch {};
                 return .close;
             }
             return err;
@@ -386,7 +386,7 @@ const ConnectionPool = struct {
             // resetting the connection, so clients, scanners, and test harnesses
             // see a diagnostic rather than ECONNRESET.
             const status = parseErrorStatus(err);
-            self.sendErrorSync(fd, status, response_mod.getStatusText(status)) catch {};
+            self.sendErrorSync(fd, status, response_mod.getStatusText(status), is_head) catch {};
             return .close;
         };
         defer request.deinit(req_allocator);
@@ -406,16 +406,10 @@ const ConnectionPool = struct {
         const keep_alive = self.server.config.keep_alive and client_wants_keep_alive;
         const outcome_if_alive: RequestOutcome = if (keep_alive) .keep_alive else .close;
 
-        // A HEAD request is routed exactly like GET to produce the right headers,
-        // but every response path must omit the body (RFC 7231); a body on HEAD
-        // mis-frames the next response on a keep-alive connection. Computed here
-        // so the static-file and well-known paths below can honor it too.
-        const is_head = std.mem.eql(u8, request.method, "HEAD");
-
         // Health and readiness probes - before WebSocket, static, and JS handler
         if (std.mem.eql(u8, request.path, "/_health")) {
             access_status = 200;
-            self.sendStatusSync(fd, 200, "OK", keep_alive) catch {};
+            self.sendStatusSync(fd, 200, "OK", keep_alive, is_head) catch {};
             return outcome_if_alive;
         }
         if (std.mem.eql(u8, request.path, "/_readiness")) {
@@ -425,11 +419,11 @@ const ConnectionPool = struct {
                 false;
             if (pool_full) {
                 access_status = 503;
-                self.sendErrorSync(fd, 503, "Service Unavailable") catch {};
+                self.sendErrorSync(fd, 503, "Service Unavailable", is_head) catch {};
                 return .close;
             }
             access_status = 200;
-            self.sendStatusSync(fd, 200, "OK", keep_alive) catch {};
+            self.sendStatusSync(fd, 200, "OK", keep_alive, is_head) catch {};
             return outcome_if_alive;
         }
 
@@ -450,7 +444,7 @@ const ConnectionPool = struct {
                     }
                     std.log.warn("static file error for {s}: {}", .{ request.url, err });
                     access_status = 500;
-                    self.sendErrorSync(fd, 500, "Internal Server Error") catch {};
+                    self.sendErrorSync(fd, 500, "Internal Server Error", is_head) catch {};
                     return outcome_if_alive;
                 };
                 return outcome_if_alive;
@@ -478,7 +472,7 @@ const ConnectionPool = struct {
         if (self.server.contract) |*contract| {
             if (!contract.matchesRoute(request.method, request.path)) {
                 access_status = 404;
-                self.sendStatusSync(fd, 404, "Not Found", keep_alive) catch {};
+                self.sendStatusSync(fd, 404, "Not Found", keep_alive, is_head) catch {};
                 return outcome_if_alive;
             }
         }
@@ -545,7 +539,7 @@ const ConnectionPool = struct {
                     break :blk "Internal Server Error";
                 };
                 access_status = status;
-                self.sendErrorSync(fd, status, message) catch |send_err| {
+                self.sendErrorSync(fd, status, message, is_head) catch |send_err| {
                     std.log.warn("failed to send error response: {}", .{send_err});
                 };
                 return .close;
@@ -598,6 +592,7 @@ const ConnectionPool = struct {
         fd: std.posix.fd_t,
         allocator: std.mem.Allocator,
         pending: *PendingRequestBytes,
+        is_head: ?*bool,
     ) ![]u8 {
         var data: std.ArrayList(u8) = .empty;
         defer data.deinit(allocator);
@@ -610,6 +605,7 @@ const ConnectionPool = struct {
         defer if (pending_bytes.len > 0) self.allocator.free(pending_bytes);
         if (pending_bytes.len > 0) {
             try data.appendSlice(allocator, pending_bytes);
+            if (is_head) |head| head.* = std.mem.startsWith(u8, data.items, "HEAD ");
             if (try self.completeRequestLength(data.items, &chunked_state)) |request_len| {
                 return try self.splitRequestAndPending(allocator, pending, data.items, request_len);
             }
@@ -634,6 +630,7 @@ const ConnectionPool = struct {
             };
             if (n == 0) return error.EndOfStream;
             try data.appendSlice(allocator, read_buf[0..n]);
+            if (is_head) |head| head.* = std.mem.startsWith(u8, data.items, "HEAD ");
 
             if (try self.completeRequestLength(data.items, &chunked_state)) |request_len| {
                 return try self.splitRequestAndPending(allocator, pending, data.items, request_len);
@@ -825,6 +822,23 @@ const ConnectionPool = struct {
         var head_buf: [512]u8 = undefined;
         const head_n = try readResponse(head_fds[0], head_fds[1], &head_buf);
         try std.testing.expect(std.mem.endsWith(u8, head_buf[0..head_n], "Content-Length: 5\r\nConnection: keep-alive\r\n\r\n"));
+
+        for ([_]bool{ false, true }) |is_head| {
+            const status_fds = try createUnixSocketPair();
+            defer std.Io.Threaded.closeFd(status_fds[0]);
+            defer std.Io.Threaded.closeFd(status_fds[1]);
+            try pool.sendStatusSync(status_fds[0], 404, "Not Found", true, is_head);
+            try pool.sendErrorSync(status_fds[0], 503, "Service Unavailable", is_head);
+            var status_buf: [512]u8 = undefined;
+            const status_n = try readResponse(status_fds[0], status_fds[1], &status_buf);
+            const expected = if (is_head)
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: keep-alive\r\n\r\n" ++
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 19\r\nConnection: close\r\n\r\n"
+            else
+                "HTTP/1.1 404 Not Found\r\nContent-Length: 9\r\nConnection: keep-alive\r\n\r\nNot Found" ++
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 19\r\nConnection: close\r\n\r\nService Unavailable";
+            try std.testing.expectEqualStrings(expected, status_buf[0..status_n]);
+        }
     }
 
     /// Map a request-parse error to an HTTP status. Takes `anyerror` so it can
@@ -846,11 +860,8 @@ const ConnectionPool = struct {
         };
     }
 
-    fn sendErrorSync(self: *ConnectionPool, fd: std.posix.fd_t, status: u16, message: []const u8) !void {
-        _ = self;
-        var buf: [512]u8 = undefined;
-        const response = formatHttpError(&buf, status, message, false, null) catch return;
-        try writeAllFd(fd, response);
+    fn sendErrorSync(self: *ConnectionPool, fd: std.posix.fd_t, status: u16, message: []const u8, is_head: bool) !void {
+        return self.sendStatusSync(fd, status, message, false, is_head);
     }
 
     /// Like sendErrorSync but frames with the connection's actual keep_alive
@@ -858,11 +869,12 @@ const ConnectionPool = struct {
     /// (keeping the fd open), so they must not advertise `Connection: close`
     /// (which a spec-compliant client treats as not reusable, defeating
     /// keep-alive on exactly the highest-frequency probe paths).
-    fn sendStatusSync(self: *ConnectionPool, fd: std.posix.fd_t, status: u16, message: []const u8, keep_alive: bool) !void {
+    fn sendStatusSync(self: *ConnectionPool, fd: std.posix.fd_t, status: u16, message: []const u8, keep_alive: bool, is_head: bool) !void {
         _ = self;
         var buf: [512]u8 = undefined;
-        const response = formatHttpError(&buf, status, message, keep_alive, null) catch return;
-        try writeAllFd(fd, response);
+        const response = try formatHttpError(&buf, status, message, keep_alive, null);
+        const wire = if (is_head) response[0 .. response.len - message.len] else response;
+        try writeAllFd(fd, wire);
     }
 
     fn serveStaticFileSync(
@@ -879,15 +891,11 @@ const ConnectionPool = struct {
         var resolved = try resolveStaticFile(self.server.allocator, self.server.io_backend.io(), static_dir, path, &path_buf, &etag_buf);
         switch (resolved) {
             .forbidden => {
-                var out_buf: [256]u8 = undefined;
-                const response = formatStaticError(&out_buf, 403, "Forbidden", keep_alive) catch return error.BufferOverflow;
-                try writeAllFd(fd, response);
+                try self.sendStatusSync(fd, 403, "Forbidden", keep_alive, is_head);
                 return 403;
             },
             .not_found => {
-                var out_buf: [256]u8 = undefined;
-                const response = formatStaticError(&out_buf, 404, "Not Found", keep_alive) catch return error.BufferOverflow;
-                try writeAllFd(fd, response);
+                try self.sendStatusSync(fd, 404, "Not Found", keep_alive, is_head);
                 return 404;
             },
             .ok => |*file_info| {
@@ -2439,7 +2447,7 @@ test "threaded readRequestData handles partial headers" {
     var pending: ConnectionPool.PendingRequestBytes = .{};
     defer pending.deinit(pool.allocator);
 
-    const data = try pool.readRequestData(fds[0], allocator, &pending);
+    const data = try pool.readRequestData(fds[0], allocator, &pending, null);
     var request = try server.parseRequestFromBuffer(allocator, data);
     defer request.deinit(allocator);
     try std.testing.expect(request.body != null);
@@ -2526,7 +2534,7 @@ test "threaded readRequestData handles chunked body across reads" {
     var pending: ConnectionPool.PendingRequestBytes = .{};
     defer pending.deinit(pool.allocator);
 
-    const data = try pool.readRequestData(fds[0], allocator, &pending);
+    const data = try pool.readRequestData(fds[0], allocator, &pending, null);
     var request = try server.parseRequestFromBuffer(allocator, data);
     defer request.deinit(allocator);
     try std.testing.expect(request.body != null);
@@ -2607,7 +2615,7 @@ test "threaded readRequestData resumes chunked body parsing across many real soc
     var pending: ConnectionPool.PendingRequestBytes = .{};
     defer pending.deinit(pool.allocator);
 
-    const data = try pool.readRequestData(fds[0], allocator, &pending);
+    const data = try pool.readRequestData(fds[0], allocator, &pending, null);
     var request = try server.parseRequestFromBuffer(allocator, data);
     defer request.deinit(allocator);
     try std.testing.expect(request.body != null);
@@ -2641,7 +2649,7 @@ test "threaded readRequestData preserves pipelined bytes for the next request" {
     defer pending.deinit(pool.allocator);
     try pending.replace(pool.allocator, first ++ second);
 
-    const first_data = try pool.readRequestData(fds[0], allocator, &pending);
+    const first_data = try pool.readRequestData(fds[0], allocator, &pending, null);
     try std.testing.expectEqualStrings(first, first_data);
     try std.testing.expectEqualStrings(second, pending.bytes);
     var first_request = try server.parseRequestFromBuffer(allocator, first_data);
@@ -2650,7 +2658,7 @@ test "threaded readRequestData preserves pipelined bytes for the next request" {
 
     _ = arena.reset(.retain_capacity);
     allocator = arena.allocator();
-    const second_data = try pool.readRequestData(fds[0], allocator, &pending);
+    const second_data = try pool.readRequestData(fds[0], allocator, &pending, null);
     try std.testing.expectEqualStrings(second, second_data);
     try std.testing.expectEqual(@as(usize, 0), pending.bytes.len);
     var second_request = try server.parseRequestFromBuffer(allocator, second_data);
@@ -2689,7 +2697,7 @@ test "threaded readRequestData rejects unsupported transfer-encoding before pres
 
     try std.testing.expectError(
         error.UnsupportedTransferEncoding,
-        pool.readRequestData(fds[0], allocator, &pending),
+        pool.readRequestData(fds[0], allocator, &pending, null),
     );
     try std.testing.expectEqual(@as(usize, 0), pending.bytes.len);
 }
@@ -2823,7 +2831,7 @@ test "threaded keep-alive connection serves two sequential requests" {
 
 test "threaded health and readiness probes return over socket accept path" {
     const Runner = struct {
-        fn expectProbe(path: []const u8) !void {
+        fn expectProbe(method: []const u8, path: []const u8, headers: []const u8, status: u16) !void {
             var server: Server = undefined;
             server.config = .{
                 .handler = .{ .inline_code = "" },
@@ -2852,22 +2860,44 @@ test "threaded health and readiness probes return over socket accept path" {
             defer worker.join();
             defer std.Io.Threaded.closeFd(fds[1]);
 
-            var request_buf: [128]u8 = undefined;
+            var request_buf: [256]u8 = undefined;
             const request = try std.fmt.bufPrint(
                 &request_buf,
-                "GET {s} HTTP/1.1\r\nHost: example.com\r\nConnection: close\r\n\r\n",
-                .{path},
+                "{s} {s} HTTP/1.1\r\nHost: example.com\r\n{s}Connection: close\r\n\r\n",
+                .{ method, path, headers },
             );
             try writeAllFd(fds[1], request);
 
             var response_buf: [512]u8 = undefined;
-            const n = try std.posix.read(fds[1], &response_buf);
-            try std.testing.expect(std.mem.startsWith(u8, response_buf[0..n], "HTTP/1.1 200 OK\r\n"));
+            var n: usize = 0;
+            while (n < response_buf.len) {
+                const received = try std.posix.read(fds[1], response_buf[n..]);
+                if (received == 0) break;
+                n += received;
+            }
+            var status_buf: [32]u8 = undefined;
+            const status_prefix = try std.fmt.bufPrint(&status_buf, "HTTP/1.1 {d} ", .{status});
+            try std.testing.expect(std.mem.startsWith(u8, response_buf[0..n], status_prefix));
+            const body_start = (std.mem.indexOf(u8, response_buf[0..n], "\r\n\r\n") orelse return error.TestUnexpectedResult) + 4;
+            const body = switch (status) {
+                200 => "OK",
+                501 => "Not Implemented",
+                413 => "Payload Too Large",
+                else => return error.TestUnexpectedResult,
+            };
+            var length_buf: [32]u8 = undefined;
+            const length = try std.fmt.bufPrint(&length_buf, "Content-Length: {d}\r\n", .{body.len});
+            try std.testing.expect(std.mem.indexOf(u8, response_buf[0..body_start], length) != null);
+            try std.testing.expectEqualStrings(if (std.mem.eql(u8, method, "HEAD")) "" else body, response_buf[body_start..n]);
         }
     };
 
-    try Runner.expectProbe("/_health");
-    try Runner.expectProbe("/_readiness");
+    for ([_][]const u8{ "GET", "HEAD" }) |method| {
+        try Runner.expectProbe(method, "/_health", "", 200);
+        try Runner.expectProbe(method, "/_readiness", "", 200);
+        try Runner.expectProbe(method, "/_health", "Transfer-Encoding: gzip\r\n", 501);
+        try Runner.expectProbe(method, "/_health", "Content-Length: 2147483647\r\n", 413);
+    }
 }
 
 const ShutdownGraceScenario = enum {
