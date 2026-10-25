@@ -214,7 +214,7 @@ This task is a diagnosis task, and the root cause is not known. Use the `ce-debu
 **Decision 1: reuse slot buffers on recycle.**
 
 Today a recycled slot frees its core runtime, and the replacement allocates it again. The arena is 1 MiB (`runtime_config.zig:39`), the value stack is 1 MiB (`context.zig:26`), and the core allocation is in `pool.zig:87`. Reuse would apply the book's "static allocation after init" pattern, and it is a probable p99 gain. It also touches request isolation.
-- 1a (recommended): decide after Task 9 reports the p99 of recycle requests.
+- 1a (recommended, chosen by the owner on 2026-10-25): decide after Task 9 reports the p99 of recycle requests.
 - 1b: drop the item now.
 
 ## Deferred, with reasons
