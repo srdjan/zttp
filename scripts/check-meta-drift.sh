@@ -26,7 +26,8 @@ fi
 
 EXPECTED_PROFILE="zts-model-1"
 # The public meta operation supplies these measured Phase 3 identities.
-EXPECTED_POLICY_HASH="ebb4b2b0a1456b5024a91fe5bfe41a7833c1ac19da923c9e6b7c0c8fa3624f96"
+# policy-hash.txt is the one committed copy of the policy identity.
+EXPECTED_POLICY_HASH="$(tr -d '\r\n' < policy-hash.txt)"
 EXPECTED_GRAMMAR_HASH="8c555c6dfe5afb98cf73d034a548dd5f18db5a6b540f334a43f0ac871f4d73be"
 EXPECTED_IDIOM_HASH="2a7059a7e3d4747c26af855ebd3a80b9fbb853bc5feb5ea16010bd300a5992db"
 EXPECTED_RESTRICTION_HASH="a2c47c9ccf240cc913719f5ba359a2285aa9854f7cc797a801a7a0e036f3ec58"
