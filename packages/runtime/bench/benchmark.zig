@@ -429,8 +429,17 @@ const benchmarks = [_]struct { name: []const u8, iterations: u32, code: []const 
 };
 
 // ---------------------------------------------------------------------------
-// request_path: HandlerPool.executeHandler under the default pooling policy
+// request_path: HandlerPool.executeHandlerBorrowed under the default pooling policy
 // ---------------------------------------------------------------------------
+
+/// Nanosecond clock for the request_path section. macOS CLOCK_MONOTONIC counts whole
+/// microseconds, so a sub-microsecond request would read 0 or 1000ns; UPTIME_RAW does not.
+fn requestPathNowNs() !u64 {
+    var ts: std.c.timespec = undefined;
+    const clock: std.c.clockid_t = if (@import("builtin").os.tag.isDarwin()) .UPTIME_RAW else .MONOTONIC;
+    if (std.c.clock_gettime(clock, &ts) != 0) return error.ClockGettimeFailed;
+    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+}
 
 const request_path_requests: usize = 1024;
 const request_path_min_recycles: u64 = 16;
@@ -510,12 +519,11 @@ fn requestPathFail(comptime fmt: []const u8, args: anytype) noreturn {
 }
 
 /// Drives 1024 requests through one HandlerPool slot at the default
-/// count-bounded policy. A request is a "recycle" request when the pool's
-/// `recycles` counter rises across its call: the slot is dropped while the
-/// request is released. The cost of building the replacement slot lands on the
-/// next request, which is reported as the "rebuild" request.
-/// shortcut: compat.Instant reads CLOCK_MONOTONIC, which is whole microseconds on macOS, so a
-/// sub-microsecond request reports 0 or 1000ns; switch to CLOCK_UPTIME_RAW if p50 must resolve.
+/// count-bounded policy, the way the server does: the call is timed until the
+/// borrowed handle returns (request latency), then `handle.deinit()` is timed
+/// on its own (release latency), because the server sends the body before the
+/// release. A request is a "recycle" request when the pool's `recycles` counter
+/// rises across its release. The request after a recycle is the "rebuild" request.
 fn runRequestPath(options: Options) !void {
     const backing = std.heap.c_allocator;
     var counter = CountingAllocator{ .backing = backing };
@@ -536,6 +544,7 @@ fn runRequestPath(options: Options) !void {
     if (max_requests != 64) requestPathFail("default max_requests is {d}, expected 64", .{max_requests});
 
     var latencies: [request_path_requests]u64 = undefined;
+    var release_latencies: [request_path_requests]u64 = undefined;
     var call_allocs: [request_path_requests]u64 = undefined;
     var recycled: [request_path_requests]bool = undefined;
 
@@ -552,13 +561,15 @@ fn runRequestPath(options: Options) !void {
         };
         const recycles_before = pool.getMetrics().recycles;
         const allocs_before = counter.alloc_calls.load(.monotonic);
-        const start = try compat.Instant.now();
-        var response = pool.executeHandler(request) catch |err| {
+        const start = try requestPathNowNs();
+        var handle = pool.executeHandlerBorrowed(request) catch |err| {
             requestPathFail("request {d} failed: {s}", .{ completed, @errorName(err) });
         };
-        const end = try compat.Instant.now();
-        response.deinit();
-        latencies[completed] = end.since(start);
+        const end = try requestPathNowNs();
+        handle.deinit();
+        const released = try requestPathNowNs();
+        latencies[completed] = end -| start;
+        release_latencies[completed] = released -| end;
         call_allocs[completed] = counter.alloc_calls.load(.monotonic) - allocs_before;
         recycled[completed] = pool.getMetrics().recycles > recycles_before;
     }
@@ -568,25 +579,25 @@ fn runRequestPath(options: Options) !void {
     if (completed != request_path_requests) requestPathFail("completed {d} of {d} requests", .{ completed, request_path_requests });
     if (recycles < request_path_min_recycles) requestPathFail("observed {d} recycles, need at least {d}", .{ recycles, request_path_min_recycles });
 
-    var drop_samples: std.ArrayList(u64) = .empty;
-    defer drop_samples.deinit(backing);
+    var release_samples: std.ArrayList(u64) = .empty;
+    defer release_samples.deinit(backing);
     var rebuild_samples: std.ArrayList(u64) = .empty;
     defer rebuild_samples.deinit(backing);
     var rebuild_allocs: u64 = 0;
     for (0..request_path_requests) |i| {
-        if (recycled[i]) try drop_samples.append(backing, latencies[i]);
+        if (recycled[i]) try release_samples.append(backing, release_latencies[i]);
         if (i > 0 and recycled[i - 1]) {
             try rebuild_samples.append(backing, latencies[i]);
             rebuild_allocs += call_allocs[i];
         }
     }
     // Floor on the groups: a recycle on the final request has no rebuild successor.
-    if (drop_samples.items.len != recycles) requestPathFail("{d} recycle requests for {d} recycles", .{ drop_samples.items.len, recycles });
-    if (rebuild_samples.items.len + 1 < drop_samples.items.len) requestPathFail("only {d} rebuild requests", .{rebuild_samples.items.len});
+    if (release_samples.items.len != recycles) requestPathFail("{d} recycle requests for {d} recycles", .{ release_samples.items.len, recycles });
+    if (rebuild_samples.items.len + 1 < release_samples.items.len) requestPathFail("only {d} rebuild requests", .{rebuild_samples.items.len});
 
     const all = try latencyGroup(backing, &latencies);
-    const drop = try latencyGroup(backing, drop_samples.items);
     const rebuild = try latencyGroup(backing, rebuild_samples.items);
+    const release = try latencyGroup(backing, release_samples.items);
     const n: f64 = @floatFromInt(request_path_requests);
     const allocs_per_request = @as(f64, @floatFromInt(counter.alloc_calls.load(.monotonic) - alloc_base)) / n;
     const frees_per_request = @as(f64, @floatFromInt(counter.free_calls.load(.monotonic) - free_base)) / n;
@@ -603,8 +614,8 @@ fn runRequestPath(options: Options) !void {
             "\"rebuild\":{{\"count\":{d},\"p50_ns\":{d},\"p99_ns\":{d},\"alloc_calls_per_request\":{d:.2}}}," ++
             "\"alloc_calls_per_request\":{d:.2},\"free_calls_per_request\":{d:.2}}}}}\n", .{
             completed,          recycles,          max_requests,
-            all.p50_ns,         all.p99_ns,        drop.count,
-            drop.p50_ns,        drop.p99_ns,       rebuild.count,
+            all.p50_ns,         all.p99_ns,        release.count,
+            release.p50_ns,     release.p99_ns,    rebuild.count,
             rebuild.p50_ns,     rebuild.p99_ns,    rebuild_allocs_per_request,
             allocs_per_request, frees_per_request,
         });
@@ -613,9 +624,9 @@ fn runRequestPath(options: Options) !void {
     }
 
     printFmt("request_path: requests={d} recycles={d} policy=reuse_bounded_by_count max_requests={d} pool=1", .{ completed, recycles, max_requests });
-    printFmt("request_path all: p50={d}ns p99={d}ns", .{ all.p50_ns, all.p99_ns });
-    printFmt("request_path recycle (recycles counter rose): n={d} p50={d}ns p99={d}ns", .{ drop.count, drop.p50_ns, drop.p99_ns });
-    printFmt("request_path rebuild (request after a recycle): n={d} p50={d}ns p99={d}ns allocator-calls={d:.1}", .{ rebuild.count, rebuild.p50_ns, rebuild.p99_ns, rebuild_allocs_per_request });
+    printFmt("request_path all (request latency): p50={d}ns p99={d}ns", .{ all.p50_ns, all.p99_ns });
+    printFmt("request_path recycle release (handle.deinit, recycles counter rose): n={d} p50={d}ns p99={d}ns", .{ release.count, release.p50_ns, release.p99_ns });
+    printFmt("request_path rebuild (request latency after a recycle; p99 is the max below 100 samples): n={d} p50={d}ns p99={d}ns allocator-calls={d:.1}", .{ rebuild.count, rebuild.p50_ns, rebuild.p99_ns, rebuild_allocs_per_request });
     printFmt("request_path allocator calls per request: alloc={d:.2} free={d:.2}", .{ allocs_per_request, frees_per_request });
 }
 
