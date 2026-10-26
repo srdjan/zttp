@@ -218,6 +218,16 @@ endpoint does not return the artifact, so the command reports provenance only
 and says so; its JSON carries `"assurance": "provenance_only"`. Proof and policy
 acceptance are established against the artifact, with `zttp proofs verify`.
 
+The endpoint also supplies the public key that checks its own signature. Without
+`--trust-key <fingerprint>` (the 64-character SHA-256 fingerprint of the expected
+key), the command cannot know who signed, so the signer is not authenticated. It
+still exits 0, prints `Signature valid against the key the endpoint supplied (key
+not pinned)`, and writes `"keyPinned": false` in JSON. Automation that reads only
+the exit status sees success for an unpinned result: pass `--trust-key`, or read
+`keyPinned`. A fingerprint that differs from the pin exits 4. A claim carries no
+host binding and no checked time: `signed_at` is the signer's own value. Binding a
+receipt to an identity is deferred; see the [roadmap](roadmap.md).
+
 Expert-session ledgers (`zttp` only; `zts ledger` prints a pointer and exits
 non-zero):
 

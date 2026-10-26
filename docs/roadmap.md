@@ -79,6 +79,11 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
 - There is no scrape-able `/metrics` endpoint. `/_health` and `/_readiness`
   return bare status codes.
 - Windows is not supported.
+- Proof receipts have no identity binding. `zttp verify <url>` checks a
+  signature against the key the endpoint supplies, so only `--trust-key`
+  authenticates the signer. A claim has no host binding and no checked time.
+  Deferred to receipt slice 2: a well-known key endpoint, a transparency log,
+  and origin and freshness binding.
 - The production certificate honestly reaches a `trusted` weakest edge today.
   The consumer re-derives `response_total`, but bytecode opcode meaning remains
   declared trusted, while `results_checked`, `no_secret_leakage`, and

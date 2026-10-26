@@ -637,7 +637,7 @@ a reason to run a handler, not a reason to stop checking it.
 ### Checking an artifact yourself
 
 ```bash
-zttp proofs bundle --contract handler.contract.json --binary ./my-service --out bundle
+zttp proofs bundle --binary ./my-service --out bundle
 zttp proofs verify bundle --require-proof
 ```
 

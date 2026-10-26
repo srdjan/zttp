@@ -356,7 +356,12 @@ zttp proofs verify bundle --require-proof
 ```
 
 `zttp verify` reads a signed claim from a live endpoint. The endpoint returns
-the claim, not the artifact, so that command reports provenance only. Proof and
+the claim, not the artifact, so that command reports provenance only. The
+endpoint also supplies the public key that checks its own signature. Without
+`--trust-key <fingerprint>`, the signer is not authenticated: the command exits 0,
+prints `key not pinned`, and writes `"keyPinned": false` in JSON. Pass the
+64-character SHA-256 key fingerprint to authenticate the signer. A claim carries
+no host binding and no checked time. Proof and
 policy acceptance are established against the artifact itself, which is what
 `zttp proofs verify` does. Integrity and proof are printed as separate lines
 because they are separate answers: matching hashes say the bundle holds the

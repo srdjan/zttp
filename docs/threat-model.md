@@ -59,6 +59,11 @@ repository is in scope.
   availability, constant-time behavior, or side-channel freedom. It establishes
   the static safety properties the certificate names, at the grades it
   discloses, over the exact bytes that will run.
+- `zttp verify <url>` does not authenticate the signer unless the caller passes
+  `--trust-key <fingerprint>`. The endpoint supplies the public key that checks
+  its own signature, so any endpoint can mint a key and pass. An unpinned result
+  exits 0 and reports `keyPinned: false`. A claim has no host binding, and
+  `signed_at` is the signer's own value that nothing checks.
 - A valid signature is not a safety claim. Provenance says who signed; it never
   raises a semantic state, and an unsigned artifact whose certificate is
   accepted is accepted.
