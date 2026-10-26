@@ -603,7 +603,7 @@ test "stand-in gate: every source edit draft passes the real parser and compiler
         file: []const u8,
         must_contain: []const u8,
     };
-    const normal_handler = "function handler(req: Request): Response {\n    return Response.json({ ok: true });\n}\n";
+    const normal_handler = "function handler(req: Request): Proof<Response, \"state_isolated\" | \"injection_safe\"> {\n    return Response.json({ ok: true });\n}\n";
     const violation_handler =
         \\import { validateJson } from "zttp:validate";
         \\
@@ -869,7 +869,7 @@ fn runCoverageCase(allocator: std.mem.Allocator, entry: range.Entry) !void {
         // dedicated arm tests use, so the two cannot describe different files.
         .hole_fill => (hole_seeds.findById("single-hole") orelse return error.MissingHoleSeed).source,
         .violation_fix => (defect_seeds.findByAsk(entry.canonical_prompt) orelse return error.MissingDefectSeed).seed_source,
-        else => "function handler(req: Request): Response {\n    return Response.json({ ok: true });\n}\n",
+        else => "function handler(req: Request): Proof<Response, \"state_isolated\" | \"injection_safe\"> {\n    return Response.json({ ok: true });\n}\n",
     };
     try tmp.writeFile(allocator, "handler.ts", original_handler);
 

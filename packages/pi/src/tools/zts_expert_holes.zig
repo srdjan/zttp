@@ -197,6 +197,7 @@ test "in-process publisher distinguishes analysis failure from no holes" {
 test "in-process publisher fails closed when a contract has verification errors" {
     const source =
         \\function handler(req: Request): Response {
+        \\  const now = Date.now();
         \\  return hole();
         \\}
     ;

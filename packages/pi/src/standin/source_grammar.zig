@@ -122,7 +122,7 @@ pub fn renderRouteSource(allocator: std.mem.Allocator, v: RouteVariant) ![]u8 {
     }
 
     try w.writeAll(
-        \\function handler(req: Request): Response {
+        \\function handler(req: Request): Proof<Response, "state_isolated" | "injection_safe"> {
         \\    return Response.json({ ok: true });
         \\}
         \\
@@ -144,7 +144,7 @@ pub fn renderEnvSource(allocator: std.mem.Allocator, v: EnvVariant) ![]u8 {
         return try buf.toOwnedSlice();
     }
 
-    try w.writeAll("function handler(req: Request): Response {\n");
+    try w.writeAll("function handler(req: Request): Proof<Response, \"state_isolated\" | \"injection_safe\"> {\n");
     if (v.has_existing_read) {
         try w.print("    env(\"{s}\");\n", .{env_variable});
     }

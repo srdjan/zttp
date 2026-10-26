@@ -18,7 +18,7 @@ A case is `FAMILY/KIND/NAME.ts` (or `.tsx`) with a sibling `NAME.diag`.
 The gate refuses a case filed in the wrong family. It refuses a `good` case
 with any diagnostic, a `good` case that skipped a stage, and a `bad` case with
 no diagnostic. Every case starts with a `//` comment that says what it proves.
-A `good` case needs a narrow capsule, or the check reports ZTS500.
+A `good` case needs a narrow capsule, or it must hold the full default profile. Otherwise the check reports ZTS500.
 
 ## The `.diag` format
 
