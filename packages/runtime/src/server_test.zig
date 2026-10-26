@@ -573,3 +573,37 @@ test "Server.start retains prepared evaluation through its handler pool" {
     try std.testing.expectEqual(@as(u16, 200), response.status);
     try std.testing.expectEqualStrings("ok", response.body);
 }
+
+test "a second server on a busy port fails with AddressInUse and the port reopens after shutdown" {
+    const allocator = std.testing.allocator;
+    const handler = "function handler(req) { return Response.text('ok'); }";
+    var first = try Server.init(allocator, .{
+        .handler = .{ .inline_code = handler },
+        .log_requests = false,
+        .pool_size = 1,
+        .port = 0,
+    });
+    defer first.deinit();
+    try first.start();
+    const port = first.listener.?.socket.address.getPort();
+
+    var second = try Server.init(allocator, .{
+        .handler = .{ .inline_code = handler },
+        .log_requests = false,
+        .pool_size = 1,
+        .port = port,
+    });
+    defer second.deinit();
+    try std.testing.expectError(error.AddressInUse, second.start());
+
+    first.shutdown(100);
+    var third = try Server.init(allocator, .{
+        .handler = .{ .inline_code = handler },
+        .log_requests = false,
+        .pool_size = 1,
+        .port = port,
+    });
+    defer third.deinit();
+    try third.start();
+    third.shutdown(100);
+}

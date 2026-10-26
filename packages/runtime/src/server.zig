@@ -200,6 +200,39 @@ fn ignoreSigpipe() void {
 /// memory-ordering guarantee is needed between the flag and pool state).
 var g_shutdown_requested: std.atomic.Value(bool) = .init(false);
 
+/// Listen on the public address with SO_REUSEADDR and without SO_REUSEPORT.
+/// std sets both when `reuse_address` is true, and SO_REUSEPORT lets a second
+/// server bind the same port and take the traffic. Clearing it after `listen`
+/// works on macOS but not on Linux, so this builds the socket itself.
+fn listenExclusive(address: net.IpAddress) !net.Server {
+    const posix = std.posix;
+    const rc = posix.system.socket(posix.AF.INET, posix.SOCK.STREAM, 0);
+    if (posix.errno(rc) != .SUCCESS) return error.SystemResources;
+    const fd: posix.socket_t = @intCast(rc);
+    errdefer _ = posix.system.close(fd);
+    _ = posix.system.fcntl(fd, posix.F.SETFD, @as(usize, posix.FD_CLOEXEC));
+    try posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.REUSEADDR, std.mem.asBytes(&@as(c_int, 1)));
+    var storage: Io.Threaded.PosixAddress = undefined;
+    var len = Io.Threaded.addressToPosix(&address, &storage);
+    switch (posix.errno(posix.system.bind(fd, &storage.any, len))) {
+        .SUCCESS => {},
+        .ADDRINUSE => return error.AddressInUse,
+        .ACCES => return error.AccessDenied,
+        .ADDRNOTAVAIL => return error.AddressUnavailable,
+        else => return error.Unexpected,
+    }
+    switch (posix.errno(posix.system.listen(fd, 128))) {
+        .SUCCESS => {},
+        .ADDRINUSE => return error.AddressInUse,
+        else => return error.Unexpected,
+    }
+    if (posix.errno(posix.system.getsockname(fd, &storage.any, &len)) != .SUCCESS) return error.Unexpected;
+    return .{
+        .socket = .{ .handle = fd, .address = Io.Threaded.addressFromPosix(&storage) },
+        .options = if (net.Server.AcceptOptions != void) .{ .mode = .stream, .protocol = null },
+    };
+}
+
 fn sigShutdownHandler(_: std.c.SIG) callconv(.c) void {
     g_shutdown_requested.store(true, .monotonic);
 }
@@ -915,7 +948,6 @@ pub const Server = struct {
     pub fn start(self: *Self) !void {
         try initIoBackend(&self.io_backend, self.allocator);
         self.evented_ready = true;
-        const io = self.io_backend.io();
 
         // Process-wide security event stream. Emits to an uninitialized
         // stream are silent no-ops, so this just sizes the ring once.
@@ -1156,9 +1188,7 @@ pub const Server = struct {
         // Parse address and create listener
         const address = try net.IpAddress.parseIp4(self.config.host, self.config.port);
 
-        self.listener = try address.listen(io, .{
-            .reuse_address = true,
-        });
+        self.listener = try listenExclusive(address);
         g_shutdown_requested.store(false, .monotonic);
 
         // Threaded backend: a fixed connection pool avoids per-connection
