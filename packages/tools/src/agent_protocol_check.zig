@@ -403,7 +403,7 @@ test "check binds graph digest diagnostics and contract to one captured root sou
     const allocator = testing.allocator;
     const source_a =
         \\function handler(req: Request): Response {
-        \\  return Response.json({ ok: true });
+        \\  return Response.json({ now: Date.now() });
         \\}
     ;
     const source_b = "export function handler(\n";

@@ -263,13 +263,13 @@ fn populate(gpa: std.mem.Allocator, io: Io, work: []const u8) !void {
     try writeInput(gpa, io, work, "chain.ts", chain.items);
 
     // The type checker once built a pool node per prefix of the chain and ran out of u16 indices at
-    // a few hundred terms. The handler has no Proof capsule, so a clean check exits 1 with
-    // ZTS500; the failure this pins is ZTS000 (the analyzer stopped).
+    // a few hundred terms. The handler has no Proof capsule and reads the clock, so a clean
+    // check exits 1 with ZTS500; the failure this pins is ZTS000 (the analyzer stopped).
     var add: std.ArrayList(u8) = .empty;
     defer add.deinit(gpa);
     try add.appendSlice(gpa, "function handler(req: Request): Response {\n  const x = 1");
     for (1..add_chain_terms) |_| try add.appendSlice(gpa, "+1");
-    try add.appendSlice(gpa, ";\n  return Response.text(String(x));\n}\n");
+    try add.appendSlice(gpa, ";\n  return Response.json({ x: x, now: Date.now() });\n}\n");
     try writeInput(gpa, io, work, "add-chain.ts", add.items);
     try writeInput(gpa, io, work, "unmapped.ts", "structural Empty<T> = ();\n" ++
         "const value: Empty<string> = \"x\";\n" ++
