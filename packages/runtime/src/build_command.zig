@@ -1021,6 +1021,9 @@ fn checkCapability(
 ) anyerror!u32 {
     var check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, input.source, input.handler_path, .{
         .sql_schema_path = input.sql_schema_path,
+        // Quiet: the compile above already printed its diagnostics; the spec
+        // sections are printed once below.
+        .json_mode = true,
     });
     defer check.deinit(allocator);
     const spec_errors = check.specErrors();

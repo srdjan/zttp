@@ -807,8 +807,8 @@ import { schemaCompile, validateJson } from "zttp:validate";
 
 schemaCompile("todo", '{"type":"object","required":["title"]}');
 
-function handler(req: Request): Response {
-    const parsed = validateJson("todo", req.body);
+function handler(req: Request): Proof<Response, "state_isolated" | "no_secret_leakage" | "injection_safe"> {
+    const parsed = validateJson("todo", req.body ?? "");
     if (!parsed.ok) {
         return Response.json({ error: "invalid body" }, { status: 400 });
     }

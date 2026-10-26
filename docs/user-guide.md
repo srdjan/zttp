@@ -104,16 +104,27 @@ function handler(req: Request): Response {
 }
 ```
 
+A handler with no `Proof<T, P>` must prove the full default profile. A handler
+that calls a virtual module does not hold `pure`, so the examples that import a
+module declare the properties they hold. `zttp check`, `zttp test`, and
+`zttp deploy` apply the same rule.
+
 Use `zttp:router` when you need path parameters:
 
 ```ts
 import { routerMatch } from "zttp:router";
 
-function handler(req: Request): Response {
-    const routes = { "GET /users/:id": true };
-    const match = routerMatch(routes, req);
-    if (match !== undefined) {
-        return Response.json({ id: match.params.id });
+function getUser(req: Request): Response {
+    return Response.json({ id: req.params.id });
+}
+
+const routes = { "GET /users/:id": getUser };
+
+function handler(req: Request): Proof<Response, "state_isolated" | "no_secret_leakage" | "injection_safe"> {
+    const found = routerMatch(routes, req);
+    if (found !== undefined) {
+        req.params = found.params;
+        return found.handler(req);
     }
     return Response.text("Not Found", { status: 404 });
 }
@@ -130,7 +141,7 @@ import { schemaCompile, validateJson } from "zttp:validate";
 
 schemaCompile("todo", '{"type":"object","required":["title"]}');
 
-function handler(req: Request): Response {
+function handler(req: Request): Proof<Response, "state_isolated" | "no_secret_leakage" | "injection_safe"> {
     const parsed = validateJson("todo", req.body ?? "");
     if (!parsed.ok) {
         return Response.json({ error: "invalid body" }, { status: 400 });

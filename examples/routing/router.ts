@@ -29,7 +29,7 @@ const routes = {
   "POST /echo": postEcho,
 };
 
-function handler(req: Request): Response {
+function handler(req: Request): Proof<Response, "state_isolated" | "no_secret_leakage" | "injection_safe"> {
   const found = routerMatch(routes, req);
   if (found !== undefined) {
     req.params = found.params;

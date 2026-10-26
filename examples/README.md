@@ -42,8 +42,10 @@ zttp test examples/handler/handler-ts.test.jsonl
 
 `zttp check` runs the strict analyzer.
 Without an explicit `Proof<T, P>`, the analyzer requires all seventeen default specification names.
-A minimal example can therefore fail strict checking while passing its expected runtime responses.
-The example gate checks these responses separately from proof discharge.
+A handler that calls a virtual module does not hold `pure`, so it declares a narrow capsule.
+`zttp test` and `zttp deploy` refuse the same handlers that `zttp check` refuses.
+The example gate checks the runtime responses and runs `zttp check` on each handler.
+Seven files are outside the `zttp check` loop. `utils.ts` is a helper module and `sql-crud.ts` has its own check with a schema. `feature-probes.ts`, `secret-leak.ts`, `spec-fails-idempotent.ts`, and `autoloop/handler.ts` exist to show a refusal or a refused form. The `modules_all.ts` example returns a signed token that the flow analysis labels secret.
 Pattern and SQL examples also run their advertised static checks.
 
 The JSONL runner substitutes virtual-module I/O and creates a fresh runtime for each request.

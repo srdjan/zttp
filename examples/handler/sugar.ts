@@ -4,7 +4,7 @@
 // higher-order functions, and `Object.keys`. Compound assignment is not one of
 // them - `score += 50` is ZTS613, so the update is written in full.
 
-function handler(req: Request): Response {
+function handler(req: Request): Proof<Response, "state_isolated" | "no_secret_leakage" | "injection_safe"> {
   const double = (x: number): number => x * 2;
 
   let score = 100;

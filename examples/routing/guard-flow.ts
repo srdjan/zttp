@@ -30,7 +30,7 @@ function requireAuth(req: Request): Response | undefined {
 
   const result = jwtVerify(token, secret);
   if (!result.ok) return Response.json(
-    { error: result.error },
+    { error: "forbidden" },
     { status: 403 },
   );
 }
@@ -56,7 +56,7 @@ function routeHandler(req: Request): Response {
 }
 
 // preflight -> auth -> routes
-function handler(req: Request): Response {
+function handler(req: Request): Proof<Response, "state_isolated" | "injection_safe"> {
   const preflighted = preflight(req);
   if (preflighted !== undefined) {
     return preflighted;
