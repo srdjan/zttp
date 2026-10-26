@@ -1,7 +1,7 @@
 # Hardening and pruning list, round 3
 
 Status: audit list, 2026-10-23, at `1fcb0734`. This file does not authorize implementation.
-Rounds 1 and 2 are excluded ([round 2 list](2026-10-20-pruning-round-2-list.md), [round 2 worklog](2026-10-21-pruning-round-2-worklog.md)).
+Rounds 1 and 2 are excluded (round 2 list `pre-reset-archive-2026-10-25:docs/plans/2026-10-20-pruning-round-2-list.md`, round 2 worklog `pre-reset-archive-2026-10-25:docs/plans/2026-10-21-pruning-round-2-worklog.md`).
 Round 2 items that are still open keep their round 2 names (A10, A12, A13, A18, C1 to C13).
 
 ## Method and evidence limits

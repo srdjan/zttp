@@ -256,3 +256,33 @@ Stopped by the stop rule, not committed, for owner Decision 11 (class B):
 Both inputs were written for the probe. The corpus, the goldens, and the digests do not move with either patch. The patches and inputs are kept outside the repository under the reset scratch directory (`r10c-stopped`).
 Gates on `main`, each exit 0: `test-zts`, `test-flow-census` (734 match, 0 fail-open, 0 over-refusal), `test-standin`, `test-diagnostic-corpus`, `test-proof-swallow`, `test-contract-golden`, `test-precompile`, `test-expert-app`, `test-zts-layering`, `test-cli`, `test-zruntime`, `check-spine`. Fresh-cache aggregate: 211/211 steps, 7809/7815 passed (6 skipped), unchanged. Digests: byte-identical. Protection against `7e86feb7`: exit 0.
 Not in scope: `bool_checker.walkStmt` has the same `else => {}` default; `bool_checker` is not in the R10 file list.
+
+## R13b archive
+
+Tag `pre-reset-archive-2026-10-25` (local, lightweight, not pushed) marks commit `264a4fd7`, the commit before the archive deletion.
+Each deleted plan stays readable at that tag, for example `pre-reset-archive-2026-10-25:docs/plans/2026-10-20-hardening-pruning-plan.md`.
+
+The rule: delete a plan or worklog only when it is complete and no tracked file outside `docs/plans/` cites it. Keep a file that a kept plan links as evidence.
+`git grep -F` checked the full name, the bare file name, and the name without its date prefix over every tracked file outside `docs/plans/`.
+
+Deleted (3 files):
+- `docs/plans/2026-10-20-hardening-pruning-plan.md` (round 1, complete 2026-10-20)
+- `docs/plans/2026-10-20-pruning-round-2-list.md` (round 2 audit list, complete 2026-10-21)
+- `docs/plans/2026-10-21-pruning-round-2-worklog.md` (round 2 execution record, complete 2026-10-21)
+
+Links in kept files now point to the tag: `docs/plans/README.md`, `2026-10-20-flow-interp-difference-dispositions.md`, `2026-10-22-modular-boundaries-plan.md`, and `2026-10-23-pruning-round-3-list.md`.
+
+Kept although no file outside `docs/plans/` cites it (20 files), with the reason:
+- `2026-07-30-015-d2-effects-purity-design.md`: retained design reference, not a completed plan.
+- `2026-10-07-beni-retrofit-study.md`: research with no completion status.
+- `2026-10-19-flow-interp-p2-r16-spec.md`, `-p3-spec.md`, `-p4-spec.md`, `-p5-spec.md`: the specifications state "for implementation" and the flow interpreter redesign is not closed (P7 final acceptance pending).
+- `2026-10-20-flow-interp-difference-dispositions.md`: review ledger that belongs to the open redesign.
+- `2026-10-21-completeness-audit.md`: audit whose groups stay unselected.
+- `2026-10-21-soundness-handoff.md`: U2 and U3 are specified and not implemented.
+- `2026-10-22-coupling-census-worklog.md`: the kept walker soundness plan cites it as evidence.
+- `2026-10-23-pruning-round-3-list.md`, `-plan.md`, `-worklog.md`: the H10 default flips wait for the batched re-record window (decision D-012 in `docs/decisions.md`).
+- `2026-10-24-hardening-pruning-list.md`, `-plan.md`, `-worklog.md`: U12 is deferred and U13 is retained for compatibility (see the plan index).
+- `2026-10-25-eager-recycle-rebuild-plan.md`, `2026-10-25-zig-book-hardening-plan.md`, `-worklog.md`: the work and its open items (deferred tasks, a `bench-check` load failure) are not closed.
+- `zttp-evidence-model-implementation-plan.md`: a proposal with no implementation.
+
+Every other file in `docs/plans/` is cited outside `docs/plans/` (for example by `docs/solutions/`, `advisor-plans/`, `docs/roadmap.md`, `docs/internals/agent-spine.md`, or source comments) and stays.

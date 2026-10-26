@@ -22,9 +22,9 @@ index when a plan starts, closes, or moves to the archive.
 | [Soundness plan](2026-10-21-soundness-plan.md) | U6 and U1 complete 2026-10-21; U2 (`env.public`) and U3 (bounded `mask`) approved and specified, validation pending | Owner approved D3(a), D4(a), D5(a) with "approved" and D6(a), D7(a), D8(a) with "as recommended" |
 | Quick-fixes plan (`pre-round-3-archive:docs/plans/2026-10-21-quick-fixes-plan.md`) | Complete 2026-10-21; Q1 to Q3 committed locally | Owner chose D1(a) and D2(a) with "yes" |
 | [Completeness audit](2026-10-21-completeness-audit.md) | Audit 2026-10-21 with Fable verdicts; groups beyond the quick fixes and soundness are not selected | No implementation authority |
-| Pruning round 2 plan (`pre-round-3-archive:docs/plans/2026-10-21-pruning-round-2-plan.md`) | Complete 2026-10-21; U1 to U17 committed locally; results in the [worklog](2026-10-21-pruning-round-2-worklog.md) | Owner chose decisions 1B, 2A, 3A, 4A, 5A with "as recommended" and approved implementation (decision 6A) with "yes" |
-| [Hardening and pruning, round 2](2026-10-20-pruning-round-2-list.md) | Audit list 2026-10-20: 21 hardening, 19 dead-code, 13 consolidation, and 8 documentation items; selected by the round 2 plan; complete 2026-10-21 | Owner chose decisions 1B, 2A, 3A, 4A, 5A with "as recommended" |
-| [Hardening and pruning](2026-10-20-hardening-pruning-plan.md) | Complete 2026-10-20; all eight units implemented locally, as the round 2 list records | Owner selected all findings with "all of them" |
+| Pruning round 2 plan (`pre-round-3-archive:docs/plans/2026-10-21-pruning-round-2-plan.md`) | Complete 2026-10-21; U1 to U17 committed locally; results in the worklog (`pre-reset-archive-2026-10-25:docs/plans/2026-10-21-pruning-round-2-worklog.md`) | Owner chose decisions 1B, 2A, 3A, 4A, 5A with "as recommended" and approved implementation (decision 6A) with "yes" |
+| Hardening and pruning, round 2 (`pre-reset-archive-2026-10-25:docs/plans/2026-10-20-pruning-round-2-list.md`) | Audit list 2026-10-20: 21 hardening, 19 dead-code, 13 consolidation, and 8 documentation items; selected by the round 2 plan; complete 2026-10-21 | Owner chose decisions 1B, 2A, 3A, 4A, 5A with "as recommended" |
+| Hardening and pruning (`pre-reset-archive-2026-10-25:docs/plans/2026-10-20-hardening-pruning-plan.md`) | Complete 2026-10-20; all eight units implemented locally, as the round 2 list records | Owner selected all findings with "all of them" |
 | [P7 request contents and sink evidence](2026-10-20-flow-interp-p7-spec.md) | Active version 7 evaluator, sink evidence and imported snapshots implemented; final acceptance pending | Included in the owner's approval of all hardening and pruning units |
 | [Flow checker redesign](2026-10-18-flow-checker-sound-redesign-plan.md) | Draft 2026-10-18, revised after one Codex astra validation round; D9 to D12 decided 2026-10-19; revised after the second validation round | Owner chose Decision 8 Option A; P0 and P1 approved (D13); R16 and P2 approved 2026-10-19 |
 | [R16 freeze and P2 evaluator core](2026-10-19-flow-interp-p2-r16-spec.md) | Specification 2026-10-19, revised after one Codex astra validation round | Owner approved R16 and P2 on 2026-10-19 |
@@ -79,7 +79,7 @@ The roadmap records the proposed later milestones.
 Pruning round 2 (decision 5A) deleted 15 completed or superseded plans and worklogs that no code, solution note, or kept plan cites as a live link.
 Each stays readable at the local `pre-round-2-archive` tag, for example
 `pre-round-2-archive:docs/plans/2026-10-11-feature-removal-worklog.md`. The tag marks the commit before the deletion.
-The round 2 worklog (`2026-10-21-pruning-round-2-worklog.md`, section "U8 archive") lists every deleted file.
+The round 2 worklog (`pre-reset-archive-2026-10-25:docs/plans/2026-10-21-pruning-round-2-worklog.md`, section "U8 archive") lists every deleted file.
 The 2026-10-14 reset plan and worklog stay as the record of U1 to U20 and of the open benchmark result. The 2026-10-25 reset plan is the active authority.
 
 Pruning round 3 (decision D7) deleted six completed plans that no tracked file outside `docs/plans/` cites, and advisor plan 006.

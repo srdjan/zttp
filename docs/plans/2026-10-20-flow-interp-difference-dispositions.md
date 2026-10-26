@@ -27,7 +27,7 @@ P0/P1/P8/P9 and revised R1–R16, supplies the operational claim and fixed P0
 expectations. The [P6 specification](2026-10-20-flow-interp-p6-spec.md) supplies
 the accepted D24 sink matrix. The [P7 specification](2026-10-20-flow-interp-p7-spec.md)
 requires source, witness and defended-path compatibility. The
-[hardening plan's owner resolution](2026-10-20-hardening-pruning-plan.md#owner-resolution-of-the-weather-precision-conflict)
+hardening plan's owner resolution (`pre-reset-archive-2026-10-25:docs/plans/2026-10-20-hardening-pruning-plan.md`, section "Owner resolution of the weather precision conflict")
 supersedes only the two weather expectations, reducing 216 historical bits
 to 214. It preserves `input_validated` and keeps recorded generations immutable.
 

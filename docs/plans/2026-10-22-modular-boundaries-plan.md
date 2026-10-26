@@ -24,7 +24,7 @@ Read root and area AGENTS.md, docs/decisions.md, .agents/skills/zig-expert/SKILL
 - D-005: proof-checker remains an independent leaf; never reuse producer proof decisions as acceptance authority.
 - D-006: CHECK flow and fault traversals retain distinct read order, repeated reads, revision selection, and stopping rules.
 - D-007: persistent reads retain unknown provenance.
-- Loaded-graph sound extraction and contract-only extraction retain their different authored-type and policy/SQL semantics (H7 in docs/plans/2026-10-20-hardening-pruning-plan.md).
+- Loaded-graph sound extraction and contract-only extraction retain their different authored-type and policy/SQL semantics (H7 in `pre-reset-archive-2026-10-25:docs/plans/2026-10-20-hardening-pruning-plan.md`).
 - Preserve existing wire formats, digest preimages, export ordering, diagnostics and public APIs. Internal session misuse may be refused as explicitly approved in phase 1.
 
 ## Phase 1: freeze effect-producing dependency inputs
