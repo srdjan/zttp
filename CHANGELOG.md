@@ -10,6 +10,25 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **`zttp deploy`, `zttp build`, and `zttp compile` refuse a handler that
+  `zttp check` refuses.** The build now runs the check analysis and stops on
+  any spec error, such as a declared capsule that the handler does not
+  discharge or a handler with no capsule that misses a default property. Before
+  this change, `zttp test` refused those handlers and the build shipped them.
+  A handler that calls a virtual module does not hold `pure`, so it needs a
+  capsule. Migration: run `zttp check` on each handler, then correct the code
+  or declare a narrow `Proof<T, P>` capsule with only the properties the
+  handler holds. Rebuild and redeploy earlier artifacts.
+- **A handler with no failable I/O site now proves `fault_covered`.** The path
+  analysis version moves to 5 and changes the policy hash. Version 4 refused
+  the property for such a handler, so the first handler in the user guide
+  failed `zttp check`. Migration: rebuild handlers and regenerate contracts
+  before deployment. `zttp proofs gate` grades a lost `fault_covered` as
+  critical, so adding the first unchecked failable call to a handler with no
+  I/O now fails the gate.
+
 ## [0.24.0] - 2026-10-23
 
 ### Highlights

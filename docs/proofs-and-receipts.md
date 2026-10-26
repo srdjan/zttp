@@ -87,6 +87,12 @@ A call through a value the compiler cannot resolve, such as
 `retry_safe` unproven. The compiler cannot see what
 that call reaches, so it does not claim that the call is safe.
 
+A handler with no `Proof<...>` capsule must prove every default property, so a
+`[-]` pill on a default property is a ZTS500 error for such a handler. A handler that calls a virtual
+module never proves `pure`, so it declares a narrow capsule. `zttp deploy`,
+`zttp build`, and `zttp compile` refuse a handler when `zttp check` reports a
+spec error, the same rule that `zttp check` and `zttp test` apply.
+
 ### Known Limits of the Security Chips
 
 The security chips are not sound proofs in v0.22.3 and earlier. On

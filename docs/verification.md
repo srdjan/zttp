@@ -369,6 +369,8 @@ Every call to a failable function counts as its own site, keyed by call site. Tw
 - an `&&` condition counts every way it can be false. `if (!auth.ok && req.method === "POST") return 401;` falls through when the check fails on a GET too, so that path is enumerated, and a 2xx on it is a critical warning. A failable call tested by a later conjunct can have failed even when short-circuit evaluation skips the test, so that case is enumerated as well;
 - no critical failure path returns 2xx.
 
+A handler with no failable I/O site holds `fault_covered` when the other conditions hold: the path set is exhaustive and no import holds a failable call. There is no site to cover. The proof trace says the property holds because the handler has no failable site. Path analysis version 4 refused this case, so the first example in the user guide failed `zttp check`.
+
 A 2xx fallback on an upstream failure does not block the property. It is reported in `upstreamFallbackSites` and the proof trace summary.
 
 A handler that proved `fault_covered` under an earlier analysis can lose it
