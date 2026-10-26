@@ -1,7 +1,7 @@
 # Roadmap
 
-This document owns work status and scheduling. The reset status was updated
-on 2026-10-25; reset phase R13 reviews the whole document. Shipped changes live in
+This document owns work status and scheduling. Phase R13 of the 2026-10-25 reset
+reviewed it on 2026-10-25. Shipped changes live in
 [CHANGELOG.md](../CHANGELOG.md); current behavior lives in the
 [User Guide](user-guide.md). The [plan index](plans/README.md) separates open
 work from reference designs. Product proposals (`pre-rebase:docs/zttp-next/README.md`) and
@@ -9,12 +9,18 @@ work from reference designs. Product proposals (`pre-rebase:docs/zttp-next/READM
 
 ## Milestones
 
-The [2026-10-25 reset plan](plans/2026-10-25-reset-implementation-plan.md) owns the active reset design, phase order, and acceptance.
-The owner approved phases R0 to R13 on 2026-10-25.
-The [reset worklog](plans/2026-10-25-reset-worklog.md) records current work and verification evidence.
-The reset precedes further feature work. Model-visible changes wait for one later re-record window (the plan's Decision 2).
+The 2026-10-25 reset is complete through R13 (2026-10-25).
+The [reset plan](plans/2026-10-25-reset-implementation-plan.md) is its authority.
+The [reset worklog](plans/2026-10-25-reset-worklog.md) records the execution, the commands, and the exit statuses.
+Plans that the reset archived stay readable at the local tag `pre-reset-archive-2026-10-25`.
+The [2026-10-14 reset plan](plans/2026-10-14-reset-implementation-plan.md) is also complete (U1 to U20) and is not an authority.
 
-The [2026-10-14 reset plan](plans/2026-10-14-reset-implementation-plan.md) is complete: U1 to U20 are committed. It is no longer the reset authority.
+Open owner decisions after the reset:
+- Decision 2 (batched re-record window, D-012 in [decisions.md](decisions.md)). Model-visible changes wait for one window. The window holds the R7c move of the three pi tools onto the production session, the missing-type location of R4 row 18, the deferred H10 and U12 defaults, and any R10c class B patch that the owner defers.
+- Decision 11 (R10c class B). Two patches are held back: spread operands in `contract_builder.scanFunctionNodeForApiFacts` and the statement-only descent in `strict_checker.collectStaticLiterals`. The owner accepts, rejects, or defers each patch.
+- Release provenance. `release-provenance` failed at the reset baseline because `docs/coverage.json` was stale. An offline republish of `docs/convergence.json` and `docs/coverage.json` is the remedy. The owner or coordinator runs it.
+
+Next work: the owner picks the date of the re-record window. No feature work starts before that decision.
 
 M1, M2, and M3 are complete.
 M4 is complete: T1a to T7 were delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 2 later removed both runtime products. No release date is assigned.
@@ -239,8 +245,9 @@ state removal. U1 to U20 are complete. Its
 [worklog](plans/2026-10-15-reset-worklog.md) records test receipts, sandbox
 limits, and the unresolved advisory benchmark result. The
 [2026-10-25 reset plan](plans/2026-10-25-reset-implementation-plan.md) is the
-current reset authority. The historical phase plans remain evidence of their
-own completed work, not a second implementation authority.
+authority for the later reset, which is complete through R13. The historical
+phase plans remain evidence of their own completed work, not a second
+implementation authority.
 
 | Work | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|

@@ -6,8 +6,11 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [Reset implementation, 2026-10-25](2026-10-25-reset-implementation-plan.md) | Active reset authority; R0 complete 2026-10-25; R1 to R13 in progress | Owner approved R0 to R13 with "as recommended" (Decisions 1 to 5, option a) and chose Decision 6 (a) |
-| [Reset worklog, 2026-10-25](2026-10-25-reset-worklog.md) | Execution record, commands, exit statuses, and stop-rule results for the 2026-10-25 reset | Records the owner decisions of the 2026-10-25 reset plan |
+| [Reset implementation, 2026-10-25](2026-10-25-reset-implementation-plan.md) | Reset authority; complete through R13, 2026-10-25; open owner decisions are in the [roadmap](../roadmap.md) | Owner approved R0 to R13 with "as recommended" (Decisions 1 to 5, option a) and chose Decision 6 (a) |
+| [Eager recycle rebuild](2026-10-25-eager-recycle-rebuild-plan.md) | Plan 2026-10-25; the worker builds the replacement runtime after the response is sent; this index records no completion | Owner chose Decision 3 option A on 2026-10-25 |
+| [Zig book hardening](2026-10-25-zig-book-hardening-plan.md) | Plan 2026-10-25; the worklog records the execution and lists open items (a ZTS200 alias-chain cost and a `bench-check` failure under host load) | Owner chose 1a; slot-buffer reuse waits for the recycle p99 |
+| [Zig book hardening worklog](2026-10-25-zig-book-hardening-worklog.md) | Execution record, decisions, and open items for the Zig book hardening plan | Records the owner decisions of that plan |
+| [Reset worklog, 2026-10-25](2026-10-25-reset-worklog.md) | Execution record, commands, exit statuses, and the R13b archive list for the 2026-10-25 reset; complete through R13 | Records the owner decisions of the 2026-10-25 reset plan |
 | [Hardening and pruning implementation, round 4](2026-10-24-hardening-pruning-plan.md) | Implemented and verified 2026-10-24; U12 deferred, U13 retained for compatibility | Owner authorized execution with `go ahead`; full unrestricted verification passed |
 | [Hardening and pruning, round 4](2026-10-24-hardening-pruning-list.md) | Selected audit list: 16 findings; implementation and dispositions are in the worklog | Owner authorized the bounded implementation plan |
 | [Hardening and pruning worklog, round 4](2026-10-24-hardening-pruning-worklog.md) | Local commits, passing full verification and benchmark gate, and deferred scope | The final unrestricted verification supersedes the earlier sandbox failures |
@@ -86,3 +89,8 @@ Pruning round 3 (decision D7) deleted six completed plans that no tracked file o
 Each stays readable at the local `pre-round-3-archive` tag, for example
 `pre-round-3-archive:docs/plans/2026-10-21-pruning-round-2-plan.md`. The tag marks the commit before the deletion.
 The round 3 worklog (`2026-10-23-pruning-round-3-worklog.md`, section "U8 archive") lists every deleted file.
+
+The 2026-10-25 reset (R13b) deleted three completed round 1 and round 2 plans that no tracked file outside `docs/plans/` cites.
+Each stays readable at the local `pre-reset-archive-2026-10-25` tag, for example
+`pre-reset-archive-2026-10-25:docs/plans/2026-10-20-hardening-pruning-plan.md`. The tag marks the commit before the deletion.
+The reset worklog (`2026-10-25-reset-worklog.md`, section "R13b archive") lists each deleted file and each kept file with its reason.
