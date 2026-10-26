@@ -740,6 +740,13 @@ fn runCheckOnParsedSource(
                     };
                 }
             }
+        } else if (flow_diags.len > 0) {
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(allocator);
+            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+            checked.flow_checker.formatDiagnostics(diag_view, &aw.writer) catch {};
+            buf = aw.toArrayList();
+            if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
         }
     }
 

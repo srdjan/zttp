@@ -127,6 +127,19 @@ fi
 [ ! -e "$BROKEN_APP_DIR/.zttp/build/broken-app" ] || fail "broken handler emitted a build artifact"
 printf '%s' "$broken_out" | grep -Eq "Compilation failed|Parse|error" || fail "broken-handler diagnostic was not actionable: $broken_out"
 
+step "negative: test prints each error that its summary counts"
+cat > "$BROKEN_APP_DIR/src/handler.ts" <<'TS'
+import { env } from "zttp:env";
+structural RO<T> = Proof<T, "read_only">;
+function handler(req: Request): RO<Response> {
+  return Response.json({ v: env("API_TOKEN") ?? "" });
+}
+TS
+leak_status=0
+leak_out=$(cd "$BROKEN_APP_DIR" && "$ZTTP" test 2>&1 </dev/null) || leak_status=$?
+[ "$leak_status" -ne 0 ] || fail "test succeeded for a handler that leaks a secret"
+printf '%s' "$leak_out" | grep -q "ZTS400" || fail "test counted a flow error and did not print it: $leak_out"
+
 step "init $APP_NAME under $TMP_DIR"
 (cd "$TMP_DIR" && "$ZTTP" init "$APP_NAME" >/dev/null) || fail "init"
 [ -f "$APP_DIR/zttp.json" ] || fail "no zttp.json after init"

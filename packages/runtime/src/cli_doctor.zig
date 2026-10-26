@@ -206,9 +206,21 @@ pub fn printCheckStageFailures(check: *const precompile.CheckResult, prefix: []c
     if (check.verify_errors > 0) std.debug.print("{s}verify   {d} error(s)\n", .{ prefix, check.verify_errors });
     if (check.flow_errors > 0) std.debug.print("{s}flow     {d} error(s)\n", .{ prefix, check.flow_errors });
     if (check.policy_errors > 0) std.debug.print("{s}policy   {d} error(s)\n", .{ prefix, check.policy_errors });
+    if (check.canonical_errors > 0) std.debug.print("{s}canonical {d} error(s)\n", .{ prefix, check.canonical_errors });
     const spec_errors = check.totalErrors() -|
-        (check.parse_errors + check.bool_errors + check.type_errors + check.strict_errors + check.verify_errors + check.flow_errors + check.policy_errors);
+        (check.parse_errors + check.bool_errors + check.type_errors + check.strict_errors + check.verify_errors + check.flow_errors + check.policy_errors + check.canonical_errors);
     if (spec_errors > 0) std.debug.print("{s}spec     {d} error(s)\n", .{ prefix, spec_errors });
+}
+
+/// Print the canonical, policy, and spec diagnostics that the stage counts
+/// above summarize. The other stages print their own lines during the check.
+pub fn printCheckFailureSections(allocator: std.mem.Allocator, check: *const precompile.CheckResult, path: []const u8) void {
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    precompile.formatFailureSections(&aw.writer, check, path);
+    buf = aw.toArrayList();
+    if (buf.items.len > 0) std.debug.print("{s}", .{buf.items});
 }
 
 fn printDoctorRuntimeTemplate(allocator: std.mem.Allocator) void {

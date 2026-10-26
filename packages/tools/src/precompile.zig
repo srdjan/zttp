@@ -35,6 +35,7 @@ pub const CheckResult = check_mod.CheckResult;
 pub const Stage = check_mod.Stage;
 pub const StageSet = check_mod.StageSet;
 pub const formatProofCard = check_mod.formatProofCard;
+pub const formatFailureSections = check_mod.formatFailureSections;
 pub const generateTypeDefs = check_mod.generateTypeDefs;
 const syncCheckResultProperties = check_mod.syncCheckResultProperties;
 const appendSpecDiagnosticsJson = check_mod.appendSpecDiagnosticsJson;

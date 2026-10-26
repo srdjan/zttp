@@ -71,6 +71,7 @@ pub fn testCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
         if (!builtin.is_test) {
             std.debug.print("Pre-test check failed for {s}: {d} error(s)\n", .{ entry, check.totalErrors() });
             printCheckStageFailures(&check, "  ");
+            cli_doctor.printCheckFailureSections(allocator, &check, entry);
             std.debug.print("Next: fix the errors above, then rerun `zttp test`.\n", .{});
         }
         return error.CheckFailed;

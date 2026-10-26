@@ -181,6 +181,7 @@ fn runDevPreflight(allocator: std.mem.Allocator, argv: []const []const u8, comma
         if (!builtin.is_test) {
             std.debug.print("zttp {s} preflight failed for {s}: {d} error(s)\n", .{ command, target, check.totalErrors() });
             printCheckStageFailures(&check, "  ");
+            cli_doctor.printCheckFailureSections(allocator, &check, target);
             std.debug.print("Next: fix the errors above, then rerun `zttp {s}`.\n", .{command});
         }
         return error.CheckFailed;

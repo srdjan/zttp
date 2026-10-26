@@ -401,6 +401,70 @@ fn preserveDuringSpecRefresh(diag: zts.SpecDiagnostic) bool {
     };
 }
 
+/// The canonical, policy, and spec sections of the card: the diagnostics that
+/// `CheckResult.totalErrors` counts and that no stage prints while it runs.
+/// `zttp test` and `zttp dev` call this on failure so their counts have lines.
+pub fn formatFailureSections(writer: anytype, r: *const CheckResult, filename: []const u8) void {
+    if (hasCanonicalDiagnostic(r.json_diagnostics.items)) {
+        writer.print("\n  Canonical diagnostics:\n", .{}) catch return;
+        for (r.json_diagnostics.items) |d| {
+            if (!isCanonicalDiagnostic(d.code)) continue;
+            writer.print(
+                "    {s} ({s}) {s}:{d}:{d}  {s}\n",
+                .{ d.code, d.severity, d.file, d.line, d.column, d.message },
+            ) catch return;
+            if (d.suggestion) |suggestion| {
+                writer.print("      help: {s}\n", .{suggestion}) catch return;
+            }
+        }
+    }
+
+    if (hasPolicyDiagnostic(r.json_diagnostics.items)) {
+        writer.print("\n  Capability policy diagnostics:\n", .{}) catch return;
+        for (r.json_diagnostics.items) |d| {
+            if (!isPolicyDiagnostic(d.code)) continue;
+            writer.print(
+                "    {s} ({s}) {s}:{d}:{d}  {s}\n",
+                .{ d.code, d.severity, d.file, d.line, d.column, d.message },
+            ) catch return;
+            if (d.suggestion) |suggestion| {
+                writer.print("      help: {s}\n", .{suggestion}) catch return;
+            }
+        }
+    }
+
+    // Spec/Effects diagnostics live in contract.spec_diagnostics, not in
+    // json_diagnostics, so the human card must render them here or the printed
+    // error lines fall short of the footer count (e.g. a Spec-less handler
+    // trips ZTS500 in `specErrors()` but otherwise prints nothing).
+    if (r.contract) |*contract| {
+        if (r.specErrors() > 0) {
+            writer.print("\n  Spec diagnostics:\n", .{}) catch return;
+            for (contract.spec_diagnostics.items) |d| {
+                if (d.kind.severity() != .err) continue;
+                writer.print(
+                    "    {s} (error) {s}:{d}:{d}  {s}",
+                    .{ diagnostic_catalog.specCode(d.kind), filename, contract.handler.line, contract.handler.column, specDiagnosticMessage(d) },
+                ) catch return;
+                if (specDiagnosticSubject(d)) |subject| {
+                    if (d.cause) |cause| {
+                        writer.print(
+                            spec_suffix_with_cause,
+                            .{ subject, cause.line, cause.column, cause.snippet },
+                        ) catch return;
+                    } else {
+                        writer.print(spec_suffix_plain, .{subject}) catch return;
+                    }
+                }
+                writer.print("\n", .{}) catch return;
+                if (d.suggestion) |suggestion| {
+                    writer.print("      help: {s}\n", .{suggestion}) catch return;
+                }
+            }
+        }
+    }
+}
+
 /// Format a structured proof card showing what the compiler proved.
 pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const u8) void {
     writer.print("\ncheck: {s}\n\n", .{filename}) catch return;
@@ -498,64 +562,7 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
     }
     writeCostBound(writer, r);
 
-    if (hasCanonicalDiagnostic(r.json_diagnostics.items)) {
-        writer.print("\n  Canonical diagnostics:\n", .{}) catch return;
-        for (r.json_diagnostics.items) |d| {
-            if (!isCanonicalDiagnostic(d.code)) continue;
-            writer.print(
-                "    {s} ({s}) {s}:{d}:{d}  {s}\n",
-                .{ d.code, d.severity, d.file, d.line, d.column, d.message },
-            ) catch return;
-            if (d.suggestion) |suggestion| {
-                writer.print("      help: {s}\n", .{suggestion}) catch return;
-            }
-        }
-    }
-
-    if (hasPolicyDiagnostic(r.json_diagnostics.items)) {
-        writer.print("\n  Capability policy diagnostics:\n", .{}) catch return;
-        for (r.json_diagnostics.items) |d| {
-            if (!isPolicyDiagnostic(d.code)) continue;
-            writer.print(
-                "    {s} ({s}) {s}:{d}:{d}  {s}\n",
-                .{ d.code, d.severity, d.file, d.line, d.column, d.message },
-            ) catch return;
-            if (d.suggestion) |suggestion| {
-                writer.print("      help: {s}\n", .{suggestion}) catch return;
-            }
-        }
-    }
-
-    // Spec/Effects diagnostics live in contract.spec_diagnostics, not in
-    // json_diagnostics, so the human card must render them here or the printed
-    // error lines fall short of the footer count (e.g. a Spec-less handler
-    // trips ZTS500 in `specErrors()` but otherwise prints nothing).
-    if (r.contract) |*contract| {
-        if (r.specErrors() > 0) {
-            writer.print("\n  Spec diagnostics:\n", .{}) catch return;
-            for (contract.spec_diagnostics.items) |d| {
-                if (d.kind.severity() != .err) continue;
-                writer.print(
-                    "    {s} (error) {s}:{d}:{d}  {s}",
-                    .{ diagnostic_catalog.specCode(d.kind), filename, contract.handler.line, contract.handler.column, specDiagnosticMessage(d) },
-                ) catch return;
-                if (specDiagnosticSubject(d)) |subject| {
-                    if (d.cause) |cause| {
-                        writer.print(
-                            spec_suffix_with_cause,
-                            .{ subject, cause.line, cause.column, cause.snippet },
-                        ) catch return;
-                    } else {
-                        writer.print(spec_suffix_plain, .{subject}) catch return;
-                    }
-                }
-                writer.print("\n", .{}) catch return;
-                if (d.suggestion) |suggestion| {
-                    writer.print("      help: {s}\n", .{suggestion}) catch return;
-                }
-            }
-        }
-    }
+    formatFailureSections(writer, r, filename);
 
     if (r.strict_advisories > 0) {
         writer.print(

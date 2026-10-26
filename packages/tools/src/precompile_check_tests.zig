@@ -589,6 +589,26 @@ test "formatProofCard: spec-less handler renders ZTS500 lines matching the foote
     try std.testing.expectEqual(spec_err_count, printed);
 }
 
+test "formatFailureSections: lists the spec errors without the stage rows" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "sections-text.ts", .{});
+    defer result.deinit(allocator);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    check_mod.formatFailureSections(&aw.writer, &result, "sections-text.ts");
+    buf = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "ZTS500") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Parse ...") == null);
+}
+
 test "formatProofCard: the card names the demotion site --json already carried" {
     // The two surfaces were said to share one source of truth, and did not:
     // `--json` printed "; demoted at line L:C by `snippet`" from `diag.cause`
