@@ -16,6 +16,7 @@ execution record.
 | 010 | [SQL writes wait for a busy writer](../../advisor-plans/010-sqlite-waits-for-a-busy-writer.md) | M7 | DONE |
 | 011 | [The documented CLI flows work](../../advisor-plans/011-cli-flows-match-the-docs.md) | M3, M4, M5, low items | DONE |
 | 012 | [Claims say what they check](../../advisor-plans/012-claims-say-what-they-check.md) | M1; H1 and M2 interim | DONE |
+| 015 | this file, Execution record 015 | follow-ups from units 011 and 012 | DONE |
 | 013 | [Vacuous fault coverage and one acceptance rule](../../advisor-plans/013-one-acceptance-rule-and-vacuous-fault-coverage.md) | H3 | TODO; re-record window |
 | U2, U3 | [Soundness plan](2026-10-21-soundness-plan.md), sections U2 and U3 | H1, M2 | TODO; re-record window |
 | 014 | [Release preparation](../../advisor-plans/014-release-prep-after-fixes.md) | M6 | TODO; last |
@@ -113,3 +114,15 @@ Change: `renderClaimsHuman` and `renderClaimsJson` in `packages/runtime/src/veri
 Gates, each with exit 0: `zig fmt --check packages/runtime/src/verify_cli.zig`, `zig build test-cli`, `test-docs-drift`, `test-doc-links`, `test`, and `git add -A && zig build check-spine`; in `../ZTTP-WEBSITE`, `deno task verify`. No contract golden, `policy-hash.txt`, or codegen replay changed. `bash scripts/verify.sh` is left to the coordinator.
 
 Coordinator: `bash scripts/verify.sh` from an empty cache exited 0 at `70681af2`.
+
+### 015: follow-ups
+
+Owner Decision 23 (a) approved three small fixes found in units 011 and 012. Each is its own commit with a test that fails without the fix. Commits: `3bc48f75` (release fix 015: proofs bundle and verify name a refused path on stderr), `59e832e6` (release fix 015: port-in-use hint names neither serve nor dev), and `3f8ee71e` (release fix 015: zttp verify prints claims of any length).
+
+F1: `rejectSuspiciousPath` in `packages/runtime/src/proofs/bundle.zig` keeps its rule (a path containing `..`, or starting with `/etc/` or `/var/`). It now takes the stderr writer and the command name, and prints `zttp proofs <bundle|verify>: refusing path '<p>': paths under /etc/ or /var/, or containing '..', are not accepted` before it returns `error.SuspiciousPath`. Exit status stays 1. Before, `zttp proofs bundle --contract "$(mktemp -d)/c.json" --out ...` on macOS (`/var/folders/...`) exited 1 with no output. The new test `bundle and verify name a refused path on stderr` fails when the print is removed (`TestExpectedEqual`).
+
+F2: `formatAddressInUse` in `packages/runtime/src/runtime_cli.zig` now prints `Port N is already in use. Pass a different port with -p <PORT>.` for both `zttp serve` and `zttp dev`. Measured with a second `zttp serve -p` on a busy port: the old text said `zttp dev -p <PORT>`. The test `formatAddressInUse names the port and the remedy` now requires `with -p <PORT>` and no `zttp dev`; it fails against the old text. No document quoted the old line.
+
+F3: `renderClaimsHuman` in `packages/runtime/src/verify_cli.zig` formats with the allocator that `run` passes through `writeClaimsHuman`, so no length drops the output. Before, an output longer than 4096 bytes printed nothing and `run` still returned exit 0. The new test `renderClaimsHuman renders in full past 4096 bytes` uses a 5000-byte `property_summary`; it fails when the output is capped at 4096 bytes (`OutOfMemory`). The command line was not run against a live attested endpoint with a long claim, so the CLI-level effect rests on that unit test.
+
+Gates, each with exit 0: `zig fmt --check` on the three files, `zig build test-cli`, `smoke-v1`, `test-docs-drift`, `test-doc-links`, `test`, and `check-spine` (before each commit and again after this record). No contract golden, `policy-hash.txt`, or codegen replay changed. `bash scripts/verify.sh` is left to the coordinator.
