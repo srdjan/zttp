@@ -22,7 +22,8 @@ A call to `Date.now()` prevents the determinism proof.
 [handler/spec-fails-idempotent.ts](handler/spec-fails-idempotent.ts) deliberately fails its declared idempotence proof.
 
 `routing/` contains branching, pattern matching, and early-return guards.
-`modules/` contains handlers that use several virtual modules.
+`modules/` contains handlers that use several virtual modules. `modules-all/` holds `modules_all.ts`, an integration example that imports `zttp:auth`, `zttp:validate`, and `zttp:cache`.
+The `zttp.json` files in `modules/`, `routing/`, and `patterns/` name a `policy.json`. Its `env.public` list names the env values that handlers in that directory may return; every other literal env name is secret to the flow analysis.
 `fetch/` contains outbound HTTP examples that require explicit allowed hosts.
 [fetch/webhook.ts](fetch/webhook.ts) forwards a POST request through `zttp:fetch`.
 

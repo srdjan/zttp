@@ -78,11 +78,19 @@ pub const Failure = struct {
 
 pub const CheckFn = *const fn (gpa: std.mem.Allocator, source: []const u8, handler_path: []const u8) anyerror!precompile.CheckResult;
 
-/// The same call `zts check --json` makes with no
-/// policy, declaration, or schema path.
+/// The policy every census probe runs under. `API_TOKEN` stays secret and
+/// `REGION` is the one name the policy vouches for (D-014): without the
+/// `public` row the clean source `env("REGION") ?? ""` would be a secret.
+pub const census_policy_source =
+    \\{"env":{"allow":["API_TOKEN","REGION"],"public":["REGION"]}}
+;
+
+/// The same call `zts check --json` makes with the census policy and no
+/// declaration or schema path.
 fn defaultCheck(gpa: std.mem.Allocator, source: []const u8, handler_path: []const u8) anyerror!precompile.CheckResult {
     return precompile.runCheckOnlyFromSourceWithOptions(gpa, source, handler_path, .{
         .json_mode = true,
+        .policy_source = census_policy_source,
     });
 }
 

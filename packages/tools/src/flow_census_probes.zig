@@ -144,7 +144,7 @@ pub const Cell = struct { expect: Expect, reason: []const u8 };
 
 const reason_not_injection_sink =
     "user input in a log or a JSON response is not an injection sink by policy: injection_safe covers SQL, HTML and egress (docs/proofs-and-receipts.md:73)";
-const reason_clean = "the value comes from env(\"REGION\"), which carries no label, so no property is at risk";
+const reason_clean = "the value comes from env(\"REGION\"), which the census policy lists in env.public, so it carries no label and no property is at risk";
 
 /// Per (label, sink): what a probe must do when the labelled value really
 /// reaches the sink. Every label family has all seven sinks written out.

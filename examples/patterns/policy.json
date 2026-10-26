@@ -1,0 +1,6 @@
+{
+  "env": {
+    "allow": ["BYTES_SCOPE"],
+    "public": ["BYTES_SCOPE"]
+  }
+}

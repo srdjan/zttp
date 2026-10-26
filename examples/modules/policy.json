@@ -1,0 +1,6 @@
+{
+  "env": {
+    "allow": ["APP_NAME", "JWT_SECRET", "WEBHOOK_SECRET"],
+    "public": ["APP_NAME"]
+  }
+}

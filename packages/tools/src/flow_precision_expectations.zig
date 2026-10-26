@@ -12,6 +12,12 @@
 //! checker until it meets every expectation here with no exemption. Each
 //! difference from the old checker needs a written disposition first.
 //!
+//! Owner decision D3(a), 2026-10-21 (recorded as D-014): every literal `env()`
+//! name is secret unless the project policy lists it in `env.public`. An entry
+//! whose handler returns a non-secret env value therefore carries a
+//! `policy_source` that lists the name. No expectation is lowered: the policy
+//! restores the verdict the name heuristic gave before.
+//!
 //! The old checker must meet the expectations too, so this is a running test
 //! from the first commit. `old_checker_misses` is the only exemption table. It
 //! is empty today. Each row names a handler, a property, and a reason. A test
@@ -88,10 +94,29 @@ pub const Entry = struct {
     expect: Set,
     /// A SQL schema for a handler that registers `zttp:sql` queries.
     sql_schema_path: ?[]const u8 = null,
+    /// The capability policy the handler is checked under. A handler that
+    /// returns an `env(...)` value needs the policy that lists the name in
+    /// `env.public` (D-014); the expectation itself is not lowered.
+    policy_source: ?[]const u8 = null,
 };
 
 const corpus_root = "packages/tools/tests/fixtures/flow_precision/corpus/";
 const auth_root = "packages/tools/tests/fixtures/flow_precision/auth/";
+
+/// The policies that list the one non-secret name each handler below returns
+/// (D-014). The expectations stay as frozen; the handlers gain a policy.
+const modules_policy =
+    \\{"env":{"allow":["APP_NAME","WEBHOOK_SECRET"],"public":["APP_NAME"]}}
+;
+const bytes_scope_policy =
+    \\{"env":{"allow":["BYTES_SCOPE"],"public":["BYTES_SCOPE"]}}
+;
+const app_name_policy =
+    \\{"env":{"allow":["APP_NAME"],"public":["APP_NAME"]}}
+;
+const sibling_policy =
+    \\{"env":{"allow":["API_TOKEN","APP_NAME"],"public":["APP_NAME"]}}
+;
 
 /// Frozen. A change needs a commit message that gives the reason.
 const frozen_entry_count: usize = 48;
@@ -110,11 +135,11 @@ pub const entries = [_]Entry{
     .{ .path = "examples/handler/spec-fails-idempotent.ts", .expect = all },
     .{ .path = "examples/handler/spec-guardrails.ts", .expect = all },
     .{ .path = "examples/handler/sugar.ts", .expect = all_but_secret_credential },
-    .{ .path = "examples/modules/modules.ts", .expect = all },
-    .{ .path = "examples/modules/modules_all.ts", .expect = all_but_secret_credential },
+    .{ .path = "examples/modules/modules.ts", .expect = all, .policy_source = modules_policy },
+    .{ .path = "examples/modules-all/modules_all.ts", .expect = all_but_secret_credential },
     .{ .path = "examples/patterns/annotate-not-assert.ts", .expect = all },
     .{ .path = "examples/patterns/boundary-types.ts", .expect = all },
-    .{ .path = "examples/patterns/bytes-boundary.ts", .expect = all },
+    .{ .path = "examples/patterns/bytes-boundary.ts", .expect = all, .policy_source = bytes_scope_policy },
     .{ .path = "examples/patterns/derive-types.ts", .expect = all },
     .{ .path = "examples/patterns/discriminated-union-match.ts", .expect = all },
     .{ .path = "examples/patterns/infer-and-generics.ts", .expect = all },
@@ -128,7 +153,7 @@ pub const entries = [_]Entry{
     .{ .path = "examples/routing/api-surface.ts", .expect = all },
     .{ .path = "examples/routing/guard-flow.ts", .expect = all_but_secret_credential },
     .{ .path = "examples/routing/match-handler.ts", .expect = all },
-    .{ .path = "examples/routing/router.ts", .expect = all },
+    .{ .path = "examples/routing/router.ts", .expect = all, .policy_source = app_name_policy },
     .{ .path = "examples/sql/sql-crud.ts", .expect = all_but_secret_credential, .sql_schema_path = "examples/sql/schema.sql" },
     .{ .path = corpus_root ++ "cache-counter/handler.ts", .expect = all_but_secret_credential },
     .{ .path = corpus_root ++ "cache-counter-holes/handler.ts", .expect = all_but_secret_credential },
@@ -138,8 +163,8 @@ pub const entries = [_]Entry{
     .{ .path = corpus_root ++ "health-holes/handler.ts", .expect = all },
     .{ .path = corpus_root ++ "jwt-auth/handler.ts", .expect = all },
     .{ .path = corpus_root ++ "log-timestamp/handler.ts", .expect = all },
-    .{ .path = corpus_root ++ "sibling-helper/handler.ts", .expect = all },
-    .{ .path = corpus_root ++ "sibling-helper-holes/handler.ts", .expect = all },
+    .{ .path = corpus_root ++ "sibling-helper/handler.ts", .expect = all, .policy_source = sibling_policy },
+    .{ .path = corpus_root ++ "sibling-helper-holes/handler.ts", .expect = all, .policy_source = sibling_policy },
     .{ .path = corpus_root ++ "sql-users/handler.ts", .expect = all_but_secret_credential, .sql_schema_path = corpus_root ++ "sql-users/schema.sql" },
     .{ .path = corpus_root ++ "validate-body/handler.ts", .expect = all },
     // Owner-approved correction, 2026-10-20: validation does not contain PII
@@ -176,7 +201,7 @@ fn observe(allocator: std.mem.Allocator, entry: Entry) !Set {
         allocator,
         source,
         entry.path,
-        .{ .json_mode = true, .sql_schema_path = entry.sql_schema_path },
+        .{ .json_mode = true, .sql_schema_path = entry.sql_schema_path, .policy_source = entry.policy_source },
     );
     defer result.deinit(allocator);
 
@@ -300,9 +325,9 @@ const CorpusTally = struct {
 
 /// Run one case through the production check path. A read failure, a refused
 /// run, a missing flow stage, or missing properties counts as a source error.
-fn tallyCase(allocator: std.mem.Allocator, tally: *CorpusTally, name: []const u8, source: []const u8, path: []const u8, schema: ?[]const u8) void {
+fn tallyCase(allocator: std.mem.Allocator, tally: *CorpusTally, name: []const u8, source: []const u8, path: []const u8, schema: ?[]const u8, policy: ?[]const u8) void {
     tally.cases += 1;
-    var result = precompile.runCheckOnlyFromSourceWithOptions(allocator, source, path, .{ .json_mode = true, .sql_schema_path = schema }) catch |err| {
+    var result = precompile.runCheckOnlyFromSourceWithOptions(allocator, source, path, .{ .json_mode = true, .sql_schema_path = schema, .policy_source = policy }) catch |err| {
         std.debug.print("flow corpus: {s} failed to check: {s}\n", .{ name, @errorName(err) });
         tally.source_errors += 1;
         return;
@@ -330,7 +355,7 @@ test "the frozen corpus leaves no construct unresolved and has no source error" 
             continue;
         };
         defer allocator.free(source);
-        tallyCase(allocator, &tally, entry.path, source, entry.path, entry.sql_schema_path);
+        tallyCase(allocator, &tally, entry.path, source, entry.path, entry.sql_schema_path, entry.policy_source);
     }
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -342,7 +367,7 @@ test "the frozen corpus leaves no construct unresolved and has no source error" 
                 try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "schema.sql", .data = schema });
                 schema_path = try tmp.dir.realPathFileAlloc(std.testing.io, "schema.sql", allocator);
             }
-            tallyCase(allocator, &tally, fixture.name, fixture.source, "flow-false-proof.ts", schema_path);
+            tallyCase(allocator, &tally, fixture.name, fixture.source, "flow-false-proof.ts", schema_path, fixture.policy_source);
         }
     }
     try std.testing.expectEqual(frozen_corpus_cases, tally.cases);

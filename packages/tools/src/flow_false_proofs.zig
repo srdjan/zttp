@@ -44,6 +44,10 @@ pub const Fixture = struct {
     /// A SQL schema for a handler that registers `zttp:sql` queries. The check
     /// refuses such a handler without one (`MissingSqlSchema`).
     sql_schema: ?[]const u8 = null,
+    /// The capability policy the fixture is checked under. A contrast that reads
+    /// `env("REGION")` needs the policy that lists `REGION` in `env.public`
+    /// (D-014); without it the value is secret.
+    policy_source: ?[]const u8 = null,
 };
 
 /// The count of fixtures at the time this file was written. The floor makes a
@@ -445,12 +449,17 @@ pub const fixtures = [_]Fixture{
     },
 };
 
+/// The policy that lists the one non-secret env name the contrasts read.
+const region_public_policy =
+    \\{"env":{"allow":["REGION"],"public":["REGION"]}}
+;
+
 /// Clean contrasts. Each handler is the same shape as a fixture above with no
 /// labelled value on the path, and its property must stay proven. A fix that
 /// refuses every handler of a shape would otherwise pass the fixtures.
 pub const contrasts = [_]Fixture{
     // runtime: none.
-    .{ .name = "fetch_with_retry_clean_contrast", .property = .no_secret_leakage, .expected = .held, .source =
+    .{ .name = "fetch_with_retry_clean_contrast", .property = .no_secret_leakage, .expected = .held, .policy_source = region_public_policy, .source =
     \\import { env } from "zttp:env";
     \\import { fetchWithRetry } from "zttp:fetch";
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
@@ -459,7 +468,7 @@ pub const contrasts = [_]Fixture{
     \\}
     },
     // runtime: none.
-    .{ .name = "raw_json_clean_contrast", .property = .no_secret_leakage, .expected = .held, .source =
+    .{ .name = "raw_json_clean_contrast", .property = .no_secret_leakage, .expected = .held, .policy_source = region_public_policy, .source =
     \\import { env } from "zttp:env";
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
     \\  const region: string = env("REGION") ?? "";
@@ -468,7 +477,7 @@ pub const contrasts = [_]Fixture{
     \\}
     },
     // runtime: none.
-    .{ .name = "status_literal_clean_contrast", .property = .no_secret_leakage, .expected = .held, .source =
+    .{ .name = "status_literal_clean_contrast", .property = .no_secret_leakage, .expected = .held, .policy_source = region_public_policy, .source =
     \\import { env } from "zttp:env";
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
     \\  const region: string = env("REGION") ?? "";
@@ -500,7 +509,7 @@ fn observe(allocator: std.mem.Allocator, fixture: Fixture) !gate.Observed {
         allocator,
         fixture.source,
         "flow-false-proof.ts",
-        .{ .json_mode = true, .sql_schema_path = schema_path },
+        .{ .json_mode = true, .sql_schema_path = schema_path, .policy_source = fixture.policy_source },
     );
     defer result.deinit(allocator);
 

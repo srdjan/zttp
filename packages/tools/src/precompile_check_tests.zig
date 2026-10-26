@@ -8460,3 +8460,111 @@ test "prove-behavior: handlers that return a match diff equivalent with themselv
         try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, outcome.verdict);
     }
 }
+
+// D-014: every literal `env()` name is secret unless the policy lists it in
+// `env.public`. These tests run the production check path, with the policy as
+// the project would hand it over, and read the verdict the way a user does:
+// the `no_secret_leakage` property and the ZTS400 diagnostic.
+
+const env_leak_template =
+    \\import {{ env }} from "zttp:env";
+    \\
+    \\function handler(req: Request): Response {{
+    \\  return Response.json({{ v: env("{s}") ?? "" }});
+    \\}}
+;
+
+/// Whether the env name `name`, returned in a response, is refused under `policy`.
+fn envNameIsRefused(allocator: std.mem.Allocator, name: []const u8, policy: ?[]const u8) !bool {
+    const source = try std.fmt.allocPrint(allocator, env_leak_template, .{name});
+    defer allocator.free(source);
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "env-name.ts", .{
+        .json_mode = true,
+        .policy_source = policy,
+    });
+    defer result.deinit(allocator);
+    const properties = result.properties orelse return error.NoHandlerProperties;
+    const refused = hasDiagnosticCode(&result, "ZTS400");
+    // The verdict and the diagnostic must agree: a held property with ZTS400,
+    // or a refused one without it, is a defect of its own.
+    try std.testing.expectEqual(refused, !properties.no_secret_leakage);
+    return refused;
+}
+
+test "env: a name is refused with no policy, whatever its spelling" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "DB_PASS", "DATABASE_URL", "STRIPE_SK", "APP_NAME" }) |name| {
+        try std.testing.expect(try envNameIsRefused(allocator, name, null));
+    }
+}
+
+test "env: a name that the policy lists in env.public holds" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "DB_PASS", "DATABASE_URL", "STRIPE_SK", "APP_NAME" }) |name| {
+        const policy = try std.fmt.allocPrint(allocator, "{{\"env\":{{\"allow\":[\"{s}\"],\"public\":[\"{s}\"]}}}}", .{ name, name });
+        defer allocator.free(policy);
+        try std.testing.expect(!try envNameIsRefused(allocator, name, policy));
+    }
+}
+
+test "env: a policy that lists the name only in allow does not make it public" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try envNameIsRefused(allocator, "APP_NAME", "{\"env\":{\"allow\":[\"APP_NAME\"]}}"));
+    // Another name in public does not vouch for this one either.
+    try std.testing.expect(try envNameIsRefused(allocator, "APP_NAME", "{\"env\":{\"allow\":[\"APP_NAME\",\"PORT\"],\"public\":[\"PORT\"]}}"));
+}
+
+test "env: the public match is exact, so a different case is refused" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try envNameIsRefused(allocator, "APP_NAME", "{\"env\":{\"allow\":[\"app_name\"],\"public\":[\"app_name\"]}}"));
+}
+
+test "env: a computed name is refused even when every listed name is public" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zttp:env";
+        \\
+        \\function pick(): string { return "APP_NAME"; }
+        \\
+        \\function handler(req: Request): Response {
+        \\  const k = pick();
+        \\  return Response.json({ v: env(k) ?? "" });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "env-computed.ts", .{
+        .json_mode = true,
+        .policy_source = "{\"env\":{\"allow\":[\"APP_NAME\"],\"public\":[\"APP_NAME\"]}}",
+    });
+    defer result.deinit(allocator);
+    const properties = result.properties orelse return error.NoHandlerProperties;
+    try std.testing.expect(!properties.no_secret_leakage);
+    try std.testing.expect(hasDiagnosticCode(&result, "ZTS400"));
+}
+
+test "env: a policy that does not parse keeps every name secret" {
+    const allocator = std.testing.allocator;
+    try std.testing.expect(try envNameIsRefused(allocator, "APP_NAME", "{\"env\":{\"public\":[\"APP_NAME\"]}}"));
+}
+
+test "env: the contract discloses the public names, and a policy without them discloses none" {
+    const allocator = std.testing.allocator;
+    const source = try std.fmt.allocPrint(allocator, env_leak_template, .{"APP_NAME"});
+    defer allocator.free(source);
+
+    var with_public = try runCheckOnlyFromSourceWithOptions(allocator, source, "env-contract.ts", .{
+        .json_mode = true,
+        .policy_source = "{\"env\":{\"allow\":[\"APP_NAME\"],\"public\":[\"APP_NAME\"]}}",
+    });
+    defer with_public.deinit(allocator);
+    const disclosed = with_public.contract orelse return error.NoContract;
+    try std.testing.expectEqual(@as(usize, 1), disclosed.env.public.items.len);
+    try std.testing.expectEqualStrings("APP_NAME", disclosed.env.public.items[0]);
+
+    var allow_only = try runCheckOnlyFromSourceWithOptions(allocator, source, "env-contract.ts", .{
+        .json_mode = true,
+        .policy_source = "{\"env\":{\"allow\":[\"APP_NAME\"]}}",
+    });
+    defer allow_only.deinit(allocator);
+    const undisclosed = allow_only.contract orelse return error.NoContract;
+    try std.testing.expectEqual(@as(usize, 0), undisclosed.env.public.items.len);
+}

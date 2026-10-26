@@ -2964,6 +2964,66 @@ test "a build accepts the handler with no I/O and no capsule" {
     try std.testing.expectEqual(@as(usize, 1), probe.tail_calls);
 }
 
+const app_name_source =
+    \\import { env } from "zttp:env";
+    \\
+    \\function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+    \\  return Response.json({ app: env("APP_NAME") ?? "zttp" });
+    \\}
+;
+
+/// Build `app_name_source` as a project would, with the real compile and the
+/// real check, and the policy text that the project hands both of them.
+fn buildAppNameHandler(policy_text: []const u8) !usize {
+    const allocator = std.testing.allocator;
+    var policy = try zts.handler_policy.parsePolicyJson(allocator, policy_text);
+    defer policy.deinit(allocator);
+    var probe = BuildProbe{ .source = app_name_source };
+    var caps = probe.capabilities();
+    caps.compile = compileCapability;
+    caps.check = checkCapability;
+    _ = try runBuild(allocator, .{
+        .handler_path = "handler.ts",
+        .output_path = "out",
+        .policy = &policy,
+        .policy_source = policy_text,
+        .attest_requested = false,
+    }, caps);
+    return probe.tail_calls;
+}
+
+test "a build accepts a returned env value that the project policy lists in env.public" {
+    const tail_calls = try buildAppNameHandler("{\"env\":{\"allow\":[\"APP_NAME\"],\"public\":[\"APP_NAME\"]}}");
+    try std.testing.expectEqual(@as(usize, 1), tail_calls);
+}
+
+test "a build refuses the same handler when the project policy does not list the name in env.public" {
+    try std.testing.expectError(
+        error.ProofAcceptanceFailed,
+        buildAppNameHandler("{\"env\":{\"allow\":[\"APP_NAME\"]}}"),
+    );
+}
+
+test "two policies that differ only in env.public serialize the same runtime policy" {
+    const allocator = std.testing.allocator;
+    var compiled_source = try precompile.compileHandler(allocator, app_name_source, "handler.ts", .{ .emit_contract = true });
+    defer compiled_source.deinit(allocator);
+    const contract = compiled_source.contract orelse return error.TestUnexpectedResult;
+
+    var with_public = try zts.handler_policy.parsePolicyJson(allocator, "{\"env\":{\"allow\":[\"APP_NAME\"],\"public\":[\"APP_NAME\"]}}");
+    defer with_public.deinit(allocator);
+    var without_public = try zts.handler_policy.parsePolicyJson(allocator, "{\"env\":{\"allow\":[\"APP_NAME\"]}}");
+    defer without_public.deinit(allocator);
+
+    const first = zts.handler_policy.contractToRuntimePolicy(&contract, &with_public);
+    const second = zts.handler_policy.contractToRuntimePolicy(&contract, &without_public);
+    const first_bytes = try self_extract.serializePolicy(allocator, &first);
+    defer allocator.free(first_bytes);
+    const second_bytes = try self_extract.serializePolicy(allocator, &second);
+    defer allocator.free(second_bytes);
+    try std.testing.expectEqualSlices(u8, first_bytes, second_bytes);
+}
+
 test "a compile failure stops before the artifact is written" {
     var probe = BuildProbe{ .compile_error = error.ParseError };
     try std.testing.expectError(error.ParseError, runBuild(std.testing.allocator, .{
@@ -3058,8 +3118,8 @@ test "direct source contracts preserve certificate bytes and proof IR" {
     };
     try std.testing.expectEqual(@as(usize, 2), fixtures.len);
     const expected_certificates = [_]struct { len: usize, sha256: []const u8, proof_nodes: usize }{
-        .{ .len = 1349, .sha256 = "19fdf6d3350abd3bd8b42bfa37c4daeadb0eccb8030b5e783a12130f2938dc19", .proof_nodes = 5 },
-        .{ .len = 1729, .sha256 = "616bb7f81141a29154fc3cc779d04e368dd92aedae3bc6244f93ed61f1811476", .proof_nodes = 9 },
+        .{ .len = 1349, .sha256 = "cc451d7911effca36a31c1ece47b4b6c0b5067e25ef251d5f2eb05232d3ccb9e", .proof_nodes = 5 },
+        .{ .len = 1729, .sha256 = "57b647ba45ad70da509643db39040b9ce0df99a427808f525709f841bd2d5dd4", .proof_nodes = 9 },
     };
     for (fixtures, expected_certificates) |source, expected| {
         var direct: zts.DirectCheckSource = undefined;
@@ -3090,7 +3150,7 @@ test "direct source contracts preserve certificate bytes and proof IR" {
         var contract_digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(direct_json, &contract_digest, .{});
         const contract_hex = std.fmt.bytesToHex(contract_digest, .lower);
-        try std.testing.expectEqualStrings("da772f2bd137d38fb9920525290981ea77800009f648ddf9e38b93af85b11535", &contract_hex);
+        try std.testing.expectEqualStrings("5721b995fa28916b9f1cca2d3918a9eaa1575c42bfd1277ac7b205abd1ee514b", &contract_hex);
 
         // Contract parity is independent of compiler and certificate encoding.
         // Both certificate builds receive the same completed compilation.

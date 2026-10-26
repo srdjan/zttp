@@ -58,9 +58,11 @@ pub const DefectSeed = struct {
     ///
     /// The POL rules compare a handler's contract to an allow-list, so a seed
     /// for one has to carry the allow-list: there is no workspace behind these
-    /// drafts to discover it from. Null for every other seed, which is the
-    /// shape of a project that declares no policy, and leaves the POL rules
-    /// silent exactly as they are today.
+    /// drafts to discover it from. A seed whose baseline or drafts return an
+    /// `env(...)` value carries a policy that lists the name in `env.public`:
+    /// every literal env name is secret without it (D-014). Null for every
+    /// other seed, which is the shape of a project that declares no policy, and
+    /// leaves the POL rules silent exactly as they are today.
     policy_json: ?[]const u8 = null,
     /// SQL schema source for a seed whose drafts import `zttp:sql`.
     ///
@@ -258,12 +260,17 @@ const clean_literal_access =
     \\
 ;
 
+// Branches on the env value and does not return it. The ZTS602 seeds run with
+// no policy, because an `env` section would guard the computed name and stop
+// the rule from firing, so the value cannot be listed in `env.public` and a
+// returned value would be secret (D-014).
 const clean_literal_capability =
     \\import { env } from "zttp:env";
     \\
     \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const v = env("APP_NAME") ?? "x";
-    \\  return Response.json({ v: v });
+    \\  if (v === "x") { return Response.json({ configured: false }); }
+    \\  return Response.json({ configured: true });
     \\}
     \\
 ;
@@ -648,11 +655,19 @@ const clean_no_imports =
     \\
 ;
 
+/// The policy for a seed whose baseline or drafts return `env("APP_NAME")`.
+/// Every literal env name is secret unless the policy lists it in `env.public`
+/// (D-014), so without this row the baseline would fail with ZTS400.
+const app_name_public_policy =
+    \\{ "env": { "allow": ["APP_NAME"], "public": ["APP_NAME"] } }
+    \\
+;
+
 /// The allow-list the POL seeds below are measured against. One policy for all
 /// four, so a seed that trips its own category cannot be passing because the
 /// other three sections are absent.
 const pol_policy =
-    \\{ "env": { "allow": ["APP_NAME"] }, "egress": { "allow_endpoints": ["https://allowed.example.com"], "allow_address_scopes": ["public"] }, "cache": { "allow_namespaces": ["allowed_ns"] }, "sql": { "allow_queries": ["allowedQuery"] } }
+    \\{ "env": { "allow": ["APP_NAME"], "public": ["APP_NAME", "OTHER_NAME"] }, "egress": { "allow_endpoints": ["https://allowed.example.com"], "allow_address_scopes": ["public"] }, "cache": { "allow_namespaces": ["allowed_ns"] }, "sql": { "allow_queries": ["allowedQuery"] } }
     \\
 ;
 
@@ -852,6 +867,7 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .ask = "Fix the ZTS308 compiler error in handler.ts",
+        .policy_json = app_name_public_policy,
     },
     .{
         .id = "redundant-bool-compare",
@@ -1261,7 +1277,8 @@ pub const seeds = [_]DefectSeed{
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const v = env("APP_NAME") ?? "y";
-        \\  return Response.json({ v: v });
+        \\  if (v === "y") { return Response.json({ configured: false }); }
+        \\  return Response.json({ configured: true });
         \\}
         \\
         ,
@@ -1344,6 +1361,7 @@ pub const seeds = [_]DefectSeed{
         \\
         ,
         .ask = "Fix the ZTS309 compiler error in handler.ts",
+        .policy_json = app_name_public_policy,
     },
     .{
         .id = "missing-path-return",

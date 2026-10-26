@@ -93,7 +93,7 @@ run_tests_with_args "examples/handler/feature-probes.ts" "examples/handler/featu
 
 # modules/
 run_tests_with_args "examples/modules/modules.ts"      "examples/modules/modules.test.jsonl"
-run_tests_with_args "examples/modules/modules_all.ts"  "examples/modules/modules_all.test.jsonl"
+run_tests_with_args "examples/modules-all/modules_all.ts"  "examples/modules-all/modules_all.test.jsonl"
 
 # fetch/
 run_tests_with_args "examples/fetch/weather-forecasts.ts" "examples/fetch/weather-forecasts.test.jsonl"
@@ -146,7 +146,7 @@ check_excluded() {
         examples/handler/secret-leak.ts) return 0 ;;        # shows the ZTS400 refusal
         examples/handler/spec-fails-idempotent.ts) return 0 ;; # shows a declared proof that fails
         examples/autoloop/handler.ts) return 0 ;;           # insecure on purpose, for the repair demo
-        examples/modules/modules_all.ts) return 0 ;;        # returns a jwtSign token that flow labels secret (ZTS400)
+        examples/modules-all/modules_all.ts) return 0 ;;        # returns a jwtSign token that flow labels secret (ZTS400)
         examples/sql/sql-crud.ts) return 0 ;;               # needs --sql-schema, checked above
     esac
     return 1
