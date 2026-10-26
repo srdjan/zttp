@@ -14,3 +14,5 @@ The area imports the SDK contract. No import boundary applies because no current
 ## Decisions that bind here
 
 D-007
+
+D-013 permits one shared store: the `zttp:ratelimit` `RateStore`. A handler pool owns it and every access holds its mutex. It holds no JS value.

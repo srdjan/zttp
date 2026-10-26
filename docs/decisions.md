@@ -140,3 +140,14 @@ The reset removed second copies that could drift. `ModuleAnalysisSession.extract
 - Gate: zig build test-expert-app
 
 A change to a prompt, a seed, a tool output, or a wire byte moves the corpus identity and the recorded cassettes. It forces a paid DeepSeek re-record. The reset therefore stays offline: each phase proves that no golden, cassette, pin, or published evidence file moved. A change that would move one is recorded and held for one later re-record window, and no phase regenerates a golden to make a gate pass. This is Decision 2 of the reset plan, option (a), which the owner chose on 2026-10-25.
+
+## Runtime isolation
+
+### D-013 The rate-limit store is the one shared state between requests
+
+- Status: standing
+- Decided: 2026-10-26
+- Binds: packages/runtime/src/runtime_pool.zig, packages/runtime/src/handler_instance.zig, packages/modules/src/data/ratelimit.zig, AGENTS.md
+- Gate: zig build test-server
+
+Each runtime kept its own `zttp:ratelimit` counters, so a pool of N runtimes admitted about N times the configured limit, and each recycle reset the counters. The owner chose Decision 18 option (a) of the release fixes plan on 2026-10-26. Each `HandlerPool` now owns one `RateStore`, and every runtime of that pool uses it. This store is the one permitted exception to request isolation. It holds integer counters keyed by strings and never a JS value. Every access holds its mutex. The pool frees the store after its last runtime. The counters survive live reload and recycle. Two processes do not share them. `zttp:cache` stays per runtime.

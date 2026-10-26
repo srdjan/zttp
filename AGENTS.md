@@ -48,7 +48,7 @@ Run `deno task verify` before committing website changes. Commit locally and do 
 
 ## Security & Configuration Notes
 - Preserve path traversal checks in `packages/runtime/src/server_static.zig#resolveStaticFile`.
-- Runtime isolation depends on `HandlerPool`/`LockFreePool`; avoid introducing shared mutable state between requests.
+- Runtime isolation depends on `HandlerPool`/`LockFreePool`; avoid introducing shared mutable state between requests. The one exception is the per-pool `zttp:ratelimit` store (D-013): integer counters keyed by strings, never a JS value, every access under its mutex.
 
 ## Agent spine
 
