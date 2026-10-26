@@ -693,16 +693,13 @@ pub fn compileHandler(
             var fault_stamp = try stampFaultCoverage(allocator, ir_view_check, &gen, &fc);
             defer fault_stamp.deinit(allocator);
 
-            // The check path writes the record for every handler. This path
-            // writes it, and the property bit, only when a failable site or an
-            // incomplete analysis gives the record something to say. The cause
-            // is stamped the way the check path stamps it.
-            const stamp_fault = fc_report.total_failable > 0 or !gen.faultAnalysisComplete();
+            // The check path and this path write the record and the property
+            // bit for every handler. A handler with no failable site holds
+            // `fault_covered` when the analysis is complete. The cause is
+            // stamped the way the check path stamps it.
             if (contract) |*c| {
-                if (stamp_fault) {
-                    if (c.properties) |*props| props.fault_covered = fault_stamp.clean;
-                    c.fault_coverage = fault_stamp.coverage;
-                }
+                if (c.properties) |*props| props.fault_covered = fault_stamp.clean;
+                c.fault_coverage = fault_stamp.coverage;
                 c.property_provenance.fault_covered = fault_stamp.unseen_cause;
                 // The cause borrows its snippet, so the contract takes the
                 // allocation that backs it.
@@ -1696,6 +1693,32 @@ test "compileHandler stamps the fault coverage record, the property, and the cau
     // The cause names the unseen call, which sits on line 3 of the source.
     try std.testing.expectEqualStrings("jwtVerify", cause.snippet);
     try std.testing.expectEqual(@as(u32, 3), cause.line);
+}
+
+test "compileHandler and the check path both hold fault_covered for a handler with no failable site" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  if (req.path === "/health") {
+        \\    return Response.json({ ok: true });
+        \\  }
+        \\  return Response.text("Not Found", { status: 404 });
+        \\}
+    ;
+    var compiled = try compileHandler(allocator, source, "no-io.ts", .{ .emit_contract = true });
+    defer compiled.deinit(allocator);
+    const contract = &(compiled.contract orelse return error.TestUnexpectedResult);
+    const fc = contract.fault_coverage orelse return error.TestUnexpectedResult;
+    // The floor: the walk saw the handler and counted no failable site.
+    try std.testing.expectEqual(@as(u32, 0), fc.total_failable);
+    try std.testing.expect(fc.analysis_complete);
+    try std.testing.expect(fc.isCovered());
+    try std.testing.expect(contract.properties.?.fault_covered);
+
+    var checked = try runCheckOnlyFromSourceWithOptions(allocator, source, "no-io.ts", .{});
+    defer checked.deinit(allocator);
+    try std.testing.expect((checked.contract orelse return error.TestUnexpectedResult).properties.?.fault_covered);
+    try std.testing.expectEqual(@as(u32, 0), checked.totalErrors());
 }
 
 test "compileHandler and the check path agree on the fault coverage record" {

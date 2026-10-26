@@ -251,7 +251,14 @@ fn dupePathIoCall(
 /// because 3 had no failure path to hold `result_not_ok`. For a handler with
 /// none of these forms the paths are the same under 3 and 4, and only the
 /// policy hash differs. This has not been measured over every handler.
-pub const path_analyzer_version: u32 = 4;
+///
+/// 5 changes what `fault_covered` proves for a handler with no failable I/O
+/// site: it holds when the analysis is complete, where 4 required at least one
+/// site. The compile path also stamps the property and the fault record for
+/// every handler, as the check path does. A version 4 artifact under-claims
+/// `fault_covered` for a handler with no failable site, so it never claims a
+/// property that 5 refuses.
+pub const path_analyzer_version: u32 = 5;
 
 /// Methods tried in order for a path whose constraints name no method.
 const request_method_candidates = [_][]const u8{ "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS" };

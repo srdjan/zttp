@@ -1369,6 +1369,27 @@ test "a decoded fault coverage record without isCovered counts as complete" {
     try std.testing.expect(parsed.fault_coverage.?.isCovered());
 }
 
+test "a decoded zero-site fault coverage record keeps the verdict the writer stamped" {
+    const allocator = std.testing.allocator;
+    const holds =
+        \\{ "version": 1, "handler": { "path": "h.ts", "line": 1, "column": 1 },
+        \\  "faultCoverage": { "totalFailable": 0, "covered": 0, "warnings": 0, "isCovered": true } }
+    ;
+    var parsed_holds = try handler_contract.parseFromJson(allocator, holds);
+    defer parsed_holds.deinit(allocator);
+    try std.testing.expect(parsed_holds.fault_coverage.?.isCovered());
+
+    // A version 4 writer stamped false for zero sites. The decoded record
+    // must not turn that into a claim.
+    const stamped_false =
+        \\{ "version": 1, "handler": { "path": "h.ts", "line": 1, "column": 1 },
+        \\  "faultCoverage": { "totalFailable": 0, "covered": 0, "warnings": 0, "isCovered": false } }
+    ;
+    var parsed_false = try handler_contract.parseFromJson(allocator, stamped_false);
+    defer parsed_false.deinit(allocator);
+    try std.testing.expect(!parsed_false.fault_coverage.?.isCovered());
+}
+
 test "source identity rejects unknown profiles and malformed hashes" {
     const allocator = std.testing.allocator;
     const unknown_profile =

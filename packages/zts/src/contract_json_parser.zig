@@ -1315,7 +1315,7 @@ fn projectFaultCoverage(
         // incomplete (or an unseen call blocked it, which the record cannot
         // tell apart), so restore false and the decoded record writes the same
         // bytes it was read from. An absent key restores a complete analysis.
-        const counts_cover = covered == total and total > 0;
+        const counts_cover = covered == total;
         const written_covered = value.isCovered orelse true;
         break :blk .{
             .total_failable = total,

@@ -503,13 +503,17 @@ fn buildTrace(
                     trace.failable_sites = fc.total_failable;
                     trace.covered_sites = fc.covered;
                     trace.upstream_fallback_sites = fc.upstream_fallback_sites;
-                    if (holds) {
+                    if (holds and fc.total_failable == 0) {
+                        trace.summary = try arena.print("The property holds because the handler has no failable I/O site, across {d} enumerated path(s).", .{paths_enumerated});
+                    } else if (holds) {
                         trace.summary = try arena.print("All {d} failable I/O site(s) have an explicit failure path, across {d} enumerated path(s).", .{ fc.total_failable, paths_enumerated });
                         if (fc.upstream_fallback_sites > 0) {
                             trace.summary = try arena.print("{s} {d} upstream site(s) answer a failure with a 2xx status; each is covered and may be an intended fallback.", .{ trace.summary, fc.upstream_fallback_sites });
                         }
-                    } else if (fc.total_failable == 0) {
-                        trace.summary = "No failable I/O sites in this handler yet.";
+                    } else if (fc.total_failable == 0 and !fc.analysis_complete) {
+                        trace.summary = "No failable I/O site was counted, but the fault analysis is not complete (the enumerated paths are a summary, or a route dispatch did not resolve), so the property is not proven.";
+                    } else if (fc.total_failable == 0 and fc.unseen_calls == 0) {
+                        trace.summary = "The contract records no failable I/O site, but it does not claim the property.";
                     } else if (fc.covered == fc.total_failable and fc.warnings == 0 and !fc.analysis_complete) {
                         // Every counted site has a failure path, but the fault
                         // analysis is incomplete: the path set is a summary (a
@@ -887,6 +891,38 @@ test "an incomplete fault analysis is named even when the enumerated paths are e
     const text = summary orelse return error.TestUnexpectedResult;
     try testing.expect(std.mem.indexOf(u8, text, "fault analysis is not complete") != null);
     try testing.expect(std.mem.indexOf(u8, text, "route dispatch did not resolve") != null);
+}
+
+test "a handler with no failable site says the property holds because there is none" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var contract = handler_contract.emptyContract(try testing.allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(testing.allocator);
+    contract.properties = .{
+        .pure = true,
+        .read_only = true,
+        .stateless = true,
+        .retry_safe = true,
+        .deterministic = true,
+        .has_egress = false,
+        .fault_covered = true,
+    };
+    contract.fault_coverage = .{
+        .total_failable = 0,
+        .covered = 0,
+        .warnings = 0,
+        .analysis_complete = true,
+    };
+
+    const traces = try collect(arena.allocator(), &contract, &.{}, &.{}, undefined, 2, true);
+    var summary: ?[]const u8 = null;
+    for (traces) |trace| {
+        if (std.mem.eql(u8, trace.property, "fault_covered")) summary = trace.summary;
+    }
+    const text = summary orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.indexOf(u8, text, "has no failable I/O site") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "All 0") == null);
 }
 
 test "incomplete effect analysis does not claim observed or absent calls" {

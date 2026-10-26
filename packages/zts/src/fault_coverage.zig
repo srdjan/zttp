@@ -89,7 +89,7 @@ pub const FaultCoverageReport = struct {
     upstream_fallback_sites: u32 = 0,
 
     pub fn isCovered(self: FaultCoverageReport) bool {
-        return self.covered == self.total_failable and self.total_failable > 0;
+        return self.covered == self.total_failable;
     }
 
     pub fn isClean(self: FaultCoverageReport) bool {
@@ -716,14 +716,15 @@ test "a failable call in a position the walk cannot see blocks fault coverage" {
     try std.testing.expectEqual(@as(usize, 12), blocked);
 }
 
-test "empty test list produces empty report" {
+test "empty test list produces a report that holds vacuously" {
     const tests: []const GeneratedTest = &.{};
     var checker = FaultCoverageChecker.init(std.testing.allocator, tests);
     defer checker.deinit();
     try checker.analyze();
     const report = checker.getReport();
     try std.testing.expectEqual(@as(u32, 0), report.total_failable);
-    try std.testing.expect(!report.isCovered());
+    try std.testing.expect(report.isCovered());
+    try std.testing.expect(report.isClean());
 }
 
 test "critical failure with 2xx produces warning" {

@@ -427,7 +427,7 @@ pub const FaultCoverageInfo = struct {
     analysis_complete: bool,
 
     pub fn isCovered(self: FaultCoverageInfo) bool {
-        return self.covered == self.total_failable and self.total_failable > 0 and self.unseen_calls == 0 and self.analysis_complete;
+        return self.covered == self.total_failable and self.unseen_calls == 0 and self.analysis_complete;
     }
 };
 
