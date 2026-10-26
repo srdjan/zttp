@@ -12,7 +12,7 @@ execution record.
 |---|---|---|---|
 | 007 | [Every counted diagnostic is printed](../../advisor-plans/007-show-every-counted-diagnostic.md) | H4 | DONE |
 | 008 | [The handler deadline fires in callbacks and recursion](../../advisor-plans/008-deadline-on-calls.md) | H2 | DONE |
-| 009 | [One rate-limit store per handler pool](../../advisor-plans/009-one-rate-limit-store-per-process.md) | H5 | TODO |
+| 009 | [One rate-limit store per handler pool](../../advisor-plans/009-one-rate-limit-store-per-process.md) | H5 | DONE |
 | 010 | [SQL writes wait for a busy writer](../../advisor-plans/010-sqlite-waits-for-a-busy-writer.md) | M7 | TODO |
 | 011 | [The documented CLI flows work](../../advisor-plans/011-cli-flows-match-the-docs.md) | M3, M4, M5, low items | TODO |
 | 012 | [Claims say what they check](../../advisor-plans/012-claims-say-what-they-check.md) | M1; H1 and M2 interim | TODO |
@@ -58,3 +58,17 @@ Gates, each with exit 0: `zig fmt --check packages/zts/src packages/runtime/src`
 Bench: `bench-check` is load sensitive. At load 2.8 to 4.2 both the parent commit and this change failed on `intArithmetic` against the stale baseline (parent 17.60%, change 15.49%); on the next pair at load 4.2 both passed (parent geomean 0.98251, regression 1.75%; change geomean 0.99073, regression 0.93%). Per-row medians of 9 alternating `zig build bench` runs (parent worktree against this change, ms; ratio change/parent), two rounds on the final code: functionCalls 3.943/3.971 and 3.966/3.986 (1.007, 1.005); recursion 9.024/9.073 and 9.052/9.059 (1.005, 1.001); stringConcat 7.503/7.734 and 7.530/7.666 (1.031, 1.018, a row that never enters the changed path); every other row within 1.5%. A parent-against-parent control run showed at most 1.0% between arms. Residual: `stringConcat` stays 1.8% to 3.1% above the parent, probably a code layout effect of the extra branch in `callBytecodeFunction`; this needs an owner decision under the plan's 2% rule.
 
 Owner Decision 21 (a), 2026-10-26: accept the `stringConcat` row. The bench never arms a deadline, so the poll does not run there. Coordinator: `bash scripts/verify.sh` from an empty cache exited 0 at `a61e24b5`.
+
+### 009: one rate-limit store per handler pool
+
+Commits `1258db20` (release fix 009: record the per-pool rate store exception, D-013) and `942f3f7c` (release fix 009: one zttp:ratelimit store per handler pool). Owner Decision 18 (a): one shared store per pool, recorded as D-013 in `docs/decisions.md`, in `AGENTS.md`, and in `packages/modules/AGENTS.md`.
+
+Change: `RateStore` holds a `std.Io.Mutex` that `check` and `reset` lock. `HandlerPool` creates one store, puts its pointer in `RuntimeConfig.shared_rate_store`, and frees it in `deinit` after `pool.deinit()` destroys every runtime. `HandlerInstance.initFromPool` calls `zq.modules.ratelimit.installShared`, which fills the ratelimit slot through `installSdkModuleState` with a no-op deinit when the slot is empty. Scope additions beyond the plan list: `packages/zts/src/modules/data/ratelimit.zig` (the zts-side shim, in the pattern of `modules/data/sql.zig`), its export in `packages/zts/src/modules/root.zig`, and a row in `scripts/zts-tiers.allow`. The runtime package cannot name `RateStore` without that shim, and `runtime modules` already has a boundary row, so `scripts/module-boundary.allow` is unchanged.
+
+Plan deviation: the plan says sequential requests rotate through the pool slots. They do not. `LockFreePool.release` re-parks the runtime at the hint slot, so sequential requests reuse one runtime until it recycles after `max_requests` (64) requests; the release-review figure of 20 of 200 is four recycle windows of 5. The two tests in `packages/runtime/src/server_test.zig` therefore hold 4 runtimes at once through `acquireWorkerRuntime` and rotate 40 requests across them, and run 200 sequential requests across 3 recycles. Each expects exactly 5 admitted of limit 5. Without the `installShared` call both fail with `expected 5, found 20`.
+
+Probe (`zttp serve -n 4`, handler `rateCheck("k", 5, 60)`, 200 sequential `/usr/bin/curl` requests): before 20 admitted of 200, after 5 admitted of 200.
+
+Gates, each with exit 0: `zig fmt --check packages scripts`, `zig build test-modules`, `test-zts`, `test-zruntime`, `test-server`, `test-module-governance`, `test-flow-census`, `test-module-boundary`, `test-zts-layering`, `test-proof-swallow`, `test-docs-drift`, `test-doc-links`, `bench-check` (geomean 0.99321, regression 0.68%), `test`, and `git add -A && zig build check-spine`. `bash scripts/verify.sh` is left to the coordinator.
+
+Bench: no worktree was allowed, so the parent comparison used `git stash -u` in place. Per-row medians of `zig build bench`, change against parent: round 1 (5 runs each) every row within 1.4% except `intArithmetic` 1.023, `jsonOps` 1.020, `objectCreate` 1.020, `stringOps` 1.020; round 2 (parent 7 runs, change 14 runs) every row within 1.3% (0.969 to 1.012). The 2% rows of round 1 reversed or vanished in round 2, so they read as noise.
