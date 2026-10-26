@@ -19,6 +19,41 @@ overlapping plans at the same time.
 | [005](005-feature-removal-rebase.md) | Remove the features that do not carry the agent-compiler | P1 | XL | Phases 1 to 3 complete; Phase 4 closed by the 2026-10-14 reset (`ad1aa961` to `10115d98`); the 2026-10-25 reset plan is the active authority |
 | 006 (`pre-round-3-archive:advisor-plans/006-modular-boundaries.md`) | Make analysis and runtime ownership explicit | P1 | L | COMPLETE 2026-10-22; five phases reviewed, aggregate/full gate passed; isolated `codex/modular-boundaries` worktree |
 
+## Release fixes from the 2026-10-26 release review
+
+The release review of 2026-10-26 at `c1ecdf65` gave the verdict "not ready". Plans 007 to 014 close its findings. Execute them in this order unless a dependency says otherwise. Each plan names its gates and its STOP conditions.
+
+| Plan | Title | Finding | Priority | Effort | Depends on | Status |
+|---|---|---|---|---|---|---|
+| [007](007-show-every-counted-diagnostic.md) | Every error that check, test, and dev count is printed | H4 | P1 | S | none | TODO |
+| [008](008-deadline-on-calls.md) | The handler deadline fires in callbacks and recursion | H2 | P1 | S | none | TODO |
+| [009](009-one-rate-limit-store-per-process.md) | zttp:ratelimit counts across every runtime of a handler pool | H5 | P1 | M | Decision 18 | TODO |
+| [010](010-sqlite-waits-for-a-busy-writer.md) | Concurrent SQL writes wait for the lock instead of failing | M7 | P2 | S | none | TODO |
+| [011](011-cli-flows-match-the-docs.md) | The documented CLI flows work and fail clearly | M3, M4, M5, low items | P2 | M | 007 | TODO |
+| [012](012-claims-say-what-they-check.md) | Provenance and security claims say exactly what they check | M1; H1 and M2 interim | P1 | S | none | TODO |
+| [013](013-one-acceptance-rule-and-vacuous-fault-coverage.md) | An I/O-free handler is fault-covered, and deploy accepts what test accepts | H3 | P1 | M | Decisions 16 and 17; 007; re-record window | TODO |
+| U2 (`docs/plans/2026-10-21-soundness-plan.md`, section U2) | Every literal `env()` name is secret unless the policy lists it in `env.public` | H1 | P1 | M | re-record window | TODO; spec written at `ece05117` with line anchors, so its first step is a drift check against HEAD |
+| U3 (`docs/plans/2026-10-21-soundness-plan.md`, section U3) | `mask` declassifies only with a literal bound of 4 or less | M2 | P2 | S | re-record window | TODO; same drift check |
+| [014](014-release-prep-after-fixes.md) | The release record matches the code, and the evidence is current | M6 | P1 | S | every selected plan | TODO |
+
+Open owner decisions, each stated in its plan with options and a recommendation: 16 and 17 (plan 013), 18 (plan 009), 19 (plan 012), and 20 (plan 011).
+
+Dependency notes:
+- Plans 007 to 012 move no hashed policy surface and no recorded corpus. They can land before the re-record window.
+- Plan 013, U2, and U3 each move the policy hash. Run them in one re-record window (owner Decision 2, decision D-012) so that one owner-run DeepSeek re-record covers all three. The U2 and U3 spec predates Zig 0.17.0 and 216 later commits; its semantics still match the code (`flow_interp.zig` `declaredLabels`, `flow_analyzer_version` 7), but its anchors do not.
+- Plan 011 follows plan 007 because both edit `packages/tools/src/precompile_check.zig`. Plan 013 reuses the printing from plan 007.
+- Plans 008, 009, 010, and 011 all edit `docs/reliability.md`, and 008 to 011 add tests to `packages/runtime/src/server_test.zig`. Run them in sequence on local `main`, not in parallel worktrees.
+- Plan 014 runs last, because `zig build release-provenance` accepts evidence only when nothing but the four evidence files changed after its source commit.
+
+Review record: on 2026-10-26 a Fable critic and a Codex astra fact-checker reviewed these plans. The plans fold in their corrections: plan 009 uses the existing `installSdkModuleState` mechanism instead of a new `Context` field; plan 008 also keeps the timeout identity through JSX components; plan 011 tests the port fix on Linux before adopting it; plan 013 adds an example census before Decision 17; the U2 and U3 rows are added. One correction was rejected after probing: recovered admission diagnostics and import errors already print in human mode, so plan 007 keeps its scope. The dated measurements in plans 008 to 010 (67 s, 20 of 200, 36 of 80) are observations from the 2026-10-26 release-review probes; no transcript is kept in the repository, so each plan's verification step measures them again.
+
+Considered and rejected:
+- H3 option (b), leaving `fault_covered` out of the default profile only for zero-site handlers: an explicit `fault_covered` claim would stay refused.
+- H5 with a module-level global store in `ratelimit.zig`: it hides shared state from the runtime and shares counters between unrelated test runtimes.
+- H5 with a new `Context` field and SDK accessor: the existing pre-install mechanism does the same without a hot-struct change.
+- A shared `zttp:cache` in this series: plan 009 documents per-runtime cache semantics instead.
+- Hosted CI: removed by decision in commit `78ac1611`; `scripts/release.sh` is the release gate.
+
 Plan 002's cutover half is superseded: the default provider moved to DeepSeek on
 2026-08-14. Its measurement half stands. The parked local corpus (16 of 19 cases)
 was deleted in round 3 and stays at the `pre-round-3-archive` tag.
