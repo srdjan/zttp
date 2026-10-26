@@ -69,10 +69,10 @@ pub fn writeBundle(allocator: std.mem.Allocator, args: BundleArgs, stdout: *std.
         return error.MissingOutArg;
     }
 
-    if (args.contract_path.len > 0) try rejectSuspiciousPath(args.contract_path);
-    if (args.binary_path) |p| try rejectSuspiciousPath(p);
-    if (args.replay_path) |p| try rejectSuspiciousPath(p);
-    try rejectSuspiciousPath(args.out_dir);
+    if (args.contract_path.len > 0) try rejectSuspiciousPath(stderr, "bundle", args.contract_path);
+    if (args.binary_path) |p| try rejectSuspiciousPath(stderr, "bundle", p);
+    if (args.replay_path) |p| try rejectSuspiciousPath(stderr, "bundle", p);
+    try rejectSuspiciousPath(stderr, "bundle", args.out_dir);
 
     // Read and classify the artifact before creating the output directory. A
     // predecessor artifact is a rebuild request, not a hash-only bundle, and
@@ -245,7 +245,7 @@ pub fn verify(
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !void {
-    try rejectSuspiciousPath(bundle_dir_path);
+    try rejectSuspiciousPath(stderr, "verify", bundle_dir_path);
 
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
@@ -777,10 +777,16 @@ fn parseSha256(value: []const u8) ?[64]u8 {
     return result;
 }
 
-fn rejectSuspiciousPath(path: []const u8) !void {
+fn rejectSuspiciousPath(stderr: *std.Io.Writer, command: []const u8, path: []const u8) !void {
     if (path.len == 0) return;
-    if (std.mem.indexOf(u8, path, "..") != null) return error.SuspiciousPath;
-    if (std.mem.startsWith(u8, path, "/etc/") or std.mem.startsWith(u8, path, "/var/")) return error.SuspiciousPath;
+    const refused = std.mem.indexOf(u8, path, "..") != null or
+        std.mem.startsWith(u8, path, "/etc/") or std.mem.startsWith(u8, path, "/var/");
+    if (!refused) return;
+    try stderr.print(
+        "zttp proofs {s}: refusing path '{s}': paths under /etc/ or /var/, or containing '..', are not accepted\n",
+        .{ command, path },
+    );
+    return error.SuspiciousPath;
 }
 
 fn ensureDir(allocator: std.mem.Allocator, path: []const u8) !void {
@@ -808,11 +814,38 @@ test "sha256Hex of empty buffer matches known digest" {
 }
 
 test "rejectSuspiciousPath blocks parent traversal and system roots" {
-    try std.testing.expectError(error.SuspiciousPath, rejectSuspiciousPath("../etc/passwd"));
-    try std.testing.expectError(error.SuspiciousPath, rejectSuspiciousPath("/etc/shadow"));
-    try std.testing.expectError(error.SuspiciousPath, rejectSuspiciousPath("/var/log/whatever"));
-    try rejectSuspiciousPath("contract.json");
-    try rejectSuspiciousPath("./out/bundle");
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    const w = &err.writer;
+    try std.testing.expectError(error.SuspiciousPath, rejectSuspiciousPath(w, "bundle", "../etc/passwd"));
+    try std.testing.expectError(error.SuspiciousPath, rejectSuspiciousPath(w, "bundle", "/etc/shadow"));
+    try std.testing.expectError(error.SuspiciousPath, rejectSuspiciousPath(w, "bundle", "/var/log/whatever"));
+    try rejectSuspiciousPath(w, "bundle", "contract.json");
+    try rejectSuspiciousPath(w, "bundle", "./out/bundle");
+}
+
+test "bundle and verify name a refused path on stderr" {
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+
+    try std.testing.expectError(error.SuspiciousPath, writeBundle(std.testing.allocator, .{
+        .contract_path = "contract.json",
+        .out_dir = "/var/folders/xy/T/tmp.abc/b",
+    }, &out.writer, &err.writer));
+    try std.testing.expectEqualStrings(
+        "zttp proofs bundle: refusing path '/var/folders/xy/T/tmp.abc/b': paths under /etc/ or /var/, or containing '..', are not accepted\n",
+        err.writer.buffered(),
+    );
+
+    var verify_err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer verify_err.deinit();
+    try std.testing.expectError(error.SuspiciousPath, verify(std.testing.allocator, "../b", false, &out.writer, &verify_err.writer));
+    try std.testing.expectEqualStrings(
+        "zttp proofs verify: refusing path '../b': paths under /etc/ or /var/, or containing '..', are not accepted\n",
+        verify_err.writer.buffered(),
+    );
 }
 
 test "bundle manifest accepts only supported names and lowercase digests" {
