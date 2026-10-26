@@ -342,6 +342,40 @@ pub fn isSecretPath(path: []const u8) bool {
     return false;
 }
 
+/// The `env.public` names of the project policy that governs `path`, parsed
+/// once. A bare `FlowChecker` takes them so an expert tool reaches the verdict
+/// the production check and the veto reach (D-014). No project, no policy, an
+/// unreadable policy, or a policy that does not parse gives no names, which
+/// keeps every `env` name secret; the production check reports the failure.
+pub const ProjectEnvPublic = struct {
+    policy: ?zts.HandlerPolicy = null,
+
+    pub fn names(self: *const ProjectEnvPublic) []const []const u8 {
+        return if (self.policy) |*policy| policy.envPublic() else &.{};
+    }
+
+    pub fn deinit(self: *ProjectEnvPublic, allocator: std.mem.Allocator) void {
+        if (self.policy) |*policy| policy.deinit(allocator);
+        self.policy = null;
+    }
+};
+
+pub fn discoverEnvPublic(allocator: std.mem.Allocator, path: []const u8) !ProjectEnvPublic {
+    const root = try workspaceRoot(allocator);
+    defer allocator.free(root);
+    const absolute = resolveInsideWorkspace(allocator, root, path) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return .{},
+    };
+    defer allocator.free(absolute);
+    const policy_source = zts_cli.edit_simulate.discoverProjectPolicySource(allocator, absolute) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return .{},
+    } orelse return .{};
+    defer allocator.free(policy_source);
+    return .{ .policy = zts.handler_policy.parsePolicyJsonOrNull(allocator, policy_source) };
+}
+
 /// An in-process analyzer run shaped as a finished child process, so a tool
 /// keeps its `commandOutcomeToToolResult` output. Copies both streams.
 pub fn inProcessOutcome(

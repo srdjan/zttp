@@ -65,6 +65,13 @@ pub fn renderFromSource(
     var project_paths = try zts_cli.edit_simulate.discoverProjectPaths(allocator, source_path);
     defer project_paths.deinit(allocator);
     const sql_schema_path = project_paths.sqlite;
+    // The project policy, so an `env.public` name is judged here as the veto
+    // judges it (D-014).
+    const policy_source: ?[]u8 = if (project_paths.policy) |policy_path|
+        try zts.file_io.readFile(allocator, policy_path, 1024 * 1024)
+    else
+        null;
+    defer if (policy_source) |bytes| allocator.free(bytes);
     // The analyzer's own failures are results, not Zig errors leaving the tool.
     // `MissingSqlSchema` used to escape `execute` and reach the autoloop as an
     // aborting error and the model as opaque text with no frames.
@@ -75,6 +82,7 @@ pub fn renderFromSource(
         .{
             .sql_schema_path = sql_schema_path,
             .json_mode = true,
+            .policy_source = policy_source,
         },
     ) catch |err| {
         return registry_mod.ToolResult.errFmt(

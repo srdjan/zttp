@@ -75,9 +75,12 @@ pub fn run(
         );
     };
 
+    var env_public = try common.discoverEnvPublic(allocator, path);
+    defer env_public.deinit(allocator);
     var checker = zts.FlowChecker.init(allocator, ir_view, &atoms);
     defer checker.deinit();
     checker.scopes = &js_parser.scopes;
+    checker.env_public = env_public.names();
     _ = checker.check(handler_fn) catch |e| {
         return registry_mod.ToolResult.errFmt(
             allocator,

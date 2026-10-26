@@ -149,9 +149,12 @@ pub fn planFromSource(
     defer verifier.deinit();
     _ = try verifier.verify(handler_fn);
 
+    var env_public = try common.discoverEnvPublic(allocator, rel_path);
+    defer env_public.deinit(allocator);
     var checker = zts.FlowChecker.init(allocator, ir_view, &atoms);
     defer checker.deinit();
     checker.scopes = &js_parser.scopes;
+    checker.env_public = env_public.names();
     _ = try checker.check(handler_fn);
 
     var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
@@ -603,4 +606,69 @@ test "planFromSource is not ok while a requested goal is unproven" {
     var result = try planFromSource(testing.allocator, source, "handler.ts", &.{"pii_contained"});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
+}
+
+const zts_expert_narrow = @import("zts_expert_narrow.zig");
+
+/// Run the three expert tools on `app_name_handler` in a fresh workspace whose
+/// `zttp.json` names `policy_text`, and report what each one says about
+/// `no_secret_leakage`.
+const ToolVerdicts = struct {
+    goal_check_ok: bool,
+    repair_plan_ok: bool,
+    narrow_reports_witness: bool,
+    production_proves: bool,
+};
+
+const app_name_handler =
+    \\import { env } from "zttp:env";
+    \\
+    \\function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+    \\  return Response.json({ app: env("APP_NAME") ?? "zttp" });
+    \\}
+    \\
+;
+
+fn toolVerdictsUnder(policy_text: []const u8) !ToolVerdicts {
+    const allocator = testing.allocator;
+    var tree = try IsolatedTmp.init(allocator, "expert-tools-env-public");
+    defer tree.cleanup(allocator);
+    try tree.writeFile(allocator, "zttp.json", "{\"policy\":\"policy.json\"}");
+    try tree.writeFile(allocator, "policy.json", policy_text);
+    try tree.writeFile(allocator, "handler.ts", app_name_handler);
+
+    const saved_cwd = try cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+    try std.Io.Threaded.chdir(tree.abs_path);
+
+    var goal_check = try pi_goal_check.evaluateSource(allocator, app_name_handler, "handler.ts", &.{"no_secret_leakage"});
+    defer goal_check.deinit(allocator);
+    var plan = try planFromSource(allocator, app_name_handler, "handler.ts", &.{"no_secret_leakage"});
+    defer plan.deinit(allocator);
+    var narrow = try zts_expert_narrow.run(allocator, "handler.ts");
+    defer narrow.deinit(allocator);
+    const unproven = try pi_goal_check.unprovenGoals(allocator, app_name_handler, "handler.ts", &.{.no_secret_leakage});
+    defer allocator.free(unproven);
+
+    return .{
+        .goal_check_ok = goal_check.ok,
+        .repair_plan_ok = plan.ok,
+        .narrow_reports_witness = std.mem.indexOf(u8, narrow.llm_text, "\"property\":\"no_secret_leakage\"") != null,
+        .production_proves = unproven.len == 0,
+    };
+}
+
+test "the expert tools agree with the production check on a public env name" {
+    const listed = try toolVerdictsUnder("{\"env\":{\"allow\":[\"APP_NAME\"],\"public\":[\"APP_NAME\"]}}");
+    try testing.expect(listed.production_proves);
+    try testing.expect(listed.goal_check_ok);
+    try testing.expect(listed.repair_plan_ok);
+    try testing.expect(!listed.narrow_reports_witness);
+
+    const unlisted = try toolVerdictsUnder("{\"env\":{\"allow\":[\"APP_NAME\"]}}");
+    try testing.expect(!unlisted.production_proves);
+    try testing.expect(!unlisted.goal_check_ok);
+    try testing.expect(!unlisted.repair_plan_ok);
+    try testing.expect(unlisted.narrow_reports_witness);
 }

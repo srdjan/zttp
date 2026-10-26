@@ -47,8 +47,8 @@ pub const tool: registry_mod.ToolDef = .{
     \\executable counterexample witnesses for the goals that are violated.
     \\
     \\Supported goals:
-    \\  - no_secret_leakage    (env vars with SECRET/PASSWORD/KEY/TOKEN
-    \\                          names must not reach response bodies,
+    \\  - no_secret_leakage    (env values, unless the policy lists the
+    \\                          name in env.public, must not reach response bodies,
     \\                          logs, or external egress)
     \\  - no_credential_leakage (Authorization headers and JWT payloads
     \\                          must not reach response bodies or logs)
@@ -223,9 +223,12 @@ fn evaluateSourceWithTags(
         );
     };
 
+    var env_public = try common.discoverEnvPublic(allocator, path);
+    defer env_public.deinit(allocator);
     var checker = zts.FlowChecker.init(allocator, ir_view, &atoms);
     defer checker.deinit();
     checker.scopes = &js_parser.scopes;
+    checker.env_public = env_public.names();
     _ = checker.check(handler_fn) catch |e| {
         return registry_mod.ToolResult.errFmt(
             allocator,

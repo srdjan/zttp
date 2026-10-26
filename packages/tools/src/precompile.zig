@@ -404,7 +404,8 @@ pub fn compileHandler(
     var result_safe: bool = false;
     var optional_safe: bool = false;
     const handler_fn = zts.findHandlerFunction(ir_view_check, root);
-    try analysis.prepareChecked(handler_fn, .{ .module_facts = try analysis.facts() });
+    const env_public: []const []const u8 = if (policy) |*configured| configured.envPublic() else &.{};
+    try analysis.prepareChecked(handler_fn, .{ .module_facts = try analysis.facts(), .env_public = env_public });
     if (emit_verify) {
         if (handler_fn) |hf| {
             const error_count = try analysis.runVerifier(hf);
@@ -620,6 +621,7 @@ pub fn compileHandler(
             );
         }
         try validateContractPolicyInputs(allocator, filename, &contract.?, sql_schema_path, policy);
+        try precompile_contract_mod.disclosePublicEnv(allocator, &contract.?, env_public);
 
         // Inject verification-derived properties (Checks 2, 6, 7)
         if (contract.?.properties) |*props| {
@@ -1049,6 +1051,66 @@ test "compileHandler aggregates contract across file imports" {
     const contract = compiled.contract orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(usize, 1), contract.env.literal.items.len);
     try std.testing.expectEqualStrings("JWT_SECRET", contract.env.literal.items[0]);
+}
+
+test "compileHandler proves no_secret_leakage for a name only when the policy lists it in env.public" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zttp:env";
+        \\
+        \\function handler(req: Request): Response {
+        \\  return Response.text(env("APP_NAME") ?? "zttp");
+        \\}
+    ;
+
+    var allow_only = try handler_policy.parsePolicyJson(allocator, "{\"env\":{\"allow\":[\"APP_NAME\"]}}");
+    defer allow_only.deinit(allocator);
+    var refused = try compileHandler(allocator, source, "handler.ts", .{ .emit_contract = true, .policy = allow_only });
+    defer refused.deinit(allocator);
+    const refused_contract = refused.contract orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!refused_contract.properties.?.no_secret_leakage);
+    try std.testing.expectEqual(@as(usize, 0), refused_contract.env.public.items.len);
+
+    var listed = try handler_policy.parsePolicyJson(allocator, "{\"env\":{\"allow\":[\"APP_NAME\"],\"public\":[\"APP_NAME\"]}}");
+    defer listed.deinit(allocator);
+    var held = try compileHandler(allocator, source, "handler.ts", .{ .emit_contract = true, .policy = listed });
+    defer held.deinit(allocator);
+    const held_contract = held.contract orelse return error.TestUnexpectedResult;
+    try std.testing.expect(held_contract.properties.?.no_secret_leakage);
+    try std.testing.expectEqual(@as(usize, 1), held_contract.env.public.items.len);
+    try std.testing.expectEqualStrings("APP_NAME", held_contract.env.public.items[0]);
+
+    // No policy at all is the conservative case.
+    var bare = try compileHandler(allocator, source, "handler.ts", .{ .emit_contract = true });
+    defer bare.deinit(allocator);
+    try std.testing.expect(!bare.contract.?.properties.?.no_secret_leakage);
+}
+
+test "compileHandler discloses env.public in the merged contract of a file-import graph" {
+    const entry_source =
+        \\import { readName } from "./dep.ts";
+        \\export function handler(req) {
+        \\  return Response.text(readName());
+        \\}
+    ;
+    const dep_source =
+        \\import { env } from "zttp:env";
+        \\export function readName() {
+        \\  return env("APP_NAME") ?? "";
+        \\}
+    ;
+    var fixture = try CompileGraphFixture.init("entry.ts", entry_source);
+    defer fixture.deinit();
+    try fixture.add("dep.ts", dep_source);
+
+    const allocator = std.testing.allocator;
+    var policy = try handler_policy.parsePolicyJson(allocator, "{\"env\":{\"allow\":[\"APP_NAME\"],\"public\":[\"APP_NAME\"]}}");
+    defer policy.deinit(allocator);
+    var compiled = try fixture.compile(.{ .emit_contract = true, .policy = policy });
+    defer compiled.deinit(allocator);
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), contract.env.public.items.len);
+    try std.testing.expectEqualStrings("APP_NAME", contract.env.public.items[0]);
 }
 
 test "compileHandler keeps merged properties null after loaded graph effects" {

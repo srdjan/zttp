@@ -134,6 +134,24 @@ pub fn reportCompletedFlow(
     if (fresh and !builtin.is_test and flow_errors == 0) debugPrint("Flow analysis passed\n", .{});
 }
 
+/// Disclose the policy's `env.public` names in the contract `env` object, so a
+/// reader of the contract can see which names the `no_secret_leakage` verdict
+/// took as non-secret (D-014). Replaces what the contract held; an empty list
+/// leaves `env.public` empty and the writer omits it.
+pub fn disclosePublicEnv(
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+    env_public: []const []const u8,
+) !void {
+    for (contract.env.public.items) |name| allocator.free(name);
+    contract.env.public.clearRetainingCapacity();
+    try contract.env.public.ensureTotalCapacity(allocator, env_public.len);
+    for (env_public) |name| {
+        const owned = try allocator.dupe(u8, name);
+        contract.env.public.appendAssumeCapacity(owned);
+    }
+}
+
 pub fn validateContractPolicyInputs(
     allocator: std.mem.Allocator,
     filename: []const u8,
@@ -153,6 +171,8 @@ fn buildContractOnlyFromParsed(
     sql_schema_path: ?[]const u8,
     manifest_registry: ?*const zts.ManifestRegistry,
 ) !HandlerContract {
+    // This path has no policy, so `env_public` stays empty and every literal
+    // `env` name is secret: the verdict is conservative, never optimistic.
     var analysis: zts.pipeline.ModuleAnalysisSession = .{};
     try analysis.initContractOnly(
         allocator,
@@ -267,6 +287,10 @@ pub fn buildMultiModuleContract(
     if (policy_checked) {
         if (!builtin.is_test) debugPrint("Capability policy check passed\n", .{});
     }
+
+    // No flow pass ran over the merged graph, so `properties` stays null here;
+    // the names are still disclosed so the contract matches the single-module one.
+    if (policy) |*configured| try disclosePublicEnv(allocator, &merged, configured.envPublic());
 
     return merged;
 }

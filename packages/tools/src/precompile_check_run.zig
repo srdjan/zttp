@@ -534,6 +534,18 @@ fn runCheckOnParsedSource(
         zts.pipeline.ParsedModule.fromExisting(ir_view, root, atoms);
     parsed.scopes = &js_parser.scopes;
 
+    // The policy is parsed once and stays alive for the whole analysis: the
+    // declared sections and the `env.public` names both come from it, and the
+    // flow checker borrows the names. A policy that does not parse yields
+    // neither, which keeps every `env` name secret; `appendPolicyDiagnostics`
+    // reports the parse failure.
+    var live_policy: ?zts.HandlerPolicy = if (opts.policy_source) |policy_source|
+        zts.handler_policy.parsePolicyJsonOrNull(allocator, policy_source)
+    else
+        null;
+    defer if (live_policy) |*policy| policy.deinit(allocator);
+    const env_public: []const []const u8 = if (live_policy) |*policy| policy.envPublic() else &.{};
+
     var analysis: zts.pipeline.ModuleAnalysisSession = .{};
     try analysis.initFull(
         allocator,
@@ -545,10 +557,7 @@ fn runCheckOnParsedSource(
             // Which sections the project's policy declares, so a computed
             // capability resource gets the diagnostic that matches what the
             // author has actually written.
-            .policy_sections = if (opts.policy_source) |policy_source|
-                zts.handler_policy.declaredSectionsFromJson(allocator, policy_source)
-            else
-                .{},
+            .policy_sections = if (live_policy) |*policy| policy.declaredSections() else .{},
             .select_verifier = !skip_contract,
             .select_flow = !skip_contract,
         },
@@ -680,6 +689,7 @@ fn runCheckOnParsedSource(
             .flow_modules = graph.views.items,
             .flow_initialization_order = graph.initialization_order.items,
             .flow_modules_complete = graph.complete,
+            .env_public = env_public,
         });
         _ = try analysis.runVerifier(hf);
         _ = try analysis.runFlow(hf);
@@ -761,6 +771,7 @@ fn runCheckOnParsedSource(
         },
     );
     try validateContractPolicyInputs(allocator, handler_path, &result.contract.?, sql_schema_path, null);
+    try contract_mod.disclosePublicEnv(allocator, &result.contract.?, env_public);
     result.stages_run.insert(.contract);
 
     // Stage 8b: capability policy. Reported, not thrown.
