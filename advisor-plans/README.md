@@ -36,7 +36,7 @@ The release review of 2026-10-26 at `c1ecdf65` gave the verdict "not ready". Pla
 | U3 (`docs/plans/2026-10-21-soundness-plan.md`, section U3) | `mask` declassifies only with a literal bound of 4 or less | M2 | P2 | S | re-record window | TODO; same drift check |
 | [014](014-release-prep-after-fixes.md) | The release record matches the code, and the evidence is current | M6 | P1 | S | every selected plan | TODO |
 
-Open owner decisions, each stated in its plan with options and a recommendation: 16 and 17 (plan 013), 18 (plan 009), 19 (plan 012), and 20 (plan 011).
+Owner decisions: on 2026-10-26 the owner chose option (a) for Decisions 16 to 20. The units are promoted to `docs/plans/2026-10-26-release-fixes-plan.md`, which holds the execution record.
 
 Dependency notes:
 - Plans 007 to 012 move no hashed policy surface and no recorded corpus. They can land before the re-record window.

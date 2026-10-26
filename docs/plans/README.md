@@ -6,6 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Release fixes, 2026-10-26](2026-10-26-release-fixes-plan.md) | Active authority for the release-review fixes; units 007 to 014, U2, and U3; execution record in the same file | Owner chose option (a) for Decisions 16 to 20 with "as recommended" on 2026-10-26 |
 | [Reset implementation, 2026-10-25](2026-10-25-reset-implementation-plan.md) | Reset authority; complete through R13, 2026-10-25; open owner decisions are in the [roadmap](../roadmap.md) | Owner approved R0 to R13 with "as recommended" (Decisions 1 to 5, option a), chose Decision 6 (a), and chose option (a) for Decisions 8 to 11 on 2026-10-26 |
 | [Eager recycle rebuild](2026-10-25-eager-recycle-rebuild-plan.md) | Plan 2026-10-25; the worker builds the replacement runtime after the response is sent; this index records no completion | Owner chose Decision 3 option A on 2026-10-25 |
 | [Zig book hardening](2026-10-25-zig-book-hardening-plan.md) | Plan 2026-10-25; the worklog records the execution and lists open items (a ZTS200 alias-chain cost and a `bench-check` failure under host load) | Owner chose 1a; slot-buffer reuse waits for the recycle p99 |

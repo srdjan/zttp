@@ -16,12 +16,12 @@ Plans that the reset archived stay readable at the local tag `pre-reset-archive-
 The [2026-10-14 reset plan](plans/2026-10-14-reset-implementation-plan.md) is also complete (U1 to U20) and is not an authority.
 
 Open owner decisions after the reset:
-- Decision 2 (batched re-record window, D-012 in [decisions.md](decisions.md)). Model-visible changes wait for one window. The window holds the R7c move of the three pi tools onto the production session, the missing-type location of R4 row 18, and the deferred H10 and U12 defaults.
+- Decision 2 (batched re-record window, D-012 in [decisions.md](decisions.md)). Model-visible changes wait for one window. The window holds the R7c move of the three pi tools onto the production session, the missing-type location of R4 row 18, and the deferred H10 and U12 defaults, and units 013, U2, and U3 of the [release fixes plan](plans/2026-10-26-release-fixes-plan.md).
 - Release provenance. `release-provenance` failed at the reset baseline because `docs/coverage.json` was stale. An offline republish of `docs/convergence.json` and `docs/coverage.json` is the remedy. The owner or coordinator runs it.
 
 The owner decided Decisions 8 to 11 on 2026-10-26; the [reset worklog](plans/2026-10-25-reset-worklog.md) records each result.
 
-Next work: the owner picks the date of the re-record window. No feature work starts before that decision.
+Next work: units 007 to 012 of the [release fixes plan](plans/2026-10-26-release-fixes-plan.md), in order. The owner picks the date of the re-record window. No feature work starts before that decision.
 
 M1, M2, and M3 are complete.
 M4 is complete: T1a to T7 were delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 2 later removed both runtime products. No release date is assigned.
