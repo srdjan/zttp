@@ -624,7 +624,9 @@ const app_name_handler =
     \\import { env } from "zttp:env";
     \\
     \\function handler(req: Request): Proof<Response, "no_secret_leakage"> {
-    \\  return Response.json({ app: env("APP_NAME") ?? "zttp" });
+    \\  const name = env("APP_NAME");
+    \\  if (name === undefined) { return Response.json({ ok: false }); }
+    \\  return Response.json({ app: name });
     \\}
     \\
 ;

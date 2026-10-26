@@ -806,6 +806,8 @@ test "simulate preserves sibling module proof context" {
         .file = handler_path,
         .content = after,
         .before = before,
+        // `displayName` returns `APP_NAME`, so the policy lists it in `env.public`.
+        .policy_source = "{\"env\":{\"allow\":[\"API_TOKEN\",\"APP_NAME\"],\"public\":[\"APP_NAME\"]}}",
     });
     defer result.deinit(std.testing.allocator);
 
