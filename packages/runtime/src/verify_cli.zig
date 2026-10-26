@@ -140,7 +140,7 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     if (opts.json_output) {
         try writeClaimsJson(allocator, opts.url, &result, pinned);
     } else {
-        try writeClaimsHuman(opts.url, &result, pinned);
+        try writeClaimsHuman(allocator, opts.url, &result, pinned);
     }
     return exit_ok;
 }
@@ -200,13 +200,13 @@ fn fetchAttestHeader(
 // manual end-to-end runs documented in the slice-1 spec.
 
 fn renderClaimsHuman(
-    buffer: []u8,
+    allocator: std.mem.Allocator,
     url: []const u8,
     result: *const envelope.VerifyResult,
     pinned: bool,
-) std.fmt.BufPrintError![]const u8 {
-    return std.fmt.bufPrint(
-        buffer,
+) std.mem.Allocator.Error![]u8 {
+    return std.fmt.allocPrint(
+        allocator,
         \\{s}: {s}
         \\{s}  signed_at is the signer's own claim; no host is bound to this claim.
         \\  This checks provenance, not proof. The endpoint returns a signed
@@ -252,9 +252,9 @@ fn renderClaimsHuman(
     );
 }
 
-fn writeClaimsHuman(url: []const u8, result: *const envelope.VerifyResult, pinned: bool) !void {
-    var buf: [4096]u8 = undefined;
-    const out = renderClaimsHuman(&buf, url, result, pinned) catch return;
+fn writeClaimsHuman(allocator: std.mem.Allocator, url: []const u8, result: *const envelope.VerifyResult, pinned: bool) !void {
+    const out = try renderClaimsHuman(allocator, url, result, pinned);
+    defer allocator.free(out);
     try writeAllFd(std.c.STDOUT_FILENO, out);
 }
 
@@ -466,8 +466,8 @@ test "renderClaimsHuman keeps static guarded categories separate from claimed ch
     };
     defer result.deinit();
 
-    var buffer: [4096]u8 = undefined;
-    const out = try renderClaimsHuman(&buffer, "https://example.test", &result, false);
+    const out = try renderClaimsHuman(testing.allocator, "https://example.test", &result, false);
+    defer testing.allocator.free(out);
     try testing.expectEqualStrings(
         "Signature valid against the key the endpoint supplied (key not pinned): https://example.test\n" ++
             "  pin it with --trust-key <fingerprint>\n" ++
@@ -494,7 +494,8 @@ test "renderClaimsHuman keeps static guarded categories separate from claimed ch
     );
 
     result.claims.guarded_categories = "env,egress,cache,sql";
-    const guarded = try renderClaimsHuman(&buffer, "https://example.test", &result, false);
+    const guarded = try renderClaimsHuman(testing.allocator, "https://example.test", &result, false);
+    defer testing.allocator.free(guarded);
     try testing.expectEqualStrings(
         "Signature valid against the key the endpoint supplied (key not pinned): https://example.test\n" ++
             "  pin it with --trust-key <fingerprint>\n" ++
@@ -521,6 +522,39 @@ test "renderClaimsHuman keeps static guarded categories separate from claimed ch
     );
 }
 
+test "renderClaimsHuman renders in full past 4096 bytes" {
+    const testing = std.testing;
+    const long = try testing.allocator.alloc(u8, 5000);
+    defer testing.allocator.free(long);
+    @memset(long, 'x');
+    var result = envelope.VerifyResult{
+        .claims = .{
+            .contract_sha256 = &@as([64:0]u8, @splat('a')),
+            .bytecode_sha256 = &@as([64:0]u8, @splat('b')),
+            .policy_sha256 = &@as([64:0]u8, @splat('c')),
+            .capability_hash = &@as([64:0]u8, @splat('d')),
+            .core_profile_id = "zts-model-1",
+            .core_grammar_sha256 = &@as([64:0]u8, @splat('1')),
+            .semantics_sha256 = &@as([64:0]u8, @splat('2')),
+            .compiler_version = "test",
+            .signed_at_unix = 7,
+            .property_summary = long,
+            .guarded_categories = "",
+            .routes_count = 1,
+        },
+        .public_key = @as([std.crypto.sign.Ed25519.PublicKey.encoded_length]u8, @splat(0)),
+        .fingerprint_hex = @splat('f'),
+        .arena = std.heap.ArenaAllocator.init(testing.allocator),
+    };
+    defer result.deinit();
+
+    const out = try renderClaimsHuman(testing.allocator, "https://example.test", &result, false);
+    defer testing.allocator.free(out);
+    try testing.expect(out.len > 4096);
+    try testing.expect(std.mem.indexOf(u8, out, long) != null);
+    try testing.expect(std.mem.endsWith(u8, out, "faultCovered=false\n"));
+}
+
 test "a pinned key is reported as pinned in human and JSON output" {
     const testing = std.testing;
     var result = envelope.VerifyResult{
@@ -544,8 +578,8 @@ test "a pinned key is reported as pinned in human and JSON output" {
     };
     defer result.deinit();
 
-    var buffer: [4096]u8 = undefined;
-    const human = try renderClaimsHuman(&buffer, "https://example.test", &result, true);
+    const human = try renderClaimsHuman(testing.allocator, "https://example.test", &result, true);
+    defer testing.allocator.free(human);
     try testing.expect(std.mem.startsWith(
         u8,
         human,
