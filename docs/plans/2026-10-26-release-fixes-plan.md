@@ -13,7 +13,7 @@ execution record.
 | 007 | [Every counted diagnostic is printed](../../advisor-plans/007-show-every-counted-diagnostic.md) | H4 | DONE |
 | 008 | [The handler deadline fires in callbacks and recursion](../../advisor-plans/008-deadline-on-calls.md) | H2 | DONE |
 | 009 | [One rate-limit store per handler pool](../../advisor-plans/009-one-rate-limit-store-per-process.md) | H5 | DONE |
-| 010 | [SQL writes wait for a busy writer](../../advisor-plans/010-sqlite-waits-for-a-busy-writer.md) | M7 | TODO |
+| 010 | [SQL writes wait for a busy writer](../../advisor-plans/010-sqlite-waits-for-a-busy-writer.md) | M7 | DONE |
 | 011 | [The documented CLI flows work](../../advisor-plans/011-cli-flows-match-the-docs.md) | M3, M4, M5, low items | TODO |
 | 012 | [Claims say what they check](../../advisor-plans/012-claims-say-what-they-check.md) | M1; H1 and M2 interim | TODO |
 | 013 | [Vacuous fault coverage and one acceptance rule](../../advisor-plans/013-one-acceptance-rule-and-vacuous-fault-coverage.md) | H3 | TODO; re-record window |
@@ -72,3 +72,15 @@ Probe (`zttp serve -n 4`, handler `rateCheck("k", 5, 60)`, 200 sequential `/usr/
 Gates, each with exit 0: `zig fmt --check packages scripts`, `zig build test-modules`, `test-zts`, `test-zruntime`, `test-server`, `test-module-governance`, `test-flow-census`, `test-module-boundary`, `test-zts-layering`, `test-proof-swallow`, `test-docs-drift`, `test-doc-links`, `bench-check` (geomean 0.99321, regression 0.68%), `test`, and `git add -A && zig build check-spine`. `bash scripts/verify.sh` is left to the coordinator.
 
 Bench: no worktree was allowed, so the parent comparison used `git stash -u` in place. Per-row medians of `zig build bench`, change against parent: round 1 (5 runs each) every row within 1.4% except `intArithmetic` 1.023, `jsonOps` 1.020, `objectCreate` 1.020, `stringOps` 1.020; round 2 (parent 7 runs, change 14 runs) every row within 1.3% (0.969 to 1.012). The 2% rows of round 1 reversed or vanished in round 2, so they read as noise.
+
+Coordinator: `bash scripts/verify.sh` from an empty cache exited 0 at `d0b56950`.
+
+### 010: SQL writes wait for a busy writer
+
+Commit `323f4539` (release fix 010: SQLite connections wait for a busy writer).
+
+Step 1: a scratch print of `sqlite3_extended_errcode` in `zttpSdkSqliteStmtErrmsg` (discarded) showed `extended_errcode=5 errcode=5`, which is `SQLITE_BUSY`, on every failed write. Probe (`zttp serve examples/sql/sql-crud.ts -n 4 --sqlite <db>`, 80 concurrent POST requests): before 75, 73, and 74 of 80 returned 201, and the rest returned 500 (3 runs). After: 80 of 80 returned 201 in 3 runs, and 200 of 200 with 8 workers. WAL was not needed, so the commit does not enable it and leaves no `-wal` or `-shm` file.
+
+Change: `Db.openReadWriteCreate` calls `sqlite3_busy_timeout(handle, busy_timeout_ms)` with 5000 ms after open and closes the handle on error. The docs say so in `docs/reliability.md` and the `--sqlite` row of `docs/user-guide.md`. Plan deviation: the test sits beside the code in `packages/zts/src/sqlite.zig`, because `packages/runtime` tests do not import the SQLite wrapper and `packages/zts` tests run in `zig build test-zts`. It holds a `BEGIN IMMEDIATE` on one connection, writes from a second connection on another thread, commits after 200 ms, and expects the write to succeed. With the timeout set to 0 it fails with `expected null, found error.SqliteExecFailed`.
+
+Gates, each with exit 0: `zig fmt --check packages/zts/src/sqlite.zig`, `zig build test-zts`, `test-modules`, `test-zruntime`, `test-server`, `test-examples`, `test-module-boundary`, `test-proof-swallow`, `test-docs-drift`, `test-doc-links`, `test`, and `git add <paths> && zig build check-spine`. `bash scripts/verify.sh` is left to the coordinator.
