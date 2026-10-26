@@ -123,7 +123,7 @@ pub const CheckResult = struct {
     /// capsule ZTS500/502, ZTS606, and the error-level Effects diagnostics
     /// (ZTS503/504/506/607). Warning-level entries are excluded so an
     /// over-declared `Effects<...>` ceiling never fails a build.
-    fn specErrors(self: *const CheckResult) u32 {
+    pub fn specErrors(self: *const CheckResult) u32 {
         const contract = if (self.contract) |*c| c else return 0;
         var n: u32 = 0;
         for (contract.spec_diagnostics.items) |d| {

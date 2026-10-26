@@ -25,6 +25,7 @@ const proof_ledger = @import("proof_ledger.zig");
 const project_config_mod = @import("project_config");
 const retired_authority = project_config_mod.retired_authority;
 const cli_paths = @import("cli_paths.zig");
+const cli_doctor = @import("cli_doctor.zig");
 const resolveRuntimeBinary = cli_paths.resolveRuntimeBinary;
 
 const no_attest_flag: []const u8 = "--no-attest";
@@ -978,6 +979,9 @@ pub const BuildCapabilities = struct {
     context: ?*anyopaque = null,
     read_source: *const fn (?*anyopaque, std.mem.Allocator, []const u8) anyerror![]u8 = readSourceCapability,
     compile: *const fn (?*anyopaque, std.mem.Allocator, BuildCompileInput) anyerror!precompile.CompiledHandler = compileCapability,
+    /// Runs the same analysis as `zttp check` and returns its count of spec
+    /// errors, so that a build refuses what `zttp check` and `zttp test` refuse.
+    check: *const fn (?*anyopaque, std.mem.Allocator, BuildCompileInput) anyerror!u32 = checkCapability,
     resolve_runtime_binary: *const fn (?*anyopaque, std.mem.Allocator) anyerror![]const u8 = resolveRuntimeBinaryCapability,
     write_tail: *const fn (?*anyopaque, std.mem.Allocator, ArtifactTailInput) anyerror!void = writeTailCapability,
     codesign: *const fn (?*anyopaque, std.mem.Allocator, []const u8) void = codesignCapability,
@@ -1007,6 +1011,24 @@ fn compileCapability(
         .sql_schema_path = input.sql_schema_path,
         .policy = if (input.policy) |policy| policy.* else null,
     });
+}
+
+/// The acceptance rule comes from the check path alone.
+fn checkCapability(
+    _: ?*anyopaque,
+    allocator: std.mem.Allocator,
+    input: BuildCompileInput,
+) anyerror!u32 {
+    var check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, input.source, input.handler_path, .{
+        .sql_schema_path = input.sql_schema_path,
+    });
+    defer check.deinit(allocator);
+    const spec_errors = check.specErrors();
+    if (spec_errors > 0 and !builtin.is_test) {
+        cli_doctor.printCheckStageFailures(&check, "  ");
+        cli_doctor.printCheckFailureSections(allocator, &check, input.handler_path);
+    }
+    return spec_errors;
 }
 
 fn resolveRuntimeBinaryCapability(_: ?*anyopaque, allocator: std.mem.Allocator) anyerror![]const u8 {
@@ -1064,15 +1086,17 @@ fn runBuild(
     };
     defer allocator.free(source);
 
-    std.log.info("Compiling {s}...", .{handler_path});
-    shared.step("Compiling handler...");
-
-    var compiled = caps.compile(caps.context, allocator, .{
+    const compile_input: BuildCompileInput = .{
         .source = source,
         .handler_path = handler_path,
         .sql_schema_path = request.sql_schema_path,
         .policy = request.policy,
-    }) catch |err| {
+    };
+
+    std.log.info("Compiling {s}...", .{handler_path});
+    shared.step("Compiling handler...");
+
+    var compiled = caps.compile(caps.context, allocator, compile_input) catch |err| {
         // precompile already prints per-error lines to stderr; only surface
         // the remediation hint so the dev knows where to look.
         std.debug.print(
@@ -1095,6 +1119,19 @@ fn runBuild(
     if (compiled.bytecode.len == 0) {
         std.log.err("No bytecode generated", .{});
         return error.NoBytecode;
+    }
+
+    // After the compile, so that a parse or type error prints once. The compile
+    // path derives its own contract and never gates on spec diagnostics.
+    const spec_errors = try caps.check(caps.context, allocator, compile_input);
+    if (spec_errors > 0) {
+        std.debug.print(
+            \\
+            \\Aborted: {s} has {d} spec error(s) that `zttp check` also reports. No binary was written.
+            \\Fix the errors above, or declare a narrow Proof capsule with only the properties the handler holds.
+            \\
+        , .{ handler_path, spec_errors });
+        return error.ProofAcceptanceFailed;
     }
 
     const retired_input: ArtifactTailInput = .{
@@ -2640,6 +2677,8 @@ const BuildProbe = struct {
 
     read_calls: usize = 0,
     compile_calls: usize = 0,
+    check_calls: usize = 0,
+    spec_errors: u32 = 0,
     resolve_calls: usize = 0,
     tail_calls: usize = 0,
     codesign_calls: usize = 0,
@@ -2659,6 +2698,12 @@ const BuildProbe = struct {
         const self = of(context);
         self.read_calls += 1;
         return allocator.dupe(u8, self.source);
+    }
+
+    fn check(context: ?*anyopaque, _: std.mem.Allocator, _: BuildCompileInput) anyerror!u32 {
+        const self = of(context);
+        self.check_calls += 1;
+        return self.spec_errors;
     }
 
     fn compile(
@@ -2727,6 +2772,7 @@ const BuildProbe = struct {
             .context = self,
             .read_source = readSource,
             .compile = compile,
+            .check = check,
             .resolve_runtime_binary = resolveRuntime,
             .write_tail = writeTail,
             .codesign = codesign,
@@ -2839,6 +2885,65 @@ test "a build with no contract embeds none and records no ledger row" {
     try std.testing.expectEqual(@as(usize, 0), probe.ledger_calls);
     try std.testing.expect(!receipt.has_contract);
     try std.testing.expect(!receipt.ledger_recorded);
+}
+
+test "a spec error from the check stops the build before the artifact is written" {
+    var probe = BuildProbe{ .spec_errors = 1 };
+    try std.testing.expectError(error.ProofAcceptanceFailed, runBuild(std.testing.allocator, .{
+        .handler_path = "handler.ts",
+        .output_path = "out",
+        .attest_requested = true,
+    }, probe.capabilities()));
+
+    try std.testing.expectEqual(@as(usize, 1), probe.check_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.resolve_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.tail_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.codesign_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.ledger_calls);
+}
+
+test "a build refuses a handler that breaks its own declared capsule" {
+    var probe = BuildProbe{
+        .source =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.json({ now: Date.now() });
+        \\}
+        ,
+    };
+    var caps = probe.capabilities();
+    caps.check = checkCapability;
+    try std.testing.expectError(error.ProofAcceptanceFailed, runBuild(std.testing.allocator, .{
+        .handler_path = "handler.ts",
+        .output_path = "out",
+        .attest_requested = true,
+    }, caps));
+
+    try std.testing.expectEqual(@as(usize, 1), probe.compile_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.tail_calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.resolve_calls);
+}
+
+test "a build accepts the handler with no I/O and no capsule" {
+    var probe = BuildProbe{
+        .source =
+        \\function handler(req: Request): Response {
+        \\  if (req.path === "/health") {
+        \\    return Response.json({ ok: true });
+        \\  }
+        \\  return Response.text("Not Found", { status: 404 });
+        \\}
+        ,
+    };
+    var caps = probe.capabilities();
+    caps.check = checkCapability;
+    _ = try runBuild(std.testing.allocator, .{
+        .handler_path = "handler.ts",
+        .output_path = "out",
+        .attest_requested = true,
+    }, caps);
+
+    try std.testing.expectEqual(@as(usize, 1), probe.compile_calls);
+    try std.testing.expectEqual(@as(usize, 1), probe.tail_calls);
 }
 
 test "a compile failure stops before the artifact is written" {
