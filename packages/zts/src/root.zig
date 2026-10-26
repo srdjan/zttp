@@ -681,6 +681,9 @@ test "DiagnosticProjection exposes stable tagged checker codes" {
 pub const SpecDiagnostic = handler_contract.SpecDiagnostic;
 pub const writeContractJson = handler_contract.writeContractJson;
 pub const HandlerPolicy = handler_policy.HandlerPolicy;
+/// The policy a source parses to, or null when it does not parse. Expert tools
+/// read `env.public` from it without reaching the internal `handler_policy` module.
+pub const parsePolicyJsonOrNull = handler_policy.parsePolicyJsonOrNull;
 pub const RuntimePolicy = handler_policy.RuntimePolicy;
 pub const PolicyInput = policy.PolicyInput;
 pub const PolicyResult = policy.PolicyResult;

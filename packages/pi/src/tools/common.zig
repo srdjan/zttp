@@ -373,7 +373,7 @@ pub fn discoverEnvPublic(allocator: std.mem.Allocator, path: []const u8) !Projec
         else => return .{},
     } orelse return .{};
     defer allocator.free(policy_source);
-    return .{ .policy = zts.handler_policy.parsePolicyJsonOrNull(allocator, policy_source) };
+    return .{ .policy = zts.parsePolicyJsonOrNull(allocator, policy_source) };
 }
 
 /// An in-process analyzer run shaped as a finished child process, so a tool
