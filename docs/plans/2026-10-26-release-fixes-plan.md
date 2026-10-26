@@ -47,7 +47,7 @@ Coordinator: `bash scripts/verify.sh` from an empty cache exited 0 at `b0b392af`
 
 ### 008: the handler deadline fires in callbacks and recursion
 
-Commit: see `git log --grep "release fix 008"` (one commit, subject "release fix 008: poll the request deadline at call entry").
+Commit `a61e24b5` (release fix 008: poll the request deadline at call entry).
 
 Change: `callBytecodeFunction` polls the deadline at call entry through the out-of-line `pollDeadlineAtCall`, behind `deadline_ns != 0` and `@branchHint(.unlikely)`. `checkDeadline` is `pub`. `renderNode` in `packages/zts/src/http.zig` keeps `RequestTimeout` (the `RenderError` set gained it). Plan deviations: the poll body sits in a `noinline` helper that returns `bool`, because the inline form moved unrelated bench rows by 2% to 3% (layout effect); `nested map callbacks time out` nests `map` three deep over a 100-element array literal, because `range()` is a lazy iterator with no `map`, `Array.from(range(n))` is refused with `HandlerTypeFault`, and an array literal of 255 or more elements fails with `HandlerError`.
 
@@ -56,3 +56,5 @@ New tests in `packages/runtime/src/server_test.zig`, each with `request_timeout_
 Gates, each with exit 0: `zig fmt --check packages/zts/src packages/runtime/src`, `zig build test-zts`, `test-server`, `test-zruntime`, `test-panic-isolation`, `test-docs-drift`, `test-doc-links`, `test`, `check-spine`, `bench-check`. `bash scripts/verify.sh` is left to the coordinator.
 
 Bench: `bench-check` is load sensitive. At load 2.8 to 4.2 both the parent commit and this change failed on `intArithmetic` against the stale baseline (parent 17.60%, change 15.49%); on the next pair at load 4.2 both passed (parent geomean 0.98251, regression 1.75%; change geomean 0.99073, regression 0.93%). Per-row medians of 9 alternating `zig build bench` runs (parent worktree against this change, ms; ratio change/parent), two rounds on the final code: functionCalls 3.943/3.971 and 3.966/3.986 (1.007, 1.005); recursion 9.024/9.073 and 9.052/9.059 (1.005, 1.001); stringConcat 7.503/7.734 and 7.530/7.666 (1.031, 1.018, a row that never enters the changed path); every other row within 1.5%. A parent-against-parent control run showed at most 1.0% between arms. Residual: `stringConcat` stays 1.8% to 3.1% above the parent, probably a code layout effect of the extra branch in `callBytecodeFunction`; this needs an owner decision under the plan's 2% rule.
+
+Owner Decision 21 (a), 2026-10-26: accept the `stringConcat` row. The bench never arms a deadline, so the poll does not run there. Coordinator: `bash scripts/verify.sh` from an empty cache exited 0 at `a61e24b5`.
