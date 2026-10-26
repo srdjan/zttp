@@ -239,3 +239,20 @@ Interleaved runs of `bench-check` on R0 (`f52d8e4a`) and `main`, load 2.2: R0 fa
 | `httpHandler` | 6,443,298 | 6,393,861 | -0.8% |
 
 The `intArithmetic` row runs for about 2.4 ms, and the two ranges overlap (R0 19.07M to 23.07M, `main` 18.72M to 20.06M). Both medians are 13% to 15% below the baseline of 22,967,386, so R0 also misses the 8% limit on this host in its median. The measured reset effect is -2.0% on one row and no change beyond 0.8% on the others. The R5 exit condition ("`bench-check` stays within its limits") is not met on this host, and it is not met at R0 either. No baseline file is changed (`benchmarks/perf-baseline.json` is protected).
+
+## R10c
+
+| Commit | Phase | Result |
+|---|---|---|
+| `54038dcd` | R10c-1 | `effect_inference`: `collectFunctionsIn` and `registerModuleBindings` keep their scope boundaries as named arms (`if_stmt`, `for_of_stmt`, `function_expr`, `arrow_function`, and `block` for bindings), and their default arms descend through `IrView.expressionChildren`. |
+| `08c6bd8e` | R10c-2 | `path_generator`: the default arm of `walkPaths` descends. The tags that reach it today hold nothing to walk. |
+| `7fda3441` | R10c-3 | `type_checker`: `walkStmt` descends; `admitTypePredicates` keeps its module-level boundary arms and descends. |
+
+No migration: `flow_interp` (its interpreter names every tag or refuses, and `bindPattern` is a pattern boundary), `handler_verifier` (its fact walks already descend), and `type_env` (a classifier). Classifiers and recognizers that return a conservative constant keep their defaults.
+Opus review: `collectFunctionsIn` records each function by its binding (scope and slot), so the wider descent cannot confuse two functions with the same name.
+Stopped by the stop rule, not committed, for owner Decision 11 (class B):
+- `contract_builder.scanFunctionNodeForApiFacts` dropped spread operands. For a route that returns `Response.json({ ...{ auth: req.headers["authorization"] } })`, `contract.json` lists no header parameter before and lists `authorization` after.
+- `strict_checker.collectStaticLiterals` (and two sibling collectors) descend with the statement-only `forEachChild`. For `xs.map((x: number): number => { const k = "a"; return o[k]; })`, ZTS605 is reported before and not after; the same code at top level is accepted before and after. The change removes a refusal.
+Both inputs were written for the probe. The corpus, the goldens, and the digests do not move with either patch. The patches and inputs are kept outside the repository under the reset scratch directory (`r10c-stopped`).
+Gates on `main`, each exit 0: `test-zts`, `test-flow-census` (734 match, 0 fail-open, 0 over-refusal), `test-standin`, `test-diagnostic-corpus`, `test-proof-swallow`, `test-contract-golden`, `test-precompile`, `test-expert-app`, `test-zts-layering`, `test-cli`, `test-zruntime`, `check-spine`. Fresh-cache aggregate: 211/211 steps, 7809/7815 passed (6 skipped), unchanged. Digests: byte-identical. Protection against `7e86feb7`: exit 0.
+Not in scope: `bool_checker.walkStmt` has the same `else => {}` default; `bool_checker` is not in the R10 file list.
