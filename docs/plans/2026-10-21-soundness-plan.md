@@ -106,3 +106,43 @@ Docs: AGENTS.md:141 declassifier rule (integer literal <= declassify_bound_max; 
 
 ## Gates (both units, unfiltered, redirected, exit status read directly)
 test-zts, test-modules, test-sdk, test-precompile, test-flow-census, test-diagnostic-corpus, test-standin, test-contract-golden, test-expert-golden, test-meta-drift, test-docs-drift, test-module-audit, test-zts-cli, test-cli, test-examples, test-expert-app (EXPECTED to fail only with StaleCodegenCassette in the codegen replay test; any other failure is a defect), then the main session runs zig build test, test-zruntime, check-spine. release-provenance stays red (evidence republish is out of scope).
+
+## Validation corrections for U2 and U3 (2026-10-26; override the text above)
+
+Two reviewers checked the U2 and U3 spec against HEAD `00f5621a` (235 commits after `e5de5586`): a Fable critic for the argument and a Codex astra fact-checker for every location. The full fact table is not tracked; the implementer re-reads each location at HEAD before editing. Cite locations by path and symbol, never by line.
+
+Window and order:
+- Owner Decision 22 (a), 2026-10-26: units 013, U2, and U3 land in one re-record window (D-012), as sequential commits on local `main`, then one owner-run DeepSeek re-record. U2 lands before U3. The landing instruction "land now" (D6(a)) is superseded by D-012.
+- The re-record must follow the last model-visible change. Seed `policy_json` edits and the expert-tool fix below are model-visible, so they land before the re-record.
+- Decision ledger: the U2 decision is D-014 and the U3 decision is D-015 (D-010 to D-013 are taken).
+- `EXPECTED_POLICY_HASH` in `scripts/check-meta-drift.sh` reads `policy-hash.txt`; there is no separate literal. Re-pin `policy-hash.txt` and the other pins that their failing tests print.
+- Area invariants in `packages/zts/AGENTS.md` are authored text that `tooling/agent_spine.zig` reads; `check-spine -- --write` regenerates only the marked tables.
+
+U2 corrections:
+1. Keep `containsIgnoreCase` in `flow_interp.zig`: HTML MIME detection also calls it. Delete only the `sensitive` table.
+2. Set `env_public` at both FlowChecker construction sites in `pipeline.zig`: `CheckedModule.init` and `prepareStandaloneFlow`.
+3. Policy plumbing: the check path parses the policy in `handler_policy.zig` and again in `packages/tools/src/precompile_contract.zig`; the compile path branches to `compileMultiModule` in `precompile.zig`, and its contract is built in `precompile_contract.zig`. Thread `envPublic()` through the single-module and multi-module paths. The contract-only path stays policy-less and conservative, with a comment.
+4. Expert tools must agree with the veto: `packages/pi/src/tools/pi_goal_check.zig` and `packages/pi/src/tools/pi_repair_plan.zig` build a bare `FlowChecker` without policy. Parse the discovered policy once in each and set `checker.env_public = policy.envPublic()`, or reuse the precompile check result. Find any other bare `FlowChecker.init` caller (`grep -rn 'FlowChecker.init' packages`) and decide each: policy-bearing callers get `env_public`; `packages/runtime/src/replay_runner.zig` is policy-less and stays conservative, and its tests may flip (S2.12 class).
+5. Contract disclosure (D8): `EnvInfo` construction, ownership, parsing, and merging live in `contract_types.zig`, `contract_json_writer.zig`, and `contract_json_parser.zig` (the parser copies only `literal` and `dynamic` today). Decide and test whether a parsed contract keeps `public`; `contract_diff.zig` builds `env_changes` from `env.literal` only, so add `public` to the env diff (that file is on the proof-swallow list; handle its errors).
+6. `docs/verification.md` ("What is not checked, said out loud"): say that `no_secret_leakage` now also rests on the author-declared `env.public` list. In the policy docs, state that `public` requires `allow`, so marking a name public also turns on runtime allow-list enforcement.
+7. Precision expectations: thread `policy_source` through `observe`, `tallyCase`, and both `tallyCase` callers in `packages/tools/src/flow_precision_expectations.zig`.
+8. Flow-checker control tests use three harnesses in `packages/zts/src/flow_checker_tests.zig`, plus a separate imported-function harness; give each an `env_public` variant where a control uses a non-sensitive name.
+9. `scripts/test-examples.sh`: a policy beside an example takes effect only through a `policy` entry in the nearest `zttp.json`.
+10. Added tests: `public: ["app_name"]` with `env("APP_NAME")` is refused (exact match); two policies that differ only in `public` produce the same serialized `RuntimePolicy`; a contract round trip of `public`; and the bite: restore the name heuristic and observe S2.15(c) fail.
+
+U3 corrections:
+11. Do not clear `source_exact` in the inexact branch of `storedRead`. The authorization cell is always joined with the header summary there, so clearing it would refuse census x24 and the listed `req.headers["authorization"] ?? ""` case. `joinValue` with `exactFor(a) and exactFor(b)` already keeps the join sound.
+12. Object field writes and reads also combine receiver and key flow (`withFlow`), and `??` uses `joinValue`; classify each copy site at HEAD rather than assuming a plain copy. The call site passes `values` directly (`evalExportValues` takes `values: []const Value`), and the export path is `applyExportCall`.
+13. Condition 2(a) also requires that `reach(args)` carries no callable.
+14. Fixpoint bite: add this test and confirm it fails when `valueEql` ignores `source_exact`:
+    ```
+    const s = env("API_SECRET") ?? "";
+    let x = s; let y = s;
+    for (const i of range(3)) { x = y; y = x.slice(0, x.length - 1); }
+    return Response.json({ v: [mask(s, 4), mask(x, 4)].join("") });
+    ```
+15. The binding field: add `declassify_bound_max` to the SDK binding, to `FunctionDescriptor` in `packages/zttp-sdk/src/descriptors.zig`, and to the zts mirror; the adapter copies matching fields generically. The SDK has no independent declassification validation; the pair check lives in `module_binding/types.zig`. `BindingHasher` feeds `bindingDigest`, not `module_registry_hash`; measure which pins move instead of assuming `EXPECTED_BUILTIN_HASH` does.
+16. `maskImpl` masks the whole input when `visible >= input.len`; a whole-number float such as `5.0` is read as integer 5 at runtime, so the analyzer refusing `lit_float` is the conservative choice.
+17. Census: `x25` is taken in `packages/tools/src/flow_census_probes.zig`; give the new mask probes unused names and set `minimum_hand` to the printed count.
+18. Added tests: a census over `builtin_modules.all` asserting that the set of exports satisfying 2(a) is exactly `zttp:env.env`; `mask(parseBearer(req.headers["authorization"] ?? "") ?? "", 4)` refused for `no_credential_leakage`; `[s].pop()` and `[s][0]` hold beside `{v: s}.v`.
+19. `docs/proofs-and-receipts.md`: replace the two open rows that unit 012 added (env name rule, mask bound) with fixed rows that name this version.

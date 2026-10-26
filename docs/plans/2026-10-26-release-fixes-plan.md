@@ -18,7 +18,7 @@ execution record.
 | 012 | [Claims say what they check](../../advisor-plans/012-claims-say-what-they-check.md) | M1; H1 and M2 interim | DONE |
 | 015 | this file, Execution record 015 | follow-ups from units 011 and 012 | DONE |
 | 013 | [Vacuous fault coverage and one acceptance rule](../../advisor-plans/013-one-acceptance-rule-and-vacuous-fault-coverage.md) | H3 | TODO; re-record window |
-| U2, U3 | [Soundness plan](2026-10-21-soundness-plan.md), sections U2 and U3 | H1, M2 | TODO; re-record window |
+| U2, U3 | [Soundness plan](2026-10-21-soundness-plan.md), sections U2 and U3, with the 2026-10-26 validation corrections | H1, M2 | TODO; re-record window; validated 2026-10-26 |
 | 014 | [Release preparation](../../advisor-plans/014-release-prep-after-fixes.md) | M6 | TODO; last |
 
 Units 007 to 012 run in this order, one at a time, on local `main`. Unit 013,
@@ -33,6 +33,11 @@ On 2026-10-26 the owner answered "as recommended" to Decisions 16 to 20:
 - 18 (a): one shared rate-limit store per handler pool, recorded as a documented exception to request isolation.
 - 19 (a): an unpinned `zttp verify` exits 0, labels the result unpinned, and writes `keyPinned: false`. The owner accepts that automation which reads only the exit status sees success.
 - 20 (a): clear `SO_REUSEPORT` after `listen`; option (b), a hand-built listener with `SO_REUSEADDR` only, is approved as the fallback if (a) fails on Linux.
+
+On 2026-10-26 the owner answered "a" to Decisions 22 and 23:
+
+- 22 (a): units 013, U2, and U3 run in one re-record window before the release. Fable and Codex astra validated U2 and U3 first; their corrections are in the soundness plan section "Validation corrections for U2 and U3".
+- 23 (a): the three small findings from units 011 and 012 are fixed as unit 015 before unit 014.
 
 ## Execution record
 
@@ -126,3 +131,5 @@ F2: `formatAddressInUse` in `packages/runtime/src/runtime_cli.zig` now prints `P
 F3: `renderClaimsHuman` in `packages/runtime/src/verify_cli.zig` formats with the allocator that `run` passes through `writeClaimsHuman`, so no length drops the output. Before, an output longer than 4096 bytes printed nothing and `run` still returned exit 0. The new test `renderClaimsHuman renders in full past 4096 bytes` uses a 5000-byte `property_summary`; it fails when the output is capped at 4096 bytes (`OutOfMemory`). The command line was not run against a live attested endpoint with a long claim, so the CLI-level effect rests on that unit test.
 
 Gates, each with exit 0: `zig fmt --check` on the three files, `zig build test-cli`, `smoke-v1`, `test-docs-drift`, `test-doc-links`, `test`, and `check-spine` (before each commit and again after this record). No contract golden, `policy-hash.txt`, or codegen replay changed. `bash scripts/verify.sh` is left to the coordinator.
+
+Coordinator: `bash scripts/verify.sh` from an empty cache exited 0 at `b3d6e760`.
