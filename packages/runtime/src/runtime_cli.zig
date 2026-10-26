@@ -364,10 +364,14 @@ fn validateSourceAuthority(allocator: std.mem.Allocator, config: ServerConfig) !
                 .type_check = refuseRetiredSourceImports,
                 .read_file = zts.file_io.readFileForModuleGraph,
             };
-            var contract = if (source.prepared_eval) |prepared|
-                try zts.pipeline.extractPreparedEvalContract(allocator, prepared.code, source.filename, options)
+            var contract = (if (source.prepared_eval) |prepared|
+                zts.pipeline.extractPreparedEvalContract(allocator, prepared.code, source.filename, options)
             else
-                try zts.pipeline.extractContract(allocator, source.code, source.filename, options);
+                zts.pipeline.extractContract(allocator, source.code, source.filename, options)) catch |err| {
+                if (err != error.ParseError) return err;
+                printParseRefusal(allocator, source.code, source.filename);
+                return error.SourceRefused;
+            };
             defer contract.deinit(allocator);
             if (retired_authority.first(retired_authority.contractFacts(&contract))) |feature| {
                 if (!builtin.is_test) {
@@ -378,6 +382,42 @@ fn validateSourceAuthority(allocator: std.mem.Allocator, config: ServerConfig) !
         },
         else => {},
     }
+}
+
+/// `extractContract` refuses a parse failure with an error and no text. Parse
+/// the source again and print each error with its code and location.
+fn printParseRefusal(allocator: std.mem.Allocator, source: []const u8, filename: []const u8) void {
+    if (renderParseRefusal(allocator, source, filename) catch null) |rendered| {
+        defer allocator.free(rendered);
+        std.debug.print("{s}", .{rendered});
+        return;
+    }
+    // A parse error in a local dependency does not recur in this file.
+    std.debug.print("zttp serve: parse error in {s} or a file it imports. Run `zttp check` for the diagnostics.\n", .{filename});
+}
+
+fn renderParseRefusal(allocator: std.mem.Allocator, source: []const u8, filename: []const u8) !?[]u8 {
+    var view = zts.SourceView.of(source);
+    view.name = filename;
+    var aw: std.Io.Writer.Allocating = .init(allocator);
+    errdefer aw.deinit();
+    if (zts.classifySourcePath(filename) == .virtual_javascript) {
+        var strings = zts.StringTable.init(allocator);
+        defer strings.deinit();
+        var parser = try zts.Parser.init(allocator, source, &strings, null);
+        defer parser.deinit();
+        _ = parser.js_parser.parse() catch {};
+        const errors = parser.js_parser.getErrors();
+        if (errors.len == 0) return null;
+        try zts.DiagnosticProjection.writeParseErrors(view, errors, &aw.writer);
+    } else {
+        var frontend: zts.DirectCheckSource = undefined;
+        try frontend.initCompileInPlace(allocator, allocator, source, filename);
+        defer frontend.deinit();
+        if (frontend.parse_outcome != .parser_refused) return null;
+        try zts.DiagnosticProjection.writeParseErrors(frontend.sourceView(), frontend.parserErrors(), &aw.writer);
+    }
+    return try aw.toOwnedSlice();
 }
 
 /// Contract projection omits unresolved imports. Inspect the existing parsed
@@ -867,7 +907,7 @@ const runtime_help_text =
 fn printServeHelp() !void {
     const help =
         \\zttp serve [options] <handler.ts>
-        \\zttp serve -e "function handler(req) { return Response.json({ok:true}) }"
+        \\zttp serve -e "function handler(req) { return Response.json({ok:true}); }"
         \\
         \\Options:
         \\  -p, --port <PORT>     Port to listen on
@@ -1037,6 +1077,20 @@ test "every retired module refuses supported startup modes" {
         }
     }
     try validateSourceAuthority(std.testing.allocator, .{ .handler = .{ .inline_code = "function handler(req) { return Response.text(\"ok\"); }" } });
+}
+
+test "source startup reports a parse refusal as SourceRefused and renders its code" {
+    const allocator = std.testing.allocator;
+    // No semicolon after the return: ZTS047.
+    const source = "function handler(req) { return Response.json({ ok: true }) }";
+    try std.testing.expectError(
+        error.SourceRefused,
+        validateSourceAuthority(allocator, .{ .handler = .{ .inline_code = source } }),
+    );
+    const text = (try renderParseRefusal(allocator, source, "<eval>")).?;
+    defer allocator.free(text);
+    try std.testing.expect(std.mem.indexOf(u8, text, "ZTS047") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text, "<eval>:1:") != null);
 }
 
 test "source startup refuses retired authority in a local dependency" {

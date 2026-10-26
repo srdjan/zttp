@@ -54,7 +54,7 @@ Core commands auto-detect `zttp.json` from the current directory or a parent.
 
 ```bash
 zttp serve src/handler.ts -p 3000
-zttp serve -e "function handler(req) { return Response.json({ ok: true }) }"
+zttp serve -e "function handler(req) { return Response.json({ ok: true }); }"
 ```
 
 Common `dev` and `serve` flags:

@@ -49,7 +49,7 @@ passed.
 For a one-file experiment:
 
 ```bash
-zttp serve -e "function handler(req) { return Response.json({ ok: true }) }"
+zttp serve -e "function handler(req) { return Response.json({ ok: true }); }"
 zttp serve examples/handler/handler.ts -p 3000
 ```
 
@@ -561,7 +561,7 @@ Run inside a project with `zttp.json`, pass a handler path, or use `-e`:
 
 ```bash
 zttp serve src/handler.ts
-zttp serve -e "function handler(req) { return Response.text('ok') }"
+zttp serve -e "function handler(req) { return Response.text('ok'); }"
 ```
 
 **An env var check fails at startup.**

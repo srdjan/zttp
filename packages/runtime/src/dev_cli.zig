@@ -200,6 +200,8 @@ fn cmdServe(ctx: cli_help.Ctx) anyerror!void {
     // Map parse/usage failures to a clean nonzero exit with a hint instead of
     // propagating a raw Zig error (which prints a stack trace).
     runtime_cli.serveCommandWithEnviron(ctx.allocator, ctx.args, ctx.environ) catch |err| {
+        // The parse diagnostics are already printed; a usage hint would mislead.
+        if (err == error.SourceRefused) std.process.exit(1);
         var buf: [256]u8 = undefined;
         std.debug.print("{s}\n", .{runtime_cli.formatFlagFailure(&buf, "serve", err, ctx.args)});
         std.process.exit(1);
