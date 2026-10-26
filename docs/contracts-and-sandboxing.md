@@ -217,23 +217,27 @@ won't boot" and "individual requests get rejected".
 - Re-runs the build-time contract diff against the running version
   before applying the swap. A `breaking` verdict blocks the swap
   unless `--force-swap` is in effect.
-- `runtime_pool.zig:reloadHandler` updates `handler_code` and
-  `handler_filename`, clears the bytecode cache, and invalidates
-  every idle runtime so it recompiles from the new source on next
+- `LiveReloadState.doSwap` in `live_reload.zig` builds a candidate with
+  `Server.prepareSourceGeneration` and commits it with
+  `Server.replaceSourceGeneration`, both in `server.zig`.
+- `HandlerPool.reloadSourceGeneration` in `runtime_pool.zig` updates
+  `handler_code` and `handler_filename`, clears the bytecode cache, and
+  invalidates every idle runtime so it recompiles from the new source on next
   acquire. In-flight requests finish on the old bytecode and are
   recycled into the new code on their next cycle.
-- `server.zig:updateContract` (called by `live_reload`) replaces the
-  integrity-validated route table. It clears proof-checked properties,
-  the proof cache because the new source has no accepted artifact certificate.
+- `Server.replaceSourceGeneration` replaces the integrity-validated route
+  table. It clears proof-checked properties, the proof cache, and the
+  attestation, because the new source has no accepted artifact certificate.
 - In the interpreted `dev`/`serve` path the embedded `RuntimePolicy`
   is the empty stub, so `live_reload` derives the full runtime policy
-  from each accepted contract and applies it via
-  `server.zig:setDevCapabilityPolicy` →
-  `runtime_pool.zig:setDevCapabilityPolicy` (plumbed as
+  from each accepted contract. `Server.prepareSourceGeneration` stages that
+  policy, and `HandlerPool.reloadSourceGeneration` installs it in the same
+  generation step as the new code (the first policy is plumbed as
   `RuntimeConfig.dev_capability_policy`). That invalidates idle
   runtimes so env, egress, cache, and sql gates re-create from the new
-  contract. If policy allocation fails, the staged policy fails closed.
-- `server.zig:updateContract` also restores conservative bounded
+  contract. If policy allocation fails, the swap fails and the old handler
+  stays active.
+- `Server.replaceSourceGeneration` also restores conservative bounded
   pooling unless an explicit lifecycle override was configured.
   In-flight requests finish on the old runtime generation; later
   acquisitions use the conservative lifecycle policy.
