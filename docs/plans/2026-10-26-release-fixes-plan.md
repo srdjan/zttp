@@ -15,7 +15,7 @@ execution record.
 | 009 | [One rate-limit store per handler pool](../../advisor-plans/009-one-rate-limit-store-per-process.md) | H5 | DONE |
 | 010 | [SQL writes wait for a busy writer](../../advisor-plans/010-sqlite-waits-for-a-busy-writer.md) | M7 | DONE |
 | 011 | [The documented CLI flows work](../../advisor-plans/011-cli-flows-match-the-docs.md) | M3, M4, M5, low items | DONE |
-| 012 | [Claims say what they check](../../advisor-plans/012-claims-say-what-they-check.md) | M1; H1 and M2 interim | TODO |
+| 012 | [Claims say what they check](../../advisor-plans/012-claims-say-what-they-check.md) | M1; H1 and M2 interim | DONE |
 | 013 | [Vacuous fault coverage and one acceptance rule](../../advisor-plans/013-one-acceptance-rule-and-vacuous-fault-coverage.md) | H3 | TODO; re-record window |
 | U2, U3 | [Soundness plan](2026-10-21-soundness-plan.md), sections U2 and U3 | H1, M2 | TODO; re-record window |
 | 014 | [Release preparation](../../advisor-plans/014-release-prep-after-fixes.md) | M6 | TODO; last |
@@ -102,3 +102,12 @@ Step 4 (low): `zts compile --help` and `zttp proofs bundle --help` print usage a
 Each new test fails without its fix: the server test fails with the original listener, Step 2 fails with `expected error.SourceRefused, found error.ParseError`, the three bundle tests fail under one mutation each, and the card and bundle `--help` tests fail with the guard reverted. Every file was restored and compared with the saved copy.
 
 Gates, each with exit 0: `zig fmt --check packages/runtime/src packages/tools/src`, `zig build test-server`, `test-zts-cli`, `test-precompile`, `test-cli`, `test-cli-abuse`, `smoke-v1`, `smoke-getting-started`, `test-docs-drift`, `test-doc-links`, `test-proof-swallow`, `test-script-reachability`, `test`, and `check-spine`. No contract golden, `policy-hash.txt`, or codegen replay changed. `bash scripts/verify.sh` is left to the coordinator.
+Coordinator: `bash scripts/verify.sh` from an empty cache exited 0 at `c0c126d4`.
+
+### 012: claims say what they check
+
+Commits: `cda251d7` (release fix 012: zttp verify says when the key is not pinned), `c147830f` (release fix 012: disclose the env name rule and the mask bound), and `060aeed3` (release fix 012: document key pinning and the limits of zttp verify). Website commit `37e0450` in `../ZTTP-WEBSITE`. Owner Decision 19 (a): an unpinned `zttp verify` exits 0, says "key not pinned", and writes `"keyPinned": false`; no exit code was added. U2 and U3 have not landed, so Steps 3 and 4 are done.
+
+Change: `renderClaimsHuman` and `renderClaimsJson` in `packages/runtime/src/verify_cli.zig` take `pinned`. Human output names the unpinned state and the `--trust-key` hint, and both states print the `signed_at` and host-binding line. The help text says the same. The new test `a pinned key is reported as pinned in human and JSON output` fails when the pinned label and the `keyPinned` value are forced to the unpinned form. The docs gained `--trust-key` and the provenance limits (`docs/cli.md`, `docs/user-guide.md`, `docs/threat-model.md`, `SECURITY.md`, a `docs/roadmap.md` limitation entry). `docs/proofs-and-receipts.md` has a table of the two open rows (env name rule, `mask` bound). Scope additions: `docs/verification.md` (the `proofs bundle` command uses `--binary` only, as in unit 011) and `../ZTTP-WEBSITE/static/sitemap.xml` (`lastmod`, per the website `CLAUDE.md`).
+
+Gates, each with exit 0: `zig fmt --check packages/runtime/src/verify_cli.zig`, `zig build test-cli`, `test-docs-drift`, `test-doc-links`, `test`, and `git add -A && zig build check-spine`; in `../ZTTP-WEBSITE`, `deno task verify`. No contract golden, `policy-hash.txt`, or codegen replay changed. `bash scripts/verify.sh` is left to the coordinator.
