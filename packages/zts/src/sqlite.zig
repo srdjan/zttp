@@ -9,11 +9,17 @@ pub const Error = error{
     SqliteBindFailed,
 };
 
+pub const busy_timeout_ms: c_int = 5000;
+
 pub const Db = struct {
     handle: *c.sqlite3,
 
     pub fn openReadWriteCreate(allocator: std.mem.Allocator, path: []const u8) !Db {
-        return openPath(allocator, path, c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE | c.SQLITE_OPEN_URI);
+        var db = try openPath(allocator, path, c.SQLITE_OPEN_READWRITE | c.SQLITE_OPEN_CREATE | c.SQLITE_OPEN_URI);
+        errdefer db.close();
+        // Policy bound, well below the 30 s handler deadline: a pooled runtime waits for a busy writer instead of failing at once.
+        if (c.sqlite3_busy_timeout(db.handle, busy_timeout_ms) != c.SQLITE_OK) return error.SqliteOpenFailed;
+        return db;
     }
 
     pub fn openReadOnly(allocator: std.mem.Allocator, path: []const u8) !Db {
@@ -122,4 +128,47 @@ fn openPath(allocator: std.mem.Allocator, path: []const u8, flags: c_int) !Db {
         return error.SqliteOpenFailed;
     }
     return .{ .handle = handle.? };
+}
+
+const testing = std.testing;
+
+fn writeWhileLockHeld(path: []const u8, result: *?anyerror) void {
+    result.* = null;
+    var db = Db.openReadWriteCreate(testing.allocator, path) catch |err| {
+        result.* = err;
+        return;
+    };
+    defer db.close();
+    db.exec(testing.allocator, "INSERT INTO t VALUES (2)") catch |err| {
+        result.* = err;
+    };
+}
+
+test "read-write connection waits for a busy writer instead of failing" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (std.c.getcwd(&cwd_buf, cwd_buf.len) == null) return error.CwdUnavailable;
+    const path = try std.fs.path.join(allocator, &.{ std.mem.sliceTo(&cwd_buf, 0), ".zig-cache", "tmp", &tmp.sub_path, "busy.db" });
+    defer allocator.free(path);
+
+    var holder = try Db.openReadWriteCreate(allocator, path);
+    defer holder.close();
+    try holder.exec(allocator, "CREATE TABLE t (n INTEGER)");
+    try holder.exec(allocator, "BEGIN IMMEDIATE");
+    try holder.exec(allocator, "INSERT INTO t VALUES (1)");
+
+    var result: ?anyerror = error.NotRun;
+    const writer = try std.Thread.spawn(.{}, writeWhileLockHeld, .{ path, &result });
+    const delay: std.c.timespec = .{ .sec = 0, .nsec = 200 * std.time.ns_per_ms };
+    _ = std.c.nanosleep(&delay, null);
+    try holder.exec(allocator, "COMMIT");
+    writer.join();
+
+    try testing.expectEqual(@as(?anyerror, null), result);
+    var stmt = try holder.prepare("SELECT COUNT(*) FROM t");
+    defer stmt.finalize();
+    try testing.expectEqual(@as(c_int, c.SQLITE_ROW), stmt.step());
+    try testing.expectEqual(@as(c_int, 2), c.sqlite3_column_int(stmt.handle, 0));
 }

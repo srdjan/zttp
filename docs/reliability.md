@@ -44,6 +44,8 @@ share them. `rateCheck` uses a fixed window per key.
   calls, so recursion and nested callbacks reach them. They return `504` and the
   runtime slot is replaced before it is reused.
 - Exhausted runtime pools return `503`.
+- Concurrent `zttp:sql` writers wait up to 5 seconds for the SQLite database
+  lock. A write that still cannot get the lock returns `500`.
 - A handler panic is caught by a setjmp/longjmp boundary around each handler
   invocation, returns `500`, and quarantines the pool slot. The server and other
   workers keep running. A panic in server infrastructure outside that boundary

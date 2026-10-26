@@ -264,7 +264,7 @@ Common runtime flags:
 
 | Need | Flag |
 |---|---|
-| SQLite queries | `--sqlite <file>` |
+| SQLite queries | `--sqlite <file>` (concurrent writers wait up to 5 seconds for the lock, then return `500`) |
 | Outbound HTTP | `--outbound-http` or `--outbound-host <host>` |
 | Skip env startup check in development | `--no-env-check` |
 
