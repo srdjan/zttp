@@ -1752,7 +1752,8 @@ pub const StrictChecker = struct {
             // exhaustive: other tags record nothing. The walk below visits every child.
             else => {},
         }
-        self.ir_view.forEachChild(node, self, collectAnnotatedFunctions);
+        var children = self.ir_view.expressionChildren(node);
+        while (children.next()) |child| self.collectAnnotatedFunctions(child);
     }
 
     fn functionHasAnnotation(self: *const StrictChecker, node: NodeIndex) bool {
@@ -1803,7 +1804,8 @@ pub const StrictChecker = struct {
                 self.static_literal_bindings.put(self.allocator, bindingKey(decl.binding), {}) catch self.markAllocationFailure();
             }
         }
-        self.ir_view.forEachChild(node, self, collectStaticLiterals);
+        var children = self.ir_view.expressionChildren(node);
+        while (children.next()) |child| self.collectStaticLiterals(child);
     }
 
     /// Record bindings initialized from a `dictEntries` chain. A round trip is
@@ -1823,7 +1825,8 @@ pub const StrictChecker = struct {
                 }
             }
         }
-        self.ir_view.forEachChild(node, self, collectEntriesDerivedBindings);
+        var children = self.ir_view.expressionChildren(node);
+        while (children.next()) |child| self.collectEntriesDerivedBindings(child);
     }
 
     /// Count the calls to each callee binding, and the declarations of each
@@ -2240,6 +2243,20 @@ test "mutable_live_iteration does not fire on a read of the iterated collection"
     var checker = try checkSource("function handler(req) { const xs = [1,2]; for (const x of xs) { const n = xs.length; } return Response.json({}); }");
     defer checker.deinit();
     try testing.expectEqual(@as(usize, 0), countKind(&checker, .mutable_live_iteration));
+}
+
+test "a static literal key declared inside a callback is not a dynamic computed access" {
+    // The literal collector once walked statements only, so a const inside a
+    // callback argument was never recorded and its key read was refused.
+    var callback = try checkSource("function handler(req) { const o = { a: 1 }; const r = [1].map((x) => { const k = \"a\"; return o[k]; }); return Response.text(\"ok\"); }");
+    defer callback.deinit();
+    try testing.expectEqual(@as(usize, 0), countKind(&callback, .computed_property_access));
+    var top = try checkSource("function handler(req) { const o = { a: 1 }; const k = \"a\"; const v = o[k]; return Response.text(\"ok\"); }");
+    defer top.deinit();
+    try testing.expectEqual(@as(usize, 0), countKind(&top, .computed_property_access));
+    var dynamic = try checkSource("function handler(req) { const o = { a: 1 }; const r = [1].map((x) => { const k = req.url; return o[k]; }); return Response.text(\"ok\"); }");
+    defer dynamic.deinit();
+    try testing.expectEqual(@as(usize, 1), countKind(&dynamic, .computed_property_access));
 }
 
 test "missing_public_annotation count is the same exported and not" {
