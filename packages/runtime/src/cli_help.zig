@@ -65,7 +65,7 @@ pub fn hasAllFlag(argv: []const []const u8) bool {
 /// The default `zttp --help` surface: only the five core verbs. Everything
 /// else lives behind `zttp help --all` (`core_help_all`).
 const core_help =
-    \\zttp - serverless JavaScript runtime
+    \\zttp - agent-compiler and local runtime for zts TypeScript
     \\
     \\Commands:
     \\  zttp init <name>     Create a project
@@ -92,7 +92,7 @@ pub fn printHelp() !void {
 // duplicate list to drift). The `.analyze` lines follow `help_all_head`; the
 // `.machine` lines follow `help_all_mid`.
 const help_all_head =
-    \\zttp - serverless JavaScript runtime
+    \\zttp - agent-compiler and local runtime for zts TypeScript
     \\
     \\Core commands:
     \\  zttp init <name> [--template basic|api]  Create a project

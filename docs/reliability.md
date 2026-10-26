@@ -12,8 +12,8 @@ reported.
 | Handler execution timeout | 30 seconds | The CLI uses a fixed 30 seconds. Embedders set `ServerConfig.timeout_ms`. The interpreter checks the deadline on loop back-edges and on function calls, including callbacks from native array and dict functions and JSX function components. Slow handlers return `504 Gateway Timeout` and invalidate the pool slot. |
 | JavaScript memory | no explicit limit | Set per runtime with `-m` / `--memory`. |
 | Runtime pool size | `cpu_count * 2`, clamped 8-128 | Set with `-n` / `--pool`. |
-| Connection workers | `cpu_count * 2`, clamped 2-128 | A fixed pool, not one thread per connection. Not configurable from the CLI. |
-| Accepted connection queue | 4,096 | The edge closes a newly accepted connection when the bounded queue is full. |
+| Connection workers | `cpu_count * 2`, not clamped | A fixed pool, not one thread per connection. Not configurable from the CLI. |
+| Accepted connection queue | 4,096 | The server closes a newly accepted connection when the bounded queue is full. |
 | Value stack | 1 MB | 131,072 JSValue slots. |
 | Call-stack depth | 1,024 frames | Deep recursion raises a typed error. |
 | Saved-state depth | 1,024 | Exceeding the cap raises a typed error. |

@@ -9,8 +9,10 @@ The build produces three binaries:
   integrations that call the analyzer directly.
 
 Every analyzer command exposed by `zts` is also reachable as `zttp <command>`
-with identical surface and output. The interactive `expert` agent and the
-session `ledger` commands are the exception: they live only in `zttp`, so the
+with identical surface and output. Three commands are the exception. `zts compile
+<handler.ts> <out.zig>` precompiles to Zig source, while `zttp compile <handler.ts>
+-o <bin>` builds a binary. The interactive `expert` agent and the
+session `ledger` commands live only in `zttp`, so the
 agent, its provider HTTP clients, and its API-key handling are compiled exactly
 once and never linked into `zts` or the deployed `zttp-runtime`. `zts expert`
 and `zts ledger` print a one-line pointer to `zttp` and exit non-zero.

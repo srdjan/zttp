@@ -17,6 +17,7 @@ pub const module_audit = @import("module_audit.zig");
 pub const json_diagnostics = @import("json_diagnostics.zig");
 const json_diag = precompile.json_diag;
 const writeAllFd = @import("precompile_util.zig").writeAllFd;
+const precompile_args = @import("precompile_args.zig");
 const search_rules = @import("search_rules.zig");
 const prove_behavior = @import("prove_behavior.zig");
 const expert = @import("expert.zig");
@@ -134,6 +135,10 @@ pub fn run(allocator: std.mem.Allocator, argv: []const []const u8) !void {
     // `compile` names different operations in `zts` (precompile to .zig) and
     // `zttp` (build a binary), so it stays out of the shared registry.
     if (std.mem.eql(u8, command, "compile")) {
+        if (precompile_args.wantsHelp(argv[1..])) {
+            try writeAllFd(std.c.STDOUT_FILENO, precompile_args.compile_usage);
+            return;
+        }
         precompile.runCompileWithArgs(allocator, argv[1..]) catch |err| switch (err) {
             // precompile already printed the file and the plain reason.
             error.HandlerReadFailed, error.PolicyReadFailed => std.process.exit(1),

@@ -25,6 +25,8 @@ the resulting certificate, and an independent consumer checker decides which cla
 meet the runtime's policy before the handler can serve. The binary needs no npm or
 Node.
 
+`--expert` needs a DeepSeek API key, or `--provider local` with a local MLX-LM server.
+
 ```bash
 zttp init my-app --expert
 # then: "add a GET /health route and a POST /echo that validates JSON"

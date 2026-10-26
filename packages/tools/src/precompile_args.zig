@@ -31,6 +31,16 @@ pub const PrecompileOptions = struct {
     policy_path: ?[]const u8 = null,
 };
 
+pub const compile_usage = "Usage: precompile [--verify] [--contract] [--sql-schema path] [--policy policy.json] [--module-manifest path] <handler.ts> <output.zig>\n";
+
+/// `zts compile --help` prints `compile_usage`; the parser refuses every other long option.
+pub fn wantsHelp(argv: []const []const u8) bool {
+    for (argv) |arg| {
+        if (std.mem.eql(u8, arg, "--help")) return true;
+    }
+    return false;
+}
+
 pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
     var opts = PrecompileOptions{ .handler_path = "", .output_path = "" };
     var handler_path: ?[]const u8 = null;
@@ -78,7 +88,7 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
         return error.InvalidArgument;
     }
 
-    const usage = "Usage: precompile [--verify] [--contract] [--sql-schema path] [--policy policy.json] [--module-manifest path] <handler.ts> <output.zig>\n";
+    const usage = compile_usage;
     opts.handler_path = handler_path orelse {
         errPrint(usage, .{});
         errPrint("\nCompiles a TypeScript/JavaScript handler to bytecode.\n", .{});
@@ -144,6 +154,13 @@ pub fn buildManifestRegistryFromPaths(
     }
 
     return registry;
+}
+
+test "wantsHelp finds --help and nothing else" {
+    try std.testing.expect(wantsHelp(&.{"--help"}));
+    try std.testing.expect(wantsHelp(&.{ "handler.ts", "--help" }));
+    try std.testing.expect(!wantsHelp(&.{ "handler.ts", "out.zig" }));
+    try std.testing.expect(!wantsHelp(&.{"--helpful"}));
 }
 
 test "parsePrecompileArgSlice consumes module manifest flags" {

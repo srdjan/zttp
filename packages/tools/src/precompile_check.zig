@@ -487,10 +487,16 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
         writer.print("OK ({d} lines)\n", .{r.line_count}) catch return;
     }
 
+    // A parse failure returns before these stages, so their line must not read OK.
+    const skipped = "SKIPPED (parse failed)\n";
+    const parse_failed = r.parse_errors > 0;
+
     // Types
     if (r.is_typescript) {
         writeDotted(writer, "Types", 24);
-        if (r.type_errors > 0) {
+        if (parse_failed) {
+            writer.writeAll(skipped) catch return;
+        } else if (r.type_errors > 0) {
             writer.print("FAIL ({d} errors)\n", .{r.type_errors}) catch return;
         } else {
             writer.print("OK\n", .{}) catch return;
@@ -499,7 +505,9 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
 
     // Sound mode
     writeDotted(writer, "Sound mode", 24);
-    if (r.bool_errors > 0) {
+    if (parse_failed) {
+        writer.writeAll(skipped) catch return;
+    } else if (r.bool_errors > 0) {
         writer.print("FAIL ({d} errors)\n", .{r.bool_errors}) catch return;
     } else if (r.bool_specializations > 0) {
         writer.print("OK ({d} specializations)\n", .{r.bool_specializations}) catch return;
@@ -509,7 +517,9 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
 
     // Strict profile
     writeDotted(writer, "Strict ZigTS", 24);
-    if (r.strict_errors > 0) {
+    if (parse_failed) {
+        writer.writeAll(skipped) catch return;
+    } else if (r.strict_errors > 0) {
         writer.print("FAIL ({d} errors)\n", .{r.strict_errors}) catch return;
     } else {
         writer.print("OK\n", .{}) catch return;

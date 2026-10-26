@@ -145,6 +145,15 @@ fn gateCommand(
     }
 }
 
+const bundle_usage =
+    \\Usage: zttp proofs bundle --out DIR [--binary PATH] [--contract PATH] [--replay PATH]
+    \\
+    \\Package a contract, an optional binary, and an optional replay into DIR.
+    \\Give --binary or --contract. Without --contract, the binary's embedded
+    \\contract is bundled; a --contract file must match it.
+    \\
+;
+
 fn bundleCommand(
     allocator: std.mem.Allocator,
     argv: []const []const u8,
@@ -159,7 +168,10 @@ fn bundleCommand(
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const arg = argv[i];
-        if (std.mem.eql(u8, arg, "--contract")) {
+        if (std.mem.eql(u8, arg, "--help")) {
+            try stdout.writeAll(bundle_usage);
+            return;
+        } else if (std.mem.eql(u8, arg, "--contract")) {
             contract_path = try shared.takeArg(&i, argv, error.MissingArgValue);
         } else if (std.mem.eql(u8, arg, "--binary")) {
             binary_path = try shared.takeArg(&i, argv, error.MissingArgValue);
@@ -1751,4 +1763,15 @@ test "formatTimestampShort: known epoch" {
     // 2024-01-01T00:00:00Z = 1_704_067_200 s = 1_704_067_200_000 ms
     const out = formatTimestampShort(1_704_067_200_000, buf[0..]);
     try testing.expectEqualStrings("2024-01-01 00:00", out);
+}
+
+test "bundle --help prints its usage and succeeds" {
+    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(testing.allocator);
+    defer err.deinit();
+
+    try runWith(testing.allocator, &.{ "bundle", "--help" }, &out.writer, &err.writer);
+    try testing.expect(std.mem.startsWith(u8, out.writer.buffered(), "Usage: zttp proofs bundle "));
+    try testing.expectEqualStrings("", err.writer.buffered());
 }

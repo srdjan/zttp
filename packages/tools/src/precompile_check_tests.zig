@@ -448,6 +448,28 @@ test "runCheckOnlyFromSource: proof capsule diagnostic ignores non-capsule specs
     try std.testing.expectEqual(@as(u32, 0), result.canonical_errors);
 }
 
+test "formatProofCard: a parse failure marks the stages that did not run as skipped" {
+    const allocator = std.testing.allocator;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, "const b = while;\n", "bad.ts", .{});
+    defer result.deinit(allocator);
+    try std.testing.expect(result.parse_errors > 0);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    formatProofCard(&aw.writer, &result, "bad.ts");
+    buf = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "Parse ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "FAIL (") != null);
+    for ([_][]const u8{ "Types ", "Sound mode ", "Strict ZigTS " }) |stage| {
+        const at = std.mem.indexOf(u8, buf.items, stage) orelse return error.TestExpectedStageLine;
+        const line_end = std.mem.indexOfScalarPos(u8, buf.items, at, '\n') orelse buf.items.len;
+        try std.testing.expect(std.mem.endsWith(u8, buf.items[at..line_end], "SKIPPED (parse failed)"));
+    }
+    try std.testing.expect(std.mem.indexOf(u8, buf.items, "OK") == null);
+}
+
 test "formatProofCard: canonical public helper diagnostics are visible in text mode" {
     const allocator = std.testing.allocator;
     const source =
