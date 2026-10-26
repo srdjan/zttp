@@ -1627,6 +1627,10 @@ pub const FlowInterp = struct {
     modules: []const ModuleView = &.{},
     initialization_order: []const ModuleId = &.{},
     modules_complete: bool = true,
+    /// Env names the policy lists in `env.public`, borrowed. An `env("NAME")`
+    /// with a literal name is `config` only if the name is here; empty means
+    /// every literal name keeps the declared `secret` label.
+    env_public: []const []const u8 = &.{},
     active_module: ModuleId = 0,
     module_offsets: []NodeIndex = &.{},
     module_name_cache: []?ModuleNames = &.{},
@@ -3373,24 +3377,25 @@ pub const FlowInterp = struct {
         return false;
     }
 
-    /// The labels an export declares for its result. `env` with a literal
-    /// name keeps `secret` when the name looks like a credential and gives
-    /// `config` otherwise, as `flow_checker.zig` refines it. A name that is
-    /// not a literal keeps the declared labels. The `validated` bit is never
-    /// kept: no value carries it, and the defense of the result comes from
-    /// `defense_sources`.
+    /// The labels an export declares for its result. `env` from `zttp:env`
+    /// with a literal name gives `config` only when `env_public` lists that
+    /// exact name (case-sensitive) and keeps the declared `secret` otherwise,
+    /// so a name the policy does not vouch for is never trusted by its
+    /// spelling (D-014). A name that is not a literal keeps the declared
+    /// labels. The `validated` bit is never kept: no value carries it, and the
+    /// defense of the result comes from `defense_sources`.
     fn declaredLabels(self: *const FlowInterp, resolved: ModuleExport, c: ir.Node.CallExpr) LabelSet {
         const declared = resolved.func.return_labels.without(.{ .validated = true });
-        if (!std.mem.eql(u8, resolved.func.name, "env") or c.args_count == 0) return declared;
+        if (!std.mem.eql(u8, resolved.binding.specifier, "zttp:env") or
+            !std.mem.eql(u8, resolved.func.name, "env") or c.args_count == 0) return declared;
         const arg = self.ir_view.getListIndex(c.args_start, 0);
         if ((self.ir_view.getTag(arg) orelse return declared) != .lit_string) return declared;
         const string_idx = self.ir_view.getStringIdx(arg) orelse return declared;
         const name = self.ir_view.getString(string_idx) orelse return declared;
-        const sensitive = [_][]const u8{ "SECRET", "PASSWORD", "PASSWD", "KEY", "TOKEN", "PRIVATE", "CREDENTIAL", "AUTH" };
-        for (sensitive) |pattern| {
-            if (containsIgnoreCase(name, pattern)) return declared;
+        for (self.env_public) |public_name| {
+            if (std.mem.eql(u8, public_name, name)) return .{ .config = true };
         }
-        return .{ .config = true };
+        return declared;
     }
 
     /// Whether an export's declassification holds at this call (D14): the
@@ -5312,12 +5317,12 @@ fn sinkDiagnostic(event: SinkEvent, label: DiagnosticLabel) report_types.Diagnos
     };
     const help = switch (event.sink) {
         .response_html, .response_other, .response_init => switch (label) {
-            .secret => "env vars with sensitive names (SECRET, PASSWORD, KEY, TOKEN) must not appear in responses",
+            .secret => "env values are secret unless the policy lists the name in env.public; do not return them in responses",
             .credential => "auth tokens and JWT payloads should not be returned to clients",
             .input => "escape the input with escapeHtml() from zttp:text",
         },
         .log => switch (label) {
-            .secret => "env vars with sensitive names must not be logged",
+            .secret => "env values are secret unless the policy lists the name in env.public; do not log them",
             .credential => "auth tokens and JWTs must not be logged",
             .input => "validate user input before logging",
         },
@@ -5372,7 +5377,7 @@ const secret: LabelSet = .{ .secret = true };
 
 test "response diagnostic guidance follows the exposed label" {
     const cases = .{
-        .{ DiagnosticLabel.secret, "secret data flows into response body", "env vars with sensitive names (SECRET, PASSWORD, KEY, TOKEN) must not appear in responses" },
+        .{ DiagnosticLabel.secret, "secret data flows into response body", "env values are secret unless the policy lists the name in env.public; do not return them in responses" },
         .{ DiagnosticLabel.credential, "credential data flows into response body", "auth tokens and JWT payloads should not be returned to clients" },
         .{ DiagnosticLabel.input, "unvalidated user input in Response.html (potential XSS)", "escape the input with escapeHtml() from zttp:text" },
     };
@@ -6959,6 +6964,17 @@ fn expectLabels(source: []const u8, params: []const Value, expected: LabelSet) !
     try testing.expectEqual(@as(u16, @bitCast(expected)), @as(u16, @bitCast(r.returnedLabels())));
 }
 
+/// `expectLabels` with the policy's `env.public` names set on the evaluator.
+fn expectLabelsPublic(source: []const u8, env_public: []const []const u8, expected: LabelSet) !void {
+    const h = try Harness.create(testing.allocator, source);
+    defer h.destroy();
+    h.interp.env_public = env_public;
+    const result = try h.analyze("f", &.{Value.clean});
+    try testing.expect(!result.cleared);
+    const labels = (result.returned orelse return error.TestUnexpectedResult).labels;
+    try testing.expectEqual(@as(u16, @bitCast(expected)), @as(u16, @bitCast(labels)));
+}
+
 // P5 specification test 1.
 test "a user method runs through a property call" {
     try expectSecret("function f(s) { const o = { m: () => s }; return o.m(); }", &.{secret_value}, true);
@@ -7523,14 +7539,23 @@ test "mask declassifies under a literal bound and an argument that holds no obje
     try expectSecretBit(text ++ "function f(s) { return mask({ x: s }, 4); }", &.{secret_value}, true);
 }
 
-// P5 specification test 30.
-test "env keeps secret for a credential name and gives config for any other" {
+// P5 specification test 30, as rewritten by D-014.
+test "env gives config only for a name the policy lists in env.public" {
     const env = "import { env } from \"zttp:env\"; ";
-    try expectLabels(env ++ "function f() { return env(\"API_KEY\"); }", &.{}, secret);
-    try expectLabels(env ++ "function f() { return env(\"db_password\"); }", &.{}, secret);
-    try expectLabels(env ++ "function f() { return env(\"PORT\"); }", &.{}, .{ .config = true });
-    // A name that is not a literal may be any variable.
-    try expectLabels(env ++ "function f(n) { return env(n); }", &.{Value.clean}, secret);
+    const public_names = [_][]const u8{ "PORT", "api_key" };
+    inline for (.{ "API_KEY", "db_password", "PORT", "APP_NAME" }) |literal| {
+        const source = env ++ "function f() { return env(\"" ++ literal ++ "\"); }";
+        // No policy: every literal name is secret, whatever its spelling.
+        try expectLabels(source, &.{}, secret);
+    }
+    const listed = env ++ "function f() { return env(\"PORT\"); }";
+    try expectLabelsPublic(listed, &public_names, .{ .config = true });
+    // A name that is not listed stays secret, and the match is exact: the
+    // listed `api_key` does not make `API_KEY` public.
+    try expectLabelsPublic(env ++ "function f() { return env(\"APP_NAME\"); }", &public_names, secret);
+    try expectLabelsPublic(env ++ "function f() { return env(\"API_KEY\"); }", &public_names, secret);
+    // A name that is not a literal may be any variable, even when it holds a listed one.
+    try expectLabelsPublic(env ++ "function f(n) { return env(n); }", &public_names, secret);
 }
 
 // P5 specification test 31.

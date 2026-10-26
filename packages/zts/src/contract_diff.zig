@@ -268,6 +268,9 @@ pub const ContractDiff = struct {
     routes: std.ArrayList(RouteChange),
     api_route_changes: std.ArrayList(ApiRouteChange),
     env_changes: std.ArrayList(ItemChange),
+    /// Names the policy's `env.public` declared non-secret (D-014). A removed
+    /// name classifies like a removed env var, an added one like an added var.
+    env_public_changes: std.ArrayList(ItemChange) = .empty,
     egress_changes: std.ArrayList(ItemChange),
     cache_changes: std.ArrayList(ItemChange),
     sql_changes: std.ArrayList(ItemChange),
@@ -300,6 +303,7 @@ pub const ContractDiff = struct {
         self.routes.deinit(allocator);
         self.api_route_changes.deinit(allocator);
         self.env_changes.deinit(allocator);
+        self.env_public_changes.deinit(allocator);
         self.egress_changes.deinit(allocator);
         self.cache_changes.deinit(allocator);
         self.sql_changes.deinit(allocator);
@@ -407,7 +411,7 @@ pub const ContractDiff = struct {
                 .dynamic => return .breaking,
             }
         }
-        inline for (.{ self.env_changes.items, self.egress_changes.items, self.cache_changes.items, self.sql_changes.items }) |items| {
+        inline for (.{ self.env_changes.items, self.env_public_changes.items, self.egress_changes.items, self.cache_changes.items, self.sql_changes.items }) |items| {
             for (items) |c| {
                 if (c.status == .removed) return .breaking;
                 if (c.status == .added) has_added = true;
@@ -643,6 +647,9 @@ pub fn diffContractsWithOptions(
     var env_changes: std.ArrayList(ItemChange) = .empty;
     errdefer env_changes.deinit(allocator);
 
+    var env_public_changes: std.ArrayList(ItemChange) = .empty;
+    errdefer env_public_changes.deinit(allocator);
+
     var egress_changes: std.ArrayList(ItemChange) = .empty;
     errdefer egress_changes.deinit(allocator);
 
@@ -710,6 +717,7 @@ pub fn diffContractsWithOptions(
 
     // Env comparison
     try diffStringList(allocator, old.env.literal.items, new.env.literal.items, &env_changes);
+    try diffStringList(allocator, old.env.public.items, new.env.public.items, &env_public_changes);
 
     // Egress comparison
     try diffStringList(allocator, old.egress.endpoints.items, new.egress.endpoints.items, &egress_changes);
@@ -791,6 +799,7 @@ pub fn diffContractsWithOptions(
         .routes = routes,
         .api_route_changes = api_route_changes,
         .env_changes = env_changes,
+        .env_public_changes = env_public_changes,
         .egress_changes = egress_changes,
         .cache_changes = cache_changes,
         .sql_changes = sql_changes,
@@ -993,6 +1002,16 @@ pub fn generateRecommendation(
                 has_additions = true;
             }
 
+            var env_public_adds: u32 = 0;
+            for (diff.env_public_changes.items) |c| {
+                if (c.status == .added) env_public_adds += 1;
+            }
+            if (env_public_adds > 0) {
+                if (has_additions) try w.writeAll(", ");
+                try w.print("{d} new public env name(s)", .{env_public_adds});
+                has_additions = true;
+            }
+
             var egress_adds: u32 = 0;
             for (diff.egress_changes.items) |c| {
                 if (c.status == .added) egress_adds += 1;
@@ -1029,6 +1048,14 @@ pub fn generateRecommendation(
                 if (c.status == .removed) {
                     if (has_removals) try w.writeAll(", ");
                     try w.writeAll("env removed: ");
+                    try w.writeAll(c.value);
+                    has_removals = true;
+                }
+            }
+            for (diff.env_public_changes.items) |c| {
+                if (c.status == .removed) {
+                    if (has_removals) try w.writeAll(", ");
+                    try w.writeAll("env public removed: ");
                     try w.writeAll(c.value);
                     has_removals = true;
                 }
@@ -1895,6 +1922,33 @@ test "diffContracts added env var is additive" {
     try std.testing.expectEqual(Classification.additive, diff.classify());
     try std.testing.expectEqual(@as(usize, 1), diff.env_changes.items.len);
     try std.testing.expectEqualStrings("API_KEY", diff.env_changes.items[0].value);
+}
+
+test "diffContracts reports an added public env name as additive and a removed one as breaking" {
+    const allocator = std.testing.allocator;
+
+    var without = try makeTestContract(allocator);
+    defer without.deinit(allocator);
+    var with_public = try makeTestContract(allocator);
+    defer with_public.deinit(allocator);
+    try with_public.env.public.append(allocator, try allocator.dupe(u8, "APP_NAME"));
+
+    var added = try diffContracts(allocator, &without, &with_public);
+    defer added.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), added.env_public_changes.items.len);
+    try std.testing.expectEqualStrings("APP_NAME", added.env_public_changes.items[0].value);
+    try std.testing.expectEqual(ChangeStatus.added, added.env_public_changes.items[0].status);
+    try std.testing.expectEqual(@as(usize, 0), added.env_changes.items.len);
+    try std.testing.expectEqual(Classification.additive, added.classify());
+
+    var removed = try diffContracts(allocator, &with_public, &without);
+    defer removed.deinit(allocator);
+    try std.testing.expectEqual(ChangeStatus.removed, removed.env_public_changes.items[0].status);
+    try std.testing.expectEqual(Classification.breaking, removed.classify());
+
+    var same = try diffContracts(allocator, &with_public, &with_public);
+    defer same.deinit(allocator);
+    try std.testing.expectEqual(Classification.equivalent, same.classify());
 }
 
 test "diffContracts added sql query is additive" {

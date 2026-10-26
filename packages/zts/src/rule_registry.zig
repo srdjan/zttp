@@ -247,7 +247,7 @@ const strict_meta = [_]struct {
         .code = "ZTS602",
         .description = "Capability-bearing virtual module access uses a dynamic argument.",
         .example = "env(req.headers.name)",
-        .help = "Use compiler-visible literal env keys, cache namespaces, SQL query names, egress URLs, route paths, or service names.",
+        .help = "Use compiler-visible literal env keys, cache namespaces, SQL query names, egress URLs, route paths, or service names. Register SQL statements and validation schemas at module scope, or with literals inside a function.",
         .repair = null,
     },
     .{

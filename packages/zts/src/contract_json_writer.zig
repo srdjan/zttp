@@ -154,7 +154,16 @@ fn writeContractJsonVersion(
         try writeJsonString(writer, name);
     }
     try writer.writeAll("],\n");
-    try writer.print("    \"dynamic\": {s}\n", .{if (contract.env.dynamic) "true" else "false"});
+    const has_public = contract.env.public.items.len > 0;
+    try writer.print("    \"dynamic\": {s}{s}\n", .{ if (contract.env.dynamic) "true" else "false", if (has_public) "," else "" });
+    if (has_public) {
+        try writer.writeAll("    \"public\": [");
+        for (contract.env.public.items, 0..) |name, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writeJsonString(writer, name);
+        }
+        try writer.writeAll("]\n");
+    }
     try writer.writeAll("  },\n");
 
     // egress
@@ -1296,6 +1305,36 @@ test "version 2 round-trips a populated contract field for field" {
     try std.testing.expect(parsed.verification.?.results_safe);
     try std.testing.expect(!parsed.verification.?.unreachable_code);
     try std.testing.expect(parsed.verification.?.bytecode_verified);
+}
+
+test "env.public is written only when it is non-empty and survives a round trip" {
+    const allocator = std.testing.allocator;
+    var empty = handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer empty.deinit(allocator);
+    const without = try writeTestContractJson(allocator, &empty, .v2);
+    defer allocator.free(without);
+    try std.testing.expect(std.mem.indexOf(u8, without, "\"public\"") == null);
+
+    var original = handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer original.deinit(allocator);
+    try appendTestString(allocator, &original.env.literal, "APP_NAME");
+    try appendTestString(allocator, &original.env.public, "APP_NAME");
+    try appendTestString(allocator, &original.env.public, "PORT");
+    inline for (.{ .v1, .v2 }) |style| {
+        const written = try writeTestContractJson(allocator, &original, style);
+        defer allocator.free(written);
+        try std.testing.expect(std.mem.indexOf(u8, written, "\"public\": [\"APP_NAME\", \"PORT\"]") != null);
+        const env_object =
+            "  \"env\": {\n    \"literal\": [\"APP_NAME\"],\n    \"dynamic\": false,\n" ++
+            "    \"public\": [\"APP_NAME\", \"PORT\"]\n  },\n";
+        try std.testing.expect(std.mem.indexOf(u8, written, env_object) != null);
+
+        var parsed = try handler_contract.parseFromJson(allocator, written);
+        defer parsed.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 2), parsed.env.public.items.len);
+        try std.testing.expectEqualStrings("APP_NAME", parsed.env.public.items[0]);
+        try std.testing.expectEqualStrings("PORT", parsed.env.public.items[1]);
+    }
 }
 
 /// The `faultCoverage` object of a written contract, in either key style. The

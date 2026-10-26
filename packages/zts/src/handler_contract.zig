@@ -178,6 +178,9 @@ pub fn mergeModuleContract(
     for (source.env.literal.items) |name| {
         try appendUniqueString(allocator, &target.env.literal, name, false);
     }
+    for (source.env.public.items) |name| {
+        try appendUniqueString(allocator, &target.env.public, name, false);
+    }
     target.env.dynamic = target.env.dynamic or source.env.dynamic;
 
     for (source.egress.endpoints.items) |host| {

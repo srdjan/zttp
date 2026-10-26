@@ -48,6 +48,10 @@ pub const RouteInfo = struct {
 pub const EnvInfo = struct {
     literal: std.ArrayList([]const u8), // each entry owned
     dynamic: bool,
+    /// The names the policy's `env.public` declared non-secret when the
+    /// contract was built (D-014). Disclosure only: the runtime policy does not
+    /// carry it, and an empty list is not written.
+    public: std.ArrayList([]const u8) = .empty, // each entry owned
 };
 
 pub const EgressInfo = struct {
@@ -1636,6 +1640,10 @@ pub const HandlerContract = struct {
             allocator.free(s);
         }
         self.env.literal.deinit(allocator);
+        for (self.env.public.items) |s| {
+            allocator.free(s);
+        }
+        self.env.public.deinit(allocator);
         for (self.egress.endpoints.items) |s| {
             allocator.free(s);
         }

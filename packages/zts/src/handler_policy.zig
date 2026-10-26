@@ -2,6 +2,11 @@
 //!
 //! Policies are opt-in and restrict precompiled handlers to an explicit set of
 //! env vars, outbound hosts, cache namespaces, and SQL query names.
+//!
+//! `env.public` is the one field that is not a capability. It lists the env
+//! names the analyzer may treat as non-secret (D-014). It needs `env.allow`,
+//! it does not change what the runtime allows, and a wrong row costs the
+//! `no_secret_leakage` guarantee for that name.
 
 const std = @import("std");
 /// The contract's data types, not `handler_contract.zig`. Everything this file
@@ -48,6 +53,8 @@ pub const AllowList = struct {
 
 pub const HandlerPolicy = struct {
     env: ?AllowList = null,
+    /// Names from `env.public`: analysis only, never part of `RuntimePolicy`.
+    env_public: ?AllowList = null,
     /// Normalized `scheme://host:port` entries, from `egress.allow_endpoints`.
     egress: ?AllowList = null,
     /// Which resolved-address scopes a connection may land in, from
@@ -75,8 +82,16 @@ pub const HandlerPolicy = struct {
         return sections;
     }
 
+    /// The `env.public` names, empty when the policy lists none. Borrowed from
+    /// the policy.
+    pub fn envPublic(self: *const HandlerPolicy) []const []const u8 {
+        const section = self.env_public orelse return &.{};
+        return section.values.items;
+    }
+
     pub fn deinit(self: *HandlerPolicy, allocator: std.mem.Allocator) void {
         if (self.env) |*section| section.deinit(allocator);
+        if (self.env_public) |*section| section.deinit(allocator);
         if (self.egress) |*section| section.deinit(allocator);
         if (self.cache) |*section| section.deinit(allocator);
         if (self.sql) |*section| section.deinit(allocator);
@@ -600,9 +615,18 @@ pub fn declaredSectionsFromJson(
     allocator: std.mem.Allocator,
     source: []const u8,
 ) guard_catalog.SectionSet {
-    var policy = parsePolicyJson(allocator, source) catch return .{};
+    var policy = parsePolicyJsonOrNull(allocator, source) orelse return .{};
     defer policy.deinit(allocator);
     return policy.declaredSections();
+}
+
+/// The policy `source` parses to, or null when it does not parse. The caller
+/// that analyzes a handler takes both the declared sections and `envPublic()`
+/// from one live policy; a policy that does not parse then declares no section
+/// and no public name, which keeps every `env` name secret. The parse failure
+/// itself is reported by the policy diagnostics path.
+pub fn parsePolicyJsonOrNull(allocator: std.mem.Allocator, source: []const u8) ?HandlerPolicy {
+    return parsePolicyJson(allocator, source) catch null;
 }
 
 pub fn parsePolicyJson(allocator: std.mem.Allocator, source: []const u8) !HandlerPolicy {
@@ -625,12 +649,14 @@ pub fn parsePolicyJson(allocator: std.mem.Allocator, source: []const u8) !Handle
         }
     }
 
+    const env_section = try parseEnvSection(allocator, root);
     var policy = HandlerPolicy{
-        .env = try parseSection(allocator, root, "env", "allow"),
-        .cache = try parseSection(allocator, root, "cache", "allow_namespaces"),
-        .sql = try parseSection(allocator, root, "sql", "allow_queries"),
+        .env = env_section.allow,
+        .env_public = env_section.public,
     };
     errdefer policy.deinit(allocator);
+    policy.cache = try parseSection(allocator, root, "cache", "allow_namespaces");
+    policy.sql = try parseSection(allocator, root, "sql", "allow_queries");
     const egress = try parseEgressSection(allocator, root);
     policy.egress = egress.allow;
     policy.egress_scopes = egress.scopes;
@@ -785,13 +811,51 @@ fn parseSection(
     }
 
     const raw_allow = section_obj.get(field_name) orelse return error.InvalidPolicy;
-    if (raw_allow != .array) return error.InvalidPolicy;
-    if (raw_allow.array.items.len > max_policy_entries) return error.TooManyEntries;
+    return try parseNameList(allocator, raw_allow);
+}
+
+const EnvSection = struct {
+    allow: ?AllowList = null,
+    public: ?AllowList = null,
+};
+
+/// `env` carries `allow` (required, the runtime capability list) and `public`
+/// (optional, analysis only). `public` without `allow` is refused so that
+/// marking a name public also turns on runtime allow-list enforcement; there is
+/// no subset rule between the two lists (D-014).
+fn parseEnvSection(allocator: std.mem.Allocator, root: std.json.ObjectMap) !EnvSection {
+    const raw_section = root.get("env") orelse return .{};
+    if (raw_section != .object) return error.InvalidPolicy;
+    const section_obj = raw_section.object;
+
+    var iter = section_obj.iterator();
+    while (iter.next()) |entry| {
+        const key = entry.key_ptr.*;
+        if (!std.mem.eql(u8, key, "allow") and !std.mem.eql(u8, key, "public")) {
+            return error.InvalidPolicy;
+        }
+    }
+
+    const raw_allow = section_obj.get("allow") orelse return error.InvalidPolicy;
+    var allow = try parseNameList(allocator, raw_allow);
+    errdefer allow.deinit(allocator);
+    const public: ?AllowList = if (section_obj.get("public")) |raw_public|
+        try parseNameList(allocator, raw_public)
+    else
+        null;
+    return .{ .allow = allow, .public = public };
+}
+
+/// Entries are non-empty strings of at most `max_identifier_bytes`, without
+/// duplicates, at most `max_policy_entries` of them.
+fn parseNameList(allocator: std.mem.Allocator, raw: std.json.Value) !AllowList {
+    if (raw != .array) return error.InvalidPolicy;
+    if (raw.array.items.len > max_policy_entries) return error.TooManyEntries;
 
     var section = AllowList{};
     errdefer section.deinit(allocator);
 
-    for (raw_allow.array.items) |item| {
+    for (raw.array.items) |item| {
         if (item != .string or item.string.len == 0) return error.InvalidPolicy;
         if (item.string.len > max_identifier_bytes) return error.EntryTooLong;
         if (section.contains(item.string)) return error.DuplicateEntry;
@@ -836,6 +900,81 @@ test "parse policy json with all sections" {
     try std.testing.expectEqualStrings("sessions", policy.cache.?.values.items[0]);
     try std.testing.expect(policy.egress_scopes.contains(.public));
     try std.testing.expect(!policy.egress_scopes.contains(.loopback));
+}
+
+test "env.public lists analysis-only names and leaves the declared sections alone" {
+    const allocator = std.testing.allocator;
+    var with_public = try parsePolicyJson(allocator,
+        \\{ "env": { "allow": ["APP_NAME", "TOKEN"], "public": ["APP_NAME"] } }
+    );
+    defer with_public.deinit(allocator);
+    var without_public = try parsePolicyJson(allocator,
+        \\{ "env": { "allow": ["APP_NAME", "TOKEN"] } }
+    );
+    defer without_public.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 1), with_public.envPublic().len);
+    try std.testing.expectEqualStrings("APP_NAME", with_public.envPublic()[0]);
+    try std.testing.expectEqual(@as(usize, 0), without_public.envPublic().len);
+    // No subset rule: a public name need not be in `allow`.
+    var unrelated = try parsePolicyJson(allocator,
+        \\{ "env": { "allow": ["TOKEN"], "public": ["OTHER"] } }
+    );
+    defer unrelated.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), unrelated.envPublic().len);
+    try std.testing.expect(std.meta.eql(with_public.declaredSections(), without_public.declaredSections()));
+}
+
+test "env.public is refused without allow, with a bad entry, or with an unknown key" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidPolicy, parsePolicyJson(allocator,
+        \\{ "env": { "public": ["APP_NAME"] } }
+    ));
+    try std.testing.expectError(error.InvalidPolicy, parsePolicyJson(allocator,
+        \\{ "env": { "allow": [], "extra": [] } }
+    ));
+    try std.testing.expectError(error.InvalidPolicy, parsePolicyJson(allocator,
+        \\{ "env": { "allow": [], "public": "APP_NAME" } }
+    ));
+    try std.testing.expectError(error.InvalidPolicy, parsePolicyJson(allocator,
+        \\{ "env": { "allow": [], "public": [""] } }
+    ));
+    try std.testing.expectError(error.InvalidPolicy, parsePolicyJson(allocator,
+        \\{ "env": { "allow": [], "public": [1] } }
+    ));
+    try std.testing.expectError(error.DuplicateEntry, parsePolicyJson(allocator,
+        \\{ "env": { "allow": [], "public": ["A", "A"] } }
+    ));
+    var too_long: [max_identifier_bytes + 1]u8 = undefined;
+    @memset(&too_long, 'A');
+    const source = try std.fmt.allocPrint(
+        allocator,
+        "{{ \"env\": {{ \"allow\": [], \"public\": [\"{s}\"] }} }}",
+        .{&too_long},
+    );
+    defer allocator.free(source);
+    try std.testing.expectError(error.EntryTooLong, parsePolicyJson(allocator, source));
+}
+
+test "the runtime policy ignores env.public, so two policies that differ only in it project the same" {
+    const allocator = std.testing.allocator;
+    var with_public = try parsePolicyJson(allocator,
+        \\{ "env": { "allow": ["APP_NAME"], "public": ["APP_NAME"] }, "cache": { "allow_namespaces": ["sessions"] } }
+    );
+    defer with_public.deinit(allocator);
+    var without_public = try parsePolicyJson(allocator,
+        \\{ "env": { "allow": ["APP_NAME"] }, "cache": { "allow_namespaces": ["sessions"] } }
+    );
+    defer without_public.deinit(allocator);
+
+    var contract = contract_mod.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(allocator);
+    const first = contractToRuntimePolicy(&contract, &with_public);
+    const second = contractToRuntimePolicy(&contract, &without_public);
+    try std.testing.expectEqual(first.env.enabled, second.env.enabled);
+    try std.testing.expectEqualDeep(first.env.values, second.env.values);
+    try std.testing.expectEqualDeep(first.cache.values, second.cache.values);
+    try std.testing.expectEqualDeep(first.egress.values, second.egress.values);
 }
 
 test "the retired egress key names its replacement" {

@@ -426,6 +426,7 @@ pub const CheckedModule = struct {
         flow.modules = opts.flow_modules;
         flow.initialization_order = opts.flow_initialization_order;
         flow.modules_complete = opts.flow_modules_complete;
+        flow.env_public = opts.env_public;
         if (tc_ptr) |tc| flow.setTypeChecker(tc);
         errdefer flow.deinit();
 
@@ -553,6 +554,9 @@ pub const CheckOptions = struct {
     flow_modules: []const FlowModuleView = &.{},
     flow_initialization_order: []const FlowModuleId = &.{},
     flow_modules_complete: bool = true,
+    /// The policy's `env.public` names. Borrowed, and must outlive the session.
+    /// Empty means every literal `env` name is secret (D-014).
+    env_public: []const []const u8 = &.{},
 };
 
 // ---------------------------------------------------------------------------
@@ -739,6 +743,8 @@ pub const ModuleAnalysisSession = struct {
 
     pub const ContractOnlyOptions = struct {
         extraction: ExtractContractOptions = .{},
+        /// The policy's `env.public` names, borrowed through the session.
+        env_public: []const []const u8 = &.{},
         select_flow: bool = false,
         flow_without_handler: FlowWithoutHandler = .keep_defaults,
     };
@@ -757,6 +763,8 @@ pub const ModuleAnalysisSession = struct {
     /// One option set for every profile. `.full` fills only `strict` and `manifest_registry`.
     extraction_opts: ExtractContractOptions = .{},
     policy_sections: guard_catalog.SectionSet = .{},
+    /// `env.public` names for the standalone flow checker of a contract-only session.
+    env_public: []const []const u8 = &.{},
     source_types: ModuleSourceTypeInput = .omitted,
     contract_context: ContractContext = .{},
     state: SessionState = .uninitialized,
@@ -821,6 +829,7 @@ pub const ModuleAnalysisSession = struct {
             .parsed = parsed,
             .profile = .contract_only,
             .extraction_opts = opts.extraction,
+            .env_public = opts.env_public,
             .source_types = .omitted,
             .contract_context = contextFromExtractOptions(opts.extraction),
             .state = .ready,
@@ -1165,6 +1174,7 @@ pub const ModuleAnalysisSession = struct {
             self.parsed.atoms,
         );
         self.standalone_flow_checker.?.scopes = self.parsed.scopes;
+        self.standalone_flow_checker.?.env_public = self.env_public;
     }
 
     fn completeSoundExtraction(self: *ModuleAnalysisSession) !void {

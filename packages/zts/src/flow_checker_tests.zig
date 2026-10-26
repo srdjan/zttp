@@ -1453,30 +1453,50 @@ test "LabelSet operations in flow context" {
     try std.testing.expect(!merged.has(.user_input));
 }
 
-test "environment names refine secret provenance" {
-    const cases = [_]struct { name: []const u8, secret: bool }{
-        .{ .name = "DB_PASSWORD", .secret = true },
-        .{ .name = "API_KEY", .secret = true },
-        .{ .name = "JWT_SECRET", .secret = true },
-        .{ .name = "ACCESS_TOKEN", .secret = true },
-        .{ .name = "PRIVATE_KEY", .secret = true },
-        .{ .name = "db_password", .secret = true },
-        .{ .name = "Auth_Header", .secret = true },
-        .{ .name = "APP_NAME", .secret = false },
-        .{ .name = "PORT", .secret = false },
-        .{ .name = "NODE_ENV", .secret = false },
-        .{ .name = "LOG_LEVEL", .secret = false },
-        .{ .name = "DATABASE_URL", .secret = false },
+test "environment names are secret unless the policy lists them in env.public" {
+    const names = [_][]const u8{
+        "DB_PASSWORD", "API_KEY",   "JWT_SECRET", "ACCESS_TOKEN", "PRIVATE_KEY", "db_password",
+        "Auth_Header", "APP_NAME",  "PORT",       "NODE_ENV",     "LOG_LEVEL",   "DATABASE_URL",
+        "DB_PASS",     "STRIPE_SK",
     };
-    for (cases) |case| {
+    const public_names = [_][]const u8{ "APP_NAME", "PORT", "NODE_ENV", "LOG_LEVEL", "DATABASE_URL", "DB_PASS", "STRIPE_SK" };
+    for (names) |name| {
         const source = try std.testing.allocator.print(
             \\import {{ env }} from "zttp:env";
             \\function handler(req) {{ return Response.text(env("{s}")); }}
-        , .{case.name});
+        , .{name});
         defer std.testing.allocator.free(source);
-        const properties = try runFlowProperties(std.testing.allocator, source);
-        try std.testing.expectEqual(!case.secret, properties.no_secret_leakage);
+        // No policy: the spelling of the name vouches for nothing.
+        const without_policy = try runFlowProperties(std.testing.allocator, source);
+        try std.testing.expect(!without_policy.no_secret_leakage);
+        // With a policy: only a name that `env.public` lists, exactly, is clean.
+        var listed = false;
+        for (public_names) |public_name| {
+            if (std.mem.eql(u8, public_name, name)) listed = true;
+        }
+        const with_policy = try runFlowPropertiesPublic(std.testing.allocator, source, &public_names);
+        try std.testing.expectEqual(listed, with_policy.no_secret_leakage);
     }
+}
+
+test "env.public matches the name exactly, so a different case is still secret" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\function handler(req) { return Response.text(env("APP_NAME")); }
+    ;
+    const lower = [_][]const u8{"app_name"};
+    const properties = try runFlowPropertiesPublic(std.testing.allocator, source, &lower);
+    try std.testing.expect(!properties.no_secret_leakage);
+}
+
+test "a computed env name stays secret even when every listed name is public" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\function handler(req) { const k = "APP_NAME"; return Response.text(env(k + "")); }
+    ;
+    const listed = [_][]const u8{"APP_NAME"};
+    const properties = try runFlowPropertiesPublic(std.testing.allocator, source, &listed);
+    try std.testing.expect(!properties.no_secret_leakage);
 }
 
 test "FlowProperties defaults to all proven" {
@@ -1782,6 +1802,17 @@ fn runWithImportedFunction(
     imported_source: []const u8,
     name: []const u8,
 ) !bool {
+    return runWithImportedFunctionPublic(allocator, source, imported_source, name, &.{});
+}
+
+/// `runWithImportedFunction` with the policy's `env.public` names set on the checker.
+fn runWithImportedFunctionPublic(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    imported_source: []const u8,
+    name: []const u8,
+    env_public: []const []const u8,
+) !bool {
     var imported_atoms = atom_table.AtomTable.init(allocator);
     defer imported_atoms.deinit();
     var imported_parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, imported_source, .compile);
@@ -1846,6 +1877,7 @@ fn runWithImportedFunction(
     checker.captures = &root_captures;
     checker.modules = &modules;
     checker.initialization_order = &.{ 1, 0 };
+    checker.env_public = env_public;
     _ = try checker.check(handler_fn);
     return checker.getProperties().no_secret_leakage;
 }
@@ -1885,6 +1917,7 @@ test "an imported function that returns a module-level secret reaches the respon
     ));
 
     // Control: a module-level constant that holds no secret keeps the property.
+    // `REGION` is listed in `env.public`.
     const clean_imported =
         \\import { env } from "zttp:env";
         \\const region = env("REGION") ?? "";
@@ -1894,11 +1927,12 @@ test "an imported function that returns a module-level secret reaches the respon
         \\import { readRegion } from "./utils.ts";
         \\function handler(req) { return Response.json({ v: readRegion() }); }
     ;
-    try std.testing.expect(try runWithImportedFunction(
+    try std.testing.expect(try runWithImportedFunctionPublic(
         std.testing.allocator,
         clean_source,
         clean_imported,
         "readRegion",
+        &.{"REGION"},
     ));
 }
 
@@ -2109,6 +2143,15 @@ fn runInputValidated(allocator: std.mem.Allocator, source: []const u8) !bool {
 /// Shared harness for route-dispatch regressions that must assert the exact
 /// flow property a source is meant to break.
 fn runFlowProperties(allocator: std.mem.Allocator, source: []const u8) !FlowProperties {
+    return runFlowPropertiesPublic(allocator, source, &.{});
+}
+
+/// `runFlowProperties` with the policy's `env.public` names set on the checker.
+fn runFlowPropertiesPublic(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    env_public: []const []const u8,
+) !FlowProperties {
     var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -2121,8 +2164,9 @@ fn runFlowProperties(allocator: std.mem.Allocator, source: []const u8) !FlowProp
         return error.HandlerNotFound;
 
     var checker = FlowChecker.init(allocator, ir_view, &atoms);
-    checker.scopes = &parser.scopes;
     defer checker.deinit();
+    checker.scopes = &parser.scopes;
+    checker.env_public = env_public;
     _ = try checker.check(handler_fn);
     return checker.getProperties();
 }
@@ -2367,7 +2411,7 @@ test "FlowChecker reports a secret logged inside a called helper, call-sensitive
     const direct_report = try runFlowDiagnostics(std.testing.allocator, direct, .secret_in_log, &buf);
     try std.testing.expectEqual(@as(usize, 1), direct_report.count);
     try std.testing.expect(!direct_report.properties.no_secret_leakage);
-    try std.testing.expectEqualStrings("env vars with sensitive names must not be logged", direct_report.help);
+    try std.testing.expectEqualStrings("env values are secret unless the policy lists the name in env.public; do not log them", direct_report.help);
 
     // Routed form: the same log, reached through a top-level helper.
     const routed =
@@ -2384,7 +2428,7 @@ test "FlowChecker reports a secret logged inside a called helper, call-sensitive
     const routed_report = try runFlowDiagnostics(std.testing.allocator, routed, .secret_in_log, &buf);
     try std.testing.expectEqual(@as(usize, 1), routed_report.count);
     try std.testing.expect(!routed_report.properties.no_secret_leakage);
-    try std.testing.expect(std.mem.startsWith(u8, routed_report.help, "env vars with sensitive names must not be logged"));
+    try std.testing.expect(std.mem.startsWith(u8, routed_report.help, "env values are secret unless the policy lists the name in env.public; do not log them"));
     try std.testing.expect(std.mem.indexOf(u8, routed_report.help, "line 7") != null);
 
     // The same helper called with a clean literal reports nothing.
@@ -3129,6 +3173,7 @@ test "FlowChecker carries labels on a module-level declaration" {
 
 test "FlowChecker keeps a property for a module-level clean constant or function" {
     // Control: a module-level constant that holds no secret keeps the property.
+    // `REGION` is listed in `env.public`.
     const clean =
         \\import { env } from "zttp:env";
         \\const region = env("REGION") ?? "";
@@ -3136,7 +3181,7 @@ test "FlowChecker keeps a property for a module-level clean constant or function
         \\  return Response.json({ region: region });
         \\}
     ;
-    try std.testing.expect((try runFlowProperties(std.testing.allocator, clean)).no_secret_leakage);
+    try std.testing.expect((try runFlowPropertiesPublic(std.testing.allocator, clean, &.{"REGION"})).no_secret_leakage);
 
     // A module-level function named in a route table is a function value, not
     // a datum without a label: the table and the route keep the property.
@@ -3197,7 +3242,7 @@ test "FlowChecker keeps a property for a captured value that holds no secret" {
         \\  return inner();
         \\}
     ;
-    try std.testing.expect((try runFlowProperties(std.testing.allocator, clean)).no_secret_leakage);
+    try std.testing.expect((try runFlowPropertiesPublic(std.testing.allocator, clean, &.{"REGION"})).no_secret_leakage);
 
     // Name collision: the helper logs its own clean x, and the handler's secret
     // x is only measured. A union by name would refuse this.
@@ -3684,7 +3729,7 @@ test "FlowChecker keeps a routed sink's single report and actual callsite help" 
     const report = try runFlowDiagnostics(std.testing.allocator, source, .secret_in_log, &buf);
     try std.testing.expectEqual(@as(usize, 1), report.count);
     try std.testing.expect(!report.properties.no_secret_leakage);
-    try std.testing.expectEqualStrings("env vars with sensitive names must not be logged (reached through the call at line 11, column 23)", report.help);
+    try std.testing.expectEqualStrings("env values are secret unless the policy lists the name in env.public; do not log them (reached through the call at line 11, column 23)", report.help);
 }
 
 test "FlowChecker reports one helper reached from two call sites once per kind" {

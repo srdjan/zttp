@@ -17,7 +17,7 @@ const mb = engine.module_binding;
 const LabelSet = mb.LabelSet;
 
 /// Version of the flow verdict semantics, included in the policy identity.
-pub const flow_analyzer_version: u32 = 7;
+pub const flow_analyzer_version: u32 = 8;
 
 pub const RepairIntent = report_types.RepairIntent;
 pub const Severity = report_types.Severity;
@@ -47,6 +47,9 @@ pub const FlowChecker = struct {
     modules: []const evaluator.ModuleView = &.{},
     initialization_order: []const evaluator.ModuleId = &.{},
     modules_complete: bool = true,
+    /// The policy's `env.public` names, borrowed; must outlive the analysis.
+    /// Empty means every literal `env` name is secret (D-014).
+    env_public: []const []const u8 = &.{},
     type_checker: ?*type_checker.TypeChecker = null,
     evaluation: ?evaluator.FlowInterp = null,
     properties: FlowProperties = unproven,
@@ -131,6 +134,7 @@ pub const FlowChecker = struct {
         analysis.modules = self.modules;
         analysis.initialization_order = self.initialization_order;
         analysis.modules_complete = self.modules_complete;
+        analysis.env_public = self.env_public;
         return analysis;
     }
 };

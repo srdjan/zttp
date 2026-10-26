@@ -57,6 +57,12 @@ const DynamicWire = struct {
     dynamic: bool = false,
 };
 
+const EnvWire = struct {
+    literal: []const WireString = &.{},
+    dynamic: bool = false,
+    public: []const WireString = &.{},
+};
+
 const EgressWire = struct {
     endpoints: []const WireString = &.{},
     urls: []const WireString = &.{},
@@ -551,7 +557,7 @@ const ContractWire = struct {
     routes: []const RouteWire = &.{},
     modules: []const WireString = &.{},
     functions: FunctionMap = .{},
-    env: DynamicWire = .{},
+    env: EnvWire = .{},
     egress: EgressWire = .{},
     serviceCalls: []const ServiceCallWire = &.{},
     workflowCalls: []const WorkflowCallWire = &.{},
@@ -801,6 +807,7 @@ fn projectContract(
     try projectFunctions(allocator, &wire.functions, &contract);
     contract.env.literal = try projectStringList(allocator, wire.env.literal);
     contract.env.dynamic = wire.env.dynamic;
+    contract.env.public = try projectStringList(allocator, wire.env.public);
     contract.egress.endpoints = try projectStringList(allocator, wire.egress.endpoints);
     contract.egress.urls = try projectStringList(allocator, wire.egress.urls);
     contract.egress.dynamic = wire.egress.dynamic;
