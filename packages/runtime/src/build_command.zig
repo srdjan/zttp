@@ -172,6 +172,7 @@ pub fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
         .output_path = opts.output_path,
         .sql_schema_path = compile_context.sql_schema_path,
         .policy = compile_context.policyPtr(),
+        .policy_source = compile_context.policy_source,
         .attest_requested = opts.attest_requested,
     });
 }
@@ -179,6 +180,8 @@ pub fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !v
 const ProjectCompileContext = struct {
     sql_schema_path: ?[]u8 = null,
     policy: ?zts.HandlerPolicy = null,
+    /// The policy text, kept so the build check reads the policy that `zttp check` reads.
+    policy_source: ?[]u8 = null,
 
     fn init(
         allocator: std.mem.Allocator,
@@ -195,7 +198,7 @@ const ProjectCompileContext = struct {
             );
             return error.PolicyContextFailed;
         };
-        defer if (policy_source) |source| allocator.free(source);
+        context.policy_source = policy_source;
         if (policy_source) |source| {
             context.policy = zts.handler_policy.parsePolicyJson(allocator, source) catch |err| {
                 std.debug.print(
@@ -213,6 +216,7 @@ const ProjectCompileContext = struct {
     fn deinit(self: *ProjectCompileContext, allocator: std.mem.Allocator) void {
         if (self.sql_schema_path) |path| allocator.free(path);
         if (self.policy) |*policy| policy.deinit(allocator);
+        if (self.policy_source) |source| allocator.free(source);
         self.* = .{};
     }
 
@@ -379,6 +383,7 @@ pub fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
         .output_path = artifact.output_path,
         .sql_schema_path = artifact.compile_context.sql_schema_path,
         .policy = artifact.compile_context.policyPtr(),
+        .policy_source = artifact.compile_context.policy_source,
         .attest_requested = opts.attest_requested,
     });
 
@@ -489,6 +494,7 @@ pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8
         .output_path = artifact.output_path,
         .sql_schema_path = artifact.compile_context.sql_schema_path,
         .policy = artifact.compile_context.policyPtr(),
+        .policy_source = artifact.compile_context.policy_source,
         .ledger_service_name = artifact.project_name,
         .attest_requested = opts.attest_requested,
     });
@@ -942,6 +948,7 @@ pub const BuildRequest = struct {
     /// no project manifest exists above the explicit handler.
     sql_schema_path: ?[]const u8 = null,
     policy: ?*const zts.HandlerPolicy = null,
+    policy_source: ?[]const u8 = null,
     /// Service name to record in the proof ledger entry. Null when the
     /// build is not part of a named project (`compile`/`build` paths);
     /// set to the project name on the `deploy --local` path.
@@ -997,6 +1004,7 @@ const BuildCompileInput = struct {
     handler_path: []const u8,
     sql_schema_path: ?[]const u8,
     policy: ?*const zts.HandlerPolicy,
+    policy_source: ?[]const u8 = null,
 };
 
 fn compileCapability(
@@ -1021,6 +1029,7 @@ fn checkCapability(
 ) anyerror!u32 {
     var check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, input.source, input.handler_path, .{
         .sql_schema_path = input.sql_schema_path,
+        .policy_source = input.policy_source,
         // Quiet: the compile above already printed its diagnostics; the spec
         // sections are printed once below.
         .json_mode = true,
@@ -1094,6 +1103,7 @@ fn runBuild(
         .handler_path = handler_path,
         .sql_schema_path = request.sql_schema_path,
         .policy = request.policy,
+        .policy_source = request.policy_source,
     };
 
     std.log.info("Compiling {s}...", .{handler_path});
@@ -2690,6 +2700,7 @@ const BuildProbe = struct {
     tail_saw_attest: bool = false,
     compile_saw_sql_schema: bool = false,
     compile_saw_policy: bool = false,
+    check_policy_source: ?[]const u8 = null,
     ledger_service: ?[]const u8 = null,
     ledger_sha_hex: ?[64]u8 = null,
 
@@ -2703,9 +2714,10 @@ const BuildProbe = struct {
         return allocator.dupe(u8, self.source);
     }
 
-    fn check(context: ?*anyopaque, _: std.mem.Allocator, _: BuildCompileInput) anyerror!u32 {
+    fn check(context: ?*anyopaque, _: std.mem.Allocator, input: BuildCompileInput) anyerror!u32 {
         const self = of(context);
         self.check_calls += 1;
+        self.check_policy_source = input.policy_source;
         return self.spec_errors;
     }
 
@@ -2834,9 +2846,12 @@ test "a deploy build signs, codesigns, and records one ledger row" {
         .output_path = ".zttp/deploy/demo",
         .sql_schema_path = "schema.sql",
         .policy = &policy,
+        .policy_source = "{}",
         .ledger_service_name = "demo",
         .attest_requested = true,
     }, probe.capabilities());
+    // The build check reads the same policy text as `zttp check`.
+    try std.testing.expectEqualStrings("{}", probe.check_policy_source.?);
 
     try std.testing.expectEqual(@as(usize, 1), probe.read_calls);
     try std.testing.expectEqual(@as(usize, 1), probe.compile_calls);
@@ -2986,6 +3001,7 @@ test "explicit compile discovers and enforces project capability policy" {
     var context = try discoverExplicitCompileContext(allocator, handler_path);
     defer context.deinit(allocator);
     const policy = context.policyPtr() orelse return error.TestExpectedPolicy;
+    try std.testing.expectEqualStrings("{\"env\":{\"allow\":[\"APP_NAME\"]}}", context.policy_source.?);
 
     const source =
         \\import { env } from "zttp:env";
