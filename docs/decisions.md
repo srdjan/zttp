@@ -151,3 +151,12 @@ A change to a prompt, a seed, a tool output, or a wire byte moves the corpus ide
 - Gate: zig build test-server
 
 Each runtime kept its own `zttp:ratelimit` counters, so a pool of N runtimes admitted about N times the configured limit, and each recycle reset the counters. The owner chose Decision 18 option (a) of the release fixes plan on 2026-10-26. Each `HandlerPool` now owns one `RateStore`, and every runtime of that pool uses it. This store is the one permitted exception to request isolation. It holds integer counters keyed by strings and never a JS value. Every access holds its mutex. The pool frees the store after its last runtime. The counters survive live reload and recycle. Two processes do not share them. `zttp:cache` stays per runtime.
+
+### D-014 A literal env name is secret unless the policy lists it in env.public
+
+- Status: standing
+- Decided: 2026-10-26
+- Binds: packages/zts/src/handler_policy.zig, packages/zts/src/flow_interp.zig, packages/modules/src/platform/env.zig
+- Gate: zig build test-zts
+
+The flow analysis gave `env("NAME")` the label `config` when the literal `NAME` held none of eight substrings (SECRET, PASSWORD, PASSWD, KEY, TOKEN, PRIVATE, CREDENTIAL, AUTH). A response that carried `env("DATABASE_URL")` or `env("STRIPE_SK")` then proved `no_secret_leakage`, although the binding declares every env result secret. The owner chose D3(a) of the soundness plan, with D7(a) and D8(a), and Decisions 22(a) and 25(a) on 2026-10-26. The result of `env` from `zttp:env` is `config` only when the policy file lists the exact literal name (case sensitive) in `env.public`. A name that is not a literal keeps the declared `secret` label, and so does every name when no policy is read. `public` is analysis only: it needs `env.allow`, there is no subset rule between the two lists, the runtime policy does not carry it, and a non-empty list is disclosed in the contract `env` object. `public` is the author's claim and the analyzer does not check it. The change moves `flow_analyzer_version` from 7 to 8 and the policy hash, so it waits for the batched re-record window of D-012. The sibling change to `mask` shares the version bump and records its own decision.

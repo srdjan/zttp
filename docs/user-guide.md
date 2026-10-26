@@ -297,6 +297,9 @@ the analyzer. It checks:
   admitted only when that policy declares the matching section. They become
   residual guards, not proven Properties. Computed SQL names remain rejected
   because the policy cannot distinguish reads from writes;
+- flow checks treat every `env("NAME")` value as secret unless the same
+  policy lists the literal `NAME` in `env.public`. A handler that returns a
+  configuration value needs that row, and `env.public` needs `env.allow`;
 - flow checks catch secret, credential, validation, injection, and PII issues
   where enough structure is visible.
 

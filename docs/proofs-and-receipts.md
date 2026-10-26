@@ -68,7 +68,7 @@ a pill: `[+]` proven, `[-]` not proven. They are grouped. `[-]` means the compil
 | Chip | Proven when |
 |---|---|
 | `injection_safe` | no unvalidated user input reaches a SQL or HTML sink |
-| `no_secret_leakage` | no secret-labelled value reaches a response body or header, a log, or an egress call (URL, headers, or body) |
+| `no_secret_leakage` | no secret-labelled value reaches a response body or header, a log, or an egress call (URL, headers, or body). A value from `env("NAME")` with a literal name is secret unless the project policy lists `NAME` in `env.public` |
 | `no_credential_leak` | no credential-labelled value reaches a response body or header, a log, or an egress call (URL, headers, or body) |
 | `input_validated` | all user input passes a validation step before any egress call |
 
@@ -138,15 +138,27 @@ The structural chips (`pure`, `read_only`, `deterministic`, `retry_safe`,
 `idempotent`) were not part of this check. Treat that as unmeasured, not as
 proven.
 
-Two rows are still open as of 2026-10-26. Both let a declared `no_secret_leakage`
+One row is still open as of 2026-10-26. It lets a declared `no_secret_leakage`
 capsule pass for a handler that leaks. Do not rely on the chip for a handler
-with one of these shapes. The planned fixes move the policy hash, so they wait
-for the batched re-record window (D-012 in [decisions](decisions.md)).
+with this shape. The planned fix moves the policy hash, so it waits for the
+batched re-record window (D-012 in [decisions](decisions.md)).
 
 | Shape | Chip that the current version proves falsely |
 |---|---|
-| A response that carries `env("NAME")` where the literal `NAME` has none of the substrings `SECRET`, `PASSWORD`, `PASSWD`, `KEY`, `TOKEN`, `PRIVATE`, `CREDENTIAL`, and `AUTH` (case-insensitive): for example `env("DATABASE_URL")`, `env("SESSION_COOKIE")`, or `env("STRIPE_SK")`. The analyzer labels such a value `config`, not secret. Rename the variable to include one of the substrings, or do not rely on the chip for it. The planned fix treats every literal name as secret unless the policy lists it in `env.public`. | `no_secret_leakage` |
 | `mask(secret, n)` where `n` is any numeric literal. The analyzer treats every literal bound as declassifying, but `mask` reveals the trailing `n` bytes of an input longer than `n`: `mask(secret, 39)` on a 40-byte secret reveals 39 bytes. The planned fix accepts a literal bound of 4 or less. | `no_secret_leakage` |
+
+The env name row is fixed after v0.24.0 (D-014 in [decisions](decisions.md)).
+Earlier versions labelled `env("DATABASE_URL")`, `env("SESSION_COOKIE")`, and
+`env("STRIPE_SK")` as `config` because the name held none of eight substrings,
+so a response that carried the value passed `no_secret_leakage`. Now every
+literal `env("NAME")` value is secret unless the project policy lists `NAME` in
+`env.public`. A computed name stays secret. The match is exact and case
+sensitive. The list is the author's claim: the analyzer does not check it, so a
+wrong entry costs the guarantee for that name, and a missing entry costs
+precision. Migration: add the names a handler may return to `env.public`.
+`env.public` needs `env.allow`, so listing a name there also turns on runtime
+allow-list enforcement for the handler. Rebuild contracts, because the flow
+analyzer version moved to 8.
 
 ### Reading A Failing Chip
 

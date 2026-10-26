@@ -61,7 +61,7 @@ durability boundary need configuration:
 
 | Module | Requirement |
 |---|---|
-| `zttp:env` | Proven literal env vars are checked at startup unless `--no-env-check` is passed. |
+| `zttp:env` | Proven literal env vars are checked at startup unless `--no-env-check` is passed. The flow analysis treats every `env` value as secret unless the policy lists the name in `env.public`. |
 | `zttp:sql` | Run with `--sqlite <file>` for execution. Use `--sql-schema <schema.sql>` or `-Dsql-schema=<schema.sql>` for schema validation. |
 | `zttp:fetch` | Enable outbound HTTP with `--outbound-http` or one or more `--outbound-host <host>` flags. |
 | `zttp:log` | Writes structured lines to stderr. Do not log raw secrets, tokens, or PII. |

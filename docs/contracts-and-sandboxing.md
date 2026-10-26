@@ -283,6 +283,36 @@ An unnamed `egress.allow_address_scopes` set permits no connection, so a
 handler that makes outbound requests needs this section even when every URL is
 a literal the compiler already proved.
 
+### Which env values are secret (`env.public`)
+
+The flow analysis treats every value that `env("NAME")` returns as secret. A
+`NAME` that is a literal becomes non-secret only when the policy lists that
+exact name in `env.public`. The match is case sensitive, and a computed name
+stays secret.
+
+```json
+{
+  "env": {
+    "allow": ["APP_NAME", "JWT_SECRET"],
+    "public": ["APP_NAME"]
+  }
+}
+```
+
+With this file a handler can return `env("APP_NAME")` and still prove
+`no_secret_leakage`. Without the `public` row it cannot: the spelling of a name
+no longer decides anything, so `env("DATABASE_URL")` and `env("STRIPE_SK")` are
+secret too. `public` is a claim by the author. The analyzer does not check it:
+a wrong entry costs the guarantee for that name, and a missing entry costs
+precision.
+
+`public` affects analysis only. It needs `allow`, so listing a name there also
+turns on runtime allow-list enforcement for the handler. The name does not have
+to appear in `allow`, and the runtime policy does not carry `public`. The
+contract `env` object lists a non-empty `public` set as `"public"`, so a reader
+of the contract sees which names the verdict took as non-secret. A command that
+reads no policy keeps every name secret.
+
 ### Egress names endpoints, not hosts
 
 An egress entry is a destination: `scheme://host:port`. A missing port is the

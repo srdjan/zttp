@@ -191,6 +191,10 @@ egress policy: `pii_contained` and `injection_safe` are omitted, while
 A table of old-checker misses is empty today, and a test holds it equal to the
 observed misses. The new flow interpreter must meet every expectation with no
 exemption before it replaces the old checker.
+Five precision entries return a non-secret `env` value, so each carries a
+`policy_source` that lists the name in `env.public` (D-014). The three false-proof
+clean contrasts that read `env("REGION")` carry the same kind of policy. No
+expectation is lowered, and the floor stays 214.
 
 The same file also holds a floor over the whole frozen corpus: the 48 precision handlers, the 38 false-proof fixtures, and the four clean contrasts. The test runs each case through the production check path. It requires 90 cases, no source error, and `CheckResult.flow_unresolved == 0`. An unresolved construct clears every flow property, so a non-zero count would hide a lost proof.
 
@@ -257,6 +261,10 @@ carries a mismatch. The gate also fails on a probe with no verdict, asserts a fl
 probes in total, per group, and per (label, sink) column, prints the counts on
 every run, and probes every failure kind through a small synthetic census.
 `-- --list` prints every probe, and `-- --dump DIR` writes the probes to `DIR`.
+Every probe runs under one census policy that lists `REGION` in `env.public`
+(`census_policy_source` in `packages/tools/src/flow_census_gate.zig`), so the
+clean source `env("REGION") ?? ""` is the one env name that carries no label.
+Without that row the clean controls would read as secret.
 
 The docs drift and link gates run here and only here. Neither Run step is
 cached, so `zig build test` always executes both scripts, and `verify.sh`

@@ -542,6 +542,13 @@ rather than the consumer checked. The runtime's acceptance line and
   that do so, but this consumer did not re-run them. Only `response_total` is
   re-derived by the consumer today. Reducing that list one family at a time is
   the ratchet's job.
+- **Which env names are public.** `no_secret_leakage` also rests on the
+  `env.public` list in the author's capability policy. The analyzer treats a
+  literal `env("NAME")` value as non-secret only when the list holds `NAME`,
+  and it does not check the claim: a wrong entry costs the guarantee for that
+  name. The list needs `env.allow`, so it also turns on runtime allow-list
+  enforcement. A contract that carries a non-empty list discloses it in its
+  `env` object.
 
 ### The residual boundary, in full
 

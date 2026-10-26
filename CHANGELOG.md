@@ -28,6 +28,21 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
   before deployment. `zttp proofs gate` grades a lost `fault_covered` as
   critical, so adding the first unchecked failable call to a handler with no
   I/O now fails the gate.
+- **`env()` values are secret unless the policy lists the name in
+  `env.public`.** The flow analysis used to label `env("NAME")` as
+  configuration when `NAME` held none of `SECRET`, `PASSWORD`, `PASSWD`, `KEY`,
+  `TOKEN`, `PRIVATE`, `CREDENTIAL`, and `AUTH`. A handler that returned
+  `env("DATABASE_URL")` or `env("STRIPE_SK")` therefore proved
+  `no_secret_leakage`. Now every literal name is secret, and the match for a
+  public name is exact and case sensitive. A computed name stays secret.
+  `env.public` needs `env.allow` in the same policy file, so listing a name
+  there also turns on runtime allow-list enforcement. It is analysis only: the
+  runtime policy does not carry it, and a non-empty list appears in the
+  contract `env` object as `public`. The flow analyzer version moves to 8 and
+  changes the policy hash. Migration: add each env name that a handler returns
+  to `env.public`, or stop returning the value. Rebuild handlers and regenerate
+  contracts before deployment. Commands that read no policy keep every name
+  secret.
 
 ## [0.24.0] - 2026-10-23
 
