@@ -265,6 +265,9 @@ Every probe runs under one census policy that lists `REGION` in `env.public`
 (`census_policy_source` in `packages/tools/src/flow_census_gate.zig`), so the
 clean source `env("REGION") ?? ""` is the one env name that carries no label.
 Without that row the clean controls would read as secret.
+The hand probes `x26` to `x31` pin the `mask` rule of D-015: a literal bound of
+4 holds, and a bound of 5 or 63, a slice, a chain of slices, and a `truncate`
+refuse.
 
 The docs drift and link gates run here and only here. Neither Run step is
 cached, so `zig build test` always executes both scripts, and `verify.sh`

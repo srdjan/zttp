@@ -138,15 +138,6 @@ The structural chips (`pure`, `read_only`, `deterministic`, `retry_safe`,
 `idempotent`) were not part of this check. Treat that as unmeasured, not as
 proven.
 
-One row is still open as of 2026-10-26. It lets a declared `no_secret_leakage`
-capsule pass for a handler that leaks. Do not rely on the chip for a handler
-with this shape. The planned fix moves the policy hash, so it waits for the
-batched re-record window (D-012 in [decisions](decisions.md)).
-
-| Shape | Chip that the current version proves falsely |
-|---|---|
-| `mask(secret, n)` where `n` is any numeric literal. The analyzer treats every literal bound as declassifying, but `mask` reveals the trailing `n` bytes of an input longer than `n`: `mask(secret, 39)` on a 40-byte secret reveals 39 bytes. The planned fix accepts a literal bound of 4 or less. | `no_secret_leakage` |
-
 The env name row is fixed after v0.24.0 (D-014 in [decisions](decisions.md)).
 Earlier versions labelled `env("DATABASE_URL")`, `env("SESSION_COOKIE")`, and
 `env("STRIPE_SK")` as `config` because the name held none of eight substrings,
@@ -159,6 +150,20 @@ precision. Migration: add the names a handler may return to `env.public`.
 `env.public` needs `env.allow`, so listing a name there also turns on runtime
 allow-list enforcement for the handler. Rebuild contracts, because the flow
 analyzer version moved to 8.
+
+The `mask` bound row is fixed after v0.24.0 (D-015 in [decisions](decisions.md)).
+Earlier versions treated every numeric literal bound as declassifying. `mask`
+reveals the trailing `n` bytes of an input longer than `n`, so `mask(secret, 39)`
+on a 40-byte secret revealed 39 bytes and still proved `no_secret_leakage`. A
+chain of four calls over slices of one secret revealed all of it. Now the
+analyzer accepts only an integer literal bound from 0 to 4 and refuses an
+omitted bound. It also requires the text to be an unmodified source value: an
+`env()` read, the `authorization` header, or a plain copy of one. A slice, a
+concatenation, `trim`, `truncate`, `slugify`, or any other transformation keeps
+the secret label. The runtime still reveals 4 bytes when the bound is omitted,
+but the analyzer does not rely on that default. Migration: write
+`mask(value, 4)` or a smaller literal on the value itself. A handler that
+relied on the old rule can lose `no_secret_leakage`, so run `zttp check` again.
 
 ### Reading A Failing Chip
 

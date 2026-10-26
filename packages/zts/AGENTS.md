@@ -19,6 +19,11 @@ Each tier imports only lower tiers. `zig build test-zts-layering` enforces the t
   label, and a command that reads no policy keeps every name secret. Proved by
   `zig build test-zts`.
 
+- **A declassifier discharges a label only for an integer literal bound within its ceiling on an unmodified source value.**
+  A join keeps the `source_exact` mark only when both sides hold it, and every
+  operation that builds a new value drops it. Proved by `zig build test-zts`
+  and `zig build test-flow-census`.
+
 ## Decisions that bind here
 
-D-004, D-006, D-007, D-014
+D-004, D-006, D-007, D-014, D-015

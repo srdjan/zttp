@@ -43,6 +43,17 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
   to `env.public`, or stop returning the value. Rebuild handlers and regenerate
   contracts before deployment. Commands that read no policy keep every name
   secret.
+- **`mask` declassifies only a literal bound of 4 or less on an unmodified
+  source value.** The flow analysis used to accept any numeric literal bound,
+  so `mask(secret, 39)` on a 40-byte secret proved `no_secret_leakage`, and
+  four bounded calls over slices of one secret revealed all of it. Now the
+  bound must be an integer literal from 0 to 4, an omitted bound is refused,
+  and the text must be an `env()` read, the `authorization` header, or a plain
+  copy of one. A slice, a concatenation, or any other transformation keeps the
+  secret label. The runtime default of 4 bytes does not change. Migration:
+  write `mask(value, 4)` on the value itself. This change shares the flow
+  analyzer version 8 with the `env.public` change. Rebuild handlers and
+  regenerate contracts before deployment.
 
 ## [0.24.0] - 2026-10-23
 
