@@ -125,6 +125,7 @@ test "descriptors preserve declaration defaults and explicit empty metadata" {
         .return_labels = .{ .secret = true, .unknown = true, ._reserved = 3 },
         .declassifies = .{ .credential = true },
         .declassify_bound_arg = 0,
+        .declassify_bound_max = 7,
         .derives_from_args = true,
         .traceable = false,
         .replay_pure = true,
@@ -142,6 +143,7 @@ test "descriptors preserve declaration defaults and explicit empty metadata" {
     try std.testing.expectEqualDeep(explicit.return_labels, second.return_labels);
     try std.testing.expectEqualDeep(explicit.declassifies, second.declassifies);
     try std.testing.expectEqual(explicit.declassify_bound_arg, second.declassify_bound_arg);
+    try std.testing.expectEqual(explicit.declassify_bound_max, second.declassify_bound_max);
     try std.testing.expect(second.derives_from_args);
     try std.testing.expect(!second.traceable);
     try std.testing.expect(second.replay_pure);

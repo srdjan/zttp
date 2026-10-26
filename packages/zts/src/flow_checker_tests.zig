@@ -5146,9 +5146,10 @@ test "mask with a computed bound declassifies nothing either" {
     try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
 }
 
-test "mask with its default bound still declassifies" {
-    // The argument is optional and the default is fixed at compile time, so
-    // omitting it is as bounded as writing the literal.
+test "mask with an omitted bound declassifies nothing (D-015)" {
+    // The runtime reveals four bytes for an omitted bound, but the analyzer
+    // accepts only an integer literal in 0..declassify_bound_max, so the
+    // default is refused rather than trusted.
     const source =
         \\import { env } from "zttp:env";
         \\import { mask } from "zttp:text";
@@ -5156,7 +5157,149 @@ test "mask with its default bound still declassifies" {
         \\  return Response.json({ v: mask(env("API_SECRET")) });
         \\}
     ;
+    try std.testing.expect(!try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+const mask_prelude =
+    \\import { env } from "zttp:env";
+    \\import { parseBearer } from "zttp:auth";
+    \\import { mask, truncate, slugify } from "zttp:text";
+    \\function helper(p) { return p; }
+    \\function handler(req) {
+    \\  const s = env("API_SECRET") ?? "";
+    \\  const cond = req.url.length > 3;
+    \\
+;
+
+/// One probe of `mask`: `pre` runs after `s` is bound, and `expr` is what the
+/// response carries.
+fn maskHolds(comptime pre: []const u8, comptime expr: []const u8) !bool {
+    const source = mask_prelude ++ pre ++ "\n  return Response.json({ v: " ++ expr ++ " });\n}";
+    return runNoSecretLeakage(std.testing.allocator, source);
+}
+
+test "mask holds for an integer literal bound on an unmodified source value (D-015)" {
+    try std.testing.expect(try maskHolds("", "mask(s, 4)"));
+    try std.testing.expect(try maskHolds("", "mask(s, 0)"));
+    // The control: the same secret returned directly, and with the bound one
+    // past the ceiling, is refused, so a true above is not the harness
+    // refusing nothing.
+    try std.testing.expect(!try maskHolds("", "s"));
+    try std.testing.expect(!try maskHolds("", "mask(s, 5)"));
+}
+
+test "mask refuses a bound that is not an integer literal in 0..4 (D-015)" {
+    inline for (.{ "mask(s, 5)", "mask(s, 63)", "mask(s, 4.0)", "mask(s, -1)", "mask(s)", "mask(s, 2 + 2)" }) |expr| {
+        try std.testing.expect(!try maskHolds("", expr));
+    }
+}
+
+test "mask holds for a plain copy of a source value (D-015)" {
+    inline for (.{
+        .{ "const t = s;", "mask(t, 4)" },
+        .{ "", "mask(helper(s), 4)" },
+        .{ "const o = { v: s };", "mask(o.v, 4)" },
+        .{ "", "mask(cond ? s : \"\", 4)" },
+        .{ "", "mask([s].pop(), 4)" },
+        .{ "", "mask([s][0], 4)" },
+        .{ "const a = [s, s];", "mask(a[1], 4)" },
+        .{ "let x = s; let y = x;", "mask(y, 4)" },
+    }) |probe| {
+        try std.testing.expect(try maskHolds(probe[0], probe[1]));
+    }
+}
+
+test "mask holds after an undefined check on a source value (D-015)" {
+    const source =
+        \\import { env } from "zttp:env";
+        \\import { mask } from "zttp:text";
+        \\function handler(req) {
+        \\  const u = env("API_SECRET");
+        \\  if (u === undefined) {
+        \\    return Response.json({ v: "none" });
+        \\  }
+        \\  return Response.json({ v: mask(u, 4) });
+        \\}
+    ;
     try std.testing.expect(try runNoSecretLeakage(std.testing.allocator, source));
+}
+
+test "mask refuses a transformation of a source value (D-015)" {
+    inline for (.{
+        .{ "", "mask(s.slice(0, 13), 4)" },
+        .{ "", "mask(s + \"\", 4)" },
+        .{ "", "mask(\"\" + s, 4)" },
+        .{ "", "mask([s].join(\"\"), 4)" },
+        .{ "", "mask(s.concat(\"\"), 4)" },
+        .{ "", "mask(s.trim(), 4)" },
+        .{ "", "mask(s.toUpperCase(), 4)" },
+        .{ "", "mask(s.padStart(20), 4)" },
+        .{ "", "mask(truncate(s, 8), 4)" },
+        .{ "", "mask(slugify(s), 4)" },
+        .{ "", "mask(s.split(\"\").join(\"\"), 4)" },
+        .{ "", "mask(cond ? s : s.slice(1), 4)" },
+        .{ "let x = s; x = x + \"\";", "mask(x, 4)" },
+        .{ "const o = { v: s.slice(1) };", "mask(o.v, 4)" },
+    }) |probe| {
+        try std.testing.expect(!try maskHolds(probe[0], probe[1]));
+    }
+}
+
+test "mask refuses a source value that another secret selected or addressed (D-015)" {
+    // The value is still the unmodified source, but a second secret decided
+    // which value arrives or where it is stored, so the declassification
+    // would also discharge the label of that second secret.
+    const other = "const t = env(\"OTHER_SECRET\") ?? \"\";";
+    try std.testing.expect(!try maskHolds(other, "mask([s].find((x) => t.length > 2), 4)"));
+    try std.testing.expect(!try maskHolds(other ++ " const o = {}; o[t] = s;", "mask(o.x, 4)"));
+    // A secret that names the variable to read makes the read a function of that secret.
+    try std.testing.expect(!try maskHolds("", "mask(env(s), 4)"));
+    // The control: the same shapes without the second secret hold.
+    try std.testing.expect(try maskHolds("const t = \"k\"; const o = {}; o[t] = s;", "mask(o.k, 4)"));
+    try std.testing.expect(try maskHolds("", "mask([s].find((x) => true), 4)"));
+}
+
+test "mask refuses the four-call chain that would reveal the whole secret (D-015)" {
+    try std.testing.expect(!try maskHolds(
+        "const a = mask(s.slice(0, s.length - 12), 4);\n  const b = mask(s.slice(0, s.length - 8), 4);\n  const c = mask(s.slice(0, s.length - 4), 4);",
+        "[a, b, c, mask(s, 4)].join(\"\")",
+    ));
+}
+
+test "mask keeps source exactness through a loop only while every pass holds it (D-015)" {
+    // `x` starts as the source and becomes a slice on the second pass. A
+    // fixpoint that ignored `source_exact` would see the first pass's state
+    // again and stop, proving the slice clean.
+    try std.testing.expect(!try maskHolds(
+        "let x = s; let y = s;\n  for (const i of range(3)) { x = y; y = x.slice(0, x.length - 1); }",
+        "[mask(s, 4), mask(x, 4)].join(\"\")",
+    ));
+}
+
+test "mask on a credential holds only for the authorization header itself (D-015)" {
+    const held =
+        \\import { mask } from "zttp:text";
+        \\function handler(req) {
+        \\  return Response.json({ v: mask(req.headers["authorization"] ?? "", 4) });
+        \\}
+    ;
+    try std.testing.expect(try runNoCredentialLeakage(std.testing.allocator, held));
+    const parsed =
+        \\import { mask } from "zttp:text";
+        \\import { parseBearer } from "zttp:auth";
+        \\function handler(req) {
+        \\  return Response.json({ v: mask(parseBearer(req.headers["authorization"] ?? "") ?? "", 4) });
+        \\}
+    ;
+    try std.testing.expect(!try runNoCredentialLeakage(std.testing.allocator, parsed));
+    const sliced =
+        \\import { mask } from "zttp:text";
+        \\function handler(req) {
+        \\  const h = req.headers["authorization"] ?? "";
+        \\  return Response.json({ v: mask(h.slice(1), 4) });
+        \\}
+    ;
+    try std.testing.expect(!try runNoCredentialLeakage(std.testing.allocator, sliced));
 }
 
 test "mask with a literal bound on a secret into a log holds no_secret_leakage" {

@@ -78,14 +78,21 @@ pub const FunctionBinding = struct {
     /// an export whose purpose is to make a labelled value publishable, and
     /// that names the labels it discharges in `declassifies`.
     ///
-    /// The declassification holds only while that argument is a compile-time
-    /// literal. `mask(text, visible)` reveals the trailing `visible` bytes, so
-    /// a runtime `visible` lets whatever computes it decide how much of the
-    /// secret survives: `mask(env("SECRET_KEY"), bytesLength(requestBody(req)))`
-    /// is request-controlled declassification. With a non-literal bound the
-    /// analyzer keeps the input's labels, and the ordinary sink diagnostic
-    /// reports the secret reaching the response.
+    /// The declassification holds only while that argument is an integer
+    /// literal in `0..declassify_bound_max`. `mask(text, visible)` reveals the
+    /// trailing `visible` bytes, so a runtime `visible` lets whatever computes
+    /// it decide how much of the secret survives:
+    /// `mask(env("SECRET_KEY"), bytesLength(requestBody(req)))` is
+    /// request-controlled declassification. An omitted, non-literal, float, or
+    /// too large bound keeps the input's labels, and the ordinary sink
+    /// diagnostic reports the secret reaching the response.
     declassify_bound_arg: ?u8 = null,
+    /// The largest integer literal that `declassify_bound_arg` may carry while
+    /// the declassification holds. Needed with `declassify_bound_arg` and only
+    /// with it. The analyzer also requires every other argument to be the
+    /// unmodified result of a labelled source, so a slice of a secret cannot
+    /// be unmasked piece by piece.
+    declassify_bound_max: ?u32 = null,
     /// The labels this export discharges from its input, and only these. The
     /// result carries every other label of its input, plus `return_labels`.
     ///

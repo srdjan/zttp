@@ -310,9 +310,14 @@ pub const FunctionBinding = struct {
     return_labels: LabelSet = .{},
 
     /// The argument that bounds how much this export declassifies; the
-    /// declassification holds only while that argument is a compile-time
-    /// literal. See the SDK field of the same name for the reasoning.
+    /// declassification holds only while that argument is an integer literal
+    /// in `0..declassify_bound_max`. See the SDK field of the same name for
+    /// the reasoning.
     declassify_bound_arg: ?u8 = null,
+
+    /// The largest integer literal the bound argument may carry. Set with
+    /// `declassify_bound_arg` and only with it.
+    declassify_bound_max: ?u32 = null,
 
     /// The labels this export discharges from its input, and only these; the
     /// result carries every other input label plus `return_labels`. Needs
@@ -488,6 +493,11 @@ pub fn validateBindings(comptime bindings: []const ModuleBinding) void {
                 if (f.declassifies.isEmpty()) {
                     @compileError(b.specifier ++ "." ++ f.name ++ " bounds a declassification but declares no `declassifies` labels; a bound with nothing to discharge names nothing");
                 }
+                if (f.declassify_bound_max == null) {
+                    @compileError(b.specifier ++ "." ++ f.name ++ " declares `declassify_bound_arg` but no `declassify_bound_max`; the analyzer needs a ceiling for the literal");
+                }
+            } else if (f.declassify_bound_max != null) {
+                @compileError(b.specifier ++ "." ++ f.name ++ " declares `declassify_bound_max` but no `declassify_bound_arg`; a ceiling with no bound names nothing");
             }
             if (!f.declassifies.isEmpty()) {
                 if (f.declassify_bound_arg == null) {

@@ -247,6 +247,11 @@ const BindingHasher = struct {
         if (value) |present| self.byte(present);
     }
 
+    fn optionalU32(self: *BindingHasher, value: ?u32) void {
+        self.boolean(value != null);
+        if (value) |present| self.count(present);
+    }
+
     fn stringList(self: *BindingHasher, values: []const []const u8) void {
         self.count(values.len);
         for (values) |value| self.bytes(value);
@@ -317,8 +322,9 @@ const BindingHasher = struct {
         // its discharged labels are authority-bearing. They are folded only
         // when declared, so that an export which declassifies nothing keeps the
         // digest it had before the fields existed.
-        if (exp.declassify_bound_arg != null or !exp.declassifies.isEmpty()) {
+        if (exp.declassify_bound_arg != null or exp.declassify_bound_max != null or !exp.declassifies.isEmpty()) {
             self.optionalByte(exp.declassify_bound_arg);
+            self.optionalU32(exp.declassify_bound_max);
             std.mem.writeInt(u16, &labels, @bitCast(exp.declassifies), .little);
             self.hasher.update(&labels);
         }
@@ -452,6 +458,13 @@ test "binding digest covers the complete authority surface" {
         // The discharged set is part of the identity, not only its presence.
         changed_exports[0].declassifies = .{ .secret = true, .credential = true };
         try std.testing.expect(!std.mem.eql(u8, &declassifying, &bindingDigest(changed)));
+        // So is the ceiling: its presence and its value.
+        const unbounded = bindingDigest(changed);
+        changed_exports[0].declassify_bound_max = 4;
+        const ceiling_four = bindingDigest(changed);
+        try std.testing.expect(!std.mem.eql(u8, &unbounded, &ceiling_four));
+        changed_exports[0].declassify_bound_max = 5;
+        try std.testing.expect(!std.mem.eql(u8, &ceiling_four, &bindingDigest(changed)));
     }
     {
         var changed = baseline_binding;

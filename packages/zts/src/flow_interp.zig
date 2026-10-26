@@ -331,6 +331,14 @@ pub const Value = struct {
     request_field: ?flow_evidence.RequestField = null,
     io_origin: ?flow_evidence.Origin = null,
     io_view: ?SchemaView = null,
+    /// Every value this denotes is the unmodified result of a labelled source
+    /// (a literal-name `env()` read, the `authorization` header), or carries
+    /// none of `declassifiable`. False by default, so a value that an operation
+    /// builds anew forgets it. Only a plain copy keeps it; a join keeps it when
+    /// both sides hold it (`exactFor`). `mask` declassifies only such text,
+    /// because a slice of a secret is not the secret and a chain of slices
+    /// would reveal all of it.
+    source_exact: bool = false,
 
     /// A primitive that carries nothing.
     pub const clean: Value = .{ .html_type = false };
@@ -418,6 +426,28 @@ fn isSubset(
     return true;
 }
 
+/// The labels `mask`-style declassifiers may discharge. `source_exact` matters
+/// only for these: a value that carries none of them has nothing to unmask.
+const declassifiable: LabelSet = .{ .secret = true, .credential = true };
+
+/// Whether `v` is an unmodified source value, or holds nothing a declassifier
+/// could discharge.
+fn exactFor(v: Value) bool {
+    return v.source_exact or !v.labels.hasAny(declassifiable);
+}
+
+/// The part of `yieldsSource` that depends on the export alone. Public for the
+/// census over the builtin registry.
+pub fn exportYieldsSource(resolved: ModuleExport) bool {
+    const func = resolved.func;
+    if (func.derives_from_args or func.declassify_bound_arg != null) return false;
+    if (findCallbackExport(&callback_exports, resolved.binding.specifier, func.name) != null) return false;
+    return switch (func.returns) {
+        .boolean, .number, .string, .optional_string, .optional_number => true,
+        .undefined, .object, .unknown, .optional_object, .result, .dict, .bytes => false,
+    };
+}
+
 /// The join of two reachable values. Labels use `mergeConditional`, and the
 /// defenses combine as data (`combineDefenses`), so a defense survives a join
 /// only when every exposed path holds it. The other parts are set unions with
@@ -447,6 +477,7 @@ fn joinValue(arena: std.mem.Allocator, a: Value, b: Value) Error!Value {
         .callables = try mergeSorted(NodeIndex, arena, a.callables, b.callables, nodeOrder),
         .callables_top = a.callables_top or b.callables_top,
         .callee_exact = a.callee_exact and b.callee_exact and std.mem.eql(NodeIndex, a.callables, b.callables) and sameExport(a.native_export, b.native_export),
+        .source_exact = exactFor(a) and exactFor(b),
     };
 }
 
@@ -468,6 +499,7 @@ fn withFlow(v: Value, source: Flow) Value {
     out.schema_guard = flow.schema_guard;
     out.html_guard = flow.html_guard;
     out.witness_complete = flow.witness_complete and source.witness_complete;
+    if (source.labels.hasAny(declassifiable)) out.source_exact = false;
     if (source.exposed() and !source.defenses.schema_checked) out.schema_view = null;
     return out;
 }
@@ -483,6 +515,7 @@ fn withoutDefenses(v: Value) Value {
     out.request_field = null;
     out.io_origin = null;
     out.io_view = null;
+    out.source_exact = false;
     return out;
 }
 
@@ -503,6 +536,7 @@ fn unionValue(arena: std.mem.Allocator, a: Value, b: Value) Error!Value {
     out.io_origin = if (sameOrigin(a.io_origin, b.io_origin)) a.io_origin else null;
     out.io_view = if (sameSchema(a.io_view, b.io_view)) a.io_view else null;
     out.witness_complete = flow.witness_complete;
+    out.source_exact = false;
     return out;
 }
 
@@ -518,6 +552,7 @@ fn withNative(arena: std.mem.Allocator, v: Value, native: Value) Error!Value {
         .request_field = v.request_field,
         .io_origin = v.io_origin,
         .io_view = v.io_view,
+        .source_exact = v.source_exact,
         .defenses = v.defenses,
         .schema_guard = v.schema_guard,
         .html_guard = v.html_guard,
@@ -714,7 +749,7 @@ fn valueEql(a: Value, b: Value) bool {
         a.html_type == b.html_type and sameExport(a.native_export, b.native_export) and sameSchema(a.schema_view, b.schema_view) and a.request_field == b.request_field and sameOrigin(a.io_origin, b.io_origin) and sameSchema(a.io_view, b.io_view) and sameGuard(a.flow().schema_guard, b.flow().schema_guard) and sameGuard(a.flow().html_guard, b.flow().html_guard) and
         a_defenses == b_defenses and
         a.origins_top == b.origins_top and
-        a.callables_top == b.callables_top and a.callee_exact == b.callee_exact and a.witness_complete == b.witness_complete and
+        a.callables_top == b.callables_top and a.callee_exact == b.callee_exact and a.witness_complete == b.witness_complete and a.source_exact == b.source_exact and
         sliceEql(SiteKey, a.origins, b.origins, SiteKey.order) and
         sliceEql(NodeIndex, a.callables, b.callables, nodeOrder);
 }
@@ -2121,7 +2156,9 @@ pub const FlowInterp = struct {
         var headers_cells: Cells = .{ .summary = input };
         try request_cells.named.put(arena, @backingInt(object.Atom.headers), headers);
         try request_cells.named.put(arena, @backingInt(object.Atom.query), query);
-        try headers_cells.named.put(arena, @backingInt(object.Atom.authorization), Value.labelled(.{ .user_input = true, .credential = true }));
+        var authorization = Value.labelled(.{ .user_input = true, .credential = true });
+        authorization.source_exact = true;
+        try headers_cells.named.put(arena, @backingInt(object.Atom.authorization), authorization);
         try entry.heap.put(arena, request_site, try joinCells(arena, entry.heap.get(request_site) orelse .{}, request_cells));
         try entry.heap.put(arena, headers_site, try joinCells(arena, entry.heap.get(headers_site) orelse .{}, headers_cells));
         try entry.heap.put(arena, query_site, try joinCells(arena, entry.heap.get(query_site) orelse .{}, .{ .summary = input }));
@@ -3398,17 +3435,42 @@ pub const FlowInterp = struct {
         return declared;
     }
 
-    /// Whether an export's declassification holds at this call (D14): the
-    /// bounding argument is a numeric literal, or is omitted so that the
-    /// export's own default bounds it, and what the call reads holds no
-    /// object and no function, which a declassified summary could not keep.
-    fn declassifies(self: *const FlowInterp, resolved: ModuleExport, c: ir.Node.CallExpr, read: Value) bool {
+    /// Whether an export's declassification holds at this call (D14, D-015).
+    /// The bounding argument must be an integer literal in
+    /// `0..declassify_bound_max`: an omitted bound, a float, a negative number,
+    /// and a larger number all refuse. Every other argument must be an
+    /// unmodified source value (`exactFor`), because a slice, a concatenation,
+    /// or any other transformation of a secret is a different value and
+    /// several bounded calls over slices would reveal all of it. The call also
+    /// reads no object and no function, which a declassified summary could not
+    /// keep.
+    fn declassifies(self: *const FlowInterp, resolved: ModuleExport, c: ir.Node.CallExpr, read: Value, values: []const Value) bool {
         const bound = resolved.func.declassify_bound_arg orelse return false;
+        const max = resolved.func.declassify_bound_max orelse return false;
         if (read.origins.len > 0 or read.callables.len > 0 or read.origins_top or read.callables_top) return false;
-        if (bound >= c.args_count) return true;
+        if (bound >= c.args_count) return false;
         const arg = self.ir_view.getListIndex(c.args_start, bound);
-        const tag = self.ir_view.getTag(arg) orelse return false;
-        return tag == .lit_int or tag == .lit_float;
+        if ((self.ir_view.getTag(arg) orelse return false) != .lit_int) return false;
+        const literal = self.ir_view.getIntValue(arg) orelse return false;
+        if (literal < 0 or literal > max) return false;
+        for (values, 0..) |value, i| {
+            if (i != bound and !exactFor(value)) return false;
+        }
+        return true;
+    }
+
+    /// Whether the call of `resolved` yields an unmodified source value: the
+    /// result of an export that only reads a labelled source (`env` with its
+    /// declared secret), not one that derives its result from its arguments,
+    /// declassifies, runs a callback, or returns a container. An argument
+    /// that carries a declassifiable label or points at an object or function
+    /// disqualifies the call.
+    fn yieldsSource(self: *const FlowInterp, resolved: ModuleExport, c: ir.Node.CallExpr, args: []const Value) bool {
+        if (!exportYieldsSource(resolved) or !self.declaredLabels(resolved, c).hasAny(declassifiable)) return false;
+        for (args) |arg| {
+            if (arg.labels.hasAny(declassifiable) or arg.origins.len > 0 or arg.origins_top or arg.callables.len > 0 or arg.callables_top) return false;
+        }
+        return true;
     }
 
     /// A call of an imported export. The binding says what the result is
@@ -3441,6 +3503,7 @@ pub const FlowInterp = struct {
         }
         var result = try self.evalExportValues(node, c, resolved, args, st);
         result.io_origin = origin;
+        result.source_exact = self.yieldsSource(resolved, c, args);
         if (resolved.func.replay_pure and resolved.func.returns == .result and resolved.func.failure_severity != .none) result.witness_complete = false;
         if (origin != null and result.origins.len > 0) result.io_view = try self.watchSchema(st, result);
         return result;
@@ -3508,7 +3571,7 @@ pub const FlowInterp = struct {
         // The labels an export declassifies leave what it read, not what it
         // declares, and they leave the summary too, so no later read of the
         // result restores them.
-        const declassified = self.declassifies(resolved, c, read);
+        const declassified = self.declassifies(resolved, c, read, values);
         const input = if (declassified) read.labels.without(resolved.func.declassifies) else read.labels;
         var labels = LabelSet.mergeValues(input, self.declaredLabels(resolved, c));
         if (readsVaryingSource(resolved)) labels.nondeterministic = true;
@@ -3565,6 +3628,8 @@ pub const FlowInterp = struct {
         shown.labels = labels;
         var out = try joinValue(arena, shown, container);
         if (results) |passed| out = try joinValue(arena, out, passed);
+        // A container or a callback result is no source value.
+        out.source_exact = false;
 
         // No native export writes into an argument today. The write keeps a
         // future one sound, at the cost of mixing the containers of one call.
@@ -4329,6 +4394,9 @@ pub const FlowInterp = struct {
         stored.schema_guard = flow.schema_guard;
         stored.html_guard = flow.html_guard;
         stored.witness_complete = flow.witness_complete;
+        // The receiver and the key join the stored flow, so a labelled one
+        // makes the cell a combination and no longer the source itself.
+        if (o.labels.hasAny(declassifiable) or (key == .dynamic and key.dynamic.labels.hasAny(declassifiable))) stored.source_exact = false;
         for (o.origins) |site| try self.weakWriteSite(st, site, name, stored);
         if (o.origins_top) st.top_cell = try weakWriteCells(self.mem(), st.top_cell, if (name) |n| try self.heapAtom(n) else null, stored);
     }
@@ -7519,12 +7587,15 @@ test "an export that answers a fact about its argument carries a nested secret" 
 // P5 specification test 29.
 test "mask declassifies under a literal bound and an argument that holds no object" {
     const text = "import { mask } from \"zttp:text\"; ";
+    // The parameter stands for an unmodified source value, as an `env()` read does.
+    var exact_secret = secret_value;
+    exact_secret.source_exact = true;
     inline for (.{
         "function f(s) { return mask(s, 4); }",
         "function f(s) { return String(mask(s, 4)); }",
-        "function f(s) { return mask(s); }",
+        "function f(s) { return mask(s, 0); }",
     }) |body| {
-        const r = try analyzeSource(text ++ body, "f", &.{secret_value});
+        const r = try analyzeSource(text ++ body, "f", &.{exact_secret});
         defer r.deinit();
         try testing.expect(!r.result.cleared);
         try testing.expect(!r.returnedLabels().secret);
@@ -7537,6 +7608,16 @@ test "mask declassifies under a literal bound and an argument that holds no obje
     try expectSecretBit(text ++ "function f(s, n) { return mask(s, n); }", &.{ secret_value, Value.clean }, true);
     try expectSecretBit(text ++ "function f(s, n) { return String(mask(s, n)); }", &.{ secret_value, Value.clean }, true);
     try expectSecretBit(text ++ "function f(s) { return mask({ x: s }, 4); }", &.{secret_value}, true);
+
+    // An omitted, too large, float, or negative bound keeps the secret, and so
+    // does a secret that is not an unmodified source value (D-015).
+    inline for (.{
+        "function f(s) { return mask(s); }",
+        "function f(s) { return mask(s, 5); }",
+        "function f(s) { return mask(s, 4.0); }",
+        "function f(s) { return mask(s, -1); }",
+    }) |body| try expectSecretBit(text ++ body, &.{exact_secret}, true);
+    try expectSecretBit(text ++ "function f(s) { return mask(s, 4); }", &.{secret_value}, true);
 }
 
 // P5 specification test 30, as rewritten by D-014.
@@ -9968,4 +10049,22 @@ test "a noncallable own slot cannot silently use a builtin prototype method" {
     try testing.expect(p.cleared);
     try testing.expect(!p.properties.no_secret_leakage);
     try testing.expect(!p.properties.no_credential_leakage);
+}
+
+test "the exports that yield an unmodified source value are exactly zttp:env.env (D-015)" {
+    // `source_exact` is set only for these, so one more export here is one more
+    // value that `mask` would treat as a source. Every declassification must
+    // also discharge only labels that `source_exact` guards.
+    var sources: usize = 0;
+    for (&engine.builtin_modules.all) |*binding| {
+        for (binding.exports) |*func| {
+            try testing.expect(func.declassifies.without(declassifiable).isEmpty());
+            const resolved: ModuleExport = .{ .binding = binding, .func = func, .imported = 0 };
+            if (!exportYieldsSource(resolved) or !func.return_labels.without(.{ .validated = true }).hasAny(declassifiable)) continue;
+            sources += 1;
+            try testing.expectEqualStrings("zttp:env", binding.specifier);
+            try testing.expectEqualStrings("env", func.name);
+        }
+    }
+    try testing.expectEqual(@as(usize, 1), sources);
 }

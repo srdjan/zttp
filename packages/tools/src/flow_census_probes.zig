@@ -854,7 +854,7 @@ const hand_header =
     \\import { env } from "zttp:env";
     \\import { logInfo } from "zttp:log";
     \\import { fetch } from "zttp:fetch";
-    \\import { mask, escapeHtml } from "zttp:text";
+    \\import { mask, escapeHtml, truncate } from "zttp:text";
     \\import { schemaCompile, validateJson } from "zttp:validate";
 ;
 
@@ -1245,6 +1245,86 @@ const hand_written = [_]Hand{
         \\}
         ,
     },
+    .{
+        .name = "x26_mask_secret_literal_bound_holds",
+        .property = .no_secret_leakage,
+        .expect = .hold,
+        .reason = "mask with an integer literal bound within the ceiling on an unmodified source value declassifies it; the control for x27 to x31",
+        .body =
+        \\function handler(req: Request): Claim<Response> {
+        \\  const t = env("API_TOKEN") ?? "";
+        \\  logInfo(mask(t, 4), { n: 1 });
+        \\  return Response.json({ ok: 1 });
+        \\}
+        ,
+    },
+    .{
+        .name = "x27_mask_bound_above_ceiling_log",
+        .property = .no_secret_leakage,
+        .expect = .refuse,
+        .reason = "mask declassifies only a literal bound of 4 or less; a bound of 5 leaves the secret in the log (ZTS402)",
+        .body =
+        \\function handler(req: Request): Claim<Response> {
+        \\  const t = env("API_TOKEN") ?? "";
+        \\  logInfo(mask(t, 5), { n: 1 });
+        \\  return Response.json({ ok: 1 });
+        \\}
+        ,
+    },
+    .{
+        .name = "x28_mask_bound_63_log",
+        .property = .no_secret_leakage,
+        .expect = .refuse,
+        .reason = "mask with a literal bound of 63 would reveal a whole token, so the secret stays in the log (ZTS402)",
+        .body =
+        \\function handler(req: Request): Claim<Response> {
+        \\  const t = env("API_TOKEN") ?? "";
+        \\  logInfo(mask(t, 63), { n: 1 });
+        \\  return Response.json({ ok: 1 });
+        \\}
+        ,
+    },
+    .{
+        .name = "x29_mask_slice_log",
+        .property = .no_secret_leakage,
+        .expect = .refuse,
+        .reason = "mask declassifies only an unmodified source value; a slice of the secret keeps the label (ZTS402)",
+        .body =
+        \\function handler(req: Request): Claim<Response> {
+        \\  const t = env("API_TOKEN") ?? "";
+        \\  logInfo(mask(t.slice(1), 4), { n: 1 });
+        \\  return Response.json({ ok: 1 });
+        \\}
+        ,
+    },
+    .{
+        .name = "x30_mask_slice_chain_response",
+        .property = .no_secret_leakage,
+        .expect = .refuse,
+        .reason = "four bounded calls over slices of one secret would reveal all of it, so each slice keeps the label (ZTS400)",
+        .body =
+        \\function handler(req: Request): Claim<Response> {
+        \\  const t = env("API_TOKEN") ?? "";
+        \\  const a = mask(t.slice(0, t.length - 12), 4);
+        \\  const b = mask(t.slice(0, t.length - 8), 4);
+        \\  const c = mask(t.slice(0, t.length - 4), 4);
+        \\  return Response.json({ v: [a, b, c, mask(t, 4)].join("") });
+        \\}
+        ,
+    },
+    .{
+        .name = "x31_mask_truncate_log",
+        .property = .no_secret_leakage,
+        .expect = .refuse,
+        .reason = "truncate of a secret is a different value, so mask does not declassify it (ZTS402)",
+        .body =
+        \\function handler(req: Request): Claim<Response> {
+        \\  const t = env("API_TOKEN") ?? "";
+        \\  logInfo(mask(truncate(t, 8, ""), 4), { n: 1 });
+        \\  return Response.json({ ok: 1 });
+        \\}
+        ,
+    },
 };
 
 /// Every probe of the census, in a fixed order. All memory comes from `a`.
@@ -1299,7 +1379,7 @@ pub fn generate(a: std.mem.Allocator) ![]Probe {
 pub const minimum_matrix: usize = 504;
 // Measured by the unfiltered Phase 3 census; every retained probe matched.
 pub const minimum_extended: usize = 206;
-pub const minimum_hand: usize = 24;
+pub const minimum_hand: usize = 30;
 /// The fewest probes a (label, sink) column holds: the 18 research kinds.
 pub const minimum_per_column: usize = 18;
 

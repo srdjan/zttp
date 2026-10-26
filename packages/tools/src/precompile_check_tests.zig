@@ -7749,6 +7749,36 @@ test "CHECK extensionless imports use reader revisions in both traversals" {
     }
 }
 
+test "CHECK mask declassifies only a literal bound of 4 or less on an unmodified source value (D-015)" {
+    const allocator = std.testing.allocator;
+    const header =
+        \\import { env } from "zttp:env";
+        \\import { mask } from "zttp:text";
+        \\function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+        \\  const s = env("API_SECRET") ?? "";
+        \\
+    ;
+    const bodies = [_]struct { body: []const u8, holds: bool }{
+        .{ .body = "  return Response.text(mask(s, 4));\n}", .holds = true },
+        .{ .body = "  return Response.text(mask(s, 5));\n}", .holds = false },
+        .{ .body = "  return Response.text(mask(s.slice(0, 13), 4));\n}", .holds = false },
+        .{
+            .body = "  const a = mask(s.slice(0, s.length - 12), 4);\n" ++
+                "  const b = mask(s.slice(0, s.length - 8), 4);\n" ++
+                "  const c = mask(s.slice(0, s.length - 4), 4);\n" ++
+                "  return Response.text([a, b, c, mask(s, 4)].join(\"\"));\n}",
+            .holds = false,
+        },
+    };
+    inline for (bodies) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, header ++ case.body, "/virtual/no-disk/handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        try std.testing.expectEqual(case.holds, result.contract.?.properties.?.no_secret_leakage);
+        try std.testing.expectEqual(!case.holds, hasDiagnosticCode(&result, "ZTS400"));
+    }
+}
+
 test "CHECK import path selection preserves explicit names and normalized cycle identity" {
     const allocator = std.testing.allocator;
     const spellings = [_][]const u8{ "./helper", "./helper.ts", "./nested/../helper" };

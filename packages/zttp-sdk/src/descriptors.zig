@@ -226,6 +226,7 @@ pub const FunctionDescriptor = struct {
     contract_flags: ContractFlags = .{},
     return_labels: LabelSet = .{},
     declassify_bound_arg: ?u8 = null,
+    declassify_bound_max: ?u32 = null,
     declassifies: LabelSet = .{},
     derives_from_args: bool = false,
     failure_severity: FailureSeverity = .none,

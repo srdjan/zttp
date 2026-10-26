@@ -15,8 +15,19 @@ const sdk = @import("zttp-sdk");
 // text, and `fetch(url, { body: mask(req.url, 4) })` must not prove
 // `injection_safe`. The result is also `internal`.
 //
+// The analyzer honors that discharge only for an integer literal bound in
+// 0..`mask_visible_max` and only when the text is the unmodified result of a
+// labelled source, so no chain of slices of one secret can reveal more than
+// the last `mask_visible_max` bytes of it. An omitted bound is refused there,
+// although the runtime reveals `mask_visible_max` bytes for it.
+//
 // The other three transform text and hand it back. `slugify` of a secret is a
 // slug of a secret.
+
+/// The most trailing bytes `mask` reveals by default and the largest bound the
+/// analyzer accepts as a declassification.
+pub const mask_visible_max: u32 = 4;
+
 pub const binding = sdk.ModuleBinding{
     .specifier = "zttp:text",
     .name = "text",
@@ -25,7 +36,7 @@ pub const binding = sdk.ModuleBinding{
         .{ .name = "unescapeHtml", .derives_from_args = true, .module_func = unescapeHtmlImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .param_names = &.{"text"}, .laws = &.{.pure} },
         .{ .name = "slugify", .derives_from_args = true, .module_func = slugifyImpl, .arg_count = 1, .effect = .none, .returns = .string, .param_types = &.{.string}, .param_names = &.{"text"}, .laws = &.{.pure} },
         .{ .name = "truncate", .derives_from_args = true, .module_func = truncateImpl, .arg_count = 3, .effect = .none, .returns = .string, .param_types = &.{ .string, .number, .string }, .param_names = &.{ "text", "maxLength", "suffix" }, .required_arg_count = 2, .laws = &.{.pure} },
-        .{ .name = "mask", .module_func = maskImpl, .arg_count = 2, .effect = .none, .returns = .string, .param_types = &.{ .string, .number }, .param_names = &.{ "text", "visible" }, .required_arg_count = 1, .return_labels = .{ .internal = true }, .declassify_bound_arg = 1, .declassifies = .{ .secret = true, .credential = true }, .laws = &.{.pure} },
+        .{ .name = "mask", .module_func = maskImpl, .arg_count = 2, .effect = .none, .returns = .string, .param_types = &.{ .string, .number }, .param_names = &.{ "text", "visible" }, .required_arg_count = 1, .return_labels = .{ .internal = true }, .declassify_bound_arg = 1, .declassify_bound_max = mask_visible_max, .declassifies = .{ .secret = true, .credential = true }, .laws = &.{.pure} },
     },
 };
 
@@ -145,25 +156,32 @@ fn truncateImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSV
     return sdk.createString(handle, buf.items) catch sdk.JSValue.undefined_val;
 }
 
-fn maskImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
-    if (args.len == 0) return sdk.JSValue.undefined_val;
-    const input = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+/// An omitted, non-integer, or negative bound reveals `mask_visible_max` bytes.
+fn visibleBytes(bound: ?i32) usize {
+    const n = bound orelse return mask_visible_max;
+    if (n < 0) return mask_visible_max;
+    return @intCast(n);
+}
 
-    const visible: usize = if (args.len > 1) blk: {
-        const n = sdk.extractInt(args[1]) orelse break :blk 4;
-        if (n < 0) break :blk 4;
-        break :blk @intCast(n);
-    } else 4;
-
-    const allocator = sdk.getAllocator(handle);
-    const buf = allocator.alloc(u8, input.len) catch return sdk.JSValue.undefined_val;
-    defer allocator.free(buf);
-
+fn maskInto(buf: []u8, input: []const u8, visible: usize) void {
     const mask_count = if (input.len > visible) input.len - visible else input.len;
     @memset(buf[0..mask_count], '*');
     if (input.len > visible) {
         @memcpy(buf[mask_count..], input[mask_count..]);
     }
+}
+
+fn maskImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
+    if (args.len == 0) return sdk.JSValue.undefined_val;
+    const input = sdk.extractString(args[0]) orelse return sdk.JSValue.undefined_val;
+
+    const visible = visibleBytes(if (args.len > 1) sdk.extractInt(args[1]) else null);
+
+    const allocator = sdk.getAllocator(handle);
+    const buf = allocator.alloc(u8, input.len) catch return sdk.JSValue.undefined_val;
+    defer allocator.free(buf);
+
+    maskInto(buf, input, visible);
 
     return sdk.createString(handle, buf) catch sdk.JSValue.undefined_val;
 }
@@ -177,4 +195,16 @@ test "matchEntity: known entities" {
     try std.testing.expectEqual(@as(u8, '\''), matchEntity("&#39;").?.char);
     try std.testing.expect(matchEntity("&unknown;") == null);
     try std.testing.expect(matchEntity("hello") == null);
+}
+
+test "mask reveals exactly mask_visible_max trailing bytes for an omitted, non-integer, or negative bound" {
+    const input = "abcdefghijklmnopq";
+    var buf: [input.len]u8 = undefined;
+    for ([_]?i32{ null, -1, -100 }) |bound| {
+        maskInto(&buf, input, visibleBytes(bound));
+        try std.testing.expectEqualStrings("*************" ++ "nopq", &buf);
+    }
+    maskInto(&buf, input, visibleBytes(2));
+    try std.testing.expectEqualStrings("***************pq", &buf);
+    try std.testing.expectEqual(@as(usize, mask_visible_max), visibleBytes(null));
 }
