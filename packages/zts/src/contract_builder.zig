@@ -2122,10 +2122,14 @@ pub const ContractBuilder = struct {
             },
             .break_stmt, .continue_stmt => {},
             .function_decl, .function_expr, .arrow_function => return,
-            // exhaustive: API facts are read from the response-producing constructs
-            // above. What remains holds no route, status, or schema to record,
-            // and a missed fact leaves contract.json quieter, never wronger.
-            else => {},
+            // Any other tag passes each child it holds back to this scan, so a
+            // spread operand or a new node kind is read by default. A nested
+            // function is a boundary: it is entered only when it is called, which
+            // this scan does not model.
+            else => {
+                var children = self.ir_view.expressionChildren(node_idx);
+                while (children.next()) |child| try self.scanFunctionNodeForApiFacts(child, request_binding_slot, route);
+            },
         }
     }
 

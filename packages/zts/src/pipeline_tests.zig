@@ -2215,6 +2215,29 @@ test "a refused payload is a dynamic response schema in the contract, not an inf
     }.run);
 }
 
+test "a request header read inside a spread operand is a header parameter of the route" {
+    // The API scan once dropped spread operands, so this header never reached
+    // the contract's API section.
+    const source = "import { routerMatch } from \"zttp:router\";\n" ++
+        "function getA(req: Request): Response {\n" ++
+        "  return Response.json({ ...{ auth: req.headers[\"authorization\"] } });\n}\n" ++
+        "const routes = { \"GET /a\": getA };\n" ++
+        "function handler(req: Request): Response {\n" ++
+        "  const found = routerMatch(routes, req);\n" ++
+        "  if (found === undefined) return Response.text(\"nf\");\n" ++
+        "  return found.handler(req);\n}";
+    try withSession(testing.allocator, source, struct {
+        fn run(session: Session) anyerror!void {
+            var contract = try extractContractOnlyForTest(session, false);
+            defer contract.deinit(session.allocator);
+            try testing.expectEqual(@as(usize, 1), contract.api.routes.items.len);
+            const route = contract.api.routes.items[0];
+            try testing.expectEqual(@as(usize, 1), route.header_params.items.len);
+            try testing.expectEqualStrings("authorization", route.header_params.items[0].name);
+        }
+    }.run);
+}
+
 // ---------------------------------------------------------------------------
 // One message per node when `check` reports every computed stage
 // ---------------------------------------------------------------------------
