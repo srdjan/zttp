@@ -146,3 +146,7 @@ U3 corrections:
 17. Census: `x25` is taken in `packages/tools/src/flow_census_probes.zig`; give the new mask probes unused names and set `minimum_hand` to the printed count.
 18. Added tests: a census over `builtin_modules.all` asserting that the set of exports satisfying 2(a) is exactly `zttp:env.env`; `mask(parseBearer(req.headers["authorization"] ?? "") ?? "", 4)` refused for `no_credential_leakage`; `[s].pop()` and `[s][0]` hold beside `{v: s}.v`.
 19. `docs/proofs-and-receipts.md`: replace the two open rows that unit 012 added (env name rule, mask bound) with fixed rows that name this version.
+
+Owner decisions of 2026-10-26 on these corrections:
+- Decision 24 (a): `mask` with an omitted bound is refused; the analyzer accepts only an integer literal bound in 0..`declassify_bound_max`. This supersedes U3 step 4 "bound omitted: accept" and the SDK doc caveat about the runtime default.
+- Decision 25 (a): U2 and U3 share one flow analyzer bump, 7 to 8. U2 bumps the version; U3 does not bump it again. This supersedes U3 step 6.
