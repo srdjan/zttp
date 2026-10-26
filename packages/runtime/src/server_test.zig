@@ -398,6 +398,52 @@ test "B2: per-request timeout aborts a slow handler and returns RequestTimeout" 
     try std.testing.expectEqualStrings("alive", resp.body);
 }
 
+const fib_source = "function fib(n) { if (n < 2) { return n; } return fib(n - 1) + fib(n - 2); }";
+const fib_n = "30";
+const map_n = 100;
+
+// range() is a lazy iterator without map, and an array literal holds fewer than 255 elements,
+// so the callbacks nest three deep over a 100-element literal.
+const map_items = blk: {
+    @setEvalBranchQuota(100_000);
+    var items: []const u8 = "[0";
+    for (1..map_n) |i| items = items ++ std.fmt.comptimePrint(",{d}", .{i});
+    break :blk items ++ "]";
+};
+
+// Sizes measured with request_timeout_ms = 0: each handler runs far past the
+// 50 ms deadline used below, and none of them executes a loop back-edge outside
+// a native callback.
+const slow_recursion_handler = fib_source ++
+    "function handler(req) { return Response.text(String(fib(" ++ fib_n ++ "))); }";
+const slow_map_handler =
+    "function handler(req) { const xs = " ++ map_items ++ "; const f = (a, y) => a + y; const r = xs.map((x) => xs.map((z) => xs.reduce(f, 0) + xs.reduce(f, 0) + xs.reduce(f, 0) + xs.reduce(f, 0)));" ++
+    " return Response.text(String(r.length)); }";
+const slow_component_handler = fib_source ++
+    "function Comp(props) { return h('p', {}, String(fib(" ++ fib_n ++ "))); }" ++
+    "function handler(req) { return Response.html(renderToString(h(Comp, {}))); }";
+
+fn expectTimeout(handler_source: []const u8) !void {
+    const allocator = std.heap.c_allocator;
+    var pool = try HandlerPool.init(allocator, .{ .request_timeout_ms = 50 }, handler_source, "<server-test>", 1, 0);
+    defer pool.deinit();
+    var req = try getRequest(allocator, "/");
+    defer req.deinit(allocator);
+    try std.testing.expectError(error.RequestTimeout, pool.executeHandler(req.asView()));
+}
+
+test "a recursive handler with no loop times out" {
+    try expectTimeout(slow_recursion_handler);
+}
+
+test "nested map callbacks time out" {
+    try expectTimeout(slow_map_handler);
+}
+
+test "a function component that runs past the deadline times out" {
+    try expectTimeout(slow_component_handler);
+}
+
 test "B3: Server.shutdown() is safe before start" {
     // This structural edge case complements the real SIGTERM socket test in
     // server.zig, which owns the accept loop and in-flight request machinery.

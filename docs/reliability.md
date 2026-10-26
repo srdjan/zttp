@@ -8,8 +8,8 @@ reported.
 | Limit | Default / Value | Notes |
 |---|---:|---|
 | Request body size | 1 MB | Set with `--max-body-size`. Oversized requests return `413 Payload Too Large`. |
-| Request read timeout | 30 seconds | Set with `ServerConfig.timeout_ms` or edge `timeoutMs`. Slow client reads return `408 Request Timeout`. |
-| Handler execution timeout | 30 seconds | Set with `ServerConfig.timeout_ms` or edge `timeoutMs`. Slow handlers return `504 Gateway Timeout` and invalidate the pool slot. |
+| Request read timeout | 30 seconds | The CLI uses a fixed 30 seconds. Embedders set `ServerConfig.timeout_ms`. Slow client reads return `408 Request Timeout`. |
+| Handler execution timeout | 30 seconds | The CLI uses a fixed 30 seconds. Embedders set `ServerConfig.timeout_ms`. The interpreter checks the deadline on loop back-edges and on function calls, including callbacks from native array and dict functions and JSX function components. Slow handlers return `504 Gateway Timeout` and invalidate the pool slot. |
 | JavaScript memory | no explicit limit | Set per runtime with `-m` / `--memory`. |
 | Runtime pool size | `cpu_count * 2`, clamped 8-128 | Set with `-n` / `--pool`. |
 | Connection workers | `cpu_count * 2`, clamped 2-128 | A fixed pool, not one thread per connection. Not configurable from the CLI. |
@@ -38,8 +38,9 @@ key, user, or route.
   into `500`.
 - Request bodies above the fixed limit return `413` before the body is buffered.
 - Slow request reads return `408`.
-- Handler execution deadlines return `504` and the runtime slot is replaced
-  before it is reused.
+- Handler execution deadlines are checked on loop back-edges and on function
+  calls, so recursion and nested callbacks reach them. They return `504` and the
+  runtime slot is replaced before it is reused.
 - Exhausted runtime pools return `503`.
 - A handler panic is caught by a setjmp/longjmp boundary around each handler
   invocation, returns `500`, and quarantines the pool slot. The server and other

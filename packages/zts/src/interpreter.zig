@@ -73,8 +73,8 @@ pub const Interpreter = struct {
     }
 
     /// Check whether the per-request deadline has passed and set the interrupt
-    /// flag if so. Called every 1024 back-edges to amortize the clock read.
-    fn checkDeadline(self: *Interpreter) void {
+    /// flag if so. Called every 1024 back-edges or calls to amortize the clock read.
+    pub fn checkDeadline(self: *Interpreter) void {
         const deadline = self.ctx.deadline_ns;
         if (deadline == 0) return;
         const now = compat.monotonicNowNs() catch return;

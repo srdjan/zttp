@@ -223,7 +223,7 @@ pub const Context = struct {
     /// Canonical SQLite database paths that SDK modules may open. Empty means deny.
     sdk_sqlite_allowlist: SdkPathAllowList,
     /// Cooperative per-request interrupt. Self-set by the deadline check at loop
-    /// back-edges; may be set by any thread (atomic) for forced aborts.
+    /// back-edges and function calls; may be set by any thread (atomic) for forced aborts.
     interrupt_requested: std.atomic.Value(bool),
     /// Monotonic deadline in ns for the current request. 0 = no deadline.
     deadline_ns: u64,

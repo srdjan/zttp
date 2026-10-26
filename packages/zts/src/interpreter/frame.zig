@@ -97,6 +97,19 @@ pub fn closeUpvaluesAbove(self: *Interpreter, local_idx: u8) void {
     }
 }
 
+/// Request-deadline poll for call entry. Callbacks and recursion run without
+/// back-edges, so calls share the back-edge counter that amortizes the clock
+/// read. Out of line so the no-deadline path of `callBytecodeFunction` stays small.
+noinline fn pollDeadlineAtCall(self: *Interpreter) bool {
+    if (self.ctx.interrupt_requested.load(.monotonic)) return true;
+    self.backedge_count +%= 1;
+    if (self.backedge_count & 0x3FF == 0) {
+        self.checkDeadline();
+        if (self.ctx.interrupt_requested.load(.monotonic)) return true;
+    }
+    return false;
+}
+
 pub fn callBytecodeFunction(
     self: *Interpreter,
     func_val: value.JSValue,
@@ -104,7 +117,10 @@ pub fn callBytecodeFunction(
     this_val: value.JSValue,
     args: []const value.JSValue,
 ) InterpreterError!value.JSValue {
-    if (self.ctx.deadline_ns != 0 and self.ctx.interrupt_requested.load(.monotonic)) return error.RequestTimeout;
+    if (self.ctx.deadline_ns != 0) {
+        @branchHint(.unlikely);
+        if (pollDeadlineAtCall(self)) return error.RequestTimeout;
+    }
     trace.traceCall(self, "bc enter", @intCast(args.len), false);
     defer trace.traceCall(self, "bc exit", @intCast(args.len), false);
 

@@ -495,7 +495,7 @@ pub fn renderToString(ctx_ptr: *anyopaque, _: value.JSValue, args: []const value
     return result;
 }
 
-const RenderError = std.Io.Writer.Error || error{ OutOfMemory, ArenaObjectEscape, NoHiddenClassPool, JsonDepthExceeded, RenderDepthExceeded, ComponentFailed };
+const RenderError = std.Io.Writer.Error || error{ OutOfMemory, ArenaObjectEscape, NoHiddenClassPool, JsonDepthExceeded, RenderDepthExceeded, ComponentFailed, RequestTimeout };
 
 /// Nesting bound for renderNode, renderRawChildren, and appendChild; matches JSON_MAX_DEPTH.
 const RENDER_MAX_DEPTH: u32 = 512;
@@ -571,6 +571,7 @@ fn renderNode(ctx: *context.Context, node: value.JSValue, writer: *std.Io.Writer
             const call_args = [_]value.JSValue{props_val};
             const component_result = call_fn(ctx, func_obj, &call_args) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
+                error.RequestTimeout => return error.RequestTimeout,
                 else => return error.ComponentFailed,
             };
 
