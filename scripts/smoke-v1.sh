@@ -181,6 +181,18 @@ run_captured "deploy exited non-zero" "$ZTTP" deploy
 [ -s "$APP_DIR/.zttp/proofs.jsonl" ] || fail "proofs.jsonl missing or empty after deploy"
 grep -q '"kind":"deploy"' "$APP_DIR/.zttp/proofs.jsonl" || fail "no kind=deploy row in proofs.jsonl"
 
+step "proofs bundle takes the deploy output and verifies with --require-proof"
+run_captured "proofs bundle exited non-zero" "$ZTTP" proofs bundle --binary ".zttp/deploy/$APP_NAME" --out bundle
+[ -s bundle/handler.contract.json ] || fail "bundle holds no contract"
+run_captured "proofs verify --require-proof exited non-zero" "$ZTTP" proofs verify bundle --require-proof
+
+step "negative: proofs bundle names a missing contract path"
+missing_contract_status=0
+missing_contract_out=$("$ZTTP" proofs bundle --contract nope.json --binary ".zttp/deploy/$APP_NAME" --out bundle2 2>&1) || missing_contract_status=$?
+[ "$missing_contract_status" -eq 1 ] || fail "missing --contract exited $missing_contract_status, want 1"
+printf '%s' "$missing_contract_out" | grep -q "cannot read contract 'nope.json'" || fail "missing --contract did not name the path: $missing_contract_out"
+printf '%s' "$missing_contract_out" | grep -q "stack\|\.zig:" && fail "missing --contract printed a stack trace: $missing_contract_out"
+
 step "run deploy artifact on :$DEPLOY_PORT and curl /"
 "$APP_DIR/.zttp/deploy/$APP_NAME" -p "$DEPLOY_PORT" >/dev/null 2>&1 &
 DEPLOY_PID=$!

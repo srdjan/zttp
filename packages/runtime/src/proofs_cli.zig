@@ -41,6 +41,8 @@ pub fn isExpectedUserError(err: anyerror) bool {
         error.UnknownArgument,
         error.MissingContractArg,
         error.MissingOutArg,
+        error.InputUnreadable,
+        error.ContractMismatch,
         error.SuspiciousPath,
         error.NoBundleJson,
         error.InvalidManifest,
@@ -285,7 +287,9 @@ fn writeHelp(w: *std.Io.Writer) !void {
         \\                   Defaults: --out ./zttp-proof.svg, --ref HEAD.
         \\  bundle           Package a contract and optional binary or replay.
         \\                   A binary's proof certificate is extracted too.
-        \\                   Flags: --contract PATH --out DIR [--binary PATH]
+        \\                   Without --contract, the binary's embedded contract
+        \\                   is bundled; a --contract file must match it.
+        \\                   Flags: --out DIR [--binary PATH] [--contract PATH]
         \\                          [--replay PATH]
         \\  verify <dir>     Check component integrity, then run artifact proof
         \\                   acceptance when binary and certificate are present.

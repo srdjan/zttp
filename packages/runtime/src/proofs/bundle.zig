@@ -49,9 +49,19 @@ pub const ComponentVerdict = struct {
     actual_sha: [64]u8,
 };
 
+/// Read one bundle input. A failure names the input and its path on `stderr`
+/// and returns `InputUnreadable`, so no bare error name reaches the user.
+fn readInput(allocator: std.mem.Allocator, stderr: *std.Io.Writer, label: []const u8, path: []const u8, limit: usize) ![]u8 {
+    return zts.file_io.readFile(allocator, path, limit) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        try stderr.print("zttp proofs bundle: cannot read {s} '{s}': {s}\n", .{ label, path, @errorName(err) });
+        return error.InputUnreadable;
+    };
+}
+
 pub fn writeBundle(allocator: std.mem.Allocator, args: BundleArgs, stdout: *std.Io.Writer, stderr: *std.Io.Writer) !void {
-    if (args.contract_path.len == 0) {
-        try stderr.writeAll("zttp proofs bundle: --contract <path> is required\n");
+    if (args.contract_path.len == 0 and args.binary_path == null) {
+        try stderr.writeAll("zttp proofs bundle: --contract <path> or --binary <path> is required\n");
         return error.MissingContractArg;
     }
     if (args.out_dir.len == 0) {
@@ -59,7 +69,7 @@ pub fn writeBundle(allocator: std.mem.Allocator, args: BundleArgs, stdout: *std.
         return error.MissingOutArg;
     }
 
-    try rejectSuspiciousPath(args.contract_path);
+    if (args.contract_path.len > 0) try rejectSuspiciousPath(args.contract_path);
     if (args.binary_path) |p| try rejectSuspiciousPath(p);
     if (args.replay_path) |p| try rejectSuspiciousPath(p);
     try rejectSuspiciousPath(args.out_dir);
@@ -72,7 +82,7 @@ pub fn writeBundle(allocator: std.mem.Allocator, args: BundleArgs, stdout: *std.
     var binary_payload: ?self_extract.Payload = null;
     defer if (binary_payload) |*payload| payload.deinit(allocator);
     if (args.binary_path) |path| {
-        const bytes = try zts.file_io.readFile(allocator, path, 256 * 1024 * 1024);
+        const bytes = try readInput(allocator, stderr, "binary", path, 256 * 1024 * 1024);
         binary_bytes = bytes;
         binary_payload = payloadFromBinary(allocator, bytes) catch |err| switch (err) {
             error.UnsupportedArtifactFormat => {
@@ -87,8 +97,28 @@ pub fn writeBundle(allocator: std.mem.Allocator, args: BundleArgs, stdout: *std.
         };
     }
 
-    const contract_bytes = try zts.file_io.readFile(allocator, args.contract_path, 256 * 1024 * 1024);
-    defer allocator.free(contract_bytes);
+    // The deploy output holds the binary only, and the binary embeds its
+    // contract. Without --contract the embedded bytes are bundled; with it,
+    // the file must match them.
+    const embedded_contract: ?[]const u8 = if (binary_payload) |payload| payload.contract_json else null;
+    var contract_file: ?[]u8 = null;
+    defer if (contract_file) |bytes| allocator.free(bytes);
+    if (args.contract_path.len > 0) {
+        contract_file = try readInput(allocator, stderr, "contract", args.contract_path, 256 * 1024 * 1024);
+        if (embedded_contract) |embedded| {
+            if (!std.mem.eql(u8, embedded, contract_file.?)) {
+                try stderr.print(
+                    "zttp proofs bundle: --contract '{s}' differs from the contract embedded in the binary; omit --contract to bundle the embedded one\n",
+                    .{args.contract_path},
+                );
+                return error.ContractMismatch;
+            }
+        }
+    }
+    const contract_bytes: []const u8 = contract_file orelse embedded_contract orelse {
+        try stderr.writeAll("zttp proofs bundle: the binary embeds no contract; pass --contract <path>\n");
+        return error.MissingContractArg;
+    };
     try refuseRetiredContract(allocator, contract_bytes, stderr);
     try ensureDir(allocator, args.out_dir);
     const contract_sha = sha256Hex(contract_bytes);
@@ -129,7 +159,7 @@ pub fn writeBundle(allocator: std.mem.Allocator, args: BundleArgs, stdout: *std.
         // Replay traces are JSONL records, expected to be KB-MB. Cap below
         // the 256 MiB contract/binary limit so a misrouted binary blob
         // path fails fast instead of silently bundling.
-        const replay_bytes = try zts.file_io.readFile(allocator, path, 32 * 1024 * 1024);
+        const replay_bytes = try readInput(allocator, stderr, "replay", path, 32 * 1024 * 1024);
         defer allocator.free(replay_bytes);
         const sha = sha256Hex(replay_bytes);
         replay_sha_hex = sha;
@@ -1402,4 +1432,91 @@ test "verify hashes a component larger than one read buffer" {
     defer verify_err.deinit();
     try verify(std.testing.allocator, "bundle", false, &verify_out.writer, &verify_err.writer);
     try std.testing.expect(std.mem.indexOf(u8, verify_out.writer.buffered(), "Integrity: verified") != null);
+}
+
+/// A binary whose payload embeds `contract`, written as `handler` in the cwd.
+fn writeEmbeddedContractBinary(contract: []const u8) !void {
+    try zts.file_io.writeFile(std.testing.allocator, "base", "test-runtime");
+    const policy = zts.RuntimePolicy{};
+    try self_extract.create(std.testing.allocator, "base", "handler", .{
+        .bytecode = "payload",
+        .policy = &policy,
+        .contract_json = contract,
+    });
+}
+
+test "bundle takes the contract embedded in the binary when --contract is absent" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer std.testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const contract = "{\"version\":18}";
+    try writeEmbeddedContractBinary(contract);
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    try writeBundle(std.testing.allocator, .{
+        .contract_path = "",
+        .binary_path = "handler",
+        .out_dir = "bundle",
+    }, &out.writer, &err.writer);
+
+    const bundled = try zts.file_io.readFile(std.testing.allocator, "bundle/handler.contract.json", 1024);
+    defer std.testing.allocator.free(bundled);
+    try std.testing.expectEqualStrings(contract, bundled);
+}
+
+test "bundle refuses a --contract file that differs from the embedded contract" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer std.testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try writeEmbeddedContractBinary("{\"version\":18}");
+    try zts.file_io.writeFile(std.testing.allocator, "other.json", "{\"version\":17}");
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    try std.testing.expectError(error.ContractMismatch, writeBundle(std.testing.allocator, .{
+        .contract_path = "other.json",
+        .binary_path = "handler",
+        .out_dir = "bundle",
+    }, &out.writer, &err.writer));
+    try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "'other.json' differs") != null);
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.access(std.Io.Dir.cwd(), std.testing.io, "bundle", .{}),
+    );
+}
+
+test "bundle names a missing --contract path and creates no output" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer std.testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    try std.testing.expectError(error.InputUnreadable, writeBundle(std.testing.allocator, .{
+        .contract_path = "missing.json",
+        .out_dir = "bundle",
+    }, &out.writer, &err.writer));
+    try std.testing.expectEqualStrings(
+        "zttp proofs bundle: cannot read contract 'missing.json': FileNotFound\n",
+        err.writer.buffered(),
+    );
+    try std.testing.expectError(
+        error.FileNotFound,
+        std.Io.Dir.access(std.Io.Dir.cwd(), std.testing.io, "bundle", .{}),
+    );
 }

@@ -351,8 +351,7 @@ Two commands answer two different questions:
 zttp verify http://127.0.0.1:8080
 
 # Proof: does this exact artifact satisfy the required properties.
-zttp proofs bundle --contract .zttp/deploy/handler.contract.json \
-  --binary .zttp/deploy/my-app --out bundle
+zttp proofs bundle --binary .zttp/deploy/my-app --out bundle
 zttp proofs verify bundle --require-proof
 ```
 
