@@ -7,7 +7,7 @@ It owns the findings review, the design, the phase order, the verification, and 
 The worklog for this plan records execution and evidence. Phase R0 (baseline) creates that worklog.
 Preparation findings go into the worklog, not into this document.
 
-Status: complete through R13, 2026-10-25. The coordinator adds the final `bash scripts/verify.sh` result. The owner approved the plan on 2026-10-25 and answered "as recommended", which selects option (a) for Decisions 1 to 5.
+Status: complete through R13, 2026-10-25. The final `bash scripts/verify.sh` from an empty local cache passed at `6d87413d`. Owner Decisions 8 to 11 are open; the worklog states each one. The owner approved the plan on 2026-10-25 and answered "as recommended", which selects option (a) for Decisions 1 to 5.
 Decision 1 (a) authorizes phases R0 to R13. Decision 6 (a), 2026-10-25: R0 waits until the concurrent session finishes and the tree is clean.
 
 When the owner approves this plan, it replaces the [2026-10-14 reset plan](2026-10-14-reset-implementation-plan.md) as the active reset authority.

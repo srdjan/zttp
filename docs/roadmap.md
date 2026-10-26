@@ -18,6 +18,9 @@ The [2026-10-14 reset plan](plans/2026-10-14-reset-implementation-plan.md) is al
 Open owner decisions after the reset:
 - Decision 2 (batched re-record window, D-012 in [decisions.md](decisions.md)). Model-visible changes wait for one window. The window holds the R7c move of the three pi tools onto the production session, the missing-type location of R4 row 18, the deferred H10 and U12 defaults, and any R10c class B patch that the owner defers.
 - Decision 11 (R10c class B). Two patches are held back: spread operands in `contract_builder.scanFunctionNodeForApiFacts` and the statement-only descent in `strict_checker.collectStaticLiterals`. The owner accepts, rejects, or defers each patch.
+- Decision 8 (R7a exit). A second checker and type environment stay for the custom `type_check` callback on the runtime serve path, because that callback needs a fresh checker. The owner keeps them as a documented exception or removes them as a class B change.
+- Decision 9 (R12 exit). The allowlist rows went from 458 to 472, because the proof-swallow gate now covers the moved CHECK files and each new zts file needs a tier row. The owner accepts the count or sets it as a target.
+- Decision 10 (R5 `bench-check`). `intArithmetic` misses the committed baseline by more than 8% on this host at R0 and after the reset. The reset moved its median by -2.0%; the other rows moved by 0.8% or less. The owner accepts the measurement or asks for a phase-by-phase search.
 - Release provenance. `release-provenance` failed at the reset baseline because `docs/coverage.json` was stale. An offline republish of `docs/convergence.json` and `docs/coverage.json` is the remedy. The owner or coordinator runs it.
 
 Next work: the owner picks the date of the re-record window. No feature work starts before that decision.

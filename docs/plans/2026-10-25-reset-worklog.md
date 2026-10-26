@@ -286,3 +286,16 @@ Kept although no file outside `docs/plans/` cites it (20 files), with the reason
 - `zttp-evidence-model-implementation-plan.md`: a proposal with no implementation.
 
 Every other file in `docs/plans/` is cited outside `docs/plans/` (for example by `docs/solutions/`, `advisor-plans/`, `docs/roadmap.md`, `docs/internals/agent-spine.md`, or source comments) and stays.
+
+## R13 final gate
+
+| Commit | Phase | Result |
+|---|---|---|
+| `5851fb74` | R13b-1 | `docs/contracts-and-sandboxing.md` names the current live-reload owners instead of the removed `server.zig:updateContract`. |
+| `0647fdc7` | R13b-2 | Three completed plans are archived at the local tag `pre-reset-archive-2026-10-25` (`264a4fd7`). |
+| `6d87413d` | R13b-3 | The roadmap, the plan index, and the plan status show the final state. |
+| this commit | R13 status | The plan status states the final gate. The roadmap lists open Decisions 8, 9, and 10 beside Decisions 2 and 11. |
+
+`bash scripts/verify.sh` at `6d87413d`, empty local cache, `DEEPSEEK_API_KEY` unset: exit 0, "verify.sh: all per-commit gates passed".
+Reset totals from R0 to `6d87413d`: the fresh-cache aggregate went from 7765/7771 to 7809/7815 passed (6 skipped). The analyzer digests over 215 sources stayed byte-identical at every phase. The protected evidence paths and the bytecode golden did not change.
+Open owner decisions: 8 (R7a exception), 9 (R12 allowlist count), 10 (R5 `bench-check` baseline), 11 (R10c class B patches), Decision 2 window items, and the release-provenance offline republish.
