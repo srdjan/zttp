@@ -73,8 +73,9 @@ pub fn printHelp() !void {
         \\zttp verify <url> [--trust-key <hex>] [--json]
         \\
         \\Fetches the URL, reads the Zttp-Attest response header, and validates
-        \\its Ed25519 signature against the embedded public key. Prints the proven
-        \\contract claims on success.
+        \\its Ed25519 signature against the embedded public key. Prints the signed
+        \\contract claims on success. Without --trust-key the endpoint supplies the
+        \\key, so the signer is not authenticated and the output says so.
         \\
         \\Options:
         \\  --trust-key <hex>  64-char SHA-256 fingerprint of the expected public
@@ -82,7 +83,7 @@ pub fn printHelp() !void {
         \\  --json             Emit the claims as a single JSON object on stdout.
         \\
         \\Exit codes:
-        \\  0  verified
+        \\  0  signature valid (key pinned only when --trust-key matched)
         \\  1  argument error
         \\  2  endpoint did not return Zttp-Attest header
         \\  3  signature does not validate
@@ -121,6 +122,8 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     };
     defer result.deinit();
 
+    // Reaching the output with a pin means the fingerprint matched.
+    const pinned = opts.trust_key_fingerprint_hex != null;
     if (opts.trust_key_fingerprint_hex) |expected| {
         // Hex is case-insensitive, so compare case-insensitively: an uppercase
         // or mixed-case --trust-key copy of the (lowercase) fingerprint must
@@ -135,9 +138,9 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     }
 
     if (opts.json_output) {
-        try writeClaimsJson(allocator, opts.url, &result);
+        try writeClaimsJson(allocator, opts.url, &result, pinned);
     } else {
-        try writeClaimsHuman(opts.url, &result);
+        try writeClaimsHuman(opts.url, &result, pinned);
     }
     return exit_ok;
 }
@@ -200,10 +203,12 @@ fn renderClaimsHuman(
     buffer: []u8,
     url: []const u8,
     result: *const envelope.VerifyResult,
+    pinned: bool,
 ) std.fmt.BufPrintError![]const u8 {
     return std.fmt.bufPrint(
         buffer,
-        \\Signature verified: {s}
+        \\{s}: {s}
+        \\{s}  signed_at is the signer's own claim; no host is bound to this claim.
         \\  This checks provenance, not proof. The endpoint returns a signed
         \\  claim about an artifact; it does not return the artifact. Nothing
         \\  here reconstructed an obligation or checked a derivation, so no
@@ -225,7 +230,9 @@ fn renderClaimsHuman(
         \\
     ,
         .{
+            if (pinned) "Signature verified" else "Signature valid against the key the endpoint supplied (key not pinned)",
             url,
+            if (pinned) "" else "  pin it with --trust-key <fingerprint>\n",
             &result.fingerprint_hex,
             result.claims.compiler_version,
             result.claims.signed_at_unix,
@@ -245,13 +252,13 @@ fn renderClaimsHuman(
     );
 }
 
-fn writeClaimsHuman(url: []const u8, result: *const envelope.VerifyResult) !void {
+fn writeClaimsHuman(url: []const u8, result: *const envelope.VerifyResult, pinned: bool) !void {
     var buf: [4096]u8 = undefined;
-    const out = renderClaimsHuman(&buf, url, result) catch return;
+    const out = renderClaimsHuman(&buf, url, result, pinned) catch return;
     try writeAllFd(std.c.STDOUT_FILENO, out);
 }
 
-fn renderClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *const envelope.VerifyResult) ![]u8 {
+fn renderClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *const envelope.VerifyResult, pinned: bool) ![]u8 {
     var aw: std.Io.Writer.Allocating = .init(allocator);
     defer aw.deinit();
     var json: std.json.Stringify = .{ .writer = &aw.writer };
@@ -276,6 +283,9 @@ fn renderClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *cons
     // not the bytes, so the semantic states stay out of reach here.
     try json.objectField("assurance");
     try json.write("provenance_only");
+    // False means the signer was not authenticated: the key came from the endpoint.
+    try json.objectField("keyPinned");
+    try json.write(pinned);
     try json.objectField("policySha256");
     try json.write(result.claims.policy_sha256);
     try json.objectField("capabilityHash");
@@ -310,8 +320,8 @@ fn renderClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *cons
     return try allocator.dupe(u8, aw.writer.buffered());
 }
 
-fn writeClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *const envelope.VerifyResult) !void {
-    const out = try renderClaimsJson(allocator, url, result);
+fn writeClaimsJson(allocator: std.mem.Allocator, url: []const u8, result: *const envelope.VerifyResult, pinned: bool) !void {
+    const out = try renderClaimsJson(allocator, url, result, pinned);
     defer allocator.free(out);
     try writeAllFd(std.c.STDOUT_FILENO, out);
 }
@@ -406,7 +416,7 @@ test "renderClaimsJson uses JSON string escaping" {
     };
     defer result.deinit();
 
-    const out = try renderClaimsJson(testing.allocator, "https://example.test/a?x=\"y\"", &result);
+    const out = try renderClaimsJson(testing.allocator, "https://example.test/a?x=\"y\"", &result, false);
     defer testing.allocator.free(out);
 
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, out, .{});
@@ -421,6 +431,7 @@ test "renderClaimsJson uses JSON string escaping" {
     try testing.expectEqualStrings("quote\" slash\\ newline\n", root.get("propertySummary").?.string);
     try testing.expectEqualStrings("env,cache", root.get("guardedCategories").?.string);
     try testing.expectEqualStrings("provenance_only", root.get("assurance").?.string);
+    try testing.expect(!root.get("keyPinned").?.bool);
     try testing.expect(root.get("propertySummary").? == .string);
     try testing.expectEqualStrings("none", root.get("durableWorkflowProofLevel").?.string);
     try testing.expect(!root.get("durableWorkflowRetrySafe").?.bool);
@@ -456,9 +467,11 @@ test "renderClaimsHuman keeps static guarded categories separate from claimed ch
     defer result.deinit();
 
     var buffer: [4096]u8 = undefined;
-    const out = try renderClaimsHuman(&buffer, "https://example.test", &result);
+    const out = try renderClaimsHuman(&buffer, "https://example.test", &result, false);
     try testing.expectEqualStrings(
-        "Signature verified: https://example.test\n" ++
+        "Signature valid against the key the endpoint supplied (key not pinned): https://example.test\n" ++
+            "  pin it with --trust-key <fingerprint>\n" ++
+            "  signed_at is the signer's own claim; no host is bound to this claim.\n" ++
             "  This checks provenance, not proof. The endpoint returns a signed\n" ++
             "  claim about an artifact; it does not return the artifact. Nothing\n" ++
             "  here reconstructed an obligation or checked a derivation, so no\n" ++
@@ -481,9 +494,11 @@ test "renderClaimsHuman keeps static guarded categories separate from claimed ch
     );
 
     result.claims.guarded_categories = "env,egress,cache,sql";
-    const guarded = try renderClaimsHuman(&buffer, "https://example.test", &result);
+    const guarded = try renderClaimsHuman(&buffer, "https://example.test", &result, false);
     try testing.expectEqualStrings(
-        "Signature verified: https://example.test\n" ++
+        "Signature valid against the key the endpoint supplied (key not pinned): https://example.test\n" ++
+            "  pin it with --trust-key <fingerprint>\n" ++
+            "  signed_at is the signer's own claim; no host is bound to this claim.\n" ++
             "  This checks provenance, not proof. The endpoint returns a signed\n" ++
             "  claim about an artifact; it does not return the artifact. Nothing\n" ++
             "  here reconstructed an obligation or checked a derivation, so no\n" ++
@@ -504,4 +519,44 @@ test "renderClaimsHuman keeps static guarded categories separate from claimed ch
             "  durable workflow: proof=none, retrySafe=false, idempotent=false, faultCovered=false\n",
         guarded,
     );
+}
+
+test "a pinned key is reported as pinned in human and JSON output" {
+    const testing = std.testing;
+    var result = envelope.VerifyResult{
+        .claims = .{
+            .contract_sha256 = &@as([64:0]u8, @splat('a')),
+            .bytecode_sha256 = &@as([64:0]u8, @splat('b')),
+            .policy_sha256 = &@as([64:0]u8, @splat('c')),
+            .capability_hash = &@as([64:0]u8, @splat('d')),
+            .core_profile_id = "zts-model-1",
+            .core_grammar_sha256 = &@as([64:0]u8, @splat('1')),
+            .semantics_sha256 = &@as([64:0]u8, @splat('2')),
+            .compiler_version = "test",
+            .signed_at_unix = 7,
+            .property_summary = "pure",
+            .guarded_categories = "",
+            .routes_count = 1,
+        },
+        .public_key = @as([std.crypto.sign.Ed25519.PublicKey.encoded_length]u8, @splat(0)),
+        .fingerprint_hex = @splat('f'),
+        .arena = std.heap.ArenaAllocator.init(testing.allocator),
+    };
+    defer result.deinit();
+
+    var buffer: [4096]u8 = undefined;
+    const human = try renderClaimsHuman(&buffer, "https://example.test", &result, true);
+    try testing.expect(std.mem.startsWith(
+        u8,
+        human,
+        "Signature verified: https://example.test\n" ++
+            "  signed_at is the signer's own claim; no host is bound to this claim.\n",
+    ));
+    try testing.expect(std.mem.indexOf(u8, human, "not pinned") == null);
+
+    const json = try renderClaimsJson(testing.allocator, "https://example.test", &result, true);
+    defer testing.allocator.free(json);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("keyPinned").?.bool);
 }
