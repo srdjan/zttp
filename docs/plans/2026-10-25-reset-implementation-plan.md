@@ -7,7 +7,7 @@ It owns the findings review, the design, the phase order, the verification, and 
 The worklog for this plan records execution and evidence. Phase R0 (baseline) creates that worklog.
 Preparation findings go into the worklog, not into this document.
 
-Status: complete through R13, 2026-10-25. The final `bash scripts/verify.sh` from an empty local cache passed at `6d87413d`. Owner Decisions 8 to 11 are open; the worklog states each one. The owner approved the plan on 2026-10-25 and answered "as recommended", which selects option (a) for Decisions 1 to 5.
+Status: complete through R13, 2026-10-25. The final `bash scripts/verify.sh` from an empty local cache passed at `6d87413d`. The owner decided Decisions 8 to 11 on 2026-10-26 (option a each); the worklog records each result. The owner approved the plan on 2026-10-25 and answered "as recommended", which selects option (a) for Decisions 1 to 5.
 Decision 1 (a) authorizes phases R0 to R13. Decision 6 (a), 2026-10-25: R0 waits until the concurrent session finishes and the tree is clean.
 
 When the owner approves this plan, it replaces the [2026-10-14 reset plan](2026-10-14-reset-implementation-plan.md) as the active reset authority.
@@ -664,6 +664,12 @@ Decision 5: unused fallback branches of the seven shell gates.
 
 The owner answered "as recommended" on 2026-10-25. That answer selects option (a) for each of Decisions 1 to 5.
 Acceptance of this plan as a report is not approval to edit. Decision 1 (a) or (b) authorizes the selected phases.
+
+Decisions 8 to 11 came from phase exits and are stated in the worklog. The owner answered "as recommended" on 2026-10-26, which selects option (a) for each:
+- Decision 8 (a): keep the second checker and type environment for the custom `type_check` callback as a documented exception.
+- Decision 9 (a): accept 472 allowlist rows against 458 at R0.
+- Decision 10 (a): accept the measured -2.0% on `intArithmetic`; the committed bench baseline is stale for this host.
+- Decision 11 (a): accept both R10c class B patches, each in its own commit with a regression test (R10c-4 and R10c-5).
 
 ## Validation record
 

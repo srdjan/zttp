@@ -299,3 +299,20 @@ Every other file in `docs/plans/` is cited outside `docs/plans/` (for example by
 `bash scripts/verify.sh` at `6d87413d`, empty local cache, `DEEPSEEK_API_KEY` unset: exit 0, "verify.sh: all per-commit gates passed".
 Reset totals from R0 to `6d87413d`: the fresh-cache aggregate went from 7765/7771 to 7809/7815 passed (6 skipped). The analyzer digests over 215 sources stayed byte-identical at every phase. The protected evidence paths and the bytecode golden did not change.
 Open owner decisions: 8 (R7a exception), 9 (R12 allowlist count), 10 (R5 `bench-check` baseline), 11 (R10c class B patches), Decision 2 window items, and the release-provenance offline republish.
+
+## Owner decisions 8 to 11, 2026-10-26
+
+The owner answered "as recommended", which selects option (a) for Decisions 8, 9, 10, and 11.
+
+- Decision 8 (a): the second checker and type environment for the custom `type_check` callback on the runtime serve path stay as a documented exception. No code change.
+- Decision 9 (a): the allowlist count of 472 rows (458 at R0) is accepted. No code change.
+- Decision 10 (a): the measured -2.0% median move on `intArithmetic` is accepted. The committed bench baseline is stale for this host: R0 and the reset both miss it by more than 8%. No baseline change.
+- Decision 11 (a): both stopped R10c patches are applied as class B repairs, each with a regression test that failed before its patch.
+
+| Commit | Unit | Change |
+|---|---|---|
+| `382ffeaa` | R10c-4 | `contract_builder.scanFunctionNodeForApiFacts` walks `expressionChildren` in its default arm. A header read inside a spread operand of a routed `Response.json` is now a header parameter of the route. Test: `pipeline_tests.zig`, "a request header read inside a spread operand is a header parameter of the route". |
+| `2e4ce352` | R10c-5 | `strict_checker` `collectAnnotatedFunctions`, `collectStaticLiterals`, and `collectEntriesDerivedBindings` descend through `expressionChildren`. A static const key inside a callback no longer reports ZTS605; a dynamic key there still does. Test: `strict_checker.zig`, "a static literal key declared inside a callback is not a dynamic computed access". |
+
+Gates for each commit, `DEEPSEEK_API_KEY` unset, private cache: `test-zts`, `test-flow-census`, `test-standin`, `test-diagnostic-corpus`, `test-proof-swallow`, `test-contract-golden`, `test-precompile` (also from an empty cache), `test-expert-app`, `test-zts-layering`, `test-cli`, `test-zruntime`, `test-examples`, and `check-spine` exit 0. R10c-5 also ran `test-canonical-style` and `test-idiom-table`, exit 0.
+The fresh-cache aggregate: 7810/7816 passed at R10c-4 and 7811/7817 at R10c-5 (6 skipped each). The analyzer digests over 215 sources stayed byte-identical, and the protected evidence paths did not change. No corpus source has either shape, so no golden or recording moved.

@@ -6,7 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [Reset implementation, 2026-10-25](2026-10-25-reset-implementation-plan.md) | Reset authority; complete through R13, 2026-10-25; open owner decisions are in the [roadmap](../roadmap.md) | Owner approved R0 to R13 with "as recommended" (Decisions 1 to 5, option a) and chose Decision 6 (a) |
+| [Reset implementation, 2026-10-25](2026-10-25-reset-implementation-plan.md) | Reset authority; complete through R13, 2026-10-25; open owner decisions are in the [roadmap](../roadmap.md) | Owner approved R0 to R13 with "as recommended" (Decisions 1 to 5, option a), chose Decision 6 (a), and chose option (a) for Decisions 8 to 11 on 2026-10-26 |
 | [Eager recycle rebuild](2026-10-25-eager-recycle-rebuild-plan.md) | Plan 2026-10-25; the worker builds the replacement runtime after the response is sent; this index records no completion | Owner chose Decision 3 option A on 2026-10-25 |
 | [Zig book hardening](2026-10-25-zig-book-hardening-plan.md) | Plan 2026-10-25; the worklog records the execution and lists open items (a ZTS200 alias-chain cost and a `bench-check` failure under host load) | Owner chose 1a; slot-buffer reuse waits for the recycle p99 |
 | [Zig book hardening worklog](2026-10-25-zig-book-hardening-worklog.md) | Execution record, decisions, and open items for the Zig book hardening plan | Records the owner decisions of that plan |
