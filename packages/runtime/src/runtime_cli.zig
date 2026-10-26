@@ -485,7 +485,7 @@ fn warnDangerousServeFlags(force_swap: bool, skip_env_check: bool) void {
 fn formatAddressInUse(buf: []u8, port: u16) ![]const u8 {
     return std.fmt.bufPrint(
         buf,
-        "Port {d} is already in use. Pass a different port: zttp dev -p <PORT>\n",
+        "Port {d} is already in use. Pass a different port with -p <PORT>.\n",
         .{port},
     );
 }
@@ -1283,7 +1283,9 @@ test "formatAddressInUse names the port and the remedy" {
     // the bare error.AddressInUse that read like a crash after the proof card.
     try std.testing.expect(std.mem.indexOf(u8, line, "3000") != null);
     try std.testing.expect(std.mem.indexOf(u8, line, "already in use") != null);
-    try std.testing.expect(std.mem.indexOf(u8, line, "zttp dev -p") != null);
+    try std.testing.expect(std.mem.indexOf(u8, line, "with -p <PORT>") != null);
+    // zttp serve and zttp dev share this line, so it names neither command.
+    try std.testing.expect(std.mem.indexOf(u8, line, "zttp dev") == null);
 }
 
 test "replay exit codes distinguish verification failures from invalid fixtures" {
