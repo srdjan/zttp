@@ -73,6 +73,10 @@ pub const RuntimeConfig = struct {
     /// Per-request handler execution deadline in ms. 0 = disabled.
     /// Checked cooperatively at interpreter loop back-edges and call entries.
     request_timeout_ms: u32 = 0,
+    /// The handler pool's one shared `zttp:ratelimit` store (D-013). The pool
+    /// owns and frees it; each runtime of the pool installs it. Null outside a
+    /// pool, where the module creates a per-runtime store on first use.
+    shared_rate_store: ?*zq.modules.ratelimit.RateStore = null,
     /// Test-only path that triggers a real panic at the guarded handler
     /// boundary for panic-isolation E2E coverage. Null in normal operation.
     debug_panic_path: ?[]const u8 = null,

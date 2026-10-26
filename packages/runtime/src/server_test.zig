@@ -444,6 +444,56 @@ test "a function component that runs past the deadline times out" {
     try expectTimeout(slow_component_handler);
 }
 
+const rate_limit = 5;
+const rate_handler = "import { rateCheck } from \"zttp:ratelimit\";" ++
+    "function handler(req) { return Response.json({ ok: rateCheck(\"k\", " ++
+    std.fmt.comptimePrint("{d}", .{rate_limit}) ++ ", 60).ok }); }";
+
+test "zttp:ratelimit counts across the runtimes held at the same time" {
+    const allocator = std.heap.c_allocator;
+    var pool = try HandlerPool.init(allocator, .{}, rate_handler, "<server-test>", 4, 0);
+    defer pool.deinit();
+
+    var leases: [4]HandlerPool.WorkerRuntimeLease = undefined;
+    for (&leases, 0..) |*lease, i| {
+        errdefer for (leases[0..i]) |*held| held.deinit();
+        lease.* = try pool.acquireWorkerRuntime();
+    }
+    defer for (&leases) |*lease| lease.deinit();
+    for (leases[1..]) |lease| try std.testing.expect(lease.runtime != leases[0].runtime);
+
+    // A per-runtime counter admits `rate_limit` requests on each of the four runtimes.
+    var admitted: usize = 0;
+    for (0..40) |i| {
+        var req = try getRequest(allocator, "/");
+        defer req.deinit(allocator);
+        var resp = try leases[i % leases.len].runtime.executeHandler(req.asView());
+        defer resp.deinit();
+        if (std.mem.indexOf(u8, resp.body, "\"ok\":true") != null) admitted += 1;
+    }
+    try std.testing.expectEqual(@as(usize, rate_limit), admitted);
+}
+
+test "zttp:ratelimit survives the recycle of its runtime" {
+    const allocator = std.heap.c_allocator;
+    var pool = try HandlerPool.init(allocator, .{}, rate_handler, "<server-test>", 4, 0);
+    defer pool.deinit();
+
+    // Each runtime recycles after `pooling_thresholds.max_requests` requests. A
+    // per-runtime counter restarts at every recycle.
+    const requests = 3 * pool.pooling_thresholds.max_requests + 8;
+    var admitted: usize = 0;
+    for (0..requests) |_| {
+        var req = try getRequest(allocator, "/");
+        defer req.deinit(allocator);
+        var resp = try pool.executeHandler(req.asView());
+        defer resp.deinit();
+        if (std.mem.indexOf(u8, resp.body, "\"ok\":true") != null) admitted += 1;
+    }
+    try std.testing.expectEqual(@as(usize, rate_limit), admitted);
+    try std.testing.expect(pool.getMetrics().recycles >= 3);
+}
+
 test "B3: Server.shutdown() is safe before start" {
     // This structural edge case complements the real SIGTERM socket test in
     // server.zig, which owns the accept loop and in-flight request machinery.

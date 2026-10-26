@@ -371,6 +371,7 @@ pub const HandlerInstance = struct {
 
         applyRuntimeConfig(pool_rt.ctx, pool_rt.gc_state, pool_rt.heap_state, config);
         applyEmbeddedCapabilityPolicy(pool_rt.ctx, config, retained_policy.policy);
+        if (config.shared_rate_store) |store| try zq.modules.ratelimit.installShared(pool_rt.ctx, store);
         pool_rt.ctx.policy_generation = retained_policy.id;
 
         // Pooled Contexts outlive this wrapper and are handed to the next

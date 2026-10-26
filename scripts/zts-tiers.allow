@@ -79,6 +79,7 @@ zts module_binding/bridge.zig
 zts module_binding/capabilities.zig
 zts module_binding/types.zig
 zts module_binding_adapter.zig
+zts modules/data/ratelimit.zig
 zts modules/data/sql.zig
 zts modules/internal/compiler.zig
 zts modules/internal/file_resolver.zig

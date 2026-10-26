@@ -201,7 +201,7 @@ pub const HandlerPool = struct {
             config.runtime_policy_index_required or embedded_handler.runtime_policy_index_required,
         );
 
-        const pool = zq.LockFreePool.init(allocator, .{
+        var pool = zq.LockFreePool.init(allocator, .{
             .max_size = max_size,
             .gc_config = .{ .nursery_size = config.nursery_size },
             .arena_config = .{ .size = config.arena_size },
@@ -211,7 +211,15 @@ pub const HandlerPool = struct {
             return err;
         };
 
+        const rate_store = allocator.create(zq.modules.ratelimit.RateStore) catch |err| {
+            pool.deinit();
+            policy_generation.release();
+            return err;
+        };
+        rate_store.* = zq.modules.ratelimit.RateStore.init(allocator);
+
         var installed_config = config;
+        installed_config.shared_rate_store = rate_store;
         // The generation owns the policy backing from here on. Keeping the
         // caller's borrowed view in the long-lived config would leave a stale
         // pointer even though capability installation no longer reads it.
@@ -269,6 +277,11 @@ pub const HandlerPool = struct {
 
     pub fn deinit(self: *Self) void {
         self.pool.deinit();
+        // Every runtime is gone, so no module state points at the shared store.
+        if (self.config.shared_rate_store) |store| {
+            store.deinitSelf();
+            self.allocator.destroy(store);
+        }
         self.policy_generation.release();
         self.cache.deinit();
         if (self.trace_file) |fd| std.Io.Threaded.closeFd(fd);

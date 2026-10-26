@@ -70,7 +70,7 @@ The extension SDK and runtime bridge are revision-locked. Native extensions must
 | `zttp:fetch` | `network`, `runtime_callback` | Checks the normalized endpoint before DNS and the resolved address scope before connecting. |
 | `zttp:id` | `clock`, `random` | UUID v7 and ULID mix clock; nanoid is pure random. |
 | `zttp:log` | `clock`, `stderr` | Timestamped log emission. |
-| `zttp:ratelimit` | `clock` | Token bucket expiry. |
+| `zttp:ratelimit` | `clock` | Fixed-window expiry. |
 | `zttp:sql` | `sqlite`, `policy_check` | SQLite connection plus query-name allowlist check. |
 
 ### Modules that declare no capabilities

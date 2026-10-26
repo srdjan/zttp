@@ -26,7 +26,9 @@ bytes.
 The server does not enforce a global or per-IP rate limit. Put standalone
 servers behind a reverse proxy or load balancer for network-layer limits. Use
 `zttp:ratelimit` inside handlers for application-level limits such as per API
-key, user, or route.
+key, user, or route. The counters are shared across all runtimes of one handler
+pool and survive live reload and runtime recycle. Separate processes do not
+share them. `rateCheck` uses a fixed window per key.
 
 ## Failure Behavior
 

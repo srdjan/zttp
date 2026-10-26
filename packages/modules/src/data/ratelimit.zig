@@ -74,8 +74,10 @@ pub const RateStore = struct {
     total_key_bytes: usize,
     max_key_bytes: usize,
     check_count: u32 = 0,
+    // Guards every field. A handler pool shares one store across its runtimes.
+    mutex: std.Io.Mutex = .init,
 
-    fn init(allocator: std.mem.Allocator) RateStore {
+    pub fn init(allocator: std.mem.Allocator) RateStore {
         return .{
             .allocator = allocator,
             .entries = std.StringHashMap(RateEntry).init(allocator),
@@ -85,7 +87,7 @@ pub const RateStore = struct {
         };
     }
 
-    fn deinitSelf(self: *RateStore) void {
+    pub fn deinitSelf(self: *RateStore) void {
         var iter = self.entries.iterator();
         while (iter.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
@@ -99,6 +101,9 @@ pub const RateStore = struct {
         store.deinitSelf();
         allocator.destroy(store);
     }
+
+    /// `sdk_deinit` for a store the module does not own: the handler pool frees it.
+    pub fn sharedDeinit(_: *anyopaque) callconv(.c) void {}
 
     fn evictExpired(self: *RateStore, now: i64) void {
         // Drain ALL expired keys this sweep. The old fixed 64-key cap let
@@ -128,6 +133,8 @@ pub const RateStore = struct {
     const CheckResult = struct { allowed: bool, remaining: u32, reset_at_ms: i64 };
 
     fn check(self: *RateStore, key: []const u8, limit: u32, window_sec: i64, now: i64) !CheckResult {
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
         self.check_count +%= 1;
         if (self.check_count % EVICT_INTERVAL == 0) {
             self.evictExpired(now);
@@ -197,6 +204,8 @@ pub const RateStore = struct {
     }
 
     fn reset(self: *RateStore, key: []const u8) bool {
+        self.mutex.lockUncancelable(std.Options.debug_io);
+        defer self.mutex.unlock(std.Options.debug_io);
         if (self.entries.fetchRemove(key)) |kv| {
             self.total_key_bytes -= kv.key.len;
             self.allocator.free(kv.key);

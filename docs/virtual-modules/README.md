@@ -66,6 +66,13 @@ durability boundary need configuration:
 | `zttp:fetch` | Enable outbound HTTP with `--outbound-http` or one or more `--outbound-host <host>` flags. |
 | `zttp:log` | Writes structured lines to stderr. Do not log raw secrets, tokens, or PII. |
 
+## State Scope
+
+| Module | Where its state lives |
+|---|---|
+| `zttp:ratelimit` | One store per handler pool. Every runtime of the pool counts into it, and it survives recycle and live reload. |
+| `zttp:cache` | One store per pooled runtime. Entries can differ between requests and vanish when the runtime recycles. |
+
 ## Effects
 
 The compiler reads each export's effect annotation when deriving handler

@@ -15,6 +15,7 @@ pub const module_graph = @import("internal/module_graph.zig");
 pub const compiler = @import("internal/compiler.zig");
 
 pub const sql = @import("data/sql.zig");
+pub const ratelimit = @import("data/ratelimit.zig");
 pub const fetch = @import("net/fetch.zig");
 
 pub const ResolveResult = resolver.ResolveResult;
