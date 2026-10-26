@@ -132,6 +132,16 @@ The structural chips (`pure`, `read_only`, `deterministic`, `retry_safe`,
 `idempotent`) were not part of this check. Treat that as unmeasured, not as
 proven.
 
+Two rows are still open as of 2026-10-26. Both let a declared `no_secret_leakage`
+capsule pass for a handler that leaks. Do not rely on the chip for a handler
+with one of these shapes. The planned fixes move the policy hash, so they wait
+for the batched re-record window (D-012 in [decisions](decisions.md)).
+
+| Shape | Chip that the current version proves falsely |
+|---|---|
+| A response that carries `env("NAME")` where the literal `NAME` has none of the substrings `SECRET`, `PASSWORD`, `PASSWD`, `KEY`, `TOKEN`, `PRIVATE`, `CREDENTIAL`, and `AUTH` (case-insensitive): for example `env("DATABASE_URL")`, `env("SESSION_COOKIE")`, or `env("STRIPE_SK")`. The analyzer labels such a value `config`, not secret. Rename the variable to include one of the substrings, or do not rely on the chip for it. The planned fix treats every literal name as secret unless the policy lists it in `env.public`. | `no_secret_leakage` |
+| `mask(secret, n)` where `n` is any numeric literal. The analyzer treats every literal bound as declassifying, but `mask` reveals the trailing `n` bytes of an input longer than `n`: `mask(secret, 39)` on a 40-byte secret reveals 39 bytes. The planned fix accepts a literal bound of 4 or less. | `no_secret_leakage` |
+
 ### Reading A Failing Chip
 
 When a save demotes a property that was proven on the previous save, the card
