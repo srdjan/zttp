@@ -130,7 +130,7 @@ fn certify(allocator: std.mem.Allocator, source: []const u8) !Certified {
             .deterministic = contract.properties.?.deterministic,
             .read_only = contract.properties.?.read_only,
             .retry_safe = contract.properties.?.retry_safe,
-            .capability_bounded = contract.capabilities != null,
+            .capability_bounded = contract.capability_budget.len > 0,
         },
         .artifact = sections,
         .contract_digest = artifact_graph.digestOf(contract_json),
@@ -316,4 +316,40 @@ test "each corpus family exercises a different totality rule" {
     try testing.expect(seen_rules.contains(.sequence_member_total));
     try testing.expect(seen_rules.contains(.emission_contiguous));
     try testing.expect(seen_rules.count() >= 2);
+}
+
+/// The edge a certificate answers `capability_bounded` with.
+fn capabilityBoundedEdge(certified: *Certified) !cert.EdgeKind {
+    const profile = try edgeProfile(&certified.built);
+    return profile[@backingInt(ps.Property.capability_bounded) - 1] orelse error.TestUnexpectedResult;
+}
+
+test "a handler with no Effects ceiling does not claim capability_bounded and is still accepted" {
+    const allocator = testing.allocator;
+    var certified = try certify(allocator, corpus[0].source);
+    defer certified.deinit();
+
+    try testing.expectEqual(cert.EdgeKind.not_established, try capabilityBoundedEdge(&certified));
+
+    const result = certified.assess(pcc.policy.production);
+    try testing.expect(result.rejection() == null);
+    try testing.expectEqual(pcc.SemanticState.policy_accepted, result.semantic());
+}
+
+test "a handler under a declared Effects ceiling holds capability_bounded at tested" {
+    const allocator = testing.allocator;
+    const source =
+        "import { sha256 } from \"zttp:crypto\";\n" ++
+        "export function handler(req: Request): Proof<Effects<Response, \"crypto\">, " ++
+        "\"deterministic\" | \"read_only\" | \"state_isolated\" | \"no_secret_leakage\" | \"result_safe\"> {\n" ++
+        "  return Response.text(sha256(\"zttp\"));\n" ++
+        "}\n";
+    var certified = try certify(allocator, source);
+    defer certified.deinit();
+
+    try testing.expectEqual(cert.EdgeKind.tested, try capabilityBoundedEdge(&certified));
+
+    const result = certified.assess(pcc.policy.production);
+    try testing.expect(result.rejection() == null);
+    try testing.expectEqual(pcc.SemanticState.policy_accepted, result.semantic());
 }

@@ -107,11 +107,12 @@ const production_requirements = [_]Requirement{
     // Translation witnesses still depend on the declared opcode relation. The
     // overall theorem is therefore trusted until the kernel models that edge.
     .{ .property = .response_total, .min_grade = .trusted },
-    // These three are disclosed rather than kernel-checked today. The floor
+    // These two are disclosed rather than kernel-checked today. The floor
     // says so out loud instead of implying a proof that does not exist.
+    // capability_bounded leaves the floor until the kernel checks it (v0.26.0
+    // Decision 10(b)): a producer cannot claim it without an Effects ceiling.
     .{ .property = .results_checked, .min_grade = .tested },
     .{ .property = .no_secret_leakage, .min_grade = .tested },
-    .{ .property = .capability_bounded, .min_grade = .tested },
 };
 
 /// The strict production policy: pinned system and epoch, no development

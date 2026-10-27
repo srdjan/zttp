@@ -85,8 +85,9 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
   and origin and freshness binding.
 - The production certificate honestly reaches a `trusted` weakest edge today.
   The consumer re-derives `response_total`, but bytecode opcode meaning remains
-  declared trusted, while `results_checked`, `no_secret_leakage`, and
-  `capability_bounded` enter at `tested`. See
+  declared trusted, while `results_checked` and `no_secret_leakage` enter at `tested`. The
+  production floor no longer requires `capability_bounded`: a handler gets it,
+  at `tested`, only when it declares `Effects<...>`. See
   [Verification](verification.md#what-is-not-checked-said-out-loud).
 - `zttp proofs gate` does not analyze a pull request that changes only an
   imported helper. The gate lists changed files, and a helper that exports no

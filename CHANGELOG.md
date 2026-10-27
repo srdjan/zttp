@@ -10,6 +10,18 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+### Fixed
+
+- **A certificate no longer claims `capability_bounded` for a handler without
+  `Effects<...>`.** The producer set the property for every handler, though the
+  compiler checks a capability ceiling only when the return type declares
+  `Effects<...>`. Now a handler with no `Effects<...>` gets `not_established`,
+  and a handler with one holds the property at `tested`. An `Effects<...>` with
+  an empty ceiling is treated as no declaration. The production floor now
+  requires `response_total`, `results_checked`, and `no_secret_leakage`, so
+  `capability_bounded` is outside it until the kernel checks the property.
+  Artifacts built earlier that claim the property are still accepted.
+
 ### Breaking changes
 
 - **`fetchWithRetry` refuses a write that carries a credential header.** A

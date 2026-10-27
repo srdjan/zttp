@@ -536,12 +536,19 @@ rather than the consumer checked. The runtime's acceptance line and
   certificate's own inventory and is counted in every result. Closing it means
   giving the kernel the opcode encoding, which is a data coupling to the engine
   that can drift silently; disclosing it is the honest interim.
-- **Three of the four production-floor properties.** `results_checked`,
-  `no_secret_leakage`, and `capability_bounded` are disclosed as `tested`: the
-  compiler discharged them and the repository's corpus exercises the analyses
-  that do so, but this consumer did not re-run them. Only `response_total` is
-  re-derived by the consumer today. Reducing that list one family at a time is
-  the ratchet's job.
+- **Two of the three production-floor properties.** The floor requires
+  `response_total`, `results_checked`, and `no_secret_leakage`. `results_checked`
+  and `no_secret_leakage` are disclosed as `tested`: the compiler discharged
+  them and the repository's corpus exercises the analyses that do so, but this
+  consumer did not re-run them. Only `response_total` is re-derived by the
+  consumer today. Reducing that list one family at a time is the ratchet's job.
+- **`capability_bounded` is outside the floor.** The producer establishes it
+  only for a handler that declares `Effects<...>`, because that declaration is
+  the only capability ceiling the compiler checks. The certificate discloses it
+  at `tested`. A handler with no `Effects<...>` gets `not_established`, and
+  production still accepts it. An `Effects<...>` with an empty ceiling cannot be
+  told apart from no declaration, so it also gets `not_established`. The
+  property returns to the floor when the kernel checks it.
 - **Nodes declared total.** A `trusted` evidence entry on `response_total`
   declares its node total without a rule. The consumer does not re-derive such a
   node: it counts the entry in the disclosed inventory, and the production floor

@@ -183,8 +183,9 @@ the complete executable graph and authority-bearing certificate sections, and
 checks static proof and residual guard policy before the process serves.
 Assurance is deliberately staged:
 `response_total` is re-derived, the bytecode opcode relation remains trusted,
-and `results_checked`, `no_secret_leakage`, and `capability_bounded` enter the
-production floor at `tested`. Production solver edges are disabled.
+and `results_checked` and `no_secret_leakage` enter the production floor at
+`tested`. (Update, v0.26.0: `capability_bounded` left the floor and is claimed
+only under an `Effects<...>` ceiling.) Production solver edges are disabled.
 Authenticated extension trust, consumer-modeled opcode semantics, broader
 consumer-checked properties, and isolated solver execution remain target
 capabilities. No producer-only receipt may be presented as the artifact

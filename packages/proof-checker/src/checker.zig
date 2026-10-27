@@ -2087,10 +2087,10 @@ test "the disclosed edge count is reported next to the grade" {
     var fixture = try test_support.build();
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expect(result.accepted());
-    // Production relies on three tested property edges and the trusted opcode
+    // Production relies on two tested property edges and the trusted opcode
     // relation under translation. A grade that hid those would report the
     // checks without the assumptions beneath them.
-    try testing.expectEqual(@as(u32, 4), result.disclosed_edges);
+    try testing.expectEqual(@as(u32, 3), result.disclosed_edges);
 }
 
 test "unchecked evidence and its trusted inventory are both disclosed" {
@@ -2112,7 +2112,7 @@ test "unchecked evidence and its trusted inventory are both disclosed" {
 
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expect(result.accepted());
-    try testing.expectEqual(@as(u32, 6), result.disclosed_edges);
+    try testing.expectEqual(@as(u32, 5), result.disclosed_edges);
 }
 
 test "translation cannot omit its trusted opcode dependency" {
@@ -2996,7 +2996,7 @@ test "a property a policy does not require may go unestablished" {
     try fixture.encode();
     const result = check(fixture.inputs(), policy_mod.production);
     try testing.expect(result.accepted());
-    try testing.expectEqual(@as(u32, 4), result.disclosed_edges);
+    try testing.expectEqual(@as(u32, 3), result.disclosed_edges);
 }
 
 test "a grade below the policy floor rejects and says both sides" {

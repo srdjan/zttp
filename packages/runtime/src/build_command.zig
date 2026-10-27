@@ -909,7 +909,7 @@ fn dischargedProperties(contract: ?*const zts.HandlerContract) proof_certificate
         .deterministic = properties.deterministic,
         .read_only = properties.read_only,
         .retry_safe = properties.retry_safe,
-        .capability_bounded = handler_contract.capabilities != null,
+        .capability_bounded = handler_contract.capability_budget.len > 0,
     };
 }
 
@@ -1761,6 +1761,37 @@ test "a real compile produces a certificate that binds its own IR and artifact" 
             return err;
         };
     }
+}
+
+test "a build certificate claims capability_bounded only under a declared Effects ceiling" {
+    const allocator = std.testing.allocator;
+    const plain =
+        \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
+        \\  return Response.text("ok");
+        \\}
+    ;
+    const bounded =
+        \\import { sha256 } from "zttp:crypto";
+        \\export function handler(req: Request): Proof<Effects<Response, "crypto">, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
+        \\  return Response.text(sha256("zttp"));
+        \\}
+    ;
+
+    var plain_compiled = try precompile.compileHandler(allocator, plain, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+    });
+    defer plain_compiled.deinit(allocator);
+    const plain_contract = plain_compiled.contract orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!dischargedProperties(&plain_contract).capability_bounded);
+
+    var bounded_compiled = try precompile.compileHandler(allocator, bounded, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+    });
+    defer bounded_compiled.deinit(allocator);
+    const bounded_contract = bounded_compiled.contract orelse return error.TestUnexpectedResult;
+    try std.testing.expect(dischargedProperties(&bounded_contract).capability_bounded);
 }
 
 test "a real compile reaches policy acceptance, and one changed byte does not" {
@@ -3118,8 +3149,8 @@ test "direct source contracts preserve certificate bytes and proof IR" {
     };
     try std.testing.expectEqual(@as(usize, 2), fixtures.len);
     const expected_certificates = [_]struct { len: usize, sha256: []const u8, proof_nodes: usize }{
-        .{ .len = 1349, .sha256 = "cc451d7911effca36a31c1ece47b4b6c0b5067e25ef251d5f2eb05232d3ccb9e", .proof_nodes = 5 },
-        .{ .len = 1729, .sha256 = "57b647ba45ad70da509643db39040b9ce0df99a427808f525709f841bd2d5dd4", .proof_nodes = 9 },
+        .{ .len = 1349, .sha256 = "ca0dd95291549aacefbe5ef9712208acc167f1a6c8e605dc88923451734fc9f8", .proof_nodes = 5 },
+        .{ .len = 1729, .sha256 = "f6f0a3ceebdf0e0660f354f4a43e6c73f3fc545203f81e1bd12b7e88c95ac236", .proof_nodes = 9 },
     };
     for (fixtures, expected_certificates) |source, expected| {
         var direct: zts.DirectCheckSource = undefined;
