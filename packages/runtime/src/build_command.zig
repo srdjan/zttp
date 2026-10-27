@@ -3355,3 +3355,124 @@ test "a refused build leaves an existing output file unchanged" {
     defer allocator.free(existing);
     try std.testing.expectEqualStrings("previous build", existing);
 }
+
+/// Build a real bundle (handler artifact with a certificate) in the current
+/// directory under `bundle/`.
+fn writeCertifiedBundleFixture(allocator: std.mem.Allocator) !void {
+    const source =
+        \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+
+    try zts.file_io.writeFile(allocator, "runtime", "runtime-template");
+    try writeArtifactTail(allocator, .{
+        .runtime_binary = "runtime",
+        .output_path = "handler.bin",
+        .attest_requested = false,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract = &contract,
+        .proof_evidence = &evidence,
+        .configured_policy = null,
+    }, production_artifact_tail_capabilities);
+
+    const contract_json = try serializeContractJson(allocator, &contract);
+    defer allocator.free(contract_json);
+    try zts.file_io.writeFile(allocator, "handler.contract.json", contract_json);
+
+    var write_out = std.Io.Writer.Allocating.init(allocator);
+    defer write_out.deinit();
+    var write_err = std.Io.Writer.Allocating.init(allocator);
+    defer write_err.deinit();
+    try proofs_bundle.writeBundle(allocator, .{
+        .contract_path = "handler.contract.json",
+        .binary_path = "handler.bin",
+        .out_dir = "bundle",
+    }, &write_out.writer, &write_err.writer);
+}
+
+/// Replace one bundle file and rewrite its digest in the manifest, so the
+/// integrity check passes and only the payload comparison can notice.
+fn replaceBundleComponent(allocator: std.mem.Allocator, file: []const u8, new_bytes: []const u8) !void {
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "bundle/{s}", .{file});
+    const old_bytes = try zts.file_io.readFile(allocator, path, 256 * 1024 * 1024);
+    defer allocator.free(old_bytes);
+    const old_hex = std.fmt.bytesToHex(sha256Digest(old_bytes), .lower);
+    const new_hex = std.fmt.bytesToHex(sha256Digest(new_bytes), .lower);
+    const manifest = try zts.file_io.readFile(allocator, "bundle/bundle.json", 1024 * 1024);
+    defer allocator.free(manifest);
+    const rewritten = try std.mem.replaceOwned(u8, allocator, manifest, &old_hex, &new_hex);
+    defer allocator.free(rewritten);
+    try zts.file_io.writeFile(allocator, path, new_bytes);
+    try zts.file_io.writeFile(allocator, "bundle/bundle.json", rewritten);
+}
+
+fn sha256Digest(bytes: []const u8) [32]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(bytes, &digest, .{});
+    return digest;
+}
+
+test "proofs verify refuses a bundle whose certificate file is not the certificate in the binary" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try proof_ledger.chdirTmpForTest(&tmp);
+    defer allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try writeCertifiedBundleFixture(allocator);
+    try replaceBundleComponent(allocator, "certificate", "garbage");
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(allocator);
+    defer err.deinit();
+    try std.testing.expectError(
+        error.BundleComponentMismatch,
+        proofs_bundle.verify(allocator, "bundle", false, &out.writer, &err.writer),
+    );
+    try std.testing.expectEqualStrings(
+        "zttp proofs verify: bundle certificate does not match the certificate in the binary\n",
+        err.writer.buffered(),
+    );
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "Proof:     REJECTED - bundle certificate does not match the binary") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "policy_accepted") == null);
+}
+
+test "proofs verify refuses a bundle whose contract file is not the contract in the binary" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try proof_ledger.chdirTmpForTest(&tmp);
+    defer allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try writeCertifiedBundleFixture(allocator);
+    try replaceBundleComponent(allocator, "handler.contract.json", "{\"version\":18}");
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(allocator);
+    defer err.deinit();
+    try std.testing.expectError(
+        error.BundleComponentMismatch,
+        proofs_bundle.verify(allocator, "bundle", false, &out.writer, &err.writer),
+    );
+    try std.testing.expectEqualStrings(
+        "zttp proofs verify: bundle contract does not match the contract in the binary\n",
+        err.writer.buffered(),
+    );
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "Proof:     REJECTED - bundle contract does not match the binary") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "policy_accepted") == null);
+}

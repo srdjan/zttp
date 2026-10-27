@@ -210,7 +210,11 @@ Integrity and proof are separate answers and are printed on separate lines.
 Matching hashes say the bundle holds the bytes the manifest names, and nothing
 more; when the bundle carries an artifact and a certificate, the verifier
 rebuilds the executable graph from the artifact and runs consumer acceptance
-over the certificate. `--require-proof` makes "nothing to check" a non-zero exit
+over the certificate. The bundle's `certificate` and contract files must equal
+the certificate and contract that the artifact carries, byte for byte. A
+difference, or a bundled certificate that the artifact lacks, is refused with
+exit 1 and a line that names the component, even when the manifest digest
+matches. `--require-proof` makes "nothing to check" a non-zero exit
 for a caller that needs the stronger state.
 
 `zttp verify <url>` checks a signature over a claim an endpoint returns. The

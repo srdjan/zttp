@@ -288,14 +288,14 @@ pub fn verify(
 
     var any_failed = false;
     var has_binary = false;
-    var has_certificate = false;
+    var certificate_path: ?[]const u8 = null;
     var contract_path: ?[]const u8 = null;
     for (verdicts.items) |v| {
         const label: []const u8 = if (v.pass) "OK  " else "FAIL";
         try stdout.print("  {s}  {s}\n", .{ label, v.name });
         if (std.mem.eql(u8, v.name, "contract")) contract_path = v.path;
         if (std.mem.eql(u8, v.name, "binary")) has_binary = true;
-        if (std.mem.eql(u8, v.name, "certificate")) has_certificate = true;
+        if (std.mem.eql(u8, v.name, "certificate")) certificate_path = v.path;
         if (!v.pass) {
             any_failed = true;
             try stdout.print("        expected sha256 {s}\n", .{v.expected_sha});
@@ -320,7 +320,7 @@ pub fn verify(
     // Integrity is one state. What the artifact does is another, and a bundle
     // that only matched hashes has established nothing about it. Say which one
     // was reached rather than printing a single word that reads as both.
-    if (!has_binary or !has_certificate) {
+    if (!has_binary or certificate_path == null) {
         try stdout.writeAll(
             "Proof:     not checked - this bundle carries no artifact and certificate to check\n",
         );
@@ -328,7 +328,7 @@ pub fn verify(
         return;
     }
 
-    verifySemantics(allocator, io, bundle_dir, stdout, stderr) catch |err| switch (err) {
+    verifySemantics(allocator, io, bundle_dir, certificate_path.?, contract_bytes, stdout, stderr) catch |err| switch (err) {
         // Nothing to check is not the same as checked and refused. A caller
         // that needs the stronger state says so; one that does not gets the
         // line and a zero exit.
@@ -338,16 +338,22 @@ pub fn verify(
 }
 
 /// Rebuild the executable graph from the bundled artifact and run consumer
-/// acceptance over the bundled certificate.
+/// acceptance over the certificate that the artifact carries.
 ///
-/// The certificate component is read from the bundle, but everything it is
-/// checked against comes from the artifact: the inventory is derived from the
-/// payload sections, not from the manifest and not from the certificate's own
-/// list.
+/// Acceptance reads the certificate and the contract from the artifact payload,
+/// and the inventory is derived from the payload sections, not from the
+/// manifest and not from the certificate's own list. The bundle's `certificate`
+/// file and its contract file are copies that `writeBundle` wrote byte for
+/// byte from the payload. This function requires each copy to equal the
+/// payload bytes exactly, because a manifest digest only proves that a file
+/// matches the manifest. A bundle certificate that the artifact lacks, or that
+/// differs from the artifact's, is a mismatch and not "not checked".
 fn verifySemantics(
     allocator: std.mem.Allocator,
     io: std.Io,
     bundle_dir: std.Io.Dir,
+    bundle_certificate_path: []const u8,
+    bundle_contract: []const u8,
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !void {
@@ -375,10 +381,24 @@ fn verifySemantics(
     };
     defer payload.deinit(allocator);
 
-    const certificate = payload.certificate orelse {
-        try stdout.writeAll("Proof:     not checked - the artifact carries no certificate\n");
-        return error.NoProofToCheck;
+    const bundle_certificate = readBundleFile(allocator, io, bundle_dir, bundle_certificate_path, 256 * 1024 * 1024) catch {
+        try stderr.writeAll("zttp proofs verify: cannot read the bundled certificate\n");
+        return error.InvalidManifest;
     };
+    defer allocator.free(bundle_certificate);
+    const certificate = payload.certificate orelse "";
+    if (payload.certificate == null or !std.mem.eql(u8, certificate, bundle_certificate)) {
+        try stderr.writeAll("zttp proofs verify: bundle certificate does not match the certificate in the binary\n");
+        try stdout.writeAll("Proof:     REJECTED - bundle certificate does not match the binary\n");
+        return error.BundleComponentMismatch;
+    }
+    if (payload.contract_json) |embedded| {
+        if (!std.mem.eql(u8, embedded, bundle_contract)) {
+            try stderr.writeAll("zttp proofs verify: bundle contract does not match the contract in the binary\n");
+            try stdout.writeAll("Proof:     REJECTED - bundle contract does not match the binary\n");
+            return error.BundleComponentMismatch;
+        }
+    }
 
     var identity = artifact_graph.Identity{};
     var raw: ?contract_runtime.RawRuntimeContract = null;

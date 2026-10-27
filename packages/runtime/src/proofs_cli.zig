@@ -236,6 +236,9 @@ fn verifyCommand(
             // lines because they are different answers.
             error.ProofRejected,
             error.NoProofToCheck,
+            // A bundle component that differs from the artifact payload also
+            // wrote its line.
+            error.BundleComponentMismatch,
             // A bundled artifact whose framed payload is damaged also wrote
             // its line.
             error.CorruptArtifact,
