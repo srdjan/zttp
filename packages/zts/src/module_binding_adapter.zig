@@ -144,7 +144,7 @@ fn adaptFunctionBinding(
 ) internal.FunctionBinding {
     comptime requireCoverage(sdk.FunctionBinding, internal.FunctionBinding, &function_source_exclusions, &function_target_exclusions);
     var out: internal.FunctionBinding = undefined;
-    out.func = wrapToNativeFn(binding.module_func, specifier, required_capabilities);
+    out.func = wrapToNativeFn(binding.module_func, specifier, binding.required_capabilities orelse required_capabilities);
     out.module_func = null;
     out.return_labels = adaptLabels(binding.return_labels);
     out.declassifies = adaptLabels(binding.declassifies);
@@ -259,6 +259,76 @@ test "adapted SDK module invocation reads authorization from its Context" {
     _ = try adapted.exports[0].func.?(ctx, value.JSValue.undefined_val, &.{});
     try std.testing.expect(Observed.clock);
     try std.testing.expect(!Observed.random);
+    try std.testing.expect(ctx.active_module_scope == null);
+}
+
+test "adapted export enforces its declared capabilities at call time" {
+    const Observed = struct {
+        var empty_clock: bool = true;
+        var declared_clock: bool = false;
+        var inherited_clock: bool = false;
+        var inherited_random: bool = true;
+    };
+    Observed.empty_clock = true;
+    Observed.declared_clock = false;
+    Observed.inherited_clock = false;
+    Observed.inherited_random = true;
+
+    const binding = sdk.ModuleBinding{
+        .specifier = "zttp-ext:export-capability-test",
+        .name = "export-capability-test",
+        .required_capabilities = &.{ .clock, .random },
+        .exports = &.{
+            .{
+                .name = "empty",
+                .module_func = struct {
+                    fn f(handle: *sdk.ModuleHandle, _: sdk.JSValue, _: []const sdk.JSValue) anyerror!sdk.JSValue {
+                        Observed.empty_clock = sdk.hasCapability(handle, .clock);
+                        return sdk.JSValue.undefined_val;
+                    }
+                }.f,
+                .arg_count = 0,
+                .required_capabilities = &.{},
+            },
+            .{
+                .name = "declared",
+                .module_func = struct {
+                    fn f(handle: *sdk.ModuleHandle, _: sdk.JSValue, _: []const sdk.JSValue) anyerror!sdk.JSValue {
+                        Observed.declared_clock = sdk.hasCapability(handle, .clock);
+                        return sdk.JSValue.undefined_val;
+                    }
+                }.f,
+                .arg_count = 0,
+                .required_capabilities = &.{.clock},
+            },
+            .{
+                .name = "inherited",
+                .module_func = struct {
+                    fn f(handle: *sdk.ModuleHandle, _: sdk.JSValue, _: []const sdk.JSValue) anyerror!sdk.JSValue {
+                        Observed.inherited_clock = sdk.hasCapability(handle, .clock);
+                        Observed.inherited_random = sdk.hasCapability(handle, .random);
+                        return sdk.JSValue.undefined_val;
+                    }
+                }.f,
+                .arg_count = 0,
+            },
+        },
+    };
+    const adapted = comptime adaptModuleBinding(binding);
+
+    const allocator = std.testing.allocator;
+    var gc_state = try gc.GC.init(allocator, .{});
+    defer gc_state.deinit();
+    const ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    _ = try adapted.exports[0].func.?(ctx, value.JSValue.undefined_val, &.{});
+    _ = try adapted.exports[1].func.?(ctx, value.JSValue.undefined_val, &.{});
+    _ = try adapted.exports[2].func.?(ctx, value.JSValue.undefined_val, &.{});
+    try std.testing.expectEqual(false, Observed.empty_clock);
+    try std.testing.expectEqual(true, Observed.declared_clock);
+    try std.testing.expectEqual(true, Observed.inherited_clock);
+    try std.testing.expectEqual(true, Observed.inherited_random);
     try std.testing.expect(ctx.active_module_scope == null);
 }
 
