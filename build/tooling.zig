@@ -232,6 +232,8 @@ pub fn add(ctx: Context) Result {
     const evidence_stream_probe = b.addSystemCommand(&.{
         "/bin/sh",               "-c",
         \\set -eu
+        \\case "$3" in /*) provenance=$3 ;; *) provenance=$PWD/$3 ;; esac
+        \\case "$5" in /*) union=$5 ;; *) union=$PWD/$5 ;; esac
         \\probe_dir=$(mktemp -d)
         \\trap 'rm -rf "$probe_dir"' EXIT
         \\failed=0
@@ -256,13 +258,13 @@ pub fn add(ctx: Context) Result {
         \\for name in coverage convergence; do printf '{"complete":true,"publishable":true,"publicationMode":true,"sourceDirty":false,"sourceCommit":"%s"}\n' "$source_commit" > "$probe_dir/provenance/docs/$name.json"; done
         \\git -C "$probe_dir/provenance" add docs
         \\git -C "$probe_dir/provenance" -c user.name=probe -c user.email=probe@example.invalid -c commit.gpgsign=false commit -qm evidence
-        \\(cd "$probe_dir/provenance" && { printf 'release provenance prefix\n'; "$3"; } > "$probe_dir/output")
+        \\(cd "$probe_dir/provenance" && { printf 'release provenance prefix\n'; "$provenance"; } > "$probe_dir/output")
         \\check_prefix 'release provenance prefix'
         \\{ printf 'evidence marker prefix\n'; "$4" "$probe_dir/coverage.log" "$coverage_marker" coverage; } > "$probe_dir/output"
         \\check_prefix 'evidence marker prefix'
         \\version=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
         \\source_tree=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-        \\(cd "$probe_dir/provenance" && { printf 'coverage union prefix\n'; "$5" "$version" "$source_tree" --measured-zero; } > "$probe_dir/output")
+        \\(cd "$probe_dir/provenance" && { printf 'coverage union prefix\n'; "$union" "$version" "$source_tree" --measured-zero; } > "$probe_dir/output")
         \\check_prefix 'coverage union prefix'
         \\test "$(grep -c '^\[coverage-union\] ' "$probe_dir/output")" -eq 1
         \\test "$failed" -eq 0

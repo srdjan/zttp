@@ -116,6 +116,7 @@ pub fn add(ctx: Context, gates: repo_gates.Result) Binaries {
     const module_spec_probe = b.addSystemCommand(&.{
         "/bin/sh",               "-c",
         \\set -eu
+        \\case "$1" in /*) zts=$1 ;; *) zts=$PWD/$1 ;; esac
         \\probe_dir=$(mktemp -d)
         \\trap 'rm -rf "$probe_dir"' EXIT
         \\git ls-files -z -- 'packages/modules/module-specs/*.json' docs/virtual-modules/README.md > "$probe_dir/inputs"
@@ -123,10 +124,10 @@ pub fn add(ctx: Context, gates: repo_gates.Result) Binaries {
         \\tar --null -T "$probe_dir/inputs" -cf "$probe_dir/files.tar"
         \\mkdir "$probe_dir/root"
         \\tar -xf "$probe_dir/files.tar" -C "$probe_dir/root"
-        \\(cd "$probe_dir/root" && "$1" module-spec-render --check)
+        \\(cd "$probe_dir/root" && "$zts" module-spec-render --check)
         \\sed 's/zttp:env/zttp:stale/g' "$probe_dir/root/docs/virtual-modules/README.md" > "$probe_dir/changed"
         \\mv "$probe_dir/changed" "$probe_dir/root/docs/virtual-modules/README.md"
-        \\if (cd "$probe_dir/root" && "$1" module-spec-render --check) > "$probe_dir/result" 2>&1; then exit 1; fi
+        \\if (cd "$probe_dir/root" && "$zts" module-spec-render --check) > "$probe_dir/result" 2>&1; then exit 1; fi
         \\grep -F 'docs/virtual-modules/README.md' "$probe_dir/result" > /dev/null
         \\printf 'module renderer probe: stale catalog refused\n'
         ,
