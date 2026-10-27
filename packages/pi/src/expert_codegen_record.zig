@@ -818,7 +818,7 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        // The policy-5 recording first failed at ZTS056, then reached green.
+        // The 2026-10-27 recording first failed at ZTS203, then reached green.
         .expect_first_attempt_green = false,
     },
     .{
@@ -853,7 +853,7 @@ const record_corpus = [_]RecordCase{
         // meant to measure. Asking for raw claims and accepting a confirmation
         // instead would count a dropped requirement as convergence, which the
         // phase-7 gate explicitly forbids.
-        .expect_first_attempt_green = true,
+        .expect_first_attempt_green = false,
         .expect_committed_intent_pass = true,
     },
     .{
@@ -957,7 +957,7 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        .expect_first_attempt_green = false,
+        .expect_first_attempt_green = true,
     },
     .{
         // Fence: the shapes of egress options object the flow checker could not
@@ -983,8 +983,8 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        .expect_first_attempt_green = false,
-        // The Phase 3 recording applies an edit and passes this runtime intent.
+        .expect_first_attempt_green = true,
+        // The 2026-10-27 recording applies an edit and passes this runtime intent.
         .expect_committed_intent_pass = true,
     },
     .{
@@ -1034,9 +1034,9 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        // The policy-5 recording first tripped ZTS500; the complete policy-7
-        // recording reaches green on its first attempt.
-        .expect_first_attempt_green = true,
+        // The 2026-10-27 recording first failed at ZTS207 and missed its intent.
+        .expect_first_attempt_green = false,
+        .expect_committed_intent_pass = false,
     },
 
     // ---------------------------------------------------------------------
@@ -1267,7 +1267,9 @@ const record_corpus = [_]RecordCase{
             ,
         },
         .mode = .holes,
-        .expect_first_attempt_green = true,
+        // The 2026-10-27 recording applied no edit and missed its intent.
+        .expect_first_attempt_green = false,
+        .expect_committed_intent_pass = false,
     },
 };
 
@@ -2510,7 +2512,7 @@ fn coverageBaseline(
     if (provider != headline_provider or !std.mem.eql(u8, model, headline_model) or
         !std.mem.eql(u8, headline_input.slice(), "db16cf2221a6fcc63c7b8cdfbee2c3df52bcad54c5ddf9bf59ba0670e7bc189e"))
         return null;
-    return .{ .minimum_rules = &.{ "ZTS500", "ZTS501" } };
+    return .{ .minimum_rules = &.{ "ZTS400", "ZTS500", "ZTS502" } };
 }
 
 const CoverageExecution = struct { declared: usize, replayed: usize, artifacts: usize, models: usize };
