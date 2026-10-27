@@ -862,6 +862,11 @@ fn onlyImplicitDefaultSpecErrors(result: *const zts_cli.precompile.CheckResult) 
 /// implicit-default spec errors. `hasAnalysisErrors` stays fail-closed.
 fn isComparable(result: *const zts_cli.precompile.CheckResult) bool {
     if (hasAnalysisErrors(result)) return false;
+    // A side whose relative imports were not all followed has effects the
+    // analysis never saw, so its contract cannot stand in for its behavior.
+    // A declared capsule usually fails on such a side; an implicit one only
+    // adds implicit-default errors, which the rule below would accept.
+    if (!result.imports_complete) return false;
     return result.totalErrors() == 0 or onlyImplicitDefaultSpecErrors(result);
 }
 
@@ -1796,6 +1801,14 @@ const GateRun = struct {
 /// Commit `base_src` as handler.ts in a temporary repository, write `head_src`
 /// to the working tree, and run the gate against HEAD.
 fn gateOverEdit(base_src: []const u8, head_src: []const u8, format: Format) !GateRun {
+    return gateOverEditWithHelpers(&.{}, base_src, head_src, format);
+}
+
+const RepoFile = struct { path: []const u8, data: []const u8 };
+
+/// As `gateOverEdit`, with `helpers` committed beside handler.ts and left
+/// unchanged in the working tree.
+fn gateOverEditWithHelpers(helpers: []const RepoFile, base_src: []const u8, head_src: []const u8, format: Format) !GateRun {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1803,6 +1816,10 @@ fn gateOverEdit(base_src: []const u8, head_src: []const u8, format: Format) !Gat
     const repo_path = path_buf[0..path_len];
 
     try expectGit(repo_path, &.{ "git", "init", "-q" });
+    for (helpers) |helper| {
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = helper.path, .data = helper.data });
+        try expectGit(repo_path, &.{ "git", "add", helper.path });
+    }
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data = base_src });
     try expectGit(repo_path, &.{ "git", "add", "handler.ts" });
     try expectGit(repo_path, &.{ "git", "-c", "user.name=zttp test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base" });
@@ -1849,6 +1866,57 @@ test "run: an implicit-default handler with an unchanged behavior is safe" {
 
 test "run: a declared capsule that fails on both sides still exits 2" {
     const g = try gateOverEdit(declared_failing_base, declared_failing_head, .json);
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 2), g.code);
+    try testing.expectEqual(@as(usize, 0), g.report.len);
+    try testing.expect(std.mem.indexOf(u8, g.stderr, "UnanalysableSource") != null);
+}
+
+// helper.ts fails its own type check, so CHECK does not follow its import
+// of deep.ts, and the write behind `loud` is never seen on either side.
+const incomplete_closure_helpers = [_]RepoFile{
+    .{ .path = "deep.ts", .data =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function deepQuiet(): string {
+    \\  return "q";
+    \\}
+    \\export function deepLoud(): string {
+    \\  cacheSet("ns", "k", "v", 60);
+    \\  return "l";
+    \\}
+    \\
+    },
+    .{ .path = "helper.ts", .data =
+    \\import { deepQuiet, deepLoud } from "./deep.ts";
+    \\export function quiet(): string {
+    \\  const n: string = 1;
+    \\  return deepQuiet();
+    \\}
+    \\export function loud(): string {
+    \\  return deepLoud();
+    \\}
+    \\
+    },
+};
+
+const incomplete_closure_base =
+    \\import { quiet } from "./helper.ts";
+    \\function handler(req: Request): Response {
+    \\  return Response.text(quiet(), { status: 200 });
+    \\}
+    \\
+;
+
+const incomplete_closure_head =
+    \\import { loud } from "./helper.ts";
+    \\function handler(req: Request): Response {
+    \\  return Response.text(loud(), { status: 200 });
+    \\}
+    \\
+;
+
+test "run: an implicit-default handler whose imports were not all followed exits 2" {
+    const g = try gateOverEditWithHelpers(&incomplete_closure_helpers, incomplete_closure_base, incomplete_closure_head, .json);
     defer g.deinit();
     try testing.expectEqual(@as(u8, 2), g.code);
     try testing.expectEqual(@as(usize, 0), g.report.len);
