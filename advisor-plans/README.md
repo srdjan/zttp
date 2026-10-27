@@ -34,7 +34,7 @@ The release review of 2026-10-26 at `c1ecdf65` gave the verdict "not ready". Pla
 | [013](013-one-acceptance-rule-and-vacuous-fault-coverage.md) | An I/O-free handler is fault-covered, and deploy accepts what test accepts | H3 | P1 | M | Decisions 16 and 17; 007; re-record window | IMPLEMENTED; waits for the re-record |
 | U2 (`docs/plans/2026-10-21-soundness-plan.md`, section U2) | Every literal `env()` name is secret unless the policy lists it in `env.public` | H1 | P1 | M | re-record window | DONE |
 | U3 (`docs/plans/2026-10-21-soundness-plan.md`, section U3) | `mask` declassifies only with a literal bound of 4 or less | M2 | P2 | S | re-record window | DONE |
-| [014](014-release-prep-after-fixes.md) | The release record matches the code, and the evidence is current | M6 | P1 | S | every selected plan | TODO |
+| [014](014-release-prep-after-fixes.md) | The release record matches the code, and the evidence is current | M6 | P1 | S | every selected plan | DONE |
 
 Owner decisions: on 2026-10-26 the owner chose option (a) for Decisions 16 to 20. The units are promoted to `docs/plans/2026-10-26-release-fixes-plan.md`, which holds the execution record.
 

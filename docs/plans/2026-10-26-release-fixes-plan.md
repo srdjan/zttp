@@ -19,7 +19,7 @@ execution record.
 | 015 | this file, Execution record 015 | follow-ups from units 011 and 012 | DONE |
 | 013 | [Vacuous fault coverage and one acceptance rule](../../advisor-plans/013-one-acceptance-rule-and-vacuous-fault-coverage.md) | H3 | DONE |
 | U2, U3 | [Soundness plan](2026-10-21-soundness-plan.md), sections U2 and U3, with the 2026-10-26 validation corrections | H1, M2 | DONE |
-| 014 | [Release preparation](../../advisor-plans/014-release-prep-after-fixes.md) | M6 | TODO; last |
+| 014 | [Release preparation](../../advisor-plans/014-release-prep-after-fixes.md) | M6 | DONE |
 
 Units 007 to 012 run in this order, one at a time, on local `main`. Unit 013,
 U2, and U3 share one owner-run DeepSeek re-record. Unit 014 runs last.
@@ -224,3 +224,15 @@ The owner ran the DeepSeek recorder once for all three units (`deepseek-v4-flash
 Pins changed in `packages/pi/src/expert_codegen_record.zig`: first-attempt green goes to false for jwt-auth (ZTS502), sibling-helper (ZTS207), and sibling-helper-holes (no edit); it goes to true for cache-counter and egress-options. Committed intent pass goes to false for sibling-helper and sibling-helper-holes. The `coverageBaseline` floor is the measured set ZTS400, ZTS500, ZTS502; the headline input hash stays `db16cf2221a6`.
 
 Evidence: `857a8dca` republished convergence and `9043227a` republished coverage. At `9043227a`, with an empty local cache and `DEEPSEEK_API_KEY` unset, `zig build test-expert-app` exited 0 (13/13 replayed) and `bash scripts/verify.sh` exited 0.
+
+### 014: release preparation
+
+Status: DONE. Release 0.25.0; the owner set `VERSION` in `21cbbf8c`.
+
+Commits: `b21ec190` (roadmap release-provenance item removed; worklog section for Decisions 14 and 15), `8aeb7894` (`[Unreleased]` filled), `67547a50` (version copies; `[Unreleased]` promoted to `[0.25.0] - 2026-10-27`), `2c00f5cb` (changelog correction). Website: `e78a302` (version sync) and `9c9449f` (0.25.0 changes and the re-recorded numbers) in `../ZTTP-WEBSITE`, `deno task verify` exit 0, not pushed or deployed.
+
+Correction: `8aeb7894` listed the flow depth bound of `8a1ea9c2` as breaking, with a 257-term `+` chain unproven. `a4e3b52b` later moved expression evaluation onto continuation frames. Measured at `67547a50`: 300, 511, and 513 terms hold `no_secret_leakage`, and 1000 terms gets ZTS044 from the parser. `2c00f5cb` lists the change under Fixed as a crash fix.
+
+Commits left out of the changelog, with no clear user effect: `1bd09809`, `53609c59`, `c9d756b0`, `b4221c7e`, `3c81c846`, `4b39d70a`. `ef3b64ac` (hidden-class retention bound) has an operator-visible recycle ceiling and has no entry.
+
+Gates at `67547a50`, empty local cache, `DEEPSEEK_API_KEY` unset: `render-release-notes.sh v0.25.0` exit 0; `bash scripts/verify.sh` exit 0. The evidence commits after this record are the release evidence; `release-provenance` and `release-check` run on them.
