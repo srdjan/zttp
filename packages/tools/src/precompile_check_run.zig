@@ -683,7 +683,6 @@ fn runCheckOnParsedSource(
         // below still performs its own independent traversal and reads.
         imported_graph = try loadFlowModulesForCheck(allocator, parsed, source, try analysis.facts(), handler_path, opts.import_reader);
         const graph = &imported_graph.?;
-        result.imports_complete = graph.complete;
 
         try analysis.prepareChecked(hf, .{
             .module_facts = try analysis.facts(),
