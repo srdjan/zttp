@@ -12,6 +12,14 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ### Fixed
 
+- **A Result or optional reassigned in a `for...of` body is unchecked at the
+  top of the next iteration.** The verifier walked the loop body once, so a
+  body that read `.value` of a checked Result, or a member of a narrowed
+  optional, and then reassigned it proved `results_safe` or `optionals_safe`,
+  although the second iteration read an unchecked value. Now the verifier
+  clears the Result check, and the optional narrowing when the new value is an
+  optional-producing call, for every binding that the body assigns, before it
+  walks the body. This adds refusals only, and no tracked `.ts` verdict moves.
 - **`zttp proofs verify` requires the bundle's certificate and contract to
   equal the copies inside the binary.** Acceptance read the certificate from
   the binary, and the bundle files were only checked against the manifest

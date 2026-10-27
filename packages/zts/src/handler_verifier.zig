@@ -977,6 +977,7 @@ pub const HandlerVerifier = struct {
             .for_of_stmt => {
                 const for_iter = self.ir_view.getForIter(node) orelse return;
                 self.walkExprForRefs(for_iter.iterable);
+                self.killFlagsAssignedIn(for_iter.body);
                 self.walkScoped(for_iter.body);
             },
             .return_stmt => {
@@ -1490,6 +1491,38 @@ pub const HandlerVerifier = struct {
         for (self.checked_journal.items) |*change| {
             if (change.flag == flag and change.key == key) change.old = false;
         }
+    }
+
+    /// Loop rule: the walk reads a loop body once, but the body runs at least
+    /// twice when the loop repeats, and the second run starts with the value
+    /// that the first run assigned. Before the body is walked, clear what the
+    /// assignment path would clear for every binding that the subtree assigns:
+    /// the checked flag of a Result, and the narrowing of an optional that is
+    /// assigned an optional-producing call. A check made before the loop then
+    /// does not hold at the top of the body, and a check made inside the body
+    /// after the assignment still holds for the code after it.
+    /// This over-approximates (an assignment in a nested closure or in a branch
+    /// counts) and so can only add refusals, never remove one. The kill outlasts
+    /// the loop, as any kill does.
+    fn killFlagsAssignedIn(self: *HandlerVerifier, root: NodeIndex) void {
+        if (root == null_node) return;
+        if ((self.ir_view.getTag(root) orelse return) == .assignment) {
+            if (self.ir_view.getAssignment(root)) |assign| {
+                if ((self.ir_view.getTag(assign.target) orelse .lit_null) == .identifier) {
+                    if (self.bindingOf(assign.target)) |binding| {
+                        const key = bindingKey(binding.scope_id, binding.slot);
+                        self.killCheckedFlag(.result_ok_checked, key);
+                        if (self.findOptionalBinding(binding.slot, binding.scope_id) != null and
+                            self.isOptionalProducingCall(assign.value) != null)
+                        {
+                            self.killCheckedFlag(.optional_narrowed, key);
+                        }
+                    }
+                }
+            }
+        }
+        var it = self.ir_view.expressionChildren(root);
+        while (it.next()) |child| self.killFlagsAssignedIn(child);
     }
 
     /// Start of a block's journal span. Pair with `journalRestore`.
@@ -2882,6 +2915,92 @@ test "ZTS303 reassigning a checked Result makes it unchecked again" {
         \\}
     );
     try std.testing.expectEqual(@as(u32, 0), kept.unchecked_result);
+}
+
+test "ZTS303 a Result reassigned in a loop body is unchecked at the top of the next iteration" {
+    const for_of = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  let result = jwtVerify("token", "key");
+        \\  if (!result.ok) { return Response.text("no"); }
+        \\  for (const x of [1, 2]) {
+        \\    const v = result.value;
+        \\    result = jwtVerify("other", "key");
+        \\  }
+        \\  return Response.text("done");
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), for_of.unchecked_result);
+
+    // Control: the body checks the new value before it reads `.value`.
+    const rechecked = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  let result = jwtVerify("token", "key");
+        \\  if (!result.ok) { return Response.text("no"); }
+        \\  for (const x of [1, 2]) {
+        \\    result = jwtVerify("other", "key");
+        \\    if (!result.ok) { return Response.text("no"); }
+        \\    const v = result.value;
+        \\  }
+        \\  return Response.text("done");
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), rechecked.unchecked_result);
+
+    // Control: the body never assigns the Result, so the guard still holds.
+    const untouched = try routeVerifierCounts(result_import ++
+        \\function handler(req) {
+        \\  let result = jwtVerify("token", "key");
+        \\  if (!result.ok) { return Response.text("no"); }
+        \\  for (const x of [1, 2]) {
+        \\    const v = result.value;
+        \\  }
+        \\  return Response.text("done");
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), untouched.unchecked_result);
+}
+
+test "ZTS309 an optional re-assigned in a loop body is un-narrowed at the top of the next iteration" {
+    const for_of = try routeVerifierCounts(optional_import ++
+        \\function handler(req) {
+        \\  let v = cacheGet("items", "k");
+        \\  if (v === undefined) { return Response.text("no"); }
+        \\  for (const x of [1, 2]) {
+        \\    const n = v.length;
+        \\    v = cacheGet("items", "k2");
+        \\  }
+        \\  return Response.text("done");
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), for_of.unchecked_optional);
+
+    // Control: the body narrows the new value before it reads `.length`.
+    const rechecked = try routeVerifierCounts(optional_import ++
+        \\function handler(req) {
+        \\  let v = cacheGet("items", "k");
+        \\  if (v === undefined) { return Response.text("no"); }
+        \\  for (const x of [1, 2]) {
+        \\    v = cacheGet("items", "k2");
+        \\    if (v === undefined) { return Response.text("no"); }
+        \\    const n = v.length;
+        \\  }
+        \\  return Response.text("done");
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), rechecked.unchecked_optional);
+
+    // Control: the body never assigns the optional, so the narrowing still holds.
+    const untouched = try routeVerifierCounts(optional_import ++
+        \\function handler(req) {
+        \\  let v = cacheGet("items", "k");
+        \\  if (v === undefined) { return Response.text("no"); }
+        \\  for (const x of [1, 2]) {
+        \\    const n = v.length;
+        \\  }
+        \\  return Response.text("done");
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), untouched.unchecked_optional);
 }
 
 test "ZTS309 reassigning an optional-producing call un-narrows the binding" {
