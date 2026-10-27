@@ -121,6 +121,10 @@ const TestHttpServer = struct {
     // Only consulted when mode == .sequenced_status: one status code per
     // accepted connection, in order.
     status_sequence: []const u16 = &.{},
+    // Requests answered in .sequenced_status mode.
+    served: std.atomic.Value(u32) = std.atomic.Value(u32).init(0),
+    // Set by `finish` so a server that is still waiting to accept stops.
+    stopping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     raw_response: []const u8 = "",
 
     const Mode = enum {
@@ -151,6 +155,21 @@ const TestHttpServer = struct {
 
     fn url(self: *const TestHttpServer, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
         return allocator.print("http://127.0.0.1:{d}{s}", .{ self.port, path });
+    }
+
+    /// Stops a .sequenced_status server that may still wait to accept, then
+    /// joins it. A wake-up connection unblocks the pending accept.
+    fn finish(self: *TestHttpServer) !void {
+        self.stopping.store(true, .release);
+        if (!self.closed) {
+            const io = self.io_backend.io();
+            const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", self.port);
+            if (address.connect(io, .{ .mode = .stream })) |wake| {
+                var stream = wake;
+                stream.close(io);
+            } else |_| {}
+        }
+        try self.join();
     }
 
     fn join(self: *TestHttpServer) !void {
@@ -188,7 +207,9 @@ const TestHttpServer = struct {
                     };
                 };
                 defer stream.close(io);
+                if (self.stopping.load(.acquire)) return;
                 try self.respondWithStatus(&stream, io, status);
+                _ = self.served.fetchAdd(1, .acq_rel);
             }
             return;
         }
@@ -2793,6 +2814,104 @@ test "fetchSync times out instead of hanging when upstream accepts and goes sile
     try std.testing.expectEqualStrings("TimedOut", obj.get("error").?.string);
     // 200ms deadline; anything near a second means the watchdog never fired.
     try std.testing.expect(elapsed_ms < 2000);
+}
+
+const RetryProbe = struct {
+    status: i64,
+    err: []const u8,
+    served: u32,
+};
+
+/// Runs `fetchWithRetry(url, init, { maxRetries: 2, baseDelayMs: 0 })` in a
+/// handler against a listener that answers 503 to every request it accepts.
+fn probeFetchWithRetry(allocator: std.mem.Allocator, init_js: []const u8) !RetryProbe {
+    var server = try TestHttpServer.init(allocator, .sequenced_status);
+    server.status_sequence = &.{ 503, 503, 503 };
+    defer server.join() catch {};
+    try server.start();
+
+    const url = try server.url(allocator, "/retry");
+    defer allocator.free(url);
+
+    const rt = try HandlerInstance.init(allocator, .{
+        .outbound_http_enabled = true,
+        .outbound_allow_host = "127.0.0.1",
+        .outbound_timeout_ms = 1000,
+        .dev_capability_policy = .{ .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback) },
+    });
+    defer rt.deinit();
+
+    const handler_code = try allocator.print(
+        \\import {{ fetchWithRetry }} from "zttp:fetch";
+        \\function handler(req) {{
+        \\  const resp = fetchWithRetry("{s}", {s}, {{ maxRetries: 2, baseDelayMs: 0 }});
+        \\  return Response.json({{
+        \\    status: resp.status,
+        \\    error: resp.error ?? "none"
+        \\  }});
+        \\}}
+    , .{ url, init_js });
+    defer allocator.free(handler_code);
+    try rt.loadHandler(handler_code, "<fetchwithretry-credential>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+    try server.finish();
+
+    var parsed = try std.json.parseFromSlice(std.json.Value, allocator, response.body, .{});
+    defer parsed.deinit();
+    const obj = parsed.value.object;
+    return .{
+        .status = obj.get("status").?.integer,
+        .err = try allocator.dupe(u8, obj.get("error").?.string),
+        .served = server.served.load(.acquire),
+    };
+}
+
+test "fetchWithRetry refuses an authorization header before any request is sent" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const probe = try probeFetchWithRetry(arena.allocator(), "{ headers: { authorization: \"Bearer t\" } }");
+    try std.testing.expectEqual(@as(i64, 599), probe.status);
+    try std.testing.expectEqualStrings("CredentialRefused", probe.err);
+    try std.testing.expectEqual(@as(u32, 0), probe.served);
+}
+
+test "fetchWithRetry refuses a mixed-case Authorization header" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const probe = try probeFetchWithRetry(arena.allocator(), "{ method: \"POST\", headers: { \"Content-Type\": \"text/plain\", \"Authorization\": \"Bearer t\" }, body: \"x\" }");
+    try std.testing.expectEqual(@as(i64, 599), probe.status);
+    try std.testing.expectEqualStrings("CredentialRefused", probe.err);
+    try std.testing.expectEqual(@as(u32, 0), probe.served);
+}
+
+test "fetchWithRetry refuses a cookie header and a proxy-authorization header" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const cookie = try probeFetchWithRetry(arena.allocator(), "{ headers: { \"COOKIE\": \"sid=1\" } }");
+    try std.testing.expectEqualStrings("CredentialRefused", cookie.err);
+    try std.testing.expectEqual(@as(u32, 0), cookie.served);
+    const proxy = try probeFetchWithRetry(arena.allocator(), "{ headers: { \"Proxy-Authorization\": \"Basic x\" } }");
+    try std.testing.expectEqualStrings("CredentialRefused", proxy.err);
+    try std.testing.expectEqual(@as(u32, 0), proxy.served);
+}
+
+test "fetchWithRetry without a credential header is still retried" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const probe = try probeFetchWithRetry(arena.allocator(), "{ method: \"POST\", headers: { \"X-Test\": \"alpha\" }, body: \"x\" }");
+    try std.testing.expectEqual(@as(i64, 503), probe.status);
+    try std.testing.expectEqualStrings("none", probe.err);
+    try std.testing.expectEqual(@as(u32, 3), probe.served);
 }
 
 /// Runs one `fetchSync` of `target_url` on its own thread, under a ceiling. A

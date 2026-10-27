@@ -145,6 +145,11 @@ const MAX_ALLOWED_DELAY_MS: i64 = 30000;
 ///   maxDelayMs    - cap on computed delay (default 5000)
 ///   retryOn       - array of status codes to retry on (default [429,500,502,503,504])
 ///
+/// A request whose init carries the retired `credential` option, or an
+/// `authorization`, `proxy-authorization`, or `cookie` header (any case), is
+/// refused with `CredentialRefused` before any request is sent. A write
+/// without a credential is still retried.
+///
 /// Safety limits: maxRetries <= 10, baseDelayMs <= 5000, maxDelayMs <= 30000.
 /// Negative retry/delay values are normalized to 0.
 ///
@@ -162,7 +167,8 @@ fn fetchWithRetryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const s
     const fetch_args = args[0..@min(args.len, 2)];
 
     // This loop resends a request, a write whose outcome is unknown included,
-    // so it never carries a credential (M4 T6 design note, section 5, Q2).
+    // so it never carries a credential, in an option or a header (M4 T6
+    // design note, section 5, Q2).
     if (namesCredential(handle, fetch_args)) {
         const refuse = state.refuse_fn orelse {
             return sdk.throwError(handle, "Error", "fetchWithRetry() cannot carry a credential");
@@ -253,12 +259,35 @@ fn fetchWithRetryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const s
     }
 }
 
-/// True when the init of a `(url, init)` or `(init)` call names a credential.
+/// True when the init of a `(url, init)` or `(init)` call names a credential:
+/// the retired `credential` option, or a header named `authorization`,
+/// `proxy-authorization`, or `cookie` (any case). The runtime reads `headers`
+/// as a plain object, so this guard reads the same shape.
 fn namesCredential(handle: *sdk.ModuleHandle, fetch_args: []const sdk.JSValue) bool {
     for (fetch_args) |arg| {
         if (!sdk.isObject(arg)) continue;
-        const credential = sdk.objectGet(handle, arg, "credential") orelse continue;
-        if (!credential.isUndefined()) return true;
+        if (sdk.objectGet(handle, arg, "credential")) |credential| {
+            if (!credential.isUndefined()) return true;
+        }
+        const headers = sdk.objectGet(handle, arg, "headers") orelse continue;
+        if (!sdk.isObject(headers)) continue;
+        if (headersNameCredential(handle, headers)) return true;
+    }
+    return false;
+}
+
+const CREDENTIAL_HEADERS = [_][]const u8{ "authorization", "proxy-authorization", "cookie" };
+
+fn headersNameCredential(handle: *sdk.ModuleHandle, headers: sdk.JSValue) bool {
+    const keys = sdk.objectKeys(handle, headers) catch return false;
+    const len = sdk.arrayLength(keys) orelse return false;
+    var i: u32 = 0;
+    while (i < len) : (i += 1) {
+        const key_val = sdk.arrayGet(handle, keys, i) orelse continue;
+        const key = sdk.extractString(key_val) orelse continue;
+        for (CREDENTIAL_HEADERS) |name| {
+            if (std.ascii.eqlIgnoreCase(key, name)) return true;
+        }
     }
     return false;
 }
