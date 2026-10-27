@@ -61,6 +61,12 @@ pub const CheckResult = struct {
     /// stops early or skips the contract still reports it. Null when parsing
     /// failed, so nothing is known.
     has_handler: ?bool = null,
+    /// Every relative import of the handler was read, type-checked, and followed.
+    /// False when a file cannot be read, a helper fails its type check, a chain
+    /// is cyclic or deeper than `max_import_depth`, or an import has no
+    /// followable target. Stays true when the contract stage never loaded the
+    /// imports; read it only for a result that has a contract.
+    imports_complete: bool = true,
     verify_ran: bool = false,
     verify_errors: u32 = 0,
     verify_warnings: u32 = 0,

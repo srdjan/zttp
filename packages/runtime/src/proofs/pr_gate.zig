@@ -33,6 +33,8 @@ const file_io = zts.file_io;
 const Classification = contract_diff.Classification;
 
 const max_source_bytes = 4 * 1024 * 1024;
+/// The cap the analyzer applies to an imported file when it reads the working tree.
+const max_import_bytes = 10 * 1024 * 1024;
 
 pub const json_schema = "zttp.proof-gate.v1";
 
@@ -599,7 +601,10 @@ fn isHandlerCandidate(path: []const u8) bool {
     return true;
 }
 
-fn changedHandlers(
+/// Every changed path of the range, with a rename listed under both of its
+/// paths (`--no-renames`): the old path is a deletion that a head-side importer
+/// can still read, and the new path is an addition.
+fn changedFiles(
     arena: std.mem.Allocator,
     cwd: []const u8,
     base: []const u8,
@@ -609,8 +614,8 @@ fn changedHandlers(
     // and is a breaking change the gate must catch, not silently drop.
     const res = if (head) |h| blk: {
         const range = try arena.print("{s}...{s}", .{ base, h });
-        break :blk try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "--diff-filter=ACMRD", range });
-    } else try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "--diff-filter=ACMRD", base });
+        break :blk try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "--no-renames", "--diff-filter=ACMRD", range });
+    } else try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "--no-renames", "--diff-filter=ACMRD", base });
     defer arena.free(res.stdout);
     if (!res.ok) return error.BadGitRef;
 
@@ -619,7 +624,7 @@ fn changedHandlers(
     while (it.next()) |line| {
         const path = std.mem.trim(u8, line, " \t\r");
         if (path.len == 0) continue;
-        if (!isHandlerCandidate(path)) continue;
+        if (!zts.classifySourcePath(path).isSupportedFile()) continue;
         try list.append(arena, try arena.dupe(u8, path));
     }
     return try list.toOwnedSlice(arena);
@@ -676,14 +681,59 @@ const RevisionReader = struct {
         const self: *RevisionReader = @ptrCast(@alignCast(context));
         const rel = try repoRelativePath(allocator, self.cwd, path);
         defer allocator.free(rel);
-        const spec = try allocator.print("{s}:./{s}", .{ self.ref, rel });
-        defer allocator.free(spec);
-        const res = try runGit(allocator, self.cwd, &.{ "git", "show", spec });
-        if (!res.ok) {
-            allocator.free(res.stdout);
-            return error.FileNotFound;
-        }
-        return res.stdout;
+        return readRevisionFile(allocator, self.cwd, self.ref, rel);
+    }
+};
+
+/// The bytes of a repository-relative path at a git revision.
+fn readRevisionFile(allocator: std.mem.Allocator, cwd: []const u8, ref: []const u8, rel: []const u8) ![]u8 {
+    const spec = try allocator.print("{s}:./{s}", .{ ref, rel });
+    defer allocator.free(spec);
+    const res = try runGit(allocator, cwd, &.{ "git", "show", spec });
+    if (!res.ok) {
+        allocator.free(res.stdout);
+        return error.FileNotFound;
+    }
+    return res.stdout;
+}
+
+/// One side of the comparison: a git revision, or the working tree.
+const Side = union(enum) {
+    ref: []const u8,
+    working_tree,
+
+    fn of(head: ?[]const u8) Side {
+        return if (head) |h| .{ .ref = h } else .working_tree;
+    }
+};
+
+/// Serves the files a handler imports from one side exactly as the analyzer
+/// would, and records each path it is asked for. The recorded paths are the
+/// handler's import closure as CHECK traversed it: a path whose file does not
+/// exist on this side is recorded too, because a deleted helper is a read that
+/// fails. Every path is normalized with `repoRelativePath` before it is kept.
+const RecordingReader = struct {
+    cwd: []const u8,
+    side: Side,
+    arena: std.mem.Allocator,
+    reads: std.ArrayList([]const u8) = .empty,
+
+    fn importReader(self: *RecordingReader) zts_cli.precompile.ImportReader {
+        return .{ .context = self, .read = read };
+    }
+
+    fn read(context: *anyopaque, allocator: std.mem.Allocator, path: []const u8) anyerror![]u8 {
+        const self: *RecordingReader = @ptrCast(@alignCast(context));
+        const rel = repoRelativePath(allocator, self.cwd, path) catch |err| switch (err) {
+            error.OutsideRepo => return error.FileNotFound,
+            error.OutOfMemory => return err,
+        };
+        defer allocator.free(rel);
+        try self.reads.append(self.arena, try self.arena.dupe(u8, rel));
+        return switch (self.side) {
+            .ref => |ref| readRevisionFile(allocator, self.cwd, ref, rel),
+            .working_tree => file_io.readFile(allocator, rel, max_import_bytes),
+        };
     }
 };
 
@@ -720,7 +770,7 @@ pub fn run(
     };
     const head_label: []const u8 = opts.head orelse "working tree";
 
-    const paths = changedHandlers(arena, cwd, base, opts.head) catch |err| switch (err) {
+    const changed = changedFiles(arena, cwd, base, opts.head) catch |err| switch (err) {
         error.BadGitRef => {
             try stderr.print("zttp proofs gate: cannot diff `{s}` against `{s}`\n", .{ base, head_label });
             return 2;
@@ -728,12 +778,50 @@ pub fn run(
         else => return err,
     };
 
-    var results: std.ArrayList(HandlerResult) = .empty;
-    var skipped: std.ArrayList(Skipped) = .empty;
-
-    for (paths) |path| {
+    // Read both sides of every changed file once and route each file: a file
+    // that declares a handler is compared as a root; any other file is a
+    // helper, which only its importers can show.
+    var entries: std.ArrayList(ChangedEntry) = .empty;
+    var scan: Scan = .{};
+    var helper_changed = false;
+    for (changed) |path| {
         const before = try readAtRef(arena, cwd, base, path);
         const after = try readAfter(arena, cwd, opts.head, path);
+        const route = try routeOf(gpa, path, before, after);
+        if (route == .helper) helper_changed = true;
+        try scan.changed.put(arena, path, {});
+        try entries.append(arena, .{ .path = path, .before = before, .after = after, .route = route });
+    }
+    if (changed.len > 0) {
+        try scanSide(gpa, arena, cwd, .{ .ref = base }, &scan);
+        try scanSide(gpa, arena, cwd, Side.of(opts.head), &scan);
+    }
+    if (helper_changed and scan.incomplete.items.len > 0) {
+        try stderr.print(
+            "zttp proofs gate: the imports of `{s}` were not fully followed, so the gate cannot tell whether it reads a changed helper\n",
+            .{scan.incomplete.items[0]},
+        );
+        return 2;
+    }
+
+    var results: std.ArrayList(HandlerResult) = .empty;
+    var skipped: std.ArrayList(Skipped) = .empty;
+    var compared: std.StringHashMapUnmanaged(void) = .empty;
+
+    for (entries.items) |entry| {
+        const path = entry.path;
+        const before = entry.before;
+        const after = entry.after;
+        if (entry.route == .helper) {
+            // A helper is never analyzed as a root. The handlers that read it
+            // are compared in its place; a candidate that nothing reads is
+            // reported as skipped.
+            if (isHandlerCandidate(path) and !scan.read_changed.contains(path)) {
+                try skipped.append(arena, .{ .path = path, .reason = "unreferenced_helper" });
+            }
+            continue;
+        }
+        try compared.put(arena, path, {});
         if (after == null) {
             // File removed at head. If it was a request handler at base, the
             // deletion removed all of its routes -> breaking (must land in
@@ -786,20 +874,21 @@ pub fn run(
             continue;
         }
 
-        const result = analyzeHandler(gpa, arena, cwd, base, opts.head, path, before.?, after.?) catch |err| {
-            // analyzeHandler returns null (handled below) for genuine
-            // non-handler / no-contract files; reaching here means an analysis
-            // or allocation failure. Swallowing it as `no_contract` drops the
-            // handler from worstVerdict, so a breaking change could pass the
-            // gate. Fail closed with the tooling-failure exit code.
-            try stderr.print("zttp proofs gate: analysis failed for `{s}`: {s}\n", .{ path, @errorName(err) });
+        if (try compareModified(gpa, arena, cwd, base, opts.head, helper_changed, path, before.?, after.?, &results, &skipped, stderr)) |code| return code;
+    }
+
+    // A handler that no one changed joins the comparison when either side of
+    // its import closure reads a changed file. It is graded as if its own
+    // file had changed.
+    for (scan.referrers.keys()) |path| {
+        if (compared.contains(path)) continue;
+        const before = try readAtRef(arena, cwd, base, path);
+        const after = try readAfter(arena, cwd, opts.head, path);
+        if (before == null or after == null) {
+            try stderr.print("zttp proofs gate: `{s}` reads a changed helper but is missing on one side\n", .{path});
             return 2;
-        };
-        const hr = result orelse {
-            try skipped.append(arena, .{ .path = path, .reason = "no_contract" });
-            continue;
-        };
-        try results.append(arena, hr);
+        }
+        if (try compareModified(gpa, arena, cwd, base, opts.head, helper_changed, path, before.?, after.?, &results, &skipped, stderr)) |code| return code;
     }
 
     const verdict = worstVerdict(results.items);
@@ -821,6 +910,141 @@ pub fn run(
     }
 
     return if (isSafe(verdict)) 0 else 1;
+}
+
+/// A changed path with both sides read. `route` decides how the gate treats it.
+const ChangedEntry = struct {
+    path: []const u8,
+    before: ?[]const u8,
+    after: ?[]const u8,
+    route: Route,
+};
+
+/// `handler`: a file the gate compares as a root, a file that declares a
+/// handler on a side that exists or whose parse failed (unknown, so it fails
+/// closed in the root path). `helper`: every other changed file.
+const Route = enum { handler, helper };
+
+/// Parse only: no import is read and no flow or contract stage runs, so the
+/// answer costs one parse and one type pass. Null when the parse failed.
+fn declaresHandler(gpa: std.mem.Allocator, src: []const u8, path: []const u8) !?bool {
+    var result = zts_cli.precompile.runCheckOnlyFromSourceWithOptions(gpa, src, path, .{
+        .json_mode = true,
+        .skip_contract = true,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return null,
+    };
+    defer result.deinit(gpa);
+    return result.has_handler;
+}
+
+fn routeOf(gpa: std.mem.Allocator, path: []const u8, before: ?[]const u8, after: ?[]const u8) !Route {
+    if (!isHandlerCandidate(path)) return .helper;
+    for ([_]?[]const u8{ before, after }) |side| {
+        const src = side orelse continue;
+        const declares = try declaresHandler(gpa, src, path);
+        if (declares != false) return .handler;
+    }
+    return .helper;
+}
+
+/// What the import scan learned over both sides.
+const Scan = struct {
+    changed: std.StringHashMapUnmanaged(void) = .empty,
+    /// Handlers whose import closure, on either side, read a changed file.
+    referrers: std.StringArrayHashMapUnmanaged(void) = .empty,
+    /// The changed files that some handler read.
+    read_changed: std.StringHashMapUnmanaged(void) = .empty,
+    /// Handlers whose imports CHECK did not follow completely, so a changed
+    /// file behind them would go unseen.
+    incomplete: std.ArrayList([]const u8) = .empty,
+};
+
+/// The tracked files of one side, NUL-separated by git.
+fn listTracked(arena: std.mem.Allocator, cwd: []const u8, side: Side) ![]const []const u8 {
+    const res = switch (side) {
+        .ref => |ref| try runGit(arena, cwd, &.{ "git", "ls-tree", "-r", "-z", "--name-only", ref }),
+        .working_tree => try runGit(arena, cwd, &.{ "git", "ls-files", "-z" }),
+    };
+    if (!res.ok) return error.BadGitRef;
+    var list: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, res.stdout, 0);
+    while (it.next()) |name| {
+        if (name.len == 0) continue;
+        try list.append(arena, name);
+    }
+    return try list.toOwnedSlice(arena);
+}
+
+/// Run CHECK on every tracked handler of one side with a recording reader.
+/// A handler whose reads include a changed file is a referrer. A handler whose
+/// import closure CHECK did not follow completely is recorded as incomplete.
+fn scanSide(gpa: std.mem.Allocator, arena: std.mem.Allocator, cwd: []const u8, side: Side, scan: *Scan) !void {
+    const names = try listTracked(arena, cwd, side);
+    for (names) |name| {
+        if (!isHandlerCandidate(name)) continue;
+        const src = switch (side) {
+            .ref => |ref| readRevisionFile(gpa, cwd, ref, name) catch continue,
+            .working_tree => file_io.readFile(gpa, name, max_source_bytes) catch continue,
+        };
+        defer gpa.free(src);
+        if ((try declaresHandler(gpa, src, name)) != true) continue;
+
+        var recorder: RecordingReader = .{ .cwd = cwd, .side = side, .arena = arena };
+        var result = zts_cli.precompile.runCheckOnlyFromSourceWithOptions(gpa, src, name, .{
+            .json_mode = true,
+            .import_reader = recorder.importReader(),
+        }) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                try scan.incomplete.append(arena, name);
+                continue;
+            },
+        };
+        defer result.deinit(gpa);
+        var reads_changed = false;
+        for (recorder.reads.items) |read| {
+            if (!scan.changed.contains(read)) continue;
+            reads_changed = true;
+            try scan.read_changed.put(arena, read, {});
+        }
+        if (reads_changed) try scan.referrers.put(arena, name, {});
+        if (result.contract == null or !result.imports_complete) try scan.incomplete.append(arena, name);
+    }
+}
+
+/// Compare one handler that exists on both sides. Returns the exit code when
+/// the analysis fails, which stops the gate, and null otherwise.
+fn compareModified(
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    cwd: []const u8,
+    base: []const u8,
+    head: ?[]const u8,
+    strict_imports: bool,
+    path: []const u8,
+    before_src: []const u8,
+    after_src: []const u8,
+    results: *std.ArrayList(HandlerResult),
+    skipped: *std.ArrayList(Skipped),
+    stderr: *std.Io.Writer,
+) !?u8 {
+    const result = analyzeHandler(gpa, arena, cwd, base, head, strict_imports, path, before_src, after_src) catch |err| {
+        // analyzeHandler returns null (handled below) for genuine
+        // non-handler / no-contract files; reaching here means an analysis
+        // or allocation failure. Swallowing it as `no_contract` drops the
+        // handler from worstVerdict, so a breaking change could pass the
+        // gate. Fail closed with the tooling-failure exit code.
+        try stderr.print("zttp proofs gate: analysis failed for `{s}`: {s}\n", .{ path, @errorName(err) });
+        return 2;
+    };
+    const hr = result orelse {
+        try skipped.append(arena, .{ .path = path, .reason = "no_contract" });
+        return null;
+    };
+    try results.append(arena, hr);
+    return null;
 }
 
 fn resolveBase(arena: std.mem.Allocator, cwd: []const u8, opts: Options) ![]const u8 {
@@ -946,6 +1170,11 @@ fn checkSides(
     return .{ .before = before, .after = after };
 }
 
+/// A check that produced a contract but did not follow every import.
+fn importsHidden(result: *const zts_cli.precompile.CheckResult) bool {
+    return result.contract != null and !result.imports_complete;
+}
+
 /// Compile before/after to contracts, diff them, and project the result into
 /// the arena-owned data model. Returns null when either side has no contract
 /// (not a handler). The ContractDiff and compile results live only for the
@@ -956,6 +1185,9 @@ fn analyzeHandler(
     cwd: []const u8,
     base: []const u8,
     head: ?[]const u8,
+    /// A changed helper exists in the range, so a side whose imports CHECK did
+    /// not follow completely may hide it: that side has no verdict.
+    strict_imports: bool,
     path: []const u8,
     before_src: []const u8,
     after_src: []const u8,
@@ -967,6 +1199,9 @@ fn analyzeHandler(
 
     if (hasAnalysisErrors(before_result) or hasAnalysisErrors(after_result)) {
         return error.UnanalysableSource;
+    }
+    if (strict_imports and (importsHidden(before_result) or importsHidden(after_result))) {
+        return error.IncompleteImports;
     }
 
     const before_contract: ?*const zts.HandlerContract = if (before_result.contract) |*c| c else null;
