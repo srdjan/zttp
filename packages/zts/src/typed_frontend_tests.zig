@@ -9040,8 +9040,27 @@ test "direct generic application closes every allocation failure" {
                 "const value: Proof<Readonly<{ data: Dict<string, number> }>, \"pure\"> = undefined;";
             try expectDirectSourceWithAllocator(allocator, source);
         }
+
+        // On Linux, in-place growth succeeds or fails with the address layout, and each
+        // failed growth becomes one more allocation, so the replayed count would vary.
+        fn noGrowthAllocator() std.mem.Allocator {
+            return .{ .ptr = undefined, .vtable = &.{
+                .alloc = forwardAlloc,
+                .resize = std.mem.Allocator.noResize,
+                .remap = std.mem.Allocator.noRemap,
+                .free = forwardFree,
+            } };
+        }
+
+        fn forwardAlloc(_: *anyopaque, len: usize, alignment: std.mem.Alignment, ra: usize) ?[*]u8 {
+            return std.testing.allocator.rawAlloc(len, alignment, ra);
+        }
+
+        fn forwardFree(_: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ra: usize) void {
+            std.testing.allocator.rawFree(memory, alignment, ra);
+        }
     };
-    try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{});
+    try std.testing.checkAllAllocationFailures(Context.noGrowthAllocator(), Context.run, .{});
 }
 
 test "direct structural generic source closes every allocation failure" {
