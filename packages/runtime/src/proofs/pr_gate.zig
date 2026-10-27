@@ -131,6 +131,9 @@ pub const HandlerResult = struct {
     counterexamples: []const Counterexample = &.{},
     /// Every monotonic proven boolean the edit lost, in `effect_changes` order.
     lost_properties: []const LostProperty = &.{},
+    /// The handler declares no `Proof<...>` capsule, so the default profile
+    /// applies and its undischarged properties did not stop the comparison.
+    implicit_capsule: bool = false,
 };
 
 pub const Skipped = struct {
@@ -195,6 +198,11 @@ pub fn renderMarkdown(
             try w.writeAll(" | ");
             try writeSurfaceCell(w, r.surface);
             try w.writeAll(" |\n");
+        }
+
+        for (results) |r| {
+            if (!r.implicit_capsule) continue;
+            try w.print("\n`{s}`: no declared capsule. The gate compared its behavior; the default proof profile is not fully held.\n", .{r.path});
         }
 
         for (results) |r| {
@@ -328,6 +336,8 @@ pub fn renderJson(
         try json.write(r.path);
         try json.objectField("verdict");
         try json.write(r.verdict.toString());
+        try json.objectField("capsule");
+        try json.write(if (r.implicit_capsule) "implicit" else "declared");
         try json.objectField("behaviorDiff");
         try json.beginObject();
         try json.objectField("preserved");
@@ -737,9 +747,10 @@ pub fn run(
                     return 2;
                 };
                 switch (source_kind) {
-                    .handler => try results.append(arena, .{
+                    .handler, .implicit_handler => try results.append(arena, .{
                         .path = try arena.dupe(u8, path),
                         .verdict = .breaking,
+                        .implicit_capsule = source_kind == .implicit_handler,
                     }),
                     .non_handler => try skipped.append(arena, .{
                         .path = path,
@@ -765,7 +776,11 @@ pub fn run(
                 return 2;
             };
             switch (source_kind) {
-                .handler => try results.append(arena, .{ .path = path, .verdict = .additive }),
+                .handler, .implicit_handler => try results.append(arena, .{
+                    .path = path,
+                    .verdict = .additive,
+                    .implicit_capsule = source_kind == .implicit_handler,
+                }),
                 .non_handler => try skipped.append(arena, .{ .path = path, .reason = "no_contract" }),
             }
             continue;
@@ -826,7 +841,34 @@ fn readAfter(arena: std.mem.Allocator, cwd: []const u8, head: ?[]const u8, path:
     };
 }
 
-const SourceKind = enum { handler, non_handler };
+const SourceKind = enum { handler, implicit_handler, non_handler };
+
+/// True when every spec error of the check is an implicit-default diagnostic:
+/// the handler declared no `Proof<...>` capsule and misses a property of the
+/// default profile. The caller has already ruled out `hasAnalysisErrors`, so
+/// spec errors are the only errors left. The test reads the
+/// `SpecDiagnostic.implicit_default` flag and never a diagnostic code, so a
+/// declared capsule failure, a helper capsule failure, ZTS606, and the Effects
+/// errors all keep the answer false. Total: a null contract returns false.
+fn onlyImplicitDefaultSpecErrors(result: *const zts_cli.precompile.CheckResult) bool {
+    const contract = if (result.contract) |*c| c else return false;
+    for (contract.spec_diagnostics.items) |d| {
+        if (d.kind.severity() == .err and !d.implicit_default) return false;
+    }
+    return true;
+}
+
+/// Whether a check is clean enough to compare. Clean means no errors, or only
+/// implicit-default spec errors. `hasAnalysisErrors` stays fail-closed.
+fn isComparable(result: *const zts_cli.precompile.CheckResult) bool {
+    if (hasAnalysisErrors(result)) return false;
+    return result.totalErrors() == 0 or onlyImplicitDefaultSpecErrors(result);
+}
+
+fn isImplicitCapsule(result: *const zts_cli.precompile.CheckResult) bool {
+    const contract = if (result.contract) |*c| c else return false;
+    return contract.declared_specs_implicit;
+}
 
 /// Classify only successfully analyzed source. A compiler failure must not be
 /// mistaken for a library module because that would make a deleted handler look
@@ -842,8 +884,8 @@ fn classifySource(gpa: std.mem.Allocator, src: []const u8, path: []const u8) !So
     if (hasAnalysisErrors(&result)) return error.UnanalysableSource;
     if (result.contract) |*contract| {
         if (!isHandlerContract(contract)) return .non_handler;
-        if (result.totalErrors() > 0) return error.UnanalysableSource;
-        return .handler;
+        if (!isComparable(&result)) return error.UnanalysableSource;
+        return if (isImplicitCapsule(&result)) .implicit_handler else .handler;
     }
     return .non_handler;
 }
@@ -933,11 +975,13 @@ fn analyzeHandler(
     const before_is_handler = before_contract != null and isHandlerContract(before_contract.?);
     const after_is_handler = after_contract != null and isHandlerContract(after_contract.?);
 
-    if ((before_is_handler and before_result.totalErrors() > 0) or
-        (after_is_handler and after_result.totalErrors() > 0))
+    if ((before_is_handler and !isComparable(before_result)) or
+        (after_is_handler and !isComparable(after_result)))
     {
         return error.UnanalysableSource;
     }
+    const implicit = (after_is_handler and isImplicitCapsule(after_result)) or
+        (!after_is_handler and before_is_handler and isImplicitCapsule(before_result));
 
     // A `.ts`/`.tsx` file that exposes no routes/behaviors on EITHER side is a
     // library/config module, not a request handler. Skip it (only adds
@@ -949,12 +993,12 @@ fn analyzeHandler(
     // land in `results` as .breaking, not in `skipped` -- worstVerdict only
     // ranks results, so otherwise the removal would pass the gate as safe.
     if (before_is_handler and !after_is_handler) {
-        return .{ .path = try arena.dupe(u8, path), .verdict = .breaking };
+        return .{ .path = try arena.dupe(u8, path), .verdict = .breaking, .implicit_capsule = implicit };
     }
 
     // Newly became a handler: no prior routes to break -> additive.
     if (!before_is_handler and after_is_handler) {
-        return .{ .path = try arena.dupe(u8, path), .verdict = .additive };
+        return .{ .path = try arena.dupe(u8, path), .verdict = .additive, .implicit_capsule = implicit };
     }
 
     var diff = try contract_diff.diffContractsFromSources(gpa, before_contract.?, after_contract.?, before_src, after_src);
@@ -972,6 +1016,7 @@ fn analyzeHandler(
         .surface = try extractSurface(arena, &diff),
         .counterexamples = try extractCounterexamples(arena, &diff),
         .lost_properties = lost,
+        .implicit_capsule = implicit,
     };
 }
 
@@ -1669,4 +1714,154 @@ test "repoRelativePath keeps a relative path, relativizes an absolute one, and r
     try testing.expectError(error.OutsideRepo, repoRelativePath(a, "/repo", "src/../../outside.ts"));
     try testing.expectError(error.OutsideRepo, repoRelativePath(a, "/repo", "/elsewhere/lib.ts"));
     try testing.expectError(error.OutsideRepo, repoRelativePath(a, "/repo", "/repo"));
+}
+
+// A handler with no `Proof<...>` return type. It writes to the cache, so the
+// implicit default profile demands `pure`, `read_only`, and others that it does
+// not hold: every spec error on each side has `implicit_default` set.
+const implicit_handler_base =
+    \\import { cacheSet } from "zttp:cache";
+    \\function handler(req: Request): Response {
+    \\  if (req.path === "/a") {
+    \\    cacheSet("ns", "k", "v", 60);
+    \\    return Response.text("ok", { status: 200 });
+    \\  }
+    \\  return Response.text("none", { status: 404 });
+    \\}
+    \\
+;
+
+const implicit_handler_status_changed =
+    \\import { cacheSet } from "zttp:cache";
+    \\function handler(req: Request): Response {
+    \\  if (req.path === "/a") {
+    \\    cacheSet("ns", "k", "v", 60);
+    \\    return Response.text("ok", { status: 404 });
+    \\  }
+    \\  return Response.text("none", { status: 404 });
+    \\}
+    \\
+;
+
+const implicit_handler_comment_only =
+    \\import { cacheSet } from "zttp:cache";
+    \\// A comment that changes no behavior.
+    \\function handler(req: Request): Response {
+    \\  if (req.path === "/a") {
+    \\    cacheSet("ns", "k", "v", 60);
+    \\    return Response.text("ok", { status: 200 });
+    \\  }
+    \\  return Response.text("none", { status: 404 });
+    \\}
+    \\
+;
+
+// A declared capsule that the handler does not hold: ZTS500 with
+// `implicit_default` false.
+const declared_failing_base =
+    \\import { cacheSet } from "zttp:cache";
+    \\function handler(req: Request): Proof<Response, "pure"> {
+    \\  if (req.path === "/a") {
+    \\    cacheSet("ns", "k", "v", 60);
+    \\    return Response.text("ok", { status: 200 });
+    \\  }
+    \\  return Response.text("none", { status: 404 });
+    \\}
+    \\
+;
+
+const declared_failing_head =
+    \\import { cacheSet } from "zttp:cache";
+    \\function handler(req: Request): Proof<Response, "pure"> {
+    \\  if (req.path === "/a") {
+    \\    cacheSet("ns", "k", "v", 60);
+    \\    return Response.text("ok", { status: 404 });
+    \\  }
+    \\  return Response.text("none", { status: 404 });
+    \\}
+    \\
+;
+
+const GateRun = struct {
+    code: u8,
+    report: []u8,
+    stderr: []u8,
+
+    fn deinit(self: GateRun) void {
+        testing.allocator.free(self.report);
+        testing.allocator.free(self.stderr);
+    }
+};
+
+/// Commit `base_src` as handler.ts in a temporary repository, write `head_src`
+/// to the working tree, and run the gate against HEAD.
+fn gateOverEdit(base_src: []const u8, head_src: []const u8, format: Format) !GateRun {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(testing.io, &path_buf);
+    const repo_path = path_buf[0..path_len];
+
+    try expectGit(repo_path, &.{ "git", "init", "-q" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data = base_src });
+    try expectGit(repo_path, &.{ "git", "add", "handler.ts" });
+    try expectGit(repo_path, &.{ "git", "-c", "user.name=zttp test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "handler.ts", .data = head_src });
+
+    const old_cwd = try @import("../proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var err: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer err.deinit();
+    const code = try run(testing.allocator, .{ .base = "HEAD", .format = format }, &out.writer, &err.writer);
+    const report = try testing.allocator.dupe(u8, out.writer.buffered());
+    errdefer testing.allocator.free(report);
+    const stderr = try testing.allocator.dupe(u8, err.writer.buffered());
+    return .{ .code = code, .report = report, .stderr = stderr };
+}
+
+test "run: an implicit-default handler whose status changes gets a breaking verdict marked implicit" {
+    const g = try gateOverEdit(implicit_handler_base, implicit_handler_status_changed, .json);
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 1), g.code);
+    try testing.expectEqualStrings("", g.stderr);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"verdict\":\"breaking\"") != null);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"capsule\":\"implicit\"") != null);
+}
+
+test "run: an implicit-default handler marks the markdown report with no declared capsule" {
+    const g = try gateOverEdit(implicit_handler_base, implicit_handler_status_changed, .md);
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 1), g.code);
+    try testing.expect(std.mem.indexOf(u8, g.report, "no declared capsule") != null);
+}
+
+test "run: an implicit-default handler with an unchanged behavior is safe" {
+    const g = try gateOverEdit(implicit_handler_base, implicit_handler_comment_only, .json);
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 0), g.code);
+    try testing.expectEqualStrings("", g.stderr);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"capsule\":\"implicit\"") != null);
+}
+
+test "run: a declared capsule that fails on both sides still exits 2" {
+    const g = try gateOverEdit(declared_failing_base, declared_failing_head, .json);
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 2), g.code);
+    try testing.expectEqual(@as(usize, 0), g.report.len);
+    try testing.expect(std.mem.indexOf(u8, g.stderr, "UnanalysableSource") != null);
+}
+
+test "classifySource: an implicit-default handler is a handler and a failing declared capsule is not analyzable" {
+    try testing.expectEqual(
+        SourceKind.implicit_handler,
+        try classifySource(testing.allocator, implicit_handler_base, "handler.ts"),
+    );
+    try testing.expectError(
+        error.UnanalysableSource,
+        classifySource(testing.allocator, declared_failing_base, "handler.ts"),
+    );
 }

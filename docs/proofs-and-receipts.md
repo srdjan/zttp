@@ -480,9 +480,24 @@ critical proof is lost, the handler is `breaking` whatever its behavior diff
 says.
 
 The gate acts on a lost proof only when the handler still analyzes. A handler
-without a `Proof<...>` capsule must prove the whole default profile, and a
-handler that declares the lost property fails its own analysis at the head. In
-both cases the gate stops with exit 2 and names the file.
+that declares the lost property in a `Proof<...>` capsule fails its own
+analysis at the head, and the gate stops with exit 2 and names the file.
+
+### A handler with no declared capsule
+
+A handler without a `Proof<...>` return type must prove the whole default
+profile. When it misses a default property, the compiler reports ZTS500, and
+ZTS501 when it imports `zttp:cache` or `zttp:sql`. Those diagnostics carry the
+`implicit_default` mark. The gate accepts a side whose only errors have that
+mark, and it compares the two contracts as for any other handler. The behavior
+verdict, the lost proofs, and the critical-loss rule apply unchanged. An added
+handler of this kind is `additive`, and a deleted one is `breaking`.
+
+The gate reads the mark, not the diagnostic code. A declared capsule that fails,
+a helper capsule that fails, ZTS606, the Effects diagnostics, and every
+analysis error still stop the gate with exit 2. The JSON report gives each
+handler a `capsule` field, `"implicit"` or `"declared"`. The Markdown report
+adds a "no declared capsule" note for an implicit handler.
 
 ### Local use
 

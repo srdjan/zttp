@@ -190,6 +190,9 @@ critical proven property is lost: `retry_safe`, `injection_safe`,
 proof under "Lost proofs". A lost proof outside that set is listed and does
 not change the verdict. The JSON report adds `lostProperties` to each handler:
 an array of `{"property", "severity"}` objects, empty when nothing was lost.
+It also adds `capsule`, which is `"implicit"` for a handler with no `Proof<...>`
+return type and `"declared"` otherwise. The gate compares an implicit handler on
+its behavior; a failing declared capsule still gives exit 2.
 The gate writes no ledger row. `--no-sign` is still accepted and does nothing.
 See [Proofs and receipts](proofs-and-receipts.md#proof-gate).
 
