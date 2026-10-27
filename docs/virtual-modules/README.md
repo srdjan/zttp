@@ -89,7 +89,8 @@ properties and runtime policy.
 bounded, `maxRetries` must be at most 10, `baseDelayMs` at most 5000, and
 `maxDelayMs` at most 30000. Negative retry or delay values are treated as 0.
 A request whose init has an `authorization`, `proxy-authorization`, or `cookie`
-header (any case) is refused with `CredentialRefused` before any request is sent.
+header (any case) and a method other than GET, HEAD, or OPTIONS is refused with
+`CredentialRefused` before any request is sent. A credentialed GET is retried.
 
 For capability governance internals, see
 [Module Capabilities](../internals/capabilities.md).

@@ -2930,10 +2930,19 @@ fn probeFetchWithRetry(allocator: std.mem.Allocator, init_js: []const u8) !Retry
     };
 }
 
-test "fetchWithRetry refuses an authorization header before any request is sent" {
+test "fetchWithRetry retries a GET with an authorization header" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const probe = try probeFetchWithRetry(arena.allocator(), "{ headers: { authorization: \"Bearer t\" } }");
+    try std.testing.expectEqual(@as(i64, 503), probe.status);
+    try std.testing.expectEqualStrings("none", probe.err);
+    try std.testing.expectEqual(@as(u32, 3), probe.served);
+}
+
+test "fetchWithRetry refuses an authorization header with a method it cannot read" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const probe = try probeFetchWithRetry(arena.allocator(), "{ method: 1, headers: { authorization: \"Bearer t\" } }");
     try std.testing.expectEqual(@as(i64, 599), probe.status);
     try std.testing.expectEqualStrings("CredentialRefused", probe.err);
     try std.testing.expectEqual(@as(u32, 0), probe.served);
@@ -2948,13 +2957,13 @@ test "fetchWithRetry refuses a mixed-case Authorization header" {
     try std.testing.expectEqual(@as(u32, 0), probe.served);
 }
 
-test "fetchWithRetry refuses a cookie header and a proxy-authorization header" {
+test "fetchWithRetry refuses a write with a cookie header or a proxy-authorization header" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cookie = try probeFetchWithRetry(arena.allocator(), "{ headers: { \"COOKIE\": \"sid=1\" } }");
+    const cookie = try probeFetchWithRetry(arena.allocator(), "{ method: \"PATCH\", headers: { \"COOKIE\": \"sid=1\" }, body: \"x\" }");
     try std.testing.expectEqualStrings("CredentialRefused", cookie.err);
     try std.testing.expectEqual(@as(u32, 0), cookie.served);
-    const proxy = try probeFetchWithRetry(arena.allocator(), "{ headers: { \"Proxy-Authorization\": \"Basic x\" } }");
+    const proxy = try probeFetchWithRetry(arena.allocator(), "{ method: \"put\", headers: { \"Proxy-Authorization\": \"Basic x\" }, body: \"x\" }");
     try std.testing.expectEqualStrings("CredentialRefused", proxy.err);
     try std.testing.expectEqual(@as(u32, 0), proxy.served);
 }

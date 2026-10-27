@@ -10,6 +10,16 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+### Breaking changes
+
+- **`fetchWithRetry` refuses a write that carries a credential header.** A
+  request with an `authorization`, `proxy-authorization`, or `cookie` header
+  and a method other than GET, HEAD, or OPTIONS gets `CredentialRefused` before
+  any request is sent. Before, such a request was resent up to `maxRetries`
+  times, so a write whose result was unknown could repeat with the user's
+  authority. A credentialed GET is still retried. Migration: send a
+  credentialed write with `fetch` and handle a failure in the handler.
+
 ## [0.25.0] - 2026-10-27
 
 ### Highlights

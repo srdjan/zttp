@@ -145,10 +145,11 @@ const MAX_ALLOWED_DELAY_MS: i64 = 30000;
 ///   maxDelayMs    - cap on computed delay (default 5000)
 ///   retryOn       - array of status codes to retry on (default [429,500,502,503,504])
 ///
-/// A request whose init carries the retired `credential` option, or an
-/// `authorization`, `proxy-authorization`, or `cookie` header (any case), is
-/// refused with `CredentialRefused` before any request is sent. A write
-/// without a credential is still retried.
+/// A request whose init carries the retired `credential` option is refused
+/// with `CredentialRefused` before any request is sent. So is a request with
+/// an `authorization`, `proxy-authorization`, or `cookie` header (any case)
+/// whose method is not GET, HEAD, or OPTIONS. A credentialed read and a write
+/// without a credential are still retried.
 ///
 /// Safety limits: maxRetries <= 10, baseDelayMs <= 5000, maxDelayMs <= 30000.
 /// Negative retry/delay values are normalized to 0.
@@ -167,8 +168,8 @@ fn fetchWithRetryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const s
     const fetch_args = args[0..@min(args.len, 2)];
 
     // This loop resends a request, a write whose outcome is unknown included,
-    // so it never carries a credential, in an option or a header (M4 T6
-    // design note, section 5, Q2).
+    // so it never resends a write with a credential (M4 T6 design note,
+    // section 5, Q2; v0.26.0 plan Decision 9).
     if (namesCredential(handle, fetch_args)) {
         const refuse = state.refuse_fn orelse {
             return sdk.throwError(handle, "Error", "fetchWithRetry() cannot carry a credential");
@@ -259,10 +260,11 @@ fn fetchWithRetryImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const s
     }
 }
 
-/// True when the init of a `(url, init)` or `(init)` call names a credential:
-/// the retired `credential` option, or a header named `authorization`,
-/// `proxy-authorization`, or `cookie` (any case). The runtime reads `headers`
-/// as a plain object, so this guard reads the same shape.
+/// True when the init of a `(url, init)` or `(init)` call must not be resent:
+/// it carries the retired `credential` option, or it sends a header named
+/// `authorization`, `proxy-authorization`, or `cookie` (any case) with a
+/// method that is not safe to repeat. The runtime reads `headers` as a plain
+/// object, so this guard reads the same shape.
 fn namesCredential(handle: *sdk.ModuleHandle, fetch_args: []const sdk.JSValue) bool {
     for (fetch_args) |arg| {
         if (!sdk.isObject(arg)) continue;
@@ -271,7 +273,22 @@ fn namesCredential(handle: *sdk.ModuleHandle, fetch_args: []const sdk.JSValue) b
         }
         const headers = sdk.objectGet(handle, arg, "headers") orelse continue;
         if (!sdk.isObject(headers)) continue;
-        if (headersNameCredential(handle, headers)) return true;
+        if (headersNameCredential(handle, headers) and !methodIsSafe(handle, arg)) return true;
+    }
+    return false;
+}
+
+const SAFE_METHODS = [_][]const u8{ "GET", "HEAD", "OPTIONS" };
+
+/// A resent GET, HEAD, or OPTIONS repeats no write, so a credential on it
+/// grants nothing a single send did not. A missing method is GET. A method
+/// this guard cannot read is treated as unsafe.
+fn methodIsSafe(handle: *sdk.ModuleHandle, init: sdk.JSValue) bool {
+    const method_val = sdk.objectGet(handle, init, "method") orelse return true;
+    if (method_val.isUndefined()) return true;
+    const method = sdk.extractString(method_val) orelse return false;
+    for (SAFE_METHODS) |name| {
+        if (std.ascii.eqlIgnoreCase(method, name)) return true;
     }
     return false;
 }
