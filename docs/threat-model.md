@@ -58,7 +58,10 @@ repository is in scope.
 - Proof acceptance does not establish functional correctness, termination,
   availability, constant-time behavior, or side-channel freedom. It establishes
   the static safety properties the certificate names, at the grades it
-  discloses, over the exact bytes that will run.
+  discloses. The consumer checks that the translation witnesses agree with the
+  executable graph, but not that the bytecode bytes at the witness offsets
+  decode to the instructions that the witnesses describe. That edge is
+  disclosed as `trusted` (see [Verification](verification.md#what-is-not-checked-said-out-loud)).
 - `zttp verify <url>` does not authenticate the signer unless the caller passes
   `--trust-key <fingerprint>`. The endpoint supplies the public key that checks
   its own signature, so any endpoint can mint a key and pass. An unpinned result

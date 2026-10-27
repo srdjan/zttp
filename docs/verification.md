@@ -542,6 +542,18 @@ rather than the consumer checked. The runtime's acceptance line and
   that do so, but this consumer did not re-run them. Only `response_total` is
   re-derived by the consumer today. Reducing that list one family at a time is
   the ratchet's job.
+- **Nodes declared total.** A `trusted` evidence entry on `response_total`
+  declares its node total without a rule. The consumer does not re-derive such a
+  node: it counts the entry in the disclosed inventory, and the production floor
+  accepts it, because `response_total` requires only `trusted` today. A
+  certificate that declares a node this way reports `trusted` as its weakest
+  edge.
+- **Implicit flow.** `no_secret_leakage` tracks explicit flow only (decision D9
+  of the flow redesign). A branch chosen by a secret, such as
+  `if (secret === guess)` with two different responses, is not a leak to the
+  analysis, so the response can reveal one bit of the secret for each request.
+  Comparing a token is the common case, and refusing it would refuse most
+  authentication handlers.
 - **Which env names are public.** `no_secret_leakage` also rests on the
   `env.public` list in the author's capability policy. The analyzer treats a
   literal `env("NAME")` value as non-secret only when the list holds `NAME`,

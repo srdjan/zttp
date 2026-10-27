@@ -165,6 +165,13 @@ but the analyzer does not rely on that default. Migration: write
 `mask(value, 4)` or a smaller literal on the value itself. A handler that
 relied on the old rule can lose `no_secret_leakage`, so run `zttp check` again.
 
+`no_secret_leakage` tracks explicit flow only. A branch chosen by a secret is
+not a leak to the analysis: `if (secret === guess)` with two different
+responses proves the chip, and each response reveals whether the guess was
+right. Decision D9 of the flow redesign chose this, because refusing it would
+refuse every handler that compares a token. Treat a response that depends on a
+secret comparison as a disclosure of that comparison.
+
 ### Reading A Failing Chip
 
 When a save demotes a property that was proven on the previous save, the card
