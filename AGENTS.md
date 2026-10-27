@@ -37,6 +37,7 @@ Run `deno task verify` before committing website changes. Commit locally and do 
 - When an integration test needs an external service, run the real service in Testcontainers. Do not write a fake of that service. SQLite runs in process and needs no container.
 - Before you fix a bug, write a test that reproduces the bug. Run it and confirm that it fails for the reason of the bug. Then fix the bug, and record in the commit message that the test failed without the fix.
 - Keep logic out of tests: no loops, branches, or computed expected values. Write literal expected values. A table of literal cases is permitted.
+- Two kinds of test are exempt from the rule above: a census, which iterates every member of an enum or registry and fails when a member has no probe or allowlist row (such as `test-flow-census`), and a property test, which iterates generated inputs and asserts an invariant over each.
 - Find missing tests with mutation tests and property-based tests. A committed mutant belongs beside its suite, as in `zig build test-proof-checker-mutants`. A property test uses a fixed `std.Random` seed and prints the seed on failure. Give each surviving mutant a test, or record why no test can kill it.
 - Test a real user flow end to end. For the CLI, use the smoke steps (`zig build smoke-v1`, `zig build smoke-getting-started`). For a browser UI, such as `../ZTTP-WEBSITE`, use Playwright MCP against the running site, and close each browser session that you open.
 - Tests live alongside code using Zig `test "..."` blocks (no separate test directory).
