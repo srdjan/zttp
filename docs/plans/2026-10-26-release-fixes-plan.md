@@ -236,3 +236,13 @@ Correction: `8aeb7894` listed the flow depth bound of `8a1ea9c2` as breaking, wi
 Commits left out of the changelog, with no clear user effect: `1bd09809`, `53609c59`, `c9d756b0`, `b4221c7e`, `3c81c846`, `4b39d70a`. `ef3b64ac` (hidden-class retention bound) has an operator-visible recycle ceiling and has no entry.
 
 Gates at `67547a50`, empty local cache, `DEEPSEEK_API_KEY` unset: `render-release-notes.sh v0.25.0` exit 0; `bash scripts/verify.sh` exit 0. The evidence commits after this record are the release evidence; `release-provenance` and `release-check` run on them.
+
+Release gate fixes, 2026-10-27. The first `release.sh v0.25.0 --no-publish` runs failed the Linux gate on four defects in tests and gate tooling. None is in shipped analyzer or runtime code.
+
+| Commit | Defect | Evidence |
+|---|---|---|
+| `f21c9827` | The module-renderer and evidence-stream probes ran `./.zig-cache/...` binaries after a `cd`, so a relative Zig cache gave exit 127. | Reproduced on macOS with the default cache; `test-docs-drift` and `test-native-gates` exit 0 after the fix. |
+| `13cb3fcf` | `cli-abuse-check` called `setPermissions` on a directory opened without `iterate`, which Linux opens with `O_PATH`; `fchmod` failed with EBADF. | Linux container: `test-cli-abuse` exit 0. |
+| `017d4b90` | "direct generic application closes every allocation failure" replayed an allocation count that in-place growth changed on Linux. | Linux probe: 82 allocations and 3 resizes in four runs, 83 and 2 in the fifth; 85 allocations in five runs with growth refused. |
+
+Release: tag `v0.25.0` at `58f8e222`. `release.sh v0.25.0 --no-publish` exit 0 (host gate, Linux gate, three targets, seven assets; the advisory `bench-check` missed, as Decision 10 records). `release.sh v0.25.0 --publish` exit 0; the GitHub release is Latest with seven assets, and the published macOS binary prints `zttp 0.25.0`. The website deployed from its push of `9c9449f`.
