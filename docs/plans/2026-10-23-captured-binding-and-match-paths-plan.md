@@ -70,7 +70,7 @@ The analyzer cannot tell which closure a call reaches. `route_resolution.zig` re
 - The verdicts: an added arm is `breaking`, not `additive`. `tryCanonicalEquivalence` reports "behavior path count differs" when the path counts differ, and `classify` then returns `breaking`. A changed arm status is `response_changed`, also `breaking`. T4 pins both.
 - This unit changes which forks the generator emits, so `path_analyzer_version` must rise (decision 13).
 
-Two arm edits stay invisible, because an arm adds no constraint (Fable `m_d.ts`, `m_e.ts`, `m_f.ts`): a changed arm pattern with the same status, and a body swap between two arms with the same status. A returned ternary and a `match` reached through a `const` also still give one path. T4 records all four as residual gaps.
+Two arm edits stay invisible, because an arm adds no constraint (Fable `m_d.ts`, `m_e.ts`, `m_f.ts`): a changed arm pattern with the same status, and a body swap between two arms with the same status. A returned ternary and a `match` reached through a `const` also still give one path. T5 records all four as residual gaps.
 
 ## Decision 13: the path analysis version
 

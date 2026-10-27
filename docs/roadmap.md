@@ -20,7 +20,7 @@ Open owner decisions after the reset:
 
 The owner decided Decisions 8 to 11 on 2026-10-26; the [reset worklog](plans/2026-10-25-reset-worklog.md) records each result.
 
-Next work: unit 014 (release preparation) of the [release fixes plan](plans/2026-10-26-release-fixes-plan.md). Units 007 to 013, 015, U2, and U3 are done.
+Next work: the [v0.26.0 plan](plans/2026-10-27-v0.26.0-plan.md), theme proof trust. Its unit W is the batched re-record window of Decision 2 below. The release fixes plan is complete and shipped as 0.25.0.
 
 M1, M2, and M3 are complete.
 M4 is complete: T1a to T7 were delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 2 later removed both runtime products. No release date is assigned.
