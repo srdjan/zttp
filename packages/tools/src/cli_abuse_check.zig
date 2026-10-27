@@ -335,7 +335,8 @@ fn runCase(check: *Check, case: Case) void {
             return;
         };
         defer check.gpa.free(path);
-        readonly_dir = Io.Dir.cwd().openDir(check.io, path, .{}) catch |err| {
+        // Without iterate, Linux opens the directory with O_PATH, and fchmod on it fails with EBADF.
+        readonly_dir = Io.Dir.cwd().openDir(check.io, path, .{ .iterate = true }) catch |err| {
             check.fail(case.name, "cannot open the read-only fixture: {s}", .{@errorName(err)});
             return;
         };
