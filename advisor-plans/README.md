@@ -32,8 +32,8 @@ The release review of 2026-10-26 at `c1ecdf65` gave the verdict "not ready". Pla
 | [011](011-cli-flows-match-the-docs.md) | The documented CLI flows work and fail clearly | M3, M4, M5, low items | P2 | M | 007 | DONE |
 | [012](012-claims-say-what-they-check.md) | Provenance and security claims say exactly what they check | M1; H1 and M2 interim | P1 | S | none | DONE |
 | [013](013-one-acceptance-rule-and-vacuous-fault-coverage.md) | An I/O-free handler is fault-covered, and deploy accepts what test accepts | H3 | P1 | M | Decisions 16 and 17; 007; re-record window | IMPLEMENTED; waits for the re-record |
-| U2 (`docs/plans/2026-10-21-soundness-plan.md`, section U2) | Every literal `env()` name is secret unless the policy lists it in `env.public` | H1 | P1 | M | re-record window | TODO; spec written at `ece05117` with line anchors, so its first step is a drift check against HEAD |
-| U3 (`docs/plans/2026-10-21-soundness-plan.md`, section U3) | `mask` declassifies only with a literal bound of 4 or less | M2 | P2 | S | re-record window | TODO; same drift check |
+| U2 (`docs/plans/2026-10-21-soundness-plan.md`, section U2) | Every literal `env()` name is secret unless the policy lists it in `env.public` | H1 | P1 | M | re-record window | DONE |
+| U3 (`docs/plans/2026-10-21-soundness-plan.md`, section U3) | `mask` declassifies only with a literal bound of 4 or less | M2 | P2 | S | re-record window | DONE |
 | [014](014-release-prep-after-fixes.md) | The release record matches the code, and the evidence is current | M6 | P1 | S | every selected plan | TODO |
 
 Owner decisions: on 2026-10-26 the owner chose option (a) for Decisions 16 to 20. The units are promoted to `docs/plans/2026-10-26-release-fixes-plan.md`, which holds the execution record.

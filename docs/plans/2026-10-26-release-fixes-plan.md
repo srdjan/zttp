@@ -17,8 +17,8 @@ execution record.
 | 011 | [The documented CLI flows work](../../advisor-plans/011-cli-flows-match-the-docs.md) | M3, M4, M5, low items | DONE |
 | 012 | [Claims say what they check](../../advisor-plans/012-claims-say-what-they-check.md) | M1; H1 and M2 interim | DONE |
 | 015 | this file, Execution record 015 | follow-ups from units 011 and 012 | DONE |
-| 013 | [Vacuous fault coverage and one acceptance rule](../../advisor-plans/013-one-acceptance-rule-and-vacuous-fault-coverage.md) | H3 | IMPLEMENTED; waits for the re-record |
-| U2, U3 | [Soundness plan](2026-10-21-soundness-plan.md), sections U2 and U3, with the 2026-10-26 validation corrections | H1, M2 | IMPLEMENTED; waits for the re-record |
+| 013 | [Vacuous fault coverage and one acceptance rule](../../advisor-plans/013-one-acceptance-rule-and-vacuous-fault-coverage.md) | H3 | DONE |
+| U2, U3 | [Soundness plan](2026-10-21-soundness-plan.md), sections U2 and U3, with the 2026-10-26 validation corrections | H1, M2 | DONE |
 | 014 | [Release preparation](../../advisor-plans/014-release-prep-after-fixes.md) | M6 | TODO; last |
 
 Units 007 to 012 run in this order, one at a time, on local `main`. Unit 013,
@@ -136,7 +136,7 @@ Coordinator: `bash scripts/verify.sh` from an empty cache exited 0 at `b3d6e760`
 
 ### 013: vacuous fault coverage and one acceptance rule
 
-Status: IMPLEMENTED; waits for the re-record. Step 4 (the owner-run DeepSeek re-record) is not done. Decisions 16 (a) and 17 (a).
+Status: DONE. The re-record of 2026-10-27 completed Step 4. Decisions 16 (a) and 17 (a).
 
 Commits in this repository: `0160ac41` (a handler with no failable I/O site holds fault_covered; `path_analyzer_version` 4 to 5), `7c6ee096` (build, compile, and deploy refuse what check refuses), `f24dffc6` (examples and doc handlers pass check, and the example gate runs it), `b77bdfe9` (regenerate the pins), `8675a48f` (documentation and CHANGELOG), and `92b5a8ee` (two probe handlers read the clock). Website commit `92f1cfd` in `../ZTTP-WEBSITE`. Drift check: only unit 007 and 011 to 015 edits overlapped (`formatFailureSections`, a flow-diagnostic print, doc lines); the Current state facts matched.
 
@@ -169,11 +169,10 @@ New tests, each failing without its fix (verified by reverting one fix at a time
 
 Gates, each with exit 0: `zig fmt --check packages build tooling`, `test-zts`, `test-precompile`, `test-contract-golden`, `test-diagnostic-corpus`, `test-meta-drift`, `test-standin`, `test-flow-census`, `test-cli`, `test-expert-golden`, `test-examples`, `test-zruntime`, `test-docs-drift`, `test-doc-links`, `test-cli-abuse`, `test-agent-protocol`, `smoke-getting-started`, `smoke-v1`, and `check-spine` (before each commit). `deno task verify` in `../ZTTP-WEBSITE` exit 0. Expected red: `test-expert-app` exits 1 with only `expert_codegen_record.test.codegen baseline replays at the committed first-attempt green rate` (`error.StaleCodegenCassette`). The aggregate `zig build test` includes `test-expert-app`; its Build Summary shows one failed step (`208/211` steps succeeded) and the same single leaf failure. A first aggregate run also failed `agent_protocol_check` and `cli-abuse-check`; commit `92b5a8ee` fixed both. `bash scripts/verify.sh` and `docs/convergence.json` and `docs/coverage.json` (they still carry the old policy hash) belong to the re-record round.
 
-Owner next step: run the re-record in one batch with U2 and U3, then the convergence and coverage republish.
 
 ### U2: every literal env name is secret unless the policy lists it in env.public
 
-Status: IMPLEMENTED; waits for the re-record. U3 (the `mask` bound) is not done. Decisions D3(a), D7(a), D8(a), 22 (a), and 25 (a); recorded as D-014 in `docs/decisions.md`.
+Status: DONE. The re-record of 2026-10-27 covers this unit. Decisions D3(a), D7(a), D8(a), 22 (a), and 25 (a); recorded as D-014 in `docs/decisions.md`.
 
 Commits: `0d17c2a1` (policy parser, analyzer, and contract disclosure), `d5a64079` (check, compile, and expert-tool plumbing), `e758c5f6` (tests, seeds, and fixtures), `933dc9f2` (pins), `d310a36d` (documentation and D-014), `1417922f` (curated `parsePolicyJsonOrNull`, so `packages/pi` needs no module-boundary row), and `6cf62783` (two tests that only the aggregate step ran).
 
@@ -193,11 +192,10 @@ Gates, each with exit 0: `zig fmt --check packages build tooling`, `test-zts`, `
 
 Website commit `b5b365d` in `../ZTTP-WEBSITE` (`deno task verify` exit 0; not pushed or deployed).
 
-Owner next step: run the re-record in one batch with U3, then the convergence and coverage republish.
 
 ### U3: mask declassifies only an integer literal bound of 4 or less on an unmodified source value
 
-Status: IMPLEMENTED; waits for the re-record. Decisions D4(a), 22 (a), 24 (a), and 25 (a); recorded as D-015 in `docs/decisions.md`.
+Status: DONE. The re-record of 2026-10-27 covers this unit. Decisions D4(a), 22 (a), 24 (a), and 25 (a); recorded as D-015 in `docs/decisions.md`.
 
 Commits: `35f3d237` (analyzer, binding field, tests, census probes) and `4d47887f` (documentation and D-015).
 
@@ -211,4 +209,18 @@ Bites, each observed on the full step and restored with `cmp`: the `exactFor` ar
 
 Gates, each with exit 0: `zig fmt --check packages build tooling`, `test-zts`, `test-modules`, `test-sdk`, `test-precompile`, `test-flow-census`, `test-diagnostic-corpus`, `test-standin`, `test-contract-golden`, `test-expert-golden`, `test-meta-drift`, `test-docs-drift`, `test-doc-links`, `test-module-audit`, `test-zts-cli`, `test-cli`, `test-examples`, `test-zruntime`, `test-proof-swallow`, `test-module-boundary`, `smoke-v1`, and `check-spine` (before each commit). `test-expert-app` and `zig build test` exit 1 with one failing leaf each: `expert_codegen_record.test.codegen baseline replays at the committed first-attempt green rate` with `error.StaleCodegenCassette` (13 cassettes no longer cover the turn). No provider was called. The website states no `mask` behavior, so `../ZTTP-WEBSITE` is unchanged.
 
-Owner next step: run the re-record in one batch for U2 and U3, then the convergence and coverage republish.
+
+### Re-record for 013, U2, and U3, 2026-10-27
+
+The owner ran the DeepSeek recorder once for all three units (`deepseek-v4-flash`, 13 cases, turn timeout 600000 ms) and committed the corpus as `20248887`. The recorder activated the complete corpus with 3 measured failures: sibling-helper missed its intent; sibling-helper-holes applied no edit and missed its intent.
+
+| Measure | Before (`925faf7c`, policy `ebb4b2b0a145`) | After (`20248887`, policy `0b6bd3b321d2`) |
+|---|---|---|
+| Raw first-draft pass | 9/13 | 8/13 |
+| First-attempt green | 9/13 | 8/13 |
+| Intent pass | 13/13 | 11/13 |
+| Tripped rules | ZTS500, ZTS501 | ZTS400, ZTS500, ZTS502 |
+
+Pins changed in `packages/pi/src/expert_codegen_record.zig`: first-attempt green goes to false for jwt-auth (ZTS502), sibling-helper (ZTS207), and sibling-helper-holes (no edit); it goes to true for cache-counter and egress-options. Committed intent pass goes to false for sibling-helper and sibling-helper-holes. The `coverageBaseline` floor is the measured set ZTS400, ZTS500, ZTS502; the headline input hash stays `db16cf2221a6`.
+
+Evidence: `857a8dca` republished convergence and `9043227a` republished coverage. At `9043227a`, with an empty local cache and `DEEPSEEK_API_KEY` unset, `zig build test-expert-app` exited 0 (13/13 replayed) and `bash scripts/verify.sh` exited 0.
