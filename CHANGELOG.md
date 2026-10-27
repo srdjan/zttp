@@ -12,6 +12,31 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ### Fixed
 
+- **`zttp proofs verify` requires the bundle's certificate and contract to
+  equal the copies inside the binary.** Acceptance read the certificate from
+  the binary, and the bundle files were only checked against the manifest
+  digest. A bundle whose `certificate` file held garbage, with the digest
+  rewritten to match, printed `policy_accepted` and exited 0. Now a difference,
+  or a bundled certificate that the binary lacks, exits 1 with a line that
+  names the component.
+- **A module export runs with only the capabilities it declares.** The runtime
+  granted every export its module's whole capability set, while the analysis
+  trusts each export's own `required_capabilities`. An export whose native code
+  read an undeclared capability could therefore break a proof without a
+  refusal. Embedders: an export that declares `required_capabilities` now gets
+  exactly that set; an export that declares none still gets the module set.
+- **`jwtSign`, `jwtVerify`, and `verifyWebhookSignature` refuse an empty
+  secret.** An empty HMAC key signed and verified, so anyone could forge a
+  token or a webhook signature. `jwtSign` returns `undefined`, `jwtVerify`
+  returns an error Result (`empty secret`), and `verifyWebhookSignature`
+  returns `false`.
+- **`zttp proofs gate` gives a behavior verdict for a handler without a
+  `Proof<...>` capsule.** Such a handler got ZTS500 on each side, and the gate
+  stopped with exit 2. Now the gate compares it when its only errors are the
+  implicit default profile, marks it `"capsule": "implicit"` in JSON and "no
+  declared capsule" in Markdown, and still exits 2 for a declared capsule that
+  fails. The gate also exits 2 when a side's relative imports were not all
+  followed, for example behind a helper that fails its type check.
 - **A certificate no longer claims `capability_bounded` for a handler without
   `Effects<...>`.** The producer set the property for every handler, though the
   compiler checks a capability ceiling only when the return type declares
@@ -31,6 +56,19 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
   times, so a write whose result was unknown could repeat with the user's
   authority. A credentialed GET is still retried. Migration: send a
   credentialed write with `fetch` and handle a failure in the handler.
+
+### Known limitations
+
+- **`zttp proofs gate` does not compare the handlers that import a changed
+  helper.** A pull request that changes only a helper file skips the helper as
+  `no_contract` when the helper analyzes cleanly, and exits 0. A helper that
+  fails its own analysis, for example with ZTS061, stops the gate with exit 2.
+  Review a helper-only change by hand, or touch the importing handler so that
+  the gate compares it.
+- **`no_secret_leakage` tracks explicit flow only.** A response chosen by a
+  comparison with a secret, such as `if (secret === guess)`, proves the
+  property and reveals the comparison result. See
+  [Verification](docs/verification.md#what-is-not-checked-said-out-loud).
 
 ## [0.25.0] - 2026-10-27
 
