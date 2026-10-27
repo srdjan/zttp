@@ -31,6 +31,14 @@ Run `deno task verify` before committing website changes. Commit locally and do 
 - Shell scripts that enumerate files should use `git ls-files -z | xargs -0` for safe path handling (handles spaces and special characters).
 
 ## Testing Guidelines
+- Test behavior through a public surface: the `zttp` or `zts` command, the HTTP server, a `zig build` step, or a `pub` function of a package root. Do not assert private state, call order, or source layout.
+- Assert what the user observes: stdout, stderr, exit status, response status and body, contract JSON, or the diagnostic code and location. Assert the exact expected value, not only a difference from a wrong value.
+- Use real components. Use a simple in-memory double only at a slow, paid, or nondeterministic boundary: the model provider (use an offline cassette), the clock, or the network. Do not add a mocking framework or assertions on calls.
+- When an integration test needs an external service, run the real service in Testcontainers. Do not write a fake of that service. SQLite runs in process and needs no container.
+- Before you fix a bug, write a test that reproduces the bug. Run it and confirm that it fails for the reason of the bug. Then fix the bug, and record in the commit message that the test failed without the fix.
+- Keep logic out of tests: no loops, branches, or computed expected values. Write literal expected values. A table of literal cases is permitted.
+- Find missing tests with mutation tests and property-based tests. A committed mutant belongs beside its suite, as in `zig build test-proof-checker-mutants`. A property test uses a fixed `std.Random` seed and prints the seed on failure. Give each surviving mutant a test, or record why no test can kill it.
+- Test a real user flow end to end. For the CLI, use the smoke steps (`zig build smoke-v1`, `zig build smoke-getting-started`). For a browser UI, such as `../ZTTP-WEBSITE`, use Playwright MCP against the running site, and close each browser session that you open.
 - Tests live alongside code using Zig `test "..."` blocks (no separate test directory).
 - `docs/internals/testing.md` maps the build steps: what `zig build test` runs, what it leaves to `scripts/verify.sh`, and why `test-zruntime` is standalone.
 - Name tests with concise behavioral descriptions (e.g., `test "runtime init and deinit"`).
