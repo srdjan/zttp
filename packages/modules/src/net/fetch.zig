@@ -279,12 +279,14 @@ fn namesCredential(handle: *sdk.ModuleHandle, fetch_args: []const sdk.JSValue) b
 const CREDENTIAL_HEADERS = [_][]const u8{ "authorization", "proxy-authorization", "cookie" };
 
 fn headersNameCredential(handle: *sdk.ModuleHandle, headers: sdk.JSValue) bool {
-    const keys = sdk.objectKeys(handle, headers) catch return false;
-    const len = sdk.arrayLength(keys) orelse return false;
+    // A headers object this guard cannot read is treated as a credential:
+    // a wrong `false` here resends an authorized request.
+    const keys = sdk.objectKeys(handle, headers) catch return true;
+    const len = sdk.arrayLength(keys) orelse return true;
     var i: u32 = 0;
     while (i < len) : (i += 1) {
-        const key_val = sdk.arrayGet(handle, keys, i) orelse continue;
-        const key = sdk.extractString(key_val) orelse continue;
+        const key_val = sdk.arrayGet(handle, keys, i) orelse return true;
+        const key = sdk.extractString(key_val) orelse return true;
         for (CREDENTIAL_HEADERS) |name| {
             if (std.ascii.eqlIgnoreCase(key, name)) return true;
         }
