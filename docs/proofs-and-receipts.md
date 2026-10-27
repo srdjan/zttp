@@ -499,6 +499,37 @@ analysis error still stop the gate with exit 2. The JSON report gives each
 handler a `capsule` field, `"implicit"` or `"declared"`. The Markdown report
 adds a "no declared capsule" note for an implicit handler.
 
+### A changed helper
+
+A pull request can change only a helper file, a `.ts` file that exposes no
+routes. The gate finds the handlers that import it. It parses every tracked
+`.ts` file on the base side and on the head side, without a type check, and it
+lists the relative imports with the rule that CHECK uses. It then follows those
+imports backward from each changed file, through any number of files. Each
+handler found joins the compared set, and the gate compares it as if its own
+file changed, with each side reading the helper at its own revision. The
+report lists that handler under its own path.
+
+The gate does not analyze a changed helper as a root. A helper that fails its
+own analysis, for example with ZTS061, no longer stops the gate. A changed
+helper that no handler imports is skipped with the reason
+`unreferenced_helper`. A renamed file is listed under both paths, so a handler
+that still imports the old path reaches a changed file.
+
+The blindness is the one that applies to an edit inside a handler. The contract
+diff compares behavior paths, status, and effects. It does not compare a value
+that a helper computes. A helper that gains `fetch` or a cache write changes
+the effects of its importer, and the handler loses `retry_safe` or
+`fault_covered`. A helper that only changes a returned string is `equivalent`.
+
+The gate exits 2 when it cannot follow a path to a changed file. A handler that
+reaches a changed file must have all its relative imports followed on both
+sides. A deleted or renamed helper that the handler still imports, an
+extensionless import specifier, a chain deeper than eight files, and a helper
+that fails its type check each give exit 2. A tracked file that does not parse
+also gives exit 2 when it is a handler candidate and its text names a changed
+file, because its imports are unknown.
+
 ### Local use
 
 ```bash

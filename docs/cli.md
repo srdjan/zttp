@@ -183,6 +183,10 @@ zttp proofs gate --base origin/main --head HEAD
 ```
 
 `zttp proofs gate` compares every changed handler between the base and the head.
+It also compares each handler that imports a changed helper, through any chain
+of relative imports, as if the handler file changed. A changed helper that no
+handler imports is skipped as `unreferenced_helper`, and the gate exits 2 when a
+handler reaches a changed file through an import that CHECK cannot follow.
 It exits 1 when a response or route is removed or changed, and also when a
 critical proven property is lost: `retry_safe`, `injection_safe`,
 `state_isolated`, `no_secret_leakage`, `no_credential_leakage`,

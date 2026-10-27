@@ -37,6 +37,18 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
   declared capsule" in Markdown, and still exits 2 for a declared capsule that
   fails. The gate also exits 2 when a side's relative imports were not all
   followed, for example behind a helper that fails its type check.
+- **`zttp proofs gate` compares the handlers that import a changed helper.** A
+  pull request that changed only a helper skipped the helper as `no_contract`
+  and exited 0, or exited 2 when the helper failed its own analysis, for
+  example with ZTS061. Now the gate parses each tracked `.ts` file on both
+  sides, finds every handler that reaches a changed file through relative
+  imports, and compares it as if its own file changed. A helper is no longer
+  analyzed as a root, and a changed helper that no handler imports is skipped
+  as `unreferenced_helper`. The blindness of an edit inside a handler applies:
+  a helper that only changes a value it returns is `equivalent`, while a new
+  `fetch` or cache write loses `retry_safe`. A renamed or deleted helper that a
+  handler still imports, an extensionless import, and a chain deeper than
+  eight files give exit 2.
 - **A certificate no longer claims `capability_bounded` for a handler without
   `Effects<...>`.** The producer set the property for every handler, though the
   compiler checks a capability ceiling only when the return type declares
@@ -59,12 +71,6 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ### Known limitations
 
-- **`zttp proofs gate` does not compare the handlers that import a changed
-  helper.** A pull request that changes only a helper file skips the helper as
-  `no_contract` when the helper analyzes cleanly, and exits 0. A helper that
-  fails its own analysis, for example with ZTS061, stops the gate with exit 2.
-  Review a helper-only change by hand, or touch the importing handler so that
-  the gate compares it.
 - **`no_secret_leakage` tracks explicit flow only.** A response chosen by a
   comparison with a secret, such as `if (secret === guess)`, proves the
   property and reveals the comparison result. See

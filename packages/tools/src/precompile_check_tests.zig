@@ -8598,3 +8598,31 @@ test "env: the contract discloses the public names, and a policy without them di
     const undisclosed = allow_only.contract orelse return error.NoContract;
     try std.testing.expectEqual(@as(usize, 0), undisclosed.env.public.items.len);
 }
+
+test "scanSource lists the relative imports CHECK follows and the handler function without checking types" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { cacheSet } from "zttp:cache";
+        \\import { a, b } from "./lib/a.ts";
+        \\import { c } from "../shared/c";
+        \\const n: number = "mistyped";
+        \\function handler(req: Request): Response { return Response.text("ok"); }
+        \\
+    ;
+    var scan = try imports_mod.scanSource(allocator, source, "app/handler.ts");
+    defer scan.deinit(allocator);
+    try std.testing.expect(scan.has_handler);
+    try std.testing.expectEqual(@as(usize, 2), scan.imports.len);
+    try std.testing.expectEqualStrings("app/lib/a.ts", scan.imports[0]);
+    try std.testing.expectEqualStrings("shared/c.ts", scan.imports[1]);
+
+    var helper = try imports_mod.scanSource(allocator, "export function f(): string { return \"x\"; }\n", "lib.ts");
+    defer helper.deinit(allocator);
+    try std.testing.expect(!helper.has_handler);
+    try std.testing.expectEqual(@as(usize, 0), helper.imports.len);
+
+    try std.testing.expectError(
+        error.Unparseable,
+        imports_mod.scanSource(allocator, "import { a } from \"./a.ts\";\nfunction handler(\n", "broken.ts"),
+    );
+}

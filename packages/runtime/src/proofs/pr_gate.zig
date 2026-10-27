@@ -33,6 +33,8 @@ const file_io = zts.file_io;
 const Classification = contract_diff.Classification;
 
 const max_source_bytes = 4 * 1024 * 1024;
+/// The largest `git archive` of one side's `.ts` files that the gate reads.
+const max_archive_bytes = 256 * 1024 * 1024;
 
 pub const json_schema = "zttp.proof-gate.v1";
 
@@ -138,7 +140,8 @@ pub const HandlerResult = struct {
 
 pub const Skipped = struct {
     path: []const u8,
-    /// "no_contract" — the file does not compile to a handler contract.
+    /// "unreferenced_helper": a changed file with no handler, and no handler
+    /// imports it. "no_contract": a handler function that exposes no route.
     reason: []const u8,
 };
 
@@ -567,12 +570,16 @@ const GitResult = struct {
 };
 
 fn runGit(allocator: std.mem.Allocator, cwd: []const u8, args: []const []const u8) !GitResult {
+    return runGitLimit(allocator, cwd, args, 8 * 1024 * 1024);
+}
+
+fn runGitLimit(allocator: std.mem.Allocator, cwd: []const u8, args: []const []const u8, stdout_limit: usize) !GitResult {
     var io_backend = shared.threadedIo(allocator);
     defer io_backend.deinit();
     const r = std.process.run(allocator, io_backend.io(), .{
         .argv = args,
         .cwd = .{ .path = cwd },
-        .stdout_limit = .limited(8 * 1024 * 1024),
+        .stdout_limit = .limited(stdout_limit),
         .stderr_limit = .limited(256 * 1024),
     }) catch return error.GitSpawnFailed;
     allocator.free(r.stderr);
@@ -599,7 +606,7 @@ fn isHandlerCandidate(path: []const u8) bool {
     return true;
 }
 
-fn changedHandlers(
+fn changedSources(
     arena: std.mem.Allocator,
     cwd: []const u8,
     base: []const u8,
@@ -607,10 +614,13 @@ fn changedHandlers(
 ) ![]const []const u8 {
     // Include D (deleted): removing a handler file removes all of its routes
     // and is a breaking change the gate must catch, not silently drop.
+    // `--no-renames` lists a renamed file under both paths: the old path is a
+    // deletion and the new path an addition, so a handler that still imports
+    // the old path reaches a changed file.
     const res = if (head) |h| blk: {
         const range = try arena.print("{s}...{s}", .{ base, h });
-        break :blk try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "--diff-filter=ACMRD", range });
-    } else try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "--diff-filter=ACMRD", base });
+        break :blk try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "--no-renames", "--diff-filter=ACMRD", range });
+    } else try runGit(arena, cwd, &.{ "git", "diff", "--name-only", "--no-renames", "--diff-filter=ACMRD", base });
     defer arena.free(res.stdout);
     if (!res.ok) return error.BadGitRef;
 
@@ -619,7 +629,7 @@ fn changedHandlers(
     while (it.next()) |line| {
         const path = std.mem.trim(u8, line, " \t\r");
         if (path.len == 0) continue;
-        if (!isHandlerCandidate(path)) continue;
+        if (!zts.classifySourcePath(path).isSupportedFile()) continue;
         try list.append(arena, try arena.dupe(u8, path));
     }
     return try list.toOwnedSlice(arena);
@@ -688,6 +698,207 @@ const RevisionReader = struct {
 };
 
 // ---------------------------------------------------------------------------
+// Reverse import graph: which files reach a changed file
+// ---------------------------------------------------------------------------
+
+/// One tracked `.ts` file as one side (the base or the head) sees it.
+const SideFile = struct {
+    /// False when the file did not parse: its imports are unknown.
+    parsed: bool,
+    /// The file defines a top-level `handler` function. Meaningful when `parsed`.
+    has_handler: bool,
+    /// Repo-relative paths of the files it imports, resolved the way CHECK
+    /// resolves them. Empty when the file did not parse.
+    imports: []const []const u8,
+    /// An unparsed handler candidate whose text names a changed file.
+    may_import_changed: bool,
+    /// The bytes that were parsed, so the other side can reuse the scan of an
+    /// identical file.
+    source: []const u8,
+};
+
+const SideGraph = std.StringHashMapUnmanaged(SideFile);
+
+const SourceEntry = struct { path: []const u8, source: []const u8 };
+
+/// Every tracked `.ts` source of one side. `ref` null is the working tree: the
+/// tracked paths come from the index and the bytes from disk, so a file that is
+/// tracked and deleted in the working tree is absent. A ref is read with one
+/// `git archive`, so the cost does not grow with a process per file.
+fn listSideSources(arena: std.mem.Allocator, cwd: []const u8, ref: ?[]const u8) ![]const SourceEntry {
+    var list: std.ArrayList(SourceEntry) = .empty;
+    if (ref) |r| {
+        const tree = try runGit(arena, cwd, &.{ "git", "ls-tree", "-r", "--name-only", r });
+        if (!tree.ok) return error.GitReadFailed;
+        var any = false;
+        var lines = std.mem.tokenizeScalar(u8, tree.stdout, '\n');
+        while (lines.next()) |line| {
+            if (zts.classifySourcePath(line).isSupportedFile()) any = true;
+        }
+        if (!any) return &.{};
+        const archive = try runGitLimit(arena, cwd, &.{ "git", "archive", "--format=tar", r, "--", "*.ts" }, max_archive_bytes);
+        if (!archive.ok) return error.GitReadFailed;
+        var reader: std.Io.Reader = .fixed(archive.stdout);
+        var name_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        var link_buffer: [std.fs.max_path_bytes]u8 = undefined;
+        var it: std.tar.Iterator = .init(&reader, .{ .file_name_buffer = &name_buffer, .link_name_buffer = &link_buffer });
+        while (try it.next()) |file| {
+            if (file.kind != .file) continue;
+            if (!zts.classifySourcePath(file.name).isSupportedFile()) continue;
+            var body: std.Io.Writer.Allocating = .init(arena);
+            try it.streamRemaining(file, &body.writer);
+            try list.append(arena, .{ .path = try arena.dupe(u8, file.name), .source = body.writer.buffered() });
+        }
+    } else {
+        const files = try runGit(arena, cwd, &.{ "git", "ls-files", "-z", "--", "*.ts" });
+        if (!files.ok) return error.GitReadFailed;
+        var names = std.mem.tokenizeScalar(u8, files.stdout, 0);
+        while (names.next()) |name| {
+            if (!zts.classifySourcePath(name).isSupportedFile()) continue;
+            const source = file_io.readFile(arena, name, max_source_bytes) catch continue;
+            try list.append(arena, .{ .path = name, .source = source });
+        }
+    }
+    return list.toOwnedSlice(arena);
+}
+
+fn mentionsAny(source: []const u8, needles: []const []const u8) bool {
+    for (needles) |needle| {
+        if (needle.len > 0 and std.mem.indexOf(u8, source, needle) != null) return true;
+    }
+    return false;
+}
+
+/// The imports of every file that can matter on one side. A relative import
+/// specifier always contains `./`, so a file without that text has no edge. It
+/// is parsed only when it is itself changed, for `has_handler`. The parse is
+/// `scanSource`: no type check and no CHECK.
+fn scanSide(
+    gpa: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    cwd: []const u8,
+    ref: ?[]const u8,
+    changed: []const []const u8,
+    stems: []const []const u8,
+    /// The other side, already scanned. A file with the same path and bytes has
+    /// the same scan, and most files are unchanged, so it is not parsed twice.
+    other: ?*const SideGraph,
+) !SideGraph {
+    var graph: SideGraph = .empty;
+    for (try listSideSources(arena, cwd, ref)) |entry| {
+        const is_changed = containsPath(changed, entry.path);
+        if (!is_changed and std.mem.indexOf(u8, entry.source, "./") == null) continue;
+        if (other) |o| {
+            if (o.get(entry.path)) |known| {
+                if (std.mem.eql(u8, known.source, entry.source)) {
+                    try graph.put(arena, entry.path, known);
+                    continue;
+                }
+            }
+        }
+        var scan = zts_cli.precompile.scanSource(gpa, entry.source, entry.path) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            error.Unparseable => {
+                try graph.put(arena, entry.path, .{
+                    .parsed = false,
+                    .has_handler = false,
+                    .imports = &.{},
+                    .may_import_changed = isHandlerCandidate(entry.path) and mentionsAny(entry.source, stems),
+                    .source = entry.source,
+                });
+                continue;
+            },
+        };
+        defer scan.deinit(gpa);
+        var edges: std.ArrayList([]const u8) = .empty;
+        for (scan.imports) |target| {
+            // A target outside the repository is not a tracked file, so no
+            // changed file can sit behind it.
+            const rel = repoRelativePath(arena, cwd, target) catch |err| switch (err) {
+                error.OutsideRepo => continue,
+                error.OutOfMemory => return err,
+            };
+            try edges.append(arena, rel);
+        }
+        try graph.put(arena, entry.path, .{
+            .parsed = true,
+            .has_handler = scan.has_handler,
+            .imports = try edges.toOwnedSlice(arena),
+            .may_import_changed = false,
+            .source = entry.source,
+        });
+    }
+    return graph;
+}
+
+fn containsPath(paths: []const []const u8, path: []const u8) bool {
+    for (paths) |p| {
+        if (std.mem.eql(u8, p, path)) return true;
+    }
+    return false;
+}
+
+fn pathLess(_: void, a: []const u8, b: []const u8) bool {
+    return std.mem.lessThan(u8, a, b);
+}
+
+/// The file name of each path without its directory and extension.
+fn pathStems(arena: std.mem.Allocator, paths: []const []const u8) ![]const []const u8 {
+    var stems: std.ArrayList([]const u8) = .empty;
+    for (paths) |path| {
+        try stems.append(arena, std.fs.path.stem(path));
+    }
+    return stems.toOwnedSlice(arena);
+}
+
+/// Importers of a file, over the union of the two sides.
+const ReverseGraph = std.StringHashMapUnmanaged(std.ArrayList([]const u8));
+
+fn addReverseEdges(arena: std.mem.Allocator, reverse: *ReverseGraph, side: *const SideGraph) !void {
+    var it = side.iterator();
+    while (it.next()) |entry| {
+        for (entry.value_ptr.imports) |target| {
+            const slot = try reverse.getOrPut(arena, target);
+            if (!slot.found_existing) slot.value_ptr.* = .empty;
+            if (!containsPath(slot.value_ptr.items, entry.key_ptr.*)) {
+                try slot.value_ptr.append(arena, entry.key_ptr.*);
+            }
+        }
+    }
+}
+
+/// The handler candidates that reach `seed` through relative imports on either
+/// side, sorted. Depth is not bounded here: CHECK stops at `max_import_depth`
+/// and marks the side incomplete, and `isComparable` turns that into exit 2.
+fn handlersReaching(
+    arena: std.mem.Allocator,
+    reverse: *const ReverseGraph,
+    base: *const SideGraph,
+    head: *const SideGraph,
+    seed: []const u8,
+) ![]const []const u8 {
+    var visited: std.StringHashMapUnmanaged(void) = .empty;
+    var queue: std.ArrayList([]const u8) = .empty;
+    var handlers: std.ArrayList([]const u8) = .empty;
+    try visited.put(arena, seed, {});
+    try queue.append(arena, seed);
+    var next: usize = 0;
+    while (next < queue.items.len) : (next += 1) {
+        const importers = reverse.get(queue.items[next]) orelse continue;
+        for (importers.items) |importer| {
+            if (visited.contains(importer)) continue;
+            try visited.put(arena, importer, {});
+            try queue.append(arena, importer);
+            const in_base = if (base.get(importer)) |f| f.parsed and f.has_handler else false;
+            const in_head = if (head.get(importer)) |f| f.parsed and f.has_handler else false;
+            if ((in_base or in_head) and isHandlerCandidate(importer)) try handlers.append(arena, importer);
+        }
+    }
+    std.mem.sort([]const u8, handlers.items, {}, pathLess);
+    return handlers.toOwnedSlice(arena);
+}
+
+// ---------------------------------------------------------------------------
 // Orchestration
 // ---------------------------------------------------------------------------
 
@@ -720,7 +931,7 @@ pub fn run(
     };
     const head_label: []const u8 = opts.head orelse "working tree";
 
-    const paths = changedHandlers(arena, cwd, base, opts.head) catch |err| switch (err) {
+    const changed = changedSources(arena, cwd, base, opts.head) catch |err| switch (err) {
         error.BadGitRef => {
             try stderr.print("zttp proofs gate: cannot diff `{s}` against `{s}`\n", .{ base, head_label });
             return 2;
@@ -731,9 +942,83 @@ pub fn run(
     var results: std.ArrayList(HandlerResult) = .empty;
     var skipped: std.ArrayList(Skipped) = .empty;
 
-    for (paths) |path| {
+    // The import graph of each side. A handler that reaches a changed file
+    // through relative imports is compared like a changed handler, because the
+    // changed file can change what the handler does.
+    const stems = try pathStems(arena, changed);
+    const scan_failed = "zttp proofs gate: cannot read the tracked TypeScript files to find the handlers that import a changed file\n";
+    const base_graph = scanSide(gpa, arena, cwd, base, changed, stems, null) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {
+            try stderr.writeAll(scan_failed);
+            return 2;
+        },
+    };
+    const head_graph = scanSide(gpa, arena, cwd, opts.head, changed, stems, &base_graph) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {
+            try stderr.writeAll(scan_failed);
+            return 2;
+        },
+    };
+    if (changed.len > 0) {
+        // A file that does not parse has unknown imports. When it is a handler
+        // candidate that names a changed file and is not changed itself, it may
+        // import that file, so the gate cannot say which handlers are affected.
+        for ([_]*const SideGraph{ &base_graph, &head_graph }) |side| {
+            var unknown = side.iterator();
+            while (unknown.next()) |entry| {
+                if (!entry.value_ptr.may_import_changed) continue;
+                if (containsPath(changed, entry.key_ptr.*)) continue;
+                try stderr.print(
+                    "zttp proofs gate: cannot read the imports of `{s}`, which may import a changed file\n",
+                    .{entry.key_ptr.*},
+                );
+                return 2;
+            }
+        }
+    }
+    var reverse: ReverseGraph = .empty;
+    try addReverseEdges(arena, &reverse, &base_graph);
+    try addReverseEdges(arena, &reverse, &head_graph);
+
+    var work: std.ArrayList([]const u8) = .empty;
+    var referenced: std.StringHashMapUnmanaged(void) = .empty;
+    for (changed) |path| {
+        if (isHandlerCandidate(path)) try work.append(arena, path);
+    }
+    const direct_count = work.items.len;
+    var reached: std.ArrayList([]const u8) = .empty;
+    for (changed) |seed| {
+        const handlers = try handlersReaching(arena, &reverse, &base_graph, &head_graph, seed);
+        if (handlers.len > 0) try referenced.put(arena, seed, {});
+        for (handlers) |handler_path| {
+            if (containsPath(changed, handler_path) or containsPath(reached.items, handler_path)) continue;
+            try reached.append(arena, handler_path);
+        }
+    }
+    std.mem.sort([]const u8, reached.items, {}, pathLess);
+    try work.appendSlice(arena, reached.items);
+
+    for (work.items, 0..) |path, index| {
+        const direct = index < direct_count;
         const before = try readAtRef(arena, cwd, base, path);
         const after = try readAfter(arena, cwd, opts.head, path);
+        if (!direct and (before == null or after == null)) {
+            try stderr.print("zttp proofs gate: cannot read `{s}`, which imports a changed file\n", .{path});
+            return 2;
+        }
+        // A changed file that holds no handler is not analyzed as a root. The
+        // handlers that import it are compared instead, and a file that no
+        // handler imports has nothing to compare.
+        if (direct and sideHoldsNoHandler(before, base_graph.get(path)) and
+            sideHoldsNoHandler(after, head_graph.get(path)))
+        {
+            if (!referenced.contains(path)) {
+                try skipped.append(arena, .{ .path = path, .reason = "unreferenced_helper" });
+            }
+            continue;
+        }
         if (after == null) {
             // File removed at head. If it was a request handler at base, the
             // deletion removed all of its routes -> breaking (must land in
@@ -796,7 +1081,7 @@ pub fn run(
             return 2;
         };
         const hr = result orelse {
-            try skipped.append(arena, .{ .path = path, .reason = "no_contract" });
+            if (direct) try skipped.append(arena, .{ .path = path, .reason = "no_contract" });
             continue;
         };
         try results.append(arena, hr);
@@ -821,6 +1106,15 @@ pub fn run(
     }
 
     return if (isSafe(verdict)) 0 else 1;
+}
+
+/// True when one side of a changed file defines no handler: the file is absent
+/// there, or it parsed and has no top-level `handler` function. A file that
+/// did not parse, or that was not scanned, is not known to hold none.
+fn sideHoldsNoHandler(source: ?[]const u8, info: ?SideFile) bool {
+    if (source == null) return true;
+    const side = info orelse return false;
+    return side.parsed and !side.has_handler;
 }
 
 fn resolveBase(arena: std.mem.Allocator, cwd: []const u8, opts: Options) ![]const u8 {
@@ -1932,4 +2226,340 @@ test "classifySource: an implicit-default handler is a handler and a failing dec
         error.UnanalysableSource,
         classifySource(testing.allocator, declared_failing_base, "handler.ts"),
     );
+}
+
+// ---------------------------------------------------------------------------
+// A changed helper reaches the handlers that import it
+// ---------------------------------------------------------------------------
+
+/// Commit `base_files`, then make the working tree `head_files` (written and
+/// staged, over any base file of the same path) minus `removed`, and run the
+/// gate against HEAD.
+fn gateOverRepos(base_files: []const RepoFile, head_files: []const RepoFile, removed: []const []const u8, format: Format) !GateRun {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const path_len = try tmp.dir.realPath(testing.io, &path_buf);
+    const repo_path = path_buf[0..path_len];
+
+    try expectGit(repo_path, &.{ "git", "init", "-q" });
+    for (base_files) |file| {
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = file.path, .data = file.data });
+        try expectGit(repo_path, &.{ "git", "add", file.path });
+    }
+    try expectGit(repo_path, &.{ "git", "-c", "user.name=zttp test", "-c", "user.email=test@example.invalid", "commit", "-qm", "base" });
+    for (head_files) |file| {
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = file.path, .data = file.data });
+        try expectGit(repo_path, &.{ "git", "add", file.path });
+    }
+    for (removed) |path| try tmp.dir.deleteFile(testing.io, path);
+
+    const old_cwd = try @import("../proof_ledger.zig").chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    var err: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer err.deinit();
+    const code = try run(testing.allocator, .{ .base = "HEAD", .format = format }, &out.writer, &err.writer);
+    const report = try testing.allocator.dupe(u8, out.writer.buffered());
+    errdefer testing.allocator.free(report);
+    const stderr = try testing.allocator.dupe(u8, err.writer.buffered());
+    return .{ .code = code, .report = report, .stderr = stderr };
+}
+
+const lib_importer =
+    \\import { enrich } from "./lib.ts";
+    \\function handler(req: Request): Response {
+    \\  return Response.text(enrich(), { status: 200 });
+    \\}
+    \\
+;
+
+const lib_pure_upper =
+    \\export function enrich(): Proof<string, "injection_safe"> {
+    \\  return "pure".toUpperCase();
+    \\}
+    \\
+;
+
+const lib_pure_literal =
+    \\export function enrich(): Proof<string, "injection_safe"> {
+    \\  return "PURE";
+    \\}
+    \\
+;
+
+const lib_cache_write =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function enrich(): Proof<string, "injection_safe"> {
+    \\  cacheSet("ns", "k", "v", 60);
+    \\  return "PURE";
+    \\}
+    \\
+;
+
+const probe_file =
+    \\export function probe(n: number): number {
+    \\  return n;
+    \\}
+    \\function handler(req: Request): Response {
+    \\  return Response.text("probe", { status: 200 });
+    \\}
+    \\
+;
+
+test "run: a pure helper that gains a cache write breaks the handler that imports it" {
+    const g = try gateOverRepos(
+        &.{ .{ .path = "handler.ts", .data = lib_importer }, .{ .path = "lib.ts", .data = lib_pure_upper } },
+        &.{.{ .path = "lib.ts", .data = lib_cache_write }},
+        &.{},
+        .json,
+    );
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 1), g.code);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"verdict\":\"breaking\"") != null);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"path\":\"handler.ts\"") != null);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"property\":\"retry_safe\"") != null);
+}
+
+test "run: a helper that fails its own analysis is not a root and its importer is compared" {
+    const handler =
+        \\import { count } from "./lib.ts";
+        \\function handler(req: Request): Response {
+        \\  return Response.text(String(count()), { status: 200 });
+        \\}
+        \\
+    ;
+    const lib_base =
+        \\export function count(): number {
+        \\  return 1;
+        \\}
+        \\
+    ;
+    const lib_head =
+        \\import { cacheSet } from "zttp:cache";
+        \\export function count(): number {
+        \\  cacheSet("ns", "k", "v", 60);
+        \\  return 1;
+        \\}
+        \\
+    ;
+    const g = try gateOverRepos(
+        &.{ .{ .path = "handler.ts", .data = handler }, .{ .path = "lib.ts", .data = lib_base } },
+        &.{.{ .path = "lib.ts", .data = lib_head }},
+        &.{},
+        .json,
+    );
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 1), g.code);
+    try testing.expect(std.mem.indexOf(u8, g.stderr, "analysis failed for") == null);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"path\":\"handler.ts\"") != null);
+}
+
+test "run: a changed helper that no handler imports is skipped as unreferenced" {
+    const orphan_base =
+        \\export function orphan(): string {
+        \\  return "a";
+        \\}
+        \\
+    ;
+    const orphan_head =
+        \\import { cacheSet } from "zttp:cache";
+        \\export function orphan(): string {
+        \\  cacheSet("ns", "k", "v", 60);
+        \\  return "a";
+        \\}
+        \\
+    ;
+    const g = try gateOverRepos(
+        &.{ .{ .path = "handler.ts", .data = lib_importer }, .{ .path = "lib.ts", .data = lib_pure_upper }, .{ .path = "orphan.ts", .data = orphan_base } },
+        &.{.{ .path = "orphan.ts", .data = orphan_head }},
+        &.{},
+        .json,
+    );
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 0), g.code);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"handlersChecked\":0") != null);
+    try testing.expect(std.mem.indexOf(u8, g.report, "{\"path\":\"orphan.ts\",\"reason\":\"unreferenced_helper\"}") != null);
+}
+
+test "run: a change two imports away from a handler reaches the handler" {
+    const handler =
+        \\import { outer } from "./a.ts";
+        \\function handler(req: Request): Response {
+        \\  return Response.text(outer(), { status: 200 });
+        \\}
+        \\
+    ;
+    const a =
+        \\import { inner } from "./b.ts";
+        \\export function outer(): string {
+        \\  return inner();
+        \\}
+        \\
+    ;
+    const b_base =
+        \\export function inner(): string {
+        \\  return "b";
+        \\}
+        \\
+    ;
+    const b_head =
+        \\import { cacheSet } from "zttp:cache";
+        \\export function inner(): string {
+        \\  cacheSet("ns", "k", "v", 60);
+        \\  return "b";
+        \\}
+        \\
+    ;
+    const g = try gateOverRepos(
+        &.{ .{ .path = "handler.ts", .data = handler }, .{ .path = "a.ts", .data = a }, .{ .path = "b.ts", .data = b_base } },
+        &.{.{ .path = "b.ts", .data = b_head }},
+        &.{},
+        .json,
+    );
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 1), g.code);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"path\":\"handler.ts\"") != null);
+}
+
+test "run: a renamed helper that an importer still names by the old path exits 2" {
+    const g = try gateOverRepos(
+        &.{ .{ .path = "handler.ts", .data = lib_importer }, .{ .path = "lib.ts", .data = lib_pure_upper } },
+        &.{.{ .path = "renamed.ts", .data = lib_pure_upper }},
+        &.{"lib.ts"},
+        .json,
+    );
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 2), g.code);
+    try testing.expect(std.mem.indexOf(u8, g.stderr, "analysis failed for `handler.ts`") != null);
+}
+
+test "run: a deleted helper that a handler still imports exits 2" {
+    const g = try gateOverRepos(
+        &.{ .{ .path = "handler.ts", .data = lib_importer }, .{ .path = "lib.ts", .data = lib_pure_upper } },
+        &.{},
+        &.{"lib.ts"},
+        .json,
+    );
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 2), g.code);
+    try testing.expect(std.mem.indexOf(u8, g.stderr, "analysis failed for `handler.ts`") != null);
+}
+
+test "run: a helper change with no effect change lists the importer as compared and exits 0" {
+    const g = try gateOverRepos(
+        &.{ .{ .path = "handler.ts", .data = lib_importer }, .{ .path = "lib.ts", .data = lib_pure_upper } },
+        &.{.{ .path = "lib.ts", .data = lib_pure_literal }},
+        &.{},
+        .json,
+    );
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 0), g.code);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"handlersChecked\":1") != null);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"path\":\"handler.ts\"") != null);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"verdict\":\"equivalent\"") != null);
+}
+
+test "run: an unchanged file that fails strict checks and imports nothing does not affect a helper verdict" {
+    const g = try gateOverRepos(
+        &.{
+            .{ .path = "handler.ts", .data = lib_importer },
+            .{ .path = "lib.ts", .data = lib_pure_upper },
+            .{ .path = "probe.ts", .data = probe_file },
+        },
+        &.{.{ .path = "lib.ts", .data = lib_cache_write }},
+        &.{},
+        .json,
+    );
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 1), g.code);
+    try testing.expect(std.mem.indexOf(u8, g.report, "probe.ts") == null);
+}
+
+test "run: a handler that reaches a changed helper through a chain deeper than the import limit exits 2" {
+    const h0 =
+        \\import { f1 } from "./c1.ts";
+        \\function handler(req: Request): Response {
+        \\  return Response.text(f1(), { status: 200 });
+        \\}
+        \\
+    ;
+    const c1 = "import { f2 } from \"./c2.ts\";\nexport function f1(): string {\n  return f2();\n}\n";
+    const c2 = "import { f3 } from \"./c3.ts\";\nexport function f2(): string {\n  return f3();\n}\n";
+    const c3 = "import { f4 } from \"./c4.ts\";\nexport function f3(): string {\n  return f4();\n}\n";
+    const c4 = "import { f5 } from \"./c5.ts\";\nexport function f4(): string {\n  return f5();\n}\n";
+    const c5 = "import { f6 } from \"./c6.ts\";\nexport function f5(): string {\n  return f6();\n}\n";
+    const c6 = "import { f7 } from \"./c7.ts\";\nexport function f6(): string {\n  return f7();\n}\n";
+    const c7 = "import { f8 } from \"./c8.ts\";\nexport function f7(): string {\n  return f8();\n}\n";
+    const c8 = "import { f9 } from \"./c9.ts\";\nexport function f8(): string {\n  return f9();\n}\n";
+    const c9_base = "export function f9(): string {\n  return \"a\";\n}\n";
+    const c9_head = "import { cacheSet } from \"zttp:cache\";\nexport function f9(): string {\n  cacheSet(\"ns\", \"k\", \"v\", 60);\n  return \"a\";\n}\n";
+    const g = try gateOverRepos(
+        &.{
+            .{ .path = "handler.ts", .data = h0 },
+            .{ .path = "c1.ts", .data = c1 },
+            .{ .path = "c2.ts", .data = c2 },
+            .{ .path = "c3.ts", .data = c3 },
+            .{ .path = "c4.ts", .data = c4 },
+            .{ .path = "c5.ts", .data = c5 },
+            .{ .path = "c6.ts", .data = c6 },
+            .{ .path = "c7.ts", .data = c7 },
+            .{ .path = "c8.ts", .data = c8 },
+            .{ .path = "c9.ts", .data = c9_base },
+        },
+        &.{.{ .path = "c9.ts", .data = c9_head }},
+        &.{},
+        .json,
+    );
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 2), g.code);
+    try testing.expect(std.mem.indexOf(u8, g.stderr, "analysis failed for `handler.ts`") != null);
+}
+
+test "run: an unparseable file that names a changed helper stops the gate" {
+    const broken = "import { enrich } from \"./lib.ts\";\nfunction handler(\n";
+    const g = try gateOverRepos(
+        &.{ .{ .path = "lib.ts", .data = lib_pure_upper }, .{ .path = "broken.ts", .data = broken } },
+        &.{.{ .path = "lib.ts", .data = lib_cache_write }},
+        &.{},
+        .json,
+    );
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 2), g.code);
+    try testing.expect(std.mem.indexOf(u8, g.stderr, "cannot read the imports of `broken.ts`") != null);
+}
+
+test "run: an unparseable file that names no changed helper does not stop the gate" {
+    const broken = "import { other } from \"./other.ts\";\nfunction handler(\n";
+    const g = try gateOverRepos(
+        &.{ .{ .path = "lib.ts", .data = lib_pure_upper }, .{ .path = "broken.ts", .data = broken } },
+        &.{.{ .path = "lib.ts", .data = lib_cache_write }},
+        &.{},
+        .json,
+    );
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 0), g.code);
+    try testing.expect(std.mem.indexOf(u8, g.report, "{\"path\":\"lib.ts\",\"reason\":\"unreferenced_helper\"}") != null);
+}
+
+test "run: a handler that imports a changed helper without an extension exits 2" {
+    const handler =
+        \\import { enrich } from "./lib";
+        \\function handler(req: Request): Response {
+        \\  return Response.text(enrich(), { status: 200 });
+        \\}
+        \\
+    ;
+    const g = try gateOverRepos(
+        &.{ .{ .path = "handler.ts", .data = handler }, .{ .path = "lib.ts", .data = lib_pure_upper } },
+        &.{.{ .path = "lib.ts", .data = lib_cache_write }},
+        &.{},
+        .json,
+    );
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 2), g.code);
+    try testing.expect(std.mem.indexOf(u8, g.stderr, "analysis failed for `handler.ts`") != null);
 }

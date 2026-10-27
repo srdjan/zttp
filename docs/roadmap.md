@@ -89,14 +89,19 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
   production floor no longer requires `capability_bounded`: a handler gets it,
   at `tested`, only when it declares `Effects<...>`. See
   [Verification](verification.md#what-is-not-checked-said-out-loud).
-- `zttp proofs gate` does not analyze a pull request that changes only an
-  imported helper. The gate lists changed files, and a helper that exports no
-  routes classifies as a non-handler, so the handler that imports it is not
-  compared. A changed helper that calls a capability, such as `fetch`, has no
-  `Effects<...>` or `Proof<...>` declaration of its own. Its analysis fails,
-  and the gate stops with exit 2. When a handler also changes, the gate reads
-  each helper at the revision of the handler that imports it. Closing the gap
-  needs the gate to map a changed helper to the handlers that import it.
+- `zttp proofs gate` compares a handler that imports a changed helper, but it
+  grades only what the contract records. The gate finds each handler that
+  reaches a changed file through relative imports, and it compares that handler
+  as if its own file changed: behavior paths, status, effects, and lost proofs.
+  A change that only alters a value the helper computes is invisible, as it is
+  for an edit inside a handler. A helper is never analyzed as a root, so a
+  helper that fails its own analysis, such as `examples/handler/utils.ts` with
+  ZTS061, no longer stops the gate. A changed helper that no handler imports
+  is skipped as `unreferenced_helper`. The gate exits 2 when a handler that
+  reaches a changed file has an import that CHECK cannot follow: a deleted or
+  renamed helper, an extensionless specifier, a chain deeper than eight files,
+  or a helper that fails its type check. It also exits 2 when a file that does
+  not parse names a changed file and so may import it.
 - Computed SQL resources remain refused. The configured SQL policy cannot
   distinguish read from write authority. Other residual-guard limits are in
   [Verification](verification.md#residual-runtime-guard-boundary).

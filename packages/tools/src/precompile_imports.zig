@@ -64,13 +64,24 @@ pub const ImportedFile = struct {
         reader: ?ImportReader,
         path: []const u8,
     ) error{Unreadable}!void {
-        self.allocator = allocator;
-        self.source = (if (reader) |r|
+        const source = (if (reader) |r|
             r.read(r.context, allocator, path)
         else
             readFilePosix(allocator, path, 10 * 1024 * 1024)) catch return error.Unreadable;
-        errdefer allocator.free(self.source);
+        errdefer allocator.free(source);
+        try self.loadOwned(allocator, source, path);
+    }
 
+    /// Parse source the caller already holds. On success the file owns `source`
+    /// (allocated with `allocator`); on failure the caller still owns it.
+    pub fn loadOwned(
+        self: *ImportedFile,
+        allocator: std.mem.Allocator,
+        source: []u8,
+        path: []const u8,
+    ) error{Unreadable}!void {
+        self.allocator = allocator;
+        self.source = source;
         self.source_owner.initCompileInPlace(allocator, allocator, self.source, path) catch return error.Unreadable;
         errdefer self.source_owner.deinit();
         const parsed = zts.parsedModuleFromDirectCheck(&self.source_owner) orelse return error.Unreadable;
@@ -89,6 +100,71 @@ pub const ImportedFile = struct {
         self.allocator.free(self.source);
     }
 };
+
+/// The result of parsing one file without checking it: whether it has a
+/// top-level `handler` function, and the paths of its relative imports as CHECK
+/// resolves them (`resolveCheckImportPath`, the same rule both traversals use).
+/// The same file is `error.Unparseable` here exactly when `ImportedFile.load`
+/// cannot load it, so an edge listed here is an edge CHECK follows.
+pub const SourceScan = struct {
+    has_handler: bool,
+    /// Owned by the allocator that `scanSource` received. Duplicates removed.
+    imports: []const []const u8,
+
+    pub fn deinit(self: *SourceScan, allocator: std.mem.Allocator) void {
+        for (self.imports) |path| allocator.free(path);
+        allocator.free(self.imports);
+    }
+};
+
+/// Parse `source` (as the file at `path`) and list its relative imports. No
+/// type check, strict pass, or CHECK runs. Any admission or parse failure is
+/// `Unparseable`: the edges of that file are unknown.
+pub fn scanSource(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    path: []const u8,
+) error{ OutOfMemory, Unparseable }!SourceScan {
+    const owned = try allocator.dupe(u8, source);
+    errdefer allocator.free(owned);
+    var file: ImportedFile = undefined;
+    file.loadOwned(allocator, owned, path) catch return error.Unparseable;
+    defer file.deinit();
+
+    const base_dir = std.fs.path.dirname(path) orelse ".";
+    var found: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (found.items) |item| allocator.free(item);
+        found.deinit(allocator);
+    }
+    for (file.module_facts.imports.items) |rec| {
+        if (rec.resolution != .unresolved) continue;
+        if (!isRelativeSpecifier(rec.module_specifier)) continue;
+        const resolved = try resolveCheckImportPath(allocator, base_dir, rec.module_specifier);
+        defer allocator.free(resolved);
+        // An extensionless specifier of a relative importer comes back rooted
+        // (`/lib.ts`): the extension probe joins it to an empty directory. CHECK
+        // reads that rooted path and fails, which makes the importer's imports
+        // incomplete. The edge names the file it means, so the importer still
+        // reaches the file and the gate fails closed on the unreadable import.
+        const rooted = !std.fs.path.isAbsolute(path) and std.mem.startsWith(u8, resolved, "/");
+        const target = try allocator.dupe(u8, if (rooted) resolved[1..] else resolved);
+        errdefer allocator.free(target);
+        var seen = false;
+        for (found.items) |item| {
+            if (std.mem.eql(u8, item, target)) seen = true;
+        }
+        if (seen) {
+            allocator.free(target);
+            continue;
+        }
+        try found.append(allocator, target);
+    }
+    return .{
+        .has_handler = zts.findHandlerFunction(file.view, file.root) != null,
+        .imports = try found.toOwnedSlice(allocator),
+    };
+}
 
 /// Retains the exact source snapshots observed by CHECK's flow reader. Repeated
 /// reads are deliberately not coalesced: a reader can serve a different nested
