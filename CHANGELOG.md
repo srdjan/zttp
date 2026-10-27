@@ -10,6 +10,14 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+### Highlights
+
+This release makes proof claims stricter and the build gate match `zttp check`.
+Every `env()` name is secret unless the policy lists it, and `mask` declassifies
+only a small literal bound. The runtime now stops handlers at the request
+deadline inside callbacks and recursion, and one `zttp:ratelimit` store serves
+each handler pool.
+
 ### Breaking changes
 
 - **`zttp deploy`, `zttp build`, and `zttp compile` refuse a handler that
@@ -54,6 +62,135 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
   write `mask(value, 4)` on the value itself. This change shares the flow
   analyzer version 8 with the `env.public` change. Rebuild handlers and
   regenerate contracts before deployment.
+- **A write through a shared object now breaks `state_isolated` (ZTS310).** The
+  verifier used to check only a write to a bare identifier. A member or index
+  write on a builtin, a module-scope binding, or a local that starts from one
+  now reports `module_scope_mutation`. Earlier versions proved such a handler
+  `state_isolated`. Migration: keep per-request state in locals that the handler
+  creates, and remove writes to module-scope objects. Rebuild and redeploy
+  earlier artifacts.
+- **A name longer than 255 bytes is refused with ZTS000.** The type pool used to
+  cut a record field or nominal name at 255 bytes, so two distinct types could
+  look equal. String values longer than 255 bytes still check as `string`.
+  Migration: shorten each record field and type name to 255 bytes or less.
+- **A deep expression or call chain in a flow check is now unproven.** The flow
+  analyzer stops at 64 call activations and 256 nested evaluation levels instead
+  of overflowing the stack. A 257-term left-associative `+` chain is unproven
+  where it was proven, so `zttp check` and `zttp deploy` refuse it. Migration:
+  split the chain into named intermediate values.
+- **A module binding type signature must parse completely.** Trailing text after
+  a signature in a `ModuleBinding` now makes the signature invalid. This affects
+  embedders only. Migration: remove the trailing text from each signature.
+
+### Added
+
+- **`zttp verify` reports whether the signing key is pinned.** Human output
+  says "key not pinned" and names the `--trust-key` option. JSON output carries
+  `"keyPinned": false` or `true`. An unpinned result still exits 0, so a script
+  that reads only the exit status must also read `keyPinned`.
+- **`zts compile --help` and `zttp proofs bundle --help` print usage and exit
+  0.**
+
+### Changed
+
+- **`zttp proofs bundle` uses the contract embedded in the deploy output.** The
+  `--contract` option is now optional. A `--contract` file that differs from the
+  embedded contract fails with `ContractMismatch`. An unreadable input prints
+  `zttp proofs bundle: cannot read contract '<path>': <error>` and exits 1.
+- **`zttp proofs bundle` and `zttp proofs verify` name a refused path.** The
+  path rules did not change: a path with `..`, or under `/etc/` or `/var/`, is
+  refused. The command now prints the reason on stderr and exits 1. Before, it
+  exited 1 with no output.
+- **A busy port refuses a second server.** `zttp serve` and `zttp dev` now
+  bind the public listener without `SO_REUSEPORT`. They print `Port N is
+  already in use. Pass a different port with -p <PORT>.` and exit 1.
+- **The check report marks skipped stages.** When parsing fails, the proof card
+  prints `SKIPPED (parse failed)` for Types, Sound mode, and Strict ZigTS.
+- **`zttp serve -e` prints parse diagnostics.** A parse error now shows the ZTS
+  code, location, and source line, and exits 1 without a usage hint.
+- **`zttp check`, `zttp test`, and `zttp dev` print every counted diagnostic.**
+  Flow diagnostics and the failing sections now appear in `test` and `dev`
+  output, so the printed errors match the counted errors.
+- **SQLite writes wait up to 5000 ms for a busy writer.** Concurrent writes
+  through `zttp:sql` used to fail with a 500 reply while another connection
+  held the write lock. They now wait and succeed. The runtime does not enable
+  WAL mode.
+- **One `zttp:ratelimit` store serves each handler pool.** Each runtime used
+  its own store, so a limit of 5 admitted about 20 requests in a test of 200.
+  The pool now shares one store of integer counters. It admits the stated
+  limit across all runtimes in the pool.
+- **A recycled runtime is rebuilt at release.** The next request no longer pays
+  the rebuild. The release step now takes longer when a recycle happens. A
+  failed rebuild logs a warning, and the next request rebuilds the runtime.
+- **The review delta tracks dynamic env, egress, and cache sets.** A change from
+  a literal set to a dynamic set now reports a property promotion or demotion.
+  Ledger rows written before this change read as not proven.
+- **`zttp expert` tools refuse secret paths.** Every file-bound tool, search,
+  and agent tool refuses a path that matches the secret deny list, as named or
+  through a symlink. The deny list applies to each path component. Context
+  loading stops at the nearest `.git` root, or at the start directory when no
+  `.git` exists.
+
+### Fixed
+
+- **A failing function component fails the render.** The renderer logged the
+  error and drew nothing, so the handler answered with a page that lacked the
+  component. The request now fails like any native error.
+- **The request deadline fires in callbacks, recursion, and components.** The
+  runtime polls the deadline at each call. A deep recursion, a nested `map`, or
+  a slow component now ends at `request_timeout_ms`. A timeout inside a `map`
+  callback stays a `RequestTimeout`.
+- **Callback errors reach the handler.** An error raised inside `map`, `filter`,
+  `reduce`, `sort`, `Array.from`, `Result.map`, or a dict helper used to become
+  `undefined` or the input element. It now ends the request like any native
+  error. Allocation failures in `concat` and default sort also propagate.
+- **HEAD replies carry no body.** Status and error replies, such as 404, 408, 413,
+  500, 501, and 503, now omit the body for a HEAD request.
+- **Schema nesting is bounded at 512.** `schemaCompile` returns `InvalidSchema`
+  for a schema nested deeper, which matches the JSON depth limit.
+- **`renderToString` refuses nesting deeper than 512.** A handler that nested
+  an array 200000 deep crashed the process. The request now fails with a 500
+  reply.
+- **Large radix literals keep their value.** A `0b` or `0o` literal above the
+  32-bit integer range used to read as 0. `{ get x: 1 }` and `{ set x: 1 }`
+  are now refused at parse time.
+- **A header read inside a spread operand reaches the route contract.** The
+  header parameter was missing from the contract before.
+- **A static key declared inside a callback no longer reports ZTS605.** A dynamic
+  key stays refused.
+- **A nested function declaration no longer makes its handler `total`.** A
+  helper that returns only when called does not return from the handler.
+- **`no_unreachable` and `state_isolated` are claimed only after the verifier
+  ran.** A file with no handler, or a check with verifier errors, used to print
+  them as proven. A contract claims `canonical` only after strict checking ran.
+- **A local does not pass as an import.** A local whose slot matched an import
+  index had its literals counted as env names and its `fetchSync` call hidden
+  from `has_egress`. The analyzer now matches imports by binding.
+- **An intersection over an alias no longer reports a false ZTS200.**
+- **A chain of 361 or more literal terms no longer exhausts the type pool.**
+  `1+1+...+1` grows the pool linearly. A pool that still fills reports ZTS000.
+- **`zts check` reports an unmapped analyzer failure as ZTS000.** It used to
+  leave `main` with a Zig error trace and no diagnostic. The same report now
+  covers `simulate`, `canonicalize`, and repair commands, which refuse the
+  source and exit 1.
+- **A write to a closed or full stdout fails the command.** About 58 writes
+  ignored the result, so a command could exit 0 with partial output.
+- **A jump past 32 KB of bytecode fails the compile.** The compiler reports
+  `JumpTooFar` instead of writing a bad offset. A string that cannot fit the
+  length limit is refused before allocation.
+- **Replay refuses an incomplete recording.** A truncated array or object, or
+  trailing recorded input, now fails the replay.
+- **JSON whitespace in traces and fixture assertions is preserved.** A tab
+  between a key and a colon is read correctly.
+- **`zttp serve` reads `--_debug-panic-path` as a value flag.** The path after
+  it no longer becomes the handler path.
+- **The expert aggregate proof refuses a candidate that deletes a handler.**
+  This also holds when the check stops before the contract. The proof scratch
+  directory is created exclusively, with mode 0700.
+- **Goal checks in `zttp expert` use the production check.** A goal with an
+  unresolved import or a user input that reaches `fetchSync` now fails.
+- **`zttp verify` prints claims of any length.** Output over 4096 bytes used to
+  print nothing while the command exited 0.
 
 ## [0.24.0] - 2026-10-23
 
