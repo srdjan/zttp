@@ -75,11 +75,6 @@ each handler pool.
   cut a record field or nominal name at 255 bytes, so two distinct types could
   look equal. String values longer than 255 bytes still check as `string`.
   Migration: shorten each record field and type name to 255 bytes or less.
-- **A deep expression or call chain in a flow check is now unproven.** The flow
-  analyzer stops at 64 call activations and 256 nested evaluation levels instead
-  of overflowing the stack. A 257-term left-associative `+` chain is unproven
-  where it was proven, so `zttp check` and `zttp deploy` refuse it. Migration:
-  split the chain into named intermediate values.
 - **A module binding type signature must parse completely.** Trailing text after
   a signature in a `ModuleBinding` now makes the signature invalid. This affects
   embedders only. Migration: remove the trailing text from each signature.
@@ -135,6 +130,10 @@ each handler pool.
 
 ### Fixed
 
+- **A deep call chain no longer crashes `zts check`.** A chain of about 250
+  functions used to overflow the stack. The flow analyzer now stops at 64 nested
+  call activations and reports the property as unproven. A long expression that
+  the parser admits is still evaluated in full.
 - **A failing function component fails the render.** The renderer logged the
   error and drew nothing, so the handler answered with a page that lacked the
   component. The request now fails like any native error.
