@@ -104,6 +104,7 @@ fn jwtVerifyImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JS
     if (args.len < 2) return sdk.resultErr(handle, "missing arguments");
     const token_str = sdk.extractString(args[0]) orelse return sdk.resultErr(handle, "token must be a string");
     const secret = sdk.extractString(args[1]) orelse return sdk.resultErr(handle, "secret must be a string");
+    if (secret.len == 0) return sdk.resultErr(handle, "empty secret");
     if (args.len >= 3) {
         const alg = sdk.extractString(args[2]) orelse return sdk.resultErr(handle, "unsupported alg");
         validateCallerAlgorithm(alg) catch return sdk.resultErr(handle, "unsupported alg");
@@ -405,6 +406,7 @@ fn isExpired(now: i64, exp: i64) bool {
 
 fn jwtSignImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
     const claims_json, const secret = sdk.decodeArgs(&.{ .string, .string }, args) orelse return sdk.JSValue.undefined_val;
+    if (secret.len == 0) return sdk.JSValue.undefined_val;
 
     const allocator = sdk.getAllocator(handle);
 
@@ -438,6 +440,7 @@ fn jwtSignImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSVa
 
 fn verifyWebhookSignatureImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sdk.JSValue) anyerror!sdk.JSValue {
     const payload, const secret, const sig_str = sdk.decodeArgs(&.{ .string, .string, .string }, args) orelse return sdk.JSValue.false_val;
+    if (secret.len == 0) return sdk.JSValue.false_val;
 
     var expected_mac: sdk.HmacSha256Mac = undefined;
     try sdk.hmacSha256(handle, payload, secret, &expected_mac);

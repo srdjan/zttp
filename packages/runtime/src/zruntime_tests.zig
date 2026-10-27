@@ -1989,6 +1989,60 @@ test "a denied cache namespace never creates the store" {
     }
 }
 
+test "jwtSign, jwtVerify, and verifyWebhookSignature refuse an empty secret" {
+    const allocator = std.testing.allocator;
+    const rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+
+    // The signature in `forged` and in `webhookEmptyKey` is the HMAC-SHA256
+    // under an empty key, computed offline with openssl. An empty key makes
+    // every signature forgeable, so each export must refuse it.
+    const handler_code =
+        \\import { jwtSign, jwtVerify, verifyWebhookSignature } from "zttp:auth";
+        \\function handler(req) {
+        \\  const signed = jwtSign("{\"sub\":\"u\"}", "");
+        \\  const forged = jwtVerify("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1In0.0BKgpXNgRqIrxGLFAtUHTOgMMdipTvNKsHd5bkn-JOc", "");
+        \\  const hook = verifyWebhookSignature("hello", "", "4352b26e33fe0d769a8922a6ba29004109f01688e26acc9e6cb347e5a5afc4da");
+        \\  return Response.json({ signed: typeof signed, verifyOk: forged.ok, hook: hook });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<empty-secret>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("{\"signed\":\"undefined\",\"verifyOk\":false,\"hook\":false}", response.body);
+}
+
+test "jwtSign, jwtVerify, and verifyWebhookSignature accept a non-empty secret" {
+    const allocator = std.testing.allocator;
+    const rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+
+    // Signatures under the key "k" were computed offline with openssl.
+    const handler_code =
+        \\import { jwtSign, jwtVerify, verifyWebhookSignature } from "zttp:auth";
+        \\function handler(req) {
+        \\  const signed = jwtSign("{\"sub\":\"u\"}", "k");
+        \\  const verified = jwtVerify("eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1In0.TI4AolyVR9MO-UaZ2NrpNzy6a0x8_ezFO_lLVawUY7Q", "k");
+        \\  const hook = verifyWebhookSignature("hello", "k", "406e4b43f87095aa86ca6299d25e875921fefa180f02043bb29bec5681c0c2d0");
+        \\  return Response.json({ signed: signed, verifyOk: verified.ok, hook: hook });
+        \\}
+    ;
+    try rt.loadHandler(handler_code, "<non-empty-secret>");
+
+    var request = try makeTestRequest(allocator, "GET", "/", null);
+    defer request.deinit(allocator);
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+
+    try std.testing.expectEqual(@as(u16, 200), response.status);
+    try std.testing.expectEqualStrings("{\"signed\":\"eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1In0.TI4AolyVR9MO-UaZ2NrpNzy6a0x8_ezFO_lLVawUY7Q\",\"verifyOk\":true,\"hook\":true}", response.body);
+}
+
 test "rateCheck answers bad arguments with an error Result, not undefined" {
     const allocator = std.testing.allocator;
     const rt = try HandlerInstance.init(allocator, .{});
