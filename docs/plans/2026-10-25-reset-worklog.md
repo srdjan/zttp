@@ -316,3 +316,13 @@ The owner answered "as recommended", which selects option (a) for Decisions 8, 9
 
 Gates for each commit, `DEEPSEEK_API_KEY` unset, private cache: `test-zts`, `test-flow-census`, `test-standin`, `test-diagnostic-corpus`, `test-proof-swallow`, `test-contract-golden`, `test-precompile` (also from an empty cache), `test-expert-app`, `test-zts-layering`, `test-cli`, `test-zruntime`, `test-examples`, and `check-spine` exit 0. R10c-5 also ran `test-canonical-style` and `test-idiom-table`, exit 0.
 The fresh-cache aggregate: 7810/7816 passed at R10c-4 and 7811/7817 at R10c-5 (6 skipped each). The analyzer digests over 215 sources stayed byte-identical, and the protected evidence paths did not change. No corpus source has either shape, so no golden or recording moved.
+
+## Owner decisions 14 and 15, 2026-10-26
+
+The owner chose option (a) for Decisions 14 and 15. No code changed.
+
+A read-only audit covered the `else => {}` walks in `packages/zts/src/bool_checker.zig`. It found no fail-open.
+
+`inferBlockReturnType` can infer a type that is too narrow, because it skips returns nested in loops. Production `requireBoolean` decides through the authoritative type checker. So the narrow inference cannot change a ZTS100 verdict when a type environment exists. Two cases run without one: untyped sources, which ZTS052 refuses, and several tests.
+
+The local inference also supplies specialization hints through `annotateNodeType`. The audit did not assess that use.
