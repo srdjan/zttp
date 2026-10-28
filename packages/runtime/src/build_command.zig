@@ -3539,7 +3539,7 @@ test "proofs verify names the properties the kernel re-derived for a guarded Res
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "\nChecked:   response_total, results_checked\n") != null);
 }
 
-test "proofs verify reports a handler without a Result as re-deriving totality only" {
+test "proofs verify reports a handler without a Result as re-deriving results_checked too, with no Result read to check" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3554,5 +3554,5 @@ test "proofs verify reports a handler without a Result as re-deriving totality o
     var err = std.Io.Writer.Allocating.init(allocator);
     defer err.deinit();
     try proofs_bundle.verify(allocator, "bundle", false, &out.writer, &err.writer);
-    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "\nChecked:   response_total\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "\nChecked:   response_total, results_checked\n") != null);
 }

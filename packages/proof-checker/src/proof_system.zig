@@ -95,11 +95,13 @@ pub const Property = enum(u16) {
             // Totality is folded over the proof IR by the consumer and related
             // to the final bytecode by the translation witnesses.
             .response_total => true,
+            // The result-binding dataflow is re-derived over the Result events
+            // in the proof IR, for every non-refused claim at any edge kind.
+            .results_checked => true,
             // Disclosed. Each needs an analysis the kernel does not model: the
-            // result-binding dataflow, the label propagation, and the effect
-            // inference respectively. Promoting one means adding its rule to
-            // the kernel and its members to the proof IR, not relabelling it.
-            .results_checked,
+            // label propagation, the state analysis, and the effect inference.
+            // Promoting one means adding its rule to the kernel and its
+            // members to the proof IR, not relabelling it.
             .no_secret_leakage,
             .state_isolated,
             .deterministic,
@@ -307,9 +309,9 @@ test "the ratchet floor is met and the two halves partition the alphabet" {
     // change that only meant to simplify.
     try std.testing.expect(checked >= 1);
     try std.testing.expect(Property.response_total.consumerChecked());
-    try std.testing.expectEqual(@as(usize, 1), checked);
+    try std.testing.expect(Property.results_checked.consumerChecked());
+    try std.testing.expectEqual(@as(usize, 2), checked);
     inline for (.{
-        Property.results_checked,
         Property.no_secret_leakage,
         Property.state_isolated,
         Property.deterministic,

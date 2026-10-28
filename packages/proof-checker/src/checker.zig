@@ -751,18 +751,17 @@ const Session = struct {
         };
     }
 
-    /// Whether a `proved` edge cites a results rule on the results obligation.
-    /// The pass runs only for such a claim, so a certificate that makes none
-    /// pays nothing for it.
+    /// Whether any edge other than `not_established` answers the results
+    /// obligation, whatever its kind: a `proved` edge and a `tested` edge are
+    /// both claims the kernel re-derives. A certificate that makes no results
+    /// claim pays nothing for the pass.
     fn claimsResultsProof(self: *Session) SessionError!bool {
         @setRuntimeSafety(true);
         var index: u32 = 0;
         while (index < self.certificate.evidence.len()) : (index += 1) {
             try self.budget.spend(1);
             const entry = try self.certificate.evidence.get(index);
-            if (entry.edge != .proved) continue;
-            const rule = entry.rule orelse continue;
-            if (rule.family() != .results) continue;
+            if (entry.edge == .not_established) continue;
             if (self.certificate.obligations.len() <= entry.obligation_index) continue;
             const obligation = try self.certificate.obligations.get(entry.obligation_index);
             if (obligation.property == .results_checked) return true;
@@ -1185,7 +1184,20 @@ const Session = struct {
                     return .{ .rejected = reject(.evidence_check, .trusted_edge_undeclared, .{ .ir_node = entry.node_id }) };
                 }
             },
-            .tested => {},
+            .tested => if (property == .results_checked) switch (self.results) {
+                .passed => {},
+                // A `tested` results claim stands only when the kernel's own
+                // pass re-derived it. An unrun pass refuses too.
+                .not_run, .failed => return .{ .rejected = .{
+                    .state = .integrity_verified,
+                    .rejection = .{
+                        .stage = .evidence_check,
+                        .code = .fabricated_property,
+                        .subject = .{ .property = .results_checked },
+                        .recertifiable = false,
+                    },
+                } },
+            },
         }
         return .{ .established = entry.edge.grade().? };
     }
@@ -1220,7 +1232,14 @@ const Session = struct {
                 .established => |grade| {
                     switch (classify(entry, obligation.property) orelse .not_established) {
                         .proved, .translation_validated => rederived[slot] = true,
-                        .solver, .trusted, .tested, .not_established => graded_only[slot] = true,
+                        // A results claim at `tested` reached here only after the
+                        // kernel's own pass accepted it (checkEvidenceEntry).
+                        .tested => if (obligation.property == .results_checked) {
+                            rederived[slot] = true;
+                        } else {
+                            graded_only[slot] = true;
+                        },
+                        .solver, .trusted, .not_established => graded_only[slot] = true,
                     }
                     grades[slot] = if (grades[slot]) |existing|
                         verdict.AssuranceGrade.weakest(existing, grade)
@@ -4126,6 +4145,23 @@ const results_only = Policy{
     .required = &results_only_requirements,
 };
 
+const totality_only_requirements = [_]policy_mod.Requirement{
+    .{ .property = .response_total, .min_grade = .trusted },
+};
+const totality_only = Policy{
+    .proof_systems = policy_mod.production.proof_systems,
+    .semantics_epochs = policy_mod.production.semantics_epochs,
+    .required = &totality_only_requirements,
+};
+
+test "results: an unclaimed results obligation is accepted when the policy does not require it and is not marked" {
+    const edge = cert_mod.Evidence{ .obligation_index = 1, .edge = .not_established, .rule = null, .node_id = 0, .aux = 0 };
+    const result = try checkResultsCertificate(&honest_rows, edge, null, .{ .policy = totality_only });
+    try testing.expect(result.rejection() == null);
+    try testing.expect(!result.properties.consumerChecked(.results_checked));
+    try testing.expect(result.properties.consumerChecked(.response_total));
+}
+
 test "results: a proved results edge without its opcode edge rejects under a results-only policy" {
     const result = try checkResultsCertificate(&honest_rows, proved_results_edge, null, .{
         .opcode_edge = false,
@@ -4145,12 +4181,45 @@ test "results: a proved results edge with its opcode edge is accepted at trusted
     try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.properties.gradeFor(.results_checked));
 }
 
-test "results: a tested claim is not re-derived in phase 1 and reads trusted" {
+test "results: a tested claim the kernel re-derives is accepted at trusted" {
+    const result = try checkResultsRows(&honest_rows, test_support.testedFor(1));
+    try expectResultsAccepted(result);
+}
+
+test "results: a tested claim over an unguarded read is refused as a fabricated property" {
+    const result = try runResultsProbeWith(.unguarded, test_support.testedFor(1));
+    try expectAt(result, .evidence_check, .fabricated_property);
+    try testing.expectEqual(verdict.Subject{ .property = .results_checked }, result.rejection().?.subject);
+    try testing.expect(!result.rejection().?.recertifiable);
+}
+
+test "results: a tested claim over an escaping use is refused as a fabricated property" {
+    const result = try runResultsProbeWith(.escape, test_support.testedFor(1));
+    try expectAt(result, .evidence_check, .fabricated_property);
+}
+
+test "results: a tested claim over a second definition is refused as a fabricated property" {
+    const result = try runResultsProbeWith(.redefined, test_support.testedFor(1));
+    try expectAt(result, .evidence_check, .fabricated_property);
+}
+
+test "results: a tested claim over a malformed guard is refused as a fabricated property" {
+    const result = try runResultsProbeWith(.guard_malformed, test_support.testedFor(1));
+    try expectAt(result, .evidence_check, .fabricated_property);
+}
+
+test "results: a tested claim over a binding past the limit is refused as a fabricated property" {
+    const result = try runResultsProbeWith(.binding_limit, test_support.testedFor(1));
+    try expectAt(result, .evidence_check, .fabricated_property);
+}
+
+test "results: a not_established results claim is not re-derived and an escape does not refuse it" {
     var rows = honest_rows;
-    rows[7] = .{ .tag = .plain, .parent = 3 };
-    const result = try checkResultsRows(&rows, test_support.testedFor(1));
-    try testing.expect(result.rejection() == null);
-    try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.properties.gradeFor(.results_checked));
+    rows[11].tag = .result_escape;
+    const edge = cert_mod.Evidence{ .obligation_index = 1, .edge = .not_established, .rule = null, .node_id = 0, .aux = 0 };
+    const result = try checkResultsRows(&rows, edge);
+    try expectAt(result, .policy, .required_property_not_established);
+    try testing.expect(!result.properties.consumerChecked(.results_checked));
 }
 
 test "results: a tested results claim without its opcode edge rejects under a results-only policy" {
@@ -4173,6 +4242,11 @@ const ResultsProbe = enum { unguarded, escape, redefined, guard_malformed, bindi
 
 fn runResultsProbe(probe: ResultsProbe) !Assessment {
     @setRuntimeSafety(true);
+    return runResultsProbeWith(probe, proved_results_edge);
+}
+
+fn runResultsProbeWith(probe: ResultsProbe, edge: cert_mod.Evidence) !Assessment {
+    @setRuntimeSafety(true);
     var rows = honest_rows;
     switch (probe) {
         .unguarded => rows[7] = .{ .tag = .plain, .parent = 3 },
@@ -4184,7 +4258,18 @@ fn runResultsProbe(probe: ResultsProbe) !Assessment {
         .guard_malformed => rows[8].tag = .plain,
         .binding_limit => rows[6].aux = 64,
     }
-    return checkResultsRows(&rows, proved_results_edge);
+    return checkResultsRows(&rows, edge);
+}
+
+test "results: a declared trusted or a solver claim on the results obligation is an invalid edge" {
+    // Phase 2 checks only `proved` and `tested` results claims. Every results
+    // claim reads `trusted` (Decision 15), so a declared trusted edge that
+    // skipped the pass would read the same as an honest claim; `classify`
+    // admits no such edge on `results_checked`.
+    const trusted_edge = cert_mod.Evidence{ .obligation_index = 1, .edge = .trusted, .rule = null, .node_id = 0, .aux = 0 };
+    try expectAt(try checkResultsRowsDeclaring(&honest_rows, trusted_edge, 0), .evidence_check, .evidence_edge_invalid);
+    const solver_edge = cert_mod.Evidence{ .obligation_index = 1, .edge = .solver, .rule = null, .node_id = 0, .aux = 0 };
+    try expectAt(try checkResultsRows(&honest_rows, solver_edge), .evidence_check, .evidence_edge_invalid);
 }
 
 test "consumer marker: a proved results certificate marks results_checked and response_total" {
@@ -4194,12 +4279,10 @@ test "consumer marker: a proved results certificate marks results_checked and re
     try testing.expect(result.properties.consumerChecked(.response_total));
 }
 
-test "consumer marker: a tested results certificate marks only response_total" {
-    var rows = honest_rows;
-    rows[7] = .{ .tag = .plain, .parent = 3 };
-    const result = try checkResultsRows(&rows, test_support.testedFor(1));
+test "consumer marker: a tested results certificate the kernel re-derives marks results_checked and response_total" {
+    const result = try checkResultsRows(&honest_rows, test_support.testedFor(1));
     try testing.expect(result.rejection() == null);
-    try testing.expect(!result.properties.consumerChecked(.results_checked));
+    try testing.expect(result.properties.consumerChecked(.results_checked));
     try testing.expect(result.properties.consumerChecked(.response_total));
 }
 

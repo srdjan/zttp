@@ -589,8 +589,8 @@ directions, so it cannot drift from what shipped.
 
 <!-- proof-ratchet: consumer-checked -->
 - `response_total`
-<!-- proof-ratchet: disclosed -->
 - `results_checked`
+<!-- proof-ratchet: disclosed -->
 - `no_secret_leakage`
 - `state_isolated`
 - `deterministic`

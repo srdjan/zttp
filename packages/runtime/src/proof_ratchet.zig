@@ -267,7 +267,7 @@ test "the disclosed boundary is exactly what the kernel does not re-derive" {
     }
 
     // And the count is the floor the gate publishes.
-    try testing.expectEqual(@as(usize, 1), ps.Property.consumerCheckedCount());
+    try testing.expectEqual(@as(usize, 2), ps.Property.consumerCheckedCount());
 }
 
 test "a certificate that only discloses totality is refused by the production floor" {
