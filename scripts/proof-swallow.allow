@@ -221,6 +221,11 @@ packages/zts/src/type_env.zig internName catch-block@2
 packages/zts/src/path_generator.zig walkPaths catch-block
 packages/zts/src/path_generator.zig walkPaths catch-block@2
 
+# trackLoopUnder does the same for a loop inside a function body under
+# expansion: both catches free the loop bound and then `return err`.
+packages/zts/src/path_generator.zig trackLoopUnder catch-block
+packages/zts/src/path_generator.zig trackLoopUnder catch-block@2
+
 # Loop descriptions are display text on a bound whose kind is already chosen.
 # An allocation failure shortens the text to a fixed string or to empty, and
 # freeLoopBound skips an empty description. The symbolic or unknown kind is

@@ -9279,6 +9279,451 @@ test "prove-behavior: bound match controls keep their verdicts" {
     try std.testing.expectEqual(@as(u32, 3), counts.preserved);
 }
 
+// 3a and Decision 29: a module call that a same-file function makes, or that
+// sits in an `if` branch that does not return, is on the path.
+
+const imp_cache = "import { cacheGet, cacheSet } from \"zttp:cache\";\n";
+
+const named_closure_a = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  const load = (): string | undefined => cacheGet("ns", "one");
+    \\  const x = load();
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const named_closure_b = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  const load = (): string | undefined => cacheGet("ns", "two");
+    \\  const x = load();
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const top_one = imp_cache ++
+    \\function load(): string | undefined { return cacheGet("ns", "one"); }
+    \\function handler(req: Request): Response {
+    \\  const x = load();
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const top_two = imp_cache ++
+    \\function load(): string | undefined { return cacheGet("ns", "two"); }
+    \\function handler(req: Request): Response {
+    \\  const x = load();
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const nested_one = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  function load(): string | undefined { return cacheGet("ns", "one"); }
+    \\  const x = load();
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const nested_two = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  function load(): string | undefined { return cacheGet("ns", "two"); }
+    \\  const x = load();
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const byname_one = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  const load = (k: string): string | undefined => cacheGet("ns", "one");
+    \\  const xs = ["a"].map(load);
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const byname_two = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  const load = (k: string): string | undefined => cacheGet("ns", "two");
+    \\  const xs = ["a"].map(load);
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const uncalled_one = imp_cache ++
+    \\function load(): string | undefined { return cacheGet("ns", "one"); }
+    \\function handler(req: Request): Response {
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const uncalled_two = imp_cache ++
+    \\function load(): string | undefined { return cacheGet("ns", "two"); }
+    \\function handler(req: Request): Response {
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const direct_one = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  const x = cacheGet("ns", "one");
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const direct_two = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  const x = cacheGet("ns", "two");
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const letfn_one = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  let g = (): string | undefined => cacheGet("ns", "one");
+    \\  g = (): string | undefined => cacheGet("ns", "z");
+    \\  const x = g();
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const letfn_two = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  let g = (): string | undefined => cacheGet("ns", "two");
+    \\  g = (): string | undefined => cacheGet("ns", "z");
+    \\  const x = g();
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const alias_one = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  const g = (): string | undefined => cacheGet("ns", "one");
+    \\  const h = g;
+    \\  const x = h();
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const alias_two = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  const g = (): string | undefined => cacheGet("ns", "two");
+    \\  const h = g;
+    \\  const x = h();
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const upvalue_one = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  const load = (): string | undefined => cacheGet("ns", "one");
+    \\  const xs = ["a"].map((k: string): string | undefined => load());
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const upvalue_two = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  const load = (): string | undefined => cacheGet("ns", "two");
+    \\  const xs = ["a"].map((k: string): string | undefined => load());
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const chain_one = imp_cache ++
+    \\function inner(): string | undefined { return cacheGet("ns", "one"); }
+    \\function outer(): string | undefined { return inner(); }
+    \\function handler(req: Request): Response {
+    \\  const x = outer();
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const chain_two = imp_cache ++
+    \\function inner(): string | undefined { return cacheGet("ns", "two"); }
+    \\function outer(): string | undefined { return inner(); }
+    \\function handler(req: Request): Response {
+    \\  const x = outer();
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const recursive_one = imp_cache ++
+    \\function spin(n: number): number {
+    \\  cacheSet("ns", "one", "v");
+    \\  return spin(n);
+    \\}
+    \\function handler(req: Request): Response {
+    \\  const x = spin(1);
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const recursive_two = imp_cache ++
+    \\function spin(n: number): number {
+    \\  cacheSet("ns", "two", "v");
+    \\  return spin(n);
+    \\}
+    \\function handler(req: Request): Response {
+    \\  const x = spin(1);
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const ifcall_one = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  if (req.method === "POST") {
+    \\    cacheSet("ns", "one", "v");
+    \\  }
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const ifcall_two = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  if (req.method === "POST") {
+    \\    cacheSet("ns", "two", "v");
+    \\  }
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const ifelse_one = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  if (req.method === "GET") {
+    \\    cacheSet("ns", "x", "v");
+    \\  } else {
+    \\    cacheSet("ns", "one", "v");
+    \\  }
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const ifelse_two = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  if (req.method === "GET") {
+    \\    cacheSet("ns", "x", "v");
+    \\  } else {
+    \\    cacheSet("ns", "two", "v");
+    \\  }
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const ifnested_one = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  if (req.method === "POST") {
+    \\    if (req.url === "/x") {
+    \\      cacheSet("ns", "one", "v");
+    \\    }
+    \\  }
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const ifnested_two = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  if (req.method === "POST") {
+    \\    if (req.url === "/x") {
+    \\      cacheSet("ns", "two", "v");
+    \\    }
+    \\  }
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const ifhelper_one = imp_cache ++
+    \\function save(): string | undefined { return cacheGet("ns", "one"); }
+    \\function handler(req: Request): Response {
+    \\  if (req.method === "POST") {
+    \\    save();
+    \\  }
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const ifhelper_two = imp_cache ++
+    \\function save(): string | undefined { return cacheGet("ns", "two"); }
+    \\function handler(req: Request): Response {
+    \\  if (req.method === "POST") {
+    \\    save();
+    \\  }
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const ifreturn_one = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  if (req.method === "POST") {
+    \\    cacheSet("ns", "one", "v");
+    \\    return Response.json({ ok: true });
+    \\  }
+    \\  return Response.json({ ok: false });
+    \\}
+;
+const ifreturn_two = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  if (req.method === "POST") {
+    \\    cacheSet("ns", "two", "v");
+    \\    return Response.json({ ok: true });
+    \\  }
+    \\  return Response.json({ ok: false });
+    \\}
+;
+
+fn expectVerdict(
+    expected: zts.contract_diff.Classification,
+    before_src: []const u8,
+    after_src: []const u8,
+) !void {
+    try std.testing.expectEqual(expected, try proveBehaviorVerdict(std.testing.allocator, before_src, after_src));
+}
+
+test "prove-behavior: a module call in a named closure is on the path" {
+    try expectVerdict(.breaking, named_closure_a, named_closure_b);
+}
+
+test "prove-behavior: a module call in a module-level helper is on the path" {
+    try expectVerdict(.breaking, top_one, top_two);
+}
+
+test "prove-behavior: a module call in a nested function declaration is on the path" {
+    try expectVerdict(.breaking, nested_one, nested_two);
+}
+
+test "prove-behavior: a closure passed by name records its call" {
+    try expectVerdict(.breaking, byname_one, byname_two);
+}
+
+test "prove-behavior: a closure called from inside an inline callback is on the path" {
+    try expectVerdict(.breaking, upvalue_one, upvalue_two);
+}
+
+test "prove-behavior: a helper that calls a helper is on the path" {
+    try expectVerdict(.breaking, chain_one, chain_two);
+}
+
+test "prove-behavior: a recursive helper is expanded once and ends" {
+    try expectVerdict(.breaking, recursive_one, recursive_two);
+}
+
+test "prove-behavior: helper expansion controls keep their verdicts" {
+    try expectVerdict(.equivalent, uncalled_one, uncalled_two);
+    try expectVerdict(.breaking, direct_one, direct_two);
+    try expectVerdict(.equivalent, top_one, top_one);
+}
+
+test "prove-behavior: a closure bound with let or reached through an alias is not expanded" {
+    try expectVerdict(.equivalent, letfn_one, letfn_two);
+    try expectVerdict(.equivalent, alias_one, alias_two);
+}
+
+test "prove-behavior: a module call in an if branch that does not return is on the path" {
+    try expectVerdict(.breaking, ifcall_one, ifcall_two);
+}
+
+test "prove-behavior: a module call in an else branch that does not return is on the path" {
+    try expectVerdict(.breaking, ifelse_one, ifelse_two);
+}
+
+test "prove-behavior: a module call in a nested if branch that does not return is on the path" {
+    try expectVerdict(.breaking, ifnested_one, ifnested_two);
+}
+
+test "prove-behavior: a helper called in an if branch that does not return keeps its calls" {
+    try expectVerdict(.breaking, ifhelper_one, ifhelper_two);
+}
+
+const loop_if_one = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  const items = ["x", "y"];
+    \\  for (const item of items) {
+    \\    if (req.method === "POST") {
+    \\      cacheSet("ns", "one", item);
+    \\    }
+    \\  }
+    \\  return Response.json({ ok: true });
+    \\}
+;
+const loop_if_two = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  const items = ["x", "y"];
+    \\  for (const item of items) {
+    \\    if (req.method === "POST") {
+    \\      cacheSet("ns", "two", item);
+    \\    }
+    \\  }
+    \\  return Response.json({ ok: true });
+    \\}
+;
+
+test "prove-behavior: a module call in an if branch inside a loop body is on the path" {
+    try expectVerdict(.breaking, loop_if_one, loop_if_two);
+    try expectVerdict(.equivalent, loop_if_one, loop_if_one);
+}
+
+const elsefall_one = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  let label = "none";
+    \\  if (req.method === "GET") {
+    \\    return Response.json({ ok: true });
+    \\  } else {
+    \\    label = "write";
+    \\  }
+    \\  cacheSet("ns", "one", label);
+    \\  return Response.json({ label: label });
+    \\}
+;
+const elsefall_two = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  let label = "none";
+    \\  if (req.method === "GET") {
+    \\    return Response.json({ ok: true });
+    \\  } else {
+    \\    label = "write";
+    \\  }
+    \\  cacheSet("ns", "two", label);
+    \\  return Response.json({ label: label });
+    \\}
+;
+const elsefall_call_one = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  if (req.method === "GET") {
+    \\    return Response.json({ ok: true });
+    \\  } else {
+    \\    cacheSet("ns", "one", "v");
+    \\  }
+    \\  return Response.json({ ok: false });
+    \\}
+;
+const elsefall_call_two = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  if (req.method === "GET") {
+    \\    return Response.json({ ok: true });
+    \\  } else {
+    \\    cacheSet("ns", "two", "v");
+    \\  }
+    \\  return Response.json({ ok: false });
+    \\}
+;
+const elsefall_chain_one = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  let label = "none";
+    \\  if (req.method === "GET") {
+    \\    return Response.json({ ok: true });
+    \\  } else if (req.method === "PUT") {
+    \\    label = "put";
+    \\  } else {
+    \\    label = "other";
+    \\  }
+    \\  cacheSet("ns", "one", label);
+    \\  return Response.json({ label: label });
+    \\}
+;
+const elsefall_chain_two = imp_cache ++
+    \\function handler(req: Request): Response {
+    \\  let label = "none";
+    \\  if (req.method === "GET") {
+    \\    return Response.json({ ok: true });
+    \\  } else if (req.method === "PUT") {
+    \\    label = "put";
+    \\  } else {
+    \\    label = "other";
+    \\  }
+    \\  cacheSet("ns", "two", label);
+    \\  return Response.json({ label: label });
+    \\}
+;
+
+test "prove-behavior: a call after an if whose else branch falls through is on the path" {
+    try expectVerdict(.breaking, elsefall_one, elsefall_two);
+    try expectVerdict(.breaking, elsefall_call_one, elsefall_call_two);
+    try expectVerdict(.breaking, elsefall_chain_one, elsefall_chain_two);
+    try expectVerdict(.equivalent, elsefall_one, elsefall_one);
+    try expectVerdict(.equivalent, elsefall_chain_one, elsefall_chain_one);
+}
+
+test "contract: an if whose else branch falls through keeps the path after it" {
+    const K = zts.handler_contract.ResponseStatus;
+    try expectStatuses(elsefall_one, &[_]K{ .{ .known = 200 }, .{ .known = 200 } });
+    // The inner `if` holds no module call, so it adds no path of its own.
+    try expectStatuses(elsefall_chain_one, &[_]K{ .{ .known = 200 }, .{ .known = 200 } });
+}
+
+test "prove-behavior: if branch controls keep their verdicts" {
+    try expectVerdict(.breaking, ifreturn_one, ifreturn_two);
+    try expectVerdict(.equivalent, ifcall_one, ifcall_one);
+    try expectVerdict(.equivalent, ifelse_one, ifelse_one);
+}
+
 // D-014: every literal `env()` name is secret unless the policy lists it in
 // `env.public`. These tests run the production check path, with the policy as
 // the project would hand it over, and read the verdict the way a user does:

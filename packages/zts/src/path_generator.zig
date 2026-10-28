@@ -282,6 +282,20 @@ fn dupePathIoCall(
 /// `Response` helper call with a literal status has the same paths under 5 and
 /// 6, and only the policy hash differs. This has not been measured over every
 /// handler.
+///
+/// Version 6 also changes which module calls a path records. A call by name to
+/// a function of the same file (a module-level function, a nested function
+/// declaration, a `const` closure, or a function passed by name as an
+/// argument) records the module calls of that function's body at the call
+/// site; version 5 recorded none. A module call in an `if` branch that does
+/// not return stays on the path that took the branch, with the condition as a
+/// constraint; version 5 dropped it from every path. An `if` whose
+/// then-branch returns and whose else-branch falls through keeps the paths
+/// after the `if`; version 5 dropped them. A version 5 artifact
+/// probably under-records the I/O sequence of a handler with either shape, so
+/// its cost envelope is probably too low and a behavior diff against it can read
+/// `equivalent` where a call changed. An imported function, an alias, and a
+/// function bound with `let` stay unexpanded.
 pub const path_analyzer_version: u32 = 6;
 
 /// Methods tried in order for a path whose constraints name no method.
@@ -327,6 +341,15 @@ pub const PathGenerator = struct {
     /// whose every reference is a `return` of the name (`onlyReturned`).
     /// `extractExprStatus` reads it for an identifier.
     bound_arms: std.AutoHashMapUnmanaged(u32, NodeIndex),
+
+    /// The same-file functions that a call can name, by binding name atom.
+    /// Built once, on the first call that no module export answers
+    /// (`namedFunctionBody`). `built_named_fns` guards the build.
+    named_fns: std.AutoHashMapUnmanaged(u16, NamedFunction),
+    built_named_fns: bool,
+    /// Function bodies under expansion at a call site, innermost last. A body
+    /// already on the stack is not expanded again (`expandNamedFunction`).
+    expanding: std.ArrayList(NodeIndex),
 
     /// Accumulated constraints for current path.
     constraints: std.ArrayList(Constraint),
@@ -562,6 +585,9 @@ pub const PathGenerator = struct {
             .module_fn_bindings = .empty,
             .var_inits = .empty,
             .bound_arms = .empty,
+            .named_fns = .empty,
+            .built_named_fns = false,
+            .expanding = .empty,
             .req_binding_key = null,
             .method_binding_key = null,
             .url_binding_key = null,
@@ -593,6 +619,8 @@ pub const PathGenerator = struct {
         self.module_fn_bindings.deinit(self.allocator);
         self.var_inits.deinit(self.allocator);
         self.bound_arms.deinit(self.allocator);
+        self.named_fns.deinit(self.allocator);
+        self.expanding.deinit(self.allocator);
         self.constraints.deinit(self.allocator);
         self.io_seq.deinit(self.allocator);
         for (self.loop_stack.items) |*frame| {
@@ -1589,7 +1617,7 @@ pub const PathGenerator = struct {
     }
 
     fn walkBlock(self: *PathGenerator, block: Node.BlockData) error{OutOfMemory}!void {
-        try self.walkBlockFrom(block, 0);
+        try self.walkBlockFrom(block, 0, null);
     }
 
     /// The failure side of `assert c, e`, modeled as `if (!c) { return e; }`.
@@ -1670,6 +1698,7 @@ pub const PathGenerator = struct {
         stmt_idx: NodeIndex,
         block: Node.BlockData,
         i: u16,
+        after: ?*const Cont,
     ) error{OutOfMemory}!bool {
         const vd = self.ir_view.getVarDecl(stmt_idx) orelse return false;
         if (vd.init == null_node) return false;
@@ -1686,6 +1715,7 @@ pub const PathGenerator = struct {
             .next = i + 1,
             .key = key,
             .resolvable = resolvable,
+            .after = after,
         } });
         return true;
     }
@@ -1703,6 +1733,7 @@ pub const PathGenerator = struct {
             next: u16,
             key: u32,
             resolvable: bool,
+            after: ?*const Cont,
         },
     };
 
@@ -1754,7 +1785,7 @@ pub const PathGenerator = struct {
                 // A declaration is reached once on a path, so the key is free.
                 if (bound.resolvable) try self.bound_arms.put(self.allocator, bound.key, arm.body);
                 defer _ = self.bound_arms.remove(bound.key);
-                try self.walkBlockFrom(bound.block, bound.next);
+                try self.walkBlockFrom(bound.block, bound.next, bound.after);
             },
         }
     }
@@ -1906,14 +1937,40 @@ pub const PathGenerator = struct {
         return packBindingKey(binding.scope_id, binding.slot) == key;
     }
 
-    fn walkBlockFrom(self: *PathGenerator, block: Node.BlockData, first: u16) error{OutOfMemory}!void {
+    /// What a path runs after the branch of an `if` that does not return: the
+    /// statements of `block` from `next`, and then `after`.
+    const Cont = struct {
+        block: Node.BlockData,
+        next: u16,
+        after: ?*const Cont,
+    };
+
+    fn resumeAfter(self: *PathGenerator, after: ?*const Cont) error{OutOfMemory}!void {
+        const cont = after orelse return;
+        // At MAX_PATHS no further path is emitted, and `coverage` already
+        // reports `truncated`, which every consumer reads as not exhaustive.
+        // Walking more continuations would cost time exponential in the
+        // number of forking `if`s and change no verdict.
+        if (self.path_count >= MAX_PATHS) return;
+        try self.walkBlockFrom(cont.block, cont.next, cont.after);
+    }
+
+    /// Walk `block` from statement `first`, then `after`. A caller that walks a
+    /// block as a barrier (a loop body, a `case`) passes null: the paths of
+    /// the block end with it.
+    fn walkBlockFrom(
+        self: *PathGenerator,
+        block: Node.BlockData,
+        first: u16,
+        after: ?*const Cont,
+    ) error{OutOfMemory}!void {
         var i: u16 = first;
         while (i < block.stmts_count) : (i += 1) {
             const stmt_idx = self.ir_view.getListIndex(block.stmts_start, i);
             const stmt_tag = self.ir_view.getTag(stmt_idx) orelse continue;
 
             if (stmt_tag == .var_decl) {
-                if (try self.forkBoundMatch(stmt_idx, block, i)) return;
+                if (try self.forkBoundMatch(stmt_idx, block, i, after)) return;
             }
 
             if (stmt_tag == .assert_stmt) {
@@ -1926,52 +1983,157 @@ pub const PathGenerator = struct {
             }
 
             if (stmt_tag == .if_stmt) {
-                const if_s = self.ir_view.getIfStmt(stmt_idx) orelse continue;
-                const then_always = self.stmtAlwaysReturns(if_s.then_branch);
-
-                if (then_always and if_s.else_branch != null_node) {
-                    // Both branches return: fork and stop
-                    try self.walkPaths(stmt_idx);
-                    return;
-                } else if (then_always and if_s.else_branch == null_node) {
-                    // Then-branch returns, no else: fork then-path, continue for fall-through
-                    // The condition runs before the fork: both paths and the
-                    // fall-through carry its module calls.
-                    try self.trackModuleCall(if_s.condition, null);
-                    const saved = self.constraints.items.len;
-                    const saved_io = self.io_seq.items.len;
-                    try self.extractAllConstraints(if_s.condition);
-                    try self.walkPaths(if_s.then_branch);
-                    self.constraints.shrinkRetainingCapacity(saved);
-                    self.io_seq.shrinkRetainingCapacity(saved_io);
-
-                    // Fall-through: one way the condition is false continues in
-                    // this loop, several walk the rest of the block each.
-                    var cases = try self.falseCases(if_s.condition);
-                    defer cases.deinit(self.allocator);
-                    if (cases.count() == 1) {
-                        try self.constraints.appendSlice(self.allocator, cases.slice(0));
-                        continue;
-                    }
-                    for (0..cases.count()) |k| {
-                        if (k > 0 and self.path_count >= MAX_PATHS) break;
-                        try self.constraints.appendSlice(self.allocator, cases.slice(k));
-                        try self.walkBlockFrom(block, i + 1);
-                        self.constraints.shrinkRetainingCapacity(saved);
-                        self.io_seq.shrinkRetainingCapacity(saved_io);
-                    }
-                    return;
-                } else {
-                    // Neither always returns: just recurse normally
-                    try self.walkPaths(stmt_idx);
-                    continue;
-                }
+                // The statements after the `if` are its continuation, so a
+                // branch that does not return can run them on its own path.
+                const rest: Cont = .{ .block = block, .next = i + 1, .after = after };
+                try self.walkIfThen(stmt_idx, &rest);
+                return;
             }
 
             try self.walkPaths(stmt_idx);
 
             // If this statement always returns, remaining statements are unreachable
             if (stmt_tag == .return_stmt) return;
+        }
+        try self.resumeAfter(after);
+    }
+
+    /// Walk the `if` statement `stmt_idx` and then `after`, the statements that
+    /// follow it.
+    ///
+    /// A branch that does not return and holds a module call forks the
+    /// continuation (`forkIf`): the path that took the branch keeps the
+    /// branch's calls and the condition as a constraint, and the other path
+    /// keeps the negation. Walking such a branch and then restoring the I/O
+    /// sequence dropped its calls from every path.
+    ///
+    /// Any other `if` keeps the older shape: a then-branch that returns forks
+    /// one path and the fall-through continues; both branches returning ends
+    /// the walk; a branch with no module call that does not return is walked
+    /// for the paths it ends, and the statements after the `if` follow.
+    ///
+    /// A then-branch that returns beside an else-branch that falls through
+    /// forks too (`ifForks`), so the statements after the `if` are walked
+    /// through the else-branch. Inside a loop body nothing forks: the calls of
+    /// a falling branch are recorded flat, under the loop's multiplicity.
+    fn walkIfThen(self: *PathGenerator, stmt_idx: NodeIndex, after: ?*const Cont) error{OutOfMemory}!void {
+        const if_s = self.ir_view.getIfStmt(stmt_idx) orelse return self.resumeAfter(after);
+        if (try self.ifForks(if_s)) return self.forkIf(if_s, after);
+
+        const then_always = self.stmtAlwaysReturns(if_s.then_branch);
+        if (then_always and if_s.else_branch != null_node) {
+            // Both branches return: fork and stop. In a loop body an
+            // else-branch that falls through keeps its calls in the record.
+            try self.walkPaths(stmt_idx);
+            if (self.loop_stack.items.len > 0 and !self.stmtAlwaysReturns(if_s.else_branch)) {
+                try self.trackModuleCall(if_s.else_branch, null);
+            }
+        } else if (then_always) {
+            // Then-branch returns, no else: fork then-path, continue for fall-through
+            // The condition runs before the fork: both paths and the
+            // fall-through carry its module calls.
+            try self.trackModuleCall(if_s.condition, null);
+            const saved = self.constraints.items.len;
+            const saved_io = self.io_seq.items.len;
+            try self.extractAllConstraints(if_s.condition);
+            try self.walkPaths(if_s.then_branch);
+            self.constraints.shrinkRetainingCapacity(saved);
+            self.io_seq.shrinkRetainingCapacity(saved_io);
+
+            // Fall-through: each way the condition is false walks the rest.
+            var cases = try self.falseCases(if_s.condition);
+            defer cases.deinit(self.allocator);
+            for (0..cases.count()) |k| {
+                if (k > 0 and self.path_count >= MAX_PATHS) break;
+                try self.constraints.appendSlice(self.allocator, cases.slice(k));
+                try self.resumeAfter(after);
+                self.constraints.shrinkRetainingCapacity(saved);
+                self.io_seq.shrinkRetainingCapacity(saved_io);
+            }
+        } else {
+            // Neither always returns: just recurse normally
+            try self.walkPaths(stmt_idx);
+            if (self.loop_stack.items.len > 0) {
+                // A loop body is walked once and does not fork (`ifForks`), so
+                // the calls of a branch that falls through stay in the record
+                // under the loop's multiplicity, as if they ran. Over-recording
+                // makes an edit `breaking`, never `equivalent`, and adds no path.
+                try self.trackModuleCall(if_s.then_branch, null);
+                if (if_s.else_branch != null_node and !self.stmtAlwaysReturns(if_s.else_branch)) {
+                    try self.trackModuleCall(if_s.else_branch, null);
+                }
+            }
+            try self.resumeAfter(after);
+        }
+    }
+
+    /// Whether an `if` forks its continuation: a branch that can fall through
+    /// holds a module call, or the then-branch returns and the else-branch
+    /// falls through. Not inside a loop body, which is walked once as a
+    /// representative iteration and ends with the loop.
+    fn ifForks(self: *PathGenerator, if_s: Node.IfStmt) error{OutOfMemory}!bool {
+        if (self.loop_stack.items.len > 0) return false;
+        // A then-branch that returns beside an else-branch that falls through:
+        // the paths after the `if` run only through the else-branch.
+        if (if_s.else_branch != null_node and self.stmtAlwaysReturns(if_s.then_branch) and
+            !self.stmtAlwaysReturns(if_s.else_branch)) return true;
+        if (!self.stmtAlwaysReturns(if_s.then_branch) and try self.branchHasCall(if_s.then_branch)) return true;
+        if (if_s.else_branch == null_node) return false;
+        return !self.stmtAlwaysReturns(if_s.else_branch) and try self.branchHasCall(if_s.else_branch);
+    }
+
+    fn branchHasCall(self: *PathGenerator, branch: NodeIndex) error{OutOfMemory}!bool {
+        const before = self.io_seq.items.len;
+        try self.trackModuleCall(branch, null);
+        const found = self.io_seq.items.len > before;
+        self.io_seq.shrinkRetainingCapacity(before);
+        return found;
+    }
+
+    /// Fork the continuation at an `if`. The condition runs before the fork,
+    /// so its module calls belong to both paths. The then-branch runs under
+    /// the condition and the else-branch, or nothing, under each way the
+    /// condition is false. Each then continues with `after`.
+    fn forkIf(self: *PathGenerator, if_s: Node.IfStmt, after: ?*const Cont) error{OutOfMemory}!void {
+        // At MAX_PATHS the walk stops: see `resumeAfter`.
+        if (self.path_count >= MAX_PATHS) return;
+        try self.trackModuleCall(if_s.condition, null);
+        const saved_constraints = self.constraints.items.len;
+        const saved_io = self.io_seq.items.len;
+
+        try self.extractAllConstraints(if_s.condition);
+        try self.walkBranch(if_s.then_branch, after);
+        self.constraints.shrinkRetainingCapacity(saved_constraints);
+        self.io_seq.shrinkRetainingCapacity(saved_io);
+
+        var cases = try self.falseCases(if_s.condition);
+        defer cases.deinit(self.allocator);
+        for (0..cases.count()) |k| {
+            if (k > 0 and self.path_count >= MAX_PATHS) break;
+            try self.constraints.appendSlice(self.allocator, cases.slice(k));
+            try self.walkBranch(if_s.else_branch, after);
+            self.constraints.shrinkRetainingCapacity(saved_constraints);
+            self.io_seq.shrinkRetainingCapacity(saved_io);
+        }
+    }
+
+    /// Walk one branch of a forked `if`, then `after`. A null branch is the
+    /// missing else: only `after` runs. A branch that always returns ends its
+    /// paths itself.
+    fn walkBranch(self: *PathGenerator, branch: NodeIndex, after: ?*const Cont) error{OutOfMemory}!void {
+        if (branch == null_node) return self.resumeAfter(after);
+        if (self.stmtAlwaysReturns(branch)) return self.walkPaths(branch);
+        switch (self.ir_view.getTag(branch) orelse return self.resumeAfter(after)) {
+            .block => {
+                const block = self.ir_view.getBlock(branch) orelse return self.resumeAfter(after);
+                try self.walkBlockFrom(block, 0, after);
+            },
+            .if_stmt => try self.walkIfThen(branch, after),
+            // A single unbraced statement.
+            else => {
+                try self.walkPaths(branch);
+                try self.resumeAfter(after);
+            },
         }
     }
 
@@ -2393,11 +2555,14 @@ pub const PathGenerator = struct {
     /// per element, and the record carries the multiplicity of the call site,
     /// so the cost envelope counts it once.
     ///
-    /// Any other nested function is not entered. `walkPaths` does not enter it
-    /// either, and a closure bound to a name runs only when it is called,
-    /// which this walk does not model. A module call that only such a closure
-    /// makes is not recorded. This is a residual, and the unseen-call scan
-    /// still lists a failable call there.
+    /// A call by name to a same-file function, and a function passed by name
+    /// as an argument, record the module calls of that function's body at the
+    /// call site (`expandNamedFunction`). A body under expansion is not
+    /// expanded again. Any other nested function is not entered, and a module
+    /// call that only it makes is not recorded: an imported function, an alias
+    /// (`const h = g`), a function held in a `let`, and a function read from a
+    /// structure. This is a residual, and the unseen-call scan still lists a
+    /// failable call there.
     fn trackModuleCallUnder(
         self: *PathGenerator,
         node: NodeIndex,
@@ -2408,6 +2573,10 @@ pub const PathGenerator = struct {
 
         switch (tag) {
             .function_decl, .function_expr, .arrow_function => return,
+            // A loop in a function body under expansion runs its body once per
+            // element, so its calls carry the loop's multiplicity. The
+            // handler's own loops go through `walkPaths`.
+            .for_of_stmt => if (self.expanding.items.len > 0) return self.trackLoopUnder(node),
             // Look through nullish coalescing: env("X") ?? "default". The left
             // operand keeps the binding of the whole expression. The right
             // operand is a different value and takes none.
@@ -2424,10 +2593,18 @@ pub const PathGenerator = struct {
         }
 
         const is_call = tag == .call or tag == .method_call;
+        const callee: NodeIndex = if (is_call)
+            (if (self.ir_view.getCall(node)) |call| call.callee else null_node)
+        else
+            null_node;
         var children = self.ir_view.expressionChildren(node);
         while (children.next()) |child| {
             if (is_call and self.isFunctionNode(child)) {
                 try self.trackInlineFunctionBody(child);
+            } else if (is_call and child != callee and self.ir_view.getTag(child) == .identifier) {
+                // A function passed by name runs inside the call that
+                // receives it, as an inline callback does.
+                try self.expandNamedFunction(child);
             } else {
                 try self.trackModuleCallUnder(child, null, false);
             }
@@ -2435,6 +2612,12 @@ pub const PathGenerator = struct {
 
         if (tag == .call) {
             const call = self.ir_view.getCall(node) orelse return;
+            if (self.getCalleeMeta(call.callee) == null) {
+                // A call by name to a same-file function runs that body here:
+                // after the arguments, and with no binding key, because the
+                // result of the call is not the result of an inner call.
+                try self.expandNamedFunction(call.callee);
+            }
             if (self.getCalleeMeta(call.callee)) |meta| {
                 try self.io_seq.append(self.allocator, .{
                     .module = meta.module,
@@ -2460,6 +2643,142 @@ pub const PathGenerator = struct {
     fn trackInlineFunctionBody(self: *PathGenerator, node: NodeIndex) error{OutOfMemory}!void {
         const func = self.ir_view.getFunction(node) orelse return;
         try self.trackModuleCallUnder(func.body, null, false);
+    }
+
+    /// A same-file function that a name can reach.
+    const NamedFunction = union(enum) {
+        /// The name has one declaration, it is a function, and nothing assigns
+        /// it. `body` is the function body.
+        function: NodeIndex,
+        /// Anything else: two declarations share the name, a `let` holds the
+        /// function, or the name is assigned. A call by this name expands
+        /// nothing.
+        unresolved,
+    };
+
+    /// Record the module calls of the same-file function that `ident` names,
+    /// at the point where the function runs. Nothing is recorded when the name
+    /// does not resolve (`namedFunctionBody`), or when the body is already
+    /// under expansion, which makes a recursive function expand once.
+    fn expandNamedFunction(self: *PathGenerator, ident: NodeIndex) error{OutOfMemory}!void {
+        const body = try self.namedFunctionBody(ident) orelse return;
+        for (self.expanding.items) |open| {
+            if (open == body) return;
+        }
+        try self.expanding.append(self.allocator, body);
+        defer _ = self.expanding.pop();
+        try self.trackModuleCallUnder(body, null, false);
+    }
+
+    /// The body of the same-file function that the identifier `ident` names.
+    ///
+    /// The lookup is by the name of the binding, never by its slot. A
+    /// reference from inside a closure is an upvalue with a different slot and
+    /// scope than the declaration, and a module-level name is a global whose
+    /// slot is an atom, so a slot or key lookup misses some references. The
+    /// name resolves only when it is unambiguous in the whole file: one
+    /// `var_decl`, `function_decl`, loop binding, or pattern binding, and no
+    /// parameter, carries it. The one declaration is a `function` declaration
+    /// or a `const` bound to a function, and no assignment targets the name.
+    /// A name that fails any of these resolves to nothing, so its calls stay
+    /// unexpanded and disclosed. An alias (`const h = g`) is a different name
+    /// whose declaration holds no function, so `h()` is not expanded either.
+    fn namedFunctionBody(self: *PathGenerator, ident: NodeIndex) error{OutOfMemory}!?NodeIndex {
+        if (self.ir_view.getTag(ident) != .identifier) return null;
+        const binding = self.ir_view.getBinding(ident) orelse return null;
+        if (!self.built_named_fns) try self.buildNamedFunctions();
+        const found = self.named_fns.get(binding.name_atom) orelse return null;
+        return switch (found) {
+            .function => |body| body,
+            .unresolved => null,
+        };
+    }
+
+    fn buildNamedFunctions(self: *PathGenerator) error{OutOfMemory}!void {
+        self.built_named_fns = true;
+        // Every declaration of a name, whether or not it holds a function.
+        var binders: std.AutoHashMapUnmanaged(u16, u32) = .empty;
+        defer binders.deinit(self.allocator);
+        var assigned: std.AutoHashMapUnmanaged(u16, void) = .empty;
+        defer assigned.deinit(self.allocator);
+
+        for (self.ir_view.store.tags.items, 0..) |tag, idx| {
+            const node: NodeIndex = @intCast(idx);
+            switch (tag) {
+                .var_decl, .function_decl => {
+                    const vd = self.ir_view.getVarDecl(node) orelse continue;
+                    try bumpBinder(self.allocator, &binders, vd.binding.name_atom);
+                    const body: ?NodeIndex = if (tag == .function_decl)
+                        (if (self.ir_view.getFunctionOfDecl(node)) |func| func.body else null)
+                    else if (vd.kind == .@"const" and vd.init != null_node and self.isFunctionNode(vd.init))
+                        (if (self.ir_view.getFunction(vd.init)) |func| func.body else null)
+                    else
+                        null;
+                    const found = body orelse continue;
+                    try self.named_fns.put(self.allocator, vd.binding.name_atom, .{ .function = found });
+                },
+                .for_of_stmt, .for_in_stmt => {
+                    const fi = self.ir_view.getForIter(node) orelse continue;
+                    try bumpBinder(self.allocator, &binders, fi.binding.name_atom);
+                },
+                .pattern_element => {
+                    const pe = self.ir_view.getPatternElem(node) orelse continue;
+                    try bumpBinder(self.allocator, &binders, pe.binding.name_atom);
+                },
+                .identifier => {
+                    // A bare parameter is an identifier of kind `argument`.
+                    // Each reference counts too, which only widens the refusal.
+                    const b = self.ir_view.getBinding(node) orelse continue;
+                    if (b.kind == .argument) try bumpBinder(self.allocator, &binders, b.name_atom);
+                },
+                .assignment => {
+                    const assign = self.ir_view.getAssignment(node) orelse continue;
+                    if (self.ir_view.getTag(assign.target) != .identifier) continue;
+                    const b = self.ir_view.getBinding(assign.target) orelse continue;
+                    try assigned.put(self.allocator, b.name_atom, {});
+                },
+                // exhaustive: only the tags above introduce or write a binding name; every other tag is skipped on purpose.
+                else => {},
+            }
+        }
+
+        var it = self.named_fns.iterator();
+        while (it.next()) |entry| {
+            const atom = entry.key_ptr.*;
+            const count = binders.get(atom) orelse 0;
+            if (count != 1 or assigned.contains(atom)) entry.value_ptr.* = .unresolved;
+        }
+    }
+
+    fn bumpBinder(
+        allocator: std.mem.Allocator,
+        binders: *std.AutoHashMapUnmanaged(u16, u32),
+        atom: u16,
+    ) error{OutOfMemory}!void {
+        const slot = try binders.getOrPut(allocator, atom);
+        if (!slot.found_existing) slot.value_ptr.* = 0;
+        slot.value_ptr.* += 1;
+    }
+
+    /// The module calls of a `for...of` in a function body under expansion:
+    /// the iterable once, then the body under the loop's multiplicity.
+    fn trackLoopUnder(self: *PathGenerator, node: NodeIndex) error{OutOfMemory}!void {
+        const fi = self.ir_view.getForIter(node) orelse return;
+        try self.trackModuleCallUnder(fi.iterable, null, false);
+        const bound = self.resolveLoopBound(fi.iterable, node);
+        self.retired_loop_descs.ensureUnusedCapacity(self.allocator, 1) catch |err| {
+            self.freeLoopBound(bound);
+            return err;
+        };
+        self.loop_stack.append(self.allocator, .{ .bound = bound }) catch |err| {
+            self.freeLoopBound(bound);
+            return err;
+        };
+        defer {
+            const frame = self.loop_stack.pop().?;
+            self.retireLoopBound(frame.bound);
+        }
+        try self.trackModuleCallUnder(fi.body, null, false);
     }
 
     fn currentMultiplicity(self: *const PathGenerator) Mult {
@@ -4652,10 +4971,13 @@ test "the scan names a failable call the walk never recorded" {
         \\import { jwtVerify } from "zttp:auth";
         \\function handler(req) {
         \\  const read = () => jwtVerify("t", "secret").error;
-        \\  return Response.text(read());
+        \\  const again = read;
+        \\  return Response.text(again());
         \\}
     ;
 
+    // A call by the closure's own name is expanded (3a). The alias is not, so
+    // the call inside stays unrecorded.
     var fixture = try generateFixture(allocator, source);
     defer fixture.deinit();
 
@@ -5212,6 +5534,28 @@ test "short-circuit enumeration that passes MAX_PATHS reports truncation" {
 
     try std.testing.expectEqual(@as(usize, PathGenerator.MAX_PATHS), fixture.generator.getTests().len);
     try std.testing.expect(!fixture.generator.pathsExhaustive());
+    try std.testing.expectEqual(PathGenerator.Coverage.truncated, fixture.generator.coverage());
+}
+
+test "forty ifs that each fork on a module call stop at MAX_PATHS" {
+    const allocator = std.testing.allocator;
+    // Each `if` forks the rest of the block on its own call, so forty of them
+    // give 2^40 continuations. The walk stops at MAX_PATHS instead of walking
+    // continuations that can emit no path. Before the stop, `zts check` on
+    // this shape ran past a 60 s timeout.
+    var source_buf: std.ArrayList(u8) = .empty;
+    defer source_buf.deinit(allocator);
+    try source_buf.appendSlice(allocator, "import { cacheSet } from \"zttp:cache\";\nfunction handler(req) {\n");
+    for (0..40) |i| {
+        const branch = try allocator.print("  if (req.url === \"/p{d}\") {{ cacheSet(\"ns\", \"k{d}\", \"v\"); }}\n", .{ i, i });
+        defer allocator.free(branch);
+        try source_buf.appendSlice(allocator, branch);
+    }
+    try source_buf.appendSlice(allocator, "  return Response.text(\"ok\");\n}\n");
+    var fixture = try generateFixture(allocator, source_buf.items);
+    defer fixture.deinit();
+
+    try std.testing.expectEqual(@as(usize, PathGenerator.MAX_PATHS), fixture.generator.getTests().len);
     try std.testing.expectEqual(PathGenerator.Coverage.truncated, fixture.generator.coverage());
 }
 
@@ -6111,4 +6455,48 @@ test "a module call in the returned match discriminant is on every arm path and 
         const expected: usize = if (t.expected_status.isKnown(405)) 1 else 2;
         try std.testing.expectEqual(expected, t.io_stubs.items.len);
     }
+}
+
+test "a helper's module call precedes the handler's later calls on the path" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { cacheGet } from "zttp:cache";
+        \\function load() { return cacheGet("ns", "one"); }
+        \\function handler(req) {
+        \\  const a = load();
+        \\  const b = cacheGet("ns", "z");
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 1), tests.len);
+    const stubs = tests[0].io_stubs.items;
+    try std.testing.expectEqual(@as(usize, 2), stubs.len);
+    try std.testing.expectEqualStrings("lit:ns|lit:one", stubs[0].arg_signature.?);
+    try std.testing.expectEqualStrings("lit:ns|lit:z", stubs[1].arg_signature.?);
+}
+
+test "a module call in an if branch that does not return stays on the path that took it" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { cacheSet } from "zttp:cache";
+        \\function handler(req) {
+        \\  if (req.method === "POST") {
+        \\    cacheSet("ns", "one", "v");
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+    ;
+    var fixture = try generateFixture(allocator, source);
+    defer fixture.deinit();
+
+    const tests = fixture.generator.getTests();
+    try std.testing.expectEqual(@as(usize, 2), tests.len);
+    try std.testing.expectEqualStrings("path 1 POST", tests[0].name);
+    try std.testing.expectEqual(@as(usize, 1), tests[0].io_stubs.items.len);
+    try std.testing.expectEqualStrings("path 2 !POST", tests[1].name);
+    try std.testing.expectEqual(@as(usize, 0), tests[1].io_stubs.items.len);
 }

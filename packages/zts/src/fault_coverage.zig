@@ -987,10 +987,12 @@ test "a handler whose only failable call is unseen is not covered" {
         \\import { jwtVerify } from "zttp:auth";
         \\function handler(req) {
         \\  const read = () => jwtVerify("t", "secret").error;
-        \\  return Response.text(read());
+        \\  const again = read;
+        \\  return Response.text(again());
         \\}
     ;
 
+    // The alias is not expanded, so the call inside the closure stays unseen.
     const coverage = try analyzeSourceFaultCoverage(std.testing.allocator, source);
     try std.testing.expectEqual(@as(u32, 0), coverage.total_failable);
     try std.testing.expectEqual(@as(usize, 1), coverage.unseen_calls);

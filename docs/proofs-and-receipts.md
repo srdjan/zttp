@@ -464,8 +464,11 @@ only where it can prove the runtime answer: `Response.json`, `text`, `html`, and
 or its literal second argument), an integer literal outside 100 to 599 (500), and
 a bare `return;` (500). Any other returned value has an unknown status: a helper
 call, a returned name, a computed or ternary status, a spread, an options value
-held in a name, `hole()`, and a `routerMatch` dispatch. The compiler never
-resolves a status through a name, because a later property write can change it.
+held in a name, `hole()`, and a `routerMatch` dispatch. The compiler resolves a
+status through a name in one case only: a `const` bound to a `match` whose arm
+returns a `Response`, when every reference to the name is a `return` of it. Any
+other reference, such as a closure, an alias, or a helper argument, can write
+`status` before the return, so the status is then unknown.
 An unknown status equals no known status. It equals another unknown status only
 for an identical program, under the rule above. Two handlers whose status is
 unknown and whose trees differ are `breaking`. The contract writes an unknown
@@ -475,6 +478,26 @@ with no assertion as `unchecked`, not `passed`. An unchecked test fails the run
 only when it reaches a `hole()`. A critical failure path with an
 unknown status keeps `fault_covered` refused. The source is
 `packages/zts/src/path_generator.zig#PathGenerator.extractExprStatus`.
+
+The module calls of a path include the calls inside a same-file function that
+the handler calls by name, or passes by name as an argument. They include the
+calls of an `if` branch that does not return: that branch forks the rest of the
+handler, so the path that took the branch carries the calls. Inside a loop body
+nothing forks; the calls of such a branch are recorded under the loop, as if
+they ran. A `match` arm pattern on the request method or URL constrains its path
+as the equal `if` does. These cases stay blind, and a change there can read
+`equivalent`:
+
+- a module call in a function reached through an alias (`const h = g; h()`), a
+  `let`, a structure, or an imported file, or under a name that the file
+  declares twice;
+- two `match` arms with the same status whose bodies swap, and any change in a
+  value that a pure computation produces;
+- a handler with no `return`, which has no behavior path.
+
+When the walk reaches 1024 paths it stops, and the coverage reads `limit
+reached`. The behavior set is then not exhaustive, and no property that needs
+every path is proven.
 
 ### A lost proof
 

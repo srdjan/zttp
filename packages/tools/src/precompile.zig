@@ -1672,15 +1672,18 @@ test "serialized bytecode matches the committed goldens" {
 // One fault coverage record across check, compile, and text output
 // ---------------------------------------------------------------------------
 
-/// A failable call inside a closure body: `walkPaths` does not enter a nested
-/// function, so no path records the call. The walk lists it as unseen and
-/// `fault_covered` is refused. (A failable call nested in a returned or
-/// initializer expression is recorded since the I/O tracker descends.)
+/// A failable call inside a closure body that the handler reaches through an
+/// alias: `walkPaths` does not enter a nested function, and a call by the
+/// alias is not expanded, so no path records the call. The walk lists it as
+/// unseen and `fault_covered` is refused. (A call by the closure's own name is
+/// expanded, and a failable call nested in a returned or initializer
+/// expression is recorded since the I/O tracker descends.)
 const unseen_call_handler =
     \\import { jwtVerify } from "zttp:auth";
     \\function handler(req: Request): Response {
     \\  const read = (): string => jwtVerify("t", "s").error;
-    \\  return Response.text(read());
+    \\  const again = read;
+    \\  return Response.text(again());
     \\}
 ;
 
