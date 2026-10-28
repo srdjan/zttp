@@ -322,6 +322,12 @@ pub const PathGenerator = struct {
     /// Slot bound to req.url or req.path.
     url_binding_key: ?u32,
 
+    /// Per-path bindings of a forked `match` declaration: packed(scope, slot)
+    /// -> the body of the arm that this path took. Set only for a `const`
+    /// whose every reference is a `return` of the name (`onlyReturned`).
+    /// `extractExprStatus` reads it for an identifier.
+    bound_arms: std.AutoHashMapUnmanaged(u32, NodeIndex),
+
     /// Accumulated constraints for current path.
     constraints: std.ArrayList(Constraint),
     /// Accumulated I/O call sequence for current path.
@@ -555,6 +561,7 @@ pub const PathGenerator = struct {
             .effect_facts = effect_facts,
             .module_fn_bindings = .empty,
             .var_inits = .empty,
+            .bound_arms = .empty,
             .req_binding_key = null,
             .method_binding_key = null,
             .url_binding_key = null,
@@ -585,6 +592,7 @@ pub const PathGenerator = struct {
         if (self.owned_facts) |*owned| owned.deinit();
         self.module_fn_bindings.deinit(self.allocator);
         self.var_inits.deinit(self.allocator);
+        self.bound_arms.deinit(self.allocator);
         self.constraints.deinit(self.allocator);
         self.io_seq.deinit(self.allocator);
         for (self.loop_stack.items) |*frame| {
@@ -880,6 +888,7 @@ pub const PathGenerator = struct {
         self.method_binding_key = null;
         self.url_binding_key = null;
         self.var_inits.clearRetainingCapacity();
+        self.bound_arms.clearRetainingCapacity();
         self.constraints.clearRetainingCapacity();
         self.io_seq.clearRetainingCapacity();
         self.walking_route_root = route_root;
@@ -1579,7 +1588,7 @@ pub const PathGenerator = struct {
         }
     }
 
-    fn walkBlock(self: *PathGenerator, block: Node.BlockData) !void {
+    fn walkBlock(self: *PathGenerator, block: Node.BlockData) error{OutOfMemory}!void {
         try self.walkBlockFrom(block, 0);
     }
 
@@ -1626,31 +1635,23 @@ pub const PathGenerator = struct {
     /// recorded before the fork and stay for every arm. Each arm saves the
     /// constraints and the I/O sequence, walks its body through this function
     /// (a nested returned `match` forks again), and restores them. An arm adds
-    /// no constraint: a pattern is not a request condition the generator can
-    /// solve, so the paths differ by status and by module calls only. The
-    /// caller drops the discriminant's calls after the last arm. The parser
-    /// refuses a `match` with no arm, so the loop always walks the first arm.
+    /// the request constraints that the equal `if` chain adds (`forkArms`).
+    /// The caller drops the discriminant's calls after the last arm. The
+    /// parser refuses a `match` with no arm, so the walk always reaches the
+    /// first arm.
     ///
     /// Residual gaps, left open on purpose. Each leaves a behavior diff
     /// `equivalent` where the behavior changed:
-    /// - an arm pattern that changes while the arm status stays the same;
+    /// - a pattern on a value that is not the request method or URL (a header,
+    ///   a body field), as for an `if` on the same value;
     /// - two arms with the same status that swap bodies;
-    /// - a `match` that is reached through a `const` and returned by name.
+    /// - a `match` that is reached through a binding that does not qualify
+    ///   (`matchForks`).
     fn walkReturnedValue(self: *PathGenerator, value: NodeIndex) error{OutOfMemory}!void {
         if (self.ir_view.getTag(value) == .match_expr) {
             if (self.ir_view.getMatchExpr(value)) |match_data| {
                 try self.trackModuleCall(match_data.discriminant, null);
-                const saved_constraints = self.constraints.items.len;
-                const saved_io = self.io_seq.items.len;
-                var i: u8 = 0;
-                while (i < match_data.arms_count) : (i += 1) {
-                    if (i > 0 and self.path_count >= MAX_PATHS) break;
-                    const arm_idx = self.ir_view.getListIndex(match_data.arms_start, i);
-                    const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
-                    try self.walkReturnedValue(arm.body);
-                    self.constraints.shrinkRetainingCapacity(saved_constraints);
-                    self.io_seq.shrinkRetainingCapacity(saved_io);
-                }
+                try self.forkArms(match_data, 0, .returned);
                 return;
             }
         }
@@ -1658,11 +1659,262 @@ pub const PathGenerator = struct {
         try self.emitTestCase(self.extractExprStatus(value));
     }
 
-    fn walkBlockFrom(self: *PathGenerator, block: Node.BlockData, first: u16) !void {
+    /// A declaration `const r = match ...` whose match qualifies (`matchForks`)
+    /// forks here, not at the statement that reads `r`. Each arm records its
+    /// module calls under the declared binding, binds `r` to its body for
+    /// this path, and walks the rest of the block. The flat tracker does not
+    /// run for the declaration: it would record every arm's calls on every
+    /// path. Returns true when it forked: the block is then walked to its end.
+    fn forkBoundMatch(
+        self: *PathGenerator,
+        stmt_idx: NodeIndex,
+        block: Node.BlockData,
+        i: u16,
+    ) error{OutOfMemory}!bool {
+        const vd = self.ir_view.getVarDecl(stmt_idx) orelse return false;
+        if (vd.init == null_node) return false;
+        if (self.ir_view.getTag(vd.init) != .match_expr) return false;
+        const match_data = self.ir_view.getMatchExpr(vd.init) orelse return false;
+        if (!try self.matchForks(match_data)) return false;
+
+        const key = packBindingKey(vd.binding.scope_id, vd.binding.slot);
+        try self.var_inits.put(self.allocator, key, vd.init);
+        try self.trackModuleCall(match_data.discriminant, null);
+        const resolvable = vd.kind == .@"const" and self.onlyReturned(key, vd.binding.name_atom);
+        try self.forkArms(match_data, 0, .{ .bound = .{
+            .block = block,
+            .next = i + 1,
+            .key = key,
+            .resolvable = resolvable,
+        } });
+        return true;
+    }
+
+    /// What a forked `match` does on each arm's path.
+    const ArmFork = union(enum) {
+        /// The `match` is returned: the arm body is the returned value.
+        returned,
+        /// The `match` is bound to `key` by a declaration in `block`, and the
+        /// path continues with the statements from `next`. `resolvable` is
+        /// true when `extractExprStatus` may read the arm body through the
+        /// binding: a `const` whose every reference is a `return` of it.
+        bound: struct {
+            block: Node.BlockData,
+            next: u16,
+            key: u32,
+            resolvable: bool,
+        },
+    };
+
+    /// Walk arm `i` of `match_data` and, for each way its pattern is false,
+    /// the arms after it. An arm holds the request constraints of its
+    /// pattern, and every later arm holds the negation of each earlier
+    /// pattern, as the branches of an `else if` chain do. A pattern with no
+    /// request constraint adds none, and the arms after it are walked once.
+    /// The caller records the discriminant's module calls before this call.
+    fn forkArms(
+        self: *PathGenerator,
+        match_data: Node.MatchExpr,
+        i: u8,
+        fork: ArmFork,
+    ) error{OutOfMemory}!void {
+        if (i >= match_data.arms_count) return;
+        const arm_idx = self.ir_view.getListIndex(match_data.arms_start, i);
+        const arm = self.ir_view.getMatchArm(arm_idx) orelse
+            return self.forkArms(match_data, i + 1, fork);
+
+        var positive: std.ArrayList(Constraint) = .empty;
+        defer positive.deinit(self.allocator);
+        var negated: FalseCases = .{};
+        defer negated.deinit(self.allocator);
+        try self.armConstraints(match_data.discriminant, arm.pattern, &positive, &negated);
+
+        const saved_constraints = self.constraints.items.len;
+        const saved_io = self.io_seq.items.len;
+
+        try self.constraints.appendSlice(self.allocator, positive.items);
+        try self.walkArm(arm, fork);
+        self.constraints.shrinkRetainingCapacity(saved_constraints);
+        self.io_seq.shrinkRetainingCapacity(saved_io);
+
+        for (0..negated.count()) |k| {
+            if (k > 0 and self.path_count >= MAX_PATHS) break;
+            try self.constraints.appendSlice(self.allocator, negated.slice(k));
+            try self.forkArms(match_data, i + 1, fork);
+            self.constraints.shrinkRetainingCapacity(saved_constraints);
+            self.io_seq.shrinkRetainingCapacity(saved_io);
+        }
+    }
+
+    fn walkArm(self: *PathGenerator, arm: Node.MatchArm, fork: ArmFork) error{OutOfMemory}!void {
+        switch (fork) {
+            .returned => try self.walkReturnedValue(arm.body),
+            .bound => |bound| {
+                try self.trackModuleCall(arm.body, bound.key);
+                // A declaration is reached once on a path, so the key is free.
+                if (bound.resolvable) try self.bound_arms.put(self.allocator, bound.key, arm.body);
+                defer _ = self.bound_arms.remove(bound.key);
+                try self.walkBlockFrom(bound.block, bound.next);
+            },
+        }
+    }
+
+    /// The request constraints of one arm. `positive` receives the
+    /// constraints that hold when the pattern matches. `negated` receives each
+    /// way the pattern is false, as `falseCases` does for `&&`: `[not a]`,
+    /// then `[a, not b]`. A test that carries no request constraint still
+    /// gets its case, holding only the earlier constraints. A `default` arm
+    /// adds nothing, and no arm follows it.
+    fn armConstraints(
+        self: *PathGenerator,
+        discriminant: NodeIndex,
+        pattern: NodeIndex,
+        positive: *std.ArrayList(Constraint),
+        negated: *FalseCases,
+    ) error{OutOfMemory}!void {
+        if (pattern == null_node) return;
+        var tests: std.ArrayList(?Constraint) = .empty;
+        defer tests.deinit(self.allocator);
+        try self.patternTests(discriminant, pattern, &tests);
+
+        // A record pattern whose fields are all bindings tests nothing.
+        if (tests.items.len == 0) {
+            try negated.add(self.allocator, &.{});
+            return;
+        }
+        var held: std.ArrayList(Constraint) = .empty;
+        defer held.deinit(self.allocator);
+        for (tests.items) |test_constraint| {
+            const negation: ?Constraint = if (test_constraint) |c| self.negateConstraint(c) else null;
+            const last: []const Constraint = if (negation) |*n| n[0..1] else &.{};
+            try negated.add(self.allocator, &.{ held.items, last });
+            if (test_constraint) |c| {
+                try held.append(self.allocator, c);
+                try positive.append(self.allocator, c);
+            }
+        }
+    }
+
+    /// The tests that an arm pattern runs, in order. An entry is the request
+    /// constraint of the test, or null when the test constrains nothing the
+    /// generator solves. Only two shapes yield a constraint: a string literal
+    /// against `req.method` or `req.url` (as `extractLiteralComparison` reads
+    /// it), and a record pattern on the request parameter whose field
+    /// `method`, `url`, or `path` is a string literal. A field bound to a name
+    /// cannot fail and adds no entry.
+    fn patternTests(
+        self: *PathGenerator,
+        discriminant: NodeIndex,
+        pattern: NodeIndex,
+        out: *std.ArrayList(?Constraint),
+    ) error{OutOfMemory}!void {
+        const tag = self.ir_view.getTag(pattern) orelse return out.append(self.allocator, null);
+        switch (tag) {
+            .lit_string => try out.append(self.allocator, self.extractLiteralComparison(discriminant, pattern)),
+            .match_pattern => {
+                if (!self.isRequestParam(discriminant)) return out.append(self.allocator, null);
+                const record = self.ir_view.getMatchPattern(pattern) orelse return out.append(self.allocator, null);
+                var j: u8 = 0;
+                while (j < record.props_count) : (j += 1) {
+                    const prop_idx = self.ir_view.getListIndex(record.props_start, j);
+                    const prop = self.ir_view.getProperty(prop_idx) orelse {
+                        try out.append(self.allocator, null);
+                        continue;
+                    };
+                    if (prop.value != null_node and self.ir_view.getTag(prop.value) == .identifier) continue;
+                    try out.append(self.allocator, self.recordFieldConstraint(prop));
+                }
+            },
+            // exhaustive: an array pattern, a type test, or a literal that is not a string constrains no request field, so the arm adds none and every arm stays walked.
+            else => try out.append(self.allocator, null),
+        }
+    }
+
+    /// The constraint of one record pattern field on the request, or null.
+    fn recordFieldConstraint(self: *const PathGenerator, prop: Node.PropertyExpr) ?Constraint {
+        if (prop.value == null_node) return null;
+        if (self.ir_view.getTag(prop.value) != .lit_string) return null;
+        const key_idx = self.ir_view.getStringIdx(prop.key) orelse return null;
+        const key = self.ir_view.getString(key_idx) orelse return null;
+        const value_idx = self.ir_view.getStringIdx(prop.value) orelse return null;
+        const value = self.ir_view.getString(value_idx) orelse return null;
+        if (std.mem.eql(u8, key, "method")) return .{ .req_method = value };
+        if (std.mem.eql(u8, key, "url") or std.mem.eql(u8, key, "path")) return .{ .req_url = value };
+        return null;
+    }
+
+    fn isRequestParam(self: *const PathGenerator, node: NodeIndex) bool {
+        const req_key = self.req_binding_key orelse return false;
+        if (self.ir_view.getTag(node) != .identifier) return false;
+        const binding = self.ir_view.getBinding(node) orelse return false;
+        return packBindingKey(binding.scope_id, binding.slot) == req_key;
+    }
+
+    /// Whether a `match` bound to a name forks at its declaration: at least
+    /// one arm body is a `Response` helper call or holds a module call. A
+    /// `match` of pure values does not fork, so its pattern and value changes
+    /// stay the blindness of a pure computation.
+    fn matchForks(self: *PathGenerator, match_data: Node.MatchExpr) error{OutOfMemory}!bool {
+        var i: u8 = 0;
+        while (i < match_data.arms_count) : (i += 1) {
+            const arm_idx = self.ir_view.getListIndex(match_data.arms_start, i);
+            const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
+            if (self.ir_view.getTag(arm.body)) |tag| {
+                if (tag == .call or tag == .method_call) {
+                    if (self.ir_view.getCall(arm.body)) |call| {
+                        if (self.responseHelperName(call.callee) != null) return true;
+                    }
+                }
+            }
+            const before = self.io_seq.items.len;
+            try self.trackModuleCall(arm.body, null);
+            const found = self.io_seq.items.len > before;
+            self.io_seq.shrinkRetainingCapacity(before);
+            if (found) return true;
+        }
+        return false;
+    }
+
+    /// Whether every reference to the declared name is a `return` of the name
+    /// itself. Any other reference can change or share the value before it is
+    /// returned: an assignment (`r = x`, `r.status = x`), an alias whose
+    /// member is written (`const q = r; q.status = x`), an argument that a
+    /// helper writes, or a closure that writes the name. So the arm body is
+    /// the returned value only when no other reference exists. A closure
+    /// names the binding as an upvalue with a different key, so an upvalue
+    /// with the same name counts as a reference.
+    fn onlyReturned(self: *const PathGenerator, key: u32, name_atom: u32) bool {
+        var references: usize = 0;
+        var returned: usize = 0;
+        for (self.ir_view.store.tags.items, 0..) |tag, idx| {
+            const node: NodeIndex = @intCast(idx);
+            if (tag == .identifier) {
+                if (self.namesBinding(node, key, name_atom)) references += 1;
+            } else if (tag == .return_stmt) {
+                const value = self.ir_view.getOptValue(node) orelse continue;
+                if (self.ir_view.getTag(value) == .identifier and self.namesBinding(value, key, name_atom)) returned += 1;
+            }
+        }
+        return references == returned;
+    }
+
+    /// Whether an identifier reads the binding `key`, or is an upvalue with
+    /// the binding's name.
+    fn namesBinding(self: *const PathGenerator, node: NodeIndex, key: u32, name_atom: u32) bool {
+        const binding = self.ir_view.getBinding(node) orelse return false;
+        if (binding.kind == .upvalue) return binding.name_atom == name_atom;
+        return packBindingKey(binding.scope_id, binding.slot) == key;
+    }
+
+    fn walkBlockFrom(self: *PathGenerator, block: Node.BlockData, first: u16) error{OutOfMemory}!void {
         var i: u16 = first;
         while (i < block.stmts_count) : (i += 1) {
             const stmt_idx = self.ir_view.getListIndex(block.stmts_start, i);
             const stmt_tag = self.ir_view.getTag(stmt_idx) orelse continue;
+
+            if (stmt_tag == .var_decl) {
+                if (try self.forkBoundMatch(stmt_idx, block, i)) return;
+            }
 
             if (stmt_tag == .assert_stmt) {
                 // `assert c, e` is `if (!c) { return e; }`: the failure paths end
@@ -2339,12 +2591,23 @@ pub const PathGenerator = struct {
     /// - `Response.redirect(url)` answers 302. A second argument that is an
     ///   integer literal answers that value (500 outside 100 to 599), and any
     ///   other second argument is `unknown`.
-    /// - Any other value is `unknown`: an identifier, a user helper call,
-    ///   `hole()`, a route dispatch, a ternary. A status is never resolved
-    ///   through a binding, because the profile admits property assignment and
-    ///   a later write would make the resolved value wrong.
+    /// - An identifier is the body of the taken arm when it names a `const`
+    ///   declared from a forked `match` and every reference to the name is a
+    ///   `return` of it (`bound_arms`, `onlyReturned`).
+    /// - Any other value is `unknown`: any other identifier, a user helper
+    ///   call, `hole()`, a route dispatch, a ternary. A status is not resolved
+    ///   through any other binding, because the profile admits property
+    ///   assignment and a later write would make the resolved value wrong.
     fn extractExprStatus(self: *PathGenerator, ret_val: NodeIndex) ResponseStatus {
         const ret_tag = self.ir_view.getTag(ret_val) orelse return .unknown;
+        if (ret_tag == .identifier) {
+            // The one binding that resolves is a `const` declared from a
+            // forked `match`: this path took one arm, and the name is never
+            // assigned, so the value is that arm's body.
+            const binding = self.ir_view.getBinding(ret_val) orelse return .unknown;
+            const arm_body = self.bound_arms.get(packBindingKey(binding.scope_id, binding.slot)) orelse return .unknown;
+            return self.extractExprStatus(arm_body);
+        }
         if (ret_tag != .call and ret_tag != .method_call) return .unknown;
         const call = self.ir_view.getCall(ret_val) orelse return .unknown;
         const helper = self.responseHelperName(call.callee) orelse return .unknown;

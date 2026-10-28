@@ -8869,6 +8869,416 @@ test "gen-tests: the expect line of an unknown status holds no status key" {
     try std.testing.expectEqualStrings("{\"type\":\"expect\"}", lines.next() orelse return error.NoThirdLine);
 }
 
+// 4a and 4d: the arms of a `match` carry the request constraints of the
+// equal `if` chain, and a `match` bound to a name forks at its declaration.
+
+const arm_methods_a =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return match (req.method) {
+    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
+    \\    when "POST": Response.json({ a: 2 }, { status: 201 })
+    \\    default: Response.json({ a: 3 }, { status: 404 })
+    \\  };
+    \\}
+;
+
+const arm_methods_put =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return match (req.method) {
+    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
+    \\    when "PUT": Response.json({ a: 2 }, { status: 201 })
+    \\    default: Response.json({ a: 3 }, { status: 404 })
+    \\  };
+    \\}
+;
+
+const arm_methods_reordered =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return match (req.method) {
+    \\    when "POST": Response.json({ a: 2 }, { status: 201 })
+    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
+    \\    default: Response.json({ a: 3 }, { status: 404 })
+    \\  };
+    \\}
+;
+
+const arm_method_only =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return match (req.method) {
+    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
+    \\    default: Response.json({ a: 3 }, { status: 404 })
+    \\  };
+    \\}
+;
+
+const arm_url_only =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return match (req.url) {
+    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
+    \\    default: Response.json({ a: 3 }, { status: 404 })
+    \\  };
+    \\}
+;
+
+const arm_header_echo =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const k = req.headers.get("x-kind") ?? "";
+    \\  return match (k) {
+    \\    when "echo": Response.json({ a: 1 }, { status: 200 })
+    \\    default: Response.json({ a: 2 }, { status: 404 })
+    \\  };
+    \\}
+;
+
+const arm_header_other =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const k = req.headers.get("x-kind") ?? "";
+    \\  return match (k) {
+    \\    when "other": Response.json({ a: 1 }, { status: 200 })
+    \\    default: Response.json({ a: 2 }, { status: 404 })
+    \\  };
+    \\}
+;
+
+const arm_record_health =
+    \\function handler(req: Request): Response {
+    \\  return match (req) {
+    \\    when { method: "GET", path: "/health" }: Response.json({ ok: true })
+    \\    when { method: "GET", path: "/version" }:
+    \\      Response.json({ version: "1.0.0" })
+    \\    when { method: "POST", path: "/echo" }: Response.json(req.body)
+    \\    default: Response.text("Not Found", { status: 404 })
+    \\  };
+    \\}
+;
+
+const arm_record_healthz =
+    \\function handler(req: Request): Response {
+    \\  return match (req) {
+    \\    when { method: "GET", path: "/healthz" }: Response.json({ ok: true })
+    \\    when { method: "GET", path: "/version" }:
+    \\      Response.json({ version: "1.0.0" })
+    \\    when { method: "POST", path: "/echo" }: Response.json(req.body)
+    \\    default: Response.text("Not Found", { status: 404 })
+    \\  };
+    \\}
+;
+
+const bound_methods_a =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const r = match (req.method) {
+    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
+    \\    when "POST": Response.json({ a: 2 }, { status: 201 })
+    \\    default: Response.json({ a: 3 }, { status: 404 })
+    \\  };
+    \\  return r;
+    \\}
+;
+
+const bound_methods_status =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const r = match (req.method) {
+    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
+    \\    when "POST": Response.json({ a: 2 }, { status: 202 })
+    \\    default: Response.json({ a: 3 }, { status: 404 })
+    \\  };
+    \\  return r;
+    \\}
+;
+
+const bound_methods_put =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const r = match (req.method) {
+    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
+    \\    when "PUT": Response.json({ a: 2 }, { status: 201 })
+    \\    default: Response.json({ a: 3 }, { status: 404 })
+    \\  };
+    \\  return r;
+    \\}
+;
+
+const bound_status_get_200 =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const s = match (req.method) {
+    \\    when "GET": 200
+    \\    default: 200
+    \\  };
+    \\  return Response.json({ a: 1 }, { status: s });
+    \\}
+;
+
+const bound_status_get_404 =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const s = match (req.method) {
+    \\    when "GET": 200
+    \\    default: 404
+    \\  };
+    \\  return Response.json({ a: 1 }, { status: s });
+    \\}
+;
+
+const bound_call_in_get =
+    \\import { sha256 } from "zttp:crypto";
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const r = match (req.method) {
+    \\    when "GET": Response.text(sha256("a"))
+    \\    default: Response.text("none")
+    \\  };
+    \\  return r;
+    \\}
+;
+
+const bound_call_in_default =
+    \\import { sha256 } from "zttp:crypto";
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const r = match (req.method) {
+    \\    when "GET": Response.text("none")
+    \\    default: Response.text(sha256("a"))
+    \\  };
+    \\  return r;
+    \\}
+;
+
+const bound_never_returned_a =
+    \\import { sha256 } from "zttp:crypto";
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const unused = match (req.method) {
+    \\    when "GET": Response.text(sha256("a"))
+    \\    default: Response.text("none")
+    \\  };
+    \\  return Response.text("ok");
+    \\}
+;
+
+const bound_never_returned_b =
+    \\import { sha256 } from "zttp:crypto";
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const unused = match (req.method) {
+    \\    when "GET": Response.text("none")
+    \\    default: Response.text(sha256("a"))
+    \\  };
+    \\  return Response.text("ok");
+    \\}
+;
+
+const bound_property_written =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const r = match (req.method) {
+    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
+    \\    default: Response.json({ a: 3 }, { status: 404 })
+    \\  };
+    \\  r.status = 500;
+    \\  return r;
+    \\}
+;
+
+const bound_let_reassigned =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  let r = match (req.method) {
+    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
+    \\    default: Response.json({ a: 3 }, { status: 404 })
+    \\  };
+    \\  r = Response.text("x", { status: 500 });
+    \\  return r;
+    \\}
+;
+
+const bound_written_in_closure_returned =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const r = match (req.method) {
+    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
+    \\    default: Response.json({ a: 3 }, { status: 404 })
+    \\  };
+    \\  const fix = (): number => {
+    \\    r.status = 500;
+    \\    return 1;
+    \\  };
+    \\  const n = fix();
+    \\  return r;
+    \\}
+;
+
+const bound_written_through_alias =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const r = match (req.method) {
+    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
+    \\    default: Response.json({ a: 3 }, { status: 404 })
+    \\  };
+    \\  const q = r;
+    \\  q.status = 500;
+    \\  return r;
+    \\}
+;
+
+const bound_passed_to_helper =
+    \\function setStatus(res: Response): number {
+    \\  res.status = 500;
+    \\  return 1;
+    \\}
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const r = match (req.method) {
+    \\    when "GET": Response.json({ a: 1 }, { status: 200 })
+    \\    default: Response.json({ a: 3 }, { status: 404 })
+    \\  };
+    \\  const n = setStatus(r);
+    \\  return r;
+    \\}
+;
+
+const bound_pure_arms =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const label = match (req.method) {
+    \\    when "GET": "read"
+    \\    default: "other"
+    \\  };
+    \\  return Response.json({ label: label });
+    \\}
+;
+
+fn expectStatuses(
+    source: []const u8,
+    expected: []const zts.handler_contract.ResponseStatus,
+) !void {
+    const allocator = std.testing.allocator;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const contract = result.contract orelse return error.NoContract;
+    try std.testing.expectEqual(expected.len, contract.behaviors.items.len);
+    for (expected, contract.behaviors.items) |status, behavior| {
+        try std.testing.expectEqual(status, behavior.response_status);
+    }
+}
+
+test "prove-behavior: a changed arm pattern with the same status is breaking" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, arm_methods_a, arm_methods_put);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+    // The default path keeps no condition, and its request is the first method
+    // that the negations leave: PUT before, POST after. Its key moves too.
+    try std.testing.expectEqual(@as(u32, 1), counts.preserved);
+    try std.testing.expectEqual(@as(u32, 2), counts.removed);
+    try std.testing.expectEqual(@as(u32, 2), counts.added);
+}
+
+test "prove-behavior: a changed match discriminant is breaking" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, arm_method_only, arm_url_only);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+}
+
+test "prove-behavior: a changed record arm pattern on the request is breaking" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, arm_record_health, arm_record_healthz);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+    try std.testing.expectEqual(@as(u32, 5), counts.preserved);
+    try std.testing.expectEqual(@as(u32, 1), counts.removed);
+    try std.testing.expectEqual(@as(u32, 1), counts.added);
+}
+
+test "prove-behavior: match arm controls keep their verdicts" {
+    const allocator = std.testing.allocator;
+    const reordered = try proveBehaviorCounts(allocator, arm_methods_a, arm_methods_reordered);
+    try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, reordered.verdict);
+    const header = try proveBehaviorCounts(allocator, arm_header_echo, arm_header_other);
+    try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, header.verdict);
+    const self = try proveBehaviorCounts(allocator, arm_methods_a, arm_methods_a);
+    try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, self.verdict);
+    try std.testing.expectEqual(@as(u32, 3), self.preserved);
+}
+
+test "contract: a routing match has the paths of the equal if chain" {
+    const K = zts.handler_contract.ResponseStatus;
+    try expectStatuses(arm_record_health, &[_]K{
+        .{ .known = 200 },
+        .{ .known = 200 },
+        .{ .known = 404 },
+        .{ .known = 404 },
+        .{ .known = 200 },
+        .{ .known = 404 },
+    });
+}
+
+test "gen-tests: match arms emit the request each arm needs" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data = arm_methods_a });
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
+    defer allocator.free(handler_path);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    const count = try @import("precompile_gen_tests.zig").runGenTests(allocator, handler_path, &out.writer);
+    try std.testing.expectEqual(@as(u32, 3), count);
+    try std.testing.expectEqualStrings(
+        \\{"type":"test","name":"path 1 GET"}
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"expect","status":200}
+        \\{"type":"test","name":"path 2 !GET POST"}
+        \\{"type":"request","method":"POST","url":"/","headers":{},"body":null}
+        \\{"type":"expect","status":201}
+        \\{"type":"test","name":"path 3 !GET !POST"}
+        \\{"type":"request","method":"PUT","url":"/","headers":{},"body":null}
+        \\{"type":"expect","status":404}
+        \\
+    , out.written());
+}
+
+test "contract: a bound match that is returned forks one path per arm" {
+    const K = zts.handler_contract.ResponseStatus;
+    try expectStatuses(bound_methods_a, &[_]K{ .{ .known = 200 }, .{ .known = 201 }, .{ .known = 404 } });
+}
+
+test "prove-behavior: a changed arm status of a bound match is breaking" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, bound_methods_a, bound_methods_status);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+    try std.testing.expectEqual(@as(u32, 2), counts.preserved);
+    try std.testing.expectEqual(@as(u32, 1), counts.response_changed);
+}
+
+test "prove-behavior: a changed arm pattern of a bound match is breaking" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, bound_methods_a, bound_methods_put);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+    try std.testing.expectEqual(@as(u32, 1), counts.preserved);
+    try std.testing.expectEqual(@as(u32, 2), counts.removed);
+    try std.testing.expectEqual(@as(u32, 2), counts.added);
+}
+
+test "prove-behavior: a status chosen by a bound match is breaking" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, bound_status_get_200, bound_status_get_404);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+}
+
+test "prove-behavior: a module call that moves between arms of a bound match is breaking" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, bound_call_in_get, bound_call_in_default);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+}
+
+test "prove-behavior: a bound match that is never returned still forks its module calls" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, bound_never_returned_a, bound_never_returned_b);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+}
+
+test "contract: a bound match whose name is written or reassigned has an unknown status" {
+    const K = zts.handler_contract.ResponseStatus;
+    try expectStatuses(bound_property_written, &[_]K{ .unknown, .unknown });
+    try expectStatuses(bound_let_reassigned, &[_]K{ .unknown, .unknown });
+    // A closure writes `r` through an upvalue, whose binding key differs from
+    // the declaration's; the write still blocks resolution.
+    try expectStatuses(bound_written_in_closure_returned, &[_]K{ .unknown, .unknown });
+    // An alias or a helper argument shares the object, so a write through it
+    // changes the value of `r`.
+    try expectStatuses(bound_written_through_alias, &[_]K{ .unknown, .unknown });
+    try expectStatuses(bound_passed_to_helper, &[_]K{ .unknown, .unknown });
+}
+
+test "contract: a bound match with only pure arms does not fork" {
+    const K = zts.handler_contract.ResponseStatus;
+    try expectStatuses(bound_pure_arms, &[_]K{.{ .known = 200 }});
+}
+
+test "prove-behavior: bound match controls keep their verdicts" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, bound_methods_a, bound_methods_a);
+    try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, counts.verdict);
+    try std.testing.expectEqual(@as(u32, 3), counts.preserved);
+}
+
 // D-014: every literal `env()` name is secret unless the policy lists it in
 // `env.public`. These tests run the production check path, with the policy as
 // the project would hand it over, and read the verdict the way a user does:
