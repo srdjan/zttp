@@ -157,6 +157,9 @@ pub const Rule = enum(u16) {
     rewrite_peephole_fusion = 7,
     /// A recorded compaction shifted later offsets by one consistent delta.
     rewrite_compaction = 8,
+    /// Every read of a Result value is dominated by an `.ok` guard of the
+    /// right polarity, over a single definition of the binding.
+    result_reads_guarded = 9,
 
     pub fn fromWire(value: u16) ?Rule {
         @setRuntimeSafety(true);
@@ -179,16 +182,18 @@ pub const Rule = enum(u16) {
             .rewrite_peephole_fusion,
             .rewrite_compaction,
             => .translation,
+            .result_reads_guarded => .results,
         };
     }
 };
 
-pub const RuleFamily = enum { totality, translation };
+pub const RuleFamily = enum { totality, translation, results };
 
 /// Proof-IR node tags the kernel can walk.
 ///
-/// Seven, which is what this subset and residual reconstruction need: six
-/// totality shapes and one unresolved capability call.
+/// Seven tags for totality and residual reconstruction (six totality shapes and
+/// one unresolved capability call), then six result-event tags. The result tags
+/// carry a binding ordinal in `aux` for the `results_checked` rule.
 pub const NodeTag = enum(u16) {
     function = 1,
     sequence = 2,
@@ -204,6 +209,18 @@ pub const NodeTag = enum(u16) {
     /// producer's list of them.
     capability_call = 7,
     // Wire ordinal 8 is retired with protected-ledger invariants.
+    /// `const b = <Result export call>`. `aux` is the binding ordinal.
+    result_def = 9,
+    /// The `if` condition is exactly `b.ok`. `aux` is the binding ordinal.
+    result_guard_ok = 10,
+    /// The `if` condition is exactly `!b.ok`. `aux` is the binding ordinal.
+    result_guard_err = 11,
+    /// A read of `.value` or `.unwrap` on binding `aux`.
+    result_read_ok = 12,
+    /// A read of `.error` or `.errors` on binding `aux`.
+    result_read_err = 13,
+    /// Any other use of binding `aux`. The kernel refuses it.
+    result_escape = 14,
 
     pub fn fromWire(value: u16) ?NodeTag {
         @setRuntimeSafety(true);
@@ -215,7 +232,17 @@ pub const NodeTag = enum(u16) {
     /// to smuggle data past the decoder.
     pub fn usesAux(self: NodeTag) bool {
         @setRuntimeSafety(true);
-        return self == .capability_call;
+        return switch (self) {
+            .capability_call,
+            .result_def,
+            .result_guard_ok,
+            .result_guard_err,
+            .result_read_ok,
+            .result_read_err,
+            .result_escape,
+            => true,
+            .function, .sequence, .branch, .loop_node, .return_node, .plain => false,
+        };
     }
 };
 
@@ -247,10 +274,13 @@ test "wire decoders refuse values outside the alphabet" {
     try std.testing.expectEqual(@as(?ProofSystem, null), ProofSystem.fromWire(2));
     try std.testing.expectEqual(@as(?Property, null), Property.fromWire(0));
     try std.testing.expectEqual(@as(?Property, null), Property.fromWire(9));
-    try std.testing.expectEqual(@as(?Rule, null), Rule.fromWire(9));
+    try std.testing.expectEqual(@as(?Rule, .result_reads_guarded), Rule.fromWire(9));
+    try std.testing.expectEqual(@as(?Rule, null), Rule.fromWire(10));
     try std.testing.expectEqual(@as(?NodeTag, .capability_call), NodeTag.fromWire(7));
     try std.testing.expectEqual(@as(?NodeTag, null), NodeTag.fromWire(8));
-    try std.testing.expectEqual(@as(?NodeTag, null), NodeTag.fromWire(9));
+    try std.testing.expectEqual(@as(?NodeTag, .result_def), NodeTag.fromWire(9));
+    try std.testing.expectEqual(@as(?NodeTag, .result_escape), NodeTag.fromWire(14));
+    try std.testing.expectEqual(@as(?NodeTag, null), NodeTag.fromWire(15));
     try std.testing.expectEqual(@as(?TrustReason, null), TrustReason.fromWire(6));
 }
 
@@ -314,4 +344,28 @@ test "rule family is stated for every rule" {
         Rule.rewrite_peephole_fusion,
         Rule.rewrite_compaction,
     }) |rule| try std.testing.expectEqual(RuleFamily.translation, rule.family());
+}
+
+test "the result rule is in the results family" {
+    try std.testing.expectEqual(RuleFamily.results, Rule.result_reads_guarded.family());
+}
+
+test "only the capability call and the six result tags carry an aux ordinal" {
+    inline for (.{
+        NodeTag.capability_call,
+        NodeTag.result_def,
+        NodeTag.result_guard_ok,
+        NodeTag.result_guard_err,
+        NodeTag.result_read_ok,
+        NodeTag.result_read_err,
+        NodeTag.result_escape,
+    }) |tag| try std.testing.expect(tag.usesAux());
+    inline for (.{
+        NodeTag.function,
+        NodeTag.sequence,
+        NodeTag.branch,
+        NodeTag.loop_node,
+        NodeTag.return_node,
+        NodeTag.plain,
+    }) |tag| try std.testing.expect(!tag.usesAux());
 }

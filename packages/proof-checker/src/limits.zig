@@ -38,6 +38,9 @@ pub const Limits = struct {
     /// Deepest proof-IR walk. The subset has no back edges, so a real handler
     /// is far below this; the bound exists for a producer that lies.
     max_depth: u16 = 256,
+    /// Distinct Result bindings a certificate may name. A binding ordinal at or
+    /// above this bound is refused rather than partly checked.
+    max_result_bindings: u16 = 64,
     /// Total unit-work budget across decoding and checking.
     max_work: u64 = 8_000_000,
 

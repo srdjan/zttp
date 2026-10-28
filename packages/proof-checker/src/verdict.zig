@@ -178,6 +178,11 @@ pub const ReasonCode = enum(u16) {
     trusted_edge_undeclared = 1508,
     evidence_edge_invalid = 1509,
     proof_node_parent_mismatch = 1510,
+    result_read_unguarded = 1511,
+    result_escape_present = 1512,
+    result_binding_redefined = 1513,
+    result_guard_malformed = 1514,
+    result_binding_limit = 1515,
 
     // translation
     witness_missing = 1601,

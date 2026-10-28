@@ -515,8 +515,17 @@ test "the compiler and the kernel agree on the proof-IR alphabet" {
     // The kernel's alphabet may run ahead of the compiler's while a producer
     // side is being built, but only by members named here. A tag the kernel
     // gained that nobody wrote down is the drift this test exists to catch.
+    // v0.26.0 C2b teaches the compiler the six Result event tags.
+    const kernel_ahead = [_]ps.NodeTag{
+        .result_def,
+        .result_guard_ok,
+        .result_guard_err,
+        .result_read_ok,
+        .result_read_err,
+        .result_escape,
+    };
     try testing.expectEqual(
-        @typeInfo(zts.ProofIrTag).@"enum".field_names.len,
+        @typeInfo(zts.ProofIrTag).@"enum".field_names.len + kernel_ahead.len,
         @typeInfo(ps.NodeTag).@"enum".field_names.len,
     );
 

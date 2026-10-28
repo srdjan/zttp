@@ -23,6 +23,18 @@ const Policy = policy_mod.Policy;
 const Rejection = verdict.Rejection;
 const SemanticState = verdict.SemanticState;
 
+/// Result bindings the results pass can track. The policy bound
+/// `max_result_bindings` may only lower this.
+const max_tracked_results = 64;
+
+const ResultsFailure = struct { code: verdict.ReasonCode, node: u32 };
+
+const ResultsVerdict = union(enum) {
+    not_run,
+    passed,
+    failed: ResultsFailure,
+};
+
 /// Scratch the kernel borrows for the totality fold.
 ///
 /// The kernel allocates nothing, so the one array it needs - a bit per proof-IR
@@ -31,7 +43,7 @@ const SemanticState = verdict.SemanticState;
 /// server happens to run startup on.
 pub fn scratchBytes(limits: limits_mod.Limits) usize {
     @setRuntimeSafety(true);
-    return irBitBytes(limits) * 2 + depthBytes(limits) + rangeStackBytes(limits);
+    return irBitBytes(limits) * 3 + depthBytes(limits) + rangeStackBytes(limits);
 }
 
 fn irBitBytes(limits: limits_mod.Limits) usize {
@@ -251,7 +263,7 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
     }
 
     const bit_bytes = irBitBytes(limits);
-    const depth_start = bit_bytes * 2;
+    const depth_start = bit_bytes * 3;
     const range_start = depth_start + depthBytes(limits);
     var session = Session{
         .certificate = certificate,
@@ -260,7 +272,8 @@ pub fn check(inputs: Inputs, policy: Policy) Assessment {
         .solver_results = inputs.solver_results,
         .budget = &budget,
         .total = BitSet.init(inputs.scratch[0..bit_bytes]),
-        .declared = BitSet.init(inputs.scratch[bit_bytes..depth_start]),
+        .declared = BitSet.init(inputs.scratch[bit_bytes .. bit_bytes * 2]),
+        .derived = BitSet.init(inputs.scratch[bit_bytes * 2 .. depth_start]),
         .depths = .{ .bytes = inputs.scratch[depth_start..range_start] },
         .active_ranges = .{ .bytes = inputs.scratch[range_start..] },
     };
@@ -338,6 +351,9 @@ const Session = struct {
     budget: *Budget,
     total: BitSet,
     declared: BitSet,
+    /// Totality folded without `declared`. Only the results pass reads it.
+    derived: BitSet,
+    results: ResultsVerdict = .not_run,
     depths: DepthTable,
     active_ranges: RangeStack,
 
@@ -374,6 +390,7 @@ const Session = struct {
 
         try self.markDeclared();
         try self.foldTotality();
+        if (try self.claimsResultsProof()) self.results = try self.checkResults();
 
         if (try self.checkTranslation()) |rejection| return rejection;
 
@@ -678,6 +695,13 @@ const Session = struct {
                 // A guarded call returns a value; it never returns a Response
                 // from the handler, so it establishes no totality.
                 .loop_node, .plain, .capability_call => false,
+                .result_def,
+                .result_guard_ok,
+                .result_guard_err,
+                .result_read_ok,
+                .result_read_err,
+                .result_escape,
+                => false,
             };
             self.total.set(index, value or self.declared.get(index));
         }
@@ -717,7 +741,272 @@ const Session = struct {
                 null,
             .loop_node => .loop_never_total,
             .function, .plain, .capability_call => null,
+            .result_def,
+            .result_guard_ok,
+            .result_guard_err,
+            .result_read_ok,
+            .result_read_err,
+            .result_escape,
+            => null,
         };
+    }
+
+    /// Whether a `proved` edge cites a results rule on the results obligation.
+    /// The pass runs only for such a claim, so a certificate that makes none
+    /// pays nothing for it.
+    fn claimsResultsProof(self: *Session) SessionError!bool {
+        @setRuntimeSafety(true);
+        var index: u32 = 0;
+        while (index < self.certificate.evidence.len()) : (index += 1) {
+            try self.budget.spend(1);
+            const entry = try self.certificate.evidence.get(index);
+            if (entry.edge != .proved) continue;
+            const rule = entry.rule orelse continue;
+            if (rule.family() != .results) continue;
+            if (self.certificate.obligations.len() <= entry.obligation_index) continue;
+            const obligation = try self.certificate.obligations.get(entry.obligation_index);
+            if (obligation.property == .results_checked) return true;
+        }
+        return false;
+    }
+
+    /// Totality again, without the nodes a trusted edge declares total. The
+    /// results pass must not accept a producer's word that an arm returns.
+    fn foldDerivedTotality(self: *Session) SessionError!void {
+        @setRuntimeSafety(true);
+        var index: u32 = self.certificate.ir.len();
+        while (index > 0) {
+            index -= 1;
+            try self.budget.spend(1);
+            const node = try self.certificate.ir.get(index);
+            const value = switch (node.tag) {
+                .return_node => true,
+                .function => body: {
+                    if (node.child_count == 0) break :body false;
+                    const first = try self.certificate.ir.get(node.first_child);
+                    break :body first.tag != .function and self.derived.get(first.id);
+                },
+                .sequence => try self.anyDerived(node),
+                .branch => node.child_count == 2 and try self.allDerived(node),
+                .loop_node,
+                .plain,
+                .capability_call,
+                .result_def,
+                .result_guard_ok,
+                .result_guard_err,
+                .result_read_ok,
+                .result_read_err,
+                .result_escape,
+                => false,
+            };
+            self.derived.set(index, value);
+        }
+    }
+
+    fn anyDerived(self: *Session, node: cert_mod.IrNode) SessionError!bool {
+        @setRuntimeSafety(true);
+        var i: u32 = 0;
+        while (i < node.child_count) : (i += 1) {
+            const member = try self.certificate.ir.get(node.first_child + i);
+            if (member.tag != .function and self.derived.get(member.id)) return true;
+        }
+        return false;
+    }
+
+    fn allDerived(self: *Session, node: cert_mod.IrNode) SessionError!bool {
+        @setRuntimeSafety(true);
+        if (node.child_count == 0) return false;
+        var i: u32 = 0;
+        while (i < node.child_count) : (i += 1) {
+            const member = try self.certificate.ir.get(node.first_child + i);
+            if (member.tag == .function or !self.derived.get(member.id)) return false;
+        }
+        return true;
+    }
+
+    fn resultsProved(self: *Session) bool {
+        @setRuntimeSafety(true);
+        return switch (self.results) {
+            .passed => true,
+            .not_run, .failed => false,
+        };
+    }
+
+    fn resultsFailed(code: verdict.ReasonCode, node: u32) ResultsVerdict {
+        @setRuntimeSafety(true);
+        return .{ .failed = .{ .code = code, .node = node } };
+    }
+
+    /// Re-derive `results_checked` from the result events in the proof IR.
+    ///
+    /// A read of a Result value must be dominated by an `.ok` guard of the
+    /// right polarity, over a binding with one definition. The pass refuses
+    /// every shape it cannot express: an escaping use, a second definition, a
+    /// malformed guard, and a read that only a guard outside its function
+    /// covers.
+    fn checkResults(self: *Session) SessionError!ResultsVerdict {
+        @setRuntimeSafety(true);
+        try self.foldDerivedTotality();
+        const count = self.certificate.ir.len();
+        var defined = @as([max_tracked_results]bool, @splat(false));
+        const bound = @min(self.policy.limits.max_result_bindings, defined.len);
+
+        var index: u32 = 0;
+        while (index < count) : (index += 1) {
+            try self.budget.spend(1);
+            const node = try self.certificate.ir.get(index);
+            switch (node.tag) {
+                .result_escape => return resultsFailed(.result_escape_present, index),
+                .result_def, .result_guard_ok, .result_guard_err, .result_read_ok, .result_read_err => {
+                    if (node.aux >= bound) return resultsFailed(.result_binding_limit, index);
+                },
+                .function, .sequence, .branch, .loop_node, .return_node, .plain, .capability_call => {},
+            }
+            switch (node.tag) {
+                .result_def => {
+                    if (defined[node.aux]) return resultsFailed(.result_binding_redefined, index);
+                    defined[node.aux] = true;
+                },
+                .result_guard_ok, .result_guard_err => {
+                    if (!try self.guardWellFormed(node)) return resultsFailed(.result_guard_malformed, index);
+                },
+                .result_read_ok,
+                .result_read_err,
+                .result_escape,
+                .function,
+                .sequence,
+                .branch,
+                .loop_node,
+                .return_node,
+                .plain,
+                .capability_call,
+                => {},
+            }
+        }
+
+        index = 0;
+        while (index < count) : (index += 1) {
+            try self.budget.spend(1);
+            const node = try self.certificate.ir.get(index);
+            if (node.tag != .result_read_ok and node.tag != .result_read_err) continue;
+            if (!defined[node.aux]) return resultsFailed(.result_read_unguarded, index);
+            if (!try self.readGuarded(node)) return resultsFailed(.result_read_unguarded, index);
+        }
+        return .passed;
+    }
+
+    /// A guard is the first of exactly two children of a sequence, and the
+    /// second child is the branch it tests.
+    fn guardWellFormed(self: *Session, guard: cert_mod.IrNode) SessionError!bool {
+        @setRuntimeSafety(true);
+        const parent = try self.certificate.ir.get(guard.parent);
+        if (parent.tag != .sequence or parent.child_count != 2 or parent.first_child != guard.id) return false;
+        const branch = try self.certificate.ir.get(guard.id + 1);
+        return branch.tag == .branch;
+    }
+
+    /// Walk from a read to the enclosing function. The read is covered when an
+    /// ancestor branch is an arm of a guard on the same binding, or when an
+    /// earlier statement is a guard whose then arm always returns. The walk
+    /// stops at a function: a closure never inherits a check from outside.
+    fn readGuarded(self: *Session, read: cert_mod.IrNode) SessionError!bool {
+        @setRuntimeSafety(true);
+        var current = read;
+        var steps: u32 = 0;
+        while (current.id != 0) {
+            try self.budget.spend(1);
+            steps += 1;
+            if (steps > self.policy.limits.max_depth) return false;
+            const parent = try self.certificate.ir.get(current.parent);
+            switch (parent.tag) {
+                .function => return false,
+                .branch => if (try self.armCovers(parent, current, read)) return true,
+                .sequence => if (try self.earlierGuardCovers(parent, current, read)) return true,
+                .loop_node,
+                .return_node,
+                .plain,
+                .capability_call,
+                .result_def,
+                .result_guard_ok,
+                .result_guard_err,
+                .result_read_ok,
+                .result_read_err,
+                .result_escape,
+                => {},
+            }
+            current = parent;
+        }
+        return false;
+    }
+
+    fn armCovers(
+        self: *Session,
+        branch: cert_mod.IrNode,
+        arm: cert_mod.IrNode,
+        read: cert_mod.IrNode,
+    ) SessionError!bool {
+        @setRuntimeSafety(true);
+        if (branch.child_count != 2) return false;
+        const wrapper = try self.certificate.ir.get(branch.parent);
+        if (wrapper.tag != .sequence or wrapper.child_count != 2 or wrapper.first_child + 1 != branch.id) return false;
+        const guard = try self.certificate.ir.get(wrapper.first_child);
+        if (guard.aux != read.aux) return false;
+        const in_then = arm.id == branch.first_child;
+        return switch (guard.tag) {
+            .result_guard_ok => (read.tag == .result_read_ok) == in_then,
+            .result_guard_err => (read.tag == .result_read_ok) != in_then,
+            .function,
+            .sequence,
+            .branch,
+            .loop_node,
+            .return_node,
+            .plain,
+            .capability_call,
+            .result_def,
+            .result_read_ok,
+            .result_read_err,
+            .result_escape,
+            => false,
+        };
+    }
+
+    fn earlierGuardCovers(
+        self: *Session,
+        sequence: cert_mod.IrNode,
+        current: cert_mod.IrNode,
+        read: cert_mod.IrNode,
+    ) SessionError!bool {
+        @setRuntimeSafety(true);
+        var id = sequence.first_child;
+        while (id < current.id) : (id += 1) {
+            try self.budget.spend(1);
+            const sibling = try self.certificate.ir.get(id);
+            if (sibling.tag != .sequence or sibling.child_count != 2) continue;
+            const guard = try self.certificate.ir.get(sibling.first_child);
+            if (guard.aux != read.aux) continue;
+            const covers_ok = switch (guard.tag) {
+                .result_guard_err => true,
+                .result_guard_ok => false,
+                .function,
+                .sequence,
+                .branch,
+                .loop_node,
+                .return_node,
+                .plain,
+                .capability_call,
+                .result_def,
+                .result_read_ok,
+                .result_read_err,
+                .result_escape,
+                => continue,
+            };
+            if (covers_ok != (read.tag == .result_read_ok)) continue;
+            const branch = try self.certificate.ir.get(sibling.first_child + 1);
+            if (branch.tag != .branch or branch.child_count == 0) continue;
+            const then_arm = try self.certificate.ir.get(branch.first_child);
+            if (then_arm.tag != .function and self.derived.get(then_arm.id)) return true;
+        }
+        return false;
     }
 
     /// Relate the proof IR to the final bytecode.
@@ -870,13 +1159,29 @@ const Session = struct {
                     return .{ .rejected = reject(.solver, .solver_inconclusive, .{ .property = property }) };
                 }
             },
-            .proved => |rule| {
-                const node = try self.certificate.ir.get(entry.node_id);
-                const derived = (try self.ruleAt(node)) orelse
-                    return .{ .rejected = reject(.evidence_check, .rule_premise_unmet, .{ .rule = rule }) };
-                if (derived != rule) {
-                    return .{ .rejected = reject(.evidence_check, .rule_premise_unmet, .{ .rule = rule }) };
-                }
+            .proved => |rule| switch (rule.family()) {
+                .totality => {
+                    const node = try self.certificate.ir.get(entry.node_id);
+                    const derived = (try self.ruleAt(node)) orelse
+                        return .{ .rejected = reject(.evidence_check, .rule_premise_unmet, .{ .rule = rule }) };
+                    if (derived != rule) {
+                        return .{ .rejected = reject(.evidence_check, .rule_premise_unmet, .{ .rule = rule }) };
+                    }
+                },
+                .results => switch (self.results) {
+                    .passed => {},
+                    .not_run => return .{ .rejected = reject(.evidence_check, .rule_premise_unmet, .{ .rule = rule }) },
+                    .failed => |failure| return .{ .rejected = .{
+                        .state = .integrity_verified,
+                        .rejection = .{
+                            .stage = .evidence_check,
+                            .code = failure.code,
+                            .subject = .{ .ir_node = failure.node },
+                            .recertifiable = false,
+                        },
+                    } },
+                },
+                .translation => return .{ .rejected = reject(.evidence_check, .evidence_edge_invalid, .{ .property = property }) },
             },
             .translation_validated => |rule| {
                 if (self.certificate.translation.len() == 0) {
@@ -929,6 +1234,7 @@ const Session = struct {
         // annotations. Every current trusted family supports totality, so its
         // declared grade caps that property before policy evaluation.
         const totality_slot = @backingInt(ps.Property.response_total) - 1;
+        const results_slot = @backingInt(ps.Property.results_checked) - 1;
         var has_opcode_dependency = false;
         var trusted_index: u32 = 0;
         while (trusted_index < self.certificate.trusted.len()) : (trusted_index += 1) {
@@ -945,6 +1251,12 @@ const Session = struct {
                 verdict.AssuranceGrade.weakest(existing, edge.grade)
             else
                 edge.grade;
+            // The IR-to-bytecode gap lies under results as it lies under
+            // totality, so a proved results edge ends at the same grade. A
+            // tested edge is already weaker and keeps its grade.
+            if (grades[results_slot]) |existing| {
+                if (existing == .proved) grades[results_slot] = edge.grade;
+            }
         }
         // Bytecode opcode meaning is unmodeled, so any claim on totality
         // depends on it: translation witnesses, a graded totality edge, or a
@@ -956,6 +1268,11 @@ const Session = struct {
             self.policy.requires(.response_total)))
         {
             return reject(.evidence_check, .trusted_edge_undeclared, .{ .property = .response_total });
+        }
+        // A proved results claim rests on the same unmodeled opcode meaning, so
+        // a certificate that makes one without the opcode edge hides it too.
+        if (!has_opcode_dependency and self.results != .not_run) {
+            return reject(.evidence_check, .trusted_edge_undeclared, .{ .property = .results_checked });
         }
 
         // Totality is the one obligation the consumer settles for itself. A
@@ -1062,6 +1379,10 @@ const Session = struct {
             if (self.policy.requires(obligation.property)) count += 1;
         }
         if (self.policy.requires(.response_total)) count += self.certificate.trusted.len();
+        // The same inventory caps the results grade. Count it once.
+        if (!self.policy.requires(.response_total) and self.policy.requires(.results_checked) and self.resultsProved()) {
+            count += self.certificate.trusted.len();
+        }
         return count;
     }
 
@@ -1090,7 +1411,8 @@ fn classify(entry: cert_mod.Evidence, property: ps.Property) ?Claim {
     @setRuntimeSafety(true);
     return switch (entry.edge) {
         .proved => if (entry.rule) |rule|
-            if (rule.family() == .totality and property == .response_total) .{ .proved = rule } else null
+            if ((rule.family() == .totality and property == .response_total) or
+                (rule.family() == .results and property == .results_checked)) .{ .proved = rule } else null
         else
             null,
         .translation_validated => if (entry.rule) |rule|
@@ -3258,20 +3580,46 @@ test "scratch smaller than the kernel needs is refused rather than truncated" {
     try testing.expect(!result.rejection().?.recertifiable);
 }
 
-test "scratchBytes covers two bits per node at the configured bound" {
+test "scratchBytes covers three bits per node at the configured bound" {
     const needed = scratchBytes(.{ .max_ir_nodes = 64, .max_witnesses = 4 });
-    try testing.expectEqual(@as(usize, 176), needed);
-    // Defaults: 65536 nodes give 8192 bytes per bit array (two arrays), 2 bytes of
+    try testing.expectEqual(@as(usize, 184), needed);
+    // Defaults: 65536 nodes give 8192 bytes per bit array (three arrays), 2 bytes of
     // depth per node, and 8 bytes of range stack per witness (65536 witnesses).
-    try testing.expectEqual(@as(usize, 8192 * 2 + 65_536 * 2 + 65_536 * 8), scratchBytes(.{}));
+    try testing.expectEqual(@as(usize, 8192 * 3 + 65_536 * 2 + 65_536 * 8), scratchBytes(.{}));
 }
 
-const ReasonProbe = enum { root_mismatch, zero_root, trailing_member, missing_evidence, fabricated_totality };
+const ReasonProbe = enum {
+    root_mismatch,
+    zero_root,
+    trailing_member,
+    missing_evidence,
+    fabricated_totality,
+    results_unguarded,
+    results_escape,
+    results_redefined,
+    results_guard_malformed,
+    results_binding_limit,
+};
 
 fn runReasonProbe(probe: ReasonProbe) !Assessment {
     @setRuntimeSafety(true);
+    switch (probe) {
+        .results_unguarded => return runResultsProbe(.unguarded),
+        .results_escape => return runResultsProbe(.escape),
+        .results_redefined => return runResultsProbe(.redefined),
+        .results_guard_malformed => return runResultsProbe(.guard_malformed),
+        .results_binding_limit => return runResultsProbe(.binding_limit),
+        // exhaustive: the remaining probes mutate the minimal fixture below.
+        else => {},
+    }
     var fixture = try test_support.build();
     switch (probe) {
+        .results_unguarded,
+        .results_escape,
+        .results_redefined,
+        .results_guard_malformed,
+        .results_binding_limit,
+        => unreachable,
         .root_mismatch => {
             var parts = fixture.parts();
             parts.identity.executable_root = test_support.digest(0x71);
@@ -3317,6 +3665,11 @@ fn reasonAllowlist(code: verdict.ReasonCode) ?[]const u8 {
         .graph_member_extra,
         .obligation_without_evidence,
         .fabricated_property,
+        .result_read_unguarded,
+        .result_escape_present,
+        .result_binding_redefined,
+        .result_guard_malformed,
+        .result_binding_limit,
         => null,
 
         .certificate_too_large,
@@ -3388,6 +3741,11 @@ test "every reason code has a public-check probe or an explained producer" {
         .{ .code = .graph_member_extra, .stage = .artifact_binding, .input = .trailing_member },
         .{ .code = .obligation_without_evidence, .stage = .evidence_check, .input = .missing_evidence },
         .{ .code = .fabricated_property, .stage = .evidence_check, .input = .fabricated_totality },
+        .{ .code = .result_read_unguarded, .stage = .evidence_check, .input = .results_unguarded },
+        .{ .code = .result_escape_present, .stage = .evidence_check, .input = .results_escape },
+        .{ .code = .result_binding_redefined, .stage = .evidence_check, .input = .results_redefined },
+        .{ .code = .result_guard_malformed, .stage = .evidence_check, .input = .results_guard_malformed },
+        .{ .code = .result_binding_limit, .stage = .evidence_check, .input = .results_binding_limit },
     };
     var probed = std.EnumSet(verdict.ReasonCode).empty;
     for (probes) |probe| {
@@ -3404,4 +3762,396 @@ test "every reason code has a public-check probe or an explained producer" {
             try testing.expect(probed.contains(code));
         }
     }
+}
+
+const ResultRow = struct { tag: ps.NodeTag, parent: u32, aux: u32 = 0 };
+
+const proved_results_edge = cert_mod.Evidence{
+    .obligation_index = 1,
+    .edge = .proved,
+    .rule = .result_reads_guarded,
+    .node_id = 0,
+    .aux = 0,
+};
+
+/// Check a certificate whose proof IR is `rows` and whose results edge is
+/// `results_edge`. Row 0 is the handler function and row 1 is its body
+/// sequence. Children of one parent must be adjacent rows, in source order.
+fn checkResultsRows(rows: []const ResultRow, results_edge: cert_mod.Evidence) !Assessment {
+    @setRuntimeSafety(true);
+    return checkResultsRowsDeclaring(rows, results_edge, null);
+}
+
+/// As `checkResultsRows`, and when `declared` names a node, the certificate
+/// also carries a disclosed trusted edge that declares that node total.
+fn checkResultsRowsDeclaring(rows: []const ResultRow, results_edge: cert_mod.Evidence, declared: ?u32) !Assessment {
+    @setRuntimeSafety(true);
+    return checkResultsCertificate(rows, results_edge, declared, .{});
+}
+
+const ResultsCertificateOptions = struct {
+    opcode_edge: bool = true,
+    totality_proved: bool = true,
+    policy: Policy = policy_mod.production,
+};
+
+fn checkResultsCertificate(
+    rows: []const ResultRow,
+    results_edge: cert_mod.Evidence,
+    declared: ?u32,
+    options: ResultsCertificateOptions,
+) !Assessment {
+    @setRuntimeSafety(true);
+    var nodes: [32]cert_mod.IrNode = undefined;
+    for (rows, 0..) |row, i| {
+        var first_child: u32 = 0;
+        var child_count: u16 = 0;
+        for (rows[1..], 1..) |other, j| {
+            if (other.parent != i) continue;
+            if (child_count == 0) first_child = @intCast(j);
+            child_count += 1;
+        }
+        nodes[i] = .{
+            .id = @intCast(i),
+            .tag = row.tag,
+            .is_handler = i == 0,
+            .parent = row.parent,
+            .first_child = first_child,
+            .child_count = child_count,
+            .digest = test_support.digest(@intCast(20 + i)),
+            .aux = row.aux,
+        };
+    }
+    const ir = nodes[0..rows.len];
+    var fixture = try test_support.build();
+    var evidence: [9]cert_mod.Evidence = undefined;
+    evidence[0] = if (options.totality_proved)
+        .{ .obligation_index = 0, .edge = .proved, .rule = .sequence_member_total, .node_id = 1, .aux = 0 }
+    else
+        .{ .obligation_index = 0, .edge = .not_established, .rule = null, .node_id = 0, .aux = 0 };
+    evidence[1] = results_edge;
+    @memcpy(evidence[2..8], fixture.evidence[4..10]);
+    var evidence_len: usize = 8;
+    var trusted: [2]cert_mod.TrustedEdge = .{
+        .{ .family = .opcode, .member_id = 0, .reason = .not_modeled, .grade = .trusted },
+        .{ .family = .node, .member_id = 0, .reason = .not_modeled, .grade = .trusted },
+    };
+    const trusted_start: usize = if (options.opcode_edge) 0 else 1;
+    var trusted_len: usize = 1;
+    if (declared) |node_id| {
+        evidence[8] = .{ .obligation_index = 0, .edge = .trusted, .rule = null, .node_id = node_id, .aux = 0 };
+        evidence_len = 9;
+        trusted[1].member_id = @intCast(node_id);
+        trusted_len = 2;
+    }
+    var parts = fixture.parts();
+    parts.ir = ir;
+    parts.identity.ir_root = cert_mod.irRootFromNodes(ir);
+    parts.translation = &.{};
+    parts.rewrites = &.{};
+    parts.evidence = evidence[0..evidence_len];
+    parts.trusted = trusted[trusted_start..trusted_len];
+    for (&fixture.members) |*member| {
+        if (member.kind == .proof_ir) member.digest = parts.identity.ir_root;
+    }
+    try fixture.encodeParts(parts);
+    return check(fixture.inputs(), options.policy);
+}
+
+fn expectResultsAccepted(result: Assessment) !void {
+    @setRuntimeSafety(true);
+    try testing.expect(result.rejection() == null);
+    try testing.expectEqual(SemanticState.policy_accepted, result.semantic());
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.properties.gradeFor(.results_checked));
+}
+
+/// `const r = ...; if (!r.ok) { return } ...; r.value; return`
+const honest_rows = [_]ResultRow{
+    .{ .tag = .function, .parent = 0 },
+    .{ .tag = .sequence, .parent = 0 },
+    .{ .tag = .plain, .parent = 1 },
+    .{ .tag = .sequence, .parent = 1 },
+    .{ .tag = .plain, .parent = 1 },
+    .{ .tag = .return_node, .parent = 1 },
+    .{ .tag = .result_def, .parent = 2, .aux = 1 },
+    .{ .tag = .result_guard_err, .parent = 3, .aux = 1 },
+    .{ .tag = .branch, .parent = 3 },
+    .{ .tag = .result_read_ok, .parent = 4, .aux = 1 },
+    .{ .tag = .return_node, .parent = 8 },
+    .{ .tag = .plain, .parent = 8 },
+};
+
+/// `const r = ...; if (<guard>) { <then> } else { <else> }; return`, with the
+/// read in the then arm (holder row 8) or the else arm (holder row 9).
+fn armRows(guard: ps.NodeTag, read: ps.NodeTag, in_then: bool) [11]ResultRow {
+    @setRuntimeSafety(true);
+    return .{
+        .{ .tag = .function, .parent = 0 },
+        .{ .tag = .sequence, .parent = 0 },
+        .{ .tag = .plain, .parent = 1 },
+        .{ .tag = .sequence, .parent = 1 },
+        .{ .tag = .return_node, .parent = 1 },
+        .{ .tag = .result_def, .parent = 2, .aux = 1 },
+        .{ .tag = guard, .parent = 3, .aux = 1 },
+        .{ .tag = .branch, .parent = 3 },
+        .{ .tag = .plain, .parent = 7 },
+        .{ .tag = .plain, .parent = 7 },
+        .{ .tag = read, .parent = if (in_then) 8 else 9, .aux = 1 },
+    };
+}
+
+test "results fixture 13: an err guard whose then arm returns covers a later value read" {
+    try expectResultsAccepted(try checkResultsRows(&honest_rows, proved_results_edge));
+}
+
+test "results fixture 1: a read with no guard is refused" {
+    var rows = honest_rows;
+    rows[7] = .{ .tag = .plain, .parent = 3 };
+    const result = try checkResultsRows(&rows, proved_results_edge);
+    try expectAt(result, .evidence_check, .result_read_unguarded);
+    try testing.expect(!result.rejection().?.recertifiable);
+    try testing.expectEqual(verdict.Subject{ .ir_node = 9 }, result.rejection().?.subject);
+}
+
+test "results fixture 2: a guard on another binding does not cover the read" {
+    var rows = honest_rows;
+    rows[7].aux = 2;
+    try expectAt(try checkResultsRows(&rows, proved_results_edge), .evidence_check, .result_read_unguarded);
+    var arm = armRows(.result_guard_ok, .result_read_ok, true);
+    arm[6].aux = 2;
+    try expectAt(try checkResultsRows(&arm, proved_results_edge), .evidence_check, .result_read_unguarded);
+}
+
+test "results fixture 3: a positive guard does not cover a read after the if" {
+    var rows = honest_rows;
+    rows[7].tag = .result_guard_ok;
+    try expectAt(try checkResultsRows(&rows, proved_results_edge), .evidence_check, .result_read_unguarded);
+}
+
+test "results fixture 4: an err guard whose then arm may fall through does not cover a later read" {
+    var rows = honest_rows;
+    rows[10].tag = .plain;
+    try expectAt(try checkResultsRows(&rows, proved_results_edge), .evidence_check, .result_read_unguarded);
+}
+
+test "results fixture 5: an escaping use refuses the pass beside a guarded read" {
+    var rows = honest_rows;
+    rows[11].tag = .result_escape;
+    try expectAt(try checkResultsRows(&rows, proved_results_edge), .evidence_check, .result_escape_present);
+}
+
+test "results fixture 6: a second definition of one binding is refused" {
+    var rows = honest_rows;
+    rows[11].tag = .result_def;
+    rows[11].aux = 1;
+    try expectAt(try checkResultsRows(&rows, proved_results_edge), .evidence_check, .result_binding_redefined);
+}
+
+test "results fixture 7: a closure boundary between guard and read refuses the read" {
+    var rows = honest_rows;
+    rows[4].tag = .function;
+    try expectAt(try checkResultsRows(&rows, proved_results_edge), .evidence_check, .result_read_unguarded);
+}
+
+test "results fixture 8: a guard inside a loop body does not cover a read after the loop" {
+    const after_loop = [_]ResultRow{
+        .{ .tag = .function, .parent = 0 },
+        .{ .tag = .sequence, .parent = 0 },
+        .{ .tag = .plain, .parent = 1 },
+        .{ .tag = .loop_node, .parent = 1 },
+        .{ .tag = .plain, .parent = 1 },
+        .{ .tag = .return_node, .parent = 1 },
+        .{ .tag = .result_def, .parent = 2, .aux = 1 },
+        .{ .tag = .sequence, .parent = 3 },
+        .{ .tag = .result_read_ok, .parent = 4, .aux = 1 },
+        .{ .tag = .sequence, .parent = 7 },
+        .{ .tag = .result_guard_err, .parent = 9, .aux = 1 },
+        .{ .tag = .branch, .parent = 9 },
+        .{ .tag = .return_node, .parent = 11 },
+        .{ .tag = .plain, .parent = 11 },
+    };
+    try expectAt(try checkResultsRows(&after_loop, proved_results_edge), .evidence_check, .result_read_unguarded);
+    const in_loop = [_]ResultRow{
+        .{ .tag = .function, .parent = 0 },
+        .{ .tag = .sequence, .parent = 0 },
+        .{ .tag = .plain, .parent = 1 },
+        .{ .tag = .loop_node, .parent = 1 },
+        .{ .tag = .return_node, .parent = 1 },
+        .{ .tag = .result_def, .parent = 2, .aux = 1 },
+        .{ .tag = .sequence, .parent = 3 },
+        .{ .tag = .sequence, .parent = 6 },
+        .{ .tag = .plain, .parent = 6 },
+        .{ .tag = .result_guard_err, .parent = 7, .aux = 1 },
+        .{ .tag = .branch, .parent = 7 },
+        .{ .tag = .result_read_ok, .parent = 8, .aux = 1 },
+        .{ .tag = .return_node, .parent = 10 },
+        .{ .tag = .plain, .parent = 10 },
+    };
+    try expectResultsAccepted(try checkResultsRows(&in_loop, proved_results_edge));
+}
+
+test "results fixture 9: a swapped polarity does not cover the read, and the right one does" {
+    try expectAt(
+        try checkResultsRows(&armRows(.result_guard_ok, .result_read_ok, false), proved_results_edge),
+        .evidence_check,
+        .result_read_unguarded,
+    );
+    try expectAt(
+        try checkResultsRows(&armRows(.result_guard_err, .result_read_ok, true), proved_results_edge),
+        .evidence_check,
+        .result_read_unguarded,
+    );
+    try expectResultsAccepted(try checkResultsRows(&armRows(.result_guard_ok, .result_read_ok, true), proved_results_edge));
+    try expectResultsAccepted(try checkResultsRows(&armRows(.result_guard_err, .result_read_ok, false), proved_results_edge));
+}
+
+test "results fixture 10: a guard outside a two-child sequence ending in a branch is refused" {
+    var not_a_branch = honest_rows;
+    not_a_branch[8].tag = .plain;
+    try expectAt(try checkResultsRows(&not_a_branch, proved_results_edge), .evidence_check, .result_guard_malformed);
+    var not_a_sequence = honest_rows;
+    not_a_sequence[3].tag = .plain;
+    try expectAt(try checkResultsRows(&not_a_sequence, proved_results_edge), .evidence_check, .result_guard_malformed);
+}
+
+test "results fixture 11: a binding ordinal at the bound is refused and one below it is not" {
+    var at_bound = honest_rows;
+    at_bound[6].aux = 64;
+    at_bound[7].aux = 64;
+    at_bound[9].aux = 64;
+    try expectAt(try checkResultsRows(&at_bound, proved_results_edge), .evidence_check, .result_binding_limit);
+    var below_bound = honest_rows;
+    below_bound[6].aux = 63;
+    below_bound[7].aux = 63;
+    below_bound[9].aux = 63;
+    try expectResultsAccepted(try checkResultsRows(&below_bound, proved_results_edge));
+}
+
+test "results fixture 12: a failing pass names the node and is not recertifiable" {
+    var rows = honest_rows;
+    rows[7] = .{ .tag = .plain, .parent = 3 };
+    const result = try checkResultsRows(&rows, proved_results_edge);
+    try testing.expectEqual(verdict.Stage.evidence_check, result.rejection().?.stage);
+    try testing.expectEqual(verdict.ReasonCode.result_read_unguarded, result.rejection().?.code);
+    try testing.expect(!result.rejection().?.recertifiable);
+    try testing.expect(!result.accepted());
+}
+
+test "results fixture 14: a trusted node edge cannot declare an err arm total for the results pass" {
+    var rows = honest_rows;
+    rows[10].tag = .plain;
+    try expectAt(try checkResultsRowsDeclaring(&rows, proved_results_edge, 10), .evidence_check, .result_read_unguarded);
+    try expectResultsAccepted(try checkResultsRowsDeclaring(&honest_rows, proved_results_edge, null));
+}
+
+test "results fixture 15: an error read in the err arm is covered and a value read there is not" {
+    try expectResultsAccepted(try checkResultsRows(&armRows(.result_guard_err, .result_read_err, true), proved_results_edge));
+    try expectAt(
+        try checkResultsRows(&armRows(.result_guard_err, .result_read_ok, true), proved_results_edge),
+        .evidence_check,
+        .result_read_unguarded,
+    );
+}
+
+test "results fixture 16: an error read in the then arm of an ok guard is refused" {
+    try expectAt(
+        try checkResultsRows(&armRows(.result_guard_ok, .result_read_err, true), proved_results_edge),
+        .evidence_check,
+        .result_read_unguarded,
+    );
+    try expectResultsAccepted(try checkResultsRows(&armRows(.result_guard_ok, .result_read_err, false), proved_results_edge));
+}
+
+test "results: an ok guard whose then arm returns covers a later error read" {
+    var rows = honest_rows;
+    rows[7].tag = .result_guard_ok;
+    rows[9].tag = .result_read_err;
+    try expectResultsAccepted(try checkResultsRows(&rows, proved_results_edge));
+    rows[7].tag = .result_guard_err;
+    try expectAt(try checkResultsRows(&rows, proved_results_edge), .evidence_check, .result_read_unguarded);
+}
+
+test "results: a read inside the guarded branch is not covered by its own wrapper" {
+    const inside = [_]ResultRow{
+        .{ .tag = .function, .parent = 0 },
+        .{ .tag = .sequence, .parent = 0 },
+        .{ .tag = .plain, .parent = 1 },
+        .{ .tag = .sequence, .parent = 1 },
+        .{ .tag = .return_node, .parent = 1 },
+        .{ .tag = .result_def, .parent = 2, .aux = 1 },
+        .{ .tag = .result_guard_err, .parent = 3, .aux = 1 },
+        .{ .tag = .branch, .parent = 3 },
+        .{ .tag = .sequence, .parent = 7 },
+        .{ .tag = .plain, .parent = 7 },
+        .{ .tag = .plain, .parent = 8 },
+        .{ .tag = .return_node, .parent = 8 },
+        .{ .tag = .result_read_ok, .parent = 10, .aux = 1 },
+    };
+    try expectAt(try checkResultsRows(&inside, proved_results_edge), .evidence_check, .result_read_unguarded);
+}
+
+test "results: a read of a binding with no definition is refused" {
+    var rows = honest_rows;
+    rows[6].aux = 2;
+    try expectAt(try checkResultsRows(&rows, proved_results_edge), .evidence_check, .result_read_unguarded);
+}
+
+const results_only_requirements = [_]policy_mod.Requirement{
+    .{ .property = .results_checked, .min_grade = .trusted },
+};
+const results_only = Policy{
+    .proof_systems = policy_mod.production.proof_systems,
+    .semantics_epochs = policy_mod.production.semantics_epochs,
+    .required = &results_only_requirements,
+};
+
+test "results: a proved results edge without its opcode edge rejects under a results-only policy" {
+    const result = try checkResultsCertificate(&honest_rows, proved_results_edge, null, .{
+        .opcode_edge = false,
+        .totality_proved = false,
+        .policy = results_only,
+    });
+    try expectAt(result, .evidence_check, .trusted_edge_undeclared);
+    try testing.expectEqual(verdict.Subject{ .property = .results_checked }, result.rejection().?.subject);
+}
+
+test "results: a proved results edge with its opcode edge is accepted at trusted under a results-only policy" {
+    const result = try checkResultsCertificate(&honest_rows, proved_results_edge, null, .{
+        .totality_proved = false,
+        .policy = results_only,
+    });
+    try testing.expect(result.rejection() == null);
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.properties.gradeFor(.results_checked));
+}
+
+test "results: a tested claim is not re-derived in phase 1" {
+    var rows = honest_rows;
+    rows[7] = .{ .tag = .plain, .parent = 3 };
+    const result = try checkResultsRows(&rows, test_support.testedFor(1));
+    try testing.expect(result.rejection() == null);
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, .tested), result.properties.gradeFor(.results_checked));
+}
+
+test "results: the results rule cited on another obligation is an invalid edge" {
+    var edge = proved_results_edge;
+    edge.obligation_index = 0;
+    try expectAt(try checkResultsRows(&honest_rows, edge), .evidence_check, .evidence_edge_invalid);
+}
+
+const ResultsProbe = enum { unguarded, escape, redefined, guard_malformed, binding_limit };
+
+fn runResultsProbe(probe: ResultsProbe) !Assessment {
+    @setRuntimeSafety(true);
+    var rows = honest_rows;
+    switch (probe) {
+        .unguarded => rows[7] = .{ .tag = .plain, .parent = 3 },
+        .escape => rows[11].tag = .result_escape,
+        .redefined => {
+            rows[11].tag = .result_def;
+            rows[11].aux = 1;
+        },
+        .guard_malformed => rows[8].tag = .plain,
+        .binding_limit => rows[6].aux = 64,
+    }
+    return checkResultsRows(&rows, proved_results_edge);
 }

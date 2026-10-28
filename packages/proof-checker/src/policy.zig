@@ -107,11 +107,13 @@ const production_requirements = [_]Requirement{
     // Translation witnesses still depend on the declared opcode relation. The
     // overall theorem is therefore trusted until the kernel models that edge.
     .{ .property = .response_total, .min_grade = .trusted },
-    // These two are disclosed rather than kernel-checked today. The floor
-    // says so out loud instead of implying a proof that does not exist.
+    // The kernel caps a results_checked edge at trusted, as it caps totality,
+    // because the IR-to-bytecode gap lies under both. The floor says so out
+    // loud instead of implying a proof that does not exist. no_secret_leakage
+    // is still disclosed rather than kernel-checked.
     // capability_bounded leaves the floor until the kernel checks it (v0.26.0
     // Decision 10(b)): a producer cannot claim it without an Effects ceiling.
-    .{ .property = .results_checked, .min_grade = .tested },
+    .{ .property = .results_checked, .min_grade = .trusted },
     .{ .property = .no_secret_leakage, .min_grade = .tested },
 };
 
