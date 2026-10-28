@@ -142,6 +142,7 @@ const buildMultiModuleContract = precompile_contract_mod.buildMultiModuleContrac
 const GuardResolver = struct {
     checker: ?*const zts.StrictChecker,
     view: zts.parser.IrView,
+    atoms: *zts.AtomTable,
 
     fn resolve(context: *const anyopaque, node: zts.parser.ir.NodeIndex) ?u32 {
         const self: *const GuardResolver = @ptrCast(@alignCast(context));
@@ -158,7 +159,7 @@ const GuardResolver = struct {
     }
 
     fn resolver(self: *const GuardResolver) zts.ProofResolver {
-        return .{ .context = self, .resolve = resolve };
+        return .{ .context = self, .resolve = resolve, .atoms = self.atoms };
     }
 };
 
@@ -569,6 +570,7 @@ pub fn compileHandler(
         var guard_resolver = GuardResolver{
             .checker = if (resolved.strict_checker) |*checker| checker else null,
             .view = proof_view,
+            .atoms = &atoms,
         };
         proof_evidence = try zts.buildProofEvidence(
             allocator,

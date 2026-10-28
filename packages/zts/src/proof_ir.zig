@@ -26,6 +26,10 @@ const std = @import("std");
 const ir = @import("zts-engine").parser.ir;
 const translation_witness = @import("zts-engine").translation_witness;
 const handler_function_mod = @import("handler_function.zig");
+const module_facts_mod = @import("module_facts.zig");
+const builtin_modules = @import("zts-engine").builtin_modules;
+const engine_object = @import("zts-engine").object;
+const engine_context = @import("zts-engine").context;
 
 const IrView = ir.IrView;
 const NodeIndex = ir.NodeIndex;
@@ -46,15 +50,31 @@ pub const Tag = enum(u16) {
     /// resolve. It contributes nothing to totality and exists so the consumer
     /// can count the guarded operations itself.
     capability_call = 7,
+    /// `const b = <Result export call>`. `aux` is the binding ordinal.
+    result_def = 9,
+    /// The condition of an `if` is exactly `b.ok`.
+    result_guard_ok = 10,
+    /// The condition of an `if` is exactly `!b.ok`.
+    result_guard_err = 11,
+    /// `b.value` or `b.unwrap`, as a member or as a literal computed key.
+    result_read_ok = 12,
+    /// `b.error` or `b.errors`, as a member or as a literal computed key.
+    result_read_err = 13,
+    /// Every other use of a Result binding or of a Result call.
+    result_escape = 14,
 };
 
-/// Mirrors `proof_system.Rule` in the acceptance kernel, totality half.
+/// Mirrors `proof_system.Rule` in the acceptance kernel.
 pub const Rule = enum(u16) {
     return_total = 1,
     branch_both_arms_total = 2,
     sequence_member_total = 3,
     loop_never_total = 4,
+    result_reads_guarded = 9,
 };
+
+/// The most Result bindings the consumer accepts in one program.
+pub const max_result_bindings: u32 = 64;
 
 /// How the lowering learns that a call reaches a guarded capability export.
 ///
@@ -65,6 +85,11 @@ pub const Rule = enum(u16) {
 pub const Resolver = struct {
     context: *const anyopaque,
     resolve: *const fn (*const anyopaque, NodeIndex) ?u32,
+    /// The atom table that names the imports of this parse. A resolver exists
+    /// so that the lowering can classify Result bindings; without a table the
+    /// lowering reads import names from the constant pool, as a standalone
+    /// parse stores them.
+    atoms: ?*engine_context.AtomTable = null,
 
     fn call(self: Resolver, node: NodeIndex) ?u32 {
         return self.resolve(self.context, node);
@@ -90,13 +115,22 @@ pub const ProofIr = struct {
     nodes: []Node,
     /// The node id of the handler function, when the program declares one.
     handler_function: ?u32,
+    /// Whether the lowering classified every Result binding of the program.
+    /// False when no resolver was supplied, when the program holds more than
+    /// `max_result_bindings` bindings, or when an expression nests deeper than
+    /// the event walk reads. A program with this flag false carries no Result
+    /// evidence, and no `proved` results edge may rest on it.
+    results_classified: bool = false,
 
     pub fn deinit(self: *ProofIr) void {
         self.allocator.free(self.nodes);
         self.nodes = &.{};
     }
 
+    /// The node a parser node lowered to. A node with no parser source, such as
+    /// a Result event, has none, so no translation witness attaches to it.
     pub fn nodeFor(self: *const ProofIr, source: NodeIndex) ?u32 {
+        if (source == null_node) return null;
         for (self.nodes) |node| {
             if (node.source == source) return node.id;
         }
@@ -133,11 +167,34 @@ const Tree = struct {
     }
 };
 
+const mb = @import("zts-engine").module_binding;
+
+/// The ambient globals that return a Result. `abi_types.zig` registers each of
+/// them with `result_record`; a test below fails when the two lists differ.
+const result_globals = [_][]const u8{ "requestJson", "requestText" };
+
+const ResultBinding = struct {
+    scope_id: ir.ScopeId,
+    slot: u16,
+    name_atom: u16,
+};
+
 const Lowerer = struct {
     allocator: std.mem.Allocator,
     view: IrView,
     resolver: ?Resolver = null,
     depth: u16 = 0,
+    /// The import index, present when a resolver supplies the classification
+    /// of Result bindings.
+    facts: ?*const module_facts_mod.ModuleFacts = null,
+    /// The Result bindings of the program. A binding's index is its ordinal.
+    bindings: []const ResultBinding = &.{},
+    results_active: bool = false,
+    /// Set while a nested expression is built under a statement leaf that
+    /// already collected the events of the whole statement.
+    events_off: bool = false,
+    /// Set when an expression nests deeper than the event walk reads.
+    overflow: bool = false,
 
     /// Whether a subtree contains a guarded call.
     ///
@@ -293,6 +350,361 @@ const Lowerer = struct {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Result events
+    //
+    // A Result binding is a `var_decl` whose initializer is a direct call to a
+    // builtin export that returns a Result. The lowering records where each
+    // binding is defined, guarded, read, and used in any other way, and the
+    // consumer decides from those events alone whether every read is guarded.
+    // The default for a use the lowering does not model is an escape, which the
+    // consumer refuses.
+    // -----------------------------------------------------------------------
+
+    const Reference = union(enum) {
+        /// Not a Result binding.
+        none,
+        ordinal: u32,
+        /// An upvalue whose name matches several Result bindings, or a key
+        /// that two Result bindings share. The IR cannot say which one it is.
+        ambiguous,
+    };
+
+    const Position = enum { other, discard, nullish_left, optional_object, result_arg };
+
+    const MemberKind = enum { ok, value, failure, other };
+
+    const max_event_depth: u16 = 1024;
+
+    fn event(tag: Tag, ordinal: u32) Tree {
+        return .{ .tag = tag, .source = null_node, .leaf_kind = 0, .aux = ordinal };
+    }
+
+    /// The builtin export that an identifier names, when it names an import.
+    fn builtinExport(self: *Lowerer, identifier: NodeIndex) ?*const mb.FunctionBinding {
+        const facts = self.facts orelse return null;
+        if (self.view.getTag(identifier) != .identifier) return null;
+        const binding = self.view.getBinding(identifier) orelse return null;
+        const record = facts.importForReference(binding, .module_reference, .builtin, .first) orelse return null;
+        const found = builtin_modules.findExport(record.module_specifier, record.imported_name) orelse return null;
+        return found.func;
+    }
+
+    /// Whether an identifier names one of the ambient globals that return a
+    /// Result. A local, argument, or upvalue that shadows the name is not the
+    /// global, so only an undeclared global qualifies.
+    fn isResultGlobal(self: *Lowerer, identifier: NodeIndex) bool {
+        if (self.view.getTag(identifier) != .identifier) return false;
+        const binding = self.view.getBinding(identifier) orelse return false;
+        if (binding.kind != .undeclared_global) return false;
+        const name = self.atomName(binding.name_atom) orelse return false;
+        for (result_globals) |global| {
+            if (std.mem.eql(u8, name, global)) return true;
+        }
+        return false;
+    }
+
+    fn atomName(self: *Lowerer, atom_index: u16) ?[]const u8 {
+        const atom: engine_object.Atom = @fromBackingInt(@intCast(atom_index));
+        if (self.resolver) |supplied| {
+            if (supplied.atoms) |table| {
+                if (atom.toPredefinedName()) |name| return name;
+                return table.getName(atom);
+            }
+        }
+        if (self.view.getString(atom_index)) |name| return name;
+        return atom.toPredefinedName();
+    }
+
+    fn isResultCall(self: *Lowerer, node: NodeIndex) bool {
+        const tag = self.view.getTag(node) orelse return false;
+        if (tag != .call and tag != .method_call) return false;
+        const call = self.view.getCall(node) orelse return false;
+        if (self.isResultGlobal(call.callee)) return true;
+        const func = self.builtinExport(call.callee) orelse return false;
+        return func.returns == .result;
+    }
+
+    /// Which Result binding an identifier names. A reference inside a nested
+    /// function is an upvalue, and the IR keeps the upvalue slot of the
+    /// closure and the name, not the declaring scope. The reference resolves
+    /// when exactly one Result binding has that name. A binding that is not a
+    /// Result and shares the name only adds events to the closure, which the
+    /// consumer treats as extra obligations and never as fewer.
+    fn referenceOf(self: *Lowerer, identifier: NodeIndex) Reference {
+        if (!self.results_active) return .none;
+        if (self.view.getTag(identifier) != .identifier) return .none;
+        const binding = self.view.getBinding(identifier) orelse return .none;
+        var found: ?u32 = null;
+        for (self.bindings, 0..) |declared, ordinal| {
+            const same = if (binding.kind == .upvalue)
+                declared.name_atom == binding.name_atom
+            else
+                declared.scope_id == binding.scope_id and declared.slot == binding.slot;
+            if (!same) continue;
+            if (found != null) return .ambiguous;
+            found = @intCast(ordinal);
+        }
+        if (found) |ordinal| return .{ .ordinal = ordinal };
+        return .none;
+    }
+
+    /// The ordinal of the binding that a declaration defines.
+    fn definedOrdinal(self: *Lowerer, binding: ir.BindingRef) ?u32 {
+        for (self.bindings, 0..) |declared, ordinal| {
+            if (declared.scope_id == binding.scope_id and declared.slot == binding.slot) return @intCast(ordinal);
+        }
+        return null;
+    }
+
+    /// Number the Result bindings of the program. Returns false when the
+    /// program cannot be classified: more bindings than the consumer accepts,
+    /// or a namespace or default import of a builtin module, whose calls the
+    /// classification does not resolve.
+    fn classify(self: *Lowerer, list: *std.ArrayList(ResultBinding)) Error!bool {
+        const facts = self.facts orelse return false;
+        for (facts.imports.items) |record| {
+            if (record.resolution == .builtin and record.import_kind != .named) return false;
+        }
+        const count = self.view.nodeCount();
+        for (0..count) |position| {
+            const node: NodeIndex = @intCast(position);
+            if (self.view.getTag(node) != .var_decl) continue;
+            const decl = self.view.getVarDecl(node) orelse continue;
+            if (decl.init == null_node or !self.isResultCall(decl.init)) continue;
+            if (list.items.len >= max_result_bindings) return false;
+            try list.append(self.allocator, .{
+                .scope_id = decl.binding.scope_id,
+                .slot = decl.binding.slot,
+                .name_atom = decl.binding.name_atom,
+            });
+        }
+        return true;
+    }
+
+    fn isEventSite(self: *Lowerer, index: NodeIndex) bool {
+        if (self.view.getTag(index) != .identifier) return false;
+        return switch (self.referenceOf(index)) {
+            .ordinal, .ambiguous => true,
+            .none => self.isResultGlobal(index) or
+                (if (self.builtinExport(index)) |func| func.returns == .result else false),
+        };
+    }
+
+    /// Whether a subtree holds any use of a Result binding or Result call.
+    fn containsEventSite(self: *Lowerer, index: NodeIndex) bool {
+        if (index == null_node or !self.results_active) return false;
+        if (self.isEventSite(index)) return true;
+        var children = self.view.expressionChildren(index);
+        while (children.next()) |child| {
+            if (self.containsEventSite(child)) return true;
+        }
+        return false;
+    }
+
+    /// Whether a subtree holds a function expression with an event inside.
+    /// Such a function must become a function node, so that the events in its
+    /// body reach the consumer.
+    fn containsEventFunction(self: *Lowerer, index: NodeIndex) bool {
+        if (index == null_node or !self.results_active) return false;
+        const tag = self.view.getTag(index) orelse return false;
+        if (tag == .function_expr or tag == .arrow_function) return self.containsEventSite(index);
+        var children = self.view.expressionChildren(index);
+        while (children.next()) |child| {
+            if (self.containsEventFunction(child)) return true;
+        }
+        return false;
+    }
+
+    /// The guard event for an `if` condition that is exactly `b.ok` or
+    /// `!b.ok`. Any other form of the condition is not a guard.
+    fn guardEvent(self: *Lowerer, condition: NodeIndex) ?Tree {
+        if (!self.results_active) return null;
+        const tag = self.view.getTag(condition) orelse return null;
+        var polarity: Tag = .result_guard_ok;
+        var subject = condition;
+        if (tag == .unary_op) {
+            const unary = self.view.getUnary(condition) orelse return null;
+            if (unary.op != .not) return null;
+            polarity = .result_guard_err;
+            subject = unary.operand;
+        }
+        if (self.view.getTag(subject) != .member_access) return null;
+        const member = self.view.getMember(subject) orelse return null;
+        if (member.computed != null_node or member.property != @backingInt(engine_object.Atom.ok)) return null;
+        if (self.view.getTag(member.object) != .identifier) return null;
+        return switch (self.referenceOf(member.object)) {
+            .ordinal => |ordinal| event(polarity, ordinal),
+            .none, .ambiguous => null,
+        };
+    }
+
+    /// The events of one statement or expression, flat and in source order.
+    /// The walk does not enter a nested function: that function is lowered as
+    /// a node of its own and carries its own events.
+    fn collectEvents(self: *Lowerer, out: *std.ArrayList(Tree), index: NodeIndex) Error!void {
+        if (index == null_node) return;
+        const tag = self.view.getTag(index) orelse return;
+        switch (tag) {
+            .var_decl => {
+                const decl = self.view.getVarDecl(index) orelse return;
+                if (decl.init == null_node) return;
+                if (!self.isResultCall(decl.init)) return self.emitExpr(out, decl.init, .other, 0);
+                if (self.definedOrdinal(decl.binding)) |ordinal| {
+                    try out.append(self.allocator, event(.result_def, ordinal));
+                }
+                const call = self.view.getCall(decl.init) orelse return;
+                try self.emitArguments(out, call, self.builtinExport(call.callee), 0);
+            },
+            .expr_stmt => {
+                const operand = self.view.getOptValue(index) orelse return;
+                try self.emitExpr(out, operand, .discard, 0);
+            },
+            else => try self.emitExpr(out, index, .other, 0),
+        }
+    }
+
+    fn emitExpr(
+        self: *Lowerer,
+        out: *std.ArrayList(Tree),
+        node: NodeIndex,
+        position: Position,
+        depth: u16,
+    ) Error!void {
+        if (node == null_node) return;
+        if (depth >= max_event_depth) {
+            self.overflow = true;
+            return;
+        }
+        const tag = self.view.getTag(node) orelse return;
+        switch (tag) {
+            .function_expr, .arrow_function, .function_decl => return,
+            .identifier => switch (self.referenceOf(node)) {
+                .ordinal => |ordinal| {
+                    if (position != .result_arg) try out.append(self.allocator, event(.result_escape, ordinal));
+                },
+                .ambiguous => try out.append(self.allocator, event(.result_escape, 0)),
+                .none => {
+                    // A Result export named outside the callee position is an
+                    // alias, and a call through the alias is not classified.
+                    if (self.isResultGlobal(node)) try out.append(self.allocator, event(.result_escape, 0));
+                    if (self.builtinExport(node)) |func| {
+                        if (func.returns == .result) try out.append(self.allocator, event(.result_escape, 0));
+                    }
+                },
+            },
+            .member_access, .optional_chain, .computed_access => try self.emitMember(out, node, tag, position, depth),
+            .binary_op => {
+                const binary = self.view.getBinary(node) orelse return;
+                const left: Position = if (binary.op == .nullish) .nullish_left else .other;
+                try self.emitExpr(out, binary.left, left, depth + 1);
+                try self.emitExpr(out, binary.right, .other, depth + 1);
+            },
+            .call, .method_call => try self.emitCall(out, node, position, depth),
+            else => {
+                var children = self.view.expressionChildren(node);
+                while (children.next()) |child| try self.emitExpr(out, child, .other, depth + 1);
+            },
+        }
+    }
+
+    fn memberKind(self: *Lowerer, member: ir.Node.MemberExpr) MemberKind {
+        if (member.computed != null_node) {
+            if (self.view.getTag(member.computed) != .lit_string) return .other;
+            const string_index = self.view.getStringIdx(member.computed) orelse return .other;
+            const name = self.view.getString(string_index) orelse return .other;
+            if (std.mem.eql(u8, name, "ok")) return .ok;
+            if (std.mem.eql(u8, name, "value") or std.mem.eql(u8, name, "unwrap")) return .value;
+            if (std.mem.eql(u8, name, "error") or std.mem.eql(u8, name, "errors")) return .failure;
+            return .other;
+        }
+        if (member.property == @backingInt(engine_object.Atom.ok)) return .ok;
+        if (member.property == @backingInt(engine_object.Atom.value) or member.property == @backingInt(engine_object.Atom.unwrap)) return .value;
+        if (member.property == @backingInt(engine_object.Atom.@"error") or member.property == @backingInt(engine_object.Atom.errors)) return .failure;
+        return .other;
+    }
+
+    fn emitMember(
+        self: *Lowerer,
+        out: *std.ArrayList(Tree),
+        node: NodeIndex,
+        tag: ir.NodeTag,
+        position: Position,
+        depth: u16,
+    ) Error!void {
+        const member = self.view.getMember(node) orelse return;
+        const reference: Reference = if (self.view.getTag(member.object) == .identifier)
+            self.referenceOf(member.object)
+        else
+            .none;
+        switch (reference) {
+            .none => {
+                const object_position: Position = if (tag == .optional_chain) .optional_object else .other;
+                try self.emitExpr(out, member.object, object_position, depth + 1);
+            },
+            .ambiguous => try out.append(self.allocator, event(.result_escape, 0)),
+            .ordinal => |ordinal| switch (self.memberKind(member)) {
+                .ok => {},
+                .value => try out.append(self.allocator, event(.result_read_ok, ordinal)),
+                .failure => {
+                    // On an ok Result `.error` is undefined, so a read that
+                    // supplies a fallback or chains optionally gets no payload.
+                    if (position != .nullish_left and position != .optional_object) {
+                        try out.append(self.allocator, event(.result_read_err, ordinal));
+                    }
+                },
+                .other => try out.append(self.allocator, event(.result_escape, ordinal)),
+            },
+        }
+        try self.emitExpr(out, member.computed, .other, depth + 1);
+    }
+
+    fn emitCall(
+        self: *Lowerer,
+        out: *std.ArrayList(Tree),
+        node: NodeIndex,
+        position: Position,
+        depth: u16,
+    ) Error!void {
+        const call = self.view.getCall(node) orelse return;
+        const exported = self.builtinExport(call.callee);
+        if (self.isResultGlobal(call.callee)) {
+            if (position != .discard and position != .result_arg) {
+                try out.append(self.allocator, event(.result_escape, 0));
+            }
+        } else if (exported) |func| {
+            // A Result nobody binds can only be discarded or passed to a
+            // consumer that tests it. Anywhere else it flows on unchecked.
+            if (func.returns == .result and position != .discard and position != .result_arg) {
+                try out.append(self.allocator, event(.result_escape, 0));
+            }
+        } else {
+            try self.emitExpr(out, call.callee, .other, depth + 1);
+        }
+        try self.emitArguments(out, call, exported, depth);
+    }
+
+    /// An argument at a position the export declares as a Result is read by
+    /// that export, and each of those exports tests `ok` before it reads.
+    fn emitArguments(
+        self: *Lowerer,
+        out: *std.ArrayList(Tree),
+        call: ir.Node.CallExpr,
+        exported: ?*const mb.FunctionBinding,
+        depth: u16,
+    ) Error!void {
+        for (0..call.args_count) |position| {
+            const argument = self.view.getListIndex(call.args_start, @intCast(position));
+            var argument_position: Position = .other;
+            if (exported) |func| {
+                if (position < func.param_types.len and func.param_types[position] == .result) {
+                    argument_position = .result_arg;
+                }
+            }
+            try self.emitExpr(out, argument, argument_position, depth + 1);
+        }
+    }
+
     fn build(self: *Lowerer, index: NodeIndex) Error!Tree {
         if (self.depth >= max_depth) return error.ProgramTooDeep;
         self.depth += 1;
@@ -317,6 +729,12 @@ const Lowerer = struct {
                 const func = self.view.getFunction(index) orelse break :blk try self.leaf(.plain, index, @backingInt(tag));
                 var node = Tree{ .tag = .function, .source = index, .leaf_kind = 0 };
                 errdefer node.deinit(self.allocator);
+                // The body is lowered on its own, so its statements collect
+                // their own events even when an enclosing leaf collected the
+                // events of the statement around this function.
+                const saved_events_off = self.events_off;
+                self.events_off = false;
+                defer self.events_off = saved_events_off;
                 try node.children.append(self.allocator, try self.build(func.body));
                 break :blk node;
             },
@@ -330,7 +748,24 @@ const Lowerer = struct {
                 if (stmt.else_branch != null_node) {
                     try branch.children.append(self.allocator, try self.build(stmt.else_branch));
                 }
-                if (!self.containsRelevantCall(stmt.condition)) break :blk branch;
+                // A condition that is exactly `b.ok` or `!b.ok` guards the
+                // Result `b`. The guard heads a wrapper of two children, the
+                // same shape that a guarded call in a condition gets.
+                if (self.guardEvent(stmt.condition)) |guard| {
+                    // The consumer reads an arm of a guarded branch only when
+                    // the branch has two arms. An absent `else` becomes an
+                    // empty statement, which returns nothing, exactly as the
+                    // absent arm did.
+                    if (stmt.else_branch == null_node) {
+                        try branch.children.append(self.allocator, .{ .tag = .plain, .source = null_node, .leaf_kind = 0 });
+                    }
+                    var wrapper = Tree{ .tag = .sequence, .source = index, .leaf_kind = 0 };
+                    errdefer wrapper.deinit(self.allocator);
+                    try wrapper.children.append(self.allocator, guard);
+                    try wrapper.children.append(self.allocator, branch);
+                    break :blk wrapper;
+                }
+                if (!self.containsRelevantCall(stmt.condition) and !self.containsEventSite(stmt.condition)) break :blk branch;
 
                 // Keep the branch's two-arm totality shape intact. The outer
                 // sequence carries only the guarded condition path, which adds
@@ -377,30 +812,53 @@ const Lowerer = struct {
     }
 
     fn appendGuarded(self: *Lowerer, parent: *Tree, child: NodeIndex) Error!void {
-        if (child == null_node or !self.containsRelevantCall(child)) return;
+        if (child == null_node) return;
+        if (!self.containsRelevantCall(child) and !self.containsEventSite(child)) return;
         try parent.children.append(self.allocator, try self.build(child));
     }
 
     /// A node with no structural children of its own.
     ///
     /// When its subtree holds a guarded call, the node keeps children after all:
-    /// just the paths that lead to one. A handler with no guarded call gets the
-    /// leaf it got before, so its proof identity does not move.
+    /// just the paths that lead to one. When it uses a Result binding, the
+    /// events of the whole statement become its first children, flat and in
+    /// source order. A handler with neither gets the leaf it got before, so its
+    /// proof identity does not move.
     fn leaf(self: *Lowerer, tag: Tag, index: NodeIndex, kind: u16) Error!Tree {
+        var events: std.ArrayList(Tree) = .empty;
+        defer events.deinit(self.allocator);
+        errdefer for (events.items) |*item| item.deinit(self.allocator);
+        if (self.results_active and !self.events_off) try self.collectEvents(&events, index);
+
         if (self.guardedIndex(index)) |catalog_index| {
-            return .{
+            const call = Tree{
                 .tag = .capability_call,
                 .source = index,
                 .leaf_kind = kind,
                 .aux = catalog_index,
             };
+            if (events.items.len == 0) return call;
+            // One node cannot be both a guarded call and the parent of events,
+            // so a wrapper without a parser source holds both. The witness of
+            // the call stays on the call.
+            var wrapper = Tree{ .tag = .plain, .source = null_node, .leaf_kind = kind };
+            errdefer wrapper.deinit(self.allocator);
+            try wrapper.children.append(self.allocator, call);
+            try wrapper.children.appendSlice(self.allocator, events.items);
+            events.clearRetainingCapacity();
+            return wrapper;
         }
-        if (!self.containsRelevantCall(index)) {
+        const descend = self.containsRelevantCall(index) or self.containsEventFunction(index);
+        if (!descend and events.items.len == 0) {
             return .{ .tag = tag, .source = index, .leaf_kind = kind };
         }
 
         var node = Tree{ .tag = tag, .source = index, .leaf_kind = kind };
         errdefer node.deinit(self.allocator);
+        try node.children.appendSlice(self.allocator, events.items);
+        events.clearRetainingCapacity();
+        if (!descend) return node;
+
         const Collector = struct {
             lowerer: *Lowerer,
             parent: *Tree,
@@ -409,7 +867,12 @@ const Lowerer = struct {
             fn visit(ctx: *@This(), lowerer: *Lowerer, child: NodeIndex) void {
                 if (ctx.failed != null) return;
                 if (child == null_node) return;
-                if (!lowerer.containsRelevantCall(child)) return;
+                if (!lowerer.containsRelevantCall(child) and !lowerer.containsEventFunction(child)) return;
+                // This leaf collected the events of the whole statement, so
+                // the nodes below it collect none, until a function begins.
+                const saved_events_off = lowerer.events_off;
+                lowerer.events_off = true;
+                defer lowerer.events_off = saved_events_off;
                 const built = lowerer.build(child) catch |err| {
                     ctx.failed = err;
                     return;
@@ -462,6 +925,18 @@ pub fn lower(
     resolver: ?Resolver,
 ) Error!ProofIr {
     var lowerer = Lowerer{ .allocator = allocator, .view = view, .resolver = resolver };
+    var facts: ?module_facts_mod.ModuleFacts = null;
+    defer if (facts) |*value| value.deinit();
+    var bindings: std.ArrayList(ResultBinding) = .empty;
+    defer bindings.deinit(allocator);
+    if (resolver) |supplied| {
+        facts = try module_facts_mod.ModuleFacts.build(allocator, view, supplied.atoms, null);
+        lowerer.facts = &facts.?;
+        if (try lowerer.classify(&bindings)) {
+            lowerer.bindings = bindings.items;
+            lowerer.results_active = true;
+        }
+    }
     var tree = try lowerer.build(root);
     defer tree.deinit(allocator);
     digestTree(&tree);
@@ -516,7 +991,12 @@ pub fn lower(
             }
         }
     }
-    return .{ .allocator = allocator, .nodes = owned, .handler_function = handler_function };
+    return .{
+        .allocator = allocator,
+        .nodes = owned,
+        .handler_function = handler_function,
+        .results_classified = lowerer.results_active and !lowerer.overflow,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -549,6 +1029,13 @@ pub fn deriveTotality(
             .sequence => anyChildTotal(proof, total, node),
             .branch => node.child_count == 2 and allChildrenTotal(proof, total, node),
             .loop_node, .plain, .capability_call => false,
+            .result_def,
+            .result_guard_ok,
+            .result_guard_err,
+            .result_read_ok,
+            .result_read_err,
+            .result_escape,
+            => false,
         };
         for (declared) |declared_id| {
             if (declared_id == node.id) total[index] = true;
@@ -594,7 +1081,210 @@ pub fn ruleAt(proof: ProofIr, total: []const bool, id: u32) ?Rule {
             null,
         .loop_node => .loop_never_total,
         .function, .plain, .capability_call => null,
+        .result_def,
+        .result_guard_ok,
+        .result_guard_err,
+        .result_read_ok,
+        .result_read_err,
+        .result_escape,
+        => null,
     };
+}
+
+// ---------------------------------------------------------------------------
+// Results
+// ---------------------------------------------------------------------------
+
+/// The depth limit of the consumer's walk from a read to its function.
+const max_read_depth: u32 = 256;
+
+/// Whether every read of a Result value in the proof IR is guarded, folded over
+/// the proof IR alone.
+///
+/// The consumer runs the same pass. This copy exists so the producer can tell,
+/// before it writes a certificate, whether the claim it is about to make is one
+/// the consumer will confirm. It reads totality from a fold that ignores
+/// declared nodes, as the consumer does, so an arm counts as returning only
+/// when its own shape returns.
+pub fn deriveResults(allocator: std.mem.Allocator, proof: ProofIr) Error!bool {
+    if (!proof.results_classified) return false;
+
+    const derived = try allocator.alloc(bool, proof.nodes.len);
+    defer allocator.free(derived);
+    @memset(derived, false);
+    var index: usize = proof.nodes.len;
+    while (index > 0) {
+        index -= 1;
+        const node = proof.nodes[index];
+        derived[index] = switch (node.tag) {
+            .return_node => true,
+            .function => firstChildTotal(proof, derived, node),
+            .sequence => anyChildTotal(proof, derived, node),
+            .branch => node.child_count == 2 and allChildrenTotal(proof, derived, node),
+            .loop_node,
+            .plain,
+            .capability_call,
+            .result_def,
+            .result_guard_ok,
+            .result_guard_err,
+            .result_read_ok,
+            .result_read_err,
+            .result_escape,
+            => false,
+        };
+    }
+
+    var defined = @as([max_result_bindings]bool, @splat(false));
+    for (proof.nodes) |node| {
+        switch (node.tag) {
+            .result_escape => return false,
+            .result_def, .result_guard_ok, .result_guard_err, .result_read_ok, .result_read_err => {
+                if (node.aux >= max_result_bindings) return false;
+            },
+            .function, .sequence, .branch, .loop_node, .return_node, .plain, .capability_call => {},
+        }
+        switch (node.tag) {
+            .result_def => {
+                if (defined[node.aux]) return false;
+                defined[node.aux] = true;
+            },
+            .result_guard_ok, .result_guard_err => {
+                if (!guardWellFormed(proof, node)) return false;
+            },
+            .result_read_ok,
+            .result_read_err,
+            .result_escape,
+            .function,
+            .sequence,
+            .branch,
+            .loop_node,
+            .return_node,
+            .plain,
+            .capability_call,
+            => {},
+        }
+    }
+
+    for (proof.nodes) |node| {
+        if (node.tag != .result_read_ok and node.tag != .result_read_err) continue;
+        if (!defined[node.aux]) return false;
+        if (!readGuarded(proof, derived, node)) return false;
+    }
+    return true;
+}
+
+/// A guard is the first of exactly two children of a sequence, and the second
+/// child is the branch it tests.
+fn guardWellFormed(proof: ProofIr, guard: Node) bool {
+    const parent = proof.nodes[guard.parent];
+    if (parent.tag != .sequence or parent.child_count != 2 or parent.first_child != guard.id) return false;
+    return proof.nodes[guard.id + 1].tag == .branch;
+}
+
+/// Walk from a read to the enclosing function. The read is covered when an
+/// ancestor branch is an arm of a guard on the same binding, or when an earlier
+/// statement is a guard whose then arm always returns. The walk stops at a
+/// function: a closure never inherits a check from outside.
+fn readGuarded(proof: ProofIr, derived: []const bool, read: Node) bool {
+    var current = read;
+    var steps: u32 = 0;
+    while (current.id != 0) {
+        steps += 1;
+        if (steps > max_read_depth) return false;
+        const parent = proof.nodes[current.parent];
+        switch (parent.tag) {
+            .function => return false,
+            .branch => if (armCovers(proof, parent, current, read)) return true,
+            .sequence => if (earlierGuardCovers(proof, derived, parent, current, read)) return true,
+            .loop_node,
+            .return_node,
+            .plain,
+            .capability_call,
+            .result_def,
+            .result_guard_ok,
+            .result_guard_err,
+            .result_read_ok,
+            .result_read_err,
+            .result_escape,
+            => {},
+        }
+        current = parent;
+    }
+    return false;
+}
+
+fn armCovers(proof: ProofIr, branch: Node, arm: Node, read: Node) bool {
+    if (branch.child_count != 2) return false;
+    const wrapper = proof.nodes[branch.parent];
+    if (wrapper.tag != .sequence or wrapper.child_count != 2 or wrapper.first_child + 1 != branch.id) return false;
+    const guard = proof.nodes[wrapper.first_child];
+    if (guard.aux != read.aux) return false;
+    const in_then = arm.id == branch.first_child;
+    return switch (guard.tag) {
+        .result_guard_ok => (read.tag == .result_read_ok) == in_then,
+        .result_guard_err => (read.tag == .result_read_ok) != in_then,
+        .function,
+        .sequence,
+        .branch,
+        .loop_node,
+        .return_node,
+        .plain,
+        .capability_call,
+        .result_def,
+        .result_read_ok,
+        .result_read_err,
+        .result_escape,
+        => false,
+    };
+}
+
+fn earlierGuardCovers(proof: ProofIr, derived: []const bool, sequence: Node, current: Node, read: Node) bool {
+    var id = sequence.first_child;
+    while (id < current.id) : (id += 1) {
+        const sibling = proof.nodes[id];
+        if (sibling.tag != .sequence or sibling.child_count != 2) continue;
+        const guard = proof.nodes[sibling.first_child];
+        if (guard.aux != read.aux) continue;
+        const covers_ok = switch (guard.tag) {
+            .result_guard_err => true,
+            .result_guard_ok => false,
+            .function,
+            .sequence,
+            .branch,
+            .loop_node,
+            .return_node,
+            .plain,
+            .capability_call,
+            .result_def,
+            .result_read_ok,
+            .result_read_err,
+            .result_escape,
+            => continue,
+        };
+        if (covers_ok != (read.tag == .result_read_ok)) continue;
+        const branch = proof.nodes[sibling.first_child + 1];
+        if (branch.tag != .branch or branch.child_count == 0) continue;
+        const then_arm = proof.nodes[branch.first_child];
+        if (then_arm.tag != .function and derived[then_arm.id]) return true;
+    }
+    return false;
+}
+
+/// Whether the proof IR holds any Result event.
+pub fn hasResultEvents(proof: ProofIr) bool {
+    for (proof.nodes) |node| {
+        switch (node.tag) {
+            .result_def,
+            .result_guard_ok,
+            .result_guard_err,
+            .result_read_ok,
+            .result_read_err,
+            .result_escape,
+            => return true,
+            .function, .sequence, .branch, .loop_node, .return_node, .plain, .capability_call => {},
+        }
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -615,6 +1305,10 @@ pub const Evidence = struct {
     total: []bool,
     /// Nodes whose totality the certificate declares rather than proves.
     declared: []u32,
+    /// Whether the proof IR holds Result events and the producer's copy of the
+    /// consumer's pass accepts them. A program with no Result binding is not
+    /// proved here: there is nothing for the pass to say about it.
+    results_proved: bool,
     emissions: []Emission,
     jumps: []Jump,
     rewrites: []translation_witness.Rewrite,
@@ -684,6 +1378,7 @@ pub fn buildEvidence(
     errdefer allocator.free(declared);
     const total = try deriveTotality(allocator, proof, declared);
     errdefer allocator.free(total);
+    const results_proved = hasResultEvents(proof) and try deriveResults(allocator, proof);
 
     var emissions: std.ArrayList(Emission) = .empty;
     errdefer emissions.deinit(allocator);
@@ -751,6 +1446,7 @@ pub fn buildEvidence(
         .proof = proof,
         .total = total,
         .declared = declared,
+        .results_proved = results_proved,
         .emissions = try emissions.toOwnedSlice(allocator),
         .jumps = try jumps.toOwnedSlice(allocator),
         .rewrites = try rewrites.toOwnedSlice(allocator),
@@ -1221,6 +1917,25 @@ test "every tag in the alphabet is reachable from real source" {
     defer guarded.deinit();
     for (guarded.proof.nodes) |node| seen.insert(node.tag);
 
+    // The Result events need a resolver too, and a Result binding that the
+    // handler uses in every way the lowering names.
+    var never_resolver = NeverResolver{};
+    var results = try parseAndLowerWith(allocator, result_source, never_resolver.resolver());
+    defer results.deinit();
+    for (results.proof.nodes) |node| seen.insert(node.tag);
+    var positive = try parseAndLowerWith(allocator,
+        \\import { validateJson } from "zttp:validate";
+        \\function handler(req) {
+        \\  const r = validateJson("a", "b");
+        \\  if (r.ok) {
+        \\    return Response.text(r.value);
+        \\  }
+        \\  return Response.text("no");
+        \\}
+    , never_resolver.resolver());
+    defer positive.deinit();
+    for (positive.proof.nodes) |node| seen.insert(node.tag);
+
     // An alphabet member no source reaches is a rule that never runs. If a tag
     // is added here, a source that produces it belongs above.
     inline for (@typeInfo(Tag).@"enum".field_names) |field| {
@@ -1303,4 +2018,83 @@ test "a program deeper than the walk bound is refused, not truncated" {
     try testing.expect(refused_at != null);
     try testing.expect(parser_refused_at != null);
     try testing.expect(refused_at.? < parser_refused_at.?);
+}
+
+const result_source =
+    \\import { validateJson } from "zttp:validate";
+    \\function handler(req) {
+    \\  const r = validateJson("a", "b");
+    \\  if (!r.ok) {
+    \\    return Response.text(r.errors);
+    \\  }
+    \\  const alias = r;
+    \\  return Response.text(r.value);
+    \\}
+;
+
+test "a Result binding is defined, guarded, read, and escaped by its events" {
+    const allocator = testing.allocator;
+    var never = NeverResolver{};
+    var lowered = try parseAndLowerWith(allocator, result_source, never.resolver());
+    defer lowered.deinit();
+
+    try testing.expect(lowered.proof.results_classified);
+    try testing.expectEqual(@as(usize, 1), countTag(lowered.proof, .result_def));
+    try testing.expectEqual(@as(usize, 1), countTag(lowered.proof, .result_guard_err));
+    try testing.expectEqual(@as(usize, 1), countTag(lowered.proof, .result_read_ok));
+    try testing.expectEqual(@as(usize, 1), countTag(lowered.proof, .result_read_err));
+    try testing.expectEqual(@as(usize, 1), countTag(lowered.proof, .result_escape));
+    try testing.expect(!(try deriveResults(allocator, lowered.proof)));
+}
+
+test "a program with no resolver carries no Result events and is not classified" {
+    const allocator = testing.allocator;
+    var lowered = try parseAndLower(allocator, result_source);
+    defer lowered.deinit();
+
+    try testing.expect(!lowered.proof.results_classified);
+    try testing.expectEqual(@as(usize, 0), countTag(lowered.proof, .result_def));
+    try testing.expectEqual(@as(usize, 0), countTag(lowered.proof, .result_escape));
+    try testing.expect(!(try deriveResults(allocator, lowered.proof)));
+}
+
+test "an event node has no parser source, so no witness attaches to it" {
+    const allocator = testing.allocator;
+    var never = NeverResolver{};
+    var lowered = try parseAndLowerWith(allocator, result_source, never.resolver());
+    defer lowered.deinit();
+
+    try testing.expectEqual(@as(?u32, null), lowered.proof.nodeFor(null_node));
+}
+
+test "a guarded read with an early return derives as proved" {
+    const allocator = testing.allocator;
+    var never = NeverResolver{};
+    var lowered = try parseAndLowerWith(allocator,
+        \\import { validateJson } from "zttp:validate";
+        \\function handler(req) {
+        \\  const r = validateJson("a", "b");
+        \\  if (!r.ok) {
+        \\    return Response.text("no");
+        \\  }
+        \\  return Response.text(r.value);
+        \\}
+    , never.resolver());
+    defer lowered.deinit();
+
+    try testing.expect(try deriveResults(allocator, lowered.proof));
+}
+
+test "the ambient Result globals match the ones abi_types registers" {
+    const source = @embedFile("abi_types.zig");
+    var registered: usize = 0;
+    var lines = std.mem.splitScalar(u8, source, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.indexOf(u8, line, "registerGlobalFn(env, \"") == null) continue;
+        if (std.mem.indexOf(u8, line, ", result_record);") == null) continue;
+        registered += 1;
+        try testing.expect(std.mem.indexOf(u8, line, "\"requestJson\"") != null or
+            std.mem.indexOf(u8, line, "\"requestText\"") != null);
+    }
+    try testing.expectEqual(result_globals.len, registered);
 }

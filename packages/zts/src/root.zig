@@ -203,6 +203,7 @@ pub const lowerProofIr = compiler.proof_ir.lower;
 pub const ProofResolver = compiler.proof_ir.Resolver;
 pub const buildProofEvidence = compiler.proof_ir.buildEvidence;
 pub const compilerProofRuleAt = compiler.proof_ir.ruleAt;
+pub const deriveProofResults = compiler.proof_ir.deriveResults;
 pub const proofIrNodeDomain = compiler.proof_ir.node_domain;
 pub const TranslationRecorder = engine.translation_witness.Recorder;
 pub const TranslationRewrite = engine.translation_witness.Rewrite;

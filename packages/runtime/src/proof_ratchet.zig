@@ -353,3 +353,304 @@ test "a handler under a declared Effects ceiling holds capability_bounded at tes
     try testing.expect(result.rejection() == null);
     try testing.expectEqual(pcc.SemanticState.policy_accepted, result.semantic());
 }
+
+// ---------------------------------------------------------------------------
+// Result events
+// ---------------------------------------------------------------------------
+
+const result_capsule = "Proof<Response, \"deterministic\" | \"read_only\" | \"result_safe\">";
+
+const validate_prelude =
+    "import { schemaCompile, validateJson } from \"zttp:validate\";\n" ++
+    "schemaCompile(\"todo\", \"{\\\"type\\\":\\\"object\\\",\\\"required\\\":[\\\"title\\\"]}\");\n";
+
+/// The edge a certificate answers `results_checked` with.
+fn resultsEdge(certified: *Certified) !cert.EdgeKind {
+    const profile = try edgeProfile(&certified.built);
+    return profile[@backingInt(ps.Property.results_checked) - 1] orelse error.TestUnexpectedResult;
+}
+
+fn irTagCount(certified: *Certified, tag: ps.NodeTag) !u32 {
+    var budget = pcc.limits.Budget.init(.{});
+    const decoded = try cert.decode(certified.built.bytes, .{}, &budget);
+    var count: u32 = 0;
+    var index: u32 = 0;
+    while (index < decoded.ir.len()) : (index += 1) {
+        if ((try decoded.ir.get(index)).tag == tag) count += 1;
+    }
+    return count;
+}
+
+fn expectAcceptedAtTrusted(certified: *Certified) !void {
+    const result = certified.assess(pcc.policy.production);
+    if (result.rejection()) |rejection| {
+        std.debug.print("rejected at {s} ({s})\n", .{ rejection.stage.name(), rejection.code.text() });
+        return error.TestUnexpectedResult;
+    }
+    try testing.expectEqual(pcc.SemanticState.policy_accepted, result.semantic());
+    try testing.expectEqual(
+        @as(?pcc.AssuranceGrade, .trusted),
+        result.properties.gradeFor(.results_checked),
+    );
+}
+
+test "a handler that returns early on a failed Result proves its reads" {
+    const allocator = testing.allocator;
+    var certified = try certify(allocator, validate_prelude ++
+        "export function handler(req: Request): " ++ result_capsule ++ " {\n" ++
+        "  const r = validateJson(\"todo\", \"{}\");\n" ++
+        "  if (!r.ok) {\n" ++
+        "    return Response.json({ error: r.errors }, { status: 400 });\n" ++
+        "  }\n" ++
+        "  return Response.json({ title: r.value }, { status: 200 });\n" ++
+        "}\n");
+    defer certified.deinit();
+
+    try testing.expectEqual(cert.EdgeKind.proved, try resultsEdge(&certified));
+    try testing.expectEqual(@as(u32, 1), try irTagCount(&certified, .result_def));
+    try testing.expectEqual(@as(u32, 1), try irTagCount(&certified, .result_guard_err));
+    try testing.expectEqual(@as(u32, 1), try irTagCount(&certified, .result_read_ok));
+    try testing.expectEqual(@as(u32, 1), try irTagCount(&certified, .result_read_err));
+    try testing.expectEqual(@as(u32, 0), try irTagCount(&certified, .result_escape));
+    try expectAcceptedAtTrusted(&certified);
+}
+
+test "a read inside an ok guard with no else is proved" {
+    const allocator = testing.allocator;
+    var certified = try certify(allocator, validate_prelude ++
+        "export function handler(req: Request): " ++ result_capsule ++ " {\n" ++
+        "  const r = validateJson(\"todo\", \"{}\");\n" ++
+        "  if (r.ok) {\n" ++
+        "    return Response.json({ title: r.value }, { status: 200 });\n" ++
+        "  }\n" ++
+        "  return Response.json({ n: 0 }, { status: 400 });\n" ++
+        "}\n");
+    defer certified.deinit();
+
+    try testing.expectEqual(cert.EdgeKind.proved, try resultsEdge(&certified));
+    try testing.expectEqual(@as(u32, 1), try irTagCount(&certified, .result_guard_ok));
+    try testing.expectEqual(@as(u32, 1), try irTagCount(&certified, .result_read_ok));
+    try testing.expectEqual(@as(u32, 0), try irTagCount(&certified, .result_escape));
+    try expectAcceptedAtTrusted(&certified);
+}
+
+test "an error read inside the err arm is proved" {
+    const allocator = testing.allocator;
+    var certified = try certify(allocator, validate_prelude ++
+        "export function handler(req: Request): " ++ result_capsule ++ " {\n" ++
+        "  const r = validateJson(\"todo\", \"{}\");\n" ++
+        "  if (!r.ok) {\n" ++
+        "    return Response.json({ error: r.errors }, { status: 400 });\n" ++
+        "  } else {\n" ++
+        "    return Response.json({ n: 1 }, { status: 200 });\n" ++
+        "  }\n" ++
+        "}\n");
+    defer certified.deinit();
+
+    try testing.expectEqual(cert.EdgeKind.proved, try resultsEdge(&certified));
+    try testing.expectEqual(@as(u32, 1), try irTagCount(&certified, .result_read_err));
+    try expectAcceptedAtTrusted(&certified);
+}
+
+test "an error read with a nullish fallback emits no event" {
+    const allocator = testing.allocator;
+    var certified = try certify(allocator, "import { parseJson } from \"zttp:json\";\n" ++
+        "const describe = (text: string): string => {\n" ++
+        "  const r = parseJson(text);\n" ++
+        "  const reason = r.error ?? \"none\";\n" ++
+        "  return reason;\n" ++
+        "};\n" ++
+        "export function handler(req: Request): " ++ result_capsule ++ " {\n" ++
+        "  return Response.json({ out: describe(\"1\") });\n" ++
+        "}\n");
+    defer certified.deinit();
+
+    try testing.expectEqual(@as(u32, 1), try irTagCount(&certified, .result_def));
+    try testing.expectEqual(@as(u32, 0), try irTagCount(&certified, .result_read_err));
+    try testing.expectEqual(@as(u32, 0), try irTagCount(&certified, .result_escape));
+    try testing.expectEqual(cert.EdgeKind.proved, try resultsEdge(&certified));
+    try expectAcceptedAtTrusted(&certified);
+}
+
+/// One program the producer must not prove, with the event that stops it.
+const FalseProof = struct {
+    name: []const u8,
+    body: []const u8,
+    event: ps.NodeTag,
+};
+
+const false_proofs = [_]FalseProof{
+    .{
+        .name = "p_alias",
+        .body = "  const late = validateJson(\"todo\", \"{}\");\n" ++
+            "  const alias = late;\n" ++
+            "  const v = alias.value;\n" ++
+            "  return Response.json({ n: 1 }, { status: 200 });\n",
+        .event = .result_escape,
+    },
+    .{
+        .name = "p_obj",
+        .body = "  const late = validateJson(\"todo\", \"{}\");\n" ++
+            "  const box = { r: late };\n" ++
+            "  const v = box.r.value;\n" ++
+            "  return Response.json({ n: 1 }, { status: 200 });\n",
+        .event = .result_escape,
+    },
+    .{
+        .name = "p_chain",
+        .body = "  const v = validateJson(\"todo\", \"{}\").value;\n" ++
+            "  return Response.json({ n: 1 }, { status: 200 });\n",
+        .event = .result_escape,
+    },
+    .{
+        .name = "p_sibling",
+        .body = "  const n = inner();\n" ++
+            "  return Response.json({ n: n }, { status: 200 });\n",
+        .event = .result_read_ok,
+    },
+    .{
+        .name = "p_eqvar",
+        .body = "  const late = validateJson(\"todo\", \"{}\");\n" ++
+            "  const flag = req.method === \"GET\";\n" ++
+            "  if (late.ok === flag) {\n" ++
+            "    const v = late.value;\n" ++
+            "  }\n" ++
+            "  return Response.json({ n: 1 }, { status: 200 });\n",
+        .event = .result_read_ok,
+    },
+    .{
+        .name = "p_helper",
+        .body = "  const late = validateJson(\"todo\", \"{}\");\n" ++
+            "  const n = reader(late);\n" ++
+            "  return Response.json({ n: n }, { status: 200 });\n",
+        .event = .result_escape,
+    },
+    .{
+        .name = "p_err",
+        .body = "  const late = validateJson(\"todo\", \"{}\");\n" ++
+            "  const v = late.error;\n" ++
+            "  return Response.json({ n: 1 }, { status: 200 });\n",
+        .event = .result_read_err,
+    },
+    .{
+        .name = "p_errors",
+        .body = "  const late = validateJson(\"todo\", \"{}\");\n" ++
+            "  return Response.json({ e: late.errors }, { status: 200 });\n",
+        .event = .result_read_err,
+    },
+    .{
+        .name = "p_spread",
+        .body = "  const r = validateJson(\"todo\", \"{}\");\n" ++
+            "  const box = { ...r };\n" ++
+            "  return Response.json({ v: box.value });\n",
+        .event = .result_escape,
+    },
+    .{
+        .name = "p_computed",
+        .body = "  const r = validateJson(\"todo\", \"{}\");\n" ++
+            "  const k = \"value\";\n" ++
+            "  const v = r[k];\n" ++
+            "  return Response.json({ v: v });\n",
+        .event = .result_escape,
+    },
+    .{
+        .name = "p_closure_dup2",
+        .body = "  if (req.method === \"GET\") {\n" ++
+            "    const r = validateJson(\"todo\", \"{}\");\n" ++
+            "    if (!r.ok) {\n" ++
+            "      return Response.json({ bad: true }, { status: 400 });\n" ++
+            "    }\n" ++
+            "    return Response.json({ v: r.value });\n" ++
+            "  }\n" ++
+            "  const r = validateJson(\"todo\", \"{}\");\n" ++
+            "  const read = (): unknown => {\n" ++
+            "    return r.value;\n" ++
+            "  };\n" ++
+            "  return Response.json({ v: read() });\n",
+        .event = .result_escape,
+    },
+};
+
+const false_proof_helpers =
+    "function inner(): number {\n" ++
+    "  const local = validateJson(\"todo\", \"{}\");\n" ++
+    "  const v = local.value;\n" ++
+    "  return 1;\n" ++
+    "}\n" ++
+    "function reader(r: unknown): number {\n" ++
+    "  const v = r.value;\n" ++
+    "  return 1;\n" ++
+    "}\n";
+
+test "a false-proof probe emits its event, stays tested, and is still accepted at trusted" {
+    const allocator = testing.allocator;
+    inline for (false_proofs) |probe| {
+        const source = comptime validate_prelude ++ false_proof_helpers ++
+            "export function handler(req: Request): " ++ result_capsule ++ " {\n" ++ probe.body ++ "}\n";
+        var certified = certify(allocator, source) catch |err| {
+            std.debug.print("probe '{s}' did not certify: {s}\n", .{ probe.name, @errorName(err) });
+            return err;
+        };
+        defer certified.deinit();
+
+        testing.expectEqual(cert.EdgeKind.tested, try resultsEdge(&certified)) catch |err| {
+            std.debug.print("probe '{s}' was answered with a different edge\n", .{probe.name});
+            return err;
+        };
+        testing.expect(try irTagCount(&certified, probe.event) > 0) catch |err| {
+            std.debug.print("probe '{s}' carries no {s} event\n", .{ probe.name, @tagName(probe.event) });
+            return err;
+        };
+        try expectAcceptedAtTrusted(&certified);
+    }
+}
+
+test "a handler with no Result binding lowers without Result events" {
+    const allocator = testing.allocator;
+    var certified = try certify(allocator, corpus[1].source);
+    defer certified.deinit();
+
+    try testing.expectEqual(@as(u32, 0), try irTagCount(&certified, .result_def));
+    try testing.expectEqual(@as(u32, 0), try irTagCount(&certified, .result_guard_ok));
+    try testing.expectEqual(@as(u32, 0), try irTagCount(&certified, .result_guard_err));
+    try testing.expectEqual(@as(u32, 0), try irTagCount(&certified, .result_read_ok));
+    try testing.expectEqual(@as(u32, 0), try irTagCount(&certified, .result_read_err));
+    try testing.expectEqual(@as(u32, 0), try irTagCount(&certified, .result_escape));
+    try testing.expectEqual(cert.EdgeKind.tested, try resultsEdge(&certified));
+}
+
+test "an unchecked requestJson read is not proved beside a checked Result" {
+    const allocator = testing.allocator;
+    var certified = try certify(allocator, validate_prelude ++
+        "export function handler(req: Request): " ++ result_capsule ++ " {\n" ++
+        "  const r = validateJson(\"todo\", \"{}\");\n" ++
+        "  if (!r.ok) { return Response.json({ e: r.errors }, { status: 400 }); }\n" ++
+        "  const body = requestJson(req);\n" ++
+        "  const v = body.value;\n" ++
+        "  return Response.json({ t: r.value, v: v }, { status: 200 });\n" ++
+        "}\n");
+    defer certified.deinit();
+
+    try testing.expectEqual(cert.EdgeKind.tested, try resultsEdge(&certified));
+    try testing.expectEqual(@as(u32, 2), try irTagCount(&certified, .result_def));
+    try testing.expectEqual(@as(u32, 2), try irTagCount(&certified, .result_read_ok));
+    try testing.expectEqual(@as(u32, 0), try irTagCount(&certified, .result_escape));
+    try expectAcceptedAtTrusted(&certified);
+}
+
+test "a guarded requestText read is proved" {
+    const allocator = testing.allocator;
+    var certified = try certify(allocator, validate_prelude ++
+        "export function handler(req: Request): " ++ result_capsule ++ " {\n" ++
+        "  const r = validateJson(\"todo\", \"{}\");\n" ++
+        "  if (!r.ok) { return Response.json({ e: r.errors }, { status: 400 }); }\n" ++
+        "  const t = requestText(req);\n" ++
+        "  if (!t.ok) { return Response.json({ n: 0 }, { status: 400 }); }\n" ++
+        "  return Response.json({ t: r.value, v: t.value }, { status: 200 });\n" ++
+        "}\n");
+    defer certified.deinit();
+
+    try testing.expectEqual(cert.EdgeKind.proved, try resultsEdge(&certified));
+    try testing.expectEqual(@as(u32, 2), try irTagCount(&certified, .result_def));
+    try expectAcceptedAtTrusted(&certified);
+}

@@ -165,6 +165,12 @@ fn tagFor(tag: zts.ProofIrTag) Error!ps.NodeTag {
         .return_node => .return_node,
         .plain => .plain,
         .capability_call => .capability_call,
+        .result_def => .result_def,
+        .result_guard_ok => .result_guard_ok,
+        .result_guard_err => .result_guard_err,
+        .result_read_ok => .result_read_ok,
+        .result_read_err => .result_read_err,
+        .result_escape => .result_escape,
     };
 }
 
@@ -174,6 +180,7 @@ fn ruleFor(rule: zts.ProofRule) ps.Rule {
         .branch_both_arms_total => .branch_both_arms_total,
         .sequence_member_total => .sequence_member_total,
         .loop_never_total => .loop_never_total,
+        .result_reads_guarded => .result_reads_guarded,
     };
 }
 
@@ -259,13 +266,28 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
                 .subject_kind = .handler,
                 .subject_id = 0,
             });
-            try builder.note(.{
-                .obligation_index = builder.index(),
-                .edge = if (inputs.properties.holds(property)) .tested else .not_established,
-                .rule = null,
-                .node_id = 0,
-                .aux = 0,
-            });
+            // The compiler's copy of the consumer's results pass accepted the
+            // Result events, and the contract holds `result_safe`: the claim is
+            // proved, and the consumer re-derives it from the events. Any other
+            // case keeps the tested or not-established row.
+            const holds = inputs.properties.holds(property);
+            if (property == .results_checked and holds and inputs.evidence.results_proved) {
+                try builder.note(.{
+                    .obligation_index = builder.index(),
+                    .edge = .proved,
+                    .rule = .result_reads_guarded,
+                    .node_id = entry,
+                    .aux = 0,
+                });
+            } else {
+                try builder.note(.{
+                    .obligation_index = builder.index(),
+                    .edge = if (holds) .tested else .not_established,
+                    .rule = null,
+                    .node_id = 0,
+                    .aux = 0,
+                });
+            }
         }
     }
 
@@ -512,20 +534,10 @@ test "the compiler and the kernel agree on the proof-IR alphabet" {
             @as(u16, @backingInt(@field(zts.ProofIrTag, field))),
         );
     }
-    // The kernel's alphabet may run ahead of the compiler's while a producer
-    // side is being built, but only by members named here. A tag the kernel
-    // gained that nobody wrote down is the drift this test exists to catch.
-    // v0.26.0 C2b teaches the compiler the six Result event tags.
-    const kernel_ahead = [_]ps.NodeTag{
-        .result_def,
-        .result_guard_ok,
-        .result_guard_err,
-        .result_read_ok,
-        .result_read_err,
-        .result_escape,
-    };
+    // A tag the kernel gained that the compiler lacks is the drift this test
+    // exists to catch, so the counts must be equal.
     try testing.expectEqual(
-        @typeInfo(zts.ProofIrTag).@"enum".field_names.len + kernel_ahead.len,
+        @typeInfo(zts.ProofIrTag).@"enum".field_names.len,
         @typeInfo(ps.NodeTag).@"enum".field_names.len,
     );
 
