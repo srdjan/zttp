@@ -3390,11 +3390,14 @@ test "a refused build leaves an existing output file unchanged" {
 /// Build a real bundle (handler artifact with a certificate) in the current
 /// directory under `bundle/`.
 fn writeCertifiedBundleFixture(allocator: std.mem.Allocator) !void {
-    const source =
+    try writeCertifiedBundleFixtureFor(allocator,
         \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
         \\  return Response.text("ok");
         \\}
-    ;
+    );
+}
+
+fn writeCertifiedBundleFixtureFor(allocator: std.mem.Allocator, source: []const u8) !void {
     var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
         .emit_verify = true,
         .emit_contract = true,
@@ -3506,4 +3509,50 @@ test "proofs verify refuses a bundle whose contract file is not the contract in 
     );
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "Proof:     REJECTED - bundle contract does not match the binary") != null);
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "policy_accepted") == null);
+}
+
+test "proofs verify names the properties the kernel re-derived for a guarded Result" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try proof_ledger.chdirTmpForTest(&tmp);
+    defer allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try writeCertifiedBundleFixtureFor(allocator,
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\schemaCompile("todo", "{\"type\":\"object\",\"required\":[\"title\"]}");
+        \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "result_safe"> {
+        \\  const r = validateJson("todo", "{}");
+        \\  if (!r.ok) {
+        \\    return Response.json({ error: r.errors }, { status: 400 });
+        \\  }
+        \\  return Response.json({ title: r.value }, { status: 200 });
+        \\}
+    );
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(allocator);
+    defer err.deinit();
+    try proofs_bundle.verify(allocator, "bundle", false, &out.writer, &err.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "\nChecked:   response_total, results_checked\n") != null);
+}
+
+test "proofs verify reports a handler without a Result as re-deriving totality only" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try proof_ledger.chdirTmpForTest(&tmp);
+    defer allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    try writeCertifiedBundleFixture(allocator);
+
+    var out = std.Io.Writer.Allocating.init(allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(allocator);
+    defer err.deinit();
+    try proofs_bundle.verify(allocator, "bundle", false, &out.writer, &err.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "\nChecked:   response_total\n") != null);
 }

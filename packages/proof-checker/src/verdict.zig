@@ -292,6 +292,10 @@ pub const PropertyVerdicts = struct {
         accepted: AssuranceGrade,
     };
     entries: [count]Entry = @as([count]Entry, @splat(.none)),
+    /// Which properties the consumer re-derived for this certificate, as
+    /// opposed to accepting a grade the producer stated. Only an accepted
+    /// assessment carries a mark.
+    checked: [count]bool = @as([count]bool, @splat(false)),
 
     fn slot(property: proof_system.Property) usize {
         @setRuntimeSafety(true);
@@ -309,6 +313,16 @@ pub const PropertyVerdicts = struct {
     pub fn accepted(self: PropertyVerdicts, property: proof_system.Property) bool {
         @setRuntimeSafety(true);
         return self.entries[slot(property)] == .accepted;
+    }
+
+    pub fn consumerChecked(self: PropertyVerdicts, property: proof_system.Property) bool {
+        @setRuntimeSafety(true);
+        return self.checked[slot(property)];
+    }
+
+    pub fn markConsumerChecked(self: *PropertyVerdicts, property: proof_system.Property) void {
+        @setRuntimeSafety(true);
+        self.checked[slot(property)] = true;
     }
 
     pub fn recordGrade(self: *PropertyVerdicts, property: proof_system.Property, grade: AssuranceGrade) void {

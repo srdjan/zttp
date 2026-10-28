@@ -453,6 +453,12 @@ fn verifySemantics(
             if (accepted.development_only) ", development artifact" else "",
         },
     );
+    // What the consumer re-derived, as opposed to what it graded. The grade
+    // above is capped, so it cannot say which properties the kernel checked.
+    var checked_buf: [128]u8 = undefined;
+    var checked_writer = std.Io.Writer.fixed(&checked_buf);
+    writeCheckedList(&checked_writer, assessment.properties) catch {};
+    try stdout.print("Checked:   {s}\n", .{checked_writer.buffered()});
     // Coverage on its own line, never inside the proof line above. A covered
     // guard is a promise to check a value at request time; the line above is
     // about what was proved before the artifact shipped.
@@ -469,6 +475,20 @@ fn verifySemantics(
             .trusted_origin => "verified against a pinned key",
         }},
     );
+}
+
+/// The properties the kernel re-derived, in `Property` order, or `none`.
+fn writeCheckedList(writer: *std.Io.Writer, properties: pcc.verdict.PropertyVerdicts) std.Io.Writer.Error!void {
+    var any = false;
+    inline for (@typeInfo(pcc.proof_system.Property).@"enum".field_names) |field| {
+        const property = @field(pcc.proof_system.Property, field);
+        if (properties.consumerChecked(property)) {
+            if (any) try writer.writeAll(", ");
+            try writer.writeAll(field);
+            any = true;
+        }
+    }
+    if (!any) try writer.writeAll("none");
 }
 
 fn readBundleManifest(

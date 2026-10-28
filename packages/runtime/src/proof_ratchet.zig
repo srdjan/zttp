@@ -95,7 +95,11 @@ const Certified = struct {
 };
 
 fn certify(allocator: std.mem.Allocator, source: []const u8) !Certified {
-    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+    return certifyAt(allocator, source, "handler.ts");
+}
+
+fn certifyAt(allocator: std.mem.Allocator, source: []const u8, filename: []const u8) !Certified {
+    var compiled = try precompile.compileHandler(allocator, source, filename, .{
         .emit_verify = true,
         .emit_contract = true,
         .emit_proof_evidence = true,
@@ -653,4 +657,201 @@ test "a guarded requestText read is proved" {
     try testing.expectEqual(cert.EdgeKind.proved, try resultsEdge(&certified));
     try testing.expectEqual(@as(u32, 2), try irTagCount(&certified, .result_def));
     try expectAcceptedAtTrusted(&certified);
+}
+
+// ---------------------------------------------------------------------------
+// Parity census over the tracked handler corpus
+// ---------------------------------------------------------------------------
+
+/// Roots the census walks for `.ts` handlers.
+const census_roots = [_][]const u8{
+    "examples",
+    "tests",
+    "packages/tools/tests/fixtures",
+    "packages/pi/src/simulator/testdata",
+};
+
+/// Directories of deliberately malformed sources, not handlers.
+const census_skipped = [_][]const u8{
+    "tests/corpus/check/bad",
+    "tests/corpus/parse/bad",
+};
+
+/// The floors. A census that compiled fewer certificates, or met fewer Result
+/// events, than this stopped covering the shapes the table below explains.
+const census_min_certified: usize = 93;
+const census_min_with_result_events: usize = 19;
+
+/// One file where the verifier says `result_safe` and the kernel did not
+/// re-derive `results_checked`, with the named cause. A file that stops being
+/// a difference fails as a stale row; a new difference fails as unexplained.
+const ParityDifference = struct { path: []const u8, cause: []const u8 };
+
+const known_differences = [_]ParityDifference{
+    .{
+        .path = "examples/patterns/json-and-dict.ts",
+        .cause = "A4 .error case: reads duplicate.error.kind and malformed.error.kind with no .ok check, so the producer claims tested",
+    },
+    .{
+        .path = "examples/patterns/result-combinators.ts",
+        .cause = "combinator case: Result values go to unwrapOr, orElse, and collectAll, and empty.ok is read outside a guard, so the producer claims tested",
+    },
+};
+
+fn hasResultEvent(built: *const proof_certificate.Built) !bool {
+    var budget = pcc.limits.Budget.init(.{});
+    const decoded = try cert.decode(built.bytes, .{}, &budget);
+    var index: u32 = 0;
+    while (index < decoded.ir.len()) : (index += 1) {
+        switch ((try decoded.ir.get(index)).tag) {
+            .result_def,
+            .result_guard_ok,
+            .result_guard_err,
+            .result_read_ok,
+            .result_read_err,
+            .result_escape,
+            => return true,
+            .function, .sequence, .branch, .loop_node, .return_node, .plain, .capability_call => {},
+        }
+    }
+    return false;
+}
+
+/// Production with only `results_checked` required. The census reads a
+/// certificate under it when production refuses the handler for another
+/// property, because the marker is set whenever the kernel accepts.
+const census_results_requirements = [_]pcc.policy.Requirement{
+    .{ .property = .results_checked, .min_grade = .trusted },
+};
+const census_results_only = pcc.Policy{
+    .proof_systems = pcc.policy.production.proof_systems,
+    .semantics_epochs = pcc.policy.production.semantics_epochs,
+    .required = &census_results_requirements,
+};
+
+fn censusRejected(path: []const u8, rejection: pcc.verdict.Rejection) error{TestUnexpectedResult} {
+    std.debug.print(
+        "census: '{s}' rejected at {s} ({s})\n",
+        .{ path, rejection.stage.name(), rejection.code.text() },
+    );
+    return error.TestUnexpectedResult;
+}
+
+fn isCensusSkipped(path: []const u8) bool {
+    for (census_skipped) |prefix| {
+        if (std.mem.startsWith(u8, path, prefix)) return true;
+    }
+    return false;
+}
+
+test "the kernel re-derives results_checked wherever the verifier says result_safe, except the named differences" {
+    const allocator = testing.allocator;
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var found: std.ArrayList([]u8) = .empty;
+    defer {
+        for (found.items) |path| allocator.free(path);
+        found.deinit(allocator);
+    }
+    var differences: std.ArrayList([]u8) = .empty;
+    defer {
+        for (differences.items) |path| allocator.free(path);
+        differences.deinit(allocator);
+    }
+
+    for (census_roots) |root| {
+        var dir = std.Io.Dir.cwd().openDir(io, root, .{ .iterate = true }) catch |err| {
+            std.debug.print("census: cannot open root '{s}': {s}\n", .{ root, @errorName(err) });
+            return err;
+        };
+        defer dir.close(io);
+        var walker = try dir.walk(allocator);
+        defer walker.deinit();
+        while (try walker.next(io)) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".ts")) continue;
+            const path = try std.fs.path.join(allocator, &.{ root, entry.path });
+            errdefer allocator.free(path);
+            if (isCensusSkipped(path)) {
+                allocator.free(path);
+                continue;
+            }
+            try found.append(allocator, path);
+        }
+    }
+    std.mem.sort([]u8, found.items, {}, struct {
+        fn less(_: void, a: []u8, b: []u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.less);
+
+    var certified_count: usize = 0;
+    var skipped_count: usize = 0;
+    var relaxed_count: usize = 0;
+    var with_events: usize = 0;
+    var rederived_count: usize = 0;
+    for (found.items) |path| {
+        const source = try zts.file_io.readFile(allocator, path, 4 * 1024 * 1024);
+        defer allocator.free(source);
+        var certified = certifyAt(allocator, source, path) catch {
+            skipped_count += 1;
+            continue;
+        };
+        defer certified.deinit();
+        certified_count += 1;
+
+        // Production first. A policy-stage refusal means the handler does not
+        // hold a property production requires (totality, say), so the same
+        // certificate is read again under a policy that asks only for
+        // `results_checked`. A refusal at any earlier stage means the kernel
+        // disagreed with the producer about the certificate itself.
+        var assessed = certified.assess(pcc.policy.production);
+        if (assessed.rejection()) |rejection| {
+            if (rejection.stage != .policy) return censusRejected(path, rejection);
+            relaxed_count += 1;
+            assessed = certified.assess(census_results_only);
+            if (assessed.rejection()) |again| {
+                if (again.stage != .policy) return censusRejected(path, again);
+            }
+        }
+
+        const rederived = assessed.properties.consumerChecked(.results_checked);
+        if (rederived) rederived_count += 1;
+        if (!try hasResultEvent(&certified.built)) continue;
+        with_events += 1;
+        const verifier_safe = certified.compiled.contract.?.properties.?.result_safe;
+        if (verifier_safe and !rederived) try differences.append(allocator, try allocator.dupe(u8, path));
+    }
+    std.debug.print(
+        "census: {d} files, {d} certified, {d} skipped, {d} read under the results-only policy, {d} with Result events, {d} re-derived, {d} differences\n",
+        .{ found.items.len, certified_count, skipped_count, relaxed_count, with_events, rederived_count, differences.items.len },
+    );
+
+    try testing.expect(certified_count >= census_min_certified);
+    try testing.expect(with_events >= census_min_with_result_events);
+
+    var failed = false;
+    for (differences.items) |path| {
+        var named = false;
+        for (known_differences) |row| {
+            if (std.mem.eql(u8, row.path, path)) named = true;
+        }
+        if (!named) {
+            std.debug.print("census: unexplained difference: {s}\n", .{path});
+            failed = true;
+        }
+    }
+    for (known_differences) |row| {
+        try testing.expect(row.cause.len > 0);
+        var still = false;
+        for (differences.items) |path| {
+            if (std.mem.eql(u8, row.path, path)) still = true;
+        }
+        if (!still) {
+            std.debug.print("census: stale row (no longer a difference): {s}\n", .{row.path});
+            failed = true;
+        }
+    }
+    try testing.expect(!failed);
 }

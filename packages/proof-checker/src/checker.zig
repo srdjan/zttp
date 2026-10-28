@@ -1195,6 +1195,10 @@ const Session = struct {
         var grades = @as([((@typeInfo(ps.Property).@"enum".field_names.len))]?verdict.AssuranceGrade, @splat(null));
         var answered = @as([grades.len]bool, @splat(false));
         var refused = @as([grades.len]bool, @splat(false));
+        // An established edge the kernel re-derived itself (a `proved` or a
+        // `translation_validated` edge) and one it only graded.
+        var rederived = @as([grades.len]bool, @splat(false));
+        var graded_only = @as([grades.len]bool, @splat(false));
 
         var index: u32 = 0;
         while (index < self.certificate.evidence.len()) : (index += 1) {
@@ -1214,6 +1218,10 @@ const Session = struct {
                     continue;
                 },
                 .established => |grade| {
+                    switch (classify(entry, obligation.property) orelse .not_established) {
+                        .proved, .translation_validated => rederived[slot] = true,
+                        .solver, .trusted, .tested, .not_established => graded_only[slot] = true,
+                    }
                     grades[slot] = if (grades[slot]) |existing|
                         verdict.AssuranceGrade.weakest(existing, grade)
                     else
@@ -1289,13 +1297,22 @@ const Session = struct {
                 return reject(.evidence_check, .obligation_without_evidence, .{ .property = property });
             }
         }
-        return self.applyEvidencePolicy(grades[0..], refused[0..]);
+        // Only totality and results are ever re-derived here, and only when
+        // every edge that answered the property was re-derived. The totality
+        // answer is the consumer's own fold (the fabricated-property check
+        // above), and the results answer is the consumer's own pass.
+        var checked = @as([grades.len]bool, @splat(false));
+        checked[totality_slot] = rederived[totality_slot] and !graded_only[totality_slot] and !refused[totality_slot];
+        checked[results_slot] = rederived[results_slot] and !graded_only[results_slot] and
+            !refused[results_slot] and self.results == .passed;
+        return self.applyEvidencePolicy(grades[0..], refused[0..], checked[0..]);
     }
 
     fn applyEvidencePolicy(
         self: *Session,
         grades: []const ?verdict.AssuranceGrade,
         refused: []const bool,
+        checked: []const bool,
     ) SessionError!Outcome {
         @setRuntimeSafety(true);
         var property_verdicts: verdict.PropertyVerdicts = .{};
@@ -1350,6 +1367,9 @@ const Session = struct {
                 },
             };
         }
+
+        if (checked[@backingInt(ps.Property.response_total) - 1]) property_verdicts.markConsumerChecked(.response_total);
+        if (checked[@backingInt(ps.Property.results_checked) - 1]) property_verdicts.markConsumerChecked(.results_checked);
 
         return .{
             .state = .policy_accepted,
@@ -4165,4 +4185,46 @@ fn runResultsProbe(probe: ResultsProbe) !Assessment {
         .binding_limit => rows[6].aux = 64,
     }
     return checkResultsRows(&rows, proved_results_edge);
+}
+
+test "consumer marker: a proved results certificate marks results_checked and response_total" {
+    const result = try checkResultsRows(&honest_rows, proved_results_edge);
+    try expectResultsAccepted(result);
+    try testing.expect(result.properties.consumerChecked(.results_checked));
+    try testing.expect(result.properties.consumerChecked(.response_total));
+}
+
+test "consumer marker: a tested results certificate marks only response_total" {
+    var rows = honest_rows;
+    rows[7] = .{ .tag = .plain, .parent = 3 };
+    const result = try checkResultsRows(&rows, test_support.testedFor(1));
+    try testing.expect(result.rejection() == null);
+    try testing.expect(!result.properties.consumerChecked(.results_checked));
+    try testing.expect(result.properties.consumerChecked(.response_total));
+}
+
+test "consumer marker: a trusted declaration on totality leaves response_total unmarked" {
+    const result = try checkResultsRowsDeclaring(&honest_rows, proved_results_edge, 10);
+    try testing.expect(result.rejection() == null);
+    try testing.expect(result.properties.consumerChecked(.results_checked));
+    try testing.expect(!result.properties.consumerChecked(.response_total));
+}
+
+test "consumer marker: a rejected certificate marks nothing" {
+    var rows = honest_rows;
+    rows[7] = .{ .tag = .plain, .parent = 3 };
+    const result = try checkResultsRows(&rows, proved_results_edge);
+    try expectAt(result, .evidence_check, .result_read_unguarded);
+    try testing.expect(!result.properties.consumerChecked(.results_checked));
+    try testing.expect(!result.properties.consumerChecked(.response_total));
+}
+
+test "consumer marker: no other property is ever marked" {
+    const result = try checkResultsRows(&honest_rows, proved_results_edge);
+    inline for (@typeInfo(ps.Property).@"enum".field_names) |field| {
+        const property: ps.Property = @field(ps.Property, field);
+        if (property != .results_checked and property != .response_total) {
+            try testing.expect(!result.properties.consumerChecked(property));
+        }
+    }
 }
