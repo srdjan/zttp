@@ -322,6 +322,12 @@ zttp serve --test tests/handler.test.jsonl src/handler.ts
 ```
 
 Ordinary fixtures use `test`, `request`, optional `io`, and `expect` rows.
+The summary reads `Results: P passed, F failed, U unchecked, T total`. A test
+whose `expect` row holds no assertion runs the handler and checks nothing, so it
+counts as `unchecked`. An unchecked test fails the run, because it cannot show
+that the handler is finished. `zttp gen-tests` writes such a row for a path whose
+status the compiler cannot read, such as a `hole()` that is not filled yet. Add
+an assertion to the row, or finish the handler, to make the run pass.
 Record and replay handler I/O:
 
 ```bash

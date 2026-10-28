@@ -33,6 +33,7 @@ pub const NodeIndex = ir.NodeIndex;
 const IrView = ir.IrView;
 pub const null_node = ir.null_node;
 const packBindingKey = @import("binding_key.zig").packBindingKey;
+pub const ResponseStatus = contract_types.ResponseStatus;
 
 // ---------------------------------------------------------------------------
 // Path constraints
@@ -114,7 +115,9 @@ pub const GeneratedTest = struct {
     method: []const u8,
     url: []const u8,
     has_auth_header: bool,
-    expected_status: u16,
+    /// The status the path returns. `unknown` when the analysis cannot read it:
+    /// the generated test then asserts no status.
+    expected_status: ResponseStatus,
     io_stubs: std.ArrayList(IoStub),
     constraints: []const Constraint = &.{},
     /// True when this path begins at a function dispatched by `routerMatch`.
@@ -258,7 +261,28 @@ fn dupePathIoCall(
 /// every handler, as the check path does. A version 4 artifact under-claims
 /// `fault_covered` for a handler with no failable site, so it never claims a
 /// property that 5 refuses.
-pub const path_analyzer_version: u32 = 5;
+///
+/// 6 changes what a behavior path records as its response status. A status
+/// is now `known(n)` or `unknown`. Version 5 recorded 200 for every value that
+/// was not an integer literal in an options object: a user helper call, a
+/// returned identifier, `hole()`, a route dispatch, a computed or ternary
+/// status, a spread, an options identifier, a `Response.rawJson` literal, and
+/// every `Response.redirect`. Version 6 reads `rawJson` like `json`, answers 302
+/// for `Response.redirect(url)` and the literal of its second argument, answers
+/// 500 for an integer literal outside 100 to 599 and for a bare `return;`, and
+/// records `unknown` for everything else. The behavior diff treats `unknown` as
+/// equal to no known status, and as equal to `unknown` only for the same
+/// program. The contract wire writes `"status": null` for `unknown`, and its
+/// version is 25.
+///
+/// A version 5 artifact probably over-claims against 6 for a handler that
+/// returns a response through one of those shapes: its record holds 200 where
+/// the runtime answers another status, so a behavior diff against it can read
+/// `equivalent` where the status changed. A handler whose every return is a
+/// `Response` helper call with a literal status has the same paths under 5 and
+/// 6, and only the policy hash differs. This has not been measured over every
+/// handler.
+pub const path_analyzer_version: u32 = 6;
 
 /// Methods tried in order for a path whose constraints name no method.
 const request_method_candidates = [_][]const u8{ "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS" };
@@ -1240,8 +1264,12 @@ pub const PathGenerator = struct {
                 });
             }
 
-            // Expected response
-            try writer.print("{{\"type\":\"expect\",\"status\":{d}}}\n", .{test_case.expected_status});
+            // Expected response. An unknown status writes no status key, so the
+            // test runner asserts none and counts the test as unchecked.
+            switch (test_case.expected_status) {
+                .known => |status| try writer.print("{{\"type\":\"expect\",\"status\":{d}}}\n", .{status}),
+                .unknown => try writer.writeAll("{\"type\":\"expect\"}\n"),
+            }
         }
     }
 
@@ -1401,7 +1429,10 @@ pub const PathGenerator = struct {
                 if (self.ir_view.getOptValue(node)) |value| {
                     try self.walkReturnedValue(value);
                 } else {
-                    try self.emitTestCase(200);
+                    // A bare `return;` hands the runtime a value that is not a
+                    // `Response`, and the runtime answers 500, as for a bare
+                    // `assert`.
+                    try self.emitTestCase(.{ .known = 500 });
                 }
                 self.io_seq.shrinkRetainingCapacity(saved_io);
             },
@@ -1575,7 +1606,7 @@ pub const PathGenerator = struct {
         for (0..cases.count()) |k| {
             if (k > 0 and self.path_count >= MAX_PATHS) break;
             try self.constraints.appendSlice(self.allocator, cases.slice(k));
-            var status: u16 = 500;
+            var status: ResponseStatus = .{ .known = 500 };
             if (has_error) {
                 try self.trackModuleCall(assert.error_expr, null);
                 status = self.extractExprStatus(assert.error_expr);
@@ -1604,7 +1635,6 @@ pub const PathGenerator = struct {
     /// `equivalent` where the behavior changed:
     /// - an arm pattern that changes while the arm status stays the same;
     /// - two arms with the same status that swap bodies;
-    /// - a returned ternary, which is still one leaf;
     /// - a `match` that is reached through a `const` and returned by name.
     fn walkReturnedValue(self: *PathGenerator, value: NodeIndex) error{OutOfMemory}!void {
         if (self.ir_view.getTag(value) == .match_expr) {
@@ -2294,48 +2324,76 @@ pub const PathGenerator = struct {
     // Response status extraction
     // -------------------------------------------------------------------
 
-    /// The response status of the value an exit returns: the `status` of a
-    /// `Response` helper call, and 200 for any other value.
-    fn extractExprStatus(self: *PathGenerator, ret_val: NodeIndex) u16 {
-        const ret_tag = self.ir_view.getTag(ret_val) orelse return 200;
+    /// The response status of the value an exit returns, by the runtime rules
+    /// of `http.zig`:
+    ///
+    /// - `Response.json`, `text`, `html`, and `rawJson` with fewer than two
+    ///   arguments answer 200.
+    /// - With an object literal as the second argument, the properties are read
+    ///   in order. A `status` that is an integer literal answers that value, or
+    ///   500 when it is outside 100 to 599 (`normalizeStatus`). Any other
+    ///   `status` value is `unknown`. A spread makes the status `unknown` until
+    ///   a literal `status` property follows it. No `status` and no spread
+    ///   answers 200.
+    /// - With any other second argument the status is `unknown`.
+    /// - `Response.redirect(url)` answers 302. A second argument that is an
+    ///   integer literal answers that value (500 outside 100 to 599), and any
+    ///   other second argument is `unknown`.
+    /// - Any other value is `unknown`: an identifier, a user helper call,
+    ///   `hole()`, a route dispatch, a ternary. A status is never resolved
+    ///   through a binding, because the profile admits property assignment and
+    ///   a later write would make the resolved value wrong.
+    fn extractExprStatus(self: *PathGenerator, ret_val: NodeIndex) ResponseStatus {
+        const ret_tag = self.ir_view.getTag(ret_val) orelse return .unknown;
+        if (ret_tag != .call and ret_tag != .method_call) return .unknown;
+        const call = self.ir_view.getCall(ret_val) orelse return .unknown;
+        const helper = self.responseHelperName(call.callee) orelse return .unknown;
 
-        if (ret_tag == .call or ret_tag == .method_call) {
-            const call = self.ir_view.getCall(ret_val) orelse return 200;
-
-            if (!self.isResponseHelper(call.callee)) return 200;
-
-            if (call.args_count >= 2) {
-                const opts = self.ir_view.getListIndex(call.args_start, 1);
-                if (self.extractStatusFromOptions(opts)) |status| return status;
-            }
+        if (std.mem.eql(u8, helper, "redirect")) {
+            if (call.args_count < 2) return .{ .known = 302 };
+            const arg = self.ir_view.getListIndex(call.args_start, 1);
+            return self.literalStatus(arg) orelse .unknown;
         }
 
-        return 200;
+        if (call.args_count < 2) return .{ .known = 200 };
+        const opts = self.ir_view.getListIndex(call.args_start, 1);
+        return self.statusFromOptions(opts);
     }
 
-    fn extractStatusFromOptions(self: *const PathGenerator, opts_node: NodeIndex) ?u16 {
-        const tag = self.ir_view.getTag(opts_node) orelse return null;
-        if (tag != .object_literal) return null;
+    /// The status that an integer literal gives: the value, or 500 when the
+    /// value is outside 100 to 599. Null when the node is not an integer literal.
+    fn literalStatus(self: *const PathGenerator, node: NodeIndex) ?ResponseStatus {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        if (tag != .lit_int) return null;
+        const value = self.ir_view.getIntValue(node) orelse return null;
+        if (value < 100 or value > 599) return .{ .known = 500 };
+        return .{ .known = @intCast(value) };
+    }
 
-        const obj = self.ir_view.getObject(opts_node) orelse return null;
+    /// The status of the options argument of a `Response` helper.
+    fn statusFromOptions(self: *const PathGenerator, opts_node: NodeIndex) ResponseStatus {
+        const tag = self.ir_view.getTag(opts_node) orelse return .unknown;
+        if (tag != .object_literal) return .unknown;
+        const obj = self.ir_view.getObject(opts_node) orelse return .unknown;
+
+        var result: ResponseStatus = .{ .known = 200 };
         var i: u16 = 0;
         while (i < obj.properties_count) : (i += 1) {
             const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
-            const prop_tag = self.ir_view.getTag(prop_idx) orelse continue;
-            if (prop_tag != .object_property) continue;
-
-            const prop = self.ir_view.getProperty(prop_idx) orelse continue;
-
-            const key_name = self.getPropertyKeyName(prop.key) orelse continue;
-            if (!std.mem.eql(u8, key_name, "status")) continue;
-
-            const val_tag = self.ir_view.getTag(prop.value) orelse continue;
-            if (val_tag == .lit_int) {
-                const val = self.ir_view.getIntValue(prop.value) orelse continue;
-                if (val >= 100 and val <= 599) return @intCast(val);
+            const prop_tag = self.ir_view.getTag(prop_idx) orelse return .unknown;
+            // A spread may carry a `status`: it is unknown until a later
+            // literal `status` property replaces it.
+            if (prop_tag != .object_property) {
+                result = .unknown;
+                continue;
             }
+            const prop = self.ir_view.getProperty(prop_idx) orelse return .unknown;
+            // A key that cannot be read might be `status`.
+            const key_name = self.getPropertyKeyName(prop.key) orelse return .unknown;
+            if (!std.mem.eql(u8, key_name, "status")) continue;
+            result = self.literalStatus(prop.value) orelse .unknown;
         }
-        return null;
+        return result;
     }
 
     // -------------------------------------------------------------------
@@ -2406,7 +2464,7 @@ pub const PathGenerator = struct {
     /// status that its stubs cannot produce. An infeasible path emits no test,
     /// no path cost, and no behavior, and is not counted toward `MAX_PATHS`, so
     /// it is not a truncation.
-    fn emitTestCase(self: *PathGenerator, status: u16) !void {
+    fn emitTestCase(self: *PathGenerator, status: ResponseStatus) !void {
         if (self.path_count >= MAX_PATHS) return;
 
         // An override is keyed by the call site, not the function name: a path
@@ -2673,23 +2731,26 @@ pub const PathGenerator = struct {
         };
     }
 
-    fn isResponseHelper(self: *const PathGenerator, callee: NodeIndex) bool {
-        const tag = self.ir_view.getTag(callee) orelse return false;
-        if (tag != .member_access) return false;
-        const member = self.ir_view.getMember(callee) orelse return false;
+    /// The helper name when `callee` is `Response.json`, `text`, `html`,
+    /// `rawJson`, or `redirect`, and null for any other callee.
+    fn responseHelperName(self: *const PathGenerator, callee: NodeIndex) ?[]const u8 {
+        const tag = self.ir_view.getTag(callee) orelse return null;
+        if (tag != .member_access) return null;
+        const member = self.ir_view.getMember(callee) orelse return null;
 
-        const obj_tag = self.ir_view.getTag(member.object) orelse return false;
-        if (obj_tag != .identifier) return false;
-        const binding = self.ir_view.getBinding(member.object) orelse return false;
-        if (binding.kind != .undeclared_global) return false;
-        const obj_name = self.resolveAtomName(binding.name_atom) orelse return false;
-        if (!std.mem.eql(u8, obj_name, "Response")) return false;
+        const obj_tag = self.ir_view.getTag(member.object) orelse return null;
+        if (obj_tag != .identifier) return null;
+        const binding = self.ir_view.getBinding(member.object) orelse return null;
+        if (binding.kind != .undeclared_global) return null;
+        const obj_name = self.resolveAtomName(binding.name_atom) orelse return null;
+        if (!std.mem.eql(u8, obj_name, "Response")) return null;
 
-        const method_name = self.resolveAtomName(member.property) orelse return false;
-        return std.mem.eql(u8, method_name, "json") or
-            std.mem.eql(u8, method_name, "text") or
-            std.mem.eql(u8, method_name, "html") or
-            std.mem.eql(u8, method_name, "redirect");
+        const method_name = self.resolveAtomName(member.property) orelse return null;
+        const helpers = [_][]const u8{ "json", "text", "html", "rawJson", "redirect" };
+        for (helpers) |helper| {
+            if (std.mem.eql(u8, method_name, helper)) return helper;
+        }
+        return null;
     }
 
     fn isReqMemberAccess(self: *const PathGenerator, node: NodeIndex, prop: []const u8) bool {
@@ -3451,7 +3512,7 @@ test "emitTestCase keeps argument signature allocation failure conservative" {
     // immediately after it so the production fallback is exercised.
     failing.allocations_before_failure = 1;
     failing.armed = true;
-    try generator.emitTestCase(200);
+    try generator.emitTestCase(.{ .known = 200 });
 
     try std.testing.expect(!failing.armed);
     try std.testing.expectEqual(@as(usize, 1), generator.tests.items.len);
@@ -3579,7 +3640,7 @@ test "route roots stay internal to analysis outputs" {
 
     var found_route_root = false;
     for (fixture.generator.getTests()) |generated| {
-        if (generated.route_root and generated.expected_status == 201) {
+        if (generated.route_root and generated.expected_status.isKnown(201)) {
             found_route_root = true;
             break;
         }
@@ -3599,7 +3660,7 @@ test "route roots stay internal to analysis outputs" {
         paths.deinit(allocator);
     }
     for (paths.items) |path| {
-        try std.testing.expect(path.response_status != 201);
+        try std.testing.expect(!path.response_status.isKnown(201));
     }
 }
 
@@ -4294,7 +4355,7 @@ test "a path that checks two calls to one function stubs each call by its own co
     for (tests) |test_case| {
         try std.testing.expect(test_case.io_stubs.items.len >= 1);
         const first_ok = std.mem.indexOf(u8, test_case.io_stubs.items[0].result_json, "\"ok\":true") != null;
-        switch (test_case.expected_status) {
+        switch (test_case.expected_status.knownValue() orelse return error.UnknownStatus) {
             401 => {
                 // The first call fails. The second call is never reached.
                 try std.testing.expectEqual(@as(usize, 1), test_case.io_stubs.items.len);
@@ -4673,7 +4734,7 @@ test "a failing fetch path stubs a response the replay reads as a 503" {
     var seen_504: bool = false;
     var seen_200: bool = false;
     for (fixture.generator.getTests()) |test_case| {
-        switch (test_case.expected_status) {
+        switch (test_case.expected_status.knownValue() orelse return error.UnknownStatus) {
             502 => {
                 // The first fetch fails and the second is never reached.
                 try std.testing.expectEqual(@as(usize, 1), test_case.io_stubs.items.len);
@@ -4728,7 +4789,7 @@ test "a Result export keeps its Result stubs beside a fetch" {
     defer fixture.deinit();
 
     for (fixture.generator.getTests()) |test_case| {
-        switch (test_case.expected_status) {
+        switch (test_case.expected_status.knownValue() orelse return error.UnknownStatus) {
             401 => try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[0].result_json, "\"ok\":false") != null),
             502 => {
                 try std.testing.expect(std.mem.indexOf(u8, test_case.io_stubs.items[0].result_json, "\"ok\":true") != null);
@@ -4745,7 +4806,7 @@ test "a Result export keeps its Result stubs beside a fetch" {
 fn countPaths(tests: []const GeneratedTest, status: u16, kinds: []const std.meta.Tag(Constraint)) usize {
     var count: usize = 0;
     for (tests) |t| {
-        if (t.expected_status != status or t.constraints.len != kinds.len) continue;
+        if (!t.expected_status.isKnown(status) or t.constraints.len != kinds.len) continue;
         for (t.constraints, kinds) |c, kind| {
             if (std.meta.activeTag(c) != kind) break;
         } else count += 1;
@@ -4966,7 +5027,7 @@ test "a status !== 200 test forks the fetch like !res.ok" {
     try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 502, &.{.result_not_ok}));
     try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{.result_ok}));
     for (tests) |t| {
-        const failed = t.expected_status == 502;
+        const failed = t.expected_status.isKnown(502);
         try std.testing.expectEqual(if (failed) @as(u16, 503) else @as(u16, 200), try stubStatus(t.io_stubs.items[0].result_json));
     }
 }
@@ -5053,7 +5114,7 @@ test "a status test that is not the complement of ok records no fork and takes i
             try std.testing.expect(!hasFailureConstraint(t));
             const status = try stubStatus(t.io_stubs.items[0].result_json);
             // The 502 path is the one where the test is true.
-            try std.testing.expectEqual(t.expected_status == 502, status_check.holds(row.cmp, status));
+            try std.testing.expectEqual(t.expected_status.isKnown(502), status_check.holds(row.cmp, status));
             // The stub's status decides `ok`; it must be a real status.
             try std.testing.expect(status >= 100 and status <= 599);
         }
@@ -5077,7 +5138,7 @@ test "a status test before an ok test stubs each branch with a status that takes
     var seen: usize = 0;
     for (tests) |t| {
         const status = try stubStatus(t.io_stubs.items[0].result_json);
-        switch (t.expected_status) {
+        switch (t.expected_status.knownValue() orelse return error.UnknownStatus) {
             404 => try std.testing.expectEqual(@as(u16, 404), status),
             502 => {
                 try std.testing.expect(status != 404);
@@ -5113,7 +5174,7 @@ test "a status test under a forked status test picks a status in the failed rang
     try std.testing.expectEqual(@as(usize, 3), tests.len);
     for (tests) |t| {
         const status = try stubStatus(t.io_stubs.items[0].result_json);
-        switch (t.expected_status) {
+        switch (t.expected_status.knownValue() orelse return error.UnknownStatus) {
             404 => try std.testing.expectEqual(@as(u16, 404), status),
             502 => try std.testing.expectEqual(@as(u16, 503), status),
             200 => try std.testing.expectEqual(@as(u16, 200), status),
@@ -5198,7 +5259,7 @@ test "a shadowed res keeps the status fork of the outer fetch" {
 
     var forked: usize = 0;
     for (fixture.generator.getTests()) |t| {
-        if (t.expected_status == 502) {
+        if (t.expected_status.isKnown(502)) {
             try std.testing.expect(hasFailureConstraint(t));
             forked += 1;
         }
@@ -5229,7 +5290,7 @@ test "a direct req.method comparison constrains the request method" {
     const tests = fixture.generator.getTests();
     try std.testing.expectEqual(@as(usize, 2), tests.len);
     for (tests) |t| {
-        if (t.expected_status == 201) {
+        if (t.expected_status.isKnown(201)) {
             try std.testing.expectEqualStrings("POST", t.method);
         } else {
             try std.testing.expect(!std.mem.eql(u8, t.method, "POST"));
@@ -5251,7 +5312,7 @@ test "a method read into a const constrains the request method" {
 
     var saw_delete = false;
     for (fixture.generator.getTests()) |t| {
-        if (t.expected_status == 204) {
+        if (t.expected_status.isKnown(204)) {
             try std.testing.expectEqualStrings("DELETE", t.method);
             saw_delete = true;
         }
@@ -5279,7 +5340,7 @@ test "a failed check behind a method conjunct sends that method on its failure p
 
     var saw_401 = false;
     for (fixture.generator.getTests()) |t| {
-        if (t.expected_status != 401) continue;
+        if (!t.expected_status.isKnown(401)) continue;
         try std.testing.expectEqualStrings("POST", t.method);
         saw_401 = true;
     }
@@ -5306,7 +5367,7 @@ test "a !== method guard sends POST on every path after it and another method on
     var seen_401 = false;
     var seen_200 = false;
     for (tests) |t| {
-        switch (t.expected_status) {
+        switch (t.expected_status.knownValue() orelse return error.UnknownStatus) {
             405 => {
                 seen_405 = true;
                 try std.testing.expect(!std.mem.eql(u8, t.method, "POST"));
@@ -5339,7 +5400,7 @@ test "a !== GET guard sends a method other than GET on the guard path" {
     const tests = fixture.generator.getTests();
     try std.testing.expectEqual(@as(usize, 2), tests.len);
     for (tests) |t| {
-        if (t.expected_status == 405) {
+        if (t.expected_status.isKnown(405)) {
             try std.testing.expect(!std.mem.eql(u8, t.method, "GET"));
         } else {
             try std.testing.expectEqualStrings("GET", t.method);
@@ -5363,7 +5424,7 @@ test "the fall-through of two method tests sends a method that is neither" {
     try std.testing.expectEqual(@as(usize, 3), tests.len);
     var seen_third = false;
     for (tests) |t| {
-        if (t.expected_status != 203) continue;
+        if (!t.expected_status.isKnown(203)) continue;
         seen_third = true;
         try std.testing.expect(!std.mem.eql(u8, t.method, "GET"));
         try std.testing.expect(!std.mem.eql(u8, t.method, "POST"));
@@ -5385,7 +5446,7 @@ test "a !== url guard sends a url other than the compared one" {
     const tests = fixture.generator.getTests();
     try std.testing.expectEqual(@as(usize, 2), tests.len);
     for (tests) |t| {
-        if (t.expected_status == 404) {
+        if (t.expected_status.isKnown(404)) {
             try std.testing.expect(!std.mem.eql(u8, t.url, "/"));
         } else {
             try std.testing.expectEqualStrings("/", t.url);
@@ -5410,7 +5471,7 @@ test "a path no status can satisfy is not emitted and is not a truncation" {
 
     const tests = fixture.generator.getTests();
     try std.testing.expectEqual(@as(usize, 2), tests.len);
-    for (tests) |t| try std.testing.expect(t.expected_status != 404);
+    for (tests) |t| try std.testing.expect(!t.expected_status.isKnown(404));
     try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 502, &.{.result_not_ok}));
     try std.testing.expectEqual(@as(usize, 1), countPaths(tests, 200, &.{ .result_ok, .status_is }));
     try std.testing.expect(fixture.generator.pathsExhaustive());
@@ -5422,7 +5483,7 @@ test "a path no status can satisfy is not emitted and is not a truncation" {
         behaviors.deinit(allocator);
     }
     try std.testing.expectEqual(@as(usize, 2), behaviors.items.len);
-    for (behaviors.items) |b| try std.testing.expect(b.response_status != 404);
+    for (behaviors.items) |b| try std.testing.expect(!b.response_status.isKnown(404));
 }
 
 test "two status tests that exclude each other leave no then-path" {
@@ -5439,7 +5500,7 @@ test "two status tests that exclude each other leave no then-path" {
 
     const tests = fixture.generator.getTests();
     try std.testing.expect(tests.len > 0);
-    for (tests) |t| try std.testing.expect(t.expected_status != 418);
+    for (tests) |t| try std.testing.expect(!t.expected_status.isKnown(418));
 }
 
 test "one call that must be both ok and not ok leaves no path" {
@@ -5456,7 +5517,7 @@ test "one call that must be both ok and not ok leaves no path" {
 
     const tests = fixture.generator.getTests();
     try std.testing.expect(tests.len > 0);
-    for (tests) |t| try std.testing.expect(t.expected_status != 418);
+    for (tests) |t| try std.testing.expect(!t.expected_status.isKnown(418));
 }
 
 test "two method tests that exclude each other leave no then-path" {
@@ -5474,8 +5535,8 @@ test "two method tests that exclude each other leave no then-path" {
     const tests = fixture.generator.getTests();
     try std.testing.expect(tests.len > 0);
     for (tests) |t| {
-        try std.testing.expect(t.expected_status != 418);
-        try std.testing.expect(t.expected_status != 419);
+        try std.testing.expect(!t.expected_status.isKnown(418));
+        try std.testing.expect(!t.expected_status.isKnown(419));
     }
 }
 
@@ -5492,7 +5553,7 @@ test "two url tests keep the last url: req.url and req.path are distinct operand
 
     var saw = false;
     for (fixture.generator.getTests()) |t| {
-        if (t.expected_status != 418) continue;
+        if (!t.expected_status.isKnown(418)) continue;
         saw = true;
         try std.testing.expectEqualStrings("/b", t.url);
     }
@@ -5593,7 +5654,7 @@ test "cost stays bounded when no function value escapes" {
 fn countStatus(tests: []const GeneratedTest, status: u16) usize {
     var n: usize = 0;
     for (tests) |t| {
-        if (t.expected_status == status) n += 1;
+        if (t.expected_status.isKnown(status)) n += 1;
     }
     return n;
 }
@@ -5685,7 +5746,7 @@ test "a module call in the assert error expression is on the failure path only" 
     const tests = fixture.generator.getTests();
     try std.testing.expectEqual(@as(usize, 2), tests.len);
     for (tests) |t| {
-        if (t.expected_status == 403) {
+        if (t.expected_status.isKnown(403)) {
             try std.testing.expectEqual(@as(usize, 1), t.io_stubs.items.len);
         } else {
             try std.testing.expectEqual(@as(usize, 0), t.io_stubs.items.len);
@@ -5784,7 +5845,7 @@ test "a module call in the returned match discriminant is on every arm path and 
     const tests = fixture.generator.getTests();
     try std.testing.expectEqual(@as(usize, 2), tests.len);
     for (tests) |t| {
-        const expected: usize = if (t.expected_status == 405) 1 else 2;
+        const expected: usize = if (t.expected_status.isKnown(405)) 1 else 2;
         try std.testing.expectEqual(expected, t.io_stubs.items.len);
     }
 }

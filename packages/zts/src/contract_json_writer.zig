@@ -504,7 +504,11 @@ fn writeContractJsonVersion(
             try writer.writeAll("      \"pattern\": ");
             try writeJsonString(writer, path.route_pattern);
             try writer.writeAll(",\n");
-            try writer.print("      \"status\": {d},\n", .{path.response_status});
+            // An unknown status is `null`; the parser reads it back as unknown.
+            switch (path.response_status) {
+                .known => |status| try writer.print("      \"status\": {d},\n", .{status}),
+                .unknown => try writer.writeAll("      \"status\": null,\n"),
+            }
             try writer.print("      \"" ++ comptime contractKey(json_version, "ioDepth") ++ "\": {d},\n", .{path.io_depth});
             try writer.print("      \"" ++ comptime contractKey(json_version, "failurePath") ++ "\": {s},\n", .{if (path.is_failure_path) "true" else "false"});
 

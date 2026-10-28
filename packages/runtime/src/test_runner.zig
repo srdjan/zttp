@@ -53,7 +53,26 @@ const TestSuite = struct {
     }
 };
 
+/// The counts of one suite run. `unchecked` counts a test that ran and had no
+/// assertion to check: it proves nothing, so it is not counted as passed.
+pub const Summary = struct {
+    passed: u32 = 0,
+    failed: u32 = 0,
+    unchecked: u32 = 0,
+};
+
+/// Run the suite. A failed test fails the run, and so does an unchecked test:
+/// a test that checks nothing cannot show that the handler is finished.
 pub fn run(allocator: std.mem.Allocator, spec: ExecutionSpec) !void {
+    const summary = try runSuite(allocator, spec);
+    if (summary.unchecked > 0) {
+        std.debug.print("{d} unchecked test(s) compared nothing with the response; an unchecked test fails the run\n", .{summary.unchecked});
+    }
+    if (summary.failed > 0 or summary.unchecked > 0) return error.TestsFailed;
+}
+
+pub fn runSuite(allocator: std.mem.Allocator, spec: ExecutionSpec) !Summary {
+    // The suite file, then the handler, then one run for each test.
     const test_path = spec.runtime_config.test_file_path orelse return error.NoTestFile;
 
     const test_source = readFile(allocator, test_path) catch |err| {
@@ -76,7 +95,7 @@ pub fn run(allocator: std.mem.Allocator, spec: ExecutionSpec) !void {
 
     if (tests.len == 0) {
         std.log.info("No tests found in '{s}'\n", .{test_path});
-        return;
+        return .{};
     }
 
     const loaded = handler_loader.load(allocator, spec.handler) catch |err| {
@@ -103,6 +122,7 @@ pub fn run(allocator: std.mem.Allocator, spec: ExecutionSpec) !void {
 
     var passed: u32 = 0;
     var failed: u32 = 0;
+    var unchecked: u32 = 0;
 
     for (tests) |test_case| {
         const result = runLoadedHandlerTest(
@@ -111,7 +131,11 @@ pub fn run(allocator: std.mem.Allocator, spec: ExecutionSpec) !void {
             loaded,
             &test_case,
         );
-        if (result.pass) {
+        if (result.pass and !hasAssertion(&test_case.assertions)) {
+            // The handler ran and nothing was compared: the test claims no check.
+            unchecked += 1;
+            std.debug.print("  UNCHECKED  {s}\n", .{result.name});
+        } else if (result.pass) {
             passed += 1;
             std.debug.print("  PASS  {s}\n", .{result.name});
         } else {
@@ -127,13 +151,19 @@ pub fn run(allocator: std.mem.Allocator, spec: ExecutionSpec) !void {
         }
     }
 
-    std.debug.print("\nResults: {d} passed, {d} failed, {d} total\n", .{
-        passed, failed, passed + failed,
+    std.debug.print("\nResults: {d} passed, {d} failed, {d} unchecked, {d} total\n", .{
+        passed, failed, unchecked, passed + failed + unchecked,
     });
 
-    if (failed > 0) {
-        return error.TestsFailed;
-    }
+    return .{ .passed = passed, .failed = failed, .unchecked = unchecked };
+}
+
+/// Whether a test compares anything with the response.
+fn hasAssertion(assertions: *const TestAssertions) bool {
+    return assertions.status != null or
+        assertions.body != null or
+        assertions.body_contains != null or
+        assertions.headers_json != null;
 }
 
 const TestResult = struct {
@@ -721,6 +751,50 @@ test "checkAssertions: a failure that cannot be recorded is an error, not a pass
         checkAssertions(failing.allocator(), &response, &assertions, &failures),
     );
     try std.testing.expectEqual(@as(usize, 0), failures.items.len);
+}
+
+test "a test with no assertion is counted as unchecked, not passed" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "suite.jsonl", .data =
+        \\{"type":"test","name":"asserted"}
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"expect","status":200}
+        \\{"type":"test","name":"unasserted"}
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"expect"}
+        \\{"type":"test","name":"wrong"}
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"expect","status":404}
+    });
+    const test_path = try allocator.print(".zig-cache/tmp/{s}/suite.jsonl", .{tmp.sub_path});
+    defer allocator.free(test_path);
+    const summary = try runSuite(allocator, .{
+        .handler = .{ .prepared_eval = .{ .code = "function handler(req: Request): Response { return Response.text(\"ok\"); }" } },
+        .runtime_config = .{ .test_file_path = test_path },
+    });
+    try std.testing.expectEqual(Summary{ .passed = 1, .failed = 1, .unchecked = 1 }, summary);
+}
+
+test "a run with an unchecked test and no failed test fails" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "suite.jsonl", .data =
+        \\{"type":"test","name":"asserted"}
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"expect","status":200}
+        \\{"type":"test","name":"unasserted"}
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"expect"}
+    });
+    const test_path = try allocator.print(".zig-cache/tmp/{s}/suite.jsonl", .{tmp.sub_path});
+    defer allocator.free(test_path);
+    try std.testing.expectError(error.TestsFailed, run(allocator, .{
+        .handler = .{ .prepared_eval = .{ .code = "function handler(req: Request): Response { return Response.text(\"ok\"); }" } },
+        .runtime_config = .{ .test_file_path = test_path },
+    }));
 }
 
 test "handler tests retain the prepared source case" {

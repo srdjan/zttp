@@ -1,5 +1,5 @@
 {
-  "version": 24,
+  "version": 25,
   "handler": {
     "path": "handler.ts",
     "line": 12,
@@ -237,6 +237,15 @@
       "failurePath": true,
       "conditions": [{"kind": "io_ok", "module": "zttp:cache", "func": "cacheGet"}, {"kind": "io_fail", "module": "zttp:fetch", "func": "fetchSync"}, {"kind": "req_method", "value": "POST"}, {"kind": "req_url", "value": "/orders/7"}],
       "ioSequence": [{"module": "zttp:cache", "func": "cacheGet", "args": "lit:orders"}, {"module": "zttp:fetch", "func": "fetchSync", "args": "?"}]
+    },
+    {
+      "method": "GET",
+      "pattern": "/orders/:id",
+      "status": null,
+      "ioDepth": 1,
+      "failurePath": true,
+      "conditions": [{"kind": "req_method", "value": "GET"}],
+      "ioSequence": [{"module": "zttp:cache", "func": "cacheGet", "args": "lit:orders"}]
     }
   ],
   "behaviorsExhaustive": true,

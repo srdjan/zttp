@@ -233,7 +233,7 @@ comptime {
 pub const BehaviorPathChange = struct {
     method: []const u8,
     pattern: []const u8,
-    status: u16,
+    status: handler_contract.ResponseStatus,
     change: BehaviorChangeKind,
 };
 
@@ -493,7 +493,12 @@ pub const ContractDiff = struct {
             }
 
             if (!found) {
-                const msg = try allocator.print("{s} {s} -> no canonically-equivalent new path (old response {d})", .{ old_path.route_method, old_path.route_pattern, old_path.response_status });
+                var status_buffer: [8]u8 = undefined;
+                const msg = try allocator.print("{s} {s} -> no canonically-equivalent new path (old response {s})", .{
+                    old_path.route_method,
+                    old_path.route_pattern,
+                    formatStatus(&status_buffer, old_path.response_status),
+                });
                 defer allocator.free(msg);
                 try self.setCounterexample(allocator, msg);
                 return;
@@ -539,7 +544,7 @@ fn canonicalPathsEqual(
     same_program: bool,
 ) bool {
     if (!behaviorPathKeysMatch(a, b)) return false;
-    if (a.response_status != b.response_status) return false;
+    if (!statusesEqual(a.response_status, b.response_status, same_program)) return false;
     if (a.is_failure_path != b.is_failure_path) return false;
     if (a.io_sequence.items.len != b.io_sequence.items.len) return false;
     for (a.io_sequence.items, b.io_sequence.items) |ia, ib| {
@@ -792,7 +797,7 @@ pub fn diffContractsWithOptions(
     // Behavioral path comparison (when both contracts have behaviors)
     var behavior_diff: ?BehaviorDiff = null;
     if (old.behaviors.items.len > 0 or new.behaviors.items.len > 0) {
-        behavior_diff = try diffBehaviors(allocator, old.behaviors.items, new.behaviors.items);
+        behavior_diff = try diffBehaviors(allocator, old.behaviors.items, new.behaviors.items, options);
     }
 
     var diff = ContractDiff{
@@ -832,6 +837,7 @@ fn diffBehaviors(
     allocator: std.mem.Allocator,
     old_paths: []const BehaviorPath,
     new_paths: []const BehaviorPath,
+    options: DiffOptions,
 ) !BehaviorDiff {
     var diff = BehaviorDiff{};
     errdefer diff.deinit(allocator);
@@ -847,7 +853,7 @@ fn diffBehaviors(
     @memset(used, false);
 
     for (old_paths) |old_path| {
-        if (takeMatchingPath(new_paths, used, &old_path, true)) |idx| {
+        if (takeMatchingPath(new_paths, used, &old_path, true, options.same_program)) |idx| {
             used[idx] = true;
             diff.preserved += 1;
             try diff.changes.append(allocator, .{
@@ -856,7 +862,7 @@ fn diffBehaviors(
                 .status = old_path.response_status,
                 .change = .preserved,
             });
-        } else if (takeMatchingPath(new_paths, used, &old_path, false)) |idx| {
+        } else if (takeMatchingPath(new_paths, used, &old_path, false, options.same_program)) |idx| {
             used[idx] = true;
             diff.response_changed += 1;
             try diff.changes.append(allocator, .{
@@ -900,14 +906,42 @@ fn takeMatchingPath(
     used: []const bool,
     target: *const BehaviorPath,
     require_status_equal: bool,
+    same_program: bool,
 ) ?usize {
     for (paths, 0..) |*path, idx| {
         if (used[idx]) continue;
         if (!behaviorPathKeysMatch(path, target)) continue;
-        if (require_status_equal and path.response_status != target.response_status) continue;
+        if (require_status_equal and !statusesEqual(path.response_status, target.response_status, same_program)) continue;
         return idx;
     }
     return null;
+}
+
+/// The only comparison of two behavior statuses that a verdict makes. A known
+/// status equals the same known status. An unknown status equals no known
+/// status. Two unknown statuses are equal only when the caller has shown that
+/// both contracts come from one program, the rule that `ioSignaturesEqual`
+/// applies to a `?` argument: the analysis could not read either value, so
+/// equal records prove nothing about two different programs.
+fn statusesEqual(a: handler_contract.ResponseStatus, b: handler_contract.ResponseStatus, same_program: bool) bool {
+    return switch (a) {
+        .known => |x| switch (b) {
+            .known => |y| x == y,
+            .unknown => false,
+        },
+        .unknown => switch (b) {
+            .known => false,
+            .unknown => same_program,
+        },
+    };
+}
+
+/// The status as the counterexample text shows it: the number, or `unknown`.
+fn formatStatus(buffer: *[8]u8, status: handler_contract.ResponseStatus) []const u8 {
+    return switch (status) {
+        .known => |value| std.fmt.bufPrint(buffer, "{d}", .{value}) catch "unknown",
+        .unknown => "unknown",
+    };
 }
 
 /// Two behavior paths match if they have the same route and the same conditions.
@@ -2409,6 +2443,21 @@ test "generateRecommendation equivalent" {
     try std.testing.expect(std.mem.indexOf(u8, rec, "Deploy immediately") != null);
 }
 
+test "statusesEqual: unknown equals no known status and equals unknown only for the same program" {
+    const K = handler_contract.ResponseStatus;
+    const cases = [_]struct { a: K, b: K, same_program: bool, expected: bool }{
+        .{ .a = .{ .known = 200 }, .b = .{ .known = 200 }, .same_program = false, .expected = true },
+        .{ .a = .{ .known = 200 }, .b = .{ .known = 404 }, .same_program = true, .expected = false },
+        .{ .a = .{ .known = 200 }, .b = .unknown, .same_program = true, .expected = false },
+        .{ .a = .unknown, .b = .{ .known = 200 }, .same_program = true, .expected = false },
+        .{ .a = .unknown, .b = .unknown, .same_program = false, .expected = false },
+        .{ .a = .unknown, .b = .unknown, .same_program = true, .expected = true },
+    };
+    for (cases) |case| {
+        try std.testing.expectEqual(case.expected, statusesEqual(case.a, case.b, case.same_program));
+    }
+}
+
 test "diffBehaviors identical paths" {
     const allocator = std.testing.allocator;
 
@@ -2425,7 +2474,7 @@ test "diffBehaviors identical paths" {
         .route_pattern = "/users/:id",
         .conditions = cond_a,
         .io_sequence = io_a,
-        .response_status = 200,
+        .response_status = .{ .known = 200 },
         .io_depth = 1,
         .is_failure_path = false,
     };
@@ -2433,7 +2482,7 @@ test "diffBehaviors identical paths" {
     const old_paths = [_]handler_contract.BehaviorPath{path_a};
     const new_paths = [_]handler_contract.BehaviorPath{path_a};
 
-    var bd = try diffBehaviors(allocator, &old_paths, &new_paths);
+    var bd = try diffBehaviors(allocator, &old_paths, &new_paths, .{});
     defer bd.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 1), bd.preserved);
@@ -2451,7 +2500,7 @@ test "diffBehaviors removed path is breaking" {
         .route_pattern = "/health",
         .conditions = .empty,
         .io_sequence = .empty,
-        .response_status = 200,
+        .response_status = .{ .known = 200 },
         .io_depth = 0,
         .is_failure_path = false,
     };
@@ -2459,7 +2508,7 @@ test "diffBehaviors removed path is breaking" {
     const old_paths = [_]handler_contract.BehaviorPath{path_a};
     const new_paths = [_]handler_contract.BehaviorPath{};
 
-    var bd = try diffBehaviors(allocator, &old_paths, &new_paths);
+    var bd = try diffBehaviors(allocator, &old_paths, &new_paths, .{});
     defer bd.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 0), bd.preserved);
@@ -2475,7 +2524,7 @@ test "diffBehaviors added path" {
         .route_pattern = "/users",
         .conditions = .empty,
         .io_sequence = .empty,
-        .response_status = 201,
+        .response_status = .{ .known = 201 },
         .io_depth = 0,
         .is_failure_path = false,
     };
@@ -2483,7 +2532,7 @@ test "diffBehaviors added path" {
     const old_paths = [_]handler_contract.BehaviorPath{};
     const new_paths = [_]handler_contract.BehaviorPath{path_a};
 
-    var bd = try diffBehaviors(allocator, &old_paths, &new_paths);
+    var bd = try diffBehaviors(allocator, &old_paths, &new_paths, .{});
     defer bd.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 0), bd.preserved);
@@ -2504,7 +2553,7 @@ test "diffBehaviors: paths sharing a key but differing in status diff clean agai
         .route_pattern = "/",
         .conditions = .empty,
         .io_sequence = .empty,
-        .response_status = 200,
+        .response_status = .{ .known = 200 },
         .io_depth = 0,
         .is_failure_path = false,
     };
@@ -2513,14 +2562,14 @@ test "diffBehaviors: paths sharing a key but differing in status diff clean agai
         .route_pattern = "/",
         .conditions = .empty,
         .io_sequence = .empty,
-        .response_status = 404,
+        .response_status = .{ .known = 404 },
         .io_depth = 0,
         .is_failure_path = true,
     };
 
     const paths = [_]handler_contract.BehaviorPath{ ok, not_found };
 
-    var bd = try diffBehaviors(allocator, &paths, &paths);
+    var bd = try diffBehaviors(allocator, &paths, &paths, .{});
     defer bd.deinit(allocator);
 
     try std.testing.expectEqual(@as(u32, 2), bd.preserved);
@@ -2566,7 +2615,7 @@ fn makeOwnedPath(
         .route_pattern = try allocator.dupe(u8, pattern),
         .conditions = .empty,
         .io_sequence = seq,
-        .response_status = status,
+        .response_status = .{ .known = status },
         .io_depth = @intCast(calls.len),
         .is_failure_path = false,
     };

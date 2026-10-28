@@ -1074,7 +1074,7 @@ test "factsFromContract projects intent and behavior summary" {
         .route_pattern = try allocator.dupe(u8, "/"),
         .conditions = .empty,
         .io_sequence = .empty,
-        .response_status = 200,
+        .response_status = .{ .known = 200 },
         .io_depth = 0,
         .is_failure_path = false,
     });
@@ -1083,7 +1083,7 @@ test "factsFromContract projects intent and behavior summary" {
         .route_pattern = try allocator.dupe(u8, "/"),
         .conditions = .empty,
         .io_sequence = .empty,
-        .response_status = 500,
+        .response_status = .{ .known = 500 },
         .io_depth = 0,
         .is_failure_path = true,
     });

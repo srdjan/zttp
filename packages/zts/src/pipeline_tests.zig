@@ -3056,7 +3056,7 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         "isDict",
         "boolean",
         3327,
-        "77f3d1f5cb85af4b04bbca518c439df4f10afcfa034d19f29d8b9f9f1149fdc0",
+        "09a4eef18d237820db630c032f0dfe9a4958b3db5963b9cdc4c71df2e29fb95f",
     );
 
     const helper_source =
@@ -3074,7 +3074,7 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         "helper",
         "unknown",
         3331,
-        "1c68dbe9cd575643a40ce2eb31cd64efde2fbdfc950525174615c77b3283817c",
+        "84786e0744ed14615e065410b9cb381754b5763ef300a705707d42d13629a16f",
     );
 }
 

@@ -96,7 +96,10 @@ pub fn deinitViolations(allocator: std.mem.Allocator, violations: []const Proper
 // ---------------------------------------------------------------------------
 
 /// Append violations derived from FaultCoverageChecker diagnostics.
-/// Only `success_on_critical_failure` warnings are included.
+/// The warnings of a critical site are included: a 2xx failure path
+/// (`success_on_critical_failure`) and a failure path whose status the
+/// analysis cannot read (`unknown_status_on_critical_failure`). Upstream
+/// diagnostics are information and are not violations.
 /// Counterexample tests are looked up by name in `tests`.
 /// Caller owns the list items' lifetime (messages are borrowed from `fc_diags`).
 pub fn collectFaultViolations(
@@ -107,7 +110,13 @@ pub fn collectFaultViolations(
 ) void {
     for (fc_diags) |diag| {
         if (diag.severity != .warning) continue;
-        if (diag.kind != .success_on_critical_failure) continue;
+        // One arm for each kind, so a kind added later is a compile error here
+        // and not a violation that the filter drops without a word.
+        const help: []const u8 = switch (diag.kind) {
+            .success_on_critical_failure => "ensure this function's failure path returns a non-2xx status",
+            .unknown_status_on_critical_failure => "return the failure response as a Response helper call with a literal non-2xx status",
+            .success_on_upstream_failure, .unknown_status_on_upstream_failure => continue,
+        };
 
         var cx_name: ?[]const u8 = null;
         var cx_idx: ?usize = null;
@@ -122,7 +131,7 @@ pub fn collectFaultViolations(
         violations.append(allocator, .{
             .kind = .fault_uncovered,
             .message = diag.message,
-            .help = "ensure this function's failure path returns a non-2xx status",
+            .help = help,
             .loc_line = 0,
             .loc_col = 0,
             .counterexample_name = cx_name,
@@ -363,7 +372,12 @@ pub fn writeViolationsJsonl(
         }
 
         // Expected response (the incorrect status the buggy handler returns)
-        try writer.print("{{\"type\":\"expect\",\"status\":{d}}}\n", .{test_case.expected_status});
+        // An unknown status writes no status key: the counterexample then shows
+        // the path and the forced failure stub, and claims no status.
+        switch (test_case.expected_status) {
+            .known => |status| try writer.print("{{\"type\":\"expect\",\"status\":{d}}}\n", .{status}),
+            .unknown => try writer.writeAll("{\"type\":\"expect\"}\n"),
+        }
     }
 }
 
@@ -487,6 +501,38 @@ test "formatViolationsSummary includes path when provided" {
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "PASS on the buggy handler") != null);
 }
 
+test "collectFaultViolations keeps an unknown-status warning and drops upstream information" {
+    const allocator = std.testing.allocator;
+    const diags = [_]fault_cov.Diagnostic{
+        .{
+            .severity = .warning,
+            .kind = .unknown_status_on_critical_failure,
+            .func_name = "jwtVerify",
+            .module_name = "zttp:auth",
+            .path_name = "p",
+            .status = .unknown,
+            .message = "the failure path returns a status the analysis cannot read",
+        },
+        .{
+            .severity = .info,
+            .kind = .unknown_status_on_upstream_failure,
+            .func_name = "fetchSync",
+            .module_name = "zttp:fetch",
+            .path_name = "q",
+            .status = .unknown,
+            .message = "the failure path returns a status the analysis cannot read",
+        },
+    };
+    var violations: std.ArrayList(PropertyViolation) = .empty;
+    defer violations.deinit(allocator);
+    collectFaultViolations(allocator, &violations, &diags, &.{});
+    try std.testing.expectEqual(@as(usize, 1), violations.items.len);
+    try std.testing.expectEqualStrings(
+        "the failure path returns a status the analysis cannot read",
+        violations.items[0].message,
+    );
+}
+
 test "fault violation with counterexample emits JSONL" {
     const allocator = std.testing.allocator;
 
@@ -503,7 +549,7 @@ test "fault violation with counterexample emits JSONL" {
         .method = "POST",
         .url = "/api",
         .has_auth_header = true,
-        .expected_status = 200,
+        .expected_status = .{ .known = 200 },
         .io_stubs = stubs,
     };
     defer allocator.free(test_case.name);
@@ -516,7 +562,7 @@ test "fault violation with counterexample emits JSONL" {
         .func_name = "jwtVerify",
         .module_name = "zttp:auth",
         .path_name = "path 1 POST /api jwtVerify !result.ok",
-        .status = 200,
+        .status = .{ .known = 200 },
         .message = "handler returns 2xx when auth/validation fails",
     };
     const fc_diags = [_]fault_cov.Diagnostic{fc_diag};
@@ -564,7 +610,7 @@ test "fillVerifierCounterexamples synthetic fallback when no failure path exists
         .method = "GET",
         .url = "/",
         .has_auth_header = false,
-        .expected_status = 200,
+        .expected_status = .{ .known = 200 },
         .io_stubs = stubs,
     };
     defer allocator.free(test_case.name);

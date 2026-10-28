@@ -26,6 +26,7 @@ const Constraint = path_gen.Constraint;
 const StubInfo = path_gen.StubInfo;
 const GeneratedTest = path_gen.GeneratedTest;
 const IrView = parser_mod.IrView;
+const ResponseStatus = path_gen.ResponseStatus;
 
 // ---------------------------------------------------------------------------
 // Diagnostic types
@@ -46,6 +47,13 @@ pub const Severity = enum {
 pub const DiagnosticKind = enum {
     success_on_critical_failure,
     success_on_upstream_failure,
+    /// The failure path of a critical site returns a status the analysis could
+    /// not read. The path is neither proven 2xx nor proven non-2xx, so the site
+    /// stays flagged and `fault_covered` stays refused.
+    unknown_status_on_critical_failure,
+    /// The same for an upstream site. It is information only: the field
+    /// `upstream_fallback` counts proven 2xx fallbacks and is not set.
+    unknown_status_on_upstream_failure,
 };
 
 pub const Diagnostic = struct {
@@ -54,7 +62,7 @@ pub const Diagnostic = struct {
     func_name: []const u8,
     module_name: []const u8,
     path_name: []const u8,
-    status: u16,
+    status: ResponseStatus,
     message: []const u8,
 };
 
@@ -67,7 +75,7 @@ pub const CallSiteEntry = struct {
     module: []const u8,
     severity: mb.FailureSeverity,
     has_failure_path: bool,
-    failure_status: u16,
+    failure_status: ResponseStatus,
     flagged: bool,
     /// A failure path of an upstream site returns 2xx. The site is covered, and
     /// this records that the 2xx may be a fallback the author meant.
@@ -218,7 +226,7 @@ pub const FaultCoverageChecker = struct {
                 .module = module,
                 .severity = severity,
                 .has_failure_path = false,
-                .failure_status = 0,
+                .failure_status = .unknown,
                 .flagged = false,
             };
         } else {
@@ -245,7 +253,10 @@ pub const FaultCoverageChecker = struct {
         test_case: GeneratedTest,
     ) !void {
         const status = test_case.expected_status;
-        if (status < 200 or status >= 300) return;
+        switch (status) {
+            .known => |code| if (code < 200 or code >= 300) return,
+            .unknown => return self.recordUnknownStatus(entry, test_case),
+        }
 
         switch (entry.severity) {
             .critical => {
@@ -277,6 +288,44 @@ pub const FaultCoverageChecker = struct {
             .expected, .none => {},
         }
     }
+
+    /// A failure path whose status the analysis cannot read. A critical site is
+    /// flagged, as for a 2xx, because the handler may answer success when auth
+    /// or validation fails and the analysis cannot say it does not. An upstream
+    /// site gets an info diagnostic only.
+    fn recordUnknownStatus(
+        self: *FaultCoverageChecker,
+        entry: *CallSiteEntry,
+        test_case: GeneratedTest,
+    ) !void {
+        switch (entry.severity) {
+            .critical => {
+                entry.flagged = true;
+                try self.diagnostics.append(self.allocator, .{
+                    .severity = .warning,
+                    .kind = .unknown_status_on_critical_failure,
+                    .func_name = entry.func,
+                    .module_name = entry.module,
+                    .path_name = test_case.name,
+                    .status = .unknown,
+                    .message = "the failure path returns a status the analysis cannot read",
+                });
+            },
+            .upstream => {
+                try self.diagnostics.append(self.allocator, .{
+                    .severity = .info,
+                    .kind = .unknown_status_on_upstream_failure,
+                    .func_name = entry.func,
+                    .module_name = entry.module,
+                    .path_name = test_case.name,
+                    .status = .unknown,
+                    .message = "the failure path returns a status the analysis cannot read",
+                });
+            },
+            .expected, .none => {},
+        }
+    }
+
     pub fn getReport(self: *const FaultCoverageChecker) FaultCoverageReport {
         var total_failable: u32 = 0;
         var covered: u32 = 0;
@@ -311,7 +360,10 @@ pub const FaultCoverageChecker = struct {
             try writer.print("  {s:<20}{s:<10}", .{ entry.func, entry.module });
 
             if (entry.has_failure_path) {
-                try writer.print("failure -> {d}", .{entry.failure_status});
+                switch (entry.failure_status) {
+                    .known => |code| try writer.print("failure -> {d}", .{code}),
+                    .unknown => try writer.writeAll("failure -> ?"),
+                }
                 if (!entry.flagged) {
                     if (entry.severity == .expected) {
                         try writer.writeAll("  OK (graceful)");
@@ -340,7 +392,10 @@ pub const FaultCoverageChecker = struct {
             try writer.print("fault-coverage {s}: {s}\n", .{ diag.severity.label(), diag.message });
             try writer.print("  function: {s} (zttp:{s})\n", .{ diag.func_name, diag.module_name });
             try writer.print("  path: {s}\n", .{diag.path_name});
-            try writer.print("  status: {d}\n\n", .{diag.status});
+            switch (diag.status) {
+                .known => |code| try writer.print("  status: {d}\n\n", .{code}),
+                .unknown => try writer.writeAll("  status: unknown\n\n"),
+            }
         }
     }
 };
@@ -737,7 +792,7 @@ test "critical failure with 2xx produces warning" {
             .method = "GET",
             .url = "/",
             .has_auth_header = false,
-            .expected_status = 200,
+            .expected_status = .{ .known = 200 },
             .io_stubs = .empty,
             .constraints = &constraints,
         },
@@ -753,6 +808,63 @@ test "critical failure with 2xx produces warning" {
     try std.testing.expect(!report.isClean());
 }
 
+test "critical failure with an unknown status is flagged and prints failure -> ?" {
+    const constraints = [_]Constraint{
+        .{ .result_not_ok = .{ .module = "auth", .func = "jwtVerify", .returns = .result } },
+    };
+    const tests = [_]GeneratedTest{
+        .{
+            .name = "path 1 !result.ok",
+            .method = "GET",
+            .url = "/",
+            .has_auth_header = false,
+            .expected_status = .unknown,
+            .io_stubs = .empty,
+            .constraints = &constraints,
+        },
+    };
+    var checker = FaultCoverageChecker.init(std.testing.allocator, &tests);
+    defer checker.deinit();
+    try checker.analyze();
+    const report = checker.getReport();
+    try std.testing.expectEqual(@as(u32, 1), report.covered);
+    try std.testing.expectEqual(@as(u32, 1), report.warning_count);
+    try std.testing.expect(!report.isClean());
+    try std.testing.expectEqual(DiagnosticKind.unknown_status_on_critical_failure, checker.diagnostics.items[0].kind);
+    try std.testing.expectEqualStrings("the failure path returns a status the analysis cannot read", checker.diagnostics.items[0].message);
+
+    var out: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer out.deinit();
+    try checker.formatMatrix(report, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "failure -> ?  WARNING") != null);
+}
+
+test "upstream failure with an unknown status is information and sets no fallback" {
+    const constraints = [_]Constraint{
+        .{ .result_not_ok = .{ .module = "fetch", .func = "fetch", .returns = .result } },
+    };
+    const tests = [_]GeneratedTest{
+        .{
+            .name = "path 1 !result.ok",
+            .method = "GET",
+            .url = "/",
+            .has_auth_header = false,
+            .expected_status = .unknown,
+            .io_stubs = .empty,
+            .constraints = &constraints,
+        },
+    };
+    var checker = FaultCoverageChecker.init(std.testing.allocator, &tests);
+    defer checker.deinit();
+    try checker.analyze();
+    const report = checker.getReport();
+    try std.testing.expectEqual(@as(u32, 0), report.warning_count);
+    try std.testing.expectEqual(@as(u32, 0), report.upstream_fallback_sites);
+    try std.testing.expectEqual(@as(usize, 1), checker.diagnostics.items.len);
+    try std.testing.expectEqual(DiagnosticKind.unknown_status_on_upstream_failure, checker.diagnostics.items[0].kind);
+    try std.testing.expectEqual(Severity.info, checker.diagnostics.items[0].severity);
+}
+
 test "critical failure with 403 produces no warning" {
     const constraints = [_]Constraint{
         .{ .result_not_ok = .{ .module = "auth", .func = "jwtVerify", .returns = .result } },
@@ -763,7 +875,7 @@ test "critical failure with 403 produces no warning" {
             .method = "GET",
             .url = "/",
             .has_auth_header = false,
-            .expected_status = 403,
+            .expected_status = .{ .known = 403 },
             .io_stubs = .empty,
             .constraints = &constraints,
         },
@@ -788,7 +900,7 @@ test "expected failure (cache miss) with 200 produces no warning" {
             .method = "GET",
             .url = "/",
             .has_auth_header = false,
-            .expected_status = 200,
+            .expected_status = .{ .known = 200 },
             .io_stubs = .empty,
             .constraints = &constraints,
         },
@@ -815,7 +927,7 @@ test "multiple call sites tracked independently" {
             .method = "GET",
             .url = "/",
             .has_auth_header = false,
-            .expected_status = 403,
+            .expected_status = .{ .known = 403 },
             .io_stubs = .empty,
             .constraints = &constraints_ok,
         },
@@ -824,7 +936,7 @@ test "multiple call sites tracked independently" {
             .method = "POST",
             .url = "/",
             .has_auth_header = false,
-            .expected_status = 200,
+            .expected_status = .{ .known = 200 },
             .io_stubs = .empty,
             .constraints = &constraints_bad,
         },
@@ -848,7 +960,7 @@ test "format matrix output" {
             .method = "GET",
             .url = "/",
             .has_auth_header = false,
-            .expected_status = 403,
+            .expected_status = .{ .known = 403 },
             .io_stubs = .empty,
             .constraints = &constraints,
         },
@@ -1230,7 +1342,7 @@ test "a critical failure with 2xx is a warning, not an upstream fallback" {
         .method = "GET",
         .url = "/",
         .has_auth_header = false,
-        .expected_status = 200,
+        .expected_status = .{ .known = 200 },
         .io_stubs = .empty,
         .constraints = &constraints,
     }};

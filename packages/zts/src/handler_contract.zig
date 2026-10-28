@@ -56,6 +56,7 @@ pub const SpecDiagnostic = contract_types.SpecDiagnostic;
 pub const PathCondition = contract_types.PathCondition;
 pub const PathIoCall = contract_types.PathIoCall;
 pub const BehaviorPath = contract_types.BehaviorPath;
+pub const ResponseStatus = contract_types.ResponseStatus;
 pub const Bound = contract_types.Bound;
 pub const BoundClass = contract_types.BoundClass;
 pub const BoundProvenance = contract_types.BoundProvenance;
@@ -719,7 +720,7 @@ test "writeContractJson minimal" {
     output = aw.toArrayList();
 
     // Should be valid-looking JSON with expected fields
-    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 24") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.items, "\"version\": 25") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"handler.ts\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"modules\": []") != null);
     try std.testing.expect(std.mem.indexOf(u8, output.items, "\"serviceCalls\"") == null);
@@ -788,7 +789,7 @@ test "behaviors serialization roundtrip" {
     const path0 = contract.behaviors.items[0];
     try std.testing.expectEqualStrings("GET", path0.route_method);
     try std.testing.expectEqualStrings("/users/:id", path0.route_pattern);
-    try std.testing.expectEqual(@as(u16, 200), path0.response_status);
+    try std.testing.expectEqual(ResponseStatus{ .known = 200 }, path0.response_status);
     try std.testing.expectEqual(@as(u32, 2), path0.io_depth);
     try std.testing.expect(!path0.is_failure_path);
     try std.testing.expectEqual(@as(usize, 2), path0.conditions.items.len);
@@ -798,7 +799,7 @@ test "behaviors serialization roundtrip" {
     try std.testing.expectEqual(@as(usize, 2), path0.io_sequence.items.len);
 
     const path1 = contract.behaviors.items[1];
-    try std.testing.expectEqual(@as(u16, 401), path1.response_status);
+    try std.testing.expectEqual(ResponseStatus{ .known = 401 }, path1.response_status);
     try std.testing.expect(path1.is_failure_path);
     try std.testing.expectEqual(PathCondition.Kind.io_fail, path1.conditions.items[0].kind);
 }

@@ -358,6 +358,11 @@ packages/zts/src/bool_checker.zig walkStmt catch-poison@5
 packages/zts/src/contract_diff.zig compareSchemaJson catch-return
 packages/zts/src/contract_diff.zig compareSchemaJson catch-return@2
 
+# formatStatus builds the status text of a counterexample message after the
+# verdict is decided. A u16 has at most five digits and the buffer holds eight,
+# so the print cannot fail; the fallback text is `unknown`, and no verdict reads it.
+packages/zts/src/contract_diff.zig formatStatus catch-value
+
 # Each switch propagates OutOfMemory and maps every other parse failure to a
 # named verdict: `unparsable` for `compare`, and false for
 # `importsOnlyBuiltinModules`. Neither answer says two sources are identical or

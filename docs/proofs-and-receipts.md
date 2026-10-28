@@ -458,6 +458,24 @@ is the same whatever the imported file holds, and the imported file may compute
 the dynamic argument. Such a handler with a `?` argument is `breaking` against
 itself. This is the cost of the rule.
 
+The same rule covers the response status of a path. The compiler reads a status
+only where it can prove the runtime answer: `Response.json`, `text`, `html`, and
+`rawJson` with no options (200) or a literal `status`, `Response.redirect` (302,
+or its literal second argument), an integer literal outside 100 to 599 (500), and
+a bare `return;` (500). Any other returned value has an unknown status: a helper
+call, a returned name, a computed or ternary status, a spread, an options value
+held in a name, `hole()`, and a `routerMatch` dispatch. The compiler never
+resolves a status through a name, because a later property write can change it.
+An unknown status equals no known status. It equals another unknown status only
+for an identical program, under the rule above. Two handlers whose status is
+unknown and whose trees differ are `breaking`. The contract writes an unknown
+status as `"status": null` (`path_analyzer_version` 6, contract `version` 25).
+`zts gen-tests` writes no status for such a path, and `zttp test` counts a test
+with no assertion as `unchecked`, not `passed`, and an unchecked test fails the
+run. A critical failure path with an
+unknown status keeps `fault_covered` refused. The source is
+`packages/zts/src/path_generator.zig#PathGenerator.extractExprStatus`.
+
 ### A lost proof
 
 The gate also compares the proven properties of each handler. A property that
@@ -548,7 +566,10 @@ Markdown form is a ready-to-paste PR comment; the JSON form
 (`zttp.proof-gate.v1`) carries the per-handler verdict, behavior delta,
 surface delta, counterexamples, and `lostProperties`: an array of
 `{"property", "severity"}` objects, empty when no proof was lost. The key is
-an addition, so the schema name does not change.
+an addition, so the schema name does not change. A counterexample carries the
+`status` of the path, and `null` when the status is unknown or the change is a
+route-level change that has none (this was `0` for a route-level change before
+contract version 25).
 
 Flags:
 

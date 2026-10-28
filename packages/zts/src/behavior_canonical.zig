@@ -182,6 +182,21 @@ pub const CanonicalStats = struct {
     }
 };
 
+/// Whether the canonicalizer left a status as it found it. This is the debug
+/// assertion of `canonicalize`, not a verdict between two programs.
+fn statusUnchanged(before: handler_contract.ResponseStatus, after: handler_contract.ResponseStatus) bool {
+    return switch (before) {
+        .known => |x| switch (after) {
+            .known => |y| x == y,
+            .unknown => false,
+        },
+        .unknown => switch (after) {
+            .known => false,
+            .unknown => true,
+        },
+    };
+}
+
 /// Rewrite `path.io_sequence` into canonical form. Returns a fully-owned
 /// clone of the input path with the rewritten sequence; the caller is
 /// responsible for `deinit`. The input is never mutated.
@@ -212,7 +227,7 @@ pub fn canonicalize(
         if (out.io_sequence.items.len == before) break;
     }
 
-    std.debug.assert(path.response_status == out.response_status);
+    std.debug.assert(statusUnchanged(path.response_status, out.response_status));
     std.debug.assert(path.io_depth >= out.io_depth);
     std.debug.assert(std.mem.eql(u8, path.route_method, out.route_method));
     std.debug.assert(std.mem.eql(u8, path.route_pattern, out.route_pattern));
@@ -315,6 +330,7 @@ fn makePath(
     io: []const PathIoCall,
     status: u16,
 ) !BehaviorPath {
+    // A test helper: every fixture path has a known status.
     var seq: std.ArrayList(PathIoCall) = .empty;
     errdefer {
         for (seq.items) |*c| @constCast(c).deinit(allocator);
@@ -327,7 +343,7 @@ fn makePath(
         .route_pattern = try allocator.dupe(u8, "/test"),
         .conditions = .empty,
         .io_sequence = seq,
-        .response_status = status,
+        .response_status = .{ .known = status },
         .io_depth = @intCast(io.len),
         .is_failure_path = false,
     };
@@ -486,7 +502,7 @@ test "canonicalize preserves route, status, and condition count" {
         .route_pattern = try a.dupe(u8, "/api/session"),
         .conditions = conditions,
         .io_sequence = seq,
-        .response_status = 201,
+        .response_status = .{ .known = 201 },
         .io_depth = 2,
         .is_failure_path = false,
     };
@@ -497,7 +513,7 @@ test "canonicalize preserves route, status, and condition count" {
 
     try testing.expectEqualStrings("POST", out.route_method);
     try testing.expectEqualStrings("/api/session", out.route_pattern);
-    try testing.expectEqual(@as(u16, 201), out.response_status);
+    try testing.expectEqual(handler_contract.ResponseStatus{ .known = 201 }, out.response_status);
     try testing.expectEqual(@as(usize, 1), out.conditions.items.len);
     try testing.expectEqual(@as(usize, 1), out.io_sequence.items.len);
     try testing.expectEqual(@as(u32, 1), out.io_depth);

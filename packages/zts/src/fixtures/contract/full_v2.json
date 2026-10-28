@@ -237,6 +237,15 @@
       "failure_path": true,
       "conditions": [{"kind": "io_ok", "module": "zttp:cache", "func": "cacheGet"}, {"kind": "io_fail", "module": "zttp:fetch", "func": "fetchSync"}, {"kind": "req_method", "value": "POST"}, {"kind": "req_url", "value": "/orders/7"}],
       "io_sequence": [{"module": "zttp:cache", "func": "cacheGet", "args": "lit:orders"}, {"module": "zttp:fetch", "func": "fetchSync", "args": "?"}]
+    },
+    {
+      "method": "GET",
+      "pattern": "/orders/:id",
+      "status": null,
+      "io_depth": 1,
+      "failure_path": true,
+      "conditions": [{"kind": "req_method", "value": "GET"}],
+      "io_sequence": [{"module": "zttp:cache", "func": "cacheGet", "args": "lit:orders"}]
     }
   ],
   "behaviors_exhaustive": true,

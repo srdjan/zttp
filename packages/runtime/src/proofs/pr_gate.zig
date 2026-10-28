@@ -64,7 +64,10 @@ pub const BehaviorCounts = struct {
 pub const Counterexample = struct {
     method: []const u8,
     pattern: []const u8,
-    status: u16,
+    /// The status of the path as the contract holds it. `unknown` when the
+    /// analysis could not read it, and for a route change that carries none.
+    /// The JSON writes `null` for `unknown`.
+    status: zts.handler_contract.ResponseStatus,
     /// `.removed` or `.response_changed`.
     change: contract_diff.BehaviorChangeKind,
 };
@@ -231,7 +234,10 @@ pub fn renderMarkdown(
                 for (r.counterexamples) |c| {
                     switch (c.change) {
                         .removed => try w.print("- `{s} {s}` removed\n", .{ c.method, c.pattern }),
-                        else => try w.print("- `{s} {s}` status {d} → response changed\n", .{ c.method, c.pattern, c.status }),
+                        else => switch (c.status) {
+                            .known => |code| try w.print("- `{s} {s}` status {d} → response changed\n", .{ c.method, c.pattern, code }),
+                            .unknown => try w.print("- `{s} {s}` status unknown → response changed\n", .{ c.method, c.pattern }),
+                        },
                     }
                 }
             }
@@ -371,7 +377,10 @@ pub fn renderJson(
             try json.objectField("pattern");
             try json.write(c.pattern);
             try json.objectField("status");
-            try json.write(c.status);
+            switch (c.status) {
+                .known => |code| try json.write(code),
+                .unknown => try json.write(null),
+            }
             try json.objectField("change");
             try json.write(@tagName(c.change));
             try json.endObject();
@@ -500,7 +509,7 @@ fn extractCounterexamples(arena: std.mem.Allocator, diff: *const contract_diff.C
             .response_changed
         else
             continue;
-        try appendCounterexample(arena, &list, &seen, c.method, c.path, 0, change);
+        try appendCounterexample(arena, &list, &seen, c.method, c.path, .unknown, change);
     }
     return try list.toOwnedSlice(arena);
 }
@@ -511,7 +520,7 @@ fn appendCounterexample(
     seen: *std.ArrayList([]const u8),
     method: []const u8,
     pattern: []const u8,
-    status: u16,
+    status: zts.handler_contract.ResponseStatus,
     change: contract_diff.BehaviorChangeKind,
 ) !void {
     const key = try arena.print("{s} {s}", .{ method, pattern });
@@ -1498,8 +1507,8 @@ test "worstVerdict: empty range is safe" {
 
 test "renderMarkdown: breaking report carries header, table, and counterexample" {
     const cex = [_]Counterexample{
-        .{ .method = "GET", .pattern = "/users/:id", .status = 200, .change = .response_changed },
-        .{ .method = "DELETE", .pattern = "/users/:id", .status = 0, .change = .removed },
+        .{ .method = "GET", .pattern = "/users/:id", .status = .{ .known = 200 }, .change = .response_changed },
+        .{ .method = "DELETE", .pattern = "/users/:id", .status = .unknown, .change = .removed },
     };
     const removed_routes = [_][]const u8{"/users/:id"};
     const results = [_]HandlerResult{

@@ -261,7 +261,7 @@ fn populateFullContract(allocator: std.mem.Allocator, contract: *HandlerContract
             .route_pattern = try dupe(allocator, "/orders/:id"),
             .conditions = .empty,
             .io_sequence = .empty,
-            .response_status = 202,
+            .response_status = .{ .known = 202 },
             .io_depth = 2,
             .is_failure_path = true,
         };
@@ -286,6 +286,25 @@ fn populateFullContract(allocator: std.mem.Allocator, contract: *HandlerContract
             .module = try dupe(allocator, "zttp:fetch"),
             .func = try dupe(allocator, "fetchSync"),
             .arg_signature = try dupe(allocator, "?"),
+        });
+        try contract.behaviors.append(allocator, path);
+    }
+    {
+        // A path whose status the analysis could not read: the wire holds null.
+        var path = contract_types.BehaviorPath{
+            .route_method = try dupe(allocator, "GET"),
+            .route_pattern = try dupe(allocator, "/orders/:id"),
+            .conditions = .empty,
+            .io_sequence = .empty,
+            .response_status = .unknown,
+            .io_depth = 1,
+            .is_failure_path = true,
+        };
+        try path.conditions.append(allocator, .{ .kind = .req_method, .value = try dupe(allocator, "GET") });
+        try path.io_sequence.append(allocator, .{
+            .module = try dupe(allocator, "zttp:cache"),
+            .func = try dupe(allocator, "cacheGet"),
+            .arg_signature = try dupe(allocator, "lit:orders"),
         });
         try contract.behaviors.append(allocator, path);
     }
@@ -416,7 +435,10 @@ const Allowance = struct {
 
 const schema_spec_reason = "a schema spec holds one of ref, inline JSON, or dynamic, so the other two spellings stay null or false; another entry in the same array populates this one";
 
+const unknown_status_reason = "an unknown status writes null, so one path holds null here; another path in the same array holds a known status";
+
 const population_allowlist = [_]Allowance{
+    .{ .path = "behaviors[].status", .reason = unknown_status_reason },
     .{ .path = "api.routes[].requestBodies[].schemaRef", .reason = schema_spec_reason },
     .{ .path = "api.routes[].requestBodies[].schema", .reason = schema_spec_reason },
     .{ .path = "api.routes[].requestBodies[].dynamic", .reason = schema_spec_reason },

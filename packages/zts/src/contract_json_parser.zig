@@ -468,7 +468,8 @@ const SourceIdentityWire = struct {
 };
 
 const BehaviorConditionWire = struct {
-    kind: WireString = .{ .bytes = "io_ok" },
+    /// Required: an absent kind is a parse error, not `io_ok`.
+    kind: ?WireString = null,
     module: ?WireString = null,
     func: ?WireString = null,
     value: ?WireString = null,
@@ -483,7 +484,9 @@ const BehaviorIoWire = struct {
 const BehaviorWire = struct {
     method: WireString = .{ .bytes = "" },
     pattern: WireString = .{ .bytes = "" },
-    status: WireU16 = .{ .value = null },
+    /// A number is a known status. `null`, an absent key, and an overflow read
+    /// as unknown: an absent status is not 0.
+    status: ?WireU16 = null,
     ioDepth: WireU32 = .{ .value = null },
     failurePath: bool = false,
     conditions: []const BehaviorConditionWire = &.{},
@@ -1486,6 +1489,12 @@ fn projectIntent(
     contract.intent = intent;
 }
 
+fn behaviorStatus(wire: ?WireU16) contract_types.ResponseStatus {
+    const status = wire orelse return .unknown;
+    const value = status.value orelse return .unknown;
+    return .{ .known = value };
+}
+
 fn projectBehaviors(
     allocator: std.mem.Allocator,
     wires: ?[]const BehaviorWire,
@@ -1500,15 +1509,18 @@ fn projectBehaviors(
             .route_pattern = owned.second,
             .conditions = .empty,
             .io_sequence = .empty,
-            .response_status = wire.status.value orelse 0,
+            .response_status = behaviorStatus(wire.status),
             .io_depth = wire.ioDepth.value orelse 0,
             .is_failure_path = wire.failurePath,
         };
         errdefer behavior.deinit(allocator);
         try behavior.conditions.ensureTotalCapacity(allocator, wire.conditions.len);
         for (wire.conditions) |condition_wire| {
+            // An absent or unknown kind is refused: reading it as `io_ok`
+            // would change the meaning of the path.
+            const kind_wire = condition_wire.kind orelse return error.InvalidJson;
             var condition = PathCondition{
-                .kind = std.meta.stringToEnum(PathCondition.Kind, condition_wire.kind.bytes) orelse .io_ok,
+                .kind = std.meta.stringToEnum(PathCondition.Kind, kind_wire.bytes) orelse return error.InvalidJson,
             };
             errdefer condition.deinit(allocator);
             condition.module = try dupeOptionalWireString(allocator, condition_wire.module);
@@ -1880,13 +1892,48 @@ test "parseFromJson compatibility matrix preserves duplicate trailing and overfl
         version: u32,
     }{
         .{ .json = "{\"version\":1,\"version\":23} trailing", .version = 23 },
-        .{ .json = "{\"version\":99999999999999999999}", .version = 24 },
+        .{ .json = "{\"version\":99999999999999999999}", .version = 25 },
     };
     for (cases) |case| {
         var contract = try parseFromJson(std.testing.allocator, case.json);
         defer contract.deinit(std.testing.allocator);
         try std.testing.expectEqual(case.version, contract.version);
     }
+}
+
+test "parseFromJson reads a null behavior status as unknown and an absent status as unknown" {
+    const allocator = std.testing.allocator;
+    var contract = try parseFromJson(allocator,
+        \\{"version":25,"behaviors":[
+        \\{"method":"GET","pattern":"/","status":null,"ioDepth":0,"failurePath":false},
+        \\{"method":"GET","pattern":"/a","ioDepth":0,"failurePath":false},
+        \\{"method":"GET","pattern":"/b","status":404,"ioDepth":0,"failurePath":false}
+        \\]}
+    );
+    defer contract.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), contract.behaviors.items.len);
+    try std.testing.expectEqual(contract_types.ResponseStatus.unknown, contract.behaviors.items[0].response_status);
+    try std.testing.expectEqual(contract_types.ResponseStatus.unknown, contract.behaviors.items[1].response_status);
+    try std.testing.expectEqual(contract_types.ResponseStatus{ .known = 404 }, contract.behaviors.items[2].response_status);
+}
+
+test "parseFromJson reads an overflowing behavior status as unknown" {
+    const allocator = std.testing.allocator;
+    var contract = try parseFromJson(allocator,
+        \\{"version":25,"behaviors":[{"method":"GET","pattern":"/","status":70000,"ioDepth":0,"failurePath":false}]}
+    );
+    defer contract.deinit(allocator);
+    try std.testing.expectEqual(contract_types.ResponseStatus.unknown, contract.behaviors.items[0].response_status);
+}
+
+test "parseFromJson refuses a behavior condition with an absent or unknown kind" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.InvalidJson, parseFromJson(allocator,
+        \\{"version":25,"behaviors":[{"method":"GET","pattern":"/","status":200,"conditions":[{}]}]}
+    ));
+    try std.testing.expectError(error.InvalidJson, parseFromJson(allocator,
+        \\{"version":25,"behaviors":[{"method":"GET","pattern":"/","status":200,"conditions":[{"kind":"no_such_kind"}]}]}
+    ));
 }
 
 test "parseFromJson keeps raw structural keys and appends repeated collections" {
@@ -1903,7 +1950,7 @@ test "parseFromJson keeps raw structural keys and appends repeated collections" 
     var contract = try parseFromJson(std.testing.allocator, json);
     defer contract.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(u32, 24), contract.version);
+    try std.testing.expectEqual(@as(u32, 25), contract.version);
     try std.testing.expectEqual(@as(usize, 2), contract.modules.items.len);
     try std.testing.expectEqualStrings("zttp:env", contract.modules.items[0]);
     try std.testing.expectEqualStrings("zttp:cache", contract.modules.items[1]);

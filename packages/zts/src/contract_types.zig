@@ -1039,6 +1039,32 @@ pub const PathIoCall = struct {
     }
 };
 
+/// The HTTP status of one behavior path: a value the analysis read, or one it
+/// could not read. A verdict never compares two `ResponseStatus` values with
+/// `==`, `!=`, or `std.meta.eql`: `contract_diff.zig` decides equality in one
+/// place, and `unknown` equals no known status.
+pub const ResponseStatus = union(enum) {
+    known: u16,
+    unknown,
+
+    /// The status when it is known. Unknown reads as absent.
+    pub fn knownValue(self: ResponseStatus) ?u16 {
+        return switch (self) {
+            .known => |value| value,
+            .unknown => null,
+        };
+    }
+
+    /// Whether the status is known and equals `value`. For display and for
+    /// tests of one literal; it is not a verdict comparison between two paths.
+    pub fn isKnown(self: ResponseStatus, value: u16) bool {
+        return switch (self) {
+            .known => |known| known == value,
+            .unknown => false,
+        };
+    }
+};
+
 /// One exhaustively-enumerated execution path through the handler.
 /// Each path is a unique combination of (route, I/O outcomes, response).
 pub const BehaviorPath = struct {
@@ -1046,7 +1072,7 @@ pub const BehaviorPath = struct {
     route_pattern: []const u8, // owned
     conditions: std.ArrayList(PathCondition),
     io_sequence: std.ArrayList(PathIoCall),
-    response_status: u16,
+    response_status: ResponseStatus,
     io_depth: u32,
     is_failure_path: bool,
 
@@ -1516,7 +1542,7 @@ pub const HoleSummary = struct {
 };
 
 pub const HandlerContract = struct {
-    version: u32 = 24,
+    version: u32 = 25,
     handler: HandlerLoc,
     routes: std.ArrayList(RouteInfo),
     modules: std.ArrayList([]const u8), // each entry owned
@@ -1721,7 +1747,7 @@ fn deepCopyAndFree(allocator: std.mem.Allocator) !void {
         .route_pattern = "/items",
         .conditions = .empty,
         .io_sequence = .empty,
-        .response_status = 200,
+        .response_status = .{ .known = 200 },
         .io_depth = 0,
         .is_failure_path = false,
     };

@@ -3149,8 +3149,8 @@ test "direct source contracts preserve certificate bytes and proof IR" {
     };
     try std.testing.expectEqual(@as(usize, 2), fixtures.len);
     const expected_certificates = [_]struct { len: usize, sha256: []const u8, proof_nodes: usize }{
-        .{ .len = 1349, .sha256 = "ca0dd95291549aacefbe5ef9712208acc167f1a6c8e605dc88923451734fc9f8", .proof_nodes = 5 },
-        .{ .len = 1729, .sha256 = "f6f0a3ceebdf0e0660f354f4a43e6c73f3fc545203f81e1bd12b7e88c95ac236", .proof_nodes = 9 },
+        .{ .len = 1349, .sha256 = "591f42f2f051e15b03d6d69e7ed7093b8758e7210fa69c36cfff6adb88e23bf0", .proof_nodes = 5 },
+        .{ .len = 1729, .sha256 = "f1109a0ad74c27e54538f7f5fe378d6a8ebef03e82799c94db775fbbef736683", .proof_nodes = 9 },
     };
     for (fixtures, expected_certificates) |source, expected| {
         var direct: zts.DirectCheckSource = undefined;
@@ -3181,7 +3181,7 @@ test "direct source contracts preserve certificate bytes and proof IR" {
         var contract_digest: [32]u8 = undefined;
         std.crypto.hash.sha2.Sha256.hash(direct_json, &contract_digest, .{});
         const contract_hex = std.fmt.bytesToHex(contract_digest, .lower);
-        try std.testing.expectEqualStrings("5721b995fa28916b9f1cca2d3918a9eaa1575c42bfd1277ac7b205abd1ee514b", &contract_hex);
+        try std.testing.expectEqualStrings("08a674b9248dc6bfd0175d74d3219eb95f709cbac8898001618ed7122bb41287", &contract_hex);
 
         // Contract parity is independent of compiler and certificate encoding.
         // Both certificate builds receive the same completed compilation.

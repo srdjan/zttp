@@ -8564,6 +8564,311 @@ test "prove-behavior: handlers that return a match diff equivalent with themselv
     }
 }
 
+// P1: a returned value whose status the generator cannot read is `unknown`,
+// and `unknown` never equals a known status in the behavior diff.
+
+const ProveCounts = struct {
+    verdict: zts.contract_diff.Classification,
+    preserved: u32,
+    response_changed: u32,
+    removed: u32,
+    added: u32,
+};
+
+fn proveBehaviorCounts(
+    allocator: std.mem.Allocator,
+    before_src: []const u8,
+    after_src: []const u8,
+) !ProveCounts {
+    var before = try runCheckOnlyFromSourceWithOptions(allocator, before_src, "handler.ts", .{ .json_mode = true });
+    defer before.deinit(allocator);
+    var after = try runCheckOnlyFromSourceWithOptions(allocator, after_src, "handler.ts", .{ .json_mode = true });
+    defer after.deinit(allocator);
+    const before_contract = before.contract orelse return error.NoContractFromBefore;
+    const after_contract = after.contract orelse return error.NoContractFromAfter;
+    var diff = try zts.contract_diff.diffContractsFromSources(allocator, &before_contract, &after_contract, before_src, after_src);
+    defer diff.deinit(allocator);
+    const bd = diff.behavior_diff orelse return error.NoBehaviorDiff;
+    return .{
+        .verdict = diff.behavioralVerdict(),
+        .preserved = bd.preserved,
+        .response_changed = bd.response_changed,
+        .removed = bd.removed,
+        .added = bd.added,
+    };
+}
+
+const p1_helper_a =
+    \\function status(): number { return 200; }
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const s = status();
+    \\  return Response.json({ a: 1 }, { status: s });
+    \\}
+;
+
+const p1_helper_b =
+    \\function status(): number { return 404; }
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const s = status();
+    \\  return Response.json({ a: 1 }, { status: s });
+    \\}
+;
+
+const p1_computed_a =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const s = 200 + 0;
+    \\  return Response.json({ a: 1 }, { status: s });
+    \\}
+;
+
+const p1_computed_b =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const s = 404 + 0;
+    \\  return Response.json({ a: 1 }, { status: s });
+    \\}
+;
+
+const p1_ternary_a =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const s = req.method === "GET" ? 200 : 404;
+    \\  return Response.json({ a: 1 }, { status: s });
+    \\}
+;
+
+const p1_ternary_b =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const s = req.method === "POST" ? 200 : 404;
+    \\  return Response.json({ a: 1 }, { status: s });
+    \\}
+;
+
+const p1_raw_a =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return Response.rawJson("{}", { status: 200 });
+    \\}
+;
+
+const p1_raw_b =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return Response.rawJson("{}", { status: 404 });
+    \\}
+;
+
+const p1_redirect_default =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return Response.redirect("/x");
+    \\}
+;
+
+const p1_redirect_301 =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return Response.redirect("/x", 301);
+    \\}
+;
+
+const p1_json_default =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return Response.json({ a: 1 });
+    \\}
+;
+
+const p1_range_200 =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return Response.json({ a: 1 }, { status: 200 });
+    \\}
+;
+
+const p1_range_700 =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return Response.json({ a: 1 }, { status: 700 });
+    \\}
+;
+
+const p1_retvoid_a =
+    \\function handler(req: Request): Response {
+    \\  return Response.json({ ok: true });
+    \\}
+;
+
+const p1_retvoid_b =
+    \\function handler(req: Request): Response {
+    \\  return;
+    \\}
+;
+
+const p1_literal_404 =
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return Response.json({ a: 1 }, { status: 404 });
+    \\}
+;
+
+test "prove-behavior: a status from a helper call that changes is breaking" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, p1_helper_a, p1_helper_b);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+    try std.testing.expectEqual(@as(u32, 1), counts.response_changed);
+    try std.testing.expectEqual(@as(u32, 0), counts.preserved);
+}
+
+test "prove-behavior: a computed status that changes is breaking" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, p1_computed_a, p1_computed_b);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+    try std.testing.expectEqual(@as(u32, 1), counts.response_changed);
+}
+
+test "prove-behavior: a status chosen by a ternary is breaking when the condition changes" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, p1_ternary_a, p1_ternary_b);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+    try std.testing.expectEqual(@as(u32, 1), counts.response_changed);
+}
+
+test "prove-behavior: a literal rawJson status change is breaking" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, p1_raw_a, p1_raw_b);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+    try std.testing.expectEqual(@as(u32, 1), counts.response_changed);
+}
+
+test "prove-behavior: a redirect status change is breaking" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, p1_redirect_default, p1_redirect_301);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+    try std.testing.expectEqual(@as(u32, 1), counts.response_changed);
+}
+
+test "prove-behavior: a redirect against a 200 response is breaking" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, p1_redirect_default, p1_json_default);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+    try std.testing.expectEqual(@as(u32, 1), counts.response_changed);
+}
+
+test "prove-behavior: an out-of-range literal status runs as 500 and is breaking" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, p1_range_200, p1_range_700);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+    try std.testing.expectEqual(@as(u32, 1), counts.response_changed);
+}
+
+test "prove-behavior: a bare return runs as 500 and differs from a response" {
+    const counts = try proveBehaviorCounts(std.testing.allocator, p1_retvoid_a, p1_retvoid_b);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+    try std.testing.expectEqual(@as(u32, 1), counts.response_changed);
+}
+
+test "prove-behavior: a literal 500 and an out-of-range literal are equal statuses" {
+    const counts = try proveBehaviorCounts(
+        std.testing.allocator,
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.json({ a: 1 }, { status: 500 });
+        \\}
+    ,
+        p1_range_700,
+    );
+    try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, counts.verdict);
+    try std.testing.expectEqual(@as(u32, 1), counts.preserved);
+}
+
+test "prove-behavior: P1 controls keep their verdicts" {
+    const allocator = std.testing.allocator;
+    const literal = try proveBehaviorCounts(allocator, p1_range_200, p1_literal_404);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, literal.verdict);
+    try std.testing.expectEqual(@as(u32, 1), literal.response_changed);
+    const literal_self = try proveBehaviorCounts(allocator, p1_range_200, p1_range_200);
+    try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, literal_self.verdict);
+    const unknown_self = try proveBehaviorCounts(allocator, p1_helper_a, p1_helper_a);
+    try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, unknown_self.verdict);
+    const unknown_comment = try proveBehaviorCounts(allocator, p1_helper_a, p1_helper_a ++ "\n// a comment\n");
+    try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, unknown_comment.verdict);
+    const redirect_self = try proveBehaviorCounts(allocator, p1_redirect_default, p1_redirect_default);
+    try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, redirect_self.verdict);
+}
+
+test "prove-behavior: an unknown status with a local import is breaking against itself" {
+    const source = "import { x } from \"./lib.ts\";\n" ++ p1_helper_a;
+    const counts = try proveBehaviorCounts(std.testing.allocator, source, source);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
+    try std.testing.expectEqual(@as(u32, 1), counts.response_changed);
+}
+
+test "contract: the status of a returned value follows the runtime rules" {
+    const K = zts.handler_contract.ResponseStatus;
+    const pre = "function handler(req: Request): Response {\n";
+    const cases = [_]struct { body: []const u8, expected: K }{
+        .{ .body = "  return Response.json({ a: 1 });\n}", .expected = .{ .known = 200 } },
+        .{ .body = "  return Response.text(\"x\", { status: 404 });\n}", .expected = .{ .known = 404 } },
+        .{ .body = "  return Response.html(\"x\", { status: 201 });\n}", .expected = .{ .known = 201 } },
+        .{ .body = "  return Response.rawJson(\"{}\");\n}", .expected = .{ .known = 200 } },
+        .{ .body = "  return Response.rawJson(\"{}\", { status: 404 });\n}", .expected = .{ .known = 404 } },
+        .{ .body = "  return Response.redirect(\"/x\");\n}", .expected = .{ .known = 302 } },
+        .{ .body = "  return Response.redirect(\"/x\", 301);\n}", .expected = .{ .known = 301 } },
+        .{ .body = "  return Response.redirect(\"/x\", 99);\n}", .expected = .{ .known = 500 } },
+        .{ .body = "  const s = 301;\n  return Response.redirect(\"/x\", s);\n}", .expected = .unknown },
+        .{ .body = "  return Response.json({ a: 1 }, { status: 99 });\n}", .expected = .{ .known = 500 } },
+        .{ .body = "  return Response.json({ a: 1 }, { status: 600 });\n}", .expected = .{ .known = 500 } },
+        .{ .body = "  return Response.json({ a: 1 }, { status: 0 });\n}", .expected = .{ .known = 500 } },
+        .{ .body = "  return Response.json({ a: 1 }, { status: 100 });\n}", .expected = .{ .known = 100 } },
+        .{ .body = "  return Response.json({ a: 1 }, { status: 599 });\n}", .expected = .{ .known = 599 } },
+        .{ .body = "  const s = 404;\n  return Response.json({ a: 1 }, { status: s });\n}", .expected = .unknown },
+        .{ .body = "  const o = { status: 404 };\n  return Response.json({ a: 1 }, o);\n}", .expected = .unknown },
+        .{ .body = "  const b = { status: 404 };\n  return Response.json({ a: 1 }, { ...b });\n}", .expected = .unknown },
+        .{ .body = "  const b = { status: 404 };\n  return Response.json({ a: 1 }, { ...b, status: 201 });\n}", .expected = .{ .known = 201 } },
+        .{ .body = "  const r = Response.json({ a: 1 }, { status: 404 });\n  return r;\n}", .expected = .unknown },
+        .{ .body = "  return;\n}", .expected = .{ .known = 500 } },
+    };
+    for (cases) |case| {
+        const allocator = std.testing.allocator;
+        const source = try std.mem.concat(allocator, u8, &.{ pre, case.body });
+        defer allocator.free(source);
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        const contract = result.contract orelse return error.NoContract;
+        try std.testing.expectEqual(@as(usize, 1), contract.behaviors.items.len);
+        try std.testing.expectEqual(case.expected, contract.behaviors.items[0].response_status);
+    }
+}
+
+test "contract: an unknown status is written as null" {
+    const allocator = std.testing.allocator;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, p1_helper_a, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const contract = result.contract orelse return error.NoContract;
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try zts.handler_contract.writeContractJson(&contract, &out.writer);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"status\": null,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"status\": 200,") == null);
+}
+
+test "diff: a strict self-diff of an unknown status is breaking and a same-program diff is equivalent" {
+    const allocator = std.testing.allocator;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, p1_helper_a, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const contract = result.contract orelse return error.NoContract;
+
+    var strict = try zts.contract_diff.diffContracts(allocator, &contract, &contract);
+    defer strict.deinit(allocator);
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, strict.behavioralVerdict());
+    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, strict.classify());
+
+    var same = try zts.contract_diff.diffContractsFromSources(allocator, &contract, &contract, p1_helper_a, p1_helper_a);
+    defer same.deinit(allocator);
+    try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, same.behavioralVerdict());
+    try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, same.classify());
+}
+
+test "gen-tests: the expect line of an unknown status holds no status key" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "handler.ts", .data = p1_helper_b });
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
+    defer allocator.free(handler_path);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    const count = try @import("precompile_gen_tests.zig").runGenTests(allocator, handler_path, &out.writer);
+    try std.testing.expectEqual(@as(u32, 1), count);
+    var lines = std.mem.splitScalar(u8, out.written(), '\n');
+    _ = lines.next();
+    _ = lines.next();
+    try std.testing.expectEqualStrings("{\"type\":\"expect\"}", lines.next() orelse return error.NoThirdLine);
+}
+
 // D-014: every literal `env()` name is secret unless the policy lists it in
 // `env.public`. These tests run the production check path, with the policy as
 // the project would hand it over, and read the verdict the way a user does:
