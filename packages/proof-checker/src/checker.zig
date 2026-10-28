@@ -4219,6 +4219,15 @@ test "consumer marker: a rejected certificate marks nothing" {
     try testing.expect(!result.properties.consumerChecked(.response_total));
 }
 
+test "consumer marker: a tested edge beside a checked totality answer leaves response_total unmarked" {
+    var fixture = try test_support.build();
+    fixture.evidence[0] = test_support.testedFor(0);
+    try fixture.encode();
+    const result = check(fixture.inputs(), policy_mod.production);
+    try testing.expect(result.rejection() == null);
+    try testing.expect(!result.properties.consumerChecked(.response_total));
+}
+
 test "consumer marker: no other property is ever marked" {
     const result = try checkResultsRows(&honest_rows, proved_results_edge);
     inline for (@typeInfo(ps.Property).@"enum".field_names) |field| {
