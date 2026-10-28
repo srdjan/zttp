@@ -98,10 +98,12 @@ packages/zts/src/fault_coverage.zig getOrPutEntry catch-block
 # fact, import, walk, checked-flag journal, shared-alias, Result-binding, Result-cover,
 # and diagnostic catches only defer that failure. A Result binding or cover that fails
 # to append sets allocation_failed, and verify returns error.OutOfMemory instead of a
-# verdict, so the missing binding or cover never reaches a proof.
+# verdict, so the missing binding or cover never reaches a proof. The note of an
+# unrecognized check only picks the ZTS303 message shape, and it sets the same flag.
 packages/zts/src/handler_verifier.zig addDiagnostic catch-poison
 packages/zts/src/handler_verifier.zig collectImportBindings catch-poison
 packages/zts/src/handler_verifier.zig collectResultBindings catch-poison
+packages/zts/src/handler_verifier.zig noteUnrecognizedOk catch-poison
 packages/zts/src/handler_verifier.zig pushResultCover catch-poison
 packages/zts/src/handler_verifier.zig recordSharedAlias catch-poison
 packages/zts/src/handler_verifier.zig resolveFacts catch-block

@@ -14,7 +14,7 @@ ZigTS already cuts most of TypeScript. The one-way profile cuts further: for eve
 | Absent value | `undefined` only |
 | Branching | `if`/`else` for guards, `match` for closed alternatives, `c ? a : b` for a two-way choice between pure values |
 | Iteration | `for (const item of items)` over a finite collection |
-| Errors | `Result<T>` values plus explicit `.ok` checks |
+| Errors | `Result<T>` values plus explicit `.ok` checks. See "Result checks" below |
 | External effects | `Effects<T, "...">` on public helpers that touch capabilities |
 | Proof obligations | Ambient `Proof<T, P>` on handlers and helpers that participate in declared proofs |
 | Module imports | Named imports from a literal `zttp:*` or registered `zttp-ext:*` specifier |
@@ -167,6 +167,22 @@ if (ready) { ... }
 if (!ready) { ... }
 ```
 Only flagged when `ready` is statically boolean: `x === true` is exactly `x` and `x === false` is exactly `!x`. For a non-boolean `x` the comparison is an identity check, not a truthiness test, so the rule does not fire there.
+
+## Result checks
+
+The proof accepts one way to use a Result. Keep each Result in one `const` that is bound directly to the call. Check `.ok` with `if (!r.ok)` or `if (r.ok)` in the function that reads it. After the check, pass `r.value`, not `r`.
+
+```ts
+const parsed = requestJson(req);
+if (!parsed.ok) {
+  return Response.json({ error: parsed.error }, { status: 400 });
+}
+const body = parsed.value;
+```
+
+Pass the Result itself only to a `zttp:result` function that takes a Result: `unwrapOr`, `collectAll` with an array literal, and `andThen` or `orElse` with an expression-bodied arrow. Read `.error` only after the failure check, or write `parsed.error ?? fallback`.
+
+Do not use `match`, `=== true`, `isOk()`, or `isErr()` on a Result. Do not copy a Result into another name, return it, store it in an object or an array, or spread it. Do not read `.value` from a call that you did not bind, such as `requestJson(req).value`. A closure needs its own `.ok` check.
 
 ## Working rules for the agent
 

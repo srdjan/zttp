@@ -8,9 +8,9 @@ Create a minimal zts handler following these conventions:
 - Use typed request parsing only when the route needs it; otherwise keep the scaffold small.
 - All errors must be returned as structured JSON responses, never thrown.
 - Import only the specific zttp modules you need.
-- Use `zttp:decode` for request parsing and `zttp:validate` for schema validation. Check every `Result.ok` before reading `.value`.
+- Use `zttp:decode` for request parsing and `zttp:validate` for schema validation. Bind each Result to its own `const` and check it with `if (!r.ok)` before reading `.value`. Pass `r.value`, not `r`.
 - Use `Response.json()` for all JSON responses, `Response.text()` for plain text.
-- No classes, no async/await, no try/catch. Use `match` for error branching.
+- No classes, no async/await, no try/catch. Branch on a Result with `if (!r.ok)`, never with `match`, `=== true`, or `isOk()`.
 - Run `zts_expert_verify_paths` before editing when modifying an existing file, and let the compiler veto verify the complete scaffold before apply.
 
 Start with the minimal passing scaffold and add complexity only as needed.

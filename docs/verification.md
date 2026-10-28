@@ -94,6 +94,8 @@ verify error[ZTS303]: result.value accessed without checking result.ok first
 - a member read on a Result call that is not bound to a `const`;
 - a `match` on the Result, and a check inside a `switch` or `try`, which covers nothing.
 
+Each refusal names its shape in the ZTS303 message. An unguarded `.value` read keeps the message `result.value accessed without checking result.ok first`. Other shapes have their own message and help: an `.error` read, an `.error` read on the ok path, a check that the proof does not recognize, a closure read, a read inside `assert`, an unknown member, a computed key, a method call, an alias, a function alias, an argument, a returned Result, an object or array member, a spread, a `match`, an unbound call, an ambiguous captured name, a deep expression, and any other use. The source of the messages is `packages/zts/src/handler_verifier.zig#ResultShape`. The shape changes the text and the repair plan only. It never changes which programs the verifier refuses.
+
 A Result can be passed to a `zttp:result` export that takes a Result, such as `unwrapOr(result, fallback)`. `collectAll` takes an array literal of Results. `andThen` and `orElse` take an arrow function whose expression body returns a Result. A closure starts with no checks: a closure that reads `.value` checks `.ok` itself. The verifier checks every function of the file, not only the handler.
 
 ### 3. Unreachable Code

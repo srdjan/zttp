@@ -373,6 +373,17 @@ pub fn concreteTemplate(
     return switch (plan.kind) {
         .check_result_before_value => {
             const name_text = subject_name orelse "result";
+            // The template is inserted into source as code. A shape that no
+            // inserted line can repair gets a comment, which is valid code and
+            // carries the advice to the next retry.
+            if (plan.result_shape) |shape| switch (shape) {
+                .error_on_ok_path => return allocator.print("if ({s}.ok) return Response.json({{ ok: true }});", .{name_text}),
+                .function_alias => return allocator.dupe(u8, "// call the Result function directly and bind the call to a const"),
+                .unbound_call => return allocator.dupe(u8, "// bind the call to a const, then check its ok before you read its value"),
+                .ambiguous_upvalue => return allocator.dupe(u8, "// give each Result binding in the file a unique name"),
+                .depth_limit => return allocator.dupe(u8, "// split the expression into const bindings"),
+                else => {},
+            };
             return allocator.print("if (!{s}.ok) return Response.json({{ error: {s}.error }}, {{ status: 400 }});", .{ name_text, name_text });
         },
         .narrow_optional_before_use => {
@@ -402,7 +413,7 @@ fn memberObjectName(
 ) ?[]const u8 {
     const tag = ir_view.getTag(node) orelse return null;
     if (tag == .identifier) return identifierName(ir_view, atoms, node);
-    if (tag != .member_access and tag != .optional_chain) return null;
+    if (tag != .member_access and tag != .optional_chain and tag != .computed_access) return null;
     const member = ir_view.getMember(node) orelse return null;
     return identifierName(ir_view, atoms, member.object);
 }
@@ -673,4 +684,204 @@ test "the expert tools agree with the production check on a public env name" {
     try testing.expect(!unlisted.goal_check_ok);
     try testing.expect(!unlisted.repair_plan_ok);
     try testing.expect(unlisted.narrow_reports_witness);
+}
+
+const shape_guard = "if (!r.ok) return Response.json({ error: r.error }, { status: 400 });";
+
+const plan_head =
+    \\import { parseJson } from "zttp:json";
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const r = parseJson("1");
+    \\
+;
+
+/// Plan `source` and check that the first plan carries `summary` and `template`.
+fn expectFirstPlan(source: []const u8, summary: []const u8, template: []const u8) !void {
+    var result = try planFromSource(testing.allocator, source, "handler.ts", &.{});
+    defer result.deinit(testing.allocator);
+    const plans_at = std.mem.indexOf(u8, result.llm_text, "\"plans\":[") orelse return error.NoPlans;
+    const plans = result.llm_text[plans_at..];
+    const expected = try std.fmt.allocPrint(testing.allocator, "\"summary\":\"{s}\",\"edit_intent\":{{\"kind\":\"insert_guard_before_line\"", .{summary});
+    defer testing.allocator.free(expected);
+    try testing.expect(std.mem.indexOf(u8, plans, expected) != null);
+    const expected_template = try std.fmt.allocPrint(testing.allocator, "\"template\":\"{s}\"", .{template});
+    defer testing.allocator.free(expected_template);
+    try testing.expect(std.mem.indexOf(u8, plans, expected_template) != null);
+}
+
+test "repair plan: an unguarded value read keeps the guard" {
+    try expectFirstPlan(plan_head ++
+        \\  const v = r.value;
+        \\  return Response.json({ v: v });
+        \\}
+    , "Add an explicit non-2xx early return before reading result.value.", shape_guard);
+}
+
+test "repair plan: an unguarded error read gets the failure guard" {
+    try expectFirstPlan(plan_head ++
+        \\  const e = r.error;
+        \\  return Response.json({ e: e });
+        \\}
+    , "Read result.error only after if (!result.ok), or write result.error ?? fallback.", shape_guard);
+}
+
+test "repair plan: an error read on the ok path gets an ok-first guard" {
+    try expectFirstPlan(plan_head ++
+        \\  if (r.ok) {
+        \\    return Response.json({ e: r.error });
+        \\  }
+        \\  return Response.text("no");
+        \\}
+    , "Result.error is undefined on the ok path. Read it after if (result.ok) return ..., or write result.error ?? fallback.", "if (r.ok) return Response.json({ ok: true });");
+}
+
+test "repair plan: a comparison of ok with true is replaced by a plain check" {
+    try expectFirstPlan(plan_head ++
+        \\  if (r.ok === true) {
+        \\    return Response.json({ v: r.value });
+        \\  }
+        \\  return Response.text("no");
+        \\}
+    , "Replace this check with if (!result.ok) return ... . The proof does not accept === true, isOk(), isErr(), or match as a check.", shape_guard);
+}
+
+test "repair plan: a closure read gets a check inside the closure" {
+    try expectFirstPlan(plan_head ++
+        \\  const read = (): unknown => {
+        \\    return r.value;
+        \\  };
+        \\  return Response.json({ v: read() });
+        \\}
+    , "Check result.ok inside the closure before it reads result.value. A check outside the closure does not reach it.", shape_guard);
+}
+
+test "repair plan: a read inside an assert gets a check before the statement" {
+    try expectFirstPlan(plan_head ++
+        \\  assert r.value !== undefined, Response.text("no");
+        \\  return Response.text("ok");
+        \\}
+    , "Check result.ok in an if statement before the assert, throw, switch, or try statement that reads the Result.", shape_guard);
+}
+
+test "repair plan: an unknown member names its subject" {
+    try expectFirstPlan(plan_head ++
+        \\  const x = r.foo;
+        \\  return Response.json({ x: x });
+        \\}
+    , "Read only result.ok, result.value, result.error, or result.errors, each with a plain member name.", shape_guard);
+}
+
+test "repair plan: a computed key resolves its subject" {
+    try expectFirstPlan(plan_head ++
+        \\  const k = "value";
+        \\  const v = r[k];
+        \\  return Response.json({ v: v });
+        \\}
+    , "Read only result.ok, result.value, result.error, or result.errors, each with a plain member name.", shape_guard);
+}
+
+test "repair plan: a method call is replaced by result.ok" {
+    try expectFirstPlan(plan_head ++
+        \\  if (r.isOk()) {
+        \\    return Response.text("yes");
+        \\  }
+        \\  return Response.text("no");
+        \\}
+    , "Use result.ok. A Result has no methods, so replace the method call with if (!result.ok) return ... .", shape_guard);
+}
+
+test "repair plan: an alias asks for a check and result.value" {
+    try expectFirstPlan(plan_head ++
+        \\  const a = r;
+        \\  return Response.text("ok");
+        \\}
+    , "Keep the Result in its one const. Check result.ok in this function, then copy result.value.", shape_guard);
+}
+
+test "repair plan: a Result function without a call asks for a direct call" {
+    try expectFirstPlan(plan_head ++
+        \\  const f = parseJson;
+        \\  return Response.text("ok");
+        \\}
+    , "Call the Result function directly and bind the call to a const.", "// call the Result function directly and bind the call to a const");
+}
+
+test "repair plan: a Result argument asks for result.value" {
+    try expectFirstPlan(plan_head ++
+        \\  const s = String(r);
+        \\  return Response.text(s);
+        \\}
+    , "Check result.ok in this function, then pass result.value, not the Result. Pass the Result itself only to a zttp:result function that takes a Result.", shape_guard);
+}
+
+test "repair plan: a returned Result asks for result.value" {
+    try expectFirstPlan(plan_head ++
+        \\  if (req.method === "GET") {
+        \\    return r;
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+    , "Check result.ok in this function, then return result.value or a Response, not the Result.", shape_guard);
+}
+
+test "repair plan: a Result in an object asks for result.value" {
+    try expectFirstPlan(plan_head ++
+        \\  const box = { r: r };
+        \\  return Response.text("ok");
+        \\}
+    , "Check result.ok in this function, then store result.value, not the Result.", shape_guard);
+}
+
+test "repair plan: a spread Result asks for result.value" {
+    try expectFirstPlan(plan_head ++
+        \\  const box = { ...r };
+        \\  return Response.text("ok");
+        \\}
+    , "Check result.ok in this function, then store result.value, not the Result.", shape_guard);
+}
+
+test "repair plan: a match on a Result gets the failure guard" {
+    try expectFirstPlan(plan_head ++
+        \\  const v = match (r) { when { ok: true, value: x }: x default: 0 };
+        \\  return Response.json({ v: v });
+        \\}
+    , "Replace match with if (!result.ok) return ... , then read result.value.", shape_guard);
+}
+
+test "repair plan: an unbound call asks for a binding" {
+    try expectFirstPlan(plan_head ++
+        \\  const v = parseJson("2").value;
+        \\  return Response.json({ v: v });
+        \\}
+    , "Bind the call to a const, then check its ok before you read its value.", "// bind the call to a const, then check its ok before you read its value");
+}
+
+test "repair plan: a shared captured name asks for unique names" {
+    try expectFirstPlan(
+        \\import { parseJson } from "zttp:json";
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  if (req.method === "GET") {
+        \\    const r = parseJson("1");
+        \\    if (!r.ok) {
+        \\      return Response.json({ bad: true }, { status: 400 });
+        \\    }
+        \\    return Response.json({ v: r.value });
+        \\  }
+        \\  const r = parseJson("2");
+        \\  const read = (): unknown => {
+        \\    return r.value;
+        \\  };
+        \\  return Response.json({ v: read() });
+        \\}
+    , "Give each Result binding in the file a unique name.", "// give each Result binding in the file a unique name");
+}
+
+test "repair plan: any other use asks for plain member reads" {
+    try expectFirstPlan(plan_head ++
+        \\  const same = r === r;
+        \\  return Response.json({ same: same });
+        \\}
+    , "Use a Result only through result.ok, result.value, result.error, and result.errors.", shape_guard);
 }

@@ -88,6 +88,85 @@ pub const DiagnosticKind = enum {
     // registry rows now hang on the enum that emits them.
 };
 
+/// Which refused Result use a ZTS303 diagnostic reports. The label changes the
+/// message and the repair plan. It never changes which programs are refused.
+pub const ResultShape = enum {
+    unchecked_value,
+    unchecked_error,
+    error_on_ok_path,
+    unrecognized_guard,
+    closure_read,
+    flat_guard,
+    unknown_member,
+    computed_key,
+    method_call,
+    alias_or_reassignment,
+    function_alias,
+    call_argument,
+    returned,
+    collection_member,
+    spread,
+    match_subject,
+    unbound_call,
+    ambiguous_upvalue,
+    depth_limit,
+    other_use,
+
+    pub fn asString(self: ResultShape) []const u8 {
+        return @tagName(self);
+    }
+
+    pub fn message(self: ResultShape) []const u8 {
+        return switch (self) {
+            .unchecked_value => "result.value accessed without checking result.ok first",
+            .unchecked_error => "result.error read where result.ok is not known to be false",
+            .error_on_ok_path => "result.error read on a path where result.ok is true",
+            .unrecognized_guard => "result.value read after a check that the proof does not recognize",
+            .closure_read => "a closure reads a Result without its own ok check",
+            .flat_guard => "a Result is read inside an assert, throw, switch, or try statement without a check before it",
+            .unknown_member => "a Result member other than ok, value, error, errors, or unwrap is read",
+            .computed_key => "a Result is read with a computed key that is not a string literal",
+            .method_call => "a method is called on a Result binding",
+            .alias_or_reassignment => "a Result is copied or reassigned",
+            .function_alias => "a Result function is named without a call",
+            .call_argument => "a Result is passed as a call argument",
+            .returned => "a Result is returned from a function",
+            .collection_member => "a Result is stored in an object or an array",
+            .spread => "a Result is spread",
+            .match_subject => "match is used on a Result",
+            .unbound_call => "a Result call is used without a const binding",
+            .ambiguous_upvalue => "a captured name matches two Result bindings",
+            .depth_limit => "an expression is too deep to check for Result use",
+            .other_use => "a Result is used in a way that the proof does not model",
+        };
+    }
+
+    pub fn help(self: ResultShape) []const u8 {
+        return switch (self) {
+            .unchecked_value => "check result.ok before accessing result.value:\n           if (result.ok) { ... result.value ... }",
+            .unchecked_error => "read result.error after if (!result.ok), or write result.error ?? fallback",
+            .error_on_ok_path => "result.error is undefined when ok is true: read it after if (result.ok) return ..., or write result.error ?? fallback",
+            .unrecognized_guard => "use exactly if (result.ok) or if (!result.ok) on the const bound to the Result call: === true, isOk(), isErr(), and match are not checks",
+            .closure_read => "a check outside a closure does not reach it: check result.ok inside the closure before the read",
+            .flat_guard => "a check inside such a statement covers nothing: check result.ok in an if statement before the statement",
+            .unknown_member => "read only result.ok, result.value, result.error, or result.errors",
+            .computed_key => "use result.ok, result.value, or result.error as a plain member read",
+            .method_call => "a Result has no methods: use if (result.ok) or if (!result.ok), then read result.value or result.error",
+            .alias_or_reassignment => "keep each Result in the one const bound to its call: check result.ok, then copy result.value",
+            .function_alias => "call the Result function directly: const result = fn(...)",
+            .call_argument => "check result.ok, then pass result.value: pass the Result itself only to a zttp:result function that takes a Result",
+            .returned => "check result.ok, then return result.value or a Response",
+            .collection_member => "check result.ok, then store result.value",
+            .spread => "check result.ok, then spread result.value",
+            .match_subject => "use if (!result.ok) { return ...; } and then read result.value",
+            .unbound_call => "bind the call to a const, then check its ok: const r = call(...); if (!r.ok) { return ...; }",
+            .ambiguous_upvalue => "give each Result binding in the file a unique name",
+            .depth_limit => "split the expression into const bindings",
+            .other_use => "use a Result only through result.ok, result.value, result.error, and result.errors",
+        };
+    }
+};
+
 pub const Diagnostic = struct {
     severity: Severity,
     kind: DiagnosticKind,
@@ -107,6 +186,8 @@ pub const Diagnostic = struct {
     /// `null` when no single canonical
     /// repair applies (e.g. unused_variable — needs a free-form delete).
     repair_intent: ?RepairIntent = null,
+    /// For unchecked_result_value from the Result walk: the refused shape.
+    result_shape: ?ResultShape = null,
 };
 
 /// Return status for a statement or block - used by exhaustive return analysis.
@@ -399,7 +480,22 @@ const ResultReference = union(enum) {
 /// Where a Result use sits. Only these positions are safe for an unbound
 /// Result or a Result binding. Every other position is a use the verifier
 /// does not model, and it is refused.
-const ResultPosition = enum { other, discard, nullish_left, optional_object, result_arg };
+/// The positions after `result_arg` only name the refusal. They never make a
+/// use safe.
+const ResultPosition = enum {
+    other,
+    discard,
+    nullish_left,
+    optional_object,
+    result_arg,
+    alias,
+    argument,
+    returned,
+    collection_member,
+    spread,
+    matched,
+    callee,
+};
 
 /// One check that holds for a Result binding over a region of the walk. An
 /// `ok` cover permits a read of `.value`; an `err` cover permits a read of
@@ -442,6 +538,10 @@ pub const HandlerVerifier = struct {
     /// Set while a statement that has no guard structure is walked. A guard
     /// inside it covers nothing, as in the proof lowering.
     result_flat: bool = false,
+    /// Set while the condition of an `if` that is not a guard is walked.
+    result_in_condition: bool = false,
+    /// Bindings whose `ok` was read in a condition that is not a guard.
+    result_unrecognized: std.ArrayList(u32),
     /// Request roots other than the handler. A refusal inside one carries
     /// `route_root`.
     result_route_roots: []const NodeIndex = &.{},
@@ -500,6 +600,7 @@ pub const HandlerVerifier = struct {
             .diagnostics = .empty,
             .result_bindings = .empty,
             .result_covers = .empty,
+            .result_unrecognized = .empty,
             .optional_bindings = .empty,
             .optional_function_slots = .empty,
             .checked_journal = .empty,
@@ -514,6 +615,7 @@ pub const HandlerVerifier = struct {
         self.result_bindings.deinit(self.allocator);
         if (self.owned_facts) |*owned| owned.deinit();
         self.result_covers.deinit(self.allocator);
+        self.result_unrecognized.deinit(self.allocator);
         self.optional_bindings.deinit(self.allocator);
         self.optional_function_slots.deinit(self.allocator);
         self.checked_journal.deinit(self.allocator);
@@ -1271,6 +1373,8 @@ pub const HandlerVerifier = struct {
         self.result_covers.clearRetainingCapacity();
         self.result_cover_base = 0;
         self.result_flat = false;
+        self.result_in_condition = false;
+        self.result_unrecognized.clearRetainingCapacity();
         self.result_function_depth = 0;
         self.walkResultNode(self.programRoot() orelse handler_func);
     }
@@ -1378,7 +1482,41 @@ pub const HandlerVerifier = struct {
         self.result_covers.append(self.allocator, .{ .ordinal = ordinal, .polarity = polarity }) catch self.markAllocationFailure();
     }
 
-    fn refuseResult(self: *HandlerVerifier, node: NodeIndex, ordinal: ?u32) void {
+    /// The shape of a refused use of a Result binding in this position.
+    fn shapeForPosition(position: ResultPosition) ResultShape {
+        return switch (position) {
+            .alias => .alias_or_reassignment,
+            .argument => .call_argument,
+            .returned => .returned,
+            .collection_member => .collection_member,
+            .spread => .spread,
+            .matched => .match_subject,
+            .other, .discard, .nullish_left, .optional_object, .result_arg, .callee => .other_use,
+        };
+    }
+
+    /// The shape of an unchecked read of `.value` or `.error` on a binding.
+    fn shapeForRead(self: *const HandlerVerifier, member_object: NodeIndex, ordinal: u32, failure: bool) ResultShape {
+        if (self.result_flat) return .flat_guard;
+        if (self.ir_view.getBinding(member_object)) |binding| {
+            if (binding.kind == .upvalue) return .closure_read;
+        }
+        if (failure) {
+            return if (self.resultCovered(ordinal, .ok)) .error_on_ok_path else .unchecked_error;
+        }
+        for (self.result_unrecognized.items) |unrecognized| {
+            if (unrecognized == ordinal) return .unrecognized_guard;
+        }
+        return .unchecked_value;
+    }
+
+    fn noteUnrecognizedOk(self: *HandlerVerifier, ordinal: u32) void {
+        if (!self.result_in_condition) return;
+        // A failed append is sticky: `allocation_failed` voids the verdict.
+        self.result_unrecognized.append(self.allocator, ordinal) catch self.markAllocationFailure();
+    }
+
+    fn refuseResult(self: *HandlerVerifier, node: NodeIndex, ordinal: ?u32, shape: ResultShape) void {
         var source_module: ?[]const u8 = null;
         var source_func: ?[]const u8 = null;
         if (ordinal) |index| {
@@ -1389,12 +1527,13 @@ pub const HandlerVerifier = struct {
             .severity = .err,
             .kind = .unchecked_result_value,
             .node = node,
-            .message = "result.value accessed without checking result.ok first",
-            .help = "check result.ok before accessing result.value:\n           if (result.ok) { ... result.value ... }",
+            .message = shape.message(),
+            .help = shape.help(),
             .source_module = source_module,
             .source_func = source_func,
             .route_root = self.result_in_route_root,
             .repair_intent = .insert_guard_before_line,
+            .result_shape = shape,
         });
     }
 
@@ -1443,12 +1582,16 @@ pub const HandlerVerifier = struct {
     /// Walk a child of a statement or expression: a statement to the statement
     /// walk, anything else to the expression walk.
     fn walkResultChild(self: *HandlerVerifier, child: NodeIndex, depth: u16) void {
+        self.walkResultChildAt(child, .other, depth);
+    }
+
+    fn walkResultChildAt(self: *HandlerVerifier, child: NodeIndex, position: ResultPosition, depth: u16) void {
         if (child == null_node) return;
         const tag = self.ir_view.getTag(child) orelse return;
         if (isStatementTag(tag)) {
             self.walkResultNode(child);
         } else {
-            self.walkResultExpr(child, .other, depth);
+            self.walkResultExpr(child, position, depth);
         }
     }
 
@@ -1495,7 +1638,7 @@ pub const HandlerVerifier = struct {
                         return;
                     }
                 }
-                self.walkResultExpr(decl.init, .other, 0);
+                self.walkResultExpr(decl.init, .alias, 0);
             },
             .expr_stmt => {
                 const operand = self.ir_view.getOptValue(node) orelse return;
@@ -1516,7 +1659,7 @@ pub const HandlerVerifier = struct {
             },
             .return_stmt => {
                 const value = self.ir_view.getOptValue(node) orelse return;
-                self.walkResultExpr(value, .other, 0);
+                self.walkResultExpr(value, .returned, 0);
             },
             // exhaustive: every other statement has no guard structure. A
             // check inside it covers nothing, so it is read flat, and the
@@ -1555,7 +1698,10 @@ pub const HandlerVerifier = struct {
                 return;
             }
         }
+        const saved_in_condition = self.result_in_condition;
+        self.result_in_condition = true;
         self.walkResultExpr(stmt.condition, .other, 0);
+        self.result_in_condition = saved_in_condition;
         self.walkResultScoped(stmt.then_branch);
         if (stmt.else_branch != null_node) self.walkResultScoped(stmt.else_branch);
     }
@@ -1603,7 +1749,7 @@ pub const HandlerVerifier = struct {
         if (node == null_node) return;
         if (depth >= max_result_depth) {
             // An expression this deep is not read, so it is not proven.
-            self.refuseResult(node, null);
+            self.refuseResult(node, null, .depth_limit);
             return;
         }
         const tag = self.ir_view.getTag(node) orelse return;
@@ -1611,15 +1757,15 @@ pub const HandlerVerifier = struct {
             .function_expr, .arrow_function, .function_decl => self.walkResultNode(node),
             .identifier => switch (self.resultReference(node)) {
                 .ordinal => |ordinal| {
-                    if (position != .result_arg) self.refuseResult(node, ordinal);
+                    if (position != .result_arg) self.refuseResult(node, ordinal, shapeForPosition(position));
                 },
-                .ambiguous => self.refuseResult(node, null),
+                .ambiguous => self.refuseResult(node, null, .ambiguous_upvalue),
                 .none => {
                     // A Result export named outside the callee position is an
                     // alias, and a call through the alias is not classified.
-                    if (self.resultGlobalName(node) != null) self.refuseResult(node, null);
+                    if (self.resultGlobalName(node) != null) self.refuseResult(node, null, .function_alias);
                     if (self.builtinExportOf(node)) |exported| {
-                        if (exported.func.returns == .result) self.refuseResult(node, null);
+                        if (exported.func.returns == .result) self.refuseResult(node, null, .function_alias);
                     }
                 },
             },
@@ -1634,8 +1780,22 @@ pub const HandlerVerifier = struct {
             // exhaustive: every other expression passes no Result safely, so
             // each child is a use in an unmodelled position.
             else => {
+                const child_position: ResultPosition = switch (tag) {
+                    .array_literal, .object_literal, .object_property => .collection_member,
+                    .spread, .object_spread => .spread,
+                    .assignment => .alias,
+                    // exhaustive: the position only names the refusal. Every
+                    // child is a refused use whatever the label is.
+                    else => .other,
+                };
+                var first = true;
                 var children = self.ir_view.expressionChildren(node);
-                while (children.next()) |child| self.walkResultChild(child, depth + 1);
+                while (children.next()) |child| {
+                    // The first child of a `match` is its subject.
+                    const at: ResultPosition = if (tag == .match_expr and first) .matched else child_position;
+                    first = false;
+                    self.walkResultChildAt(child, at, depth + 1);
+                }
             },
         }
     }
@@ -1651,20 +1811,31 @@ pub const HandlerVerifier = struct {
                 const object_position: ResultPosition = if (tag == .optional_chain) .optional_object else .other;
                 self.walkResultExpr(member.object, object_position, depth + 1);
             },
-            .ambiguous => self.refuseResult(node, null),
+            .ambiguous => self.refuseResult(node, null, .ambiguous_upvalue),
             .ordinal => |ordinal| switch (self.resultMemberKind(member)) {
-                .ok => {},
-                .value => if (!self.resultCovered(ordinal, .ok)) self.refuseResult(node, ordinal),
+                .ok => self.noteUnrecognizedOk(ordinal),
+                .value => if (!self.resultCovered(ordinal, .ok)) {
+                    self.refuseResult(node, ordinal, self.shapeForRead(member.object, ordinal, false));
+                },
                 .failure => {
                     // On an ok Result `.error` is undefined, so a read that
                     // supplies a fallback or chains optionally gets no payload.
                     if (position != .nullish_left and position != .optional_object and
                         !self.resultCovered(ordinal, .err))
                     {
-                        self.refuseResult(node, ordinal);
+                        self.refuseResult(node, ordinal, self.shapeForRead(member.object, ordinal, true));
                     }
                 },
-                .other => self.refuseResult(node, ordinal),
+                .other => {
+                    self.noteUnrecognizedOk(ordinal);
+                    const shape: ResultShape = if (position == .callee)
+                        .method_call
+                    else if (member.computed != null_node and self.ir_view.getTag(member.computed) != .lit_string)
+                        .computed_key
+                    else
+                        .unknown_member;
+                    self.refuseResult(node, ordinal, shape);
+                },
             },
         }
         self.walkResultExpr(member.computed, .other, depth + 1);
@@ -1674,15 +1845,15 @@ pub const HandlerVerifier = struct {
         const call = self.ir_view.getCall(node) orelse return;
         const exported = self.builtinExportOf(call.callee);
         if (self.resultGlobalName(call.callee) != null) {
-            if (position != .discard and position != .result_arg) self.refuseResult(node, null);
+            if (position != .discard and position != .result_arg) self.refuseResult(node, null, .unbound_call);
         } else if (exported) |found| {
             // A Result nobody binds can only be discarded or passed to a
             // consumer that tests it. Anywhere else it flows on unchecked.
             if (found.func.returns == .result and position != .discard and position != .result_arg) {
-                self.refuseResult(node, null);
+                self.refuseResult(node, null, .unbound_call);
             }
         } else {
-            self.walkResultExpr(call.callee, .other, depth + 1);
+            self.walkResultExpr(call.callee, .callee, depth + 1);
         }
         self.walkResultArguments(call, if (exported) |found| found.func else null, depth);
     }
@@ -1708,7 +1879,7 @@ pub const HandlerVerifier = struct {
                         .result_fn => {
                             switch (self.ir_view.getTag(argument) orelse .lit_null) {
                                 .arrow_function, .function_expr => self.walkResultFunction(argument, true),
-                                else => self.walkResultExpr(argument, .other, depth + 1),
+                                else => self.walkResultExpr(argument, .argument, depth + 1),
                             }
                             continue;
                         },
@@ -1718,12 +1889,12 @@ pub const HandlerVerifier = struct {
                     }
                 }
             }
-            self.walkResultExpr(argument, .other, depth + 1);
+            self.walkResultExpr(argument, .argument, depth + 1);
         }
     }
 
     fn walkResultList(self: *HandlerVerifier, argument: NodeIndex, depth: u16) void {
-        if (self.ir_view.getTag(argument) != .array_literal) return self.walkResultExpr(argument, .other, depth);
+        if (self.ir_view.getTag(argument) != .array_literal) return self.walkResultExpr(argument, .argument, depth);
         const array = self.ir_view.getArray(argument) orelse return;
         var i: u16 = 0;
         while (i < array.elements_count) : (i += 1) {
@@ -4088,4 +4259,239 @@ test "with no atom table the index resolves imports this verifier used to miss" 
     // `env` returns an optional string, so it lands in the optional list. Before
     // C1 this was 0 on the no-table path.
     try std.testing.expectEqual(@as(usize, 1), verifier.optional_function_slots.items.len);
+}
+
+/// The shape and the message of the first ZTS303 diagnostic of `source`.
+const FirstShape = struct { shape: ResultShape, message: []const u8 };
+
+fn firstResultShape(source: []const u8) !FirstShape {
+    const allocator = std.testing.allocator;
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler = findHandlerFunction(view, root) orelse return error.HandlerNotFound;
+
+    var verifier = HandlerVerifier.init(allocator, view, &atoms, null, null);
+    defer verifier.deinit();
+    _ = try verifier.verify(handler);
+
+    for (verifier.getDiagnostics()) |diagnostic| {
+        if (diagnostic.kind != .unchecked_result_value) continue;
+        return .{ .shape = diagnostic.result_shape orelse return error.NoShape, .message = diagnostic.message };
+    }
+    return error.NoRefusal;
+}
+
+const shape_head = json_prefix ++
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const r = parseJson("1");
+    \\
+;
+
+test "ZTS303 shape: an unguarded value read keeps the original message" {
+    const first = try firstResultShape(shape_head ++
+        \\  const v = r.value;
+        \\  return Response.json({ v: v });
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.unchecked_value, first.shape);
+    try std.testing.expectEqualStrings("result.value accessed without checking result.ok first", first.message);
+}
+
+test "ZTS303 shape: an unguarded error read" {
+    const first = try firstResultShape(shape_head ++
+        \\  const e = r.error;
+        \\  return Response.json({ e: e });
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.unchecked_error, first.shape);
+    try std.testing.expectEqualStrings("result.error read where result.ok is not known to be false", first.message);
+}
+
+test "ZTS303 shape: an error read on the ok path" {
+    const first = try firstResultShape(shape_head ++
+        \\  if (r.ok) {
+        \\    return Response.json({ e: r.error });
+        \\  }
+        \\  return Response.text("no");
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.error_on_ok_path, first.shape);
+}
+
+test "ZTS303 shape: a value read after a comparison of ok with true" {
+    const first = try firstResultShape(shape_head ++
+        \\  if (r.ok === true) {
+        \\    return Response.json({ v: r.value });
+        \\  }
+        \\  return Response.text("no");
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.unrecognized_guard, first.shape);
+}
+
+test "ZTS303 shape: a closure reads a Result without its own check" {
+    const first = try firstResultShape(shape_head ++
+        \\  const read = (): unknown => {
+        \\    return r.value;
+        \\  };
+        \\  return Response.json({ v: read() });
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.closure_read, first.shape);
+}
+
+test "ZTS303 shape: a read inside an assert statement" {
+    const first = try firstResultShape(shape_head ++
+        \\  assert r.value !== undefined, Response.text("no");
+        \\  return Response.text("ok");
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.flat_guard, first.shape);
+}
+
+test "ZTS303 shape: an unknown member" {
+    const first = try firstResultShape(shape_head ++
+        \\  const x = r.foo;
+        \\  return Response.json({ x: x });
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.unknown_member, first.shape);
+}
+
+test "ZTS303 shape: a computed key" {
+    const first = try firstResultShape(shape_head ++
+        \\  const k = "value";
+        \\  const v = r[k];
+        \\  return Response.json({ v: v });
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.computed_key, first.shape);
+}
+
+test "ZTS303 shape: a method call on a Result" {
+    const first = try firstResultShape(shape_head ++
+        \\  if (r.isOk()) {
+        \\    return Response.text("yes");
+        \\  }
+        \\  return Response.text("no");
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.method_call, first.shape);
+}
+
+test "ZTS303 shape: an alias of a Result" {
+    const first = try firstResultShape(shape_head ++
+        \\  const a = r;
+        \\  return Response.text("ok");
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.alias_or_reassignment, first.shape);
+}
+
+test "ZTS303 shape: a Result function named without a call" {
+    const first = try firstResultShape(shape_head ++
+        \\  const f = parseJson;
+        \\  return Response.text("ok");
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.function_alias, first.shape);
+}
+
+test "ZTS303 shape: a Result passed as an argument" {
+    const first = try firstResultShape(shape_head ++
+        \\  const s = String(r);
+        \\  return Response.text(s);
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.call_argument, first.shape);
+}
+
+test "ZTS303 shape: a Result returned" {
+    const first = try firstResultShape(shape_head ++
+        \\  if (req.method === "GET") {
+        \\    return r;
+        \\  }
+        \\  return Response.text("ok");
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.returned, first.shape);
+}
+
+test "ZTS303 shape: a Result stored in an object" {
+    const first = try firstResultShape(shape_head ++
+        \\  const box = { r: r };
+        \\  return Response.text("ok");
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.collection_member, first.shape);
+}
+
+test "ZTS303 shape: a Result in an array" {
+    const first = try firstResultShape(shape_head ++
+        \\  const list = [r];
+        \\  return Response.text("ok");
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.collection_member, first.shape);
+}
+
+test "ZTS303 shape: a spread Result" {
+    const first = try firstResultShape(shape_head ++
+        \\  const box = { ...r };
+        \\  return Response.text("ok");
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.spread, first.shape);
+}
+
+test "ZTS303 shape: a match on a Result" {
+    const first = try firstResultShape(shape_head ++
+        \\  const v = match (r) { when { ok: true, value: x }: x default: 0 };
+        \\  return Response.json({ v: v });
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.match_subject, first.shape);
+}
+
+test "ZTS303 shape: a member read on an unbound Result call" {
+    const first = try firstResultShape(shape_head ++
+        \\  const v = parseJson("2").value;
+        \\  return Response.json({ v: v });
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.unbound_call, first.shape);
+}
+
+test "ZTS303 shape: a captured name that two Result bindings share" {
+    const first = try firstResultShape(json_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  if (req.method === "GET") {
+        \\    const r = parseJson("1");
+        \\    if (!r.ok) {
+        \\      return Response.json({ bad: true }, { status: 400 });
+        \\    }
+        \\    return Response.json({ v: r.value });
+        \\  }
+        \\  const r = parseJson("2");
+        \\  const read = (): unknown => {
+        \\    return r.value;
+        \\  };
+        \\  return Response.json({ v: read() });
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.ambiguous_upvalue, first.shape);
+}
+
+test "ZTS303 shape: any other use of a Result" {
+    const first = try firstResultShape(shape_head ++
+        \\  const same = r === r;
+        \\  return Response.json({ same: same });
+        \\}
+    );
+    try std.testing.expectEqual(ResultShape.other_use, first.shape);
 }

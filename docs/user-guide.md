@@ -151,6 +151,9 @@ function handler(req: Request): Proof<Response, "state_isolated" | "no_secret_le
 ```
 
 Result-producing virtual-module calls must be checked before `.value` access.
+Bind each call to a `const` and check it with `if (!parsed.ok)` or
+`if (parsed.ok)`. Pass `parsed.value`, not `parsed`. The verifier refuses
+`match`, `=== true`, and `isOk()` on a Result.
 Optional-producing calls must be narrowed before use. The verifier enforces both
 patterns.
 
