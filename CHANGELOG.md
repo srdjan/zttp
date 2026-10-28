@@ -12,6 +12,15 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ### Fixed
 
+- **An extensionless relative import resolves against its importer.** CHECK
+  resolved `./lib` from `src/handler.ts` to the rooted path `/src/lib.ts`
+  instead of `src/lib.ts`, which the runtime loads. CHECK read a path under the
+  filesystem root: the read failed and the verdict failed closed, and a file at
+  that root path would have been analyzed in place of the project file. Now
+  CHECK appends `.ts` to the path joined with the importer's directory. The PR
+  gate follows such an import, so a changed helper behind `./lib` now gives a
+  breaking verdict (exit 1) in place of an unreadable import (exit 2). No
+  tracked `.ts` file has an extensionless import, so no tracked verdict moves.
 - **A Result or optional reassigned in a `for...of` body is unchecked at the
   top of the next iteration.** The verifier walked the loop body once, so a
   body that read `.value` of a checked Result, or a member of a narrowed

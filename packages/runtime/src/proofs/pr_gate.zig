@@ -2545,7 +2545,7 @@ test "run: an unparseable file that names no changed helper does not stop the ga
     try testing.expect(std.mem.indexOf(u8, g.report, "{\"path\":\"lib.ts\",\"reason\":\"unreferenced_helper\"}") != null);
 }
 
-test "run: a handler that imports a changed helper without an extension exits 2" {
+test "run: a handler that imports a changed helper without an extension is followed and breaking" {
     const handler =
         \\import { enrich } from "./lib";
         \\function handler(req: Request): Response {
@@ -2560,6 +2560,6 @@ test "run: a handler that imports a changed helper without an extension exits 2"
         .json,
     );
     defer g.deinit();
-    try testing.expectEqual(@as(u8, 2), g.code);
-    try testing.expect(std.mem.indexOf(u8, g.stderr, "analysis failed for `handler.ts`") != null);
+    try testing.expectEqual(@as(u8, 1), g.code);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"path\":\"handler.ts\"") != null);
 }

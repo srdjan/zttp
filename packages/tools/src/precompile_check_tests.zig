@@ -3791,6 +3791,79 @@ test "CHECK stops nested effect reads after an imported type failure" {
     try std.testing.expect(!properties.retry_safe);
 }
 
+test "CHECK resolves an extensionless import against the importer directory" {
+    const allocator = std.testing.allocator;
+    const handler_source =
+        \\import { save } from "./lib";
+        \\function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(save("x"));
+        \\}
+        \\
+    ;
+    const dependency =
+        "import { cacheSet } from \"zttp:cache\";\n" ++
+        "export function save(value: string): string { cacheSet(\"n\", \"k\", value); return value; }\n";
+    const reader_sources = [_][]const u8{ dependency, dependency };
+    var tracing_reader: TracingImportReader = .{ .sources = &reader_sources };
+    defer tracing_reader.deinit(allocator);
+
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, handler_source, "src/handler.ts", .{
+        .json_mode = true,
+        .import_reader = tracing_reader.reader(),
+    });
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(usize, 2), tracing_reader.paths.items.len);
+    try std.testing.expectEqualStrings("src/lib.ts", tracing_reader.paths.items[0]);
+    try std.testing.expectEqualStrings("src/lib.ts", tracing_reader.paths.items[1]);
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    const properties = contract.properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(contract.effect_analysis_complete);
+    try std.testing.expect(!properties.read_only);
+}
+
+test "CHECK gives an extensionless import the verdict of its explicit form" {
+    const allocator = std.testing.allocator;
+    const bare_source =
+        \\import { clean } from "./lib";
+        \\function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(clean("x"));
+        \\}
+        \\
+    ;
+    const explicit_source =
+        \\import { clean } from "./lib.ts";
+        \\function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(clean("x"));
+        \\}
+        \\
+    ;
+    const dependency = "export function clean(value: string): string { return value.toUpperCase(); }\n";
+    const reader_sources = [_][]const u8{ dependency, dependency };
+    var bare_reader: TracingImportReader = .{ .sources = &reader_sources };
+    defer bare_reader.deinit(allocator);
+    var explicit_reader: TracingImportReader = .{ .sources = &reader_sources };
+    defer explicit_reader.deinit(allocator);
+
+    var bare = try runCheckOnlyFromSourceWithOptions(allocator, bare_source, "handler.ts", .{
+        .json_mode = true,
+        .import_reader = bare_reader.reader(),
+    });
+    defer bare.deinit(allocator);
+    var explicit = try runCheckOnlyFromSourceWithOptions(allocator, explicit_source, "handler.ts", .{
+        .json_mode = true,
+        .import_reader = explicit_reader.reader(),
+    });
+    defer explicit.deinit(allocator);
+
+    try std.testing.expectEqualStrings("lib.ts", bare_reader.paths.items[0]);
+    try std.testing.expectEqualStrings("lib.ts", explicit_reader.paths.items[0]);
+    const bare_properties = bare.contract.?.properties.?;
+    const explicit_properties = explicit.contract.?.properties.?;
+    try std.testing.expect(explicit_properties.read_only);
+    try std.testing.expectEqual(explicit_properties.read_only, bare_properties.read_only);
+    try std.testing.expectEqual(explicit.contract.?.effect_analysis_complete, bare.contract.?.effect_analysis_complete);
+}
 // ---------------------------------------------------------------------------
 // One loader for an imported file
 // ---------------------------------------------------------------------------

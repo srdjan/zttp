@@ -140,15 +140,7 @@ pub fn scanSource(
     for (file.module_facts.imports.items) |rec| {
         if (rec.resolution != .unresolved) continue;
         if (!isRelativeSpecifier(rec.module_specifier)) continue;
-        const resolved = try resolveCheckImportPath(allocator, base_dir, rec.module_specifier);
-        defer allocator.free(resolved);
-        // An extensionless specifier of a relative importer comes back rooted
-        // (`/lib.ts`): the extension probe joins it to an empty directory. CHECK
-        // reads that rooted path and fails, which makes the importer's imports
-        // incomplete. The edge names the file it means, so the importer still
-        // reaches the file and the gate fails closed on the unreadable import.
-        const rooted = !std.fs.path.isAbsolute(path) and std.mem.startsWith(u8, resolved, "/");
-        const target = try allocator.dupe(u8, if (rooted) resolved[1..] else resolved);
+        const target = try resolveCheckImportPath(allocator, base_dir, rec.module_specifier);
         errdefer allocator.free(target);
         var seen = false;
         for (found.items) |item| {
@@ -405,11 +397,11 @@ pub fn resolveCheckImportPath(allocator: std.mem.Allocator, base_dir: []const u8
     const normalized = try std.fs.path.resolve(allocator, &.{ base_dir, specifier });
     if (std.fs.path.extension(normalized).len != 0) return normalized;
     defer allocator.free(normalized);
-    return zts.modules.file_resolver.resolve(allocator, normalized, "", null) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        // exhaustive: the only error besides OutOfMemory is UnsupportedSourceExtension, and the path has no extension here, so the arm cannot run.
-        else => unreachable, // An extensionless path cannot have an unsupported source extension.
-    };
+    // The runtime loader joins the importer's directory with the specifier and
+    // appends the probe extension (`file_resolver.resolve`). `normalized` is
+    // already that join, so the extension is appended directly: passing it back
+    // through `resolve` with an empty directory rooted a relative path (`/lib.ts`).
+    return std.mem.concat(allocator, u8, &.{ normalized, ".ts" });
 }
 
 fn isRelativeSpecifier(specifier: []const u8) bool {
