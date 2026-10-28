@@ -490,7 +490,6 @@ pub const module_examples = [_]ModuleExample{
         \\}));
         \\
         \\export function handler(req: Request): Proof<Response,
-        \\  | "deterministic"
         \\  | "state_isolated"
         \\  | "fault_covered"
         \\  | "result_safe"

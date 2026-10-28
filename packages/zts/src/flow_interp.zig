@@ -2356,7 +2356,12 @@ pub const FlowInterp = struct {
         const header_site: SiteKey = .{ .kind = .response_headers, .node = node, .context = self.active_module, .call = self.allocation_context };
         const response = try self.siteValue(site, null);
         const headers = try self.siteValue(header_site, null);
-        const source = Value.labelled(resolved.func.return_labels.without(.{ .validated = true }));
+        // A response from the network differs between runs of the same
+        // request. The fetch path returns before the generic export path sets
+        // this label, so it is set here.
+        var source_labels = resolved.func.return_labels.without(.{ .validated = true });
+        if (readsVaryingSource(resolved)) source_labels.nondeterministic = true;
+        const source = Value.labelled(source_labels);
         var cells = st.heap.get(site) orelse Cells{};
         cells.html_possible = true;
         try st.heap.put(self.mem(), site, cells);
@@ -3391,17 +3396,12 @@ pub const FlowInterp = struct {
         return self.moduleExport(binding.name_atom);
     }
 
-    /// Whether an export's result differs between runs of the same request:
-    /// the module is stateful and the export reads, or its capabilities
-    /// include a clock or a random source. `flow_checker.zig` applies the same
-    /// test. An explicit empty capability list does not inherit the module's.
+    /// Whether an export's result differs between runs of the same request.
+    /// `mb.exportVaries` decides it from the binding: a clock, a random
+    /// source, the network, or stored data. An explicit empty capability list
+    /// does not inherit the module's. Effect inference reads the same rule.
     fn readsVaryingSource(resolved: ModuleExport) bool {
-        if (resolved.binding.stateful and resolved.func.effect == .read) return true;
-        const caps = resolved.func.required_capabilities orelse resolved.binding.required_capabilities;
-        for (caps) |cap| {
-            if (cap == .clock or cap == .random) return true;
-        }
-        return false;
+        return mb.exportVaries(resolved.binding, resolved.func);
     }
 
     /// Whether `haystack` holds `needle`, ignoring ASCII case.

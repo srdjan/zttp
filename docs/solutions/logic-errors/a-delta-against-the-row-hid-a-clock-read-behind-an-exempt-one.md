@@ -63,7 +63,7 @@ row.capabilities.setUnion(reached.capabilities);
 if (reachesClockOrRandom(reached.capabilities)) row.deterministic = false;
 ```
 
-The declared-callback site builds a local `CapabilitySet` from the declared effect names in the same way. The shared test is the helper `reachesClockOrRandom` near the top of the file. The regression test is `"a clock read after a discarded log call still demotes determinism"`. It covers the direct-call case and the callback-argument case.
+The declared-callback site builds a local `CapabilitySet` from the declared effect names in the same way. The shared test is the helper `reachesVaryingSource` near the top of the file. It was named `reachesClockOrRandom` when this fix landed, and the snippet above shows that name. A2 widened it from a clock or random read to every varying capability. The regression test is `"a clock read after a discarded log call still demotes determinism"`. It covers the direct-call case and the callback-argument case.
 
 ## Why This Works
 

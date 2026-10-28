@@ -16,8 +16,11 @@ const IrView = ir.IrView;
 const mb = engine.module_binding;
 const LabelSet = mb.LabelSet;
 
-/// Version of the flow verdict semantics, included in the policy identity.
-pub const flow_analyzer_version: u32 = 8;
+/// Version of the flow verdict semantics, included in the policy identity. It
+/// also covers the `deterministic` verdict of `effect_inference.zig`, which has
+/// no version of its own: version 9 counts a network, SQL, filesystem, or
+/// stored-data read as a varying source (`module_binding.exportVaries`).
+pub const flow_analyzer_version: u32 = 9;
 
 pub const RepairIntent = report_types.RepairIntent;
 pub const Severity = report_types.Severity;

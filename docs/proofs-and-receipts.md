@@ -59,9 +59,11 @@ a pill: `[+]` proven, `[-]` not proven. They are grouped. `[-]` means the compil
 |---|---|
 | `pure` | the handler calls no virtual modules and makes no call the compiler cannot resolve: it is a pure function of the request |
 | `read_only` | every virtual-module call is read-classified and every call resolves to a known function: no state is mutated |
-| `deterministic` | no value that can differ between runs, such as a clock read, a random draw, or stored data, reaches the response |
+| `deterministic` | no value that can differ between runs, such as a clock read, a random draw, a network response, or stored data, reaches the response |
 | `retry_safe` | the same condition as `read_only` |
 | `idempotent` | deterministic and retry-safe: safe under at-least-once delivery |
+
+The analyzer decides from module binding metadata whether an export returns a varying value. An export varies when its capabilities include `clock`, `random`, `network`, `sqlite`, or `filesystem`. It also varies when it reads a stateful module, or when it declares `unknown` or `nondeterministic` in its return labels. So the result of `fetch` or `fetchWithRetry`, a cache read, a SQL read, and a rate-limit call count as varying. The rule is `exportVaries` in `packages/zts/src/module_binding.zig`. The flow analysis and the effect rows of helper capsules both use it. A fetch whose result the handler discards does not demote the property. `flow_analyzer_version` 9 introduced this rule.
 
 **Security** - data-flow guarantees:
 

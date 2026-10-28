@@ -113,6 +113,32 @@ const findDuplicateRequiredCapability = types.findDuplicateRequiredCapability;
 pub const findFunctionInRegistry = types.findFunctionInRegistry;
 pub const hasInverseLawPointingTo = types.hasInverseLawPointingTo;
 
+/// Whether a result that reads this capability can differ between two runs of
+/// the same request: a clock, a random source, the network, and stored data.
+/// The switch has no `else`, so a new capability must be classified here.
+pub fn capabilityVaries(cap: ModuleCapability) bool {
+    return switch (cap) {
+        .clock, .random, .network, .sqlite, .filesystem => true,
+        .env, .crypto, .stderr, .runtime_callback, .policy_check => false,
+    };
+}
+
+/// Whether the result of an export can differ between runs of the same
+/// request. The export varies when its capabilities (its own list, or the
+/// module's when it declares none) include a varying capability, when it reads
+/// from a stateful module, or when it declares `unknown` or `nondeterministic`
+/// for its return labels. The two flow analyses and the effect rows read this
+/// one rule, so a new export cannot slip past one of them.
+pub fn exportVaries(binding: *const ModuleBinding, func: *const FunctionBinding) bool {
+    if (binding.stateful and func.effect == .read) return true;
+    if (func.return_labels.unknown or func.return_labels.nondeterministic) return true;
+    const caps = func.required_capabilities orelse binding.required_capabilities;
+    for (caps) |cap| {
+        if (capabilityVaries(cap)) return true;
+    }
+    return false;
+}
+
 // -------------------------------------------------------------------------
 // Tests
 // -------------------------------------------------------------------------

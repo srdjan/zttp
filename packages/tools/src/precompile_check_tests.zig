@@ -9859,3 +9859,98 @@ test "scanSource lists the relative imports CHECK follows and the handler functi
         imports_mod.scanSource(allocator, "import { a } from \"./a.ts\";\nfunction handler(\n", "broken.ts"),
     );
 }
+
+// A2: a value from the network or from stored state differs between two runs
+// of the same request, so a handler or helper that returns it is not
+// deterministic.
+fn varyingProbe(allocator: std.mem.Allocator, imports: []const u8, handler_body: []const u8, helper_body: []const u8) !CheckResult {
+    const source = try std.fmt.allocPrint(
+        allocator,
+        "{s}\nfunction load(): unknown {{ {s} }}\nfunction handler(req: Request): Response {{ {s} }}\n",
+        .{ imports, helper_body, handler_body },
+    );
+    defer allocator.free(source);
+    return runCheckOnlyFromSourceWithOptions(allocator, source, "a2-probe.ts", .{ .json_mode = true });
+}
+
+fn probeHandlerDeterministic(result: *const CheckResult) !bool {
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    const properties = contract.properties orelse return error.TestUnexpectedResult;
+    return properties.deterministic;
+}
+
+fn probeHelperDeterministic(result: *const CheckResult) !bool {
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    for (contract.function_capsules.items) |capsule| {
+        if (std.mem.eql(u8, capsule.function, "load")) return capsule.proven_deterministic;
+    }
+    return error.TestUnexpectedResult;
+}
+
+const fetch_import = "import { fetch, fetchWithRetry } from \"zttp:fetch\";";
+const constant_helper = "return \"x\";";
+const constant_handler = "return Response.text(\"ok\");";
+
+test "A2: a handler that returns a fetch result is not deterministic" {
+    const allocator = std.testing.allocator;
+    var result = try varyingProbe(allocator, fetch_import, "return fetch(\"https://api.example.com/data\");", constant_helper);
+    defer result.deinit(allocator);
+    try std.testing.expect(!try probeHandlerDeterministic(&result));
+}
+
+test "A2: a handler that answers a fetch body is not deterministic" {
+    const allocator = std.testing.allocator;
+    var result = try varyingProbe(allocator, fetch_import, "const r = fetch(\"https://api.example.com/data\"); return Response.text(r.body);", constant_helper);
+    defer result.deinit(allocator);
+    try std.testing.expect(!try probeHandlerDeterministic(&result));
+}
+
+test "A2: a handler that returns a fetchWithRetry result is not deterministic" {
+    const allocator = std.testing.allocator;
+    var result = try varyingProbe(allocator, fetch_import, "return fetchWithRetry(\"https://api.example.com/data\", {}, {});", constant_helper);
+    defer result.deinit(allocator);
+    try std.testing.expect(!try probeHandlerDeterministic(&result));
+}
+
+test "A2: a helper that returns a fetch result is not a deterministic capsule" {
+    const allocator = std.testing.allocator;
+    var result = try varyingProbe(allocator, fetch_import, constant_handler, "return fetch(\"https://api.example.com/data\");");
+    defer result.deinit(allocator);
+    try std.testing.expect(!try probeHelperDeterministic(&result));
+}
+
+test "A2: a helper that returns a fetchWithRetry result is not a deterministic capsule" {
+    const allocator = std.testing.allocator;
+    var result = try varyingProbe(allocator, fetch_import, constant_handler, "return fetchWithRetry(\"https://api.example.com/data\", {}, {});");
+    defer result.deinit(allocator);
+    try std.testing.expect(!try probeHelperDeterministic(&result));
+}
+
+test "A2: a helper that reads the cache without a clock is not a deterministic capsule" {
+    const allocator = std.testing.allocator;
+    var cache_stats = try varyingProbe(allocator, "import { cacheStats } from \"zttp:cache\";", constant_handler, "return cacheStats();");
+    defer cache_stats.deinit(allocator);
+    try std.testing.expect(!try probeHelperDeterministic(&cache_stats));
+}
+
+test "A2: a helper that reads SQL is not a deterministic capsule" {
+    const allocator = std.testing.allocator;
+    var sql_one = try varyingProbe(allocator, "import { sqlOne } from \"zttp:sql\";", constant_handler, "return sqlOne(\"q\", {});");
+    defer sql_one.deinit(allocator);
+    try std.testing.expect(!try probeHelperDeterministic(&sql_one));
+}
+
+test "A2: a fetch whose result is discarded keeps the handler deterministic" {
+    const allocator = std.testing.allocator;
+    var result = try varyingProbe(allocator, fetch_import, "fetch(\"https://api.example.com/hook\"); return Response.text(\"ok\");", constant_helper);
+    defer result.deinit(allocator);
+    try std.testing.expect(try probeHandlerDeterministic(&result));
+}
+
+test "A2: a handler and a helper with no varying source stay deterministic" {
+    const allocator = std.testing.allocator;
+    var result = try varyingProbe(allocator, fetch_import, constant_handler, constant_helper);
+    defer result.deinit(allocator);
+    try std.testing.expect(try probeHandlerDeterministic(&result));
+    try std.testing.expect(try probeHelperDeterministic(&result));
+}

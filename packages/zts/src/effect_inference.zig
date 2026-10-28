@@ -31,10 +31,25 @@ const Capability = module_binding.ModuleCapability;
 
 pub const CapabilitySet = std.EnumSet(Capability);
 
-/// A callee that reads the clock or draws randomness can return a different
-/// value on the next run, so its caller is not deterministic.
-fn reachesClockOrRandom(caps: CapabilitySet) bool {
-    return caps.contains(.clock) or caps.contains(.random);
+/// A callee that reads the clock, draws randomness, reaches the network, or
+/// reads stored data can return a different value on the next run, so its
+/// caller is not deterministic. `module_binding.capabilityVaries` classifies
+/// each capability.
+fn reachesVaryingSource(caps: CapabilitySet) bool {
+    var it = caps.iterator();
+    while (it.next()) |cap| {
+        if (module_binding.capabilityVaries(cap)) return true;
+    }
+    return false;
+}
+
+/// Whether a built-in export returns a value that differs between runs, by
+/// the binding rule that the flow analysis also reads. An export of a module
+/// that is not built in answers false here; its capability set is charged
+/// through `reachesVaryingSource`, and an unknown module gets every capability.
+fn importExportVaries(module: []const u8, name: []const u8) bool {
+    const found = builtin_modules.findExport(module, name) orelse return false;
+    return module_binding.exportVaries(found.binding, found.func);
 }
 
 pub const EffectRow = struct {
@@ -1325,7 +1340,9 @@ pub const Analyzer = struct {
             // Test what this export reaches, not what it adds to the row: a
             // discarded `logInfo` earlier in the body leaves `.clock` in the row
             // without demoting it, and a later clock read would add nothing.
-            if (!sinks_the_read and reachesClockOrRandom(reached.capabilities)) {
+            if (!sinks_the_read and (reachesVaryingSource(reached.capabilities) or
+                importExportVaries(imported.module, imported.name)))
+            {
                 row.deterministic = false;
             }
             row.pure = false;
@@ -1536,7 +1553,7 @@ pub const Analyzer = struct {
         row.capabilities.setUnion(declared);
         // Same demotions a direct module call makes: reaching a capability is
         // not pure, and reaching the clock or the RNG is not deterministic.
-        if (reachesClockOrRandom(declared)) row.deterministic = false;
+        if (reachesVaryingSource(declared)) row.deterministic = false;
         row.pure = false;
         return true;
     }
@@ -1636,12 +1653,14 @@ pub const Analyzer = struct {
     /// Put an imported export's effects in `row` without a call node: the
     /// capabilities, clock or randomness, write, and egress it reaches. The
     /// determinism test reads the export's own set, not the row's delta, for
-    /// the reason the doc note on `reachesClockOrRandom` gives.
+    /// the reason the doc note on `reachesVaryingSource` gives.
     fn chargeImportValue(self: *const Analyzer, imported: ImportedFunction, row: *EffectRow) void {
         var reached: EffectRow = .{};
         self.insertModuleCapabilities(imported.module, imported.name, &reached);
         row.capabilities.setUnion(reached.capabilities);
-        if (reachesClockOrRandom(reached.capabilities)) row.deterministic = false;
+        if (reachesVaryingSource(reached.capabilities) or importExportVaries(imported.module, imported.name)) {
+            row.deterministic = false;
+        }
         row.pure = false;
         if (self.importEffect(imported.module, imported.name) == .write) row.writes = true;
         if (std.mem.eql(u8, imported.module, fetch_module_specifier) and

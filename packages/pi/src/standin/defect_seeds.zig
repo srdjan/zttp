@@ -278,7 +278,7 @@ const clean_literal_capability =
 const clean_literal_egress =
     \\import { fetch } from "zttp:fetch";
     \\
-    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\function handler(req: Request): Proof<Response, "injection_safe"> {
     \\  const res = fetch("https://api.example.com/status");
     \\  return Response.json({ status: res.status });
     \\}
@@ -364,7 +364,7 @@ const clean_secret_and_egress =
     \\import { env } from "zttp:env";
     \\import { fetch } from "zttp:fetch";
     \\
-    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\function handler(req: Request): Proof<Response, "injection_safe"> {
     \\  const token = env("API_TOKEN") ?? "";
     \\  const r = fetch("https://api.example.com/v1", { method: "POST", body: "ping" });
     \\  if (token === "") { return Response.json({ ok: 0 }); }
@@ -591,7 +591,7 @@ const clean_secret_and_headers =
     \\import { env } from "zttp:env";
     \\import { fetch } from "zttp:fetch";
     \\
-    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\function handler(req: Request): Proof<Response, "injection_safe"> {
     \\  const token = env("SECRET_KEY") ?? "";
     \\  const r = fetch("https://api.example.com/v1", { headers: { "x-tag": "static" } });
     \\  if (token === "") { return Response.json({ ok: 0 }); }
@@ -603,7 +603,7 @@ const clean_secret_and_headers =
 const clean_credential_and_headers =
     \\import { fetch } from "zttp:fetch";
     \\
-    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\function handler(req: Request): Proof<Response, "injection_safe"> {
     \\  const auth = req.headers.authorization ?? "";
     \\  const r = fetch("https://api.example.com/v1", { headers: { "x-tag": "static" } });
     \\  if (auth === "") { return Response.json({ ok: 0 }); }
@@ -692,7 +692,7 @@ const env_not_allowed_clean =
 const egress_not_allowed_clean =
     \\import { fetch } from "zttp:fetch";
     \\
-    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\function handler(req: Request): Proof<Response, "injection_safe"> {
     \\  const r = fetch("https://allowed.example.com/v1");
     \\  return Response.json({ s: r.status });
     \\}
@@ -1292,7 +1292,7 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\import { fetch } from "zttp:fetch";
         \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\function handler(req: Request): Proof<Response, "injection_safe"> {
         \\  const target = req.url;
         \\  const res = fetch(target);
         \\  return Response.json({ status: res.status });
@@ -1302,7 +1302,7 @@ pub const seeds = [_]DefectSeed{
         .good_draft =
         \\import { fetch } from "zttp:fetch";
         \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\function handler(req: Request): Proof<Response, "injection_safe"> {
         \\  const res = fetch("https://api.example.com/health");
         \\  return Response.json({ status: res.status });
         \\}
@@ -1502,7 +1502,7 @@ pub const seeds = [_]DefectSeed{
         \\import { env } from "zttp:env";
         \\import { fetch } from "zttp:fetch";
         \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\function handler(req: Request): Proof<Response, "injection_safe"> {
         \\  const token = env("API_TOKEN") ?? "";
         \\  const r = fetch("https://api.example.com/v1", { method: "POST", body: token });
         \\  return Response.json({ s: r.status });
@@ -1513,7 +1513,7 @@ pub const seeds = [_]DefectSeed{
         \\import { env } from "zttp:env";
         \\import { fetch } from "zttp:fetch";
         \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\function handler(req: Request): Proof<Response, "injection_safe"> {
         \\  const token = env("API_TOKEN") ?? "";
         \\  const r = fetch("https://api.example.com/v1", { method: "POST", body: "pong" });
         \\  if (token === "") { return Response.json({ ok: 0 }); }
@@ -2312,7 +2312,7 @@ pub const seeds = [_]DefectSeed{
         \\import { env } from "zttp:env";
         \\import { fetch } from "zttp:fetch";
         \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\function handler(req: Request): Proof<Response, "injection_safe"> {
         \\  const token = env("SECRET_KEY") ?? "";
         \\  const r = fetch("https://api.example.com/v1", { headers: { "x-tag": token } });
         \\  return Response.json({ s: r.status });
@@ -2323,7 +2323,7 @@ pub const seeds = [_]DefectSeed{
         \\import { env } from "zttp:env";
         \\import { fetch } from "zttp:fetch";
         \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\function handler(req: Request): Proof<Response, "injection_safe"> {
         \\  const token = env("SECRET_KEY") ?? "";
         \\  const r = fetch("https://api.example.com/v1", { headers: { "x-tag": "redacted" } });
         \\  if (token === "") { return Response.json({ ok: 0 }); }
@@ -2341,7 +2341,7 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\import { fetch } from "zttp:fetch";
         \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\function handler(req: Request): Proof<Response, "injection_safe"> {
         \\  const auth = req.headers.authorization ?? "";
         \\  const r = fetch("https://api.example.com/v1", { headers: { "x-tag": auth } });
         \\  return Response.json({ s: r.status });
@@ -2351,7 +2351,7 @@ pub const seeds = [_]DefectSeed{
         .good_draft =
         \\import { fetch } from "zttp:fetch";
         \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\function handler(req: Request): Proof<Response, "injection_safe"> {
         \\  const auth = req.headers.authorization ?? "";
         \\  const r = fetch("https://api.example.com/v1", { headers: { "x-tag": "scoped" } });
         \\  if (auth === "") { return Response.json({ ok: 0 }); }
@@ -2369,7 +2369,7 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\import { fetch } from "zttp:fetch";
         \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\function handler(req: Request): Proof<Response, "injection_safe"> {
         \\  const auth = req.headers.authorization ?? "";
         \\  const r = fetch("https://api.example.com/v1", { method: "POST", body: auth });
         \\  return Response.json({ s: r.status });
@@ -2379,7 +2379,7 @@ pub const seeds = [_]DefectSeed{
         .good_draft =
         \\import { fetch } from "zttp:fetch";
         \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\function handler(req: Request): Proof<Response, "injection_safe"> {
         \\  const auth = req.headers.authorization ?? "";
         \\  const r = fetch("https://api.example.com/v1", { method: "POST", body: "scoped" });
         \\  if (auth === "") { return Response.json({ ok: 0 }); }
@@ -2565,7 +2565,7 @@ pub const seeds = [_]DefectSeed{
         .bad_draft =
         \\import { fetch } from "zttp:fetch";
         \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\function handler(req: Request): Proof<Response, "injection_safe"> {
         \\  const r = fetch("https://forbidden.example.com/v1");
         \\  return Response.json({ s: r.status });
         \\}
@@ -2574,7 +2574,7 @@ pub const seeds = [_]DefectSeed{
         .good_draft =
         \\import { fetch } from "zttp:fetch";
         \\
-        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\function handler(req: Request): Proof<Response, "injection_safe"> {
         \\  const r = fetch("https://allowed.example.com/v2");
         \\  return Response.json({ s: r.status });
         \\}
