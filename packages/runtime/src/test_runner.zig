@@ -61,14 +61,16 @@ pub const Summary = struct {
     unchecked: u32 = 0,
 };
 
-/// Run the suite. A failed test fails the run, and so does an unchecked test:
-/// a test that checks nothing cannot show that the handler is finished.
+/// Run the suite. A failed test fails the run. A test that checks nothing and
+/// reaches a `hole()` is counted as failed, because the handler is not
+/// finished. Any other test that checks nothing is unchecked: it is reported
+/// and does not fail the run.
 pub fn run(allocator: std.mem.Allocator, spec: ExecutionSpec) !void {
     const summary = try runSuite(allocator, spec);
     if (summary.unchecked > 0) {
-        std.debug.print("{d} unchecked test(s) compared nothing with the response; an unchecked test fails the run\n", .{summary.unchecked});
+        std.debug.print("{d} unchecked test(s) compared nothing with the response\n", .{summary.unchecked});
     }
-    if (summary.failed > 0 or summary.unchecked > 0) return error.TestsFailed;
+    if (summary.failed > 0) return error.TestsFailed;
 }
 
 pub fn runSuite(allocator: std.mem.Allocator, spec: ExecutionSpec) !Summary {
@@ -131,7 +133,12 @@ pub fn runSuite(allocator: std.mem.Allocator, spec: ExecutionSpec) !Summary {
             loaded,
             &test_case,
         );
-        if (result.pass and !hasAssertion(&test_case.assertions)) {
+        if (result.pass and !hasAssertion(&test_case.assertions) and result.hole_reached) {
+            // Nothing was compared, and the path ends in an unfilled hole: the
+            // handler is not finished, so the test fails.
+            failed += 1;
+            std.debug.print("  FAIL  {s}\n        reached a hole() and checks nothing\n", .{result.name});
+        } else if (result.pass and !hasAssertion(&test_case.assertions)) {
             // The handler ran and nothing was compared: the test claims no check.
             unchecked += 1;
             std.debug.print("  UNCHECKED  {s}\n", .{result.name});
@@ -171,6 +178,8 @@ const TestResult = struct {
     name: []const u8,
     failures: std.ArrayList([]const u8),
     err: ?anyerror = null,
+    /// The handler reached a `hole()` the author has not filled yet.
+    hole_reached: bool = false,
 
     fn deinitFailures(self: TestResult, allocator: std.mem.Allocator) void {
         for (self.failures.items) |msg| allocator.free(msg);
@@ -282,6 +291,7 @@ fn runLoadedHandlerTest(
                 .name = test_case.name,
                 .failures = failures,
                 .err = null,
+                .hole_reached = true,
             };
         }
         return .{ .pass = false, .name = test_case.name, .failures = failures, .err = err };
@@ -777,7 +787,7 @@ test "a test with no assertion is counted as unchecked, not passed" {
     try std.testing.expectEqual(Summary{ .passed = 1, .failed = 1, .unchecked = 1 }, summary);
 }
 
-test "a run with an unchecked test and no failed test fails" {
+test "a run whose unchecked tests reach no hole passes" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -791,10 +801,29 @@ test "a run with an unchecked test and no failed test fails" {
     });
     const test_path = try allocator.print(".zig-cache/tmp/{s}/suite.jsonl", .{tmp.sub_path});
     defer allocator.free(test_path);
-    try std.testing.expectError(error.TestsFailed, run(allocator, .{
+    try run(allocator, .{
         .handler = .{ .prepared_eval = .{ .code = "function handler(req: Request): Response { return Response.text(\"ok\"); }" } },
         .runtime_config = .{ .test_file_path = test_path },
-    }));
+    });
+}
+
+test "an unchecked test that reaches a hole fails the run" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "suite.jsonl", .data =
+        \\{"type":"test","name":"unasserted"}
+        \\{"type":"request","method":"GET","url":"/","headers":{},"body":null}
+        \\{"type":"expect"}
+    });
+    const test_path = try allocator.print(".zig-cache/tmp/{s}/suite.jsonl", .{tmp.sub_path});
+    defer allocator.free(test_path);
+    const spec: ExecutionSpec = .{
+        .handler = .{ .prepared_eval = .{ .code = "function handler(req: Request): Response { return hole(); }" } },
+        .runtime_config = .{ .test_file_path = test_path },
+    };
+    try std.testing.expectEqual(Summary{ .passed = 0, .failed = 1, .unchecked = 0 }, try runSuite(allocator, spec));
+    try std.testing.expectError(error.TestsFailed, run(allocator, spec));
 }
 
 test "handler tests retain the prepared source case" {

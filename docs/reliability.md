@@ -136,7 +136,7 @@ Common cases:
 
 - `zttp check` / `zts check`: `0` clean, `1` errors, `2` warning-only.
 - `zttp build`: `0` success, `1` build failure.
-- `zttp test`: `0` every test passed, `1` a test failed or a test had no assertion (unchecked), `2` invalid fixture.
+- `zttp test`: `0` no test failed (a test with no assertion counts as unchecked and does not fail the run), `1` a test failed or a test with no assertion reached a `hole()`, `2` invalid fixture.
 
 Security-relevant crashes or bypasses should be reported through
 [SECURITY.md](../SECURITY.md).

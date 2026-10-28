@@ -471,8 +471,8 @@ for an identical program, under the rule above. Two handlers whose status is
 unknown and whose trees differ are `breaking`. The contract writes an unknown
 status as `"status": null` (`path_analyzer_version` 6, contract `version` 25).
 `zts gen-tests` writes no status for such a path, and `zttp test` counts a test
-with no assertion as `unchecked`, not `passed`, and an unchecked test fails the
-run. A critical failure path with an
+with no assertion as `unchecked`, not `passed`. An unchecked test fails the run
+only when it reaches a `hole()`. A critical failure path with an
 unknown status keeps `fault_covered` refused. The source is
 `packages/zts/src/path_generator.zig#PathGenerator.extractExprStatus`.
 
