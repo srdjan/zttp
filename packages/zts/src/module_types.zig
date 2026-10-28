@@ -150,12 +150,12 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
     const val_n = pool.addName(allocator, "value");
     const err_n = pool.addName(allocator, "error");
     const errs_n = pool.addName(allocator, "errors");
-    const result_type = pool.addRecord(allocator, &.{
+    const result_type = pool.markResultRecord(allocator, pool.addRecord(allocator, &.{
         .{ .name_start = ok_n.start, .name_len = ok_n.len, .type_idx = pool.idx_boolean, .optional = false },
         .{ .name_start = val_n.start, .name_len = val_n.len, .type_idx = pool.idx_unknown, .optional = true },
         .{ .name_start = err_n.start, .name_len = err_n.len, .type_idx = pool.idx_string, .optional = true },
         .{ .name_start = errs_n.start, .name_len = errs_n.len, .type_idx = pool.idx_unknown, .optional = true },
-    });
+    }));
     const optional_string = pool.addNullable(allocator, pool.idx_string);
     const object_ref = pool.addRef(allocator, "object");
     const optional_object = pool.addNullable(allocator, object_ref);

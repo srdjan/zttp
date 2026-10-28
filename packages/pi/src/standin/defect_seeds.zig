@@ -166,7 +166,7 @@ const clean_send =
     \\
     \\function handler(req: Request): Proof<Response, "deterministic"> {
     \\  const args = [1];
-    \\  const sent = send(args[0]);
+    \\  const sent = send(args[0] ?? 0);
     \\  return Response.json({ sent: sent });
     \\}
     \\
@@ -1052,7 +1052,7 @@ pub const seeds = [_]DefectSeed{
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const args = [4];
-        \\  const sent = send(args[0]);
+        \\  const sent = send(args[0] ?? 0);
         \\  return Response.json({ sent: sent });
         \\}
         \\

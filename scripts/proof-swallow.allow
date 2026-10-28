@@ -34,7 +34,7 @@ packages/zts/src/type_checker.zig walkStmt catch-return
 # Every check downstream therefore sees more of the type than the guard proved,
 # so the failure can add a diagnostic and can never remove one. It cannot turn
 # an unproven program into a reported-proven one.
-packages/zts/src/type_checker.zig resolveAbsentBinding catch-return
+packages/zts/src/type_checker.zig removeAbsence catch-return
 packages/zts/src/type_checker.zig extractTypeofGuard catch-return
 packages/zts/src/type_checker.zig extractIsArrayGuard catch-return
 packages/zts/src/type_checker.zig extractIsDictGuard catch-return
@@ -111,6 +111,11 @@ packages/zts/src/handler_verifier.zig scanImports catch-poison
 packages/zts/src/handler_verifier.zig setCheckedFlag catch-poison
 packages/zts/src/handler_verifier.zig walkForResultsAndRefs catch-poison
 
+# The typed absent-read phase reads the type checker's record of reads. An
+# allocation failure while it copies that record sets allocation_failed, so
+# verify returns error.OutOfMemory and the missing ZTS309 never reaches a verdict.
+packages/zts/src/handler_verifier.zig reportTypedAbsentReads catch-block
+
 # A nonliteral or incomplete assertion makes the whole intent dynamic. Other
 # parse errors propagate; the catch never installs a partial assertion.
 packages/zts/src/intent_extractor.zig collectAssertions catch-switch
@@ -134,6 +139,18 @@ packages/zts/src/type_checker.zig schemaValueToType catch-block
 packages/zts/src/type_checker.zig schemaValueToType catch-poison
 packages/zts/src/type_checker.zig walkExpr catch-poison
 packages/zts/src/type_checker.zig walkStmt catch-poison
+
+# The A3 records and bindings below follow the same rule: each catch sets the
+# checker's poison flag, which ensureHealthy reports before a build can use the
+# types. A dropped absent-read record, opaque pattern binding, callback element
+# type, or narrowing arm is therefore a failed build, never a reported pass.
+packages/zts/src/type_checker.zig bindCallbackElement catch-poison
+packages/zts/src/type_checker.zig bindCallbackElement catch-poison@2
+packages/zts/src/type_checker.zig markOpaqueBinding catch-poison
+packages/zts/src/type_checker.zig markOpaqueBinding catch-poison@2
+packages/zts/src/type_checker.zig recordAbsentReceiver catch-poison
+packages/zts/src/type_checker.zig walkMatchWithNarrowing catch-poison
+packages/zts/src/type_checker.zig walkMatchWithNarrowing catch-poison@2
 
 # Invalid schema JSON yields no compiled type entry, so no schema shape can be
 # inferred from it. Contract extraction independently marks that surface

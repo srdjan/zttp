@@ -161,6 +161,10 @@ pub const TypePool = struct {
     key_memo: std.AutoHashMapUnmanaged(TypeIndex, []const u8),
     /// Literal-type nodes by value, so equal literals share one node.
     literal_memo: std.AutoHashMapUnmanaged(u64, TypeIndex) = .empty,
+    /// The record types the checker itself builds for a fallible export's
+    /// `Result`. Membership is by type index, set where the record is created,
+    /// never by shape: a record a handler declares never enters this set.
+    result_records: std.AutoHashMapUnmanaged(TypeIndex, void) = .empty,
     /// Operational failure is separate from `null_type_idx`, which remains a
     /// semantic absence sentinel. Once poisoned, the pool must be discarded.
     failure: ?TypePoolError = null,
@@ -216,6 +220,19 @@ pub const TypePool = struct {
         while (keys.next()) |key| allocator.free(key.*);
         self.key_memo.deinit(allocator);
         self.literal_memo.deinit(allocator);
+        self.result_records.deinit(allocator);
+    }
+
+    /// Mark `idx` as a Result record that the checker built. The returned
+    /// index is `idx`, so a creator writes `pool.markResultRecord(a, pool.addRecord(...))`.
+    pub fn markResultRecord(self: *TypePool, allocator: std.mem.Allocator, idx: TypeIndex) TypeIndex {
+        if (idx == null_type_idx) return idx;
+        self.result_records.put(allocator, idx, {}) catch self.recordFailure(error.OutOfMemory);
+        return idx;
+    }
+
+    pub fn isResultRecord(self: *const TypePool, idx: TypeIndex) bool {
+        return self.result_records.contains(idx);
     }
 
     // -------------------------------------------------------------------

@@ -9954,3 +9954,1104 @@ test "A2: a handler and a helper with no varying source stay deterministic" {
     try std.testing.expect(try probeHandlerDeterministic(&result));
     try std.testing.expect(try probeHelperDeterministic(&result));
 }
+
+// ---------------------------------------------------------------------------
+// A3: a read on a value that may be undefined (ZTS309), and a Dict read (ZTS201).
+// Each case runs the public check and compares the exact list of diagnostics,
+// `CODE@line`, in report order. "clean" means no diagnostic at all.
+// ---------------------------------------------------------------------------
+
+const AbsentReadCase = struct {
+    name: []const u8,
+    expect: []const u8,
+    source: []const u8,
+};
+
+fn absentReadSummary(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "absent-read.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    if (result.json_diagnostics.items.len == 0) return allocator.dupe(u8, "clean");
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    for (result.json_diagnostics.items, 0..) |diagnostic, i| {
+        if (i > 0) try out.writer.writeAll(",");
+        try out.writer.print("{s}@{d}", .{ diagnostic.code, diagnostic.line });
+    }
+    return allocator.dupe(u8, out.written());
+}
+
+fn expectAbsentReadCases(cases: []const AbsentReadCase) !void {
+    const allocator = std.testing.allocator;
+    var failures: usize = 0;
+    for (cases) |case| {
+        const got = try absentReadSummary(allocator, case.source);
+        defer allocator.free(got);
+        if (!std.mem.eql(u8, got, case.expect)) {
+            failures += 1;
+            std.debug.print("A3 case {s}: expected {s}, got {s}\n", .{ case.name, case.expect, got });
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), failures);
+}
+
+const absent_read_refused = [_]AbsentReadCase{
+    .{ .name = "user_structural_with_the_exact_result_shape", .expect = "ZTS309@6,ZTS500@4", .source =
+    \\structural X = { x: number };
+    \\structural R = { ok: boolean; value?: X; error?: string; errors?: string };
+    \\function mk(): R { return { ok: false }; }
+    \\function handler(req: Request): Response {
+    \\  const r = mk();
+    \\  return Response.json({ a: r.value.x });
+    \\}
+    },
+    .{ .name = "n19_typed_decl", .expect = "ZTS200@4", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p: P = ps[0];
+    \\  return Response.json({ a: p.age });
+    \\}
+    },
+    .{ .name = "p01_optchain_bind", .expect = "ZTS309@6,ZTS500@3", .source =
+    \\structural Q = { age: number };
+    \\structural P = { q: Q };
+    \\function handler(req: Request): Response {
+    \\  const p: P | undefined = undefined;
+    \\  const q = p?.q;
+    \\  return Response.json({ a: q.age });
+    \\}
+    },
+    .{ .name = "p02_computed_record_key", .expect = "ZTS309@5,ZTS500@3", .source =
+    \\structural P = { age: number };
+    \\structural W = { p: P | undefined };
+    \\function handler(req: Request): Response {
+    \\  const w: W = { p: undefined };
+    \\  return Response.json({ a: w["p"].age });
+    \\}
+    },
+    .{ .name = "p03_match_arm_nullable_field", .expect = "ZTS216@6,ZTS309@7,ZTS500@3", .source =
+    \\structural Q = { age: number };
+    \\structural P = { q: Q | undefined };
+    \\function handler(req: Request): Response {
+    \\  const p: P | undefined = { q: undefined };
+    \\  return match (p) {
+    \\    when undefined: Response.json({ a: 0 })
+    \\    when { q: v }: Response.json({ a: v.age })
+    \\  };
+    \\}
+    },
+    .{ .name = "p04_optional_field", .expect = "ZTS309@5,ZTS500@3", .source =
+    \\structural P = { age: number };
+    \\structural W = { p?: P };
+    \\function handler(req: Request): Response {
+    \\  const w: W = {};
+    \\  return Response.json({ a: w.p.age });
+    \\}
+    },
+    .{ .name = "p05_callback_param_unannotated", .expect = "ZTS309@4,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: (P | undefined)[] = [undefined];
+    \\  return Response.json({ a: ps.map((x) => x.age) });
+    \\}
+    },
+    .{ .name = "p06_typed_decl_from_untyped_init", .expect = "ZTS200@5", .source =
+    \\structural Q = { age: number };
+    \\structural P = { q: Q };
+    \\function handler(req: Request): Response {
+    \\  const p: P | undefined = undefined;
+    \\  const q: Q = p?.q;
+    \\  return Response.json({ a: q.age });
+    \\}
+    },
+    .{ .name = "p08_ternary_cond_kill", .expect = "ZTS107@8,ZTS309@8,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  let p: P | undefined = { age: 1 };
+    \\  const reset = (): boolean => {
+    \\    p = undefined;
+    \\    return true;
+    \\  };
+    \\  const a: number = p !== undefined && reset() ? p.age : 0;
+    \\  return Response.json({ a: a });
+    \\}
+    },
+    .{ .name = "p10_union_of_arrays", .expect = "ZTS309@5,ZTS500@3", .source =
+    \\structural P = { age: number };
+    \\structural Q = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const xs: P[] | Q[] = [];
+    \\  return Response.json({ a: xs[0].age });
+    \\}
+    },
+    .{ .name = "p11_optchain_then_member", .expect = "ZTS309@5,ZTS500@3", .source =
+    \\structural Q = { age: number };
+    \\structural P = { q: Q | undefined };
+    \\function handler(req: Request): Response {
+    \\  const p: P | undefined = { q: undefined };
+    \\  return Response.json({ a: p?.q.age });
+    \\}
+    },
+    .{ .name = "p20_match_nonident_scrutinee", .expect = "ZTS309@7,ZTS500@3", .source =
+    \\structural Q = { age: number };
+    \\structural P = { q: Q | undefined };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [{ q: undefined }];
+    \\  return match (ps[0]) {
+    \\    when undefined: Response.json({ a: 0 })
+    \\    when { q: v }: Response.json({ a: v.age })
+    \\  };
+    \\}
+    },
+    .{ .name = "p28_ternary_assign_in_cond", .expect = "ZTS309@5,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  let p: P | undefined = ps[0];
+    \\  const a: number = p !== undefined && (p = ps[1]) !== undefined ? p.age : 0;
+    \\  return Response.json({ a: a });
+    \\}
+    },
+    .{ .name = "p33_tracker_vs_phase_computed", .expect = "ZTS309@4,ZTS400@4,ZTS500@2", .source =
+    \\import { env } from "zttp:env";
+    \\function handler(req: Request): Response {
+    \\  const name = env("APP_NAME");
+    \\  return Response.json({ n: name["length"] });
+    \\}
+    },
+    .{ .name = "p38_both_branches_assign", .expect = "ZTS309@6,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  let p: P | undefined = ps[0];
+    \\  if (p === undefined) { p = { age: 0 }; } else { p = { age: 1 }; }
+    \\  return Response.json({ a: p.age });
+    \\}
+    },
+    .{ .name = "p40_ternary_cond_kill_assign", .expect = "ZTS309@5,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  let p: P | undefined = ps[0];
+    \\  const a: number = p !== undefined && (p = ps[1]) === undefined ? p.age : 0;
+    \\  return Response.json({ a: a });
+    \\}
+    },
+    .{ .name = "p42_match_nullable_scrutinee", .expect = "ZTS309@8,ZTS500@3", .source =
+    \\structural Q = { age: number };
+    \\structural P = { q: Q | undefined };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [{ q: undefined }];
+    \\  const p = ps[0];
+    \\  return match (p) {
+    \\    when undefined: Response.json({ a: 0 })
+    \\    when { q: v }: Response.json({ a: v.age })
+    \\  };
+    \\}
+    },
+    .{ .name = "q10_match_call_result", .expect = "ZTS309@10,ZTS500@6", .source =
+    \\structural Q = { age: number };
+    \\structural P = { q: Q | undefined };
+    \\function first(ps: P[]): P | undefined {
+    \\  return ps[0];
+    \\}
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [{ q: undefined }];
+    \\  return match (first(ps)) {
+    \\    when undefined: Response.json({ a: 0 })
+    \\    when { q: v }: Response.json({ a: v.age })
+    \\  };
+    \\}
+    },
+    .{ .name = "q13_nested_match_default_read", .expect = "ZTS309@10,ZTS500@3", .source =
+    \\structural Q = { age: number };
+    \\structural P = { q: Q | undefined };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  return match (p) {
+    \\    when undefined: Response.json({ a: 0 })
+    \\    when { q: v }: match (v) {
+    \\      when undefined: Response.json({ a: 0 })
+    \\      default: Response.json({ a: v.age })
+    \\    }
+    \\  };
+    \\}
+    },
+    .{ .name = "q14_undefined_arm_reads", .expect = "ZTS309@6,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  return match (p) {
+    \\    when undefined: Response.json({ a: p.age })
+    \\    when { age: a }: Response.json({ a: a })
+    \\  };
+    \\}
+    },
+    .{ .name = "q15_default_after_undefined_arm", .expect = "ZTS309@7,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  return match (p) {
+    \\    when undefined: Response.json({ a: 0 })
+    \\    default: Response.json({ a: p.age })
+    \\  };
+    \\}
+    },
+    .{ .name = "q16_read_after_match", .expect = "ZTS309@9,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  const a: number = match (p) {
+    \\    when undefined: 0
+    \\    default: 1
+    \\  };
+    \\  return Response.json({ a: a, b: p.age });
+    \\}
+    },
+    .{ .name = "q20_result_shaped_record", .expect = "ZTS309@5,ZTS500@3", .source =
+    \\structural P = { age: number };
+    \\structural R = { ok: boolean; value?: P; error?: string };
+    \\function handler(req: Request): Response {
+    \\  const r: R = { ok: false };
+    \\  return Response.json({ a: r.value.age });
+    \\}
+    },
+    .{ .name = "r01_decl", .expect = "ZTS309@4,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const p: P | undefined = undefined;
+    \\  return Response.json({ a: p.age });
+    \\}
+    },
+    .{ .name = "r02_empty_index", .expect = "ZTS309@5,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  return Response.json({ a: p.age });
+    \\}
+    },
+    .{ .name = "r03_helper_param", .expect = "ZTS309@3,ZTS500@5", .source =
+    \\structural P = { age: number };
+    \\function f(p: P | undefined): number {
+    \\  return p.age;
+    \\}
+    \\function handler(req: Request): Response {
+    \\  return Response.json({ a: f(undefined) });
+    \\}
+    },
+    .{ .name = "r04_direct_index", .expect = "ZTS309@4,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  return Response.json({ a: ps[0].age });
+    \\}
+    },
+    .{ .name = "r05_computed_on_nullable", .expect = "ZTS309@4,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const p: P | undefined = undefined;
+    \\  return Response.json({ a: p["age"] });
+    \\}
+    },
+    .{ .name = "r06_method_call", .expect = "ZTS309@3,ZTS500@1", .source =
+    \\function handler(req: Request): Response {
+    \\  const xs: string[] = [];
+    \\  return Response.json({ a: xs[0].trim() });
+    \\}
+    },
+    .{ .name = "r07_length", .expect = "ZTS309@3,ZTS500@1", .source =
+    \\function handler(req: Request): Response {
+    \\  const xs: string[] = [];
+    \\  return Response.json({ a: xs[0].length });
+    \\}
+    },
+    .{ .name = "r08_for_of", .expect = "ZTS309@4,ZTS500@1", .source =
+    \\function handler(req: Request): Response {
+    \\  const xs: number[] | undefined = undefined;
+    \\  const out: number[] = [];
+    \\  for (const x of xs) { out.push(x); }
+    \\  return Response.json({ a: out });
+    \\}
+    },
+    .{ .name = "r09_array_spread", .expect = "ZTS309@3,ZTS500@1", .source =
+    \\function handler(req: Request): Response {
+    \\  const xs: number[] | undefined = undefined;
+    \\  const ys: number[] = [...xs];
+    \\  return Response.json({ a: ys });
+    \\}
+    },
+    .{ .name = "r10_union3", .expect = "ZTS309@5,ZTS500@3", .source =
+    \\structural P = { age: number };
+    \\structural Q = { age: number, name: string };
+    \\function handler(req: Request): Response {
+    \\  const p: P | Q | undefined = undefined;
+    \\  return Response.json({ a: p.age });
+    \\}
+    },
+    .{ .name = "r11_nested_index", .expect = "ZTS309@3,ZTS500@1", .source =
+    \\function handler(req: Request): Response {
+    \\  const m: number[][] = [];
+    \\  const n: number = m[0][0] ?? 0;
+    \\  return Response.json({ a: n });
+    \\}
+    },
+    .{ .name = "r12_field_nullable", .expect = "ZTS309@5,ZTS500@3", .source =
+    \\structural P = { age: number };
+    \\structural W = { p: P | undefined };
+    \\function handler(req: Request): Response {
+    \\  const w: W = { p: undefined };
+    \\  return Response.json({ a: w.p.age });
+    \\}
+    },
+    .{ .name = "r14_req_body", .expect = "ZTS309@2,ZTS500@1", .source =
+    \\function handler(req: Request): Response {
+    \\  return Response.json({ a: req.body.length });
+    \\}
+    },
+    .{ .name = "r17_assign_through", .expect = "ZTS309@4,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const p: P | undefined = undefined;
+    \\  p.age = 3;
+    \\  return Response.json({ a: 1 });
+    \\}
+    },
+    .{ .name = "r18_find", .expect = "ZTS309@5,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps.find((x: P): boolean => x.age > 1);
+    \\  return Response.json({ a: p.age });
+    \\}
+    },
+    .{ .name = "r20_env_existing", .expect = "ZTS309@4,ZTS400@4,ZTS500@2", .source =
+    \\import { env } from "zttp:env";
+    \\function handler(req: Request): Response {
+    \\  const name = env("APP_NAME");
+    \\  return Response.json({ n: name.length });
+    \\}
+    },
+    .{ .name = "r22_length_guard", .expect = "ZTS309@4,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const a: number = ps.length > 0 ? ps[0].age : 0;
+    \\  return Response.json({ a: a });
+    \\}
+    },
+    .{ .name = "r24_tuple_oob", .expect = "ZTS309@4,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const t: [P, P] = [{ age: 1 }, { age: 2 }];
+    \\  return Response.json({ a: t[2].age });
+    \\}
+    },
+    .{ .name = "r29_env_in_helper", .expect = "ZTS309@4,ZTS400@7,ZTS500@6,ZTS606@6", .source =
+    \\import { env } from "zttp:env";
+    \\function h(): number {
+    \\  const name = env("APP_NAME");
+    \\  return name.length;
+    \\}
+    \\function handler(req: Request): Response {
+    \\  return Response.json({ n: h() });
+    \\}
+    },
+    .{ .name = "r30_capsule", .expect = "ZTS309@4", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const ps: P[] = [];
+    \\  return Response.json({ a: ps[0].age });
+    \\}
+    },
+    .{ .name = "r31_reassign_to_index", .expect = "ZTS309@6,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  let p: P | undefined = { age: 1 };
+    \\  p = ps[0];
+    \\  return Response.json({ a: p.age });
+    \\}
+    },
+    .{ .name = "r32_closure_unguarded", .expect = "ZTS309@5,ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  const f = (): number => p.age;
+    \\  return Response.json({ a: f() });
+    \\}
+    },
+    .{ .name = "s01_union_result_unnarrowed", .expect = "ZTS309@6,ZTS500@4", .source =
+    \\structural P = { age: number };
+    \\structural R = { ok: true; value: P } | { ok: false; error: string };
+    \\function mk(): R { return { ok: false, error: "x" }; }
+    \\function handler(req: Request): Response {
+    \\  const r = mk();
+    \\  return Response.json({ a: r.value.age });
+    \\}
+    },
+    .{ .name = "s05_upvalue_name_collision", .expect = "ZTS303@11,ZTS500@9,ZTS606@9", .source =
+    \\import { parseJson } from "zttp:json";
+    \\structural P = { age: number };
+    \\structural R = { ok: boolean; value?: P; error?: string };
+    \\function other(): number {
+    \\  const r = parseJson("{}");
+    \\  if (!r.ok) return 0;
+    \\  return 1;
+    \\}
+    \\function handler(req: Request): Response {
+    \\  const r: R = { ok: false };
+    \\  const read = (): number => r.value.age;
+    \\  return Response.json({ a: read(), b: other() });
+    \\}
+    },
+    .{ .name = "s05b_upvalue_no_collision", .expect = "ZTS309@5,ZTS500@3", .source =
+    \\structural P = { age: number };
+    \\structural R = { ok: boolean; value?: P; error?: string };
+    \\function handler(req: Request): Response {
+    \\  const r: R = { ok: false };
+    \\  const read = (): number => r.value.age;
+    \\  return Response.json({ a: read() });
+    \\}
+    },
+    .{ .name = "u01_match_on_unknown_binding", .expect = "ZTS309@7,ZTS500@3", .source =
+    \\import { parseJson } from "zttp:json";
+    \\structural N = { first: string };
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  return match (parsed.value) {
+    \\    when { name: n }: Response.json({ a: n.first })
+    \\    default: Response.json({ a: "none" })
+    \\  };
+    \\}
+    },
+    .{ .name = "u08_match_unknown_nested_pattern", .expect = "ZTS309@6,ZTS500@2", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  return match (parsed.value) {
+    \\    when { name: { first: f } }: Response.json({ a: f.len })
+    \\    default: Response.json({ a: "none" })
+    \\  };
+    \\}
+    },
+    .{ .name = "u09_match_unknown_shorthand", .expect = "ZTS309@6,ZTS500@2", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  return match (parsed.value) {
+    \\    when { name }: Response.json({ a: name.first })
+    \\    default: Response.json({ a: "none" })
+    \\  };
+    \\}
+    },
+    .{ .name = "u08b_record_in_array_pattern_on_unknown", .expect = "ZTS309@6,ZTS500@2", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  return match (parsed.value) {
+    \\    when [{ name: n }]: Response.json({ a: n.len })
+    \\    default: Response.json({ a: "none" })
+    \\  };
+    \\}
+    },
+};
+
+const absent_read_accepted = [_]AbsentReadCase{
+    .{ .name = "union_annotation_present_initializer_narrows", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\structural Q = { age: number; n: number };
+    \\function handler(req: Request): Response {
+    \\  const p: P | Q | undefined = { age: 1 };
+    \\  return Response.json({ a: p.age });
+    \\}
+    },
+    .{ .name = "validated_value_bound_then_read", .expect = "ZTS500@3", .source =
+    \\import { schemaCompile, validateJson } from "zttp:validate";
+    \\schemaCompile("todo", "{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"}},\"required\":[\"title\"]}");
+    \\function handler(req: Request): Response {
+    \\  const parsed = validateJson("todo", req.body ?? "");
+    \\  if (!parsed.ok) {
+    \\    return Response.json({ error: "invalid body" }, { status: 400 });
+    \\  }
+    \\  const t = parsed.value;
+    \\  const n: string = parsed.value.title;
+    \\  return Response.json({ a: t.title, n: n, l: parsed.value.title.length });
+    \\}
+    },
+    .{ .name = "result_error_returned_as_string", .expect = "ZTS303@3,ZTS401@5,ZTS500@2", .source =
+    \\import { jwtVerify } from "zttp:auth";
+    \\function handler(req: Request): Response {
+    \\  const read = (): string => jwtVerify("t", "s").error;
+    \\  const again = read;
+    \\  return Response.text(again());
+    \\}
+    },
+    .{ .name = "d5_requestjson", .expect = "clean", .source =
+    \\function handler(req: Request): Response {
+    \\  const parsed = requestJson(req);
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const f = parsed.value;
+    \\  return Response.json({ isd: isDict(f), idxUndef: f["a"] === undefined, memUndef: f.a === undefined });
+    \\}
+    },
+    .{ .name = "n01_eq_return", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  if (p === undefined) {
+    \\    return Response.json({ a: 0 });
+    \\  }
+    \\  return Response.json({ a: p.age });
+    \\}
+    },
+    .{ .name = "n02_neq_block", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  if (p !== undefined) {
+    \\    return Response.json({ a: p.age });
+    \\  }
+    \\  return Response.json({ a: 0 });
+    \\}
+    },
+    .{ .name = "n05_chain", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  return Response.json({ a: ps[0]?.age ?? 0 });
+    \\}
+    },
+    .{ .name = "n06_nullish_obj", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const d: P = { age: 0 };
+    \\  const p = ps[0] ?? d;
+    \\  return Response.json({ a: p.age });
+    \\}
+    },
+    .{ .name = "n07_assert", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  assert p !== undefined, Response.json({ error: "none" }, { status: 404 });
+    \\  return Response.json({ a: p.age });
+    \\}
+    },
+    .{ .name = "n08_and", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  const ok: boolean = p !== undefined && p.age > 1;
+    \\  return Response.json({ a: ok });
+    \\}
+    },
+    .{ .name = "n09_or", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  const bad: boolean = p === undefined || p.age > 1;
+    \\  return Response.json({ a: bad });
+    \\}
+    },
+    .{ .name = "n10_ternary", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  const a: number = p !== undefined ? p.age : 0;
+    \\  return Response.json({ a: a });
+    \\}
+    },
+    .{ .name = "n13b_helper_guard_proof", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function f(p: P | undefined): number {
+    \\  if (p === undefined) return 0;
+    \\  return p.age;
+    \\}
+    \\function handler(req: Request): Proof<Response, "optional_safe"> {
+    \\  return Response.json({ a: f(undefined) });
+    \\}
+    },
+    .{ .name = "n15_match", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  return match (p) {
+    \\    when undefined: Response.json({ a: 0 })
+    \\    when { age }: Response.json({ a: age })
+    \\  };
+    \\}
+    },
+    .{ .name = "n16_req_body_guard", .expect = "clean", .source =
+    \\function handler(req: Request): Response {
+    \\  const b = req.body;
+    \\  if (b === undefined) return Response.json({ a: 0 });
+    \\  return Response.json({ a: b.length });
+    \\}
+    },
+    .{ .name = "n21_reassign_straight", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  let p: P | undefined = ps[0];
+    \\  p = { age: 0 };
+    \\  return Response.json({ a: p.age });
+    \\}
+    },
+    .{ .name = "n26_decl_present_init", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const p: P | undefined = { age: 1 };
+    \\  return Response.json({ a: p.age });
+    \\}
+    },
+    .{ .name = "n28_closure_capture_const", .expect = "ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  if (p === undefined) return Response.json({ a: 0 });
+    \\  const f = (): number => p.age;
+    \\  return Response.json({ a: f() });
+    \\}
+    },
+    .{ .name = "n29_closure_in_block", .expect = "ZTS500@2", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const q = ps[0];
+    \\  if (q !== undefined) {
+    \\    const f = (): number => q.age;
+    \\    return Response.json({ a: f() });
+    \\  }
+    \\  return Response.json({ a: 0 });
+    \\}
+    },
+    .{ .name = "n31_result_fields", .expect = "ZTS500@2", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{}");
+    \\  if (!parsed.ok) return Response.json({ error: parsed.error.kind }, { status: 400 });
+    \\  return Response.json({ a: parsed.value.name });
+    \\}
+    },
+    .{ .name = "p12_unknown_read", .expect = "clean", .source =
+    \\function handler(req: Request): Response {
+    \\  const u: unknown = undefined;
+    \\  return Response.json({ a: u.age });
+    \\}
+    },
+    .{ .name = "p27_assert_then_ternary_else", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  const a: number = p === undefined ? 0 : p.age;
+    \\  return Response.json({ a: a });
+    \\}
+    },
+    .{ .name = "p39_ternary_both_senses", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p: P | undefined = ps[0];
+    \\  const a: number = p !== undefined ? p.age : 0;
+    \\  const b: number = p === undefined ? 0 : p.age;
+    \\  return Response.json({ a: a + b });
+    \\}
+    },
+    .{ .name = "p41_decl_narrow_then_guard", .expect = "ZTS107@4", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const p: P | undefined = { age: 1 };
+    \\  if (p === undefined) return Response.json({ a: 0 });
+    \\  return Response.json({ a: p.age });
+    \\}
+    },
+    .{ .name = "p44_decl_narrow_then_ternary_guard", .expect = "ZTS107@4", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const p: P | undefined = { age: 1 };
+    \\  const a: number = p === undefined ? 0 : p.age;
+    \\  return Response.json({ a: a });
+    \\}
+    },
+    .{ .name = "q12_nested_match_ok", .expect = "clean", .source =
+    \\structural Q = { age: number };
+    \\structural P = { q: Q | undefined };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  return match (p) {
+    \\    when undefined: Response.json({ a: 0 })
+    \\    when { q: v }: match (v) {
+    \\      when undefined: Response.json({ a: 0 })
+    \\      when { age: a }: Response.json({ a: a })
+    \\    }
+    \\  };
+    \\}
+    },
+    .{ .name = "q17_guard_after_match_ok", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  const a: number = match (p) {
+    \\    when undefined: 0
+    \\    default: 1
+    \\  };
+    \\  if (p === undefined) return Response.json({ a: a });
+    \\  return Response.json({ a: a, b: p.age });
+    \\}
+    },
+    .{ .name = "q23_result_value_member_read", .expect = "ZTS500@2", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  return Response.json({ a: parsed.value.name.first });
+    \\}
+    },
+    .{ .name = "q33_ternary_guard_const", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const ps: P[] = [];
+    \\  const p = ps[0];
+    \\  const a: number = p !== undefined ? p.age : 0;
+    \\  const b: number = p === undefined ? 0 : p.age;
+    \\  return Response.json({ a: a, b: b });
+    \\}
+    },
+    .{ .name = "r13_null", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const p: P | null = null;
+    \\  return Response.json({ a: p.age });
+    \\}
+    },
+    .{ .name = "r15_header_index", .expect = "clean", .source =
+    \\function handler(req: Request): Response {
+    \\  return Response.json({ a: req.headers["x"].length });
+    \\}
+    },
+    .{ .name = "r16_query_member", .expect = "clean", .source =
+    \\function handler(req: Request): Response {
+    \\  return Response.json({ a: req.query.q.length });
+    \\}
+    },
+    .{ .name = "r21_arith", .expect = "clean", .source =
+    \\function handler(req: Request): Response {
+    \\  const xs: number[] = [1, 2];
+    \\  return Response.json({ a: 1 + xs[5] });
+    \\}
+    },
+    .{ .name = "r23_tuple_in_range", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const t: [P, P] = [{ age: 1 }, { age: 2 }];
+    \\  return Response.json({ a: t[0].age });
+    \\}
+    },
+    .{ .name = "r27_object_spread", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const p: P | undefined = undefined;
+    \\  return Response.json({ ...p, b: 1 });
+    \\}
+    },
+    .{ .name = "r33_string_index", .expect = "clean", .source =
+    \\function handler(req: Request): Response {
+    \\  const s: string = "abc";
+    \\  return Response.json({ a: s[5].length });
+    \\}
+    },
+    .{ .name = "s01b_union_result_if_narrowed", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\structural R = { ok: true; value: P } | { ok: false; error: string };
+    \\function mk(): R { return { ok: false, error: "x" }; }
+    \\function handler(req: Request): Response {
+    \\  const r = mk();
+    \\  if (!r.ok) return Response.json({ e: r.error }, { status: 400 });
+    \\  return Response.json({ a: r.value.age });
+    \\}
+    },
+    .{ .name = "s01c_union_narrowed_assign", .expect = "clean", .source =
+    \\structural P = { age: number };
+    \\structural R = { ok: true; value: P } | { ok: false; error: string };
+    \\function mk(): R { return { ok: false, error: "x" }; }
+    \\function handler(req: Request): Response {
+    \\  const r = mk();
+    \\  if (!r.ok) return Response.json({ e: r.error }, { status: 400 });
+    \\  const v: P = r.value;
+    \\  return Response.json({ a: v.age });
+    \\}
+    },
+    .{ .name = "s01d_union_unnarrowed_assign_is_a_type_error", .expect = "ZTS200@6", .source =
+    \\structural P = { age: number };
+    \\structural R = { ok: true; value: P } | { ok: false; error: string };
+    \\function mk(): R { return { ok: false, error: "x" }; }
+    \\function handler(req: Request): Response {
+    \\  const r = mk();
+    \\  const v: number = r.value;
+    \\  return Response.json({ a: v });
+    \\}
+    },
+    .{ .name = "u05_dictget_unknown_read", .expect = "ZTS500@3", .source =
+    \\import { parseJson } from "zttp:json";
+    \\import { dictGet } from "zttp:collections";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{\"a\":1}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const f = parsed.value;
+    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  const v = dictGet(f, "zz");
+    \\  return Response.json({ a: v.age });
+    \\}
+    },
+    .{ .name = "u06_param_unknown_read", .expect = "clean", .source =
+    \\function age(p: unknown): unknown { return p.age; }
+    \\function handler(req: Request): Response {
+    \\  return Response.json({ a: age(undefined) });
+    \\}
+    },
+};
+
+const absent_read_dict = [_]AbsentReadCase{
+    .{ .name = "e3_dictget_chain", .expect = "ZTS500@2", .source =
+    \\import { dictGet } from "zttp:collections";
+    \\function handler(req: Request): Response {
+    \\  const parsed = requestJson(req);
+    \\  if (!parsed.ok) return Response.json({ error: parsed.error.kind }, { status: 400 });
+    \\  const f = parsed.value;
+    \\  if (!isDict(f)) return Response.json({ error: "not_dict" }, { status: 502 });
+    \\  const c = dictGet(f, "b");
+    \\  if (!isDict(c)) return Response.json({ error: "no_b" }, { status: 502 });
+    \\  return Response.json({ a: dictGet(f, "a"), c: dictGet(c, "c") });
+    \\}
+    },
+    .{ .name = "k01_dict_computed_key", .expect = "ZTS201@8", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{\"a\":1,\"b\":{\"c\":2}}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const f = parsed.value;
+    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  const k = "a";
+    \\  return Response.json({ v: f[k] });
+    \\}
+    },
+    .{ .name = "k03_dict_nullish", .expect = "ZTS201@7", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{\"a\":1,\"b\":{\"c\":2}}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const f = parsed.value;
+    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  return Response.json({ v: f["a"] ?? 0 });
+    \\}
+    },
+    .{ .name = "k04_dict_nested_member", .expect = "ZTS201@7", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{\"a\":1,\"b\":{\"c\":2}}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const f = parsed.value;
+    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  return Response.json({ v: f.b.c });
+    \\}
+    },
+    .{ .name = "k06_record_with_dict_field", .expect = "ZTS201@8", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{\"a\":1,\"b\":{\"c\":2}}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const f = parsed.value;
+    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  const rec = { d: f, n: 1 };
+    \\  return Response.json({ v: rec.d.a, n: rec.n });
+    \\}
+    },
+    .{ .name = "k07_dict_param", .expect = "ZTS201@3", .source =
+    \\import { dictEmpty } from "zttp:collections";
+    \\function pick(d: Dict<unknown, unknown>): unknown {
+    \\  return d["a"] ?? 0;
+    \\}
+    \\function handler(req: Request): Response {
+    \\  return Response.json({ v: pick(dictEmpty()) });
+    \\}
+    },
+    .{ .name = "k08_dict_or_undefined", .expect = "ZTS201@8", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{\"a\":1,\"b\":{\"c\":2}}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const f = parsed.value;
+    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  const d = req.method === "GET" ? f : undefined;
+    \\  return Response.json({ v: d?.a });
+    \\}
+    },
+    .{ .name = "k08b_dict_or_undefined_narrowed", .expect = "ZTS201@9", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{\"a\":1,\"b\":{\"c\":2}}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const f = parsed.value;
+    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  const d = req.method === "GET" ? f : undefined;
+    \\  if (d === undefined) return Response.json({ v: 0 });
+    \\  return Response.json({ v: d.a });
+    \\}
+    },
+    .{ .name = "k11_dict_index_in_compare", .expect = "ZTS201@7", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{\"a\":1,\"b\":{\"c\":2}}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const f = parsed.value;
+    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  return Response.json({ v: f["a"] === undefined ? "absent" : "present" });
+    \\}
+    },
+    .{ .name = "n25_dict_guard", .expect = "ZTS201@4", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const d: Dict<string, P> = {};
+    \\  const p = d["k"];
+    \\  if (p === undefined) return Response.json({ a: 0 });
+    \\  return Response.json({ a: p.age });
+    \\}
+    },
+    .{ .name = "n30_unknown_isdict", .expect = "ZTS201@4", .source =
+    \\function handler(req: Request): Response {
+    \\  const f: unknown = req.json();
+    \\  if (!isDict(f)) return Response.json({ error: "bad" }, { status: 502 });
+    \\  return Response.json({ a: f.latitude });
+    \\}
+    },
+    .{ .name = "p31_dict_nullable_value", .expect = "ZTS201@4", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const d: Dict<string, P | undefined> = {};
+    \\  return Response.json({ a: d["k"].age });
+    \\}
+    },
+    .{ .name = "q30_isdict_member_vs_index", .expect = "ZTS201@4,ZTS201@4,ZTS201@4", .source =
+    \\function handler(req: Request): Response {
+    \\  const f: unknown = req.json();
+    \\  if (!isDict(f)) return Response.json({ error: "bad" }, { status: 502 });
+    \\  return Response.json({ a: f.latitude, b: f["latitude"], c: f.current.time });
+    \\}
+    },
+    .{ .name = "q34_requestjson_isdict_runtime", .expect = "ZTS201@6,ZTS201@6", .source =
+    \\function handler(req: Request): Response {
+    \\  const parsed = requestJson(req);
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const f = parsed.value;
+    \\  if (!isDict(f)) return Response.json({ error: "not_dict" }, { status: 502 });
+    \\  return Response.json({ t: f.current.time, lat: f.latitude });
+    \\}
+    },
+    .{ .name = "q34b_requestjson_isdict_index", .expect = "ZTS201@6,ZTS201@8", .source =
+    \\function handler(req: Request): Response {
+    \\  const parsed = requestJson(req);
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const f = parsed.value;
+    \\  if (!isDict(f)) return Response.json({ error: "not_dict" }, { status: 502 });
+    \\  const c = f["current"];
+    \\  if (!isDict(c)) return Response.json({ error: "no_current" }, { status: 502 });
+    \\  return Response.json({ t: c["time"], lat: f["latitude"] });
+    \\}
+    },
+    .{ .name = "q35_dict_contents", .expect = "ZTS201@6,ZTS201@6,ZTS201@6", .source =
+    \\function handler(req: Request): Response {
+    \\  const parsed = requestJson(req);
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const f = parsed.value;
+    \\  if (!isDict(f)) return Response.json({ error: "not_dict" }, { status: 502 });
+    \\  return Response.json({ a: f["latitude"], b: f["current"], c: isDict(f["current"]) });
+    \\}
+    },
+    .{ .name = "q37_dictget_runtime", .expect = "ZTS201@7", .source =
+    \\import { dictGet } from "zttp:collections";
+    \\function handler(req: Request): Response {
+    \\  const parsed = requestJson(req);
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const f = parsed.value;
+    \\  if (!isDict(f)) return Response.json({ error: "not_dict" }, { status: 502 });
+    \\  return Response.json({ a: dictGet(f, "latitude"), b: f["latitude"] });
+    \\}
+    },
+    .{ .name = "r25_dict", .expect = "ZTS201@4", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Response {
+    \\  const d: Dict<string, P> = {};
+    \\  return Response.json({ a: d["k"].age });
+    \\}
+    },
+    .{ .name = "rt02_dict_nested", .expect = "ZTS201@7", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{\"a\":1,\"b\":{\"c\":2}}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const f = parsed.value;
+    \\  if (!isDict(f)) return Response.json({ error: "nd" }, { status: 502 });
+    \\  return Response.json({ v: f.b.c });
+    \\}
+    },
+};
+
+test "A3: a read on a value that may be undefined is refused as ZTS309" {
+    try expectAbsentReadCases(&absent_read_refused);
+}
+
+test "A3: a guarded, narrowed, or unchecked-by-design read is still accepted" {
+    try expectAbsentReadCases(&absent_read_accepted);
+}
+
+test "A3: a member or index read on a Dict is refused as ZTS201 and dictGet is accepted" {
+    try expectAbsentReadCases(&absent_read_dict);
+}
+
+test "A3: one ZTS309 for each read, with its own line and column" {
+    const source =
+        \\structural P = { age: number };
+        \\function handler(req: Request): Response {
+        \\  const ps: P[] = [];
+        \\  const a = ps[0].age + ps[1].age;
+        \\  const b = ps[2].age;
+        \\  return Response.json({ a: a, b: b });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "absent-count.ts", .{ .json_mode = true });
+    defer result.deinit(std.testing.allocator);
+    var lines: [8]u32 = undefined;
+    var columns: [8]u32 = undefined;
+    var count: usize = 0;
+    for (result.json_diagnostics.items) |diagnostic| {
+        if (!std.mem.eql(u8, diagnostic.code, "ZTS309")) continue;
+        lines[count] = diagnostic.line;
+        columns[count] = diagnostic.column;
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), count);
+    try std.testing.expectEqualSlices(u32, &.{ 4, 4, 5 }, lines[0..count]);
+    try std.testing.expectEqualSlices(u32, &.{ 18, 30, 18 }, columns[0..count]);
+}

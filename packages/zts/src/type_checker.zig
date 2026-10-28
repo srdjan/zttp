@@ -215,6 +215,13 @@ pub const TypeChecker = struct {
     /// guards that held where the operand was written. Keyed by node: each
     /// node is walked once.
     context_types: std.AutoHashMapUnmanaged(NodeIndex, TypeIndex) = .empty,
+    /// Member, computed, for-of, or spread operand nodes whose receiver type
+    /// admits undefined at the walk point. Keyed by the read node. The
+    /// verifier turns each entry into one ZTS309.
+    absent_receivers: std.AutoHashMapUnmanaged(NodeIndex, TypeIndex) = .empty,
+    /// Pattern bindings typed `unknown` because their arm has no record type.
+    /// A read of one is still recorded: the fallback stays fail-closed.
+    opaque_pattern_bindings: std.AutoHashMapUnmanaged(u64, void) = .empty,
     /// Track current function's declared return type for return statement checking
     current_return_type: TypeIndex = null_type_idx,
     /// Sticky failure for proof-relevant type, narrowing, schema, parameter,
@@ -278,6 +285,8 @@ pub const TypeChecker = struct {
         self.param_types.deinit(self.allocator);
         self.narrowed.deinit(self.allocator);
         self.context_types.deinit(self.allocator);
+        self.absent_receivers.deinit(self.allocator);
+        self.opaque_pattern_bindings.deinit(self.allocator);
         self.narrow_journal.deinit(self.allocator);
         self.admitted_predicates.deinit(self.allocator);
     }
@@ -343,6 +352,186 @@ pub const TypeChecker = struct {
         self.report_inference_diagnostics = false;
         defer self.report_inference_diagnostics = previous;
         self.context_types.put(self.allocator, node, self.inferType(node)) catch self.markAllocationFailure();
+    }
+
+    fn admitsUndefined(self: *const TypeChecker, raw: TypeIndex) bool {
+        return self.admitsUndefinedAt(raw, 0);
+    }
+
+    /// Fail closed: a type that may hold `undefined`, or that the checker
+    /// cannot bound, admits it. `null_type_idx` (no type at all) answers
+    /// false: that is the disclosed class of reads this rule cannot see.
+    /// The switch names every type tag, so a new tag is a compile error here.
+    fn admitsUndefinedAt(self: *const TypeChecker, raw: TypeIndex, depth: u8) bool {
+        if (raw == null_type_idx) return false;
+        if (depth > 8) return true;
+        const pool = self.env.pool;
+        const t = pool.unwrapNominal(self.env.resolveRef(raw));
+        const tag = pool.getTag(t) orelse return true;
+        return switch (tag) {
+            .t_nullable, .t_undefined, .t_void, .t_unknown_type, .t_generic_param => true,
+            .t_union => blk: {
+                for (pool.getUnionMembers(t)) |m| {
+                    if (self.admitsUndefinedAt(m, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .t_intersection => blk: {
+                for (pool.getIntersectionMembers(t)) |m| {
+                    if (!self.admitsUndefinedAt(m, depth + 1)) break :blk false;
+                }
+                break :blk true;
+            },
+            .t_generic_app => blk: {
+                const inst = self.env.finishParsedTypeRoot(t);
+                if (inst == t or inst == null_type_idx) break :blk true;
+                break :blk self.admitsUndefinedAt(inst, depth + 1);
+            },
+            .t_ref => !std.mem.eql(u8, pool.getRefName(t), "object"),
+            .t_boolean,
+            .t_number,
+            .t_string,
+            .t_null,
+            .t_dict,
+            .t_bytes,
+            .t_never,
+            .t_error,
+            .t_record,
+            .t_array,
+            .t_tuple,
+            .t_function,
+            .t_literal_string,
+            .t_literal_number,
+            .t_literal_bool,
+            .t_template_literal,
+            => false,
+        };
+    }
+
+    /// Whether a read on a value of this type reads a Dict entry. A union, a
+    /// nullable, or an intersection with any Dict member counts: a Dict
+    /// member or index read yields `undefined` at run time on every Dict
+    /// that the runtime builds, so the read is refused, not typed.
+    fn isDictOperandType(self: *const TypeChecker, raw: TypeIndex, depth: u8) bool {
+        if (raw == null_type_idx) return false;
+        if (depth > 8) return false;
+        const pool = self.env.pool;
+        const t = pool.unwrapNominal(self.env.resolveRef(raw));
+        const tag = pool.getTag(t) orelse return false;
+        return switch (tag) {
+            .t_dict => true,
+            .t_nullable => self.isDictOperandType(pool.getNullableInner(t), depth + 1),
+            .t_union => blk: {
+                for (pool.getUnionMembers(t)) |m| {
+                    if (self.isDictOperandType(m, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .t_intersection => blk: {
+                for (pool.getIntersectionMembers(t)) |m| {
+                    if (self.isDictOperandType(m, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .t_undefined,
+            .t_void,
+            .t_unknown_type,
+            .t_generic_param,
+            .t_generic_app,
+            .t_ref,
+            .t_boolean,
+            .t_number,
+            .t_string,
+            .t_null,
+            .t_bytes,
+            .t_never,
+            .t_error,
+            .t_record,
+            .t_array,
+            .t_tuple,
+            .t_function,
+            .t_literal_string,
+            .t_literal_number,
+            .t_literal_bool,
+            .t_template_literal,
+            => false,
+        };
+    }
+
+    fn isOpaquePatternBinding(self: *const TypeChecker, operand: NodeIndex) bool {
+        if (self.ir_view.getTag(operand) != .identifier) return false;
+        const binding = self.ir_view.getBinding(operand) orelse return false;
+        return self.opaque_pattern_bindings.contains(bindingKey(binding));
+    }
+
+    /// The type a read of `field` yields: an optional field may be absent.
+    fn fieldReadType(self: *const TypeChecker, field: type_pool_mod.RecordField) TypeIndex {
+        if (!field.optional or field.type_idx == null_type_idx) return field.type_idx;
+        if (self.admitsUndefined(field.type_idx)) return field.type_idx;
+        return self.env.pool.addNullable(self.allocator, field.type_idx);
+    }
+
+    /// The type a read of `field` of `record` yields. A field of a Result
+    /// record that the checker built for a fallible export keeps its declared
+    /// type: the Result check (ZTS303) owns that read. The test is the type's
+    /// identity in the pool (`TypePool.isResultRecord`), never its shape, so a
+    /// record a handler declares itself widens like any other optional field.
+    fn recordFieldReadType(self: *const TypeChecker, record: TypeIndex, field: type_pool_mod.RecordField) TypeIndex {
+        if (self.env.pool.isResultRecord(record)) return field.type_idx;
+        return self.fieldReadType(field);
+    }
+
+    /// Record `read` when `operand` may be undefined under the live narrowing.
+    fn recordAbsentReceiver(self: *TypeChecker, read: NodeIndex, operand: NodeIndex) void {
+        if (read == null_node or operand == null_node) return;
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+        const t = self.inferType(operand);
+        if (!self.admitsUndefined(t)) return;
+        // A read on `unknown` is not recorded (a Result `.value`, a request
+        // body, a fetch `.json()`): disclosed in the property text. A
+        // pattern binding that only has the type `unknown` because its arm
+        // has no record type is still recorded, so that fallback fails closed.
+        const resolved = self.env.pool.unwrapNominal(self.env.resolveRef(t));
+        if (self.env.pool.getTag(resolved) == .t_unknown_type and !self.isOpaquePatternBinding(operand)) return;
+        self.absent_receivers.put(self.allocator, read, t) catch self.markAllocationFailure();
+    }
+
+    /// Every recorded read, in ascending node order.
+    pub fn absentReceiverReads(self: *const TypeChecker, allocator: std.mem.Allocator) ![]NodeIndex {
+        const out = try allocator.alloc(NodeIndex, self.absent_receivers.count());
+        errdefer allocator.free(out);
+        var it = self.absent_receivers.keyIterator();
+        var i: usize = 0;
+        while (it.next()) |k| : (i += 1) out[i] = k.*;
+        std.mem.sort(NodeIndex, out, {}, std.sort.asc(NodeIndex));
+        return out;
+    }
+
+    /// The receiver type the walk saw for a read whose operand may be undefined.
+    pub fn absentReceiverOf(self: *const TypeChecker, read: NodeIndex) ?TypeIndex {
+        return self.absent_receivers.get(read);
+    }
+
+    /// Refuse a member or index read whose operand is a Dict, or a union or
+    /// nullable with a Dict member. On every Dict the runtime builds, such a
+    /// read yields `undefined`, so a guard on the result always takes the
+    /// absent branch. The walk visits each node once, so each read reports
+    /// once.
+    fn reportDictEntryRead(self: *TypeChecker, read: NodeIndex, operand: NodeIndex) void {
+        if (read == null_node or operand == null_node) return;
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+        if (!self.isDictOperandType(self.inferType(operand), 0)) return;
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .missing_field,
+            .node = read,
+            .message = "a Dict has no member or index read: the read yields undefined",
+            .help = "read a Dict entry with dictGet(d, key)",
+        });
     }
 
     /// The type a function parameter was declared with, or `null_type_idx` for
@@ -812,6 +1001,13 @@ pub const TypeChecker = struct {
                     if (effective != null_type_idx) {
                         self.binding_types.put(self.allocator, key, effective) catch self.markAllocationFailure();
                     }
+                    // A present initializer narrows a `T | undefined` annotation
+                    // (written `T?` or as a union) to `T` for the rest of the scope.
+                    if (declared != null_type_idx and inferred != null_type_idx and !self.admitsUndefined(inferred)) {
+                        if (self.removeAbsence(declared, .undefined_only)) |inner| {
+                            if (self.env.isAssignableTo(inferred, inner)) self.putNarrowed(key, inner);
+                        }
+                    }
                 }
             },
 
@@ -932,6 +1128,7 @@ pub const TypeChecker = struct {
             .for_of_stmt, .for_in_stmt => {
                 const fi = self.ir_view.getForIter(node) orelse return;
                 self.walkExpr(fi.iterable);
+                if (tag == .for_of_stmt) self.recordAbsentReceiver(node, fi.iterable);
                 // The element variable of `for (const x of xs)` takes the element
                 // type of an array iterable. Without it the variable had no type
                 // and a boolean read of it was refused.
@@ -1055,6 +1252,7 @@ pub const TypeChecker = struct {
                 self.reportNominalConstructorCall(node, c);
                 self.reportReadonlyMutation(node, c);
                 self.walkExpr(c.callee);
+                self.bindCallbackElement(c);
                 if (self.closure_writes_outer) {
                     self.walkCallArgsThenKill(node, c);
                     return;
@@ -1109,15 +1307,28 @@ pub const TypeChecker = struct {
 
             .ternary => {
                 const t = self.ir_view.getTernary(node) orelse return;
+                // Each branch narrows by the condition, as `&&` and `||` do. A
+                // guard whose binding the condition reassigns installs nothing.
+                const watch = self.beginKillWatch();
                 self.walkExpr(t.condition);
+                const cond_kills = self.endKillWatch(watch);
                 self.recordContextType(t.condition);
+                const then_mark = self.beginNarrowScope();
+                self.installBranchNarrowing(t.condition, true, cond_kills);
                 self.walkExpr(t.then_branch);
+                const then_kills = self.endNarrowScope(then_mark);
+                const else_mark = self.beginNarrowScope();
+                self.installBranchNarrowing(t.condition, false, cond_kills);
                 self.walkExpr(t.else_branch);
+                const else_kills = self.endNarrowScope(else_mark);
+                self.applyKills(then_kills);
+                self.applyKills(else_kills);
             },
 
             .method_call => {
                 const mc = self.ir_view.getCall(node) orelse return;
                 self.walkExpr(mc.callee);
+                self.bindCallbackElement(mc);
                 if (self.closure_writes_outer) {
                     self.walkCallArgsThenKill(node, mc);
                     return;
@@ -1148,10 +1359,19 @@ pub const TypeChecker = struct {
                                 self.addTypeMismatch(node, declared, val_type);
                             }
                         }
+                        // A present value narrows a nullable binding to its inner
+                        // type. A nullable value leaves the narrowing killed.
+                        const assigned = self.inferType(asgn.value);
+                        if (assigned != null_type_idx and !self.admitsUndefined(assigned)) {
+                            if (self.resolveAbsentBinding(asgn.target, .undefined_only)) |nb| {
+                                if (self.env.isAssignableTo(assigned, nb.inner)) self.putNarrowed(nb.key, nb.inner);
+                            }
+                        }
                     }
                 } else if (target_tag == .member_access) {
                     // Check readonly field assignment
                     const member = self.ir_view.getMember(asgn.target) orelse return;
+                    self.recordAbsentReceiver(asgn.target, member.object);
                     const obj_tag = self.ir_view.getTag(member.object) orelse return;
                     if (obj_tag == .identifier) {
                         const binding = self.ir_view.getBinding(member.object) orelse return;
@@ -1207,11 +1427,16 @@ pub const TypeChecker = struct {
                 const member = self.ir_view.getMember(node) orelse return;
                 self.walkExpr(member.object);
                 self.walkExpr(member.computed);
+                self.reportDictEntryRead(node, member.object);
+                if (tag != .optional_chain) self.recordAbsentReceiver(node, member.object);
             },
 
             // The spread operand is payload word `a`, read by `getOptValue`.
             .spread => {
-                if (self.ir_view.getOptValue(node)) |operand| self.walkExpr(operand);
+                if (self.ir_view.getOptValue(node)) |operand| {
+                    self.walkExpr(operand);
+                    self.recordAbsentReceiver(node, operand);
+                }
             },
 
             .match_expr => {
@@ -1465,12 +1690,12 @@ pub const TypeChecker = struct {
         const val_name = pool.addName(self.allocator, "value");
         const err_name = pool.addName(self.allocator, "error");
         const errs_name = pool.addName(self.allocator, "errors");
-        return pool.addRecord(self.allocator, &.{
+        return pool.markResultRecord(self.allocator, pool.addRecord(self.allocator, &.{
             .{ .name_start = ok_name.start, .name_len = ok_name.len, .type_idx = pool.idx_boolean, .optional = false },
             .{ .name_start = val_name.start, .name_len = val_name.len, .type_idx = inner, .optional = true },
             .{ .name_start = err_name.start, .name_len = err_name.len, .type_idx = pool.idx_string, .optional = true },
             .{ .name_start = errs_name.start, .name_len = errs_name.len, .type_idx = pool.idx_unknown, .optional = true },
-        });
+        }));
     }
 
     // -------------------------------------------------------------------
@@ -1574,6 +1799,10 @@ pub const TypeChecker = struct {
             },
 
             .member_access => self.inferMemberAccessType(node),
+
+            .optional_chain => self.inferOptionalChainType(node),
+
+            .computed_access => self.inferIndexReadType(node),
 
             .call => self.inferCallType(node),
 
@@ -2321,13 +2550,21 @@ pub const TypeChecker = struct {
         const binding = self.ir_view.getBinding(ident_node) orelse return null;
         const key = bindingKey(binding);
         const current = self.currentBindingType(binding) orelse return null;
+        const inner = self.removeAbsence(current, kind) orelse return null;
+        return .{ .key = key, .inner = inner };
+    }
+
+    /// The type left when the absence that `kind` names is removed from
+    /// `current`, or null when `current` is not a type that may be absent in
+    /// that way.
+    fn removeAbsence(self: *const TypeChecker, current: TypeIndex, kind: AbsentKind) ?TypeIndex {
         const pool = self.env.pool;
         switch (pool.getTag(current) orelse return null) {
             // `t_nullable` is `T | undefined`. It carries no `null`, so a
             // `null` test over it removes nothing and installs no guard.
             .t_nullable => {
                 if (kind == .null_only) return null;
-                return .{ .key = key, .inner = pool.getNullableInner(current) };
+                return pool.getNullableInner(current);
             },
             // `string | undefined` written out is the same type as `string?`
             // and narrows the same way. Only the `t_nullable` spelling was
@@ -2353,7 +2590,7 @@ pub const TypeChecker = struct {
                     kept.append(self.allocator, member) catch return null;
                 }
                 if (!saw_absent or kept.items.len == 0) return null;
-                return .{ .key = key, .inner = pool.addUnion(self.allocator, kept.items) };
+                return pool.addUnion(self.allocator, kept.items);
             },
             // exhaustive: only `T?` and a union carrying `undefined` or `null`
             // describe a value that may be absent. Every other tag is a type that
@@ -2460,8 +2697,9 @@ pub const TypeChecker = struct {
                 const lt = self.inferType(bin.left);
                 const rt = self.inferType(bin.right);
                 const lt_tag = pool.getTag(lt);
-                if (lt_tag == .t_nullable) {
-                    const inner = pool.getNullableInner(lt);
+                // `T?` and a union written with `undefined` both lose the
+                // `undefined` when the left side is not undefined.
+                if (self.removeAbsence(lt, .undefined_only)) |inner| {
                     if (rt == null_type_idx) return null_type_idx;
                     return pool.addUnion(self.allocator, &.{ inner, rt });
                 }
@@ -2615,6 +2853,11 @@ pub const TypeChecker = struct {
         return self.env.pool.addTuple(self.allocator, element_types[0..count]);
     }
 
+    fn unionMemberIsRecord(self: *const TypeChecker, member_type: TypeIndex) bool {
+        const resolved = self.env.pool.unwrapNominal(self.env.resolveRef(member_type));
+        return self.env.pool.getTag(resolved) == .t_record;
+    }
+
     fn functionsCompatible(self: *const TypeChecker, field_type: TypeIndex, first_info: anytype) bool {
         if (self.env.pool.getTag(field_type) != .t_function) return false;
         const info = self.env.pool.getFunctionInfo(field_type);
@@ -2623,6 +2866,70 @@ pub const TypeChecker = struct {
             if (param.type_idx != first_param.type_idx) return false;
         }
         return info.ret == first_info.ret;
+    }
+
+    /// An index read of an array or tuple is `T | undefined`, as under
+    /// noUncheckedIndexedAccess. A literal key on a record is the field's
+    /// type. A union of arrays reads as the union of its elements, plus
+    /// `undefined`. Other receivers stay untyped, as before.
+    fn inferIndexReadType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
+        const member = self.ir_view.getMember(node) orelse return null_type_idx;
+        const raw = self.inferType(member.object);
+        if (raw == null_type_idx) return null_type_idx;
+        const pool = self.env.pool;
+        var obj = pool.unwrapNominal(self.env.resolveRef(raw));
+        const tag = pool.getTag(obj) orelse return null_type_idx;
+        if (tag == .t_record and member.computed != null_node) {
+            const key = self.getLiteralString(member.computed) orelse return null_type_idx;
+            const field = pool.lookupRecordField(obj, key) orelse return null_type_idx;
+            return self.recordFieldReadType(obj, field);
+        }
+        if (tag == .t_union) {
+            var elems: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+            var count: usize = 0;
+            for (pool.getUnionMembers(obj)) |m| {
+                var arr = pool.unwrapNominal(self.env.resolveRef(m));
+                const mt = pool.getTag(arr) orelse return null_type_idx;
+                if (mt == .t_tuple) arr = self.tupleToArrayType(arr) else if (mt != .t_array) return null_type_idx;
+                if (count >= elems.len) return null_type_idx;
+                elems[count] = pool.getArrayElement(arr);
+                if (elems[count] == null_type_idx) return null_type_idx;
+                count += 1;
+            }
+            if (count == 0) return null_type_idx;
+            const joined = pool.addUnion(self.allocator, elems[0..count]);
+            if (self.admitsUndefined(joined)) return joined;
+            return pool.addNullable(self.allocator, joined);
+        }
+        if (tag == .t_tuple and member.computed != null_node and self.ir_view.getTag(member.computed) == .lit_int) {
+            const at = self.ir_view.getIntValue(member.computed) orelse return null_type_idx;
+            const elems = pool.getTupleElements(obj);
+            if (at >= 0 and at < elems.len) return elems[@intCast(at)];
+        }
+        if (tag == .t_tuple) obj = self.tupleToArrayType(obj) else if (tag != .t_array) return null_type_idx;
+        const elem = pool.getArrayElement(obj);
+        if (elem == null_type_idx) return null_type_idx;
+        if (pool.getTag(elem) == .t_nullable) return elem;
+        return pool.addNullable(self.allocator, elem);
+    }
+
+    /// `p?.q` is the field type of `q` plus `undefined` when `p` may be
+    /// undefined. A receiver that is not a nullable record stays untyped.
+    fn inferOptionalChainType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
+        const member = self.ir_view.getMember(node) orelse return null_type_idx;
+        const raw = self.inferType(member.object);
+        if (raw == null_type_idx) return null_type_idx;
+        if (!self.admitsUndefined(raw)) return self.inferMemberAccessType(node);
+        const pool = self.env.pool;
+        const t = pool.unwrapNominal(self.env.resolveRef(raw));
+        if (pool.getTag(t) != .t_nullable) return null_type_idx;
+        const obj = pool.unwrapNominal(self.env.resolveRef(pool.getNullableInner(t)));
+        if (pool.getTag(obj) != .t_record) return null_type_idx;
+        const prop_name = self.resolveAtomName(member.property) orelse return null_type_idx;
+        const field = pool.lookupRecordField(obj, prop_name) orelse return null_type_idx;
+        const ft = self.recordFieldReadType(obj, field);
+        if (ft == null_type_idx or self.admitsUndefined(ft)) return ft;
+        return pool.addNullable(self.allocator, ft);
     }
 
     fn inferMemberAccessType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
@@ -2642,7 +2949,7 @@ pub const TypeChecker = struct {
         const tag = self.env.pool.getTag(obj_type) orelse return null_type_idx;
         if (tag == .t_record) {
             if (self.env.pool.lookupRecordField(obj_type, prop_name)) |field| {
-                return field.type_idx;
+                return self.recordFieldReadType(obj_type, field);
             }
             self.addInferenceDiagnostic(.{
                 .severity = .err,
@@ -2657,19 +2964,31 @@ pub const TypeChecker = struct {
         if (tag == .t_union) {
             var field_types: [MAX_UNION_MEMBERS]TypeIndex = undefined;
             var count: usize = 0;
+            var any_field = false;
             for (self.env.pool.getUnionMembers(obj_type)) |member_type| {
-                const field = self.env.pool.lookupRecordField(member_type, prop_name) orelse return null_type_idx;
                 if (count >= field_types.len) return null_type_idx;
-                field_types[count] = field.type_idx;
+                if (self.env.pool.lookupRecordField(member_type, prop_name)) |field| {
+                    field_types[count] = self.fieldReadType(field);
+                    any_field = true;
+                } else if (self.unionMemberIsRecord(member_type)) {
+                    // A member of the union has no such field: reading it
+                    // there yields `undefined`.
+                    field_types[count] = self.env.pool.idx_undefined;
+                } else {
+                    return null_type_idx;
+                }
                 count += 1;
             }
-            if (count == 0) return null_type_idx;
+            if (count == 0 or !any_field) return null_type_idx;
             if (count == 1) return field_types[0];
 
             const first_tag = self.env.pool.getTag(field_types[0]) orelse return null_type_idx;
             if (first_tag == .t_function) {
                 const first_info = self.env.pool.getFunctionInfo(field_types[0]);
                 for (field_types[1..count]) |field_type| {
+                    // A call through a member that some branch lacks stays
+                    // untyped, as it was before a missing field read as `undefined`.
+                    if (field_type == self.env.pool.idx_undefined) return null_type_idx;
                     if (!self.functionsCompatible(field_type, first_info)) {
                         self.addInferenceDiagnostic(.{
                             .severity = .err,
@@ -2966,6 +3285,23 @@ pub const TypeChecker = struct {
         return null;
     }
 
+    /// Whether the declaration that `upvalue` captures is a `const` variable.
+    /// A parameter, a function, an import, and a `let` answer false.
+    fn captureSourceIsConst(self: *const TypeChecker, upvalue: ir.BindingRef) bool {
+        if (upvalue.kind != .upvalue) return false;
+        const scopes = self.scopes orelse return false;
+        if (upvalue.scope_id >= scopes.scopes.items.len) return false;
+        const captures = scopes.scopes.items[upvalue.scope_id].upvalues.items;
+        if (upvalue.slot >= captures.len) return false;
+        const capture = captures[upvalue.slot];
+        if (capture.source_scope_id >= scopes.scopes.items.len) return false;
+        for (scopes.scopes.items[capture.source_scope_id].bindings.items) |source| {
+            if (source.slot != capture.source_slot) continue;
+            return source.is_const and source.kind == .variable;
+        }
+        return false;
+    }
+
     fn boundCallableMetadata(self: *const TypeChecker, binding: ir.BindingRef) ?CallableMetadata {
         // A capture the record cannot resolve is unknown. `unavailable` says so
         // and keeps the by-name module signature from answering for it.
@@ -2983,6 +3319,46 @@ pub const TypeChecker = struct {
 
         const name = self.resolveAtomName(binding.name_atom) orelse return null;
         return self.env.getFnSigByName(name);
+    }
+
+    /// An unannotated first parameter of an array callback (`map`, `filter`,
+    /// `find`, `findIndex`, `forEach`, `some`, `every`, `flatMap`) takes the
+    /// receiver's element type, so a read of it is checked like any other.
+    fn bindCallbackElement(self: *TypeChecker, c: Node.CallExpr) void {
+        if (c.args_count == 0) return;
+        const callee_tag = self.ir_view.getTag(c.callee) orelse return;
+        if (callee_tag != .member_access) return;
+        const member = self.ir_view.getMember(c.callee) orelse return;
+        const name = self.resolveAtomName(member.property) orelse return;
+        const methods = [_][]const u8{ "map", "filter", "find", "findIndex", "forEach", "some", "every", "flatMap" };
+        var known = false;
+        for (methods) |m| {
+            if (std.mem.eql(u8, m, name)) known = true;
+        }
+        if (!known) return;
+        const pool = self.env.pool;
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        const raw = self.inferType(member.object);
+        self.report_inference_diagnostics = previous;
+        if (raw == null_type_idx) return;
+        var arr = pool.unwrapNominal(self.env.resolveRef(raw));
+        const tag = pool.getTag(arr) orelse return;
+        if (tag == .t_tuple) arr = self.tupleToArrayType(arr) else if (tag != .t_array) return;
+        const elem = pool.getArrayElement(arr);
+        if (elem == null_type_idx) return;
+        const arg = self.ir_view.getListIndex(c.args_start, 0);
+        const arg_tag = self.ir_view.getTag(arg) orelse return;
+        if (arg_tag != .arrow_function and arg_tag != .function_expr) return;
+        const func = self.ir_view.getFunction(arg) orelse return;
+        if (func.params_count == 0) return;
+        if (self.sourceFunctionSignature(arg)) |sig| {
+            if (sig.param_count > 0 and sig.param_types[0] != null_type_idx) return;
+        }
+        const param_idx = self.ir_view.getListIndex(func.params_start, 0);
+        const binding = self.ir_view.paramBinding(param_idx) orelse return;
+        self.param_types.put(self.allocator, bindingKey(binding), elem) catch self.markAllocationFailure();
+        self.env.bindVarType(binding.scope_id, binding.name_atom, elem) catch self.markAllocationFailure();
     }
 
     fn sourceFunctionSignature(
@@ -3056,10 +3432,15 @@ pub const TypeChecker = struct {
     fn declaredTypeForBinding(self: *const TypeChecker, binding: ir.BindingRef) TypeIndex {
         // A captured binding has the type its declaration has. A closure can run
         // at any time, so the narrowing the walk holds at the closure's position
-        // does not describe it: this never reads `narrowed`. It also reads the
-        // maps and not the walk's position, so it answers after `check` returns.
+        // does not describe a captured `let` or parameter: those can change.
+        // A `const` cannot change, and the closure is created on the path where
+        // the guard ran, so a narrowing of a `const` reaches the closure. After
+        // `check` returns the overlay is closed and the declared type answers.
         if (binding.kind == .upvalue) {
             const declaration = self.captureSource(binding) orelse return null_type_idx;
+            if (self.captureSourceIsConst(binding)) {
+                if (self.narrowed.get(bindingKey(declaration))) |t| return t;
+            }
             return self.typeOfDeclaration(declaration);
         }
 
@@ -3108,9 +3489,47 @@ pub const TypeChecker = struct {
             disc_type = self.currentBindingType(binding) orelse null_type_idx;
             break :blk bindingKey(binding);
         } else null;
+        // A scrutinee that is not a plain name still has a type. Without it,
+        // the arms bound nothing and a `when { q: v }` arm read `v` untyped.
+        if (disc_key == null) {
+            const previous = self.report_inference_diagnostics;
+            self.report_inference_diagnostics = false;
+            disc_type = self.inferType(me.discriminant);
+            self.report_inference_diagnostics = previous;
+        }
 
         const pool = self.env.pool;
-        const is_union = if (pool.getTag(disc_type)) |tag| tag == .t_union else false;
+        // Over `T | undefined`, a `when undefined` arm sees `undefined` and
+        // every other arm sees `T`, with its bindings typed from `T`.
+        const disc_absent = self.admitsUndefined(disc_type);
+        var present_type: TypeIndex = null_type_idx;
+        if (disc_absent and disc_type != null_type_idx) {
+            const resolved = pool.unwrapNominal(self.env.resolveRef(disc_type));
+            switch (pool.getTag(resolved) orelse .t_never) {
+                .t_nullable => present_type = pool.getNullableInner(resolved),
+                .t_union => {
+                    var kept: std.ArrayListUnmanaged(TypeIndex) = .empty;
+                    defer kept.deinit(self.allocator);
+                    for (pool.getUnionMembers(resolved)) |m| {
+                        const mt = pool.getTag(m) orelse continue;
+                        if (mt == .t_undefined) continue;
+                        if (mt == .t_nullable) {
+                            kept.append(self.allocator, pool.getNullableInner(m)) catch self.markAllocationFailure();
+                            continue;
+                        }
+                        kept.append(self.allocator, m) catch self.markAllocationFailure();
+                    }
+                    if (kept.items.len > 0) present_type = pool.addUnion(self.allocator, kept.items);
+                },
+                // exhaustive: only `T?` and a union carry a present part to
+                // narrow to; any other type keeps the scrutinee's own type
+                // and its arm bindings fall back to `unknown`.
+                else => {},
+            }
+        }
+        const base_type = if (present_type != null_type_idx) present_type else disc_type;
+        const base_resolved = pool.unwrapNominal(self.env.resolveRef(base_type));
+        const is_union = if (pool.getTag(base_resolved)) |tag| tag == .t_union else false;
 
         // Each arm is an alternative path, so it runs in its own narrow scope
         // and the arms do not see each other's kills. The scope undoes the
@@ -3126,10 +3545,15 @@ pub const TypeChecker = struct {
             // A binding still needs its field type: without one it infers
             // nothing, and a call that misuses it is checked against nothing.
             var scrutinee = disc_type;
-            if (is_union and disc_key != null and arm.pattern != ir.null_node) {
-                const narrowed_type = self.findUnionMemberForPattern(disc_type, arm.pattern);
+            const is_undefined_arm = arm.pattern != ir.null_node and self.ir_view.getTag(arm.pattern) == .lit_undefined;
+            if (present_type != null_type_idx and arm.pattern != ir.null_node) {
+                scrutinee = if (is_undefined_arm) pool.idx_undefined else present_type;
+                if (disc_key) |k| self.putNarrowed(k, scrutinee);
+            }
+            if (is_union and arm.pattern != ir.null_node and !is_undefined_arm) {
+                const narrowed_type = self.findUnionMemberForPattern(base_resolved, arm.pattern);
                 if (narrowed_type != null_type_idx) {
-                    self.putNarrowed(disc_key.?, narrowed_type);
+                    if (disc_key) |k| self.putNarrowed(k, narrowed_type);
                     scrutinee = narrowed_type;
                 }
             }
@@ -3147,10 +3571,26 @@ pub const TypeChecker = struct {
     /// parameter and a `string` field would pass.
     fn bindPatternBindings(self: *TypeChecker, pattern: ir.NodeIndex, scrutinee: TypeIndex) void {
         if (pattern == ir.null_node or scrutinee == null_type_idx) return;
+        const pool = self.env.pool;
+        const resolved = pool.unwrapNominal(self.env.resolveRef(scrutinee));
+        if (self.ir_view.getTag(pattern) == .array_pattern) {
+            // An array pattern over a typed array or tuple keeps the bindings
+            // it had before: untyped. Over any other type (`unknown`, a union),
+            // its nested bindings are opaque.
+            const scrutinee_tag = pool.getTag(resolved) orelse return;
+            if (scrutinee_tag == .t_array or scrutinee_tag == .t_tuple) return;
+            self.markPatternBindingsOpaque(pattern, 0);
+            return;
+        }
         if (self.ir_view.getTag(pattern) != .match_pattern) return;
         const record = self.ir_view.getMatchPattern(pattern) orelse return;
-        const pool = self.env.pool;
-        if (pool.getTag(scrutinee) != .t_record) return;
+        if (pool.getTag(resolved) != .t_record) {
+            // The scrutinee has a type, but no record this arm can read. Every
+            // binding the pattern introduces, at any depth, is `unknown`, and a
+            // read of one is refused.
+            self.markPatternBindingsOpaque(pattern, 0);
+            return;
+        }
 
         for (0..record.props_count) |i| {
             const prop_idx = self.ir_view.getListIndex(record.props_start, @intCast(i));
@@ -3162,11 +3602,55 @@ pub const TypeChecker = struct {
             const key_str_idx = self.ir_view.getStringIdx(prop.key) orelse continue;
             const key_str = self.ir_view.getString(key_str_idx) orelse continue;
 
-            for (pool.getRecordFields(scrutinee)) |field| {
+            for (pool.getRecordFields(resolved)) |field| {
                 if (!std.mem.eql(u8, pool.getName(field.name_start, field.name_len), key_str)) continue;
-                self.binding_types.put(self.allocator, bindingKey(binding), field.type_idx) catch self.markAllocationFailure();
+                self.binding_types.put(self.allocator, bindingKey(binding), self.recordFieldReadType(resolved, field)) catch self.markAllocationFailure();
                 break;
             }
+        }
+    }
+
+    /// Type one pattern binding `unknown` and mark it opaque.
+    fn markOpaqueBinding(self: *TypeChecker, binding: ir.BindingRef) void {
+        self.binding_types.put(self.allocator, bindingKey(binding), self.env.pool.idx_unknown) catch self.markAllocationFailure();
+        self.opaque_pattern_bindings.put(self.allocator, bindingKey(binding), {}) catch self.markAllocationFailure();
+    }
+
+    /// Type every binding that `pattern` introduces as `unknown`, and mark it
+    /// opaque so that a read of it is recorded. The walk descends through
+    /// nested record patterns and array patterns, so `when { name: { first: f } }`
+    /// marks `f`, and not only a flat binding.
+    fn markPatternBindingsOpaque(self: *TypeChecker, pattern: ir.NodeIndex, depth: u8) void {
+        if (pattern == ir.null_node or depth > 32) return;
+        const tag = self.ir_view.getTag(pattern) orelse return;
+        switch (tag) {
+            .identifier => {
+                const binding = self.ir_view.getBinding(pattern) orelse return;
+                self.markOpaqueBinding(binding);
+            },
+            .match_pattern => {
+                const record = self.ir_view.getMatchPattern(pattern) orelse return;
+                for (0..record.props_count) |i| {
+                    const prop_idx = self.ir_view.getListIndex(record.props_start, @intCast(i));
+                    const prop = self.ir_view.getProperty(prop_idx) orelse continue;
+                    self.markPatternBindingsOpaque(prop.value, depth + 1);
+                }
+            },
+            .array_pattern => {
+                const array = self.ir_view.getArray(pattern) orelse return;
+                for (0..array.elements_count) |i| {
+                    const element = self.ir_view.getListIndex(array.elements_start, @intCast(i));
+                    self.markPatternBindingsOpaque(element, depth + 1);
+                }
+            },
+            .pattern_element, .pattern_rest, .pattern_default => {
+                const elem = self.ir_view.getPatternElem(pattern) orelse return;
+                self.markOpaqueBinding(elem.binding);
+            },
+            // exhaustive: a literal, a type test, and a wildcard bind no name,
+            // so there is nothing to mark. Every tag that can carry a binding
+            // is listed above.
+            else => {},
         }
     }
 
@@ -4877,7 +5361,7 @@ test "narrowing: Array.isArray" {
     try checkTypedSource(
         \\function first(v: string | string[]): string {
         \\  if (Array.isArray(v)) {
-        \\    return v[0];
+        \\    return v[0] ?? "";
         \\  }
         \\  return v;
         \\}
@@ -6566,7 +7050,7 @@ test "TypeChecker tracks schema object fields beyond 32 properties" {
         try aw.writer.print("\"p{d}\":{{\"type\":\"string\"}}", .{i});
     }
     try aw.writer.writeAll(
-        \\}}');
+        \\},"required":["p32"]}');
         \\const result = validateJson("big", "{}");
         \\const last: string = result.value.p32;
         \\
@@ -6661,7 +7145,7 @@ test "TypeChecker preserves raw schema typing and skips unreadable schemas" {
         \\schemaCompile("raw", ' { "type" : "object", "properties" : { "title" : { "type" : "string" } } } ');
         \\const parsed = validateJson("raw", "{}");
         \\const title: number = parsed.value.title;
-    , 1, "type 'string' is not assignable to type 'number'");
+    , 1, "type 'string | undefined' is not assignable to type 'number'");
 
     try checkTypedSource(
         \\import { schemaCompile, validateJson } from "zttp:validate";
@@ -6702,7 +7186,7 @@ test "TypeChecker keeps the current JSON binding distinction for schemas" {
         \\}));
         \\const parsed = validateJson("global-shadow", "{}");
         \\const title: number = parsed.value.title;
-    , 1, "type 'string' is not assignable to type 'number'");
+    , 1, "type 'string | undefined' is not assignable to type 'number'");
 
     try checkTypedSource(
         \\import { schemaCompile, validateJson } from "zttp:validate";
@@ -7034,7 +7518,7 @@ test "a boolean field that is not a discriminant installs no guard" {
     try checkTypedSource(
         \\function f(c: { on: true, a: string } | { on: boolean, b: string }): string {
         \\    if (c.on) {
-        \\        return c.b;
+        \\        return c.b ?? "d";
         \\    }
         \\    return "d";
         \\}
@@ -7197,12 +7681,14 @@ test "a null guard over an optional type narrows nothing" {
         \\function take(s: string): number {
         \\    return s.length;
         \\}
-        \\function handler(req: Request): Response {
-        \\    const value: string | undefined = req.url;
+        \\function pick(value: string | undefined): Response {
         \\    if (value !== null) {
         \\        return Response.json({ n: take(value) });
         \\    }
         \\    return Response.json({ n: 0 });
+        \\}
+        \\function handler(req: Request): Response {
+        \\    return pick(req.url);
         \\}
     ,
         1,

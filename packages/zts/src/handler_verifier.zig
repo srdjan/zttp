@@ -667,6 +667,7 @@ pub const HandlerVerifier = struct {
         self.result_route_roots = route_roots.functions.items;
         defer self.result_route_roots = &.{};
         self.checkResultUses(handler_func);
+        self.reportTypedAbsentReads();
 
         // Phase 5: Report unused variables (scope-aware tracking)
         self.reportUnusedVariables();
@@ -2281,6 +2282,55 @@ pub const HandlerVerifier = struct {
             .help = help,
             .repair_intent = .insert_guard_before_line,
         });
+    }
+
+    /// The operand of `read` is `b.value`, `b.error`, or `b.errors` on a
+    /// tracked Result binding `b`. The Result check (ZTS303) owns that read.
+    fn isTrackedResultFieldRead(self: *const HandlerVerifier, read: NodeIndex) bool {
+        const tag = self.ir_view.getTag(read) orelse return false;
+        const operand: NodeIndex = switch (tag) {
+            .member_access, .computed_access => (self.ir_view.getMember(read) orelse return false).object,
+            // exhaustive: only a member or index read has an operand that
+            // can be a Result field; every other recorded node is refused.
+            else => return false,
+        };
+        const op_tag = self.ir_view.getTag(operand) orelse return false;
+        if (op_tag != .member_access and op_tag != .computed_access) return false;
+        const member = self.ir_view.getMember(operand) orelse return false;
+        switch (self.resultMemberKind(member)) {
+            .value, .failure => {},
+            .ok, .other => return false,
+        }
+        return switch (self.resultReference(member.object)) {
+            .ordinal => true,
+            .none, .ambiguous => false,
+        };
+    }
+
+    /// Every read, in any function, whose operand the type checker saw as
+    /// possibly undefined under its live narrowing. One ZTS309 for each read.
+    /// A node that the binding tracker already refused keeps its diagnostic.
+    fn reportTypedAbsentReads(self: *HandlerVerifier) void {
+        const tc = self.type_checker orelse return;
+        const reads = tc.absentReceiverReads(self.allocator) catch {
+            self.allocation_failed = true;
+            return;
+        };
+        defer self.allocator.free(reads);
+        outer: for (reads) |read| {
+            for (self.diagnostics.items) |d| {
+                if (d.kind == .unchecked_optional_access and d.node == read) continue :outer;
+            }
+            if (self.isTrackedResultFieldRead(read)) continue;
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .unchecked_optional_access,
+                .node = read,
+                .message = "read on a value that may be undefined, without checking for undefined",
+                .help = "check before use: if (val === undefined) return ...; or use optional chaining val?.prop, or a fallback val ?? fallback",
+                .repair_intent = .insert_guard_before_line,
+            });
+        }
     }
 
     /// Handle reassignment to a tracked binding. A non-optional value narrows an
