@@ -114,7 +114,7 @@ pub fn shapeFor(returns: mb.ReturnKind) Shape {
         .result => .result_ok,
         .optional_string, .optional_object, .optional_number => .optional_absent,
         .boolean => .boolean_falsy,
-        .number, .string, .object, .undefined, .unknown, .dict, .bytes => .undefined_sentinel,
+        .number, .string, .object, .result_list, .result_fn, .undefined, .unknown, .dict, .bytes => .undefined_sentinel,
     };
 }
 
@@ -495,7 +495,7 @@ fn failingStubShape(shape: Shape, returns: mb.ReturnKind, json: []const u8) bool
         .result => std.mem.indexOf(u8, json, "\"ok\":false") != null,
         .optional_string, .optional_object, .optional_number => std.mem.eql(u8, json, "null"),
         .boolean => std.mem.eql(u8, json, "false"),
-        .number, .string, .object, .undefined, .unknown, .dict, .bytes => false,
+        .number, .string, .object, .result_list, .result_fn, .undefined, .unknown, .dict, .bytes => false,
     };
 }
 

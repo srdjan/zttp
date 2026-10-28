@@ -42,7 +42,7 @@ fn mapReturnKind(
         .boolean => pool.idx_boolean,
         .number => pool.idx_number,
         .string => pool.idx_string,
-        .object => object_ref,
+        .object, .result_list, .result_fn => object_ref,
         .undefined => pool.idx_undefined,
         .unknown => pool.idx_unknown,
         .optional_string => optional_string,

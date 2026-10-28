@@ -260,8 +260,6 @@ fn pureIfReturns(ir_view: IrView, node: NodeIndex) ReturnStatus {
 const BindingState = struct {
     scope_id: ir.ScopeId, // scope that owns this binding
     slot: u16,
-    is_result: bool,
-    ok_checked: bool,
     ref_count: u16,
     decl_node: NodeIndex,
     name_idx: u16, // string constant index for the name (0 = unknown)
@@ -339,6 +337,8 @@ fn lookupTrackedFunction(module_specifier: []const u8, name: []const u8) ?Functi
         .undefined,
         .unknown,
         .optional_number,
+        .result_list,
+        .result_fn,
         .dict,
         .bytes,
         => null,
@@ -351,7 +351,7 @@ const findHandlerFunction = @import("handler_function.zig").findHandlerFunction;
 /// One change to a checked flag, kept so the enclosing block can restore the
 /// value the flag had before the change.
 const CheckedChange = struct {
-    const Flag = enum { result_ok_checked, optional_narrowed };
+    const Flag = enum { optional_narrowed };
     flag: Flag,
     key: u32,
     old: bool,
@@ -374,13 +374,42 @@ const OptionalBindingState = struct {
     }
 };
 
-/// Associates a local binding slot with the virtual module function that produced it.
-/// Strings are borrowed from the module binding registry (program lifetime).
-const ResultFnSlot = struct {
-    slot: u16,
+/// The names of the ambient globals that return a Result. `abi_types.zig`
+/// registers each of them; `proof_ir.zig` holds the same list for the lowering.
+const result_globals = [_][]const u8{ "requestJson", "requestText" };
+
+/// What a Result call names: the export that produces it, or null for an
+/// ambient global. Strings are borrowed from the module binding registry.
+const ResultCallee = struct {
+    func: ?*const mb.FunctionBinding,
+    module_name: ?[]const u8,
     func_name: []const u8,
-    module_name: []const u8,
 };
+
+/// How one identifier relates to the Result bindings of the program.
+const ResultReference = union(enum) {
+    /// Not a Result binding.
+    none,
+    /// The index of the binding in `result_bindings`.
+    ordinal: u32,
+    /// An upvalue whose name matches several Result bindings.
+    ambiguous,
+};
+
+/// Where a Result use sits. Only these positions are safe for an unbound
+/// Result or a Result binding. Every other position is a use the verifier
+/// does not model, and it is refused.
+const ResultPosition = enum { other, discard, nullish_left, optional_object, result_arg };
+
+/// One check that holds for a Result binding over a region of the walk. An
+/// `ok` cover permits a read of `.value`; an `err` cover permits a read of
+/// `.error`.
+const ResultCover = struct {
+    ordinal: u32,
+    polarity: ResultPolarity,
+};
+
+const ResultPolarity = enum { ok, err };
 
 const NarrowingBranch = enum { then, then_returns_early };
 
@@ -402,15 +431,29 @@ pub const HandlerVerifier = struct {
     type_checker: ?*TypeChecker,
     diagnostics: std.ArrayList(Diagnostic),
 
-    // Result checking state
+    // Result checking state. A Result binding is a `var_decl` whose initializer
+    // is a direct call that returns a Result; its index is its ordinal. The
+    // covers are the checks in force at the current point of the walk.
     result_bindings: std.ArrayList(BindingState),
-    // Import-to-module mapping: local binding slot -> result-producing function identity
-    result_function_slots: std.ArrayList(ResultFnSlot),
+    result_covers: std.ArrayList(ResultCover),
+    /// Covers below this index belong to an enclosing function and do not
+    /// reach the function being walked.
+    result_cover_base: usize = 0,
+    /// Set while a statement that has no guard structure is walked. A guard
+    /// inside it covers nothing, as in the proof lowering.
+    result_flat: bool = false,
+    /// Request roots other than the handler. A refusal inside one carries
+    /// `route_root`.
+    result_route_roots: []const NodeIndex = &.{},
+    result_in_route_root: bool = false,
+    result_handler: NodeIndex = null_node,
+    /// How many functions enclose the point of the walk.
+    result_function_depth: u32 = 0,
 
     // Optional checking state (Check 6)
     optional_bindings: std.ArrayList(OptionalBindingState),
     optional_function_slots: std.ArrayList(OptionalFnSlot),
-    /// Changes to `ok_checked` and `narrowed`, in order, so a block can undo what
+    /// Changes to `narrowed`, in order, so a block can undo what
     /// it changed when it ends. See `journalMark` and `journalRestore`.
     checked_journal: std.ArrayList(CheckedChange),
     /// Shared import index, injected by the orchestrator when one exists.
@@ -456,7 +499,7 @@ pub const HandlerVerifier = struct {
             .type_checker = type_checker,
             .diagnostics = .empty,
             .result_bindings = .empty,
-            .result_function_slots = .empty,
+            .result_covers = .empty,
             .optional_bindings = .empty,
             .optional_function_slots = .empty,
             .checked_journal = .empty,
@@ -470,7 +513,7 @@ pub const HandlerVerifier = struct {
         self.diagnostics.deinit(self.allocator);
         self.result_bindings.deinit(self.allocator);
         if (self.owned_facts) |*owned| owned.deinit();
-        self.result_function_slots.deinit(self.allocator);
+        self.result_covers.deinit(self.allocator);
         self.optional_bindings.deinit(self.allocator);
         self.optional_function_slots.deinit(self.allocator);
         self.checked_journal.deinit(self.allocator);
@@ -516,7 +559,12 @@ pub const HandlerVerifier = struct {
         }
         try self.checkUnresolvedRouteDispatches(&route_resolver);
 
-        // Phase 4: Report unchecked result accesses (already emitted during walk)
+        // Phase 4: Result uses, over every function of the program and not
+        // only the request roots. A Result in a sibling helper is as unchecked
+        // as one in the handler.
+        self.result_route_roots = route_roots.functions.items;
+        defer self.result_route_roots = &.{};
+        self.checkResultUses(handler_func);
 
         // Phase 5: Report unused variables (scope-aware tracking)
         self.reportUnusedVariables();
@@ -743,11 +791,9 @@ pub const HandlerVerifier = struct {
             if (rec.resolution != .builtin) continue;
             const produces = lookupTrackedFunction(rec.module_specifier, rec.imported_name) orelse continue;
             switch (produces) {
-                .result => self.result_function_slots.append(self.allocator, .{
-                    .slot = rec.slot,
-                    .func_name = rec.imported_name,
-                    .module_name = rec.module_specifier,
-                }) catch self.markAllocationFailure(),
+                // A Result source is classified from the import index at the
+                // call (`resultCallee`), not from a slot list kept here.
+                .result => {},
                 .optional_string, .optional_object => self.optional_function_slots.append(self.allocator, .{
                     .slot = rec.slot,
                     .kind = produces.toOptionalKind().?,
@@ -852,32 +898,15 @@ pub const HandlerVerifier = struct {
                 self.all_bindings.append(self.allocator, .{
                     .scope_id = decl.binding.scope_id,
                     .slot = decl.binding.slot,
-                    .is_result = false,
-                    .ok_checked = false,
                     .ref_count = 0,
                     .decl_node = node,
                     .name_idx = 0,
                     .name_atom = decl.binding.name_atom,
                 }) catch self.markAllocationFailure();
 
-                // Check if the init expression is a call to a result-producing function
                 if (decl.init != null_node) {
                     self.walkExprForRefs(decl.init);
                     self.recordSharedAlias(decl);
-
-                    if (self.resultProducingCallSource(decl.init)) |rfs| {
-                        self.result_bindings.append(self.allocator, .{
-                            .scope_id = decl.binding.scope_id,
-                            .slot = decl.binding.slot,
-                            .is_result = true,
-                            .ok_checked = false,
-                            .ref_count = 0,
-                            .decl_node = node,
-                            .name_idx = 0,
-                            .source_func = rfs.func_name,
-                            .source_module = rfs.module_name,
-                        }) catch self.markAllocationFailure();
-                    }
 
                     // Check 6: track optional-producing calls
                     // Skip if RHS is `optionalCall() ?? default` (nullish coalesce resolves)
@@ -902,40 +931,7 @@ pub const HandlerVerifier = struct {
                 // matches). The extraction helpers are read-only so order is safe.
                 self.walkExprForRefs(if_stmt.condition);
 
-                // Check if condition is a result.ok check
-                const checked_slot = self.extractResultOkCheck(if_stmt.condition);
-
-                if (checked_slot) |binding| {
-                    // Mark the result as checked in the then-branch scope
-                    self.setResultChecked(binding, true);
-                    self.walkScoped(if_stmt.then_branch);
-                    self.setResultChecked(binding, false);
-
-                    // In the else branch, .ok is known to be false
-                    if (if_stmt.else_branch != null_node) {
-                        self.walkScoped(if_stmt.else_branch);
-                    }
-                } else if (self.extractNegatedResultOkCheck(if_stmt.condition)) |binding| {
-                    // Negated pattern: if (!result.ok) { return ...; }
-                    self.walkScoped(if_stmt.then_branch);
-
-                    // If the then branch always returns, code after is the ok path
-                    const then_returns = self.stmtReturnsQuick(if_stmt.then_branch);
-                    if (then_returns == .always) {
-                        self.setResultChecked(binding, true);
-                    }
-
-                    if (if_stmt.else_branch != null_node) {
-                        self.setResultChecked(binding, true);
-                        self.walkScoped(if_stmt.else_branch);
-                        // Only reset if then-branch did NOT always return: when
-                        // then_returns == .always the early-return guard means all
-                        // post-if code (including after the else) is the ok path.
-                        if (then_returns != .always) {
-                            self.setResultChecked(binding, false);
-                        }
-                    }
-                } else if (self.extractOptionalNarrowingCheck(if_stmt.condition)) |info| {
+                if (self.extractOptionalNarrowingCheck(if_stmt.condition)) |info| {
                     // Check 6: optional narrowing via if (val) or if (val !== undefined)
                     switch (info.branch) {
                         .then => {
@@ -1064,9 +1060,9 @@ pub const HandlerVerifier = struct {
     }
 
     /// Walk the body of a nested function (declaration, expression, or arrow).
-    /// A closure can run at any later time, so no check made outside it holds
-    /// inside it: every flag is cleared for the walk and restored exactly after.
-    /// A check or narrowing made inside the body is undone with the walk. A kill
+    /// A closure can run at any later time, so no narrowing made outside it
+    /// holds inside it: every flag is cleared for the walk and restored exactly
+    /// after. A narrowing made inside the body is undone with the walk. A kill
     /// made inside the body survives, because the closure may have run:
     /// `killCheckedFlag` rewrites the journal entries, so the restore leaves the
     /// flag false.
@@ -1074,9 +1070,6 @@ pub const HandlerVerifier = struct {
         if (body == null_node) return;
         const mark = self.journalMark();
         defer self.journalRestore(mark);
-        for (self.result_bindings.items) |rb| {
-            self.setCheckedFlag(.result_ok_checked, rb.key(), false);
-        }
         for (self.optional_bindings.items) |ob| {
             self.setCheckedFlag(.optional_narrowed, ob.key(), false);
         }
@@ -1096,7 +1089,6 @@ pub const HandlerVerifier = struct {
             .member_access, .optional_chain => {
                 const member = self.ir_view.getMember(node) orelse return;
                 self.walkExprForRefs(member.object);
-                self.checkResultValueAccess(member, node);
 
                 // optional_chain (val?.prop) safely handles undefined - skip optional check
                 if (tag == .member_access) {
@@ -1204,11 +1196,11 @@ pub const HandlerVerifier = struct {
                 if (member.computed != null_node) {
                     self.walkExprForRefs(member.computed);
                 }
-                // Bracket access must satisfy the same soundness proofs as dot
-                // access: `r["value"]` is an unchecked-Result read, and `m["x"]`
-                // on an un-narrowed optional is an unchecked-optional access.
-                // Without this, bracket notation launders both past the verdict.
-                self.checkResultValueAccessComputed(member, node);
+                // Bracket access must satisfy the same soundness proof as dot
+                // access: `m["x"]` on an un-narrowed optional is an
+                // unchecked-optional access. Without this, bracket notation
+                // launders it past the verdict. The Result forms are checked
+                // by `checkResultUses`.
                 self.checkOptionalObjectAccess(member, node);
             },
             // exhaustive: this walk looks for unguarded Result and optional reads.
@@ -1222,94 +1214,521 @@ pub const HandlerVerifier = struct {
         }
     }
 
-    /// Return the ResultFnSlot for a result-producing call, or null if not one.
-    fn resultProducingCallSource(self: *HandlerVerifier, node: NodeIndex) ?ResultFnSlot {
+    // -----------------------------------------------------------------------
+    // Check 2: Result uses
+    //
+    // A Result binding is a `var_decl` whose initializer is a direct call that
+    // returns a Result: a builtin export with `returns == .result`, or one of
+    // the ambient globals `requestJson` and `requestText`. Every use of one is
+    // classified, and a use that is not modelled is refused. This is the same
+    // classification that `proof_ir.zig` lowers into events and that the
+    // consumer re-derives, so `result_safe` in the contract and the
+    // certificate agree.
+    //
+    //   - `b.ok` is a read of a boolean and is never refused.
+    //   - `.value`, `.unwrap` and the literal keys `"value"` and `"unwrap"`
+    //     need an ok check. `.error`, `.errors` and their literal keys need an
+    //     err check, unless the read is the left operand of `??` or the object
+    //     of `?.`.
+    //   - The only checks are `if (b.ok)` and `if (!b.ok)`. The then arm and
+    //     the else arm take opposite polarity. When the then arm always
+    //     returns, the rest of the enclosing block takes the else polarity.
+    //   - An argument at a position that the export declares `.result` is
+    //     read by that export after it tests `ok`. An array literal of Results
+    //     at a `.result_list` position is the same. Any other use is refused:
+    //     alias, other argument, return, object or array member, spread, a
+    //     computed key that is not a literal, a method call on the binding,
+    //     a member read on a Result call that nobody binds, and a Result call
+    //     in any position except a discarded statement.
+    //   - A closure starts with no checks. An upvalue names its binding by
+    //     atom, so it resolves only when exactly one Result binding has that
+    //     name.
+    //   - A statement without guard structure (`switch`, `try`) is read flat:
+    //     a check inside it covers nothing.
+    // -----------------------------------------------------------------------
+
+    /// The deepest expression the Result walk reads before it refuses.
+    const max_result_depth: u16 = 1024;
+
+    const ResultMemberKind = enum { ok, value, failure, other };
+
+    const ResultGuard = struct {
+        ordinal: u32,
+        then_polarity: ResultPolarity,
+        else_polarity: ResultPolarity,
+    };
+
+    const BuiltinExport = struct {
+        func: *const mb.FunctionBinding,
+        module_name: []const u8,
+    };
+
+    /// Check every use of a Result in the program. The walk covers each
+    /// function, not only the request roots.
+    fn checkResultUses(self: *HandlerVerifier, handler_func: NodeIndex) void {
+        self.collectResultBindings();
+        self.result_handler = handler_func;
+        self.result_covers.clearRetainingCapacity();
+        self.result_cover_base = 0;
+        self.result_flat = false;
+        self.result_function_depth = 0;
+        self.walkResultNode(self.programRoot() orelse handler_func);
+    }
+
+    /// The program node. The parser adds it last.
+    fn programRoot(self: *const HandlerVerifier) ?NodeIndex {
+        var index = self.ir_view.nodeCount();
+        while (index > 0) {
+            index -= 1;
+            const node: NodeIndex = @intCast(index);
+            if (self.ir_view.getTag(node) == .program) return node;
+        }
+        return null;
+    }
+
+    /// Number the Result bindings of the program, in node order.
+    fn collectResultBindings(self: *HandlerVerifier) void {
+        for (0..self.ir_view.nodeCount()) |position| {
+            const node: NodeIndex = @intCast(position);
+            if (self.ir_view.getTag(node) != .var_decl) continue;
+            const decl = self.ir_view.getVarDecl(node) orelse continue;
+            if (decl.init == null_node) continue;
+            const callee = self.resultCallee(decl.init) orelse continue;
+            self.result_bindings.append(self.allocator, .{
+                .scope_id = decl.binding.scope_id,
+                .slot = decl.binding.slot,
+                .ref_count = 0,
+                .decl_node = node,
+                .name_idx = 0,
+                .source_module = callee.module_name,
+                .source_func = callee.func_name,
+                .name_atom = decl.binding.name_atom,
+            }) catch self.markAllocationFailure();
+        }
+    }
+
+    /// The builtin export that an identifier names through an import.
+    fn builtinExportOf(self: *HandlerVerifier, identifier: NodeIndex) ?BuiltinExport {
+        const facts = self.resolveFacts() orelse return null;
+        if (self.ir_view.getTag(identifier) != .identifier) return null;
+        const binding = self.ir_view.getBinding(identifier) orelse return null;
+        const record = facts.importForReference(binding, .module_reference, .builtin, .first) orelse return null;
+        const found = builtin_modules.findExport(record.module_specifier, record.imported_name) orelse return null;
+        return .{ .func = found.func, .module_name = found.binding.specifier };
+    }
+
+    /// The name of the ambient Result global that an identifier names. A local,
+    /// argument, or upvalue that shadows the name is not the global.
+    fn resultGlobalName(self: *const HandlerVerifier, identifier: NodeIndex) ?[]const u8 {
+        if (self.ir_view.getTag(identifier) != .identifier) return null;
+        const binding = self.ir_view.getBinding(identifier) orelse return null;
+        if (binding.kind != .undeclared_global) return null;
+        const name = self.resolveAtomName(binding.name_atom) orelse return null;
+        for (result_globals) |global| {
+            if (std.mem.eql(u8, name, global)) return global;
+        }
+        return null;
+    }
+
+    /// What a direct call that returns a Result names, or null for any other
+    /// expression.
+    fn resultCallee(self: *HandlerVerifier, node: NodeIndex) ?ResultCallee {
         const tag = self.ir_view.getTag(node) orelse return null;
         if (tag != .call and tag != .method_call) return null;
-
         const call = self.ir_view.getCall(node) orelse return null;
-        const callee_tag = self.ir_view.getTag(call.callee) orelse return null;
-
-        if (callee_tag == .identifier) {
-            const binding = self.ir_view.getBinding(call.callee) orelse return null;
-            for (self.result_function_slots.items) |rfs| {
-                if (rfs.slot == binding.slot) return rfs;
-            }
+        if (self.resultGlobalName(call.callee)) |name| {
+            return .{ .func = null, .module_name = null, .func_name = name };
         }
-
-        return null;
+        const exported = self.builtinExportOf(call.callee) orelse return null;
+        if (exported.func.returns != .result) return null;
+        return .{ .func = exported.func, .module_name = exported.module_name, .func_name = exported.func.name };
     }
 
-    /// Extract the binding slot from a `result.ok` condition check.
-    /// Recognizes: `result.ok`, `result.ok === true`, `result.ok !== false`,
-    ///             `result.isOk()` (method call on member access)
-    fn extractResultOkCheck(self: *HandlerVerifier, cond_node: NodeIndex) ?ir.BindingRef {
-        const tag = self.ir_view.getTag(cond_node) orelse return null;
-
-        // Direct: result.ok or result.isOk
-        if (tag == .member_access or tag == .optional_chain) {
-            return self.extractResultMemberSlot(cond_node, &ok_atoms);
+    /// Which Result binding an identifier names. An upvalue names its binding
+    /// by atom, so it resolves only when exactly one Result binding has that
+    /// name. A binding that is not a Result and shares the name adds no
+    /// refusal.
+    fn resultReference(self: *const HandlerVerifier, identifier: NodeIndex) ResultReference {
+        if (self.ir_view.getTag(identifier) != .identifier) return .none;
+        const binding = self.ir_view.getBinding(identifier) orelse return .none;
+        var found: ?u32 = null;
+        for (self.result_bindings.items, 0..) |declared, ordinal| {
+            const same = if (binding.kind == .upvalue)
+                declared.name_atom == binding.name_atom
+            else
+                declared.scope_id == binding.scope_id and declared.slot == binding.slot;
+            if (!same) continue;
+            if (found != null) return .ambiguous;
+            found = @intCast(ordinal);
         }
-
-        // Method call: result.isOk()
-        if (tag == .call or tag == .method_call) {
-            const call = self.ir_view.getCall(cond_node) orelse return null;
-            if (call.args_count == 0) {
-                return self.extractResultMemberSlot(call.callee, &ok_atoms);
-            }
-        }
-
-        // Comparison: result.ok === true, etc.
-        if (tag == .binary_op) {
-            const binary = self.ir_view.getBinary(cond_node) orelse return null;
-            if (binary.op == .strict_eq) {
-                if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |binding| return binding;
-                if (self.extractResultMemberSlot(binary.right, &ok_atoms)) |binding| return binding;
-            }
-        }
-
-        return null;
+        if (found) |ordinal| return .{ .ordinal = ordinal };
+        return .none;
     }
 
-    /// Extract the binding slot from `!result.ok`, `result.ok === false`,
-    /// or `result.isErr()`.
-    fn extractNegatedResultOkCheck(self: *HandlerVerifier, cond_node: NodeIndex) ?ir.BindingRef {
-        const tag = self.ir_view.getTag(cond_node) orelse return null;
+    /// Whether the walk holds a check of this polarity for the binding.
+    fn resultCovered(self: *const HandlerVerifier, ordinal: u32, polarity: ResultPolarity) bool {
+        for (self.result_covers.items[self.result_cover_base..]) |cover| {
+            if (cover.ordinal == ordinal and cover.polarity == polarity) return true;
+        }
+        return false;
+    }
 
-        // Negation: !result.ok
+    fn pushResultCover(self: *HandlerVerifier, ordinal: u32, polarity: ResultPolarity) void {
+        // A failed append is sticky: `allocation_failed` voids the verdict.
+        self.result_covers.append(self.allocator, .{ .ordinal = ordinal, .polarity = polarity }) catch self.markAllocationFailure();
+    }
+
+    fn refuseResult(self: *HandlerVerifier, node: NodeIndex, ordinal: ?u32) void {
+        var source_module: ?[]const u8 = null;
+        var source_func: ?[]const u8 = null;
+        if (ordinal) |index| {
+            source_module = self.result_bindings.items[index].source_module;
+            source_func = self.result_bindings.items[index].source_func;
+        }
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .unchecked_result_value,
+            .node = node,
+            .message = "result.value accessed without checking result.ok first",
+            .help = "check result.ok before accessing result.value:\n           if (result.ok) { ... result.value ... }",
+            .source_module = source_module,
+            .source_func = source_func,
+            .route_root = self.result_in_route_root,
+            .repair_intent = .insert_guard_before_line,
+        });
+    }
+
+    /// The guard that an `if` condition forms: exactly `b.ok` or `!b.ok` on a
+    /// Result binding. Every other condition is not a guard.
+    fn resultGuard(self: *const HandlerVerifier, condition: NodeIndex) ?ResultGuard {
+        const tag = self.ir_view.getTag(condition) orelse return null;
+        var negated = false;
+        var subject = condition;
         if (tag == .unary_op) {
-            const unary = self.ir_view.getUnary(cond_node) orelse return null;
-            if (unary.op == .not) {
-                return self.extractResultOkCheck(unary.operand);
+            const unary = self.ir_view.getUnary(condition) orelse return null;
+            if (unary.op != .not) return null;
+            negated = true;
+            subject = unary.operand;
+        }
+        if (self.ir_view.getTag(subject) != .member_access) return null;
+        const member = self.ir_view.getMember(subject) orelse return null;
+        if (member.computed != null_node or member.property != @backingInt(object.Atom.ok)) return null;
+        if (self.ir_view.getTag(member.object) != .identifier) return null;
+        return switch (self.resultReference(member.object)) {
+            .ordinal => |ordinal| .{
+                .ordinal = ordinal,
+                .then_polarity = if (negated) .err else .ok,
+                .else_polarity = if (negated) .ok else .err,
+            },
+            .none, .ambiguous => null,
+        };
+    }
+
+    fn resultMemberKind(self: *const HandlerVerifier, member: Node.MemberExpr) ResultMemberKind {
+        if (member.computed != null_node) {
+            if (self.ir_view.getTag(member.computed) != .lit_string) return .other;
+            const string_index = self.ir_view.getStringIdx(member.computed) orelse return .other;
+            const name = self.ir_view.getString(string_index) orelse return .other;
+            if (std.mem.eql(u8, name, "ok")) return .ok;
+            if (std.mem.eql(u8, name, "value") or std.mem.eql(u8, name, "unwrap")) return .value;
+            if (std.mem.eql(u8, name, "error") or std.mem.eql(u8, name, "errors")) return .failure;
+            return .other;
+        }
+        if (member.property == @backingInt(object.Atom.ok)) return .ok;
+        if (member.property == @backingInt(object.Atom.value) or member.property == @backingInt(object.Atom.unwrap)) return .value;
+        if (member.property == @backingInt(object.Atom.@"error") or member.property == @backingInt(object.Atom.errors)) return .failure;
+        return .other;
+    }
+
+    /// Walk a child of a statement or expression: a statement to the statement
+    /// walk, anything else to the expression walk.
+    fn walkResultChild(self: *HandlerVerifier, child: NodeIndex, depth: u16) void {
+        if (child == null_node) return;
+        const tag = self.ir_view.getTag(child) orelse return;
+        if (isStatementTag(tag)) {
+            self.walkResultNode(child);
+        } else {
+            self.walkResultExpr(child, .other, depth);
+        }
+    }
+
+    /// Walk a node in its own span of covers: a check made inside does not
+    /// reach the code after it.
+    fn walkResultScoped(self: *HandlerVerifier, node: NodeIndex) void {
+        const mark = self.result_covers.items.len;
+        defer self.result_covers.shrinkRetainingCapacity(mark);
+        self.walkResultChild(node, 0);
+    }
+
+    fn walkResultNode(self: *HandlerVerifier, node: NodeIndex) void {
+        if (node == null_node) return;
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .program, .block => {
+                const block = self.ir_view.getBlock(node) orelse return;
+                // A check holds for the rest of its block and no further.
+                const mark = self.result_covers.items.len;
+                defer self.result_covers.shrinkRetainingCapacity(mark);
+                var i: u16 = 0;
+                while (i < block.stmts_count) : (i += 1) {
+                    self.walkResultNode(self.ir_view.getListIndex(block.stmts_start, i));
+                }
+            },
+            .export_decl => {
+                const decl = self.ir_view.getExportDecl(node) orelse return;
+                self.walkResultNode(decl.declaration);
+            },
+            .function_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                self.walkResultNode(decl.init);
+            },
+            .function_expr, .arrow_function => self.walkResultFunction(node, false),
+            .var_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                if (decl.init == null_node) return;
+                // A declaration inside a flat statement binds nothing the
+                // walk can follow, so its initializer is an ordinary use.
+                if (!self.result_flat) {
+                    if (self.resultCallee(decl.init)) |callee| {
+                        const call = self.ir_view.getCall(decl.init) orelse return;
+                        self.walkResultArguments(call, callee.func, 0);
+                        return;
+                    }
+                }
+                self.walkResultExpr(decl.init, .other, 0);
+            },
+            .expr_stmt => {
+                const operand = self.ir_view.getOptValue(node) orelse return;
+                self.walkResultExpr(operand, if (self.result_flat) .other else .discard, 0);
+            },
+            .if_stmt => self.walkResultIf(node),
+            .for_of_stmt, .for_in_stmt => {
+                const loop = self.ir_view.getForIter(node) orelse return;
+                self.walkResultExpr(loop.iterable, .other, 0);
+                self.walkResultScoped(loop.body);
+            },
+            .for_stmt, .while_stmt, .do_while_stmt => {
+                const loop = self.ir_view.getLoop(node) orelse return;
+                self.walkResultChild(loop.init, 0);
+                self.walkResultChild(loop.condition, 0);
+                self.walkResultChild(loop.update, 0);
+                self.walkResultScoped(loop.body);
+            },
+            .return_stmt => {
+                const value = self.ir_view.getOptValue(node) orelse return;
+                self.walkResultExpr(value, .other, 0);
+            },
+            // exhaustive: every other statement has no guard structure. A
+            // check inside it covers nothing, so it is read flat, and the
+            // shared child map reaches every node that holds code.
+            else => {
+                const saved_flat = self.result_flat;
+                self.result_flat = true;
+                defer self.result_flat = saved_flat;
+                var children = self.ir_view.expressionChildren(node);
+                while (children.next()) |child| self.walkResultChild(child, 0);
+            },
+        }
+    }
+
+    fn walkResultIf(self: *HandlerVerifier, node: NodeIndex) void {
+        const stmt = self.ir_view.getIfStmt(node) orelse return;
+        if (!self.result_flat) {
+            if (self.resultGuard(stmt.condition)) |guard| {
+                {
+                    const mark = self.result_covers.items.len;
+                    defer self.result_covers.shrinkRetainingCapacity(mark);
+                    self.pushResultCover(guard.ordinal, guard.then_polarity);
+                    self.walkResultChild(stmt.then_branch, 0);
+                }
+                if (stmt.else_branch != null_node) {
+                    const mark = self.result_covers.items.len;
+                    defer self.result_covers.shrinkRetainingCapacity(mark);
+                    self.pushResultCover(guard.ordinal, guard.else_polarity);
+                    self.walkResultChild(stmt.else_branch, 0);
+                }
+                // A then arm that always returns leaves the else polarity
+                // true for the rest of the enclosing block.
+                if (self.stmtReturnsQuick(stmt.then_branch) == .always) {
+                    self.pushResultCover(guard.ordinal, guard.else_polarity);
+                }
+                return;
             }
         }
+        self.walkResultExpr(stmt.condition, .other, 0);
+        self.walkResultScoped(stmt.then_branch);
+        if (stmt.else_branch != null_node) self.walkResultScoped(stmt.else_branch);
+    }
 
-        // Method call: result.isErr()
-        if (tag == .call or tag == .method_call) {
-            const call = self.ir_view.getCall(cond_node) orelse return null;
-            if (call.args_count == 0) {
-                return self.extractResultMemberSlot(call.callee, &err_atoms);
-            }
+    /// Walk the body of a function. A function can run at any later time, so
+    /// no check made outside it holds inside it. When `returns_consumed` is
+    /// set, the function is a callback at a `.result_fn` position: an
+    /// expression body is a position where an unbound Result is consumed by
+    /// the export that took the callback.
+    fn walkResultFunction(self: *HandlerVerifier, node: NodeIndex, returns_consumed: bool) void {
+        const func = self.ir_view.getFunction(node) orelse return;
+        const saved_base = self.result_cover_base;
+        const saved_flat = self.result_flat;
+        const saved_route = self.result_in_route_root;
+        const outer_length = self.result_covers.items.len;
+        self.result_cover_base = outer_length;
+        self.result_flat = false;
+        if (self.result_function_depth == 0) self.result_in_route_root = self.isRouteRootFunction(node);
+        self.result_function_depth += 1;
+        // The parser wraps the expression body of an arrow in a `return`.
+        const body_is_expression = self.ir_view.getTag(func.body) == .return_stmt;
+        if (returns_consumed and body_is_expression) {
+            self.walkResultExpr(self.ir_view.getOptValue(func.body) orelse null_node, .result_arg, 0);
+        } else {
+            self.walkResultChild(func.body, 0);
         }
+        self.result_function_depth -= 1;
+        self.result_in_route_root = saved_route;
+        self.result_flat = saved_flat;
+        self.result_cover_base = saved_base;
+        self.result_covers.shrinkRetainingCapacity(outer_length);
+    }
 
-        // Comparison: result.ok === false, result.ok !== true
-        if (tag == .binary_op) {
-            const binary = self.ir_view.getBinary(cond_node) orelse return null;
-            if (binary.op == .strict_neq) {
-                // result.ok !== true
-                if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |binding| {
-                    if (self.isTrueLiteral(binary.right)) return binding;
+    /// A request root other than the handler: a route function that
+    /// `routerMatch` dispatches to.
+    fn isRouteRootFunction(self: *const HandlerVerifier, node: NodeIndex) bool {
+        if (node == self.result_handler) return false;
+        for (self.result_route_roots) |root| {
+            if (root == node) return true;
+        }
+        return false;
+    }
+
+    fn walkResultExpr(self: *HandlerVerifier, node: NodeIndex, position: ResultPosition, depth: u16) void {
+        if (node == null_node) return;
+        if (depth >= max_result_depth) {
+            // An expression this deep is not read, so it is not proven.
+            self.refuseResult(node, null);
+            return;
+        }
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .function_expr, .arrow_function, .function_decl => self.walkResultNode(node),
+            .identifier => switch (self.resultReference(node)) {
+                .ordinal => |ordinal| {
+                    if (position != .result_arg) self.refuseResult(node, ordinal);
+                },
+                .ambiguous => self.refuseResult(node, null),
+                .none => {
+                    // A Result export named outside the callee position is an
+                    // alias, and a call through the alias is not classified.
+                    if (self.resultGlobalName(node) != null) self.refuseResult(node, null);
+                    if (self.builtinExportOf(node)) |exported| {
+                        if (exported.func.returns == .result) self.refuseResult(node, null);
+                    }
+                },
+            },
+            .member_access, .optional_chain, .computed_access => self.walkResultMember(node, tag, position, depth),
+            .binary_op => {
+                const binary = self.ir_view.getBinary(node) orelse return;
+                const left: ResultPosition = if (binary.op == .nullish) .nullish_left else .other;
+                self.walkResultExpr(binary.left, left, depth + 1);
+                self.walkResultExpr(binary.right, .other, depth + 1);
+            },
+            .call, .method_call => self.walkResultCall(node, position, depth),
+            // exhaustive: every other expression passes no Result safely, so
+            // each child is a use in an unmodelled position.
+            else => {
+                var children = self.ir_view.expressionChildren(node);
+                while (children.next()) |child| self.walkResultChild(child, depth + 1);
+            },
+        }
+    }
+
+    fn walkResultMember(self: *HandlerVerifier, node: NodeIndex, tag: NodeTag, position: ResultPosition, depth: u16) void {
+        const member = self.ir_view.getMember(node) orelse return;
+        const reference: ResultReference = if (self.ir_view.getTag(member.object) == .identifier)
+            self.resultReference(member.object)
+        else
+            .none;
+        switch (reference) {
+            .none => {
+                const object_position: ResultPosition = if (tag == .optional_chain) .optional_object else .other;
+                self.walkResultExpr(member.object, object_position, depth + 1);
+            },
+            .ambiguous => self.refuseResult(node, null),
+            .ordinal => |ordinal| switch (self.resultMemberKind(member)) {
+                .ok => {},
+                .value => if (!self.resultCovered(ordinal, .ok)) self.refuseResult(node, ordinal),
+                .failure => {
+                    // On an ok Result `.error` is undefined, so a read that
+                    // supplies a fallback or chains optionally gets no payload.
+                    if (position != .nullish_left and position != .optional_object and
+                        !self.resultCovered(ordinal, .err))
+                    {
+                        self.refuseResult(node, ordinal);
+                    }
+                },
+                .other => self.refuseResult(node, ordinal),
+            },
+        }
+        self.walkResultExpr(member.computed, .other, depth + 1);
+    }
+
+    fn walkResultCall(self: *HandlerVerifier, node: NodeIndex, position: ResultPosition, depth: u16) void {
+        const call = self.ir_view.getCall(node) orelse return;
+        const exported = self.builtinExportOf(call.callee);
+        if (self.resultGlobalName(call.callee) != null) {
+            if (position != .discard and position != .result_arg) self.refuseResult(node, null);
+        } else if (exported) |found| {
+            // A Result nobody binds can only be discarded or passed to a
+            // consumer that tests it. Anywhere else it flows on unchecked.
+            if (found.func.returns == .result and position != .discard and position != .result_arg) {
+                self.refuseResult(node, null);
+            }
+        } else {
+            self.walkResultExpr(call.callee, .other, depth + 1);
+        }
+        self.walkResultArguments(call, if (exported) |found| found.func else null, depth);
+    }
+
+    /// An argument at a position the export declares as a Result is read by
+    /// that export, and each such export tests `ok` before it reads. An array
+    /// literal at a `.result_list` position holds Results that the export
+    /// reads the same way.
+    fn walkResultArguments(self: *HandlerVerifier, call: Node.CallExpr, func: ?*const mb.FunctionBinding, depth: u16) void {
+        for (0..call.args_count) |position| {
+            const argument = self.ir_view.getListIndex(call.args_start, @intCast(position));
+            if (func) |exported| {
+                if (position < exported.param_types.len) {
+                    switch (exported.param_types[position]) {
+                        .result => {
+                            self.walkResultExpr(argument, .result_arg, depth + 1);
+                            continue;
+                        },
+                        .result_list => {
+                            self.walkResultList(argument, depth + 1);
+                            continue;
+                        },
+                        .result_fn => {
+                            switch (self.ir_view.getTag(argument) orelse .lit_null) {
+                                .arrow_function, .function_expr => self.walkResultFunction(argument, true),
+                                else => self.walkResultExpr(argument, .other, depth + 1),
+                            }
+                            continue;
+                        },
+                        // exhaustive: every other parameter kind passes no Result
+                        // safely, so its argument is an ordinary use, walked below.
+                        else => {},
+                    }
                 }
             }
-            if (binary.op == .strict_eq) {
-                // result.ok === false
-                if (self.extractResultMemberSlot(binary.left, &ok_atoms)) |binding| {
-                    if (self.isFalseLiteral(binary.right)) return binding;
-                }
-            }
+            self.walkResultExpr(argument, .other, depth + 1);
         }
+    }
 
-        return null;
+    fn walkResultList(self: *HandlerVerifier, argument: NodeIndex, depth: u16) void {
+        if (self.ir_view.getTag(argument) != .array_literal) return self.walkResultExpr(argument, .other, depth);
+        const array = self.ir_view.getArray(argument) orelse return;
+        var i: u16 = 0;
+        while (i < array.elements_count) : (i += 1) {
+            self.walkResultExpr(self.ir_view.getListIndex(array.elements_start, i), .result_arg, depth + 1);
+        }
     }
 
     /// The binding an identifier node reads, as the declaring scope names it.
@@ -1338,130 +1757,10 @@ pub const HandlerVerifier = struct {
         };
     }
 
-    /// Find a result binding by (scope_id, slot), or null if not tracked.
-    /// Keying on the slot alone would let a `.ok` check in one branch clear the
-    /// unchecked-value state of a same-slot binding in a sibling scope, yielding
-    /// a false "verified" verdict.
-    fn findResultBinding(self: *HandlerVerifier, binding: ir.BindingRef) ?*BindingState {
-        const want = bindingKey(binding.scope_id, binding.slot);
-        for (self.result_bindings.items) |*rb| {
-            if (rb.key() == want) return rb;
-        }
-        return null;
-    }
-
-    const ok_atoms = [_]u16{ @backingInt(object.Atom.ok), @backingInt(object.Atom.isOk) };
-    const err_atoms = [_]u16{@backingInt(object.Atom.isErr)};
-
-    /// Given a member_access node, return the object's binding if the property
-    /// matches one of `accepted_atoms` and the object is a tracked result binding.
-    fn extractResultMemberSlot(self: *HandlerVerifier, node: NodeIndex, accepted_atoms: []const u16) ?ir.BindingRef {
-        const tag = self.ir_view.getTag(node) orelse return null;
-        if (tag != .member_access and tag != .optional_chain) return null;
-
-        const member = self.ir_view.getMember(node) orelse return null;
-
-        // Check property atom against accepted list
-        var found = false;
-        for (accepted_atoms) |atom| {
-            if (member.property == atom) {
-                found = true;
-                break;
-            }
-        }
-        if (!found) return null;
-
-        // Check object is an identifier that's a tracked result
-        const obj_tag = self.ir_view.getTag(member.object) orelse return null;
-        if (obj_tag != .identifier) return null;
-        const binding = self.bindingOf(member.object) orelse return null;
-
-        if (self.findResultBinding(binding)) |_| return binding;
-        return null;
-    }
-
-    fn isTrueLiteral(self: *HandlerVerifier, node: NodeIndex) bool {
-        const tag = self.ir_view.getTag(node) orelse return false;
-        if (tag != .lit_bool) return false;
-        return self.ir_view.getBoolValue(node) orelse false;
-    }
-
-    fn isFalseLiteral(self: *HandlerVerifier, node: NodeIndex) bool {
-        const tag = self.ir_view.getTag(node) orelse return false;
-        if (tag != .lit_bool) return false;
-        const val = self.ir_view.getBoolValue(node) orelse return false;
-        return !val;
-    }
-
-    /// Check if a member access on a result binding accesses .value/.unwrap()
-    /// without prior .ok check.
-    fn checkResultValueAccess(self: *HandlerVerifier, member: Node.MemberExpr, node: NodeIndex) void {
-        // Check property - we care about .value (180), .unwrap (202) access
-        const prop = member.property;
-        const is_value_access = (prop == @backingInt(object.Atom.value) or
-            prop == @backingInt(object.Atom.unwrap));
-        if (!is_value_access) return;
-
-        // Check if the object is a result binding
-        const obj_tag = self.ir_view.getTag(member.object) orelse return;
-        if (obj_tag != .identifier) return;
-        const binding = self.bindingOf(member.object) orelse return;
-
-        const rb = self.findResultBinding(binding) orelse return;
-        if (!rb.ok_checked) {
-            self.addDiagnostic(.{
-                .severity = .err,
-                .kind = .unchecked_result_value,
-                .node = node,
-                .message = "result.value accessed without checking result.ok first",
-                .help = "check result.ok before accessing result.value:\n           if (result.ok) { ... result.value ... }",
-                .source_module = rb.source_module,
-                .source_func = rb.source_func,
-                .repair_intent = .insert_guard_before_line,
-            });
-        }
-    }
-
-    /// A computed member access with a literal string key (`r["value"]`,
-    /// `r["unwrap"]`) is equivalent to the dot access `r.value` for the
-    /// unchecked-Result-value proof. Resolve the literal key to its atom and
-    /// run the same check, so bracket notation cannot launder an unchecked
-    /// Result past the soundness verdict. A dynamic (non-literal) key is left
-    /// alone — it is handled conservatively elsewhere.
-    fn checkResultValueAccessComputed(self: *HandlerVerifier, member: Node.MemberExpr, node: NodeIndex) void {
-        if (member.computed == null_node) return;
-        if ((self.ir_view.getTag(member.computed) orelse return) != .lit_string) return;
-        const key_idx = self.ir_view.getStringIdx(member.computed) orelse return;
-        const key = self.ir_view.getString(key_idx) orelse return;
-        const prop: u16 = if (std.mem.eql(u8, key, "value"))
-            @backingInt(object.Atom.value)
-        else if (std.mem.eql(u8, key, "unwrap"))
-            @backingInt(object.Atom.unwrap)
-        else
-            return;
-        self.checkResultValueAccess(.{
-            .object = member.object,
-            .property = prop,
-            .computed = null_node,
-            .is_optional = false,
-        }, node);
-    }
-
-    /// Set the ok_checked state for a result binding, keyed by (scope_id, slot).
-    /// The change is journaled, so the enclosing block restores it when it ends.
-    fn setResultChecked(self: *HandlerVerifier, binding: ir.BindingRef, checked: bool) void {
-        self.setCheckedFlag(.result_ok_checked, bindingKey(binding.scope_id, binding.slot), checked);
-    }
-
     /// Pointer to the flag that `flag` and `key` name, or null when the binding
     /// is not tracked. Valid until the next append to the binding lists.
     fn checkedFlagPtr(self: *HandlerVerifier, flag: CheckedChange.Flag, key: u32) ?*bool {
         switch (flag) {
-            .result_ok_checked => {
-                for (self.result_bindings.items) |*rb| {
-                    if (rb.key() == key) return &rb.ok_checked;
-                }
-            },
             .optional_narrowed => {
                 for (self.optional_bindings.items) |*ob| {
                     if (ob.key() == key) return &ob.narrowed;
@@ -1497,10 +1796,10 @@ pub const HandlerVerifier = struct {
     /// twice when the loop repeats, and the second run starts with the value
     /// that the first run assigned. Before the body is walked, clear what the
     /// assignment path would clear for every binding that the subtree assigns:
-    /// the checked flag of a Result, and the narrowing of an optional that is
-    /// assigned an optional-producing call. A check made before the loop then
-    /// does not hold at the top of the body, and a check made inside the body
-    /// after the assignment still holds for the code after it.
+    /// the narrowing of an optional that is assigned an optional-producing
+    /// call. A narrowing made before the loop then does not hold at the top of
+    /// the body, and a narrowing made inside the body after the assignment
+    /// still holds for the code after it.
     /// This over-approximates (an assignment in a nested closure or in a branch
     /// counts) and so can only add refusals, never remove one. The kill outlasts
     /// the loop, as any kill does.
@@ -1511,7 +1810,6 @@ pub const HandlerVerifier = struct {
                 if ((self.ir_view.getTag(assign.target) orelse .lit_null) == .identifier) {
                     if (self.bindingOf(assign.target)) |binding| {
                         const key = bindingKey(binding.scope_id, binding.slot);
-                        self.killCheckedFlag(.result_ok_checked, key);
                         if (self.findOptionalBinding(binding.slot, binding.scope_id) != null and
                             self.isOptionalProducingCall(assign.value) != null)
                         {
@@ -1816,17 +2114,14 @@ pub const HandlerVerifier = struct {
 
     /// Handle reassignment to a tracked binding. A non-optional value narrows an
     /// optional, for the rest of the enclosing block. An optional-producing
-    /// call makes the binding optional again, and a Result-producing call or any
-    /// other value makes a Result binding unchecked. Those kills outlast the block.
+    /// call makes the binding optional again. That kill outlasts the block. An
+    /// assignment to a Result binding is refused by `checkResultUses`.
     fn handleOptionalReassignment(self: *HandlerVerifier, assign: Node.AssignExpr) void {
         const target_tag = self.ir_view.getTag(assign.target) orelse return;
         if (target_tag != .identifier) return;
 
         const binding = self.bindingOf(assign.target) orelse return;
         const key = bindingKey(binding.scope_id, binding.slot);
-
-        // The assigned value is new: a check made on the old Result does not hold for it.
-        self.killCheckedFlag(.result_ok_checked, key);
 
         if (self.findOptionalBinding(binding.slot, binding.scope_id) == null) return;
 
@@ -2542,7 +2837,9 @@ test "a stable table with only reads stays resolved" {
         \\  const known = routes["GET /"];
     ++ "\n" ++ route_table_dispatch);
     try std.testing.expect(!counts.unresolved_dispatch);
-    try std.testing.expectEqual(@as(u32, 0), counts.unchecked_result);
+    // `bad` is a sibling that nothing dispatches to. It reads a Result with no
+    // check, and the whole-program walk refuses that read.
+    try std.testing.expectEqual(@as(u32, 1), counts.unchecked_result);
 }
 
 test "an untracked assignment root unresolves every table in the file" {
@@ -2883,7 +3180,9 @@ test "ZTS303 guard at the top level of the handler still clears the code after i
     try std.testing.expectEqual(@as(u32, 0), positive.unchecked_result);
 }
 
-test "ZTS303 reassigning a checked Result makes it unchecked again" {
+test "ZTS303 reassigning a Result is refused" {
+    // An assignment is a use that no rule models. It is refused twice: once
+    // for the assigned binding and once for the Result call that nobody binds.
     const reassigned = try routeVerifierCounts(result_import ++
         \\function handler(req) {
         \\  let result = jwtVerify("token", "key");
@@ -2892,10 +3191,9 @@ test "ZTS303 reassigning a checked Result makes it unchecked again" {
         \\  return Response.text(String(result.value));
         \\}
     );
-    try std.testing.expectEqual(@as(u32, 1), reassigned.unchecked_result);
+    try std.testing.expectEqual(@as(u32, 2), reassigned.unchecked_result);
 
-    // A reassignment inside a branch outlasts the branch: the value is
-    // unchecked on the path that ran it.
+    // A reassignment inside a branch is refused the same way.
     const in_branch = try routeVerifierCounts(result_import ++
         \\function handler(req) {
         \\  let result = jwtVerify("token", "key");
@@ -2904,7 +3202,7 @@ test "ZTS303 reassigning a checked Result makes it unchecked again" {
         \\  return Response.text(String(result.value));
         \\}
     );
-    try std.testing.expectEqual(@as(u32, 1), in_branch.unchecked_result);
+    try std.testing.expectEqual(@as(u32, 2), in_branch.unchecked_result);
 
     // Control: no reassignment, so the guard still holds.
     const kept = try routeVerifierCounts(result_import ++
@@ -2917,7 +3215,10 @@ test "ZTS303 reassigning a checked Result makes it unchecked again" {
     try std.testing.expectEqual(@as(u32, 0), kept.unchecked_result);
 }
 
-test "ZTS303 a Result reassigned in a loop body is unchecked at the top of the next iteration" {
+test "ZTS303 a Result reassigned in a loop body is refused" {
+    // The assignment is refused twice, for the binding and for the unbound call.
+    // The read at the top of the body keeps its guard, because no assignment is
+    // accepted that could have changed the checked value.
     const for_of = try routeVerifierCounts(result_import ++
         \\function handler(req) {
         \\  let result = jwtVerify("token", "key");
@@ -2929,9 +3230,10 @@ test "ZTS303 a Result reassigned in a loop body is unchecked at the top of the n
         \\  return Response.text("done");
         \\}
     );
-    try std.testing.expectEqual(@as(u32, 1), for_of.unchecked_result);
+    try std.testing.expectEqual(@as(u32, 2), for_of.unchecked_result);
 
-    // Control: the body checks the new value before it reads `.value`.
+    // The assignment is still refused when the body checks the new value
+    // before it reads `.value`.
     const rechecked = try routeVerifierCounts(result_import ++
         \\function handler(req) {
         \\  let result = jwtVerify("token", "key");
@@ -2944,7 +3246,7 @@ test "ZTS303 a Result reassigned in a loop body is unchecked at the top of the n
         \\  return Response.text("done");
         \\}
     );
-    try std.testing.expectEqual(@as(u32, 0), rechecked.unchecked_result);
+    try std.testing.expectEqual(@as(u32, 2), rechecked.unchecked_result);
 
     // Control: the body never assigns the Result, so the guard still holds.
     const untouched = try routeVerifierCounts(result_import ++
@@ -3156,7 +3458,7 @@ test "ZTS309 an assignment inside a closure does not narrow the enclosing read" 
     try std.testing.expectEqual(@as(u32, 1), counts.unchecked_optional);
 }
 
-test "a reassignment inside a closure makes the enclosing Result or optional unchecked" {
+test "a reassignment inside a closure is refused for a Result and un-narrows an optional" {
     const result_kill = try routeVerifierCounts(result_import ++
         \\function handler(req) {
         \\  let result = jwtVerify("token", "key");
@@ -3169,7 +3471,7 @@ test "a reassignment inside a closure makes the enclosing Result or optional unc
         \\  return Response.text(String(result.value));
         \\}
     );
-    try std.testing.expectEqual(@as(u32, 1), result_kill.unchecked_result);
+    try std.testing.expectEqual(@as(u32, 2), result_kill.unchecked_result);
 
     const optional_kill = try routeVerifierCounts(optional_import ++
         \\function handler(req) {
@@ -3241,6 +3543,423 @@ fn totalityOfFirstNode(source: []const u8, tag: NodeTag) !bool {
         if (view.getTag(i) == tag) return functionAlwaysReturns(view, i);
     }
     return error.TagNotFound;
+}
+
+const ResultRefusals = struct { count: u32 = 0, first_line: u32 = 0 };
+
+/// The ZTS303 diagnostics of `source`, parsed in the mode production uses.
+fn resultRefusals(source: []const u8) !ResultRefusals {
+    const allocator = std.testing.allocator;
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler = findHandlerFunction(view, root) orelse return error.HandlerNotFound;
+
+    var verifier = HandlerVerifier.init(allocator, view, &atoms, null, null);
+    defer verifier.deinit();
+    _ = try verifier.verify(handler);
+
+    var refusals: ResultRefusals = .{};
+    for (verifier.getDiagnostics()) |diagnostic| {
+        if (diagnostic.kind != .unchecked_result_value) continue;
+        if (refusals.count == 0) refusals.first_line = (view.getLoc(diagnostic.node) orelse return error.NoLocation).line;
+        refusals.count += 1;
+    }
+    return refusals;
+}
+
+const validate_prefix =
+    \\import { schemaCompile, validateJson } from "zttp:validate";
+    \\schemaCompile("todo", "{\"type\":\"object\",\"required\":[\"title\"]}");
+    \\
+;
+const json_prefix = "import { parseJson } from \"zttp:json\";\n";
+const result_prefix = "import { ok, err, unwrapOr, collectAll, andThen, mapResult } from \"zttp:result\";\n";
+
+test "ZTS303 p_helper: a Result passed to a helper that reads it is refused" {
+    const refusals = try resultRefusals(validate_prefix ++
+        \\function reader(r: unknown): number {
+        \\  const v = r.value;
+        \\  return 1;
+        \\}
+        \\function handler(req: Request): Proof<Response, "deterministic" | "read_only"> {
+        \\  const late = validateJson("todo", "{}");
+        \\  const n = reader(late);
+        \\  return Response.json({ n: n }, { status: 200 });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 9), refusals.first_line);
+}
+
+test "ZTS303 p_alias: an alias of a Result is refused" {
+    const refusals = try resultRefusals(validate_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic" | "read_only"> {
+        \\  const late = validateJson("todo", "{}");
+        \\  const alias = late;
+        \\  const v = alias.value;
+        \\  return Response.json({ n: 1 }, { status: 200 });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 5), refusals.first_line);
+}
+
+test "ZTS303 p_obj: a Result stored in an object literal is refused" {
+    const refusals = try resultRefusals(validate_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic" | "read_only"> {
+        \\  const late = validateJson("todo", "{}");
+        \\  const box = { r: late };
+        \\  const v = box.r.value;
+        \\  return Response.json({ n: 1 }, { status: 200 });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 5), refusals.first_line);
+}
+
+test "ZTS303 p_chain: a member read on an unbound Result call is refused" {
+    const refusals = try resultRefusals(validate_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic" | "read_only"> {
+        \\  const v = validateJson("todo", "{}").value;
+        \\  return Response.json({ n: 1 }, { status: 200 });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 4), refusals.first_line);
+}
+
+test "ZTS303 p_sibling: a sibling function that reads a Result unchecked is refused" {
+    const refusals = try resultRefusals(validate_prefix ++
+        \\function inner(): number {
+        \\  const local = validateJson("todo", "{}");
+        \\  const v = local.value;
+        \\  return 1;
+        \\}
+        \\function handler(req: Request): Proof<Response, "deterministic" | "read_only"> {
+        \\  const n = inner();
+        \\  return Response.json({ n: n }, { status: 200 });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 5), refusals.first_line);
+}
+
+test "ZTS303 p_eqvar: a comparison of ok with a variable is not a guard" {
+    const refusals = try resultRefusals(validate_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic" | "read_only"> {
+        \\  const late = validateJson("todo", "{}");
+        \\  const flag = req.method === "GET";
+        \\  if (late.ok === flag) {
+        \\    const v = late.value;
+        \\  }
+        \\  return Response.json({ n: 1 }, { status: 200 });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 7), refusals.first_line);
+}
+
+test "ZTS303 p_err: an unguarded error read is refused" {
+    const refusals = try resultRefusals(validate_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic" | "read_only"> {
+        \\  const late = validateJson("todo", "{}");
+        \\  const v = late.error;
+        \\  return Response.json({ n: 1 }, { status: 200 });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 5), refusals.first_line);
+}
+
+test "ZTS303 p_errors: an unguarded errors read is refused" {
+    const refusals = try resultRefusals(validate_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic" | "read_only"> {
+        \\  const late = validateJson("todo", "{}");
+        \\  return Response.json({ e: late.errors }, { status: 200 });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 5), refusals.first_line);
+}
+
+test "ZTS303 p_spread: spreading a Result is refused" {
+    const refusals = try resultRefusals(json_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const r = parseJson("1");
+        \\  const box = { ...r };
+        \\  return Response.json({ v: box.value });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 4), refusals.first_line);
+}
+
+test "ZTS303 p_computed: a non-literal computed key on a Result is refused" {
+    const refusals = try resultRefusals(json_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const r = parseJson("1");
+        \\  const k = "value";
+        \\  const v = r[k];
+        \\  return Response.json({ v: v });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 5), refusals.first_line);
+}
+
+test "ZTS303 p_closure_dup2: a closure over a Result name that two bindings share is refused" {
+    const refusals = try resultRefusals(json_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  if (req.method === "GET") {
+        \\    const r = parseJson("1");
+        \\    if (!r.ok) {
+        \\      return Response.json({ bad: true }, { status: 400 });
+        \\    }
+        \\    return Response.json({ v: r.value });
+        \\  }
+        \\  const r = parseJson("2");
+        \\  const read = (): unknown => {
+        \\    return r.value;
+        \\  };
+        \\  return Response.json({ v: read() });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 12), refusals.first_line);
+}
+
+test "ZTS303 an unchecked requestJson read is refused" {
+    const refusals = try resultRefusals(
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const v = requestJson(req).value;
+        \\  return Response.json({ v: v });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 2), refusals.first_line);
+}
+
+test "ZTS303 a bound requestText read without a guard is refused" {
+    const refusals = try resultRefusals(
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const body = requestText(req);
+        \\  return Response.text(body.value);
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 3), refusals.first_line);
+}
+
+test "ZTS303 isOk is a method call on a Result and is not a guard" {
+    const refusals = try resultRefusals(json_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const r = parseJson("1");
+        \\  if (r.isOk()) {
+        \\    return Response.json({ v: r.value });
+        \\  }
+        \\  return Response.text("no");
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 2), refusals.count);
+    try std.testing.expectEqual(@as(u32, 4), refusals.first_line);
+}
+
+test "ZTS303 a strict comparison of ok with true is not a guard" {
+    const refusals = try resultRefusals(json_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const r = parseJson("1");
+        \\  if (r.ok === true) {
+        \\    return Response.json({ v: r.value });
+        \\  }
+        \\  return Response.text("no");
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 5), refusals.first_line);
+}
+
+test "ZTS303 a match on a Result is refused" {
+    const refusals = try resultRefusals(json_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const r = parseJson("1");
+        \\  const v = match (r) { when { ok: true, value: x }: x default: 0 };
+        \\  return Response.json({ v: v });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 4), refusals.first_line);
+}
+
+test "ZTS303 an error read in the then arm of an ok guard has the wrong polarity" {
+    const refusals = try resultRefusals(json_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const r = parseJson("1");
+        \\  if (r.ok) {
+        \\    return Response.json({ e: r.error });
+        \\  }
+        \\  return Response.text("no");
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 5), refusals.first_line);
+}
+
+test "ZTS303 a value read in the then arm of an err guard has the wrong polarity" {
+    const refusals = try resultRefusals(json_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const r = parseJson("1");
+        \\  if (!r.ok) {
+        \\    return Response.json({ v: r.value });
+        \\  }
+        \\  return Response.text("no");
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 5), refusals.first_line);
+}
+
+test "ZTS303 accepts an errors read in the then arm of an err guard" {
+    const refusals = try resultRefusals(validate_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic" | "read_only"> {
+        \\  const late = validateJson("todo", "{}");
+        \\  if (!late.ok) {
+        \\    return Response.json({ e: late.errors }, { status: 400 });
+        \\  }
+        \\  return Response.json({ v: late.value }, { status: 200 });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), refusals.count);
+}
+
+test "ZTS303 accepts an error read after an ok guard that returns" {
+    const refusals = try resultRefusals(json_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const r = parseJson("1");
+        \\  if (r.ok) {
+        \\    return Response.json({ v: r.value });
+        \\  }
+        \\  return Response.json({ e: r.error }, { status: 400 });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), refusals.count);
+}
+
+test "ZTS303 accepts an error read that supplies a fallback" {
+    const refusals = try resultRefusals(json_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const r = parseJson("1");
+        \\  const message = r.error ?? "none";
+        \\  return Response.text(String(message));
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), refusals.count);
+}
+
+test "ZTS303 accepts a Result at a position the export declares as a Result" {
+    const refusals = try resultRefusals(result_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const r = ok(1);
+        \\  const n = unwrapOr(r, 0);
+        \\  return Response.json({ n: n });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), refusals.count);
+}
+
+test "ZTS303 accepts an array literal of Results passed to collectAll" {
+    const refusals = try resultRefusals(result_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const first = ok(1);
+        \\  const all = collectAll([first, ok(2), err("x")]);
+        \\  if (!all.ok) {
+        \\    return Response.json({ e: all.error }, { status: 400 });
+        \\  }
+        \\  return Response.json({ v: all.value });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), refusals.count);
+}
+
+test "ZTS303 refuses a Result binding passed to collectAll without an array literal" {
+    const refusals = try resultRefusals(result_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const first = ok(1);
+        \\  const all = collectAll(first);
+        \\  return Response.json({ n: 1 });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 4), refusals.first_line);
+}
+
+test "ZTS303 refuses a Result nested in the array that collectAll receives" {
+    const refusals = try resultRefusals(result_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const first = ok(1);
+        \\  const all = collectAll([[first]]);
+        \\  return Response.json({ n: 1 });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 4), refusals.first_line);
+}
+
+test "ZTS303 accepts the Result that an expression-bodied callback returns to andThen" {
+    const refusals = try resultRefusals(result_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const first = ok(1);
+        \\  const next = andThen(first, (n) => ok(n + 1));
+        \\  if (!next.ok) {
+        \\    return Response.json({ e: next.error }, { status: 400 });
+        \\  }
+        \\  return Response.json({ v: next.value });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), refusals.count);
+}
+
+test "ZTS303 refuses a Result that a callback returns to mapResult" {
+    // `mapResult` wraps the callback's return in the payload, so a Result
+    // returned there escapes into an untracked value.
+    const refusals = try resultRefusals(result_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const first = ok(1);
+        \\  const next = mapResult(first, (n) => ok(n));
+        \\  return Response.json({ n: 1 });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 4), refusals.first_line);
+}
+
+test "ZTS303 refuses a Result returned from a block-bodied callback to andThen" {
+    const refusals = try resultRefusals(result_prefix ++
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const first = ok(1);
+        \\  const next = andThen(first, (n) => { return ok(n); });
+        \\  return Response.json({ n: 1 });
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 1), refusals.count);
+    try std.testing.expectEqual(@as(u32, 4), refusals.first_line);
+}
+
+test "ZTS303 accepts a guarded requestText read" {
+    const refusals = try resultRefusals(
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const body = requestText(req);
+        \\  if (!body.ok) {
+        \\    return Response.text("bad", { status: 400 });
+        \\  }
+        \\  return Response.text(body.value);
+        \\}
+    );
+    try std.testing.expectEqual(@as(u32, 0), refusals.count);
 }
 
 test "an assert statement is not a total function body" {
@@ -3334,10 +4053,9 @@ test "the import scan splits tracked builtins into result and optional slots" {
     defer verifier.deinit();
     verifier.scanImports();
 
-    // jwtVerify returns a Result; env returns an optional string; sha256 returns
-    // a plain string and is tracked by neither; the unresolved module is skipped.
-    try std.testing.expectEqual(@as(usize, 1), verifier.result_function_slots.items.len);
-    try std.testing.expectEqualStrings("jwtVerify", verifier.result_function_slots.items[0].func_name);
+    // env returns an optional string; jwtVerify returns a Result, which the
+    // scan leaves to `resultCallee`; sha256 returns a plain string and is
+    // tracked by neither; the unresolved module is skipped.
     try std.testing.expectEqual(@as(usize, 1), verifier.optional_function_slots.items.len);
 }
 
@@ -3370,5 +4088,4 @@ test "with no atom table the index resolves imports this verifier used to miss" 
     // `env` returns an optional string, so it lands in the optional list. Before
     // C1 this was 0 on the no-table path.
     try std.testing.expectEqual(@as(usize, 1), verifier.optional_function_slots.items.len);
-    try std.testing.expectEqual(@as(usize, 0), verifier.result_function_slots.items.len);
 }

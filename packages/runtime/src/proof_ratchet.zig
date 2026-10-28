@@ -476,11 +476,13 @@ test "an error read with a nullish fallback emits no event" {
     try expectAcceptedAtTrusted(&certified);
 }
 
-/// One program the producer must not prove, with the event that stops it.
+/// One program the producer must refuse.
 const FalseProof = struct {
     name: []const u8,
     body: []const u8,
-    event: ps.NodeTag,
+    /// Functions declared before the handler. Each probe carries only its
+    /// own, so that no other probe's unchecked read causes the refusal.
+    helpers: []const u8 = "",
 };
 
 const false_proofs = [_]FalseProof{
@@ -490,7 +492,6 @@ const false_proofs = [_]FalseProof{
             "  const alias = late;\n" ++
             "  const v = alias.value;\n" ++
             "  return Response.json({ n: 1 }, { status: 200 });\n",
-        .event = .result_escape,
     },
     .{
         .name = "p_obj",
@@ -498,19 +499,21 @@ const false_proofs = [_]FalseProof{
             "  const box = { r: late };\n" ++
             "  const v = box.r.value;\n" ++
             "  return Response.json({ n: 1 }, { status: 200 });\n",
-        .event = .result_escape,
     },
     .{
         .name = "p_chain",
         .body = "  const v = validateJson(\"todo\", \"{}\").value;\n" ++
             "  return Response.json({ n: 1 }, { status: 200 });\n",
-        .event = .result_escape,
     },
     .{
         .name = "p_sibling",
         .body = "  const n = inner();\n" ++
             "  return Response.json({ n: n }, { status: 200 });\n",
-        .event = .result_read_ok,
+        .helpers = "function inner(): number {\n" ++
+            "  const local = validateJson(\"todo\", \"{}\");\n" ++
+            "  const v = local.value;\n" ++
+            "  return 1;\n" ++
+            "}\n",
     },
     .{
         .name = "p_eqvar",
@@ -520,34 +523,33 @@ const false_proofs = [_]FalseProof{
             "    const v = late.value;\n" ++
             "  }\n" ++
             "  return Response.json({ n: 1 }, { status: 200 });\n",
-        .event = .result_read_ok,
     },
     .{
         .name = "p_helper",
         .body = "  const late = validateJson(\"todo\", \"{}\");\n" ++
             "  const n = reader(late);\n" ++
             "  return Response.json({ n: n }, { status: 200 });\n",
-        .event = .result_escape,
+        .helpers = "function reader(r: unknown): number {\n" ++
+            "  const v = r.value;\n" ++
+            "  return 1;\n" ++
+            "}\n",
     },
     .{
         .name = "p_err",
         .body = "  const late = validateJson(\"todo\", \"{}\");\n" ++
             "  const v = late.error;\n" ++
             "  return Response.json({ n: 1 }, { status: 200 });\n",
-        .event = .result_read_err,
     },
     .{
         .name = "p_errors",
         .body = "  const late = validateJson(\"todo\", \"{}\");\n" ++
             "  return Response.json({ e: late.errors }, { status: 200 });\n",
-        .event = .result_read_err,
     },
     .{
         .name = "p_spread",
         .body = "  const r = validateJson(\"todo\", \"{}\");\n" ++
             "  const box = { ...r };\n" ++
             "  return Response.json({ v: box.value });\n",
-        .event = .result_escape,
     },
     .{
         .name = "p_computed",
@@ -555,7 +557,6 @@ const false_proofs = [_]FalseProof{
             "  const k = \"value\";\n" ++
             "  const v = r[k];\n" ++
             "  return Response.json({ v: v });\n",
-        .event = .result_escape,
     },
     .{
         .name = "p_closure_dup2",
@@ -571,41 +572,40 @@ const false_proofs = [_]FalseProof{
             "    return r.value;\n" ++
             "  };\n" ++
             "  return Response.json({ v: read() });\n",
-        .event = .result_escape,
     },
 };
 
-const false_proof_helpers =
-    "function inner(): number {\n" ++
-    "  const local = validateJson(\"todo\", \"{}\");\n" ++
-    "  const v = local.value;\n" ++
-    "  return 1;\n" ++
-    "}\n" ++
-    "function reader(r: unknown): number {\n" ++
-    "  const v = r.value;\n" ++
-    "  return 1;\n" ++
-    "}\n";
+/// Whether the producer refuses `source`: the verifier reports an error, so no
+/// certificate exists to carry a `results_checked` claim.
+fn producerRefuses(allocator: std.mem.Allocator, source: []const u8) !bool {
+    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+    return compiled.verify_failed and compiled.proof_evidence == null;
+}
 
-test "a false-proof probe emits its event, stays tested, and is still accepted at trusted" {
+test "the producer accepts the probe prelude when the handler checks its Result" {
+    const allocator = testing.allocator;
+    try testing.expect(!(try producerRefuses(allocator, validate_prelude ++
+        "export function handler(req: Request): " ++ result_capsule ++ " {\n" ++
+        "  const late = validateJson(\"todo\", \"{}\");\n" ++
+        "  if (!late.ok) { return Response.json({ e: late.errors }, { status: 400 }); }\n" ++
+        "  return Response.json({ v: late.value }, { status: 200 });\n" ++
+        "}\n")));
+}
+
+test "the producer refuses every false-proof probe, so no certificate carries the claim" {
     const allocator = testing.allocator;
     inline for (false_proofs) |probe| {
-        const source = comptime validate_prelude ++ false_proof_helpers ++
+        const source = comptime validate_prelude ++ probe.helpers ++
             "export function handler(req: Request): " ++ result_capsule ++ " {\n" ++ probe.body ++ "}\n";
-        var certified = certify(allocator, source) catch |err| {
-            std.debug.print("probe '{s}' did not certify: {s}\n", .{ probe.name, @errorName(err) });
+        testing.expect(try producerRefuses(allocator, source)) catch |err| {
+            std.debug.print("probe '{s}' was not refused by the producer\n", .{probe.name});
             return err;
         };
-        defer certified.deinit();
-
-        testing.expectEqual(cert.EdgeKind.tested, try resultsEdge(&certified)) catch |err| {
-            std.debug.print("probe '{s}' was answered with a different edge\n", .{probe.name});
-            return err;
-        };
-        testing.expect(try irTagCount(&certified, probe.event) > 0) catch |err| {
-            std.debug.print("probe '{s}' carries no {s} event\n", .{ probe.name, @tagName(probe.event) });
-            return err;
-        };
-        try expectAcceptedAtTrusted(&certified);
     }
 }
 
@@ -623,23 +623,16 @@ test "a handler with no Result binding lowers without Result events" {
     try testing.expectEqual(cert.EdgeKind.tested, try resultsEdge(&certified));
 }
 
-test "an unchecked requestJson read is not proved beside a checked Result" {
+test "an unchecked requestJson read is refused beside a checked Result" {
     const allocator = testing.allocator;
-    var certified = try certify(allocator, validate_prelude ++
+    try testing.expect(try producerRefuses(allocator, validate_prelude ++
         "export function handler(req: Request): " ++ result_capsule ++ " {\n" ++
         "  const r = validateJson(\"todo\", \"{}\");\n" ++
         "  if (!r.ok) { return Response.json({ e: r.errors }, { status: 400 }); }\n" ++
         "  const body = requestJson(req);\n" ++
         "  const v = body.value;\n" ++
         "  return Response.json({ t: r.value, v: v }, { status: 200 });\n" ++
-        "}\n");
-    defer certified.deinit();
-
-    try testing.expectEqual(cert.EdgeKind.tested, try resultsEdge(&certified));
-    try testing.expectEqual(@as(u32, 2), try irTagCount(&certified, .result_def));
-    try testing.expectEqual(@as(u32, 2), try irTagCount(&certified, .result_read_ok));
-    try testing.expectEqual(@as(u32, 0), try irTagCount(&certified, .result_escape));
-    try expectAcceptedAtTrusted(&certified);
+        "}\n"));
 }
 
 test "a guarded requestText read is proved" {
@@ -687,16 +680,7 @@ const census_min_with_result_events: usize = 19;
 /// a difference fails as a stale row; a new difference fails as unexplained.
 const ParityDifference = struct { path: []const u8, cause: []const u8 };
 
-const known_differences = [_]ParityDifference{
-    .{
-        .path = "examples/patterns/json-and-dict.ts",
-        .cause = "A4 .error case: reads duplicate.error.kind and malformed.error.kind with no .ok check, so the producer claims tested",
-    },
-    .{
-        .path = "examples/patterns/result-combinators.ts",
-        .cause = "combinator case: Result values go to unwrapOr, orElse, and collectAll, and empty.ok is read outside a guard, so the producer claims tested",
-    },
-};
+const known_differences = [_]ParityDifference{};
 
 fn hasResultEvent(built: *const proof_certificate.Built) !bool {
     var budget = pcc.limits.Budget.init(.{});

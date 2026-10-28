@@ -47,8 +47,16 @@ function handler(req: Request): Guardrails<Response> {
     return Response.json({ error: "not-an-object" }, { status: 400 });
   }
 
+  // Both documents are malformed on purpose. Each failure carries its detail,
+  // and `.error` is read only on the failure arm.
   const duplicate = parseJson("{\"a\":1,\"a\":2}");
+  if (duplicate.ok) {
+    return Response.json({ error: "duplicate-accepted" }, { status: 500 });
+  }
   const malformed = parseJson("{oops}");
+  if (malformed.ok) {
+    return Response.json({ error: "malformed-accepted" }, { status: 500 });
+  }
   const encoded = stringifyJson(document);
   if (!encoded.ok) {
     return Response.json({ error: encoded.error.kind }, { status: 500 });

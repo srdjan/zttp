@@ -189,6 +189,10 @@ const Lowerer = struct {
     facts: ?*const module_facts_mod.ModuleFacts = null,
     /// The Result bindings of the program. A binding's index is its ordinal.
     bindings: []const ResultBinding = &.{},
+    /// The expression bodies of function literals that sit at a `.result_fn`
+    /// position of a builtin export. The export hands the Result that such a
+    /// body returns on inside the Result it returns itself.
+    callback_bodies: []const NodeIndex = &.{},
     results_active: bool = false,
     /// Set while a nested expression is built under a statement leaf that
     /// already collected the events of the whole statement.
@@ -482,6 +486,37 @@ const Lowerer = struct {
         return true;
     }
 
+    /// Find the expression bodies of the function literals that sit at a
+    /// `.result_fn` position. The parser wraps an arrow's expression body in a
+    /// `return` node, and that node is listed. A block body is not listed: a
+    /// `return` in it is an ordinary use.
+    fn collectCallbackBodies(self: *Lowerer, list: *std.ArrayList(NodeIndex)) Error!void {
+        for (0..self.view.nodeCount()) |position| {
+            const node: NodeIndex = @intCast(position);
+            const tag = self.view.getTag(node) orelse continue;
+            if (tag != .call and tag != .method_call) continue;
+            const call = self.view.getCall(node) orelse continue;
+            const exported = self.builtinExport(call.callee) orelse continue;
+            for (0..call.args_count) |index| {
+                if (index >= exported.param_types.len or exported.param_types[index] != .result_fn) continue;
+                const argument = self.view.getListIndex(call.args_start, @intCast(index));
+                const argument_tag = self.view.getTag(argument) orelse continue;
+                if (argument_tag != .arrow_function and argument_tag != .function_expr) continue;
+                const function = self.view.getFunction(argument) orelse continue;
+                const body_tag = self.view.getTag(function.body) orelse continue;
+                if (body_tag != .return_stmt) continue;
+                try list.append(self.allocator, function.body);
+            }
+        }
+    }
+
+    fn isCallbackBody(self: *Lowerer, index: NodeIndex) bool {
+        for (self.callback_bodies) |body| {
+            if (body == index) return true;
+        }
+        return false;
+    }
+
     fn isEventSite(self: *Lowerer, index: NodeIndex) bool {
         if (self.view.getTag(index) != .identifier) return false;
         return switch (self.referenceOf(index)) {
@@ -560,7 +595,16 @@ const Lowerer = struct {
                 const operand = self.view.getOptValue(index) orelse return;
                 try self.emitExpr(out, operand, .discard, 0);
             },
-            else => try self.emitExpr(out, index, .other, 0),
+            else => {
+                // The parser wraps the expression body of an arrow in a
+                // `return`. At a `.result_fn` position the export consumes the
+                // value that return carries.
+                if (self.isCallbackBody(index)) {
+                    const operand = self.view.getOptValue(index) orelse return;
+                    return self.emitExpr(out, operand, .result_arg, 0);
+                }
+                try self.emitExpr(out, index, .other, 0);
+            },
         }
     }
 
@@ -697,11 +741,37 @@ const Lowerer = struct {
             const argument = self.view.getListIndex(call.args_start, @intCast(position));
             var argument_position: Position = .other;
             if (exported) |func| {
-                if (position < func.param_types.len and func.param_types[position] == .result) {
-                    argument_position = .result_arg;
+                if (position < func.param_types.len) {
+                    switch (func.param_types[position]) {
+                        .result => argument_position = .result_arg,
+                        .result_list => {
+                            try self.emitResultList(out, argument, depth + 1);
+                            continue;
+                        },
+                        // exhaustive: every other parameter kind passes no Result
+                        // safely, so its argument is an ordinary use, emitted below.
+                        else => {},
+                    }
                 }
             }
             try self.emitExpr(out, argument, argument_position, depth + 1);
+        }
+    }
+
+    /// An array literal at a `.result_list` position holds Results that the
+    /// export reads after it tests `ok`, so each element is a safe consumer
+    /// position. Any other argument at the position is an ordinary use.
+    fn emitResultList(
+        self: *Lowerer,
+        out: *std.ArrayList(Tree),
+        argument: NodeIndex,
+        depth: u16,
+    ) Error!void {
+        if (self.view.getTag(argument) != .array_literal) return self.emitExpr(out, argument, .other, depth);
+        const array = self.view.getArray(argument) orelse return;
+        for (0..array.elements_count) |position| {
+            const element = self.view.getListIndex(array.elements_start, @intCast(position));
+            try self.emitExpr(out, element, .result_arg, depth + 1);
         }
     }
 
@@ -929,11 +999,15 @@ pub fn lower(
     defer if (facts) |*value| value.deinit();
     var bindings: std.ArrayList(ResultBinding) = .empty;
     defer bindings.deinit(allocator);
+    var callback_bodies: std.ArrayList(NodeIndex) = .empty;
+    defer callback_bodies.deinit(allocator);
     if (resolver) |supplied| {
         facts = try module_facts_mod.ModuleFacts.build(allocator, view, supplied.atoms, null);
         lowerer.facts = &facts.?;
         if (try lowerer.classify(&bindings)) {
+            try lowerer.collectCallbackBodies(&callback_bodies);
             lowerer.bindings = bindings.items;
+            lowerer.callback_bodies = callback_bodies.items;
             lowerer.results_active = true;
         }
     }
@@ -2083,6 +2157,214 @@ test "a guarded read with an early return derives as proved" {
     defer lowered.deinit();
 
     try testing.expect(try deriveResults(allocator, lowered.proof));
+}
+
+/// One false-proof shape, with the event that stops the lowering from
+/// deriving a proof for it. The verifier refuses the same shapes, and this
+/// table shows the lowering does not depend on that refusal.
+const FalseProofLowering = struct {
+    name: []const u8,
+    source: []const u8,
+    event: Tag,
+};
+
+const false_proof_lowerings = [_]FalseProofLowering{
+    .{ .name = "p_alias", .event = .result_escape, .source =
+    \\function handler(req) {
+    \\  const late = validateJson("todo", "{}");
+    \\  const alias = late;
+    \\  return Response.text(alias.value);
+    \\}
+    },
+    .{ .name = "p_obj", .event = .result_escape, .source =
+    \\function handler(req) {
+    \\  const late = validateJson("todo", "{}");
+    \\  const box = { r: late };
+    \\  return Response.text(box.r.value);
+    \\}
+    },
+    .{ .name = "p_chain", .event = .result_escape, .source =
+    \\function handler(req) {
+    \\  return Response.text(validateJson("todo", "{}").value);
+    \\}
+    },
+    .{ .name = "p_sibling", .event = .result_read_ok, .source =
+    \\function inner() {
+    \\  const local = validateJson("todo", "{}");
+    \\  return local.value;
+    \\}
+    \\function handler(req) {
+    \\  return Response.text(inner());
+    \\}
+    },
+    .{ .name = "p_eqvar", .event = .result_read_ok, .source =
+    \\function handler(req) {
+    \\  const late = validateJson("todo", "{}");
+    \\  const flag = req.method === "GET";
+    \\  if (late.ok === flag) {
+    \\    return Response.text(late.value);
+    \\  }
+    \\  return Response.text("no");
+    \\}
+    },
+    .{ .name = "p_helper", .event = .result_escape, .source =
+    \\function reader(r) {
+    \\  return r.value;
+    \\}
+    \\function handler(req) {
+    \\  const late = validateJson("todo", "{}");
+    \\  return Response.text(reader(late));
+    \\}
+    },
+    .{ .name = "p_err", .event = .result_read_err, .source =
+    \\function handler(req) {
+    \\  const late = validateJson("todo", "{}");
+    \\  return Response.text(late.error);
+    \\}
+    },
+    .{ .name = "p_errors", .event = .result_read_err, .source =
+    \\function handler(req) {
+    \\  const late = validateJson("todo", "{}");
+    \\  return Response.text(late.errors);
+    \\}
+    },
+    .{ .name = "p_spread", .event = .result_escape, .source =
+    \\function handler(req) {
+    \\  const r = validateJson("todo", "{}");
+    \\  const box = { ...r };
+    \\  return Response.text(box.value);
+    \\}
+    },
+    .{ .name = "p_computed", .event = .result_escape, .source =
+    \\function handler(req) {
+    \\  const r = validateJson("todo", "{}");
+    \\  const k = "value";
+    \\  return Response.text(r[k]);
+    \\}
+    },
+    .{ .name = "p_closure_dup2", .event = .result_escape, .source =
+    \\function handler(req) {
+    \\  if (req.method === "GET") {
+    \\    const r = validateJson("todo", "{}");
+    \\    if (!r.ok) {
+    \\      return Response.text("bad");
+    \\    }
+    \\    return Response.text(r.value);
+    \\  }
+    \\  const r = validateJson("todo", "{}");
+    \\  const read = () => {
+    \\    return r.value;
+    \\  };
+    \\  return Response.text(read());
+    \\}
+    },
+};
+
+test "the lowering marks every false-proof shape and derives no proof for it" {
+    const allocator = testing.allocator;
+    var never = NeverResolver{};
+    inline for (false_proof_lowerings) |probe| {
+        var lowered = try parseAndLowerWith(allocator, "import { validateJson } from \"zttp:validate\";\n" ++ probe.source, never.resolver());
+        defer lowered.deinit();
+        testing.expect(lowered.proof.results_classified) catch |err| {
+            std.debug.print("probe '{s}' was not classified\n", .{probe.name});
+            return err;
+        };
+        testing.expect(countTag(lowered.proof, probe.event) > 0) catch |err| {
+            std.debug.print("probe '{s}' carries no {s} event\n", .{ probe.name, @tagName(probe.event) });
+            return err;
+        };
+        testing.expect(!(try deriveResults(allocator, lowered.proof))) catch |err| {
+            std.debug.print("probe '{s}' derived a proof\n", .{probe.name});
+            return err;
+        };
+    }
+}
+
+const combinator_import = "import { ok, err, collectAll, andThen } from \"zttp:result\";\n";
+
+test "an array literal of Results at the collectAll position derives as proved" {
+    const allocator = testing.allocator;
+    var never = NeverResolver{};
+    var lowered = try parseAndLowerWith(allocator, combinator_import ++
+        \\function handler(req) {
+        \\  const first = ok(1);
+        \\  const all = collectAll([first, ok(2), err("x")]);
+        \\  if (!all.ok) {
+        \\    return Response.text("no");
+        \\  }
+        \\  return Response.text(all.value);
+        \\}
+    , never.resolver());
+    defer lowered.deinit();
+
+    try testing.expectEqual(@as(usize, 0), countTag(lowered.proof, .result_escape));
+    try testing.expect(try deriveResults(allocator, lowered.proof));
+}
+
+test "a Result binding passed to collectAll outside an array literal escapes" {
+    const allocator = testing.allocator;
+    var never = NeverResolver{};
+    var lowered = try parseAndLowerWith(allocator, combinator_import ++
+        \\function handler(req) {
+        \\  const first = ok(1);
+        \\  const all = collectAll(first);
+        \\  return Response.text("done");
+        \\}
+    , never.resolver());
+    defer lowered.deinit();
+
+    try testing.expectEqual(@as(usize, 1), countTag(lowered.proof, .result_escape));
+    try testing.expect(!(try deriveResults(allocator, lowered.proof)));
+}
+
+test "a Result nested in the array that collectAll receives escapes" {
+    const allocator = testing.allocator;
+    var never = NeverResolver{};
+    var lowered = try parseAndLowerWith(allocator, combinator_import ++
+        \\function handler(req) {
+        \\  const first = ok(1);
+        \\  const all = collectAll([[first]]);
+        \\  return Response.text("done");
+        \\}
+    , never.resolver());
+    defer lowered.deinit();
+
+    try testing.expectEqual(@as(usize, 1), countTag(lowered.proof, .result_escape));
+}
+
+test "an expression body that returns a Result to andThen is consumed" {
+    const allocator = testing.allocator;
+    var never = NeverResolver{};
+    var lowered = try parseAndLowerWith(allocator, combinator_import ++
+        \\function handler(req) {
+        \\  const first = ok(1);
+        \\  const next = andThen(first, (n) => ok(n + 1));
+        \\  if (!next.ok) {
+        \\    return Response.text("no");
+        \\  }
+        \\  return Response.text(next.value);
+        \\}
+    , never.resolver());
+    defer lowered.deinit();
+
+    try testing.expectEqual(@as(usize, 0), countTag(lowered.proof, .result_escape));
+    try testing.expect(try deriveResults(allocator, lowered.proof));
+}
+
+test "a block body that returns a Result to andThen escapes" {
+    const allocator = testing.allocator;
+    var never = NeverResolver{};
+    var lowered = try parseAndLowerWith(allocator, combinator_import ++
+        \\function handler(req) {
+        \\  const first = ok(1);
+        \\  const next = andThen(first, (n) => { return ok(n); });
+        \\  return Response.text("done");
+        \\}
+    , never.resolver());
+    defer lowered.deinit();
+
+    try testing.expectEqual(@as(usize, 1), countTag(lowered.proof, .result_escape));
 }
 
 test "the ambient Result globals match the ones abi_types registers" {

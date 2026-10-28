@@ -79,13 +79,22 @@ verify error[ZTS303]: result.value accessed without checking result.ok first
            if (result.ok) { ... result.value ... }
 ```
 
-**Recognized patterns for .ok checks:**
+**Recognized checks.** The verifier recognizes two `if` conditions on a `const` that holds a Result call: `result.ok` and `!result.ok`. It recognizes no other form. `result.ok === true`, `result.isOk()`, and `result.isErr()` are refused.
 
-- `if (result.ok) { ... }` - direct boolean discriminant
-- `if (result.isOk()) { ... }` - method call
-- `if (result.ok === true) { ... }` - strict equality
-- `if (!result.ok) { return ...; }` - negated early return (code after is safe)
-- `if (result.isErr()) { return ...; }` - error early return
+- In the arm where `result.ok` is true, `.value` and `.unwrap` can be read.
+- In the arm where `result.ok` is false, `.error` and `.errors` can be read.
+- When the then arm always returns, the opposite polarity holds for the rest of the block. After `if (!result.ok) { return ...; }`, `.value` can be read.
+- `.error` can also be read as the left operand of `??` or as the object of `?.`, because those forms give a fallback when the Result holds no error.
+
+**Refused uses.** The verifier refuses each use of a Result that it does not model, with ZTS303. These uses are refused:
+
+- an alias (`const other = result`) or a reassignment of the binding;
+- a Result passed to a function, returned, put in an object or array, or spread;
+- a method call on the binding, and a computed key that is not a string literal;
+- a member read on a Result call that is not bound to a `const`;
+- a `match` on the Result, and a check inside a `switch` or `try`, which covers nothing.
+
+A Result can be passed to a `zttp:result` export that takes a Result, such as `unwrapOr(result, fallback)`. `collectAll` takes an array literal of Results. `andThen` and `orElse` take an arrow function whose expression body returns a Result. A closure starts with no checks: a closure that reads `.value` checks `.ok` itself. The verifier checks every function of the file, not only the handler.
 
 ### 3. Unreachable Code
 

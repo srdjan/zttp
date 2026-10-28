@@ -64,7 +64,7 @@
       "returns": "result",
       "params": [
         "result",
-        "object"
+        "result_fn"
       ],
       "paramNames": [
         "result",
@@ -77,7 +77,7 @@
       "returns": "result",
       "params": [
         "result",
-        "object"
+        "result_fn"
       ],
       "paramNames": [
         "result",
@@ -105,7 +105,7 @@
       "effect": "none",
       "returns": "result",
       "params": [
-        "object"
+        "result_list"
       ],
       "paramNames": [
         "results"

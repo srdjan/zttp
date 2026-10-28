@@ -32,6 +32,21 @@ pub const ReturnKind = enum {
     /// Result type ({ok, value, error}) - verifier requires .ok check
     result,
 
+    /// A parameter that takes an array literal of Results and reads each one
+    /// only after it tests `ok` (`collectAll`). Typed as `object`, the same as
+    /// before the kind existed. The verifier and the proof lowering accept an
+    /// array literal of Result calls or Result bindings at this position and
+    /// nothing else. Meaningful as a parameter kind only.
+    result_list,
+
+    /// A parameter that takes a function whose return value the export hands
+    /// on inside the Result it returns (`andThen`, `orElse`). Typed as
+    /// `object`, the same as before the kind existed. A Result that an
+    /// expression-bodied function literal at this position returns is consumed
+    /// by the export, and the Result the export returns stays tracked.
+    /// Meaningful as a parameter kind only.
+    result_fn,
+
     /// `Dict<K, V>` (spec 6.2). Coarse in the same way `result` is: a binding
     /// cannot spell an export's type parameters, so a declared `dict` reaches
     /// the checker as `Dict<unknown, unknown>`.
@@ -56,6 +71,7 @@ pub const ReturnKind = enum {
             .optional_object => "object?",
             .optional_number => "number?",
             .result => "Result",
+            .result_list, .result_fn => "object",
             .dict => "Dict",
             .bytes => "Bytes",
         };

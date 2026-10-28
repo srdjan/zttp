@@ -444,7 +444,7 @@ pub fn exportYieldsSource(resolved: ModuleExport) bool {
     if (findCallbackExport(&callback_exports, resolved.binding.specifier, func.name) != null) return false;
     return switch (func.returns) {
         .boolean, .number, .string, .optional_string, .optional_number => true,
-        .undefined, .object, .unknown, .optional_object, .result, .dict, .bytes => false,
+        .undefined, .object, .unknown, .optional_object, .result, .result_list, .result_fn, .dict, .bytes => false,
     };
 }
 
@@ -3613,7 +3613,7 @@ pub const FlowInterp = struct {
                 if (results) |passed| primitive = combineFlows(primitive, try self.deepFlow(st, &.{passed}));
                 return Value.flowing(primitive);
             },
-            .object, .unknown, .optional_object, .result, .dict, .bytes => {},
+            .object, .unknown, .optional_object, .result, .result_list, .result_fn, .dict, .bytes => {},
         }
 
         var contents: std.ArrayList(Value) = .empty;
@@ -8019,7 +8019,13 @@ const ExportCensusError = error{
 fn censusExports(rows: []const CallbackExport, fixtures: []const ExportFixture) ExportCensusError!usize {
     for (rows) |row| {
         const found = engine.builtin_modules.findExport(row.specifier, row.name) orelse return error.RowWithoutExport;
-        if (found.func.param_types.len < 2 or found.func.param_types[1] != .object) return error.RowWithoutCallbackParam;
+        // A callback is declared `.object`, or `.result_fn` when the export
+        // hands the callback's Result on inside its own.
+        if (found.func.param_types.len < 2 or
+            (found.func.param_types[1] != .object and found.func.param_types[1] != .result_fn))
+        {
+            return error.RowWithoutCallbackParam;
+        }
         var tested = false;
         for (fixtures) |fixture| {
             tested = tested or (std.mem.eql(u8, fixture.specifier, row.specifier) and std.mem.eql(u8, fixture.name, row.name));

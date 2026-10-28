@@ -465,7 +465,7 @@ fn stubValue(returns: mb.ReturnKind, truthy: bool) []const u8 {
     }
     return switch (returns) {
         .optional_string, .string => "\"secret-sentinel\"",
-        .optional_object, .object => "{\"id\":\"1\"}",
+        .optional_object, .object, .result_list, .result_fn => "{\"id\":\"1\"}",
         .result => "{\"ok\":true,\"value\":\"secret-sentinel\"}",
         .boolean => "true",
         .number, .optional_number => "42",

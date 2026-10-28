@@ -434,7 +434,8 @@ pub const fixtures = [_]Fixture{
     .{ .name = "render_script_child_from_input", .property = .injection_safe, .source =
     \\export function handler(req: Request): Proof<Response, "injection_safe"> {
     \\  const q = requestText(req);
-    \\  const text = match (q) { when { ok: true, value: v }: v default: "" };
+    \\  if (!q.ok) { return Response.html(""); }
+    \\  const text = q.value;
     \\  return Response.html(renderToString(h("script", {}, text)));
     \\}
     },
@@ -443,7 +444,8 @@ pub const fixtures = [_]Fixture{
     .{ .name = "render_tag_from_input", .property = .injection_safe, .source =
     \\export function handler(req: Request): Proof<Response, "injection_safe"> {
     \\  const q = requestText(req);
-    \\  const text = match (q) { when { ok: true, value: v }: v default: "" };
+    \\  if (!q.ok) { return Response.html(""); }
+    \\  const text = q.value;
     \\  return Response.html(renderToString(h(text, {})));
     \\}
     },

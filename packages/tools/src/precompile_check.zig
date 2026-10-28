@@ -830,7 +830,7 @@ fn returnKindToTs(kind: @import("zts").module_binding.ReturnKind) []const u8 {
         .boolean => "boolean",
         .number => "number",
         .string => "string",
-        .object => "Record<string, unknown>",
+        .object, .result_list, .result_fn => "Record<string, unknown>",
         .undefined => "undefined",
         .unknown => "unknown",
         .optional_string => "string | undefined",

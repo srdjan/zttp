@@ -824,6 +824,8 @@ pub const PathGenerator = struct {
             .undefined,
             .unknown,
             .result,
+            .result_list,
+            .result_fn,
             .dict,
             .bytes,
             => false,
@@ -1975,6 +1977,8 @@ pub const PathGenerator = struct {
             .undefined,
             .unknown,
             .result,
+            .result_list,
+            .result_fn,
             .dict,
             .bytes,
             => return null,
@@ -3142,7 +3146,7 @@ fn stubValueForType(returns: mb.ReturnKind, truthy: bool) []const u8 {
     }
     return switch (returns) {
         .optional_string, .string => "\"test-value\"",
-        .optional_object, .object => "{\"id\":\"1\"}",
+        .optional_object, .object, .result_list, .result_fn => "{\"id\":\"1\"}",
         .result => "{\"ok\":true,\"value\":{}}",
         .boolean => "true",
         .number, .optional_number => "42",

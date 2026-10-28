@@ -95,10 +95,14 @@ packages/zts/src/contract_builder.zig appendQueryParamsFromSchema catch-block
 packages/zts/src/fault_coverage.zig getOrPutEntry catch-block
 
 # HandlerVerifier checks allocation_failed before it returns a verdict. Its
-# fact, import, walk, checked-flag journal, shared-alias, and diagnostic catches only defer
-# that failure.
+# fact, import, walk, checked-flag journal, shared-alias, Result-binding, Result-cover,
+# and diagnostic catches only defer that failure. A Result binding or cover that fails
+# to append sets allocation_failed, and verify returns error.OutOfMemory instead of a
+# verdict, so the missing binding or cover never reaches a proof.
 packages/zts/src/handler_verifier.zig addDiagnostic catch-poison
 packages/zts/src/handler_verifier.zig collectImportBindings catch-poison
+packages/zts/src/handler_verifier.zig collectResultBindings catch-poison
+packages/zts/src/handler_verifier.zig pushResultCover catch-poison
 packages/zts/src/handler_verifier.zig recordSharedAlias catch-poison
 packages/zts/src/handler_verifier.zig resolveFacts catch-block
 packages/zts/src/handler_verifier.zig scanImports catch-poison
@@ -188,9 +192,7 @@ packages/zts/src/contract_builder.zig appendQueryParamsFromSchema catch-block@2
 packages/zts/src/contract_builder.zig currentPolicyHashRaw catch-trap
 
 # The extra verifier catches record poison; verify checks it before it returns.
-packages/zts/src/handler_verifier.zig scanImports catch-poison@2
 packages/zts/src/handler_verifier.zig walkForResultsAndRefs catch-poison@2
-packages/zts/src/handler_verifier.zig walkForResultsAndRefs catch-poison@3
 
 # Each second narrowing allocation failure returns null. The un-narrowed type
 # is wider, so these sites cannot remove a required diagnostic.
