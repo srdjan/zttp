@@ -185,7 +185,7 @@
     .{ .id = "RES13", .file = "checker.zig", .old = ".failed => |failure| return .{ .rejected = .{", .new = ".failed => |failure| if (failure.node == std.math.maxInt(u32)) return .{ .rejected = .{", .equivalent = null },
     .{ .id = "RES14", .file = "checker.zig", .old = "while (id < current.id) : (id += 1) {", .new = "while (id <= current.id) : (id += 1) {", .equivalent = null },
     .{ .id = "RES15", .file = "checker.zig", .old = "return branch.tag == .branch;", .new = "_ = branch; return true;", .equivalent = null },
-    .{ .id = "RES16", .file = "checker.zig", .old = "if (existing == .proved) grades[results_slot] = edge.grade;", .new = "_ = existing;", .equivalent = null },
-    .{ .id = "RES17", .file = "checker.zig", .old = "if (!has_opcode_dependency and self.results != .not_run) {", .new = "if (false) {", .equivalent = null },
+    .{ .id = "RES16", .file = "checker.zig", .old = "grades[results_slot] = verdict.AssuranceGrade.weakest(existing, edge.grade);", .new = "_ = existing;", .equivalent = null },
+    .{ .id = "RES17", .file = "checker.zig", .old = "if (!has_opcode_dependency and grades[results_slot] != null) {", .new = "if (false) {", .equivalent = null },
     .{ .id = "RES18", .file = "checker.zig", .old = "if (!defined[node.aux]) return resultsFailed(.result_read_unguarded, index);", .new = "", .equivalent = null },
 }

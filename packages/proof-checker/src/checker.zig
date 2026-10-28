@@ -824,14 +824,6 @@ const Session = struct {
         return true;
     }
 
-    fn resultsProved(self: *Session) bool {
-        @setRuntimeSafety(true);
-        return switch (self.results) {
-            .passed => true,
-            .not_run, .failed => false,
-        };
-    }
-
     fn resultsFailed(code: verdict.ReasonCode, node: u32) ResultsVerdict {
         @setRuntimeSafety(true);
         return .{ .failed = .{ .code = code, .node = node } };
@@ -1251,11 +1243,11 @@ const Session = struct {
                 verdict.AssuranceGrade.weakest(existing, edge.grade)
             else
                 edge.grade;
-            // The IR-to-bytecode gap lies under results as it lies under
-            // totality, so a proved results edge ends at the same grade. A
-            // tested edge is already weaker and keeps its grade.
+            // The IR-to-bytecode gap lies under every results claim, checked or
+            // not: the bytecode must run what was analyzed. So every results
+            // grade is capped as totality is (v0.26.0 Decision 15(a)).
             if (grades[results_slot]) |existing| {
-                if (existing == .proved) grades[results_slot] = edge.grade;
+                grades[results_slot] = verdict.AssuranceGrade.weakest(existing, edge.grade);
             }
         }
         // Bytecode opcode meaning is unmodeled, so any claim on totality
@@ -1269,9 +1261,9 @@ const Session = struct {
         {
             return reject(.evidence_check, .trusted_edge_undeclared, .{ .property = .response_total });
         }
-        // A proved results claim rests on the same unmodeled opcode meaning, so
-        // a certificate that makes one without the opcode edge hides it too.
-        if (!has_opcode_dependency and self.results != .not_run) {
+        // Every results claim rests on the same unmodeled opcode meaning, so a
+        // certificate that makes one without the opcode edge hides it too.
+        if (!has_opcode_dependency and grades[results_slot] != null) {
             return reject(.evidence_check, .trusted_edge_undeclared, .{ .property = .results_checked });
         }
 
@@ -1379,8 +1371,8 @@ const Session = struct {
             if (self.policy.requires(obligation.property)) count += 1;
         }
         if (self.policy.requires(.response_total)) count += self.certificate.trusted.len();
-        // The same inventory caps the results grade. Count it once.
-        if (!self.policy.requires(.response_total) and self.policy.requires(.results_checked) and self.resultsProved()) {
+        // The same inventory caps every results grade. Count it once.
+        if (!self.policy.requires(.response_total) and self.policy.requires(.results_checked)) {
             count += self.certificate.trusted.len();
         }
         return count;
@@ -2032,13 +2024,16 @@ test "a guarded artifact is accepted, and its guards are counted apart from its 
     try testing.expectEqual(@as(u8, 1 << 0), result.guards.kinds);
 
     // A covered guard is not a discharged property. Nothing about the guard
-    // appears in the property verdicts. The totality grade is capped at
-    // trusted by the opcode edge, so the overall grade is trusted and the
-    // other seven properties stay tested.
+    // appears in the property verdicts. The totality and results grades are
+    // capped at trusted by the opcode edge, so the overall grade is trusted and
+    // the other six properties stay tested.
     try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.grade());
     inline for (@typeInfo(ps.Property).@"enum".field_names) |field| {
         const property: ps.Property = @fromBackingInt(@intCast(@backingInt(@field(ps.Property, field))));
-        const expected: verdict.AssuranceGrade = if (property == .response_total) .trusted else .tested;
+        const expected: verdict.AssuranceGrade = switch (property) {
+            .response_total, .results_checked => .trusted,
+            else => .tested,
+        };
         try testing.expectEqual(@as(?verdict.AssuranceGrade, expected), result.properties.gradeFor(property));
     }
 }
@@ -2449,8 +2444,14 @@ test "translation cannot omit its trusted opcode dependency" {
 }
 
 const without_totality_requirement = [_]policy_mod.Requirement{
-    .{ .property = .results_checked, .min_grade = .tested },
+    .{ .property = .results_checked, .min_grade = .trusted },
 };
+
+fn expectTotalityOpcodeUndeclared(result: Assessment) !void {
+    @setRuntimeSafety(true);
+    try expectAt(result, .evidence_check, .trusted_edge_undeclared);
+    try testing.expectEqual(verdict.Subject{ .property = .response_total }, result.rejection().?.subject);
+}
 
 fn policyWithoutTotality() Policy {
     @setRuntimeSafety(true);
@@ -2467,8 +2468,8 @@ test "an established totality claim with no translation still needs its opcode e
     var parts = fixture.parts();
     parts.trusted = &.{};
     try encodeGuardedParts(&fixture, parts);
-    try expectAt(check(fixture.inputs(), policyWithoutTotality()), .evidence_check, .trusted_edge_undeclared);
-    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .trusted_edge_undeclared);
+    try expectTotalityOpcodeUndeclared(check(fixture.inputs(), policyWithoutTotality()));
+    try expectTotalityOpcodeUndeclared(check(fixture.inputs(), policy_mod.production));
 }
 
 test "a required totality property with unestablished evidence still needs its opcode edge" {
@@ -2478,7 +2479,7 @@ test "a required totality property with unestablished evidence still needs its o
     parts.evidence = &fixture.evidence;
     parts.trusted = &.{};
     try encodeGuardedParts(&fixture, parts);
-    try expectAt(check(fixture.inputs(), policy_mod.production), .evidence_check, .trusted_edge_undeclared);
+    try expectTotalityOpcodeUndeclared(check(fixture.inputs(), policy_mod.production));
 }
 
 test "translation witnesses with unestablished totality still need the opcode edge" {
@@ -2487,7 +2488,7 @@ test "translation witnesses with unestablished totality still need the opcode ed
     var parts = fixture.parts();
     parts.trusted = &.{};
     try fixture.encodeParts(parts);
-    try expectAt(check(fixture.inputs(), policyWithoutTotality()), .evidence_check, .trusted_edge_undeclared);
+    try expectTotalityOpcodeUndeclared(check(fixture.inputs(), policyWithoutTotality()));
 }
 
 test "an established totality claim with no translation is accepted at trusted with its opcode edge" {
@@ -2873,7 +2874,7 @@ test "refused totality evidence prevents a fabricated-property verdict" {
 test "an optional trusted totality edge is not counted as disclosed" {
     var fixture = try test_support.build();
     var policy = policy_mod.production;
-    const required = [_]policy_mod.Requirement{.{ .property = .results_checked, .min_grade = .tested }};
+    const required = [_]policy_mod.Requirement{.{ .property = .no_secret_leakage, .min_grade = .tested }};
     policy.required = &required;
     const result = check(fixture.inputs(), policy);
     try testing.expectEqual(SemanticState.policy_accepted, result.semantic());
@@ -2907,7 +2908,7 @@ test "refused evidence defeats graded evidence for the same property" {
     var parts = fixture.parts();
     parts.evidence = &evidence;
     try fixture.encodeParts(parts);
-    const required = [_]policy_mod.Requirement{.{ .property = .results_checked, .min_grade = .tested }};
+    const required = [_]policy_mod.Requirement{.{ .property = .results_checked, .min_grade = .trusted }};
     var policy = policy_mod.production;
     policy.required = &required;
     try expectAt(check(fixture.inputs(), policy), .policy, .required_property_not_established);
@@ -3273,7 +3274,7 @@ test "emission ranges reset between function scopes" {
     }
     fixture.len = try encodeBoundTestParts(&fixture.buffer, parts, &fixture.members);
     var policy = policy_mod.production;
-    const required = [_]policy_mod.Requirement{.{ .property = .results_checked, .min_grade = .tested }};
+    const required = [_]policy_mod.Requirement{.{ .property = .results_checked, .min_grade = .trusted }};
     policy.required = &required;
     const result = check(fixture.inputs(), policy);
     try testing.expectEqual(SemanticState.policy_accepted, result.semantic());
@@ -4124,12 +4125,22 @@ test "results: a proved results edge with its opcode edge is accepted at trusted
     try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.properties.gradeFor(.results_checked));
 }
 
-test "results: a tested claim is not re-derived in phase 1" {
+test "results: a tested claim is not re-derived in phase 1 and reads trusted" {
     var rows = honest_rows;
     rows[7] = .{ .tag = .plain, .parent = 3 };
     const result = try checkResultsRows(&rows, test_support.testedFor(1));
     try testing.expect(result.rejection() == null);
-    try testing.expectEqual(@as(?verdict.AssuranceGrade, .tested), result.properties.gradeFor(.results_checked));
+    try testing.expectEqual(@as(?verdict.AssuranceGrade, .trusted), result.properties.gradeFor(.results_checked));
+}
+
+test "results: a tested results claim without its opcode edge rejects under a results-only policy" {
+    const result = try checkResultsCertificate(&honest_rows, test_support.testedFor(1), null, .{
+        .opcode_edge = false,
+        .totality_proved = false,
+        .policy = results_only,
+    });
+    try expectAt(result, .evidence_check, .trusted_edge_undeclared);
+    try testing.expectEqual(verdict.Subject{ .property = .results_checked }, result.rejection().?.subject);
 }
 
 test "results: the results rule cited on another obligation is an invalid edge" {
