@@ -814,7 +814,9 @@ fn toolVerdictsUnder(policy_text: []const u8) !ToolVerdicts {
     defer plan.deinit(allocator);
     var narrow = try zts_expert_narrow.run(allocator, "handler.ts");
     defer narrow.deinit(allocator);
-    const unproven = try pi_goal_check.unprovenGoals(allocator, app_name_handler, "handler.ts", &.{.no_secret_leakage});
+    var check = try common.runProductionCheck(allocator, app_name_handler, "handler.ts", null);
+    defer check.deinit(allocator);
+    const unproven = try pi_goal_check.unprovenFromCheck(allocator, &check, &.{.no_secret_leakage});
     defer allocator.free(unproven);
 
     return .{

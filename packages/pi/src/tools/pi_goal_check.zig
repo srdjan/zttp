@@ -346,27 +346,10 @@ fn writeWitnesses(observed: *Observed, view: zts_cli.precompile.CheckedView) !vo
     }
 }
 
-/// The requested goals the production check does not prove for `source`, as an
-/// owned slice. A goal counts as proven only when the check ran with imports
-/// resolved, left no construct unresolved, and holds the goal's property. An
-/// analysis that cannot run proves nothing, so every goal is then unproven.
-/// This is the same check `aggregate_proof` gates edits with; the bare
-/// single-file FlowChecker cannot see imports and cannot fail `input_validated`
-/// or `pii_contained` by its diagnostics alone.
-pub fn unprovenGoals(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    path: []const u8,
-    goals: []const counterexample.PropertyTag,
-) ![]counterexample.PropertyTag {
-    var check = common.runProductionCheck(allocator, source, path, null) catch |err| switch (err) {
-        error.OutOfMemory, error.PathOutsideWorkspace => return err,
-        else => return allocator.dupe(counterexample.PropertyTag, goals),
-    };
-    defer check.deinit(allocator);
-    return unprovenFromCheck(allocator, &check, goals);
-}
-
+/// The requested goals that `check` does not prove, as an owned slice. A goal
+/// counts as proven only when the check left no construct unresolved and holds
+/// the goal's property. A check that did not reach the verifier has no
+/// properties, so every goal is then unproven.
 pub fn unprovenFromCheck(
     allocator: std.mem.Allocator,
     check: *const zts_cli.precompile.CheckResult,
