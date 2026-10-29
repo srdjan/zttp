@@ -8,6 +8,7 @@ const std = @import("std");
 const counterexample = @import("counterexample.zig");
 const flow_checker = @import("flow_checker.zig");
 const handler_verifier = @import("handler_verifier.zig");
+const RepairIntent = @import("repair_intent.zig").RepairIntent;
 
 pub const SourceSpan = counterexample.SourceSpan;
 
@@ -17,6 +18,10 @@ pub const RepairKind = enum {
     add_fallback_response,
     redact_sensitive_sink,
     validate_before_egress,
+    /// A production diagnostic whose checker-owned repair intent the apply step runs.
+    apply_repair_intent,
+    /// A production diagnostic with no typed repair: the author follows its help text.
+    follow_diagnostic_help,
 
     pub fn asString(self: RepairKind) []const u8 {
         return @tagName(self);
@@ -28,6 +33,8 @@ pub const EditIntentKind = enum {
     replace_sink_expression,
     add_trailing_return,
     validate_before_sink,
+    /// Advice for the author. No tool applies it.
+    manual_edit,
 
     pub fn asString(self: EditIntentKind) []const u8 {
         return @tagName(self);
@@ -39,6 +46,8 @@ pub const EditIntent = struct {
     line: u32,
     column: u32,
     template: []const u8,
+    /// Set for `apply_repair_intent`: the intent name the plan writes as its JSON kind.
+    repair_intent: ?RepairIntent = null,
 };
 
 pub const Plan = struct {
@@ -174,6 +183,69 @@ pub fn fromFlowDiagnostic(
             },
         },
         .input_validated, .pii_contained => null,
+    };
+}
+
+/// Plain fields of one production diagnostic. The caller decides which
+/// `supported_intent` the apply step can run, because this tier cannot import
+/// the apply step.
+pub const ProductionFields = struct {
+    line: u32,
+    column: u32,
+    help: ?[]const u8,
+    result_shape: ?handler_verifier.ResultShape,
+    supported_intent: ?RepairIntent,
+};
+
+/// The summary of `follow_diagnostic_help` when the diagnostic has no help text.
+pub const no_help_summary = "Read the diagnostic message and edit the code at this position.";
+
+/// One plan for one production diagnostic. Precedence: a Result shape, then a
+/// supported repair intent, then the help text.
+pub fn fromProductionDiagnostic(fields: ProductionFields) Plan {
+    const target: SourceSpan = .{ .line = fields.line, .column = fields.column };
+    if (fields.result_shape) |shape| {
+        return .{
+            .kind = .check_result_before_value,
+            .target = target,
+            .behavioral_change = true,
+            .summary = resultSummary(shape),
+            .result_shape = shape,
+            .edit_intent = .{
+                .kind = .insert_guard_before_line,
+                .line = fields.line,
+                .column = fields.column,
+                .template = "if (!result.ok) return Response.json({ error: result.error }, { status: 400 });",
+            },
+        };
+    }
+    if (fields.supported_intent) |intent| {
+        return .{
+            .kind = .apply_repair_intent,
+            .target = target,
+            .behavioral_change = true,
+            .summary = fields.help orelse no_help_summary,
+            // The plan's JSON kind is `repair_intent`, not this kind.
+            .edit_intent = .{
+                .kind = .manual_edit,
+                .line = fields.line,
+                .column = fields.column,
+                .template = "",
+                .repair_intent = intent,
+            },
+        };
+    }
+    return .{
+        .kind = .follow_diagnostic_help,
+        .target = target,
+        .behavioral_change = true,
+        .summary = fields.help orelse no_help_summary,
+        .edit_intent = .{
+            .kind = .manual_edit,
+            .line = fields.line,
+            .column = fields.column,
+            .template = "",
+        },
     };
 }
 

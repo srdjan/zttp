@@ -383,22 +383,31 @@ pub fn writeProductionDiagnostics(
 ) !void {
     for (diagnostics, 0..) |diag, i| {
         if (i > 0) try writer.writeByte(',');
-        var id_buf: [16]u8 = undefined;
-        const id = std.fmt.bufPrint(&id_buf, "diag_{d:0>3}", .{i + 1}) catch unreachable;
-        try writer.writeAll("{\"id\":");
-        try zts.writeJsonString(writer, id);
-        try writer.writeAll(",\"code\":");
-        try zts.writeJsonString(writer, diag.code);
-        try writer.writeAll(",\"severity\":");
-        try zts.writeJsonString(writer, diag.severity);
-        try writer.print(",\"line\":{d},\"column\":{d},\"message\":", .{ diag.line, diag.column });
-        try zts.writeJsonString(writer, diag.message);
-        if (diag.suggestion) |help| {
-            try writer.writeAll(",\"help\":");
-            try zts.writeJsonString(writer, help);
-        }
-        try writer.writeByte('}');
+        try writeProductionDiagnostic(writer, i + 1, diag);
     }
+}
+
+/// Write one production diagnostic as a JSON object with id `diag_NNN`.
+pub fn writeProductionDiagnostic(
+    writer: *std.Io.Writer,
+    number: usize,
+    diag: zts_cli.json_diagnostics.JsonDiagnostic,
+) !void {
+    var id_buf: [16]u8 = undefined;
+    const id = std.fmt.bufPrint(&id_buf, "diag_{d:0>3}", .{number}) catch unreachable;
+    try writer.writeAll("{\"id\":");
+    try zts.writeJsonString(writer, id);
+    try writer.writeAll(",\"code\":");
+    try zts.writeJsonString(writer, diag.code);
+    try writer.writeAll(",\"severity\":");
+    try zts.writeJsonString(writer, diag.severity);
+    try writer.print(",\"line\":{d},\"column\":{d},\"message\":", .{ diag.line, diag.column });
+    try zts.writeJsonString(writer, diag.message);
+    if (diag.suggestion) |help| {
+        try writer.writeAll(",\"help\":");
+        try zts.writeJsonString(writer, help);
+    }
+    try writer.writeByte('}');
 }
 
 /// True when the check stopped before the verifier on a file with no handler
@@ -1014,9 +1023,10 @@ fn writeTriples(w: *std.Io.Writer, triples: []const Triple) !void {
     try w.writeByte(']');
 }
 
-fn isVerifierCode(code: []const u8) bool {
+/// True when the registry lists `code` under `source`.
+pub fn isCodeFrom(source: zts.DiagnosticProjection.Source, code: []const u8) bool {
     for (zts.DiagnosticProjection.allCodes()) |entry| {
-        if (entry.source == .verifier and std.mem.eql(u8, entry.code, code)) return true;
+        if (entry.source == source and std.mem.eql(u8, entry.code, code)) return true;
     }
     return false;
 }
@@ -1097,7 +1107,7 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
 
         var expected: std.ArrayList(Triple) = .empty;
         for (check.json_diagnostics.items) |diag| {
-            if (check.verify_ran and !isVerifierCode(diag.code)) continue;
+            if (isCodeFrom(.flow, diag.code)) continue;
             try expected.append(arena, .{ .code = diag.code, .line = diag.line, .column = diag.column });
         }
         std.mem.sort(Triple, expected.items, {}, Triple.lessThan);
@@ -1123,8 +1133,8 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
         std.debug.print("{s}", .{differences.items});
         return error.CensusDifference;
     }
-    // Every case reaches the comparison, and 116 of them carry a diagnostic, so
+    // Every case reaches the comparison, and 145 of them carry a diagnostic, so
     // the equality is not over empty lists. A corpus change moves these counts.
     try testing.expectEqual(cases.items.len, compared);
-    try testing.expectEqual(@as(usize, 116), with_diagnostics);
+    try testing.expectEqual(@as(usize, 145), with_diagnostics);
 }
