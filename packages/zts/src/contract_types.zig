@@ -452,18 +452,19 @@ pub const HandlerProperties = struct {
     /// Uses fetchSync (conservative write).
     has_egress: bool,
     // --- Data flow provenance (from FlowChecker) ---
+    // These default to false: a property is unproven until its pass proves it.
     /// No {secret} data reaches response bodies or headers, logs, or external
     /// egress. A write to cache or SQL is not a sink. Store readers carry
     /// {unknown}.
-    no_secret_leakage: bool = true,
+    no_secret_leakage: bool = false,
     /// No {credential} data reaches response bodies or headers, logs, or external
     /// egress (URL, headers, or body). The store exclusion matches
     /// `no_secret_leakage`.
-    no_credential_leakage: bool = true,
+    no_credential_leakage: bool = false,
     /// All {user_input} data passes through validation before external egress.
-    input_validated: bool = true,
+    input_validated: bool = false,
     /// {user_input} data does not flow to external egress hosts.
-    pii_contained: bool = true,
+    pii_contained: bool = false,
     // --- Derived properties ---
     /// Deterministic AND read_only.
     /// Safe for at-least-once delivery and automatic retry.
@@ -473,10 +474,10 @@ pub const HandlerProperties = struct {
     max_io_depth: ?u32 = null,
     /// No unvalidated user input reaches sensitive sinks.
     /// Proves SQL injection and XSS prevention.
-    injection_safe: bool = true,
+    injection_safe: bool = false,
     /// No module-scope variable mutations inside handler body.
     /// Proves cross-request data isolation.
-    state_isolated: bool = true,
+    state_isolated: bool = false,
     // --- Fault coverage (from FaultCoverageChecker) ---
     /// Every failable I/O call site has an explicit failure path.
     fault_covered: bool = false,
@@ -678,6 +679,12 @@ test "HandlerProperties.provenSpecNames excludes inverse-polarity facts" {
         .retry_safe = false,
         .deterministic = false,
         .has_egress = true,
+        .no_secret_leakage = true,
+        .no_credential_leakage = true,
+        .input_validated = true,
+        .pii_contained = true,
+        .injection_safe = true,
+        .state_isolated = true,
     };
 
     var buf: [HandlerProperties.max_proven_specs]?[]const u8 = undefined;
@@ -689,7 +696,7 @@ test "HandlerProperties.provenSpecNames excludes inverse-polarity facts" {
         // Fields set false above are not proven, so they are not named.
         try std.testing.expect(!std.mem.eql(u8, name_opt.?, "pure"));
         try std.testing.expect(!std.mem.eql(u8, name_opt.?, "deterministic"));
-        // The default leaves no_secret_leakage true, so it is among the names.
+        // The fixture sets no_secret_leakage true, so it is among the names.
         if (std.mem.eql(u8, name_opt.?, "no_secret_leakage")) found_no_secret_leakage = true;
     }
     try std.testing.expect(found_no_secret_leakage);

@@ -4446,12 +4446,10 @@ test "CHECK preserves legacy preparation diagnostics and recovery boundaries" {
     const CompatibilityStage = enum { strip, parse, contract_without_handler, contract };
     const proof_suggestion =
         "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, " ++
-        "but it does not hold: cost_bounded, deterministic, fault_covered, idempotent, optional_safe, result_safe, state_isolated. " ++
+        "but it does not hold: cost_bounded, deterministic, fault_covered, idempotent, injection_safe, input_validated, no_credential_leakage, no_secret_leakage, optional_safe, pii_contained, result_safe, state_isolated. " ++
         "Return a narrow Proof capsule with only the properties it holds, e.g. " ++
         "`function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | " ++
-        "\"pure\" | \"stateless\" | \"no_secret_leakage\" | " ++
-        "\"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | " ++
-        "\"injection_safe\" | \"canonical\">`.";
+        "\"pure\" | \"stateless\" | \"canonical\">`.";
     const compatibility_cases = [_]struct {
         name: []const u8,
         source: []const u8,
@@ -5993,12 +5991,10 @@ test "CHECK preserves repeated global declaration bindings" {
     };
     const proof_suggestion =
         "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, " ++
-        "but it does not hold: cost_bounded, deterministic, fault_covered, idempotent, optional_safe, result_safe, state_isolated. " ++
+        "but it does not hold: cost_bounded, deterministic, fault_covered, idempotent, injection_safe, input_validated, no_credential_leakage, no_secret_leakage, optional_safe, pii_contained, result_safe, state_isolated. " ++
         "Return a narrow Proof capsule with only the properties it holds, e.g. " ++
         "`function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | " ++
-        "\"pure\" | \"stateless\" | \"no_secret_leakage\" | " ++
-        "\"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | " ++
-        "\"injection_safe\" | \"canonical\">`.";
+        "\"pure\" | \"stateless\" | \"canonical\">`.";
     const cases = [_]struct {
         case: Case,
         source: []const u8,

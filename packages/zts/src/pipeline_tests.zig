@@ -3055,8 +3055,8 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         &abi_contract,
         "isDict",
         "boolean",
-        3327,
-        "7025dd56d378377490e9dff8ce02a350fd54b9f1e4c129421a1a96aecc5670af",
+        3291,
+        "4b1504e4a5886408849782968cefa25043ca98a22d63f2113130a7d3e1bfbfbd",
     );
 
     const helper_source =
@@ -3073,8 +3073,8 @@ test "explicit omitted selection preserves native ABI holes and hides authored s
         &helper_contract,
         "helper",
         "unknown",
-        3331,
-        "00bdc0519ca65b2aa62fe709784e29bb2cba9d39d370dd0335af2bea63b2b796",
+        3295,
+        "996071c646f3b4705c02e1633effa2a087d8ee2872cb4d256d60850f5873b6a5",
     );
 }
 
@@ -3741,7 +3741,7 @@ test "flow projection preserves independent determinism and retry constraints" {
     try testing.expect(!contract.properties.?.idempotent);
 }
 
-test "ModuleAnalysisSession applies the flow rule for a module with no handler" {
+test "ModuleAnalysisSession leaves the flow properties unproven under both rules for a module with no handler" {
     const allocator = testing.allocator;
     inline for (.{ FlowWithoutHandler.keep_defaults, FlowWithoutHandler.unproven }) |rule| {
         var parsed_state = try parseSourceForTest(allocator, "const value = 1;\n");
@@ -3756,8 +3756,8 @@ test "ModuleAnalysisSession applies the flow rule for a module with no handler" 
         var contract = try session.extractContract("no-handler.ts");
         defer contract.deinit(allocator);
         const properties = contract.properties orelse return error.PropertiesMissing;
-        try testing.expectEqual(rule == .keep_defaults, properties.no_secret_leakage);
-        try testing.expectEqual(rule == .keep_defaults, properties.injection_safe);
+        try testing.expectEqual(false, properties.no_secret_leakage);
+        try testing.expectEqual(false, properties.injection_safe);
         try testing.expect(!properties.deterministic);
     }
 }
