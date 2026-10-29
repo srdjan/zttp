@@ -820,6 +820,9 @@ const record_corpus = [_]RecordCase{
         },
         // The 2026-10-27 recording first failed at ZTS203, then reached green.
         .expect_first_attempt_green = false,
+        // The 2026-10-29 recording ended on a ZTS056 refusal, so the committed
+        // handler does not do the task.
+        .expect_committed_intent_pass = false,
     },
     .{
         .name = "jwt-auth",
@@ -853,7 +856,7 @@ const record_corpus = [_]RecordCase{
         // meant to measure. Asking for raw claims and accepting a confirmation
         // instead would count a dropped requirement as convergence, which the
         // phase-7 gate explicitly forbids.
-        .expect_first_attempt_green = false,
+        .expect_first_attempt_green = true,
         .expect_committed_intent_pass = true,
     },
     .{
@@ -904,7 +907,7 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        .expect_first_attempt_green = false,
+        .expect_first_attempt_green = true,
     },
     .{
         // Fence: the `deterministic` loosening. The property moved from "was a
@@ -2512,7 +2515,10 @@ fn coverageBaseline(
     if (provider != headline_provider or !std.mem.eql(u8, model, headline_model) or
         !std.mem.eql(u8, headline_input.slice(), "db16cf2221a6fcc63c7b8cdfbee2c3df52bcad54c5ddf9bf59ba0670e7bc189e"))
         return null;
-    return .{ .minimum_rules = &.{ "ZTS400", "ZTS500", "ZTS502" } };
+    // The 2026-10-29 recording trips ZTS400 (sibling-helper-holes) and, outside
+    // the registry, ZTS056 and ZTS001. Its handlers no longer leave a proof
+    // spec undischarged, so ZTS500 and ZTS502 stay only in the published union.
+    return .{ .minimum_rules = &.{"ZTS400"} };
 }
 
 const CoverageExecution = struct { declared: usize, replayed: usize, artifacts: usize, models: usize };
