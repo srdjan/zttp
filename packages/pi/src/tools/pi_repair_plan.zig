@@ -347,7 +347,15 @@ fn writeObserved(observed: *Observed, view: zts_cli.precompile.CheckedView) !voi
     for (view.verifier_diagnostics) |diag| {
         const loc = mappedLoc(observed, ir_view, diag.node) orelse continue;
         diag_index += 1;
-        const plan = repair_plan.fromVerifierDiagnostic(diag, .{ .line = loc.line, .column = loc.column }) orelse continue;
+        // A verifier error with no typed repair still gets a plan: its help text.
+        const plan = repair_plan.fromVerifierDiagnostic(diag, .{ .line = loc.line, .column = loc.column }) orelse
+            if (diag.severity == .err) repair_plan.fromProductionDiagnostic(.{
+                .line = loc.line,
+                .column = loc.column,
+                .help = diag.help,
+                .result_shape = null,
+                .supported_intent = null,
+            }) else continue;
         const subject_name = repairSubjectName(ir_view, view.atoms, diag);
         observed.plan_count += 1;
         if (observed.plan_count > 1) try pw.writeByte(',');
@@ -1199,4 +1207,22 @@ test "repair plan: a spec assertion the handler does not satisfy is reported wit
     try testing.expect(std.mem.indexOf(u8, text, "\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS500\",\"severity\":\"error\",\"line\":1,\"column\":17,") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\"plans\":[{\"id\":\"rp_001\",\"kind\":\"follow_diagnostic_help\",\"target\":{\"line\":1,\"column\":17},\"behavioral_change\":true,\"summary\":\"remove Date.now(), Math.random(), and performance.now() from the response path.\"") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\"closes\":[\"diag_001\"]") != null);
+}
+
+test "repair plan: a verifier error with no typed repair gets a help plan" {
+    const source =
+        \\let count = 0;
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\    count = count + 1;
+        \\    return Response.json({ count: count });
+        \\}
+        \\
+    ;
+    var result = try planFromSource(testing.allocator, source, "handler.ts", &.{});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"code\":\"ZTS310\",\"kind\":\"module_scope_mutation\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"kind\":\"follow_diagnostic_help\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"edit_intent\":{\"kind\":\"manual_edit\",\"line\":4,\"column\":11") != null);
 }

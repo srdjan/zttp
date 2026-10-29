@@ -61,10 +61,20 @@ pub fn buildRetryBlock(allocator: std.mem.Allocator, plan_json: []const u8) !?[]
         if (shown >= max_templates) break;
         if (plan_val != .object) continue;
         const po = plan_val.object;
-        const intent = objField(po, "edit_intent");
-        const template = (if (intent) |i| strField(i, "template") else null) orelse continue;
+        const intent = objField(po, "edit_intent") orelse continue;
+        const intent_kind = strField(intent, "kind") orelse "";
+        // A help-text plan names no edit, so it is not a compiler-authored fix.
+        if (std.mem.eql(u8, intent_kind, "manual_edit")) continue;
+        const template = strField(intent, "template") orelse continue;
         const kind = strField(po, "kind") orelse "repair";
         const line = lineFromTarget(po);
+        if (template.len == 0) {
+            // A repair-intent plan carries no template: name the intent the apply step runs.
+            const summary = strField(po, "summary") orelse continue;
+            shown += 1;
+            try w.print("  {d}. line {d} [{s}]: {s} (repair intent: {s})\n", .{ shown, line, kind, summary, intent_kind });
+            continue;
+        }
         shown += 1;
         try w.print("  {d}. line {d} [{s}]: {s}\n", .{ shown, line, kind, template });
     }
@@ -185,4 +195,37 @@ test "buildRetryBlock returns null when there are no plans" {
     try testing.expect(empty == null);
     const malformed = (try buildRetryBlock(testing.allocator, "not json"));
     try testing.expect(malformed == null);
+}
+
+test "buildRetryBlock returns null when every plan is a manual_edit help plan" {
+    const plan_json =
+        \\{"ok":false,"plans":[
+        \\{"id":"rp_001","kind":"follow_diagnostic_help","target":{"line":2,"column":3},"behavioral_change":true,
+        \\"summary":"Change the value or the declared type so that the two types match.",
+        \\"edit_intent":{"kind":"manual_edit","line":2,"column":3,"template":""}}
+        \\],"witnesses":[]}
+    ;
+    const block = try buildRetryBlock(testing.allocator, plan_json);
+    try testing.expect(block == null);
+}
+
+test "buildRetryBlock names the repair intent and summary when the template is empty" {
+    const plan_json =
+        \\{"ok":false,"plans":[
+        \\{"id":"rp_001","kind":"apply_repair_intent","target":{"line":3,"column":3},
+        \\"summary":"write x = x + 1 instead of x += 1",
+        \\"edit_intent":{"kind":"replace_compound_assign_with_explicit","line":3,"column":3,"template":""}},
+        \\{"id":"rp_002","kind":"follow_diagnostic_help","target":{"line":5,"column":1},"behavioral_change":true,
+        \\"summary":"help only","edit_intent":{"kind":"manual_edit","line":5,"column":1,"template":""}}
+        \\],"witnesses":[]}
+    ;
+    const block = (try buildRetryBlock(testing.allocator, plan_json)) orelse return error.ExpectedBlock;
+    defer testing.allocator.free(block);
+    try testing.expectEqualStrings(
+        "COMPILER-AUTHORED FIX. The analyzer already derived these exact repairs " ++
+            "for your failed draft. Apply them at the given lines and emit a new, " ++
+            "complete edit:\n" ++
+            "  1. line 3 [apply_repair_intent]: write x = x + 1 instead of x += 1 (repair intent: replace_compound_assign_with_explicit)\n",
+        block,
+    );
 }

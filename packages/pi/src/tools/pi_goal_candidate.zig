@@ -11,6 +11,7 @@ const registry_mod = @import("../registry/registry.zig");
 const json_writer = @import("../providers/json_writer.zig");
 const pi_repair_plan = @import("pi_repair_plan.zig");
 const pi_apply_repair_plan = @import("pi_apply_repair_plan.zig");
+const repair_apply = @import("repair_apply.zig");
 
 const writeJsonString = zts.writeJsonString;
 
@@ -236,7 +237,13 @@ fn parsePlans(allocator: std.mem.Allocator, json_text: []const u8) !ParsedPlans 
     const plans_val = parsed.value.object.get("plans") orelse return .{ .items = try allocator.alloc(ParsedPlan, 0) };
     if (plans_val != .array) return .{ .items = try allocator.alloc(ParsedPlan, 0) };
 
-    const items = try allocator.alloc(ParsedPlan, plans_val.array.items.len);
+    // Only a plan the apply step can run is a candidate. A help-text plan
+    // (`manual_edit`) is advice for the author.
+    var applicable: usize = 0;
+    for (plans_val.array.items) |plan_val| {
+        if (isApplicable(plan_val)) applicable += 1;
+    }
+    const items = try allocator.alloc(ParsedPlan, applicable);
     errdefer allocator.free(items);
     var next: usize = 0;
     errdefer {
@@ -248,6 +255,7 @@ fn parsePlans(allocator: std.mem.Allocator, json_text: []const u8) !ParsedPlans 
         if (plan_val != .object) return error.InvalidToolOutput;
         const id_val = plan_val.object.get("id") orelse return error.InvalidToolOutput;
         if (id_val != .string) return error.InvalidToolOutput;
+        if (!isApplicable(plan_val)) continue;
 
         var raw_buf = registry_mod.helpers.TextBuffer.init(allocator);
         defer raw_buf.deinit();
@@ -267,6 +275,16 @@ fn parsePlans(allocator: std.mem.Allocator, json_text: []const u8) !ParsedPlans 
     }
 
     return .{ .items = items };
+}
+
+/// True when the plan names an edit intent that `repair_apply` runs.
+fn isApplicable(plan_val: std.json.Value) bool {
+    if (plan_val != .object) return false;
+    const intent = plan_val.object.get("edit_intent") orelse return false;
+    if (intent != .object) return false;
+    const kind = intent.object.get("kind") orelse return false;
+    if (kind != .string) return false;
+    return repair_apply.RepairKind.fromString(kind.string) != null;
 }
 
 fn extractEditIntentLine(plan_val: std.json.Value) u32 {
@@ -651,4 +669,18 @@ test "execute does not persist witnesses to the on-disk corpus" {
     const corpus_root = try tmp.childPath(allocator, ".zttp/witnesses");
     defer allocator.free(corpus_root);
     try testing.expect(!zts.file_io.fileExists(allocator, corpus_root));
+}
+
+test "candidateFromSource reports no_repair_plans when every plan is help text" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const n: number = "a";
+        \\  return Response.json({ n: n });
+        \\}
+        \\
+    ;
+    var cand = try candidateFromSource(testing.allocator, source, "handler.ts", &.{}, 4);
+    defer cand.deinit(testing.allocator);
+    try testing.expectEqualStrings("no_repair_plans", cand.reason);
+    try testing.expect(cand.proposed_content == null);
 }

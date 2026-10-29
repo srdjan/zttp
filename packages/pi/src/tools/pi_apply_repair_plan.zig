@@ -379,7 +379,7 @@ fn unsupportedResult(
         allocator,
         intent,
         "unsupported_repair_intent",
-        "pi_apply_repair_plan v1 only supports insert_guard_before_line and add_trailing_return",
+        "pi_apply_repair_plan has no apply step for this edit intent kind",
     );
 }
 
@@ -659,4 +659,16 @@ test "execute dry-runs a source-backed guard insertion" {
         },
         else => return error.TestFailed,
     }
+}
+
+test "execute reports a manual_edit help plan as unsupported" {
+    const input =
+        \\{"path":"handler.ts","source":"function handler() {}","plan":{"id":"rp_001","edit_intent":{"kind":"manual_edit","line":1,"column":1,"template":""}}}
+    ;
+    var result = try executeSemanticPlan(testing.allocator, &.{input});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"unsupported_repair_intent\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "pi_apply_repair_plan has no apply step for this edit intent kind") != null);
+    try testing.expect(result.ui_payload == null);
 }

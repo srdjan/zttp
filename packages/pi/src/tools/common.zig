@@ -1050,6 +1050,30 @@ fn toolTriples(arena: std.mem.Allocator, llm_text: []const u8) !?[]Triple {
     return out.items;
 }
 
+/// One plan in the tool envelope: its kind and the position its edit targets.
+const PlanRef = struct {
+    kind: []const u8,
+    line: i64,
+    column: i64,
+};
+
+fn toolPlans(arena: std.mem.Allocator, llm_text: []const u8) ![]PlanRef {
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, llm_text, .{}) catch return &.{};
+    if (parsed != .object) return &.{};
+    const list = parsed.object.get("plans") orelse return &.{};
+    if (list != .array) return &.{};
+    var out: std.ArrayList(PlanRef) = .empty;
+    for (list.array.items) |item| {
+        const intent = item.object.get("edit_intent").?.object;
+        try out.append(arena, .{
+            .kind = item.object.get("kind").?.string,
+            .line = intent.get("line").?.integer,
+            .column = intent.get("column").?.integer,
+        });
+    }
+    return out.items;
+}
+
 test "R7c census: tool diagnostics equal production over tests/corpus" {
     const pi_repair_plan = @import("pi_repair_plan.zig");
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
@@ -1089,6 +1113,14 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
     var refused: usize = 0;
     var differences: std.ArrayList(u8) = .empty;
     var diff_count: usize = 0;
+    // Every error the check reports, flow errors included, needs a plan at its position.
+    var unplanned: std.ArrayList(u8) = .empty;
+    var unplanned_count: usize = 0;
+    var tier_result: usize = 0;
+    var tier_intent: usize = 0;
+    var tier_help: usize = 0;
+    var tier_other: usize = 0;
+    var error_codes: std.StringHashMapUnmanaged(void) = .empty;
 
     for (cases.items) |path| {
         const source = try zts.file_io.readFile(arena, path, 4 * 1024 * 1024);
@@ -1113,6 +1145,23 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
         std.mem.sort(Triple, expected.items, {}, Triple.lessThan);
 
         compared += 1;
+        const plans = try toolPlans(arena, tool.llm_text);
+        for (plans) |plan| {
+            if (std.mem.eql(u8, plan.kind, "check_result_before_value")) tier_result += 1 else if (std.mem.eql(u8, plan.kind, "apply_repair_intent")) tier_intent += 1 else if (std.mem.eql(u8, plan.kind, "follow_diagnostic_help")) tier_help += 1 else tier_other += 1;
+        }
+        for (check.json_diagnostics.items) |diag| {
+            if (!std.mem.eql(u8, diag.severity, "error")) continue;
+            try error_codes.put(arena, diag.code, {});
+            const planned = for (plans) |plan| {
+                if (plan.line == diag.line and plan.column == diag.column) break true;
+            } else false;
+            if (planned) continue;
+            unplanned_count += 1;
+            var aw: std.Io.Writer.Allocating = .init(arena);
+            try aw.writer.print("{s}: {s}@{d}:{d} has no plan\n", .{ path, diag.code, diag.line, diag.column });
+            try unplanned.appendSlice(arena, aw.written());
+        }
+
         if (expected.items.len > 0) with_diagnostics += 1;
         if (triplesEqual(tool_triples, expected.items)) continue;
         diff_count += 1;
@@ -1129,6 +1178,14 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
         "R7c census: cases={d} compared={d} with_diagnostics={d} refused_before_analysis={d} differences={d}\n",
         .{ cases.items.len, compared, with_diagnostics, refused, diff_count },
     );
+    std.debug.print(
+        "R7c census: error_codes={d} unplanned={d} plans: result={d} intent={d} help={d} other={d}\n",
+        .{ error_codes.count(), unplanned_count, tier_result, tier_intent, tier_help, tier_other },
+    );
+    if (unplanned_count != 0) {
+        std.debug.print("{s}", .{unplanned.items});
+        return error.CensusUnplannedError;
+    }
     if (diff_count != 0) {
         std.debug.print("{s}", .{differences.items});
         return error.CensusDifference;
@@ -1137,4 +1194,10 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
     // the equality is not over empty lists. A corpus change moves these counts.
     try testing.expectEqual(cases.items.len, compared);
     try testing.expectEqual(@as(usize, 145), with_diagnostics);
+    // Every error carries a plan, and the tiers show where plans come from.
+    try testing.expectEqual(@as(usize, 90), error_codes.count());
+    try testing.expectEqual(@as(usize, 1), tier_result);
+    try testing.expectEqual(@as(usize, 18), tier_intent);
+    try testing.expectEqual(@as(usize, 123), tier_help);
+    try testing.expectEqual(@as(usize, 15), tier_other);
 }
