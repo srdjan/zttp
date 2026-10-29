@@ -5,6 +5,8 @@
 //! result-ok narrowing). The expert uses this to suggest a discriminating
 //! guard that would close a leak on one branch without restructuring the
 //! handler; the autoloop uses it as the input to /guard-for synthesis.
+//! When the check stops before the analysis, the result carries the production
+//! diagnostics in a `diagnostics` list and no witnesses, and is not ok.
 
 const std = @import("std");
 const zts = @import("zts");

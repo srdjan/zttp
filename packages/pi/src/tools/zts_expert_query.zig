@@ -40,6 +40,7 @@ pub const tool: registry_mod.ToolDef = .{
     .description = "Query compiler-owned facts through one closed operation. " ++
         "Use meta(view), describe_rule(rule), search_rules(query), " ++
         "modules(file), or effects/holes/narrow(path); " ++
+        "narrow returns diagnostics in place of witnesses when the check stops early; " ++
         "features and restrictions take no second field.",
     .input_schema = "{\"type\":\"object\",\"additionalProperties\":false," ++
         "\"properties\":{" ++
@@ -495,4 +496,8 @@ fn expectAliasBytes(
 
     try testing.expectEqual(canonical_result.ok, alias_result.ok);
     try testing.expectEqualStrings(canonical_result.llm_text, alias_result.llm_text);
+}
+
+test "tool description says narrow returns diagnostics when the check stops early" {
+    try std.testing.expect(std.mem.indexOf(u8, tool.description, "narrow returns diagnostics in place of witnesses when the check stops early") != null);
 }

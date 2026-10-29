@@ -30,10 +30,16 @@ pub fn shouldRunLane(sql_failure: bool, new_violations: u32) bool {
     return !sql_failure and new_violations > 0;
 }
 
-/// Build a retry-guidance block from a pi_repair_plan JSON envelope. Returns
-/// null when the envelope carries no actionable repair plans (the caller then
-/// falls back to the raw diagnostics alone). The returned bytes are owned by
-/// `allocator` and end with a newline.
+const fix_header = "COMPILER-AUTHORED FIX. The analyzer already derived these exact repairs " ++
+    "for your failed draft. Apply them at the given lines and emit a new, " ++
+    "complete edit:\n";
+const advice_header = "COMPILER ADVICE. No tool applies these; make each edit by hand in your new, complete edit:\n";
+
+/// Build a retry-guidance block from a pi_repair_plan JSON envelope: the
+/// compiler-authored fixes first, then the help-text plans as advice. Returns
+/// null when the envelope carries no plan to show (the caller then falls back
+/// to the raw diagnostics alone). The returned bytes are owned by `allocator`
+/// and end with a newline.
 pub fn buildRetryBlock(allocator: std.mem.Allocator, plan_json: []const u8) !?[]u8 {
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, plan_json, .{}) catch return null;
     defer parsed.deinit();
@@ -50,12 +56,6 @@ pub fn buildRetryBlock(allocator: std.mem.Allocator, plan_json: []const u8) !?[]
     defer buf.deinit();
     const w = buf.writer();
 
-    try w.writeAll(
-        "COMPILER-AUTHORED FIX. The analyzer already derived these exact repairs " ++
-            "for your failed draft. Apply them at the given lines and emit a new, " ++
-            "complete edit:\n",
-    );
-
     var shown: usize = 0;
     for (plans.?) |plan_val| {
         if (shown >= max_templates) break;
@@ -63,22 +63,39 @@ pub fn buildRetryBlock(allocator: std.mem.Allocator, plan_json: []const u8) !?[]
         const po = plan_val.object;
         const intent = objField(po, "edit_intent") orelse continue;
         const intent_kind = strField(intent, "kind") orelse "";
-        // A help-text plan names no edit, so it is not a compiler-authored fix.
+        // A help-text plan names no edit; the advice section below lists it.
         if (std.mem.eql(u8, intent_kind, "manual_edit")) continue;
         const template = strField(intent, "template") orelse continue;
         const kind = strField(po, "kind") orelse "repair";
         const line = lineFromTarget(po);
         if (template.len == 0) {
-            // A repair-intent plan carries no template: name the intent the apply step runs.
+            // A repair-intent plan carries no template: name the intent and the tool that runs it.
             const summary = strField(po, "summary") orelse continue;
+            if (shown == 0) try w.writeAll(fix_header);
             shown += 1;
-            try w.print("  {d}. line {d} [{s}]: {s} (repair intent: {s})\n", .{ shown, line, kind, summary, intent_kind });
+            try w.print("  {d}. line {d} [{s}]: {s} (repair intent: {s}; apply it with pi_apply_repair_plan)\n", .{ shown, line, kind, summary, intent_kind });
             continue;
         }
+        if (shown == 0) try w.writeAll(fix_header);
         shown += 1;
         try w.print("  {d}. line {d} [{s}]: {s}\n", .{ shown, line, kind, template });
     }
-    if (shown == 0) return null;
+
+    // Help-text plans are advice: the model makes the edit itself.
+    var advised: usize = 0;
+    for (plans.?) |plan_val| {
+        if (shown + advised >= max_templates) break;
+        if (plan_val != .object) continue;
+        const po = plan_val.object;
+        const intent = objField(po, "edit_intent") orelse continue;
+        const intent_kind = strField(intent, "kind") orelse "";
+        if (!std.mem.eql(u8, intent_kind, "manual_edit")) continue;
+        const summary = strField(po, "summary") orelse continue;
+        if (advised == 0) try w.writeAll(advice_header);
+        advised += 1;
+        try w.print("  {d}. line {d}: {s}\n", .{ shown + advised, lineFromTarget(po), summary });
+    }
+    if (shown + advised == 0) return null;
 
     if (smallestWitness(obj)) |wit| {
         try w.writeAll("FAILING INPUT (smallest counterexample):\n");
@@ -197,7 +214,7 @@ test "buildRetryBlock returns null when there are no plans" {
     try testing.expect(malformed == null);
 }
 
-test "buildRetryBlock returns null when every plan is a manual_edit help plan" {
+test "buildRetryBlock lists help plans as advice, not as a compiler-authored fix" {
     const plan_json =
         \\{"ok":false,"plans":[
         \\{"id":"rp_001","kind":"follow_diagnostic_help","target":{"line":2,"column":3},"behavioral_change":true,
@@ -205,11 +222,16 @@ test "buildRetryBlock returns null when every plan is a manual_edit help plan" {
         \\"edit_intent":{"kind":"manual_edit","line":2,"column":3,"template":""}}
         \\],"witnesses":[]}
     ;
-    const block = try buildRetryBlock(testing.allocator, plan_json);
-    try testing.expect(block == null);
+    const block = (try buildRetryBlock(testing.allocator, plan_json)) orelse return error.ExpectedBlock;
+    defer testing.allocator.free(block);
+    try testing.expectEqualStrings(
+        "COMPILER ADVICE. No tool applies these; make each edit by hand in your new, complete edit:\n" ++
+            "  1. line 2: Change the value or the declared type so that the two types match.\n",
+        block,
+    );
 }
 
-test "buildRetryBlock names the repair intent and summary when the template is empty" {
+test "buildRetryBlock names the repair intent, its apply tool, and the advice" {
     const plan_json =
         \\{"ok":false,"plans":[
         \\{"id":"rp_001","kind":"apply_repair_intent","target":{"line":3,"column":3},
@@ -225,7 +247,9 @@ test "buildRetryBlock names the repair intent and summary when the template is e
         "COMPILER-AUTHORED FIX. The analyzer already derived these exact repairs " ++
             "for your failed draft. Apply them at the given lines and emit a new, " ++
             "complete edit:\n" ++
-            "  1. line 3 [apply_repair_intent]: write x = x + 1 instead of x += 1 (repair intent: replace_compound_assign_with_explicit)\n",
+            "  1. line 3 [apply_repair_intent]: write x = x + 1 instead of x += 1 (repair intent: replace_compound_assign_with_explicit; apply it with pi_apply_repair_plan)\n" ++
+            "COMPILER ADVICE. No tool applies these; make each edit by hand in your new, complete edit:\n" ++
+            "  2. line 5: help only\n",
         block,
     );
 }

@@ -61,6 +61,10 @@ pub const tool: registry_mod.ToolDef = .{
     \\  - pii_contained        (user input must not flow to an external
     \\                          egress host)
     \\
+    \\If the check stops before the analysis (a parse, type, or other
+    \\refusal), the result has ok false, every goal unproven, no
+    \\witnesses, and the refusals in a diagnostics list: fix those first.
+    \\
     \\Each witness carries a concrete Request and the virtual-module stub
     \\sequence that drives the handler into the violating path. Use the
     \\returned witness data to close the concrete path before repair.
@@ -605,4 +609,8 @@ test "a goal check stops at a type error and returns the production diagnostic" 
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
     try testing.expectEqualStrings("{\"goals\":[\"no_secret_leakage\"],\"witnesses\":[],\"unproven\":[\"no_secret_leakage\"],\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS200\",\"severity\":\"error\",\"line\":2,\"column\":3,\"message\":\"type '\\\"a\\\"' is not assignable to type 'number'\",\"help\":\"Change the value or the declared type so that the two types match.\"}],\"ok\":false}\n", result.llm_text);
+}
+
+test "tool description names the early-stop diagnostics key" {
+    try testing.expect(std.mem.indexOf(u8, tool.description, "the refusals in a diagnostics list") != null);
 }
