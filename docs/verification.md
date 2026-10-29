@@ -561,12 +561,15 @@ rather than the consumer checked. The runtime's acceptance line and
   certificate's own inventory and is counted in every result. Closing it means
   giving the kernel the opcode encoding, which is a data coupling to the engine
   that can drift silently; disclosing it is the honest interim.
-- **Two of the three production-floor properties.** The floor requires
-  `response_total`, `results_checked`, and `no_secret_leakage`. `results_checked`
-  and `no_secret_leakage` are disclosed as `tested`: the compiler discharged
-  them and the repository's corpus exercises the analyses that do so, but this
-  consumer did not re-run them. Only `response_total` is re-derived by the
-  consumer today. Reducing that list one family at a time is the ratchet's job.
+- **One of the three production-floor properties.** The floor requires
+  `response_total`, `results_checked`, and `no_secret_leakage`. The consumer
+  re-derives `response_total` and `results_checked`. `no_secret_leakage` is
+  disclosed as `tested`: the compiler discharged it and the repository's corpus
+  exercises the analysis that does so, but this consumer does not re-run it. A
+  `results_checked` claim reads `trusted` even when the consumer re-derives it,
+  because the step from IR to bytecode is trusted for every claim; `zttp proofs
+  verify` names it on its `Checked:` line. Reducing the disclosed list one family
+  at a time is the ratchet's job.
 - **`capability_bounded` is outside the floor.** The producer establishes it
   only for a handler that declares `Effects<...>`, because that declaration is
   the only capability ceiling the compiler checks. The certificate discloses it
@@ -615,9 +618,9 @@ directions, so it cannot drift from what shipped.
 
 Promoting one is the unit of work that shrinks this list: it means adding the
 property's members to the proof IR and its rule to the kernel, not relabelling
-the edge. `results_checked` is the next one - the result-binding dataflow is the
-smallest analysis the kernel does not yet model, and it is the property with the
-most direct security consequence after totality.
+the edge. `results_checked` was promoted this way: the proof IR carries each
+Result definition, guard, read, and escape, and the kernel rule
+`result_reads_guarded` checks that every read is guarded.
 
 ### Residual runtime guard boundary
 

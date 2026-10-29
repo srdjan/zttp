@@ -10,7 +10,64 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+### Added
+
+- **The acceptance kernel re-derives `results_checked`.** The proof IR now
+  carries each Result definition, guard, read, and escape, and the kernel rule
+  `result_reads_guarded` checks that every read of a Result is guarded. The
+  kernel runs this check for every `results_checked` claim that is not
+  `not_established`, and refuses a mismatch, or a check that did not run, as
+  `fabricated_property`. `zttp proofs verify` names the properties the
+  kernel re-derived on a `Checked:` line, for example
+  `Checked:   response_total, results_checked`.
+  A results claim reads `trusted`, not `proved`, because the step from IR to
+  bytecode is trusted for every claim; a results claim without that opcode
+  edge is refused. Over the 93 tracked certificates, the kernel re-derives all
+  93 results claims with no difference from the producer.
+- **Every rejection that `pi_repair_plan` reports carries a repair plan.** A
+  Result mistake that the check stops early (`r.ok === true`, an unknown
+  member, `r.isOk()`, `return r`) gets the typed Result plan that names its
+  subject. A diagnostic whose repair intent `pi_apply_repair_plan` can run gets
+  a plan that names that intent. Every other error gets a help-text plan with
+  edit kind `manual_edit`, which no tool applies. The retry block lists these
+  as advice after the compiler-authored fixes.
+- **Every error code that the diagnostic corpus produces carries help text.**
+  Thirteen codes reported no `suggestion` in `zts check --json`: ZTS002,
+  ZTS012, ZTS013, ZTS026, ZTS045, ZTS047, ZTS200, ZTS201, ZTS202, ZTS203,
+  ZTS209, ZTS502, and ZTS504. Each now carries a fixed help string, and no help
+  string repeats source text.
+
+### Changed
+
+- **The expert tools read the production analysis.** `pi_repair_plan`,
+  `pi_goal_check`, and `zts_expert_narrow` used their own single-file checkers,
+  which could not see imports and gave no ZTS309 diagnostic. They now read the
+  analysis that `zts check` runs. When the check stops before the verifier, the
+  tools return the production diagnostics; a file with no handler keeps the
+  error "no handler function found in file". `pi_repair_plan` also reports the
+  spec, policy, and canonical errors that come after the verifier. Its `ok`
+  still answers the requested goals: it is false while a goal is unproven or a
+  verifier error remains, and an unrelated error does not change it. A census
+  test over the 182 corpus cases holds the tools equal to `zts check`.
+- **A flow property is unproven until its pass proves it.** The defaults of
+  `no_secret_leakage`, `no_credential_leakage`, `input_validated`,
+  `pii_contained`, `injection_safe`, and `state_isolated` are now `false`. A
+  handler whose flow pass runs reads exactly as before; over the 263 tracked
+  `.ts` files only the `holes[].undischarged` lists of 5 codegen testdata
+  files move. A module with no handler now reads the six as unproven, so the
+  default-profile ZTS500 for it lists them.
+
 ### Fixed
+
+- **A precompiled contract discharges its specs against the final
+  properties.** `compileHandler` discharged the handler specs before the flow
+  pass and the verifier set their properties, so `contract.json` could omit a
+  ZTS500 for a declared `no_secret_leakage` over a leak, and could carry one for
+  a proved `result_safe`. It now discharges the specs again after both passes.
+- **A colon with no type reports the missing type.** `const value: = 1;`
+  reported "const declarations must have an initializer" and a second error,
+  "statement is not terminated". It now reports one ZTS002, "expected a type
+  after `:`", at the colon, and parses the initializer.
 
 - **An extensionless relative import resolves against its importer.** CHECK
   resolved `./lib` from `src/handler.ts` to the rooted path `/src/lib.ts`
