@@ -40,7 +40,7 @@ When a gate claims "every X has a Y", join X to Y by an identity that X and Y bo
 
 - Prefer an id the producer writes on purpose. In this envelope every plan lists the ids it closes (`"closes":["diag_003"]`), and every reported diagnostic has an id. The census now requires, for each reported error id, a plan whose `closes` contains that id (`PlanRef.closesId` in the census helpers).
 - Keep a position join only where no shared id exists, and say why beside it. Flow errors are witnesses, not reported diagnostics, so they carry no `diag_` id; the census keeps the position match for them alone.
-- Check each claim the gate is cited for, separately and by its own observable. The census now also fails when production reports an error and the tool result or its JSON says `ok` (R3), and when an error diagnostic has no help text (R8). Each has its own failure list and its own error tag (`CensusFalseOk`, `CensusErrorWithoutHelp`).
+- Check each claim the gate is cited for, separately and by its own observable. The census now also fails when the tool verdict, in the tool result or its JSON, differs from the verdict the production check gives for the requested goals (R3, as the owner narrowed it on 2026-10-29), and when an error diagnostic has no help text (R8). Each has its own failure list and its own error tag (`CensusWrongVerdict`, `CensusErrorWithoutHelp`).
 - Probe the join, not only the input. A delete-its-input probe shows the gate reads its input. To show the join is right, keep the partners present and break the link: shift every `closes` id by one, or force the verdict to pass, and confirm the gate fails.
 
 ## Why This Matters
@@ -79,9 +79,10 @@ for (envelope.error_ids) |id| {
     if (!planned) unplanned_count += 1;
 }
 // ... flow errors keep the position match; every error must carry help text ...
-if (production_errors > 0 and (tool.ok or envelope.ok != false)) false_ok_count += 1;
+// expected_ok: the verifier ran, no verifier or flow error remains, no requested goal is unproven.
+if (tool.ok != expected_ok or envelope.ok != expected_ok) wrong_verdict_count += 1;
 ```
 
-The probes that showed the new checks work, run by hand and not committed: forcing `ok` to true in `pi_repair_plan` gave `false_ok=135`; shifting every `closes` index by one gave 132 errors "with no plan that closes it". Before the fix, neither change would have failed the census.
+The probes that showed the new checks work, run by hand and not committed: forcing `ok` to true in `pi_repair_plan` gave 135 false passes; after the verdict was narrowed to the requested goals, forcing it to false gave `wrong_verdict=60`; shifting every `closes` index by one gave 132 errors "with no plan that closes it". Before the fix, neither change would have failed the census.
 
 Related: [a-gate-can-be-non-vacuous-and-still-porous](a-gate-can-be-non-vacuous-and-still-porous.md) (probe a gate by mutating its inputs), [a-gate-that-counts-nothing-still-reports-a-pass](a-gate-that-counts-nothing-still-reports-a-pass.md) (assert a floor), [difference-is-not-the-claim-and-a-probe-must-compile](difference-is-not-the-claim-and-a-probe-must-compile.md) (assert the claim, not a difference).
