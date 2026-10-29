@@ -11239,3 +11239,47 @@ test "A3: one ZTS309 for each read, with its own line and column" {
     try std.testing.expectEqualSlices(u32, &.{ 4, 4, 5 }, lines[0..count]);
     try std.testing.expectEqualSlices(u32, &.{ 18, 30, 18 }, columns[0..count]);
 }
+
+const ObserverProbe = struct {
+    calls: u32 = 0,
+    verifier_count: usize = 0,
+    flow_count: usize = 0,
+
+    fn onChecked(context: *anyopaque, checked: check_run_mod.CheckedView) error{OutOfMemory}!void {
+        const self: *ObserverProbe = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        self.verifier_count = checked.verifier_diagnostics.len;
+        self.flow_count = checked.flow_diagnostics.len;
+    }
+};
+
+test "observer sees the verifier and flow diagnostics of a leaking handler once" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zttp:env";
+        \\function handler(req: Request): Response { const s: string = env("SECRET_KEY") ?? ""; return Response.text(s); }
+    ;
+    var probe: ObserverProbe = .{};
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "leak.ts", .{
+        .json_mode = true,
+        .observer = .{ .context = &probe, .on_checked = ObserverProbe.onChecked },
+    });
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), probe.calls);
+    try std.testing.expectEqual(@as(usize, 0), probe.verifier_count);
+    try std.testing.expectEqual(@as(usize, 1), probe.flow_count);
+    try std.testing.expectEqual(@as(u32, 1), result.flow_errors + result.flow_warnings);
+}
+
+test "observer is not called for a file with no handler" {
+    const allocator = std.testing.allocator;
+    var probe: ObserverProbe = .{};
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, "const x: number = 1;", "nohandler.ts", .{
+        .json_mode = true,
+        .observer = .{ .context = &probe, .on_checked = ObserverProbe.onChecked },
+    });
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), probe.calls);
+}

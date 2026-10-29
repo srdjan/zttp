@@ -731,6 +731,10 @@ pub const FaultCoverageChecker = fault_coverage.FaultCoverageChecker;
 /// produced it - compare `SpecDiagnostic` and `StripDiagnostic`.
 pub const VerifierDiagnostic = handler_verifier.Diagnostic;
 
+/// One finding from the flow checker, with its location and kind.
+/// Qualified for the same reason as `VerifierDiagnostic`.
+pub const FlowDiagnostic = flow_checker.Diagnostic;
+
 /// Search for a concrete input that refutes a proof obligation.
 pub const solveCounterexample = counterexample.solve;
 

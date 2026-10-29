@@ -34,6 +34,23 @@ const extractContractFromAnalysis = contract_mod.extractContractFromAnalysis;
 const validateContractPolicyInputs = contract_mod.validateContractPolicyInputs;
 const appendPolicyDiagnostics = contract_mod.appendPolicyDiagnostics;
 
+/// What a check hands an observer once the verifier and flow passes have run.
+/// Everything is borrowed and lives only during the callback: copy what you keep.
+pub const CheckedView = struct {
+    ir_view: zts.IrView,
+    atoms: *zts.AtomTable,
+    handler_fn: zts.parser.NodeIndex,
+    verifier_diagnostics: []const zts.VerifierDiagnostic,
+    flow_diagnostics: []const zts.FlowDiagnostic,
+};
+
+/// Callback run once per check that reaches the verifier and flow passes.
+/// It may fail only with `OutOfMemory`; keep any other failure in `context`.
+pub const CheckedObserver = struct {
+    context: *anyopaque,
+    on_checked: *const fn (context: *anyopaque, checked: CheckedView) error{OutOfMemory}!void,
+};
+
 /// Run the full analysis pipeline without generating bytecode.
 /// Returns a CheckResult with all verification, contract, and coverage data.
 pub const CheckOptions = struct {
@@ -52,6 +69,10 @@ pub const CheckOptions = struct {
     /// revision, so a helper is analyzed at the revision of the handler that
     /// imports it. Borrowed for the call.
     import_reader: ?ImportReader = null,
+    /// Called once after the verifier and flow passes, when the file has a
+    /// handler and the earlier stages passed. Observes only: the check's
+    /// output does not change.
+    observer: ?CheckedObserver = null,
 };
 
 pub fn runCheckOnlyWithOptions(
@@ -695,6 +716,13 @@ fn runCheckOnParsedSource(
         _ = try analysis.runVerifier(hf);
         _ = try analysis.runFlow(hf);
         const checked = analysis.checkedModule() orelse return error.AnalysisPassIncomplete;
+        if (opts.observer) |obs| try obs.on_checked(obs.context, .{
+            .ir_view = ir_view,
+            .atoms = atoms,
+            .handler_fn = hf,
+            .verifier_diagnostics = checked.verifierDiagnostics(),
+            .flow_diagnostics = checked.flowDiagnostics(),
+        });
         result.verify_ran = true;
         result.stages_run.insert(.verifier);
         result.stages_run.insert(.flow);
