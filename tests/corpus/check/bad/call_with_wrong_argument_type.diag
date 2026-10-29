@@ -1,2 +1,2 @@
 stages: strip,parse,imports,boolean,types,strict
-{"code":"ZTS203","severity":"error","message":"argument type does not match parameter type: expected number, got \"a\"","file":"check/bad/call_with_wrong_argument_type.ts","line":7,"column":22,"suggestion":null,"repair_intent":null}
+{"code":"ZTS203","severity":"error","message":"argument type does not match parameter type: expected number, got \"a\"","file":"check/bad/call_with_wrong_argument_type.ts","line":7,"column":22,"suggestion":"Pass a value of the parameter type, or change the parameter type.","repair_intent":null}
