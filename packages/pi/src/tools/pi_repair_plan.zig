@@ -1016,7 +1016,7 @@ test "repair plan: a type error stops the check and returns the production diagn
     try testing.expect(std.mem.endsWith(
         u8,
         result.llm_text,
-        "\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS200\",\"severity\":\"error\",\"line\":2,\"column\":3,\"message\":\"type '\\\"a\\\"' is not assignable to type 'number'\"}],\"witnesses\":[],\"plans\":[]}\n",
+        "\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS200\",\"severity\":\"error\",\"line\":2,\"column\":3,\"message\":\"type '\\\"a\\\"' is not assignable to type 'number'\",\"help\":\"Change the value or the declared type so that the two types match.\"}],\"witnesses\":[],\"plans\":[]}\n",
     ));
 }
 

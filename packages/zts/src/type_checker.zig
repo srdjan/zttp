@@ -24,6 +24,8 @@ const json_utils = @import("zts-base").json_utils;
 
 /// Help for a ZTS200 or ZTS203 whose source type has an absent case (A3, Decision 40).
 const undefined_source_help_text = "the value may be undefined: check it first, or use `?? fallback`";
+const mismatch_help_text = "Change the value or the declared type so that the two types match.";
+const arg_type_help_text = "Pass a value of the parameter type, or change the parameter type.";
 const object = @import("zts-engine").object;
 const context = @import("zts-engine").context;
 const type_pool_mod = @import("type_pool.zig");
@@ -1434,7 +1436,7 @@ pub const TypeChecker = struct {
                                         .kind = .type_mismatch,
                                         .node = node,
                                         .message = "cannot assign to readonly property",
-                                        .help = null,
+                                        .help = "Assign to a mutable property, or remove the readonly modifier.",
                                     });
                                 }
                             }
@@ -3000,7 +3002,7 @@ pub const TypeChecker = struct {
                 .kind = .missing_field,
                 .node = node,
                 .message = "property does not exist on type",
-                .help = null,
+                .help = "Read a property that the type declares, or add the property to the type.",
             });
             return null_type_idx;
         }
@@ -3039,7 +3041,7 @@ pub const TypeChecker = struct {
                             .kind = .type_mismatch,
                             .node = node,
                             .message = "must narrow union before calling this member",
-                            .help = null,
+                            .help = "Check which union member the value holds before the call.",
                         });
                         return null_type_idx;
                     }
@@ -4338,7 +4340,7 @@ pub const TypeChecker = struct {
                         self.env.pool.formatType(v.constraint, &constraint_buf),
                     },
                     "a type argument does not satisfy its constraint",
-                    null,
+                    "Pass a type argument that satisfies the constraint, or relax the constraint.",
                 );
             },
         }
@@ -4904,7 +4906,7 @@ pub const TypeChecker = struct {
     }
 
     fn addTypeMismatch(self: *TypeChecker, node: NodeIndex, expected: TypeIndex, got: TypeIndex) void {
-        const help = self.undefinedSourceHelp(expected, got);
+        const help = self.undefinedSourceHelp(expected, got) orelse mismatch_help_text;
         var buf: [256]u8 = undefined;
         const expected_str = self.env.pool.formatType(expected, buf[0..128]);
         const got_str = self.env.pool.formatType(got, buf[128..256]);
@@ -4941,7 +4943,7 @@ pub const TypeChecker = struct {
             .kind = .arg_count_mismatch,
             .node = node,
             .message = msg,
-            .help = null,
+            .help = "Pass exactly as many arguments as the function declares parameters.",
             .allocated = !std.mem.eql(u8, msg, "wrong number of arguments"),
         });
     }
@@ -4964,7 +4966,7 @@ pub const TypeChecker = struct {
             .kind = .arg_type_mismatch,
             .node = node,
             .message = msg,
-            .help = self.undefinedSourceHelp(expected, got),
+            .help = self.undefinedSourceHelp(expected, got) orelse arg_type_help_text,
             .allocated = !std.mem.eql(u8, msg, "argument type does not match parameter type"),
         });
     }
@@ -5159,6 +5161,12 @@ fn checkTypedSource(source: []const u8, expect_errors: u32, expect_warnings: ?u3
 /// is satisfied by any error at all, including one from a different rule, so a
 /// test that means to pin a particular refusal names it.
 fn checkTypedSourceSaying(source: []const u8, expect_errors: u32, needle: []const u8) !void {
+    return checkTypedSourceHelping(source, expect_errors, needle, null);
+}
+
+/// `checkTypedSourceSaying` plus the exact help text of the matched diagnostic,
+/// when `expected_help` is given.
+fn checkTypedSourceHelping(source: []const u8, expect_errors: u32, needle: []const u8, expected_help: ?[]const u8) !void {
     const allocator = std.testing.allocator;
     var atoms = @import("zts-engine").atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -5190,7 +5198,10 @@ fn checkTypedSourceSaying(source: []const u8, expect_errors: u32, needle: []cons
     try std.testing.expectEqual(expect_errors, errors);
 
     for (checker.getDiagnostics()) |diag| {
-        if (std.mem.indexOf(u8, diag.message, needle) != null) return;
+        if (std.mem.indexOf(u8, diag.message, needle) != null) {
+            if (expected_help) |want| try std.testing.expectEqualStrings(want, diag.help orelse "(null)");
+            return;
+        }
     }
     for (checker.getDiagnostics()) |diag| {
         std.debug.print("diagnostic: {s}\n", .{diag.message});
@@ -9515,7 +9526,7 @@ test "ZTS203 help names the undefined check when the source type admits undefine
     }
 }
 
-test "ZTS200 has no help when the source type cannot be undefined" {
+test "ZTS200 carries the generic mismatch help when the source type cannot be undefined" {
     const allocator = std.testing.allocator;
     const seen = try typedDiagnostics(allocator,
         \\function run(input: number): number {
@@ -9527,6 +9538,44 @@ test "ZTS200 has no help when the source type cannot be undefined" {
     try std.testing.expectEqual(@as(usize, 1), countKind(seen, .type_mismatch));
     for (seen) |d| {
         if (d.kind != .type_mismatch) continue;
-        try std.testing.expect(d.help == null);
+        try std.testing.expectEqualStrings(mismatch_help_text, d.help orelse "(null)");
     }
+}
+
+test "TypeChecker: each type refusal carries a fixed help string" {
+    try checkTypedSourceHelping(
+        \\function handler(req: Request): Response {
+        \\  const s: string = 1 + 2;
+        \\  return Response.text(s);
+        \\}
+    , 1, "is not assignable to type", "Change the value or the declared type so that the two types match.");
+    try checkTypedSourceHelping(
+        \\function double(x: number): number { return x * 2; }
+        \\function handler(req: Request): Response {
+        \\  const n = double(1, 2);
+        \\  return Response.json({ n: n });
+        \\}
+    , 1, "wrong number of arguments", "Pass exactly as many arguments as the function declares parameters.");
+    try checkTypedSourceHelping(
+        \\function double(x: number): number { return x * 2; }
+        \\function handler(req: Request): Response {
+        \\  const n = double("a");
+        \\  return Response.json({ n: n });
+        \\}
+    , 1, "argument type does not match", "Pass a value of the parameter type, or change the parameter type.");
+    try checkTypedSourceHelping(
+        \\structural Point = { x: number; y: number };
+        \\function handler(req: Request): Response {
+        \\  const p: Point = { x: 1, y: 2 };
+        \\  const z = p.z;
+        \\  return Response.text(String(z));
+        \\}
+    , 1, "property does not exist", "Read a property that the type declares, or add the property to the type.");
+    try checkTypedSourceHelping(
+        \\function idOf<T extends { id: string }>(v: T): string { return v.id; }
+        \\function handler(req: Request): Response {
+        \\  const s = idOf({ name: "no id" });
+        \\  return Response.json({ s: s });
+        \\}
+    , 1, "does not satisfy constraint", "Pass a type argument that satisfies the constraint, or relax the constraint.");
 }

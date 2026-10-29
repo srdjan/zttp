@@ -11881,3 +11881,23 @@ test "source observer cleans partial printable captures through allocation failu
     try std.testing.checkAllAllocationFailures(std.testing.allocator, Context.run, .{&partial_failures});
     try std.testing.expect(partial_failures > 0);
 }
+
+test "a parse refusal carries a fixed help string" {
+    const Case = struct { source: []const u8, help: []const u8 };
+    const cases = [_]Case{
+        .{ .source = "const x = ;", .help = "Write a complete expression or statement at this position." },
+        .{ .source = "const x = 0x;", .help = "Write decimal digits, or 0x, 0o, 0b with digits. Use no underscore and no leading zero. Give an exponent a digit." },
+        .{ .source = "const s = \"a\\qb\";", .help = "Replace the escape with a supported one, or remove the backslash." },
+        .{ .source = "const s = \"a\\\nb\";", .help = "Join the string onto one line, or write the newline as \\n." },
+        .{ .source = "const x = 1\nconst y = 2;", .help = "Add a semicolon at the end of the statement." },
+        .{ .source = "function f() { return await g(); }", .help = "Remove await. Handlers run synchronously, so call the function directly." },
+    };
+    for (cases) |case| {
+        var parser = try Parser.init(std.testing.allocator, case.source);
+        defer parser.deinit();
+        _ = parser.parse() catch {};
+        const errors = parser.getErrors();
+        try std.testing.expect(errors.len >= 1);
+        try std.testing.expectEqualStrings(case.help, errors[0].suggestion orelse "(null)");
+    }
+}

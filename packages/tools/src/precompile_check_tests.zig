@@ -3999,12 +3999,29 @@ fn expectLegacyCompoundDiagnostic(
     try std.testing.expectEqualStrings("handler.ts", actual.file);
     try std.testing.expectEqual(expected.line, actual.line);
     try std.testing.expectEqual(expected.column, actual.column);
-    if (expected.suggestion) |suggestion| {
-        try std.testing.expectEqualStrings(suggestion, actual.suggestion.?);
-    } else {
-        try std.testing.expect(actual.suggestion == null);
-    }
+    // A row that names no suggestion expects the fixed help of its code.
+    const suggestion = expected.suggestion orelse fixedHelp(expected.code);
+    try std.testing.expectEqualStrings(suggestion, actual.suggestion orelse "(null)");
     try std.testing.expect(actual.repair_intent == null);
+}
+
+/// The fixed help string each refusal code carries when its site writes none.
+fn fixedHelp(code: []const u8) []const u8 {
+    const rows = [_]struct { code: []const u8, help: []const u8 }{
+        .{ .code = "ZTS002", .help = "Write a complete expression or statement at this position." },
+        .{ .code = "ZTS012", .help = "Write decimal digits, or 0x, 0o, 0b with digits. Use no underscore and no leading zero. Give an exponent a digit." },
+        .{ .code = "ZTS013", .help = "Replace the escape with a supported one, or remove the backslash." },
+        .{ .code = "ZTS026", .help = "Remove await. Handlers run synchronously, so call the function directly." },
+        .{ .code = "ZTS045", .help = "Join the string onto one line, or write the newline as \\n." },
+        .{ .code = "ZTS047", .help = "Add a semicolon at the end of the statement." },
+        .{ .code = "ZTS200", .help = "Change the value or the declared type so that the two types match." },
+        .{ .code = "ZTS201", .help = "Read a property that the type declares, or add the property to the type." },
+        .{ .code = "ZTS202", .help = "Pass exactly as many arguments as the function declares parameters." },
+        .{ .code = "ZTS203", .help = "Pass a value of the parameter type, or change the parameter type." },
+        .{ .code = "ZTS209", .help = "Pass a type argument that satisfies the constraint, or relax the constraint." },
+    };
+    for (rows) |row| if (std.mem.eql(u8, row.code, code)) return row.help;
+    return "(null)";
 }
 
 test "CHECK preserves repeated-name fallback through growth and source offsets" {

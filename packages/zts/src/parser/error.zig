@@ -167,6 +167,20 @@ pub const ErrorList = struct {
         return false;
     }
 
+    /// The fixed help for a kind whose sites do not each write their own. A string
+    /// never names the source text, which can carry a secret.
+    fn defaultSuggestion(kind: ErrorKind) ?[]const u8 {
+        return switch (kind) {
+            .unexpected_token => "Write a complete expression or statement at this position.",
+            .invalid_number => "Write decimal digits, or 0x, 0o, 0b with digits. Use no underscore and no leading zero. Give an exponent a digit.",
+            .invalid_escape_sequence => "Replace the escape with a supported one, or remove the backslash.",
+            .string_line_continuation => "Join the string onto one line, or write the newline as \\n.",
+            .missing_semicolon => "Add a semicolon at the end of the statement.",
+            .invalid_await => "Remove await. Handlers run synchronously, so call the function directly.",
+            else => null,
+        };
+    }
+
     /// Add an error
     pub fn addError(
         self: *ErrorList,
@@ -184,6 +198,7 @@ pub const ErrorList = struct {
             .message = message,
             .token_text = null,
             .expected = null,
+            .suggestion = defaultSuggestion(kind),
         }) catch {
             self.errors_truncated = true;
         };
@@ -247,6 +262,7 @@ pub const ErrorList = struct {
             .message = message,
             .token_text = token_text,
             .expected = null,
+            .suggestion = defaultSuggestion(kind),
         }) catch {
             self.errors_truncated = true;
         };

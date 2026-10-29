@@ -3195,7 +3195,7 @@ test "arrow lookahead keeps grouped controls outside signatures" {
         try std.testing.expectEqual(@as(u32, 1), errors[0].location.line);
         try std.testing.expectEqual(@as(u32, 16), errors[0].location.column);
         try std.testing.expect(errors[0].expected == null);
-        try std.testing.expect(errors[0].suggestion == null);
+        try std.testing.expectEqualStrings("Write a complete expression or statement at this position.", errors[0].suggestion orelse "(null)");
         try std.testing.expectEqual(@as(usize, 0), parser.type_store.function_signatures.items.len);
         try std.testing.expectEqual(@as(usize, 0), parser.type_store.parameter_annotations.items.len);
     }
@@ -13931,7 +13931,7 @@ test "direct single-module full and sound extraction preserve contract bytes" {
         .{ .kind = .nested_hole, .source = "function outer(): string {\n  function inner(): number { return hole(); }\n  return \"ok\";\n}\nfunction handler(req: Request): Response { return Response.text(outer()); }\n", .json_hash = 0xed5fd52b8053a03e },
         .{ .kind = .module_arrow, .source = "const helper = (value: string): string => hole();\nfunction handler(req: Request): Response { return Response.text(helper(\"x\")); }\n", .json_hash = 0xd1af807307203432 },
         .{ .kind = .nonliteral_effect, .source = "function handler(req: Request): Effects<Response, string> { return Response.text(\"ok\"); }\n", .json_hash = 0x17e8ff0a6b406869 },
-        .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0xd0737c3aea5ffcd1 },
+        .{ .kind = .unknown_capability, .source = "function handler(req: Request): Effects<Response, \"unpublished-capability\"> { return Response.text(\"ok\"); }\n", .json_hash = 0xb4e2262a15886ce4 },
     };
     const fields = @typeInfo(ContractConsumerCase).@"enum".field_names;
     try std.testing.expectEqual(@as(usize, 9), fixtures.len);

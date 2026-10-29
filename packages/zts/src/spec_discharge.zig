@@ -177,12 +177,13 @@ pub const v1_spec_names = blk: {
 };
 
 /// Nearest-match suggestion: when `name` is within Levenshtein distance 2 of
-/// a candidate, return an owned `did you mean ...` string, else null. The
+/// a candidate, return an owned `did you mean ...` string, else an owned copy of `fallback`. The
 /// distance-2 cap keeps further misses from being more noise than signal.
 fn nearestSuggestion(
     allocator: std.mem.Allocator,
     name: []const u8,
     candidates: []const []const u8,
+    fallback: []const u8,
 ) !?[]const u8 {
     var best_name: ?[]const u8 = null;
     var best_dist: usize = std.math.maxInt(usize);
@@ -193,13 +194,13 @@ fn nearestSuggestion(
             best_name = cand;
         }
     }
-    if (best_name == null or best_dist > 2) return null;
+    if (best_name == null or best_dist > 2) return try allocator.dupe(u8, fallback);
     return try allocator.print("did you mean `{s}`?", .{best_name.?});
 }
 
 /// ZTS502 suggestion for an unknown handler spec name. Caller frees.
 pub fn suggestionForUnknown(allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
-    return nearestSuggestion(allocator, name, &v1_spec_names);
+    return nearestSuggestion(allocator, name, &v1_spec_names, "Name one of the supported handler properties.");
 }
 
 /// Iterative Levenshtein distance with a single row buffer. Bounded
@@ -594,7 +595,7 @@ fn escapeSuggestion(
 
 /// ZTS502 suggestion for an unknown capsule property name. Caller frees.
 fn suggestionForUnknownCapsule(allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
-    return nearestSuggestion(allocator, name, &capsule_property_names);
+    return nearestSuggestion(allocator, name, &capsule_property_names, "Name one of the supported handler properties.");
 }
 
 /// Discharge a helper's declared capsule properties against the facts the
@@ -683,7 +684,7 @@ pub const CapabilitySet = std.EnumSet(module_binding.ModuleCapability);
 
 /// ZTS504 suggestion for an unknown capability name. Caller frees.
 pub fn suggestionForUnknownCapability(allocator: std.mem.Allocator, name: []const u8) !?[]const u8 {
-    return nearestSuggestion(allocator, name, &effect_capability_names);
+    return nearestSuggestion(allocator, name, &effect_capability_names, "Name a capability that a zttp module declares.");
 }
 
 /// Discharge a function's declared `Effects<...>` ceiling against the
@@ -760,7 +761,7 @@ pub fn dischargeEffects(
         const cap = std.meta.stringToEnum(module_binding.ModuleCapability, name) orelse {
             const spec_name = try allocator.dupe(u8, name);
             errdefer allocator.free(spec_name);
-            const suggestion = try nearestSuggestion(allocator, name, &effect_capability_names);
+            const suggestion = try nearestSuggestion(allocator, name, &effect_capability_names, "Name a capability that a zttp module declares.");
             errdefer if (suggestion) |s| allocator.free(s);
             try out.append(allocator, .{
                 .kind = .effect_unknown_capability,
@@ -1332,7 +1333,7 @@ test "dischargeSpecs ZTS502 unknown name carries a nearest-match suggestion" {
     try std.testing.expect(std.mem.indexOf(u8, diags.items[0].suggestion.?, "idempotent") != null);
 }
 
-test "dischargeSpecs ZTS502 with far-off name yields no suggestion" {
+test "dischargeSpecs ZTS502 with far-off name yields the fixed suggestion" {
     const allocator = std.testing.allocator;
 
     const props = HandlerProperties{
@@ -1352,7 +1353,7 @@ test "dischargeSpecs ZTS502 with far-off name yields no suggestion" {
         diags.deinit(allocator);
     }
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
-    try std.testing.expect(diags.items[0].suggestion == null);
+    try std.testing.expectEqualStrings("Name one of the supported handler properties.", diags.items[0].suggestion orelse "(null)");
 }
 
 test "dischargeSpecs ZTS501 incompatible carries an actionable suggestion" {
@@ -1498,4 +1499,20 @@ test "dischargeCapsule a lower-bound row still refuses every property" {
     var diags = try dischargeCapsule(allocator, &declared, facts);
     defer freeDiags(allocator, &diags);
     try std.testing.expectEqual(@as(usize, 4), diags.items.len);
+}
+
+test "an unknown spec, capsule, or capability name carries a fixed suggestion" {
+    const allocator = std.testing.allocator;
+
+    const declared_spec: [1][]const u8 = .{"banana"};
+    var specs = try dischargeCapsule(allocator, &declared_spec, CapsuleFacts{});
+    defer freeDiags(allocator, &specs);
+    try std.testing.expectEqualStrings("Name one of the supported handler properties.", specs.items[0].suggestion orelse "(null)");
+
+    var inferred = CapabilitySet.empty;
+    inferred.insert(.env);
+    const declared_cap: [1][]const u8 = .{"teleport"};
+    var effects = try dischargeEffects(allocator, &declared_cap, inferred, false, false);
+    defer freeDiags(allocator, &effects);
+    try std.testing.expectEqualStrings("Name a capability that a zttp module declares.", effects.items[0].suggestion orelse "(null)");
 }

@@ -621,5 +621,5 @@ test "a goal check stops at a type error and returns the production diagnostic" 
     }}, "{\"path\":\"handler.ts\",\"goals\":[\"no_secret_leakage\"]}");
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expectEqualStrings("{\"goals\":[\"no_secret_leakage\"],\"witnesses\":[],\"unproven\":[\"no_secret_leakage\"],\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS200\",\"severity\":\"error\",\"line\":2,\"column\":3,\"message\":\"type '\\\"a\\\"' is not assignable to type 'number'\"}],\"ok\":false}\n", result.llm_text);
+    try testing.expectEqualStrings("{\"goals\":[\"no_secret_leakage\"],\"witnesses\":[],\"unproven\":[\"no_secret_leakage\"],\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS200\",\"severity\":\"error\",\"line\":2,\"column\":3,\"message\":\"type '\\\"a\\\"' is not assignable to type 'number'\",\"help\":\"Change the value or the declared type so that the two types match.\"}],\"ok\":false}\n", result.llm_text);
 }

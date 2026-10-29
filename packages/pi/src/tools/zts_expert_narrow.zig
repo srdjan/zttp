@@ -270,5 +270,5 @@ test "narrow stops at a type error and returns the production diagnostic" {
     }});
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
-    try testing.expectEqualStrings("{\"path\":\"handler.ts\",\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS200\",\"severity\":\"error\",\"line\":2,\"column\":3,\"message\":\"type '\\\"a\\\"' is not assignable to type 'number'\"}],\"witnesses\":[]}", result.llm_text);
+    try testing.expectEqualStrings("{\"path\":\"handler.ts\",\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS200\",\"severity\":\"error\",\"line\":2,\"column\":3,\"message\":\"type '\\\"a\\\"' is not assignable to type 'number'\",\"help\":\"Change the value or the declared type so that the two types match.\"}],\"witnesses\":[]}", result.llm_text);
 }
