@@ -1050,28 +1050,53 @@ fn toolTriples(arena: std.mem.Allocator, llm_text: []const u8) !?[]Triple {
     return out.items;
 }
 
-/// One plan in the tool envelope: its kind and the position its edit targets.
+/// One plan in the tool envelope: its kind, the position its edit targets,
+/// and the ids it closes.
 const PlanRef = struct {
     kind: []const u8,
     line: i64,
     column: i64,
+    closes: []const std.json.Value,
+
+    fn closesId(self: PlanRef, id: []const u8) bool {
+        for (self.closes) |c| if (c == .string and std.mem.eql(u8, c.string, id)) return true;
+        return false;
+    }
 };
 
-fn toolPlans(arena: std.mem.Allocator, llm_text: []const u8) ![]PlanRef {
-    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, llm_text, .{}) catch return &.{};
-    if (parsed != .object) return &.{};
-    const list = parsed.object.get("plans") orelse return &.{};
-    if (list != .array) return &.{};
-    var out: std.ArrayList(PlanRef) = .empty;
-    for (list.array.items) |item| {
-        const intent = item.object.get("edit_intent").?.object;
-        try out.append(arena, .{
-            .kind = item.object.get("kind").?.string,
-            .line = intent.get("line").?.integer,
-            .column = intent.get("column").?.integer,
-        });
+/// The tool envelope parts the census checks: its verdict, its plans, and the
+/// ids of the error diagnostics it reports.
+const ToolEnvelope = struct {
+    ok: ?bool,
+    plans: []PlanRef,
+    error_ids: [][]const u8,
+};
+
+fn toolEnvelope(arena: std.mem.Allocator, llm_text: []const u8) !ToolEnvelope {
+    const empty: ToolEnvelope = .{ .ok = null, .plans = &.{}, .error_ids = &.{} };
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, llm_text, .{}) catch return empty;
+    if (parsed != .object) return empty;
+    var plans: std.ArrayList(PlanRef) = .empty;
+    if (parsed.object.get("plans")) |list| {
+        for (list.array.items) |item| {
+            const intent = item.object.get("edit_intent").?.object;
+            try plans.append(arena, .{
+                .kind = item.object.get("kind").?.string,
+                .line = intent.get("line").?.integer,
+                .column = intent.get("column").?.integer,
+                .closes = item.object.get("closes").?.array.items,
+            });
+        }
     }
-    return out.items;
+    var error_ids: std.ArrayList([]const u8) = .empty;
+    if (parsed.object.get("diagnostics")) |list| {
+        for (list.array.items) |item| {
+            if (!std.mem.eql(u8, item.object.get("severity").?.string, "error")) continue;
+            try error_ids.append(arena, item.object.get("id").?.string);
+        }
+    }
+    const ok: ?bool = if (parsed.object.get("ok")) |v| (if (v == .bool) v.bool else null) else null;
+    return .{ .ok = ok, .plans = plans.items, .error_ids = error_ids.items };
 }
 
 test "R7c census: tool diagnostics equal production over tests/corpus" {
@@ -1121,6 +1146,10 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
     var tier_help: usize = 0;
     var tier_other: usize = 0;
     var error_codes: std.StringHashMapUnmanaged(void) = .empty;
+    var helpless: std.ArrayList(u8) = .empty;
+    var helpless_count: usize = 0;
+    var false_ok: std.ArrayList(u8) = .empty;
+    var false_ok_count: usize = 0;
 
     for (cases.items) |path| {
         const source = try zts.file_io.readFile(arena, path, 4 * 1024 * 1024);
@@ -1145,13 +1174,39 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
         std.mem.sort(Triple, expected.items, {}, Triple.lessThan);
 
         compared += 1;
-        const plans = try toolPlans(arena, tool.llm_text);
+        const envelope = try toolEnvelope(arena, tool.llm_text);
+        const plans = envelope.plans;
         for (plans) |plan| {
             if (std.mem.eql(u8, plan.kind, "check_result_before_value")) tier_result += 1 else if (std.mem.eql(u8, plan.kind, "apply_repair_intent")) tier_intent += 1 else if (std.mem.eql(u8, plan.kind, "follow_diagnostic_help")) tier_help += 1 else tier_other += 1;
         }
+        // A reported error is planned when a plan closes its id, so one plan
+        // cannot stand for two errors that share a position.
+        for (envelope.error_ids) |id| {
+            const planned = for (plans) |plan| {
+                if (plan.closesId(id)) break true;
+            } else false;
+            if (planned) continue;
+            unplanned_count += 1;
+            var aw: std.Io.Writer.Allocating = .init(arena);
+            try aw.writer.print("{s}: {s} has no plan that closes it\n", .{ path, id });
+            try unplanned.appendSlice(arena, aw.written());
+        }
+        var production_errors: usize = 0;
         for (check.json_diagnostics.items) |diag| {
             if (!std.mem.eql(u8, diag.severity, "error")) continue;
+            production_errors += 1;
             try error_codes.put(arena, diag.code, {});
+            // Every error carries help text (R8).
+            const help = diag.suggestion orelse "";
+            if (help.len == 0) {
+                helpless_count += 1;
+                var aw: std.Io.Writer.Allocating = .init(arena);
+                try aw.writer.print("{s}: {s}@{d}:{d} has no help text\n", .{ path, diag.code, diag.line, diag.column });
+                try helpless.appendSlice(arena, aw.written());
+            }
+            // A flow error is a witness, not a reported diagnostic: its plan
+            // targets the error's position.
+            if (!isCodeFrom(.flow, diag.code)) continue;
             const planned = for (plans) |plan| {
                 if (plan.line == diag.line and plan.column == diag.column) break true;
             } else false;
@@ -1160,6 +1215,13 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
             var aw: std.Io.Writer.Allocating = .init(arena);
             try aw.writer.print("{s}: {s}@{d}:{d} has no plan\n", .{ path, diag.code, diag.line, diag.column });
             try unplanned.appendSlice(arena, aw.written());
+        }
+        // A remaining error must not read as a pass, in the tool result or its JSON (R3).
+        if (production_errors > 0 and (tool.ok or envelope.ok != false)) {
+            false_ok_count += 1;
+            var aw: std.Io.Writer.Allocating = .init(arena);
+            try aw.writer.print("{s}: {d} error(s) but the tool reports ok\n", .{ path, production_errors });
+            try false_ok.appendSlice(arena, aw.written());
         }
 
         if (expected.items.len > 0) with_diagnostics += 1;
@@ -1179,12 +1241,20 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
         .{ cases.items.len, compared, with_diagnostics, refused, diff_count },
     );
     std.debug.print(
-        "R7c census: error_codes={d} unplanned={d} plans: result={d} intent={d} help={d} other={d}\n",
-        .{ error_codes.count(), unplanned_count, tier_result, tier_intent, tier_help, tier_other },
+        "R7c census: error_codes={d} unplanned={d} helpless={d} false_ok={d} plans: result={d} intent={d} help={d} other={d}\n",
+        .{ error_codes.count(), unplanned_count, helpless_count, false_ok_count, tier_result, tier_intent, tier_help, tier_other },
     );
     if (unplanned_count != 0) {
         std.debug.print("{s}", .{unplanned.items});
         return error.CensusUnplannedError;
+    }
+    if (helpless_count != 0) {
+        std.debug.print("{s}", .{helpless.items});
+        return error.CensusErrorWithoutHelp;
+    }
+    if (false_ok_count != 0) {
+        std.debug.print("{s}", .{false_ok.items});
+        return error.CensusFalseOk;
     }
     if (diff_count != 0) {
         std.debug.print("{s}", .{differences.items});

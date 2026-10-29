@@ -22,13 +22,15 @@ pub const tool: registry_mod.ToolDef = .{
     .context_policy = .exact,
     .model_exposure = .visible,
     .description =
-    \\Generate compiler-native typed repair plans for a handler.
-    \\The tool runs handler verification and property witness analysis,
-    \\then returns structured repair intents for the narrow supported v1
-    \\cases: unchecked Result.value, unchecked optional use, missing
-    \\fallback Response, no_secret_leakage, no_credential_leakage,
-    \\injection_safe, input_validated, and pii_contained. The compiler
-    \\does not edit files; apply one plan,
+    \\Generate compiler-native repair plans for a handler.
+    \\The tool runs the production check and reports every rejection with
+    \\at least one plan. A plan with an edit template, such as an
+    \\unchecked Result.value guard, is a concrete edit. An
+    \\apply_repair_intent plan names a repair intent in edit_intent.kind:
+    \\pass it to pi_apply_repair_plan. A follow_diagnostic_help plan has
+    \\edit_intent.kind manual_edit: follow its summary by hand, because no
+    \\tool applies it. ok is false while any rejection remains. The
+    \\compiler does not edit files; apply one plan,
     \\then re-run the veto / goal check until the proof passes.
     ,
     .input_schema =
@@ -737,6 +739,8 @@ test "a repair plan reads the same from two different workspaces" {
 test "tool description names repair plan authority boundary" {
     try testing.expect(std.mem.indexOf(u8, tool.description, "does not edit files") != null);
     try testing.expect(std.mem.indexOf(u8, tool.description, "unchecked Result.value") != null);
+    try testing.expect(std.mem.indexOf(u8, tool.description, "pass it to pi_apply_repair_plan") != null);
+    try testing.expect(std.mem.indexOf(u8, tool.description, "edit_intent.kind manual_edit: follow its summary by hand") != null);
 }
 
 test "concreteTemplate uses extracted subject names" {
