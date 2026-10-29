@@ -408,6 +408,34 @@ pub const TypeChecker = struct {
         };
     }
 
+    /// Whether `raw` is the JSON value type, or a nullable, union, or
+    /// intersection that has it as a member, the way `isDictOperandType`
+    /// treats a Dict member.
+    fn isJsonValueOperandType(self: *const TypeChecker, raw: TypeIndex, depth: u8) bool {
+        if (raw == null_type_idx or depth > 8) return false;
+        const pool = self.env.pool;
+        const t = pool.unwrapNominal(self.env.resolveRef(raw));
+        if (t == pool.idx_json_value) return true;
+        const tag = pool.getTag(t) orelse return false;
+        switch (tag) {
+            .t_nullable => return self.isJsonValueOperandType(pool.getNullableInner(t), depth + 1),
+            .t_union => {
+                for (pool.getUnionMembers(t)) |m| {
+                    if (self.isJsonValueOperandType(m, depth + 1)) return true;
+                }
+                return false;
+            },
+            .t_intersection => {
+                for (pool.getIntersectionMembers(t)) |m| {
+                    if (self.isJsonValueOperandType(m, depth + 1)) return true;
+                }
+                return false;
+            },
+            // exhaustive: any other type is not the JSON value type and holds no member of it.
+            else => return false,
+        }
+    }
+
     /// Whether a read on a value of this type reads a Dict entry. A union, a
     /// nullable, or an intersection with any Dict member counts: a Dict
     /// member or index read yields `undefined` at run time on every Dict
@@ -524,7 +552,20 @@ pub const TypeChecker = struct {
         const previous = self.report_inference_diagnostics;
         self.report_inference_diagnostics = false;
         defer self.report_inference_diagnostics = previous;
-        if (!self.isDictOperandType(self.inferType(operand), 0)) return;
+        const operand_type = self.inferType(operand);
+        // The `.value` of `requestJson` and `parseJson` (`TypePool.idx_json_value`)
+        // is a Dict at run time. It narrows like `unknown`, so only the read is refused.
+        if (self.isJsonValueOperandType(operand_type, 0)) {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .missing_field,
+                .node = read,
+                .message = "a parsed JSON value is a Dict: a member or index read yields undefined",
+                .help = "a parsed JSON value is a Dict: decode it with decodeJson(schema, text), or check isDict(v) and read with dictGet(v, key)",
+            });
+            return;
+        }
+        if (!self.isDictOperandType(operand_type, 0)) return;
         self.addDiagnostic(.{
             .severity = .err,
             .kind = .missing_field,

@@ -184,6 +184,13 @@ pub const TypePool = struct {
     /// The refused-expression type (`TypeTag.t_error`). Created with the pool
     /// so asking for it cannot fail.
     idx_error: TypeIndex = null_type_idx,
+    /// The `.value` of `requestJson` and `parseJson`. It is a second
+    /// `t_unknown_type` node, so every rule that reads the tag treats it as
+    /// `unknown`: a guard narrows it, it flows where `unknown` flows. Only the
+    /// checker's read refusal tells the two apart, by this index, because at
+    /// run time the value is a Dict and a member or index read is undefined.
+    /// It is created after `idx_error`, so every earlier index is unchanged.
+    idx_json_value: TypeIndex = null_type_idx,
 
     pub fn init(allocator: std.mem.Allocator) TypePool {
         var pool = TypePool{
@@ -206,6 +213,7 @@ pub const TypePool = struct {
         pool.idx_never = pool.addNode(allocator, .{ .tag = .t_never, .data = .{} });
         pool.idx_unknown = pool.addNode(allocator, .{ .tag = .t_unknown_type, .data = .{} });
         pool.idx_error = pool.addNode(allocator, .{ .tag = .t_error, .data = .{} });
+        pool.idx_json_value = pool.addNode(allocator, .{ .tag = .t_unknown_type, .data = .{} });
         return pool;
     }
 
@@ -1525,7 +1533,7 @@ pub const TypePool = struct {
         if (source == target) return true;
         // Unknown target accepts anything; null_type_idx means inference
         // produced no result, so skip rather than reject.
-        if (target == null_type_idx or target == self.idx_unknown) return true;
+        if (target == null_type_idx or target == self.idx_unknown or target == self.idx_json_value) return true;
         if (source == null_type_idx) return true;
         // A refused expression (`t_error`) was already reported where it was
         // refused; reporting it again where its value is used is the second

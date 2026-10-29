@@ -10496,7 +10496,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\  return Response.text(again());
     \\}
     },
-    .{ .name = "d5_requestjson", .expect = "clean", .source =
+    .{ .name = "d5_requestjson", .expect = "ZTS201@5,ZTS201@5", .source =
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
     \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
@@ -10644,14 +10644,6 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\  return Response.json({ a: 0 });
     \\}
     },
-    .{ .name = "n31_result_fields", .expect = "ZTS500@2", .source =
-    \\import { parseJson } from "zttp:json";
-    \\function handler(req: Request): Response {
-    \\  const parsed = parseJson("{}");
-    \\  if (!parsed.ok) return Response.json({ error: parsed.error.kind }, { status: 400 });
-    \\  return Response.json({ a: parsed.value.name });
-    \\}
-    },
     .{ .name = "p12_unknown_read", .expect = "clean", .source =
     \\function handler(req: Request): Response {
     \\  const u: unknown = undefined;
@@ -10719,14 +10711,6 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\  };
     \\  if (p === undefined) return Response.json({ a: a });
     \\  return Response.json({ a: a, b: p.age });
-    \\}
-    },
-    .{ .name = "q23_result_value_member_read", .expect = "ZTS500@2", .source =
-    \\import { parseJson } from "zttp:json";
-    \\function handler(req: Request): Response {
-    \\  const parsed = parseJson("{}");
-    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
-    \\  return Response.json({ a: parsed.value.name.first });
     \\}
     },
     .{ .name = "q33_ternary_guard_const", .expect = "clean", .source =
@@ -11017,6 +11001,206 @@ const absent_read_dict = [_]AbsentReadCase{
     \\}
     },
 };
+
+// A3 part 2a (Decision 44a): the `.value` of `requestJson` and `parseJson` is a
+// Dict at run time, so a member, index, optional-chain, or computed read on it
+// is refused as ZTS201. A guard, `decodeJson`, a stringify, and every other
+// source of `unknown` stay as they were.
+const absent_read_json_value = [_]AbsentReadCase{
+    .{ .name = "requestjson_member", .expect = "ZTS201@4", .source =
+    \\function handler(req: Request): Response {
+    \\  const parsed = requestJson(req);
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  return Response.json({ a: parsed.value.name });
+    \\}
+    },
+    .{ .name = "parsejson_index", .expect = "ZTS201@5", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  return Response.json({ a: parsed.value["name"] });
+    \\}
+    },
+    .{ .name = "requestjson_optional_chain", .expect = "ZTS201@5", .source =
+    \\function handler(req: Request): Response {
+    \\  const parsed = requestJson(req);
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const v = parsed.value;
+    \\  return Response.json({ a: v?.name });
+    \\}
+    },
+    .{ .name = "parsejson_computed", .expect = "ZTS201@7", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const v = parsed.value;
+    \\  const k = "name";
+    \\  return Response.json({ a: v[k] });
+    \\}
+    },
+    .{ .name = "requestjson_nested_member", .expect = "ZTS201@5", .source =
+    \\function handler(req: Request): Response {
+    \\  const parsed = requestJson(req);
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const v = parsed.value;
+    \\  return Response.json({ a: v.a.b });
+    \\}
+    },
+    .{ .name = "parsejson_error_field_read_stays_accepted_value_member_refused", .expect = "ZTS201@5", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{}");
+    \\  if (!parsed.ok) return Response.json({ error: parsed.error.kind }, { status: 400 });
+    \\  return Response.json({ a: parsed.value.name });
+    \\}
+    },
+    .{ .name = "parsejson_chained_member_read", .expect = "ZTS201@5", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  return Response.json({ a: parsed.value.name.first });
+    \\}
+    },
+    .{ .name = "parsejsonbytes_member", .expect = "ZTS201@5", .source =
+    \\import { parseJsonBytes } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJsonBytes(requestBody(req));
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  return Response.json({ a: parsed.value.name });
+    \\}
+    },
+    .{ .name = "control_parsejsonbytes_isdict_dictget", .expect = "ZTS500@3", .source =
+    \\import { parseJsonBytes } from "zttp:json";
+    \\import { dictGet } from "zttp:collections";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJsonBytes(requestBody(req));
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const v = parsed.value;
+    \\  if (!isDict(v)) return Response.json({ error: "not_dict" }, { status: 400 });
+    \\  return Response.json({ a: dictGet(v, "name") });
+    \\}
+    },
+    .{ .name = "json_value_in_ternary_union", .expect = "ZTS201@7", .source =
+    \\function handler(req: Request): Response {
+    \\  const parsed = requestJson(req);
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const other: string = "x";
+    \\  const flag = req.method === "GET";
+    \\  const v = flag ? parsed.value : other;
+    \\  return Response.json({ a: v.name });
+    \\}
+    },
+    .{ .name = "json_value_or_undefined", .expect = "ZTS201@5", .source =
+    \\function handler(req: Request): Response {
+    \\  const parsed = requestJson(req);
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const v = req.method === "GET" ? parsed.value : undefined;
+    \\  return Response.json({ a: v.name });
+    \\}
+    },
+    .{ .name = "json_value_with_a_record", .expect = "ZTS201@7", .source =
+    \\structural R = { n: number };
+    \\function handler(req: Request): Response {
+    \\  const parsed = requestJson(req);
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const r: R = { n: 1 };
+    \\  const v = req.method === "GET" ? r : parsed.value;
+    \\  return Response.json({ a: v.n });
+    \\}
+    },
+    .{ .name = "control_union_of_plain_records", .expect = "clean", .source =
+    \\structural A = { n: number };
+    \\structural B = { n: number; m: number };
+    \\function handler(req: Request): Response {
+    \\  const a: A = { n: 1 };
+    \\  const b: B = { n: 2, m: 3 };
+    \\  const v = req.method === "GET" ? a : b;
+    \\  return Response.json({ a: v.n });
+    \\}
+    },
+    .{ .name = "control_isdict_then_dictget", .expect = "ZTS500@2", .source =
+    \\import { dictGet } from "zttp:collections";
+    \\function handler(req: Request): Response {
+    \\  const parsed = requestJson(req);
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const v = parsed.value;
+    \\  if (!isDict(v)) return Response.json({ error: "not_dict" }, { status: 400 });
+    \\  return Response.json({ a: dictGet(v, "name") });
+    \\}
+    },
+    .{ .name = "control_typeof_string_narrows", .expect = "ZTS500@2", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Response {
+    \\  const parsed = parseJson("{}");
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const v = parsed.value;
+    \\  if (typeof v === "string") return Response.json({ a: v.length });
+    \\  return Response.json({ a: 0 });
+    \\}
+    },
+    .{ .name = "control_stringify_then_validate", .expect = "ZTS500@3", .source =
+    \\import { schemaCompile, validateJson } from "zttp:validate";
+    \\schemaCompile("todo", "{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"}},\"required\":[\"title\"]}");
+    \\function handler(req: Request): Response {
+    \\  const parsed = requestJson(req);
+    \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  const checked = validateJson("todo", JSON.stringify(parsed.value));
+    \\  if (!checked.ok) return Response.json({ error: "invalid" }, { status: 400 });
+    \\  return Response.json({ a: checked.value.title });
+    \\}
+    },
+    .{ .name = "control_decodejson_member_read", .expect = "ZTS500@2", .source =
+    \\import { decodeJson } from "zttp:decode";
+    \\function handler(req: Request): Response {
+    \\  const decoded = decodeJson("todo", "{}");
+    \\  if (!decoded.ok) return Response.json({ error: "bad" }, { status: 400 });
+    \\  return Response.json({ a: decoded.value.title });
+    \\}
+    },
+    .{ .name = "control_jwtverify_value_after_ok_check", .expect = "ZTS401@5,ZTS500@2", .source =
+    \\import { jwtVerify } from "zttp:auth";
+    \\function handler(req: Request): Response {
+    \\  const r = jwtVerify("token", "secret");
+    \\  if (!r.ok) return Response.json({ error: "bad" }, { status: 401 });
+    \\  return Response.json({ claims: r.value });
+    \\}
+    },
+    .{ .name = "control_fetch_json_member_read", .expect = "ZTS500@2", .source =
+    \\import { fetch } from "zttp:fetch";
+    \\function handler(req: Request): Response {
+    \\  const res = fetch("https://api.example.com/a");
+    \\  if (!res.ok) return Response.json({ error: "upstream" }, { status: 502 });
+    \\  const j = res.json();
+    \\  return Response.json({ a: j.name });
+    \\}
+    },
+};
+
+test "A3 part 2a: a member or index read on a parsed JSON value is refused as ZTS201" {
+    try expectAbsentReadCases(&absent_read_json_value);
+}
+
+test "A3 part 2a: the ZTS201 repair on a parsed JSON value names decodeJson and dictGet" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const parsed = requestJson(req);
+        \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });
+        \\  return Response.json({ a: parsed.value.name });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "json-value.ts", .{ .json_mode = true });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const diagnostic = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS201", diagnostic.code);
+    try std.testing.expectEqualStrings(
+        "a parsed JSON value is a Dict: decode it with decodeJson(schema, text), or check isDict(v) and read with dictGet(v, key)",
+        diagnostic.suggestion.?,
+    );
+}
 
 test "A3: a read on a value that may be undefined is refused as ZTS309" {
     try expectAbsentReadCases(&absent_read_refused);

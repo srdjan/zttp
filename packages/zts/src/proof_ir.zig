@@ -2373,7 +2373,9 @@ test "the ambient Result globals match the ones abi_types registers" {
     var lines = std.mem.splitScalar(u8, source, '\n');
     while (lines.next()) |line| {
         if (std.mem.indexOf(u8, line, "registerGlobalFn(env, \"") == null) continue;
-        if (std.mem.indexOf(u8, line, ", result_record);") == null) continue;
+        // `requestJson` registers the same record with a JSON `value`.
+        if (std.mem.indexOf(u8, line, ", result_record);") == null and
+            std.mem.indexOf(u8, line, ", json_result_record);") == null) continue;
         registered += 1;
         try testing.expect(std.mem.indexOf(u8, line, "\"requestJson\"") != null or
             std.mem.indexOf(u8, line, "\"requestText\"") != null);

@@ -218,10 +218,19 @@ fn populateRequestReaders(env: *TypeEnv, pool: *TypePool, allocator: std.mem.All
         .{ .name_start = errs_n.start, .name_len = errs_n.len, .type_idx = pool.idx_unknown, .optional = true },
     }));
     if (result_record == null_type_idx) return;
+    // The same record with a JSON `value` (Decision 44a): the document is a
+    // Dict at run time, so the checker refuses a member or index read on it.
+    const json_result_record = pool.markResultRecord(allocator, pool.addRecord(allocator, &.{
+        .{ .name_start = ok_n.start, .name_len = ok_n.len, .type_idx = pool.idx_boolean, .optional = false },
+        .{ .name_start = val_n.start, .name_len = val_n.len, .type_idx = pool.idx_json_value, .optional = true },
+        .{ .name_start = err_n.start, .name_len = err_n.len, .type_idx = pool.idx_unknown, .optional = true },
+        .{ .name_start = errs_n.start, .name_len = errs_n.len, .type_idx = pool.idx_unknown, .optional = true },
+    }));
+    if (json_result_record == null_type_idx) return;
 
     registerGlobalFn(env, "requestBody", request, pool.idx_bytes);
     registerGlobalFn(env, "requestText", request, result_record);
-    registerGlobalFn(env, "requestJson", request, result_record);
+    registerGlobalFn(env, "requestJson", request, json_result_record);
 }
 
 /// `isDict(x)` and `isBytes(x)` are the intrinsic type guards of spec 5.7 and

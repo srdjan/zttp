@@ -156,6 +156,16 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
         .{ .name_start = err_n.start, .name_len = err_n.len, .type_idx = pool.idx_string, .optional = true },
         .{ .name_start = errs_n.start, .name_len = errs_n.len, .type_idx = pool.idx_unknown, .optional = true },
     }));
+    // `parseJson` and `parseJsonBytes` answer the same record with a JSON
+    // `value` (Decision 44a): the document is a Dict at run time, so a member
+    // or index read on it is refused. The `.result` kind cannot carry that, so
+    // the two exports are named.
+    const json_result_type = pool.markResultRecord(allocator, pool.addRecord(allocator, &.{
+        .{ .name_start = ok_n.start, .name_len = ok_n.len, .type_idx = pool.idx_boolean, .optional = false },
+        .{ .name_start = val_n.start, .name_len = val_n.len, .type_idx = pool.idx_json_value, .optional = true },
+        .{ .name_start = err_n.start, .name_len = err_n.len, .type_idx = pool.idx_string, .optional = true },
+        .{ .name_start = errs_n.start, .name_len = errs_n.len, .type_idx = pool.idx_unknown, .optional = true },
+    }));
     const optional_string = pool.addNullable(allocator, pool.idx_string);
     const object_ref = pool.addRef(allocator, "object");
     const optional_object = pool.addNullable(allocator, object_ref);
@@ -171,8 +181,11 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
             // truncated to one, so `init` typed as nothing at all. It is the
             // first customer of the general mechanism rather than a case the
             // mechanism has to keep working around.
+            const is_parse_json = std.mem.eql(u8, binding.specifier, "zttp:json") and (std.mem.eql(u8, func.name, "parseJson") or std.mem.eql(u8, func.name, "parseJsonBytes"));
             const return_type_idx = if (func.signature) |declared|
                 env.resolveType(declared.returns)
+            else if (is_parse_json)
+                json_result_type
             else
                 mapReturnKind(
                     func.returns,
