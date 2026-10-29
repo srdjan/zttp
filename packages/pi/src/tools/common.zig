@@ -981,3 +981,150 @@ test "tool preparation preserves typed and raw virtual source profiles" {
     try std.testing.expectError(error.UnsupportedSourceExtension, admitToolSource(allocator, typed, "handler.js"));
     try std.testing.expectEqual(zts.SourceKind.typescript, try admitToolSource(allocator, "const broken = ;", "handler.ts"));
 }
+
+const Triple = struct {
+    code: []const u8,
+    line: u64,
+    column: u64,
+
+    fn lessThan(_: void, a: Triple, b: Triple) bool {
+        const order = std.mem.order(u8, a.code, b.code);
+        if (order != .eq) return order == .lt;
+        if (a.line != b.line) return a.line < b.line;
+        return a.column < b.column;
+    }
+
+    fn eql(a: Triple, b: Triple) bool {
+        return std.mem.eql(u8, a.code, b.code) and a.line == b.line and a.column == b.column;
+    }
+};
+
+fn triplesEqual(a: []const Triple, b: []const Triple) bool {
+    if (a.len != b.len) return false;
+    for (a, b) |x, y| if (!Triple.eql(x, y)) return false;
+    return true;
+}
+
+fn writeTriples(w: *std.Io.Writer, triples: []const Triple) !void {
+    try w.writeByte('[');
+    for (triples, 0..) |t, i| {
+        if (i > 0) try w.writeAll(", ");
+        try w.print("{s}@{d}:{d}", .{ t.code, t.line, t.column });
+    }
+    try w.writeByte(']');
+}
+
+fn isVerifierCode(code: []const u8) bool {
+    for (zts.DiagnosticProjection.allCodes()) |entry| {
+        if (entry.source == .verifier and std.mem.eql(u8, entry.code, code)) return true;
+    }
+    return false;
+}
+
+/// The tool's diagnostics as sorted triples, or null when the result is a tool
+/// error that holds no JSON envelope.
+fn toolTriples(arena: std.mem.Allocator, llm_text: []const u8) !?[]Triple {
+    const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, llm_text, .{}) catch return null;
+    if (parsed != .object) return null;
+    const list = parsed.object.get("diagnostics") orelse return null;
+    if (list != .array) return null;
+    var out: std.ArrayList(Triple) = .empty;
+    for (list.array.items) |item| {
+        try out.append(arena, .{
+            .code = item.object.get("code").?.string,
+            .line = @intCast(item.object.get("line").?.integer),
+            .column = @intCast(item.object.get("column").?.integer),
+        });
+    }
+    std.mem.sort(Triple, out.items, {}, Triple.lessThan);
+    return out.items;
+}
+
+test "R7c census: tool diagnostics equal production over tests/corpus" {
+    const pi_repair_plan = @import("pi_repair_plan.zig");
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var io_backend = std.Io.Threaded.init(arena, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    const corpus_root = "tests/corpus";
+    var cases: std.ArrayList([]const u8) = .empty;
+    {
+        var dir = try std.Io.Dir.cwd().openDir(io, corpus_root, .{ .iterate = true });
+        defer dir.close(io);
+        var walker = try dir.walk(arena);
+        defer walker.deinit();
+        while (try walker.next(io)) |entry| {
+            if (entry.kind != .file or !std.mem.endsWith(u8, entry.path, ".ts")) continue;
+            try cases.append(arena, try std.fs.path.join(arena, &.{ corpus_root, entry.path }));
+        }
+    }
+    std.mem.sort([]const u8, cases.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.lessThan(u8, a, b);
+        }
+    }.lessThan);
+
+    const floor: usize = 182;
+    if (cases.items.len < floor) {
+        std.debug.print("R7c census: found {d} corpus cases, the floor is {d}\n", .{ cases.items.len, floor });
+        return error.CorpusBelowFloor;
+    }
+
+    var compared: usize = 0;
+    var with_diagnostics: usize = 0;
+    var refused: usize = 0;
+    var differences: std.ArrayList(u8) = .empty;
+    var diff_count: usize = 0;
+
+    for (cases.items) |path| {
+        const source = try zts.file_io.readFile(arena, path, 4 * 1024 * 1024);
+
+        var check = try runProductionCheck(arena, source, path, null);
+        defer check.deinit(arena);
+        if (hasNoHandler(&check)) {
+            refused += 1;
+            continue;
+        }
+        const tool = try pi_repair_plan.planFromSource(arena, source, path, &.{});
+        const tool_triples = (try toolTriples(arena, tool.llm_text)) orelse {
+            refused += 1;
+            continue;
+        };
+
+        var expected: std.ArrayList(Triple) = .empty;
+        for (check.json_diagnostics.items) |diag| {
+            if (check.verify_ran and !isVerifierCode(diag.code)) continue;
+            try expected.append(arena, .{ .code = diag.code, .line = diag.line, .column = diag.column });
+        }
+        std.mem.sort(Triple, expected.items, {}, Triple.lessThan);
+
+        compared += 1;
+        if (expected.items.len > 0) with_diagnostics += 1;
+        if (triplesEqual(tool_triples, expected.items)) continue;
+        diff_count += 1;
+        var aw: std.Io.Writer.Allocating = .init(arena);
+        try aw.writer.print("{s}\n  tool: ", .{path});
+        try writeTriples(&aw.writer, tool_triples);
+        try aw.writer.writeAll("\n  production: ");
+        try writeTriples(&aw.writer, expected.items);
+        try aw.writer.writeByte('\n');
+        try differences.appendSlice(arena, aw.written());
+    }
+
+    std.debug.print(
+        "R7c census: cases={d} compared={d} with_diagnostics={d} refused_before_analysis={d} differences={d}\n",
+        .{ cases.items.len, compared, with_diagnostics, refused, diff_count },
+    );
+    if (diff_count != 0) {
+        std.debug.print("{s}", .{differences.items});
+        return error.CensusDifference;
+    }
+    // Every case reaches the comparison, and 116 of them carry a diagnostic, so
+    // the equality is not over empty lists. A corpus change moves these counts.
+    try testing.expectEqual(cases.items.len, compared);
+    try testing.expectEqual(@as(usize, 116), with_diagnostics);
+}
