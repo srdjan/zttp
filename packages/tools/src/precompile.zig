@@ -41,7 +41,7 @@ const syncCheckResultProperties = check_mod.syncCheckResultProperties;
 const appendSpecDiagnosticsJson = check_mod.appendSpecDiagnosticsJson;
 pub const appendExportCapsuleDiagnostics = check_mod.appendExportCapsuleDiagnostics;
 const appendCanonicalPublicHelperDiagnostics = check_mod.appendCanonicalPublicHelperDiagnostics;
-const refreshSpecDiagnostics = check_mod.refreshSpecDiagnostics;
+const refreshContractSpecDiagnostics = check_mod.refreshContractSpecDiagnostics;
 
 pub const CompiledHandler = struct {
     bytecode: []const u8 = &.{},
@@ -633,6 +633,7 @@ pub fn compileHandler(
             props.result_safe = result_safe;
             props.optional_safe = optional_safe;
         }
+        try refreshContractSpecDiagnostics(allocator, &contract.?);
     }
 
     // Generate exhaustive test cases from path analysis.
@@ -1541,6 +1542,41 @@ test "compileHandler claims state isolation only when the verifier ran and found
     var verified = try compileHandler(allocator, source, "handler.ts", .{ .emit_contract = true, .emit_verify = true });
     defer verified.deinit(allocator);
     try std.testing.expect(verified.verify_failed);
+}
+
+test "compileHandler refuses a declared no_secret_leakage over a leak in the contract" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zttp:env";
+        \\function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+        \\  const secret: string = env("SECRET_KEY") ?? "";
+        \\  return Response.text(secret);
+        \\}
+    ;
+    var compiled = try compileHandler(allocator, source, "handler.ts", .{ .emit_contract = true, .emit_verify = true });
+    defer compiled.deinit(allocator);
+    const contract = compiled.contract orelse return error.MissingContract;
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(!props.no_secret_leakage);
+    try std.testing.expectEqual(@as(usize, 1), contract.spec_diagnostics.items.len);
+    const diag = contract.spec_diagnostics.items[0];
+    try std.testing.expectEqual(zts.SpecDiagnostic.Kind.not_discharged, diag.kind);
+    try std.testing.expectEqualStrings("no_secret_leakage", diag.spec_name);
+}
+
+test "compileHandler discharges a declared result_safe that the verifier proved" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var compiled = try compileHandler(allocator, source, "handler.ts", .{ .emit_contract = true, .emit_verify = true });
+    defer compiled.deinit(allocator);
+    const contract = compiled.contract orelse return error.MissingContract;
+    const props = contract.properties orelse return error.MissingProperties;
+    try std.testing.expect(props.result_safe);
+    try std.testing.expectEqual(@as(usize, 0), contract.spec_diagnostics.items.len);
 }
 
 test "compileHandler without strict checking does not claim canonical form" {

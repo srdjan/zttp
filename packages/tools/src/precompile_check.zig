@@ -364,7 +364,13 @@ fn declaresProofSupportedSpec(specs: []const []const u8) bool {
 
 pub fn refreshSpecDiagnostics(allocator: std.mem.Allocator, result: *CheckResult) !void {
     const contract = if (result.contract) |*c| c else return;
+    try refreshContractSpecDiagnostics(allocator, contract);
+}
 
+/// Discharge the handler specs again against the contract's final properties.
+/// `ContractBuilder.build` discharges before the flow pass and the verifier
+/// set their properties, so a caller that sets them later calls this last.
+pub fn refreshContractSpecDiagnostics(allocator: std.mem.Allocator, contract: *HandlerContract) !void {
     // Re-discharge the handler's Proof<T, P> obligations against the freshly
     // classified properties. Capsule diagnostics - those carrying a
     // `function` - come from proof-carrying-function discharge, which this
