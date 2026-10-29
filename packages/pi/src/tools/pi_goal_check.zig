@@ -19,10 +19,12 @@
 //!     "witnesses": [{ property, origin, sink, summary, request, io_stubs }...],
 //!     "unproven": [property_tag...] }  // requested goals the check does not prove
 //!
-//! The bare single-file FlowChecker only synthesises witnesses. The verdict
-//! comes from the production check (`unprovenGoals`), which resolves imports:
-//! `ok` is false when a requested goal is unproven or the bare checker raised
-//! a diagnostic for it. The agent reads the witness list, repairs the handler
+//! The production check (`common.runProductionCheck`) supplies the witnesses,
+//! through an observer, and the verdict. `ok` is false when a requested goal is
+//! unproven or the check raised a flow diagnostic for it. An early stop (a parse,
+//! type, or other refusal before the verifier) gives `ok: false`, every goal
+//! unproven, no witnesses, and the production diagnostics in a `diagnostics` key.
+//! The agent reads the witness list, repairs the handler
 //! to close the concrete path, then re-invokes this tool until `ok` is true.
 
 const std = @import("std");
@@ -186,58 +188,38 @@ fn evaluateSourceWithTags(
     path: []const u8,
     goals: []const counterexample.PropertyTag,
 ) !registry_mod.ToolResult {
-    const source_kind = common.admitToolSource(allocator, source, path) catch |e| {
-        switch (e) {
-            error.InvalidSourceObservation => return e,
-            else => {},
-        }
-        return registry_mod.ToolResult.errFmt(
-            allocator,
-            name ++ ": TypeScript strip failed: {s}\n",
-            .{@errorName(e)},
-        );
+    var observed: Observed = .{
+        .allocator = allocator,
+        .goals = goals,
+        .source_view = .{ .text = source, .normalize_positions = true },
+        .body = registry_mod.helpers.TextBuffer.init(allocator),
     };
+    defer observed.body.deinit();
 
-    var atoms = zts.AtomTable.init(allocator);
-    defer atoms.deinit();
-    var js_parser = if (source_kind.isTyped())
-        try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile)
+    var check = common.runProductionCheck(allocator, source, path, .{
+        .context = &observed,
+        .on_checked = onChecked,
+    }) catch |e| switch (e) {
+        error.OutOfMemory => return e,
+        else => return registry_mod.ToolResult.errFmt(allocator, name ++ ": production check failed: {s}\n", .{@errorName(e)}),
+    };
+    defer check.deinit(allocator);
+
+    // The check stopped before the verifier. A file with no handler that passed
+    // every earlier stage keeps its error; any other early stop is a refusal that
+    // `zts check` reports, and the tool reports it with every goal unproven.
+    if (!observed.ran and common.hasNoHandler(&check)) {
+        return registry_mod.ToolResult.err(allocator, name ++ ": no handler function found in file\n");
+    }
+
+    // `properties` and `flow_unresolved` are set after the observer runs.
+    const unproven = if (observed.ran)
+        try unprovenFromCheck(allocator, &check, goals)
     else
-        try zts.parser.JsParser.init(allocator, source);
-    defer js_parser.deinit();
-    js_parser.setAtomTable(&atoms);
+        try allocator.dupe(counterexample.PropertyTag, goals);
+    defer allocator.free(unproven);
+    const ok = observed.ran and observed.violation_count == 0 and unproven.len == 0;
 
-    const program_root = js_parser.parse() catch |e| {
-        return registry_mod.ToolResult.errFmt(
-            allocator,
-            name ++ ": parse failed: {s}\n",
-            .{@errorName(e)},
-        );
-    };
-    const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-
-    const handler_fn = zts.findHandlerFunction(ir_view, program_root) orelse {
-        return registry_mod.ToolResult.err(
-            allocator,
-            name ++ ": no handler function found in file\n",
-        );
-    };
-
-    var env_public = try common.discoverEnvPublic(allocator, path);
-    defer env_public.deinit(allocator);
-    var checker = zts.FlowChecker.init(allocator, ir_view, &atoms);
-    defer checker.deinit();
-    checker.scopes = &js_parser.scopes;
-    checker.env_public = env_public.names();
-    _ = checker.check(handler_fn) catch |e| {
-        return registry_mod.ToolResult.errFmt(
-            allocator,
-            name ++ ": flow check failed: {s}\n",
-            .{@errorName(e)},
-        );
-    };
-
-    // Emit the JSON envelope.
     var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
     defer text_buf.deinit();
     const w = text_buf.writer();
@@ -250,21 +232,69 @@ fn evaluateSourceWithTags(
         try w.writeByte('"');
     }
     try w.writeAll("],\"witnesses\":[");
+    try w.writeAll(observed.body.written());
+    try w.writeAll("],\"unproven\":[");
+    for (unproven, 0..) |g, i| {
+        if (i > 0) try w.writeByte(',');
+        try w.writeByte('"');
+        try w.writeAll(g.asString());
+        try w.writeByte('"');
+    }
+    try w.writeByte(']');
+    if (!observed.ran) {
+        try w.writeAll(",\"diagnostics\":[");
+        try common.writeProductionDiagnostics(w, check.json_diagnostics.items);
+        try w.writeByte(']');
+    }
+    try w.print(",\"ok\":{s}}}\n", .{if (ok) "true" else "false"});
+    const llm_text = try text_buf.toOwnedSlice();
+    errdefer allocator.free(llm_text);
 
-    // A diagnostic for a requested goal is a violation whether or not a
-    // witness can be built for it: a missing location or a solver error omits
-    // the witness and keeps the count.
-    var violation_count: usize = 0;
+    return .{
+        .ok = ok,
+        .llm_text = llm_text,
+    };
+}
+
+/// State the production check's observer fills. `body` holds the witness
+/// objects, separated by commas.
+const Observed = struct {
+    allocator: std.mem.Allocator,
+    goals: []const counterexample.PropertyTag,
+    /// Maps the observer's raw positions to the ones `zts check --json` reports.
+    source_view: zts.SourceView,
+    body: registry_mod.helpers.TextBuffer,
+    ran: bool = false,
+    /// A diagnostic for a requested goal is a violation whether or not a
+    /// witness can be built for it: a missing location or a solver error omits
+    /// the witness and keeps the count.
+    violation_count: usize = 0,
+};
+
+fn onChecked(context: *anyopaque, view: zts_cli.precompile.CheckedView) error{OutOfMemory}!void {
+    const observed: *Observed = @ptrCast(@alignCast(context));
+    writeWitnesses(observed, view) catch |e| switch (e) {
+        // A write into the in-memory buffer fails only when it cannot grow.
+        error.WriteFailed => return error.OutOfMemory,
+    };
+    observed.ran = true;
+}
+
+fn writeWitnesses(observed: *Observed, view: zts_cli.precompile.CheckedView) !void {
+    const allocator = observed.allocator;
+    const goals = observed.goals;
+    const w = observed.body.writer();
     var witness_count: usize = 0;
-    for (checker.getDiagnostics()) |diag| {
+    for (view.flow_diagnostics) |diag| {
         const tag = flow_checker.propertyTagForKind(diag.kind) orelse continue;
         if (!goalRequested(goals, tag)) continue;
-        violation_count += 1;
+        observed.violation_count += 1;
 
-        const loc = ir_view.getLoc(diag.node) orelse continue;
+        const loc = view.ir_view.getLoc(diag.node) orelse continue;
+        const at = observed.source_view.position(loc.line, loc.column);
         const span: counterexample.SourceSpan = .{
-            .line = loc.line,
-            .column = loc.column,
+            .line = at.line,
+            .column = at.column,
         };
 
         // Diagnostics with no witness still count as a goal violation, but
@@ -314,26 +344,6 @@ fn evaluateSourceWithTags(
         }
         try w.writeAll("]}");
     }
-
-    const unproven = try unprovenGoals(allocator, source, path, goals);
-    defer allocator.free(unproven);
-    const ok = violation_count == 0 and unproven.len == 0;
-
-    try w.writeAll("],\"unproven\":[");
-    for (unproven, 0..) |g, i| {
-        if (i > 0) try w.writeByte(',');
-        try w.writeByte('"');
-        try w.writeAll(g.asString());
-        try w.writeByte('"');
-    }
-    try w.print("],\"ok\":{s}}}\n", .{if (ok) "true" else "false"});
-    const llm_text = try text_buf.toOwnedSlice();
-    errdefer allocator.free(llm_text);
-
-    return .{
-        .ok = ok,
-        .llm_text = llm_text,
-    };
 }
 
 /// The requested goals the production check does not prove for `source`, as an
@@ -349,40 +359,21 @@ pub fn unprovenGoals(
     path: []const u8,
     goals: []const counterexample.PropertyTag,
 ) ![]counterexample.PropertyTag {
-    var unproven: std.ArrayList(counterexample.PropertyTag) = .empty;
-    errdefer unproven.deinit(allocator);
-
-    const root = try common.workspaceRoot(allocator);
-    defer allocator.free(root);
-    const absolute = try common.resolveInsideWorkspace(allocator, root, path);
-    defer allocator.free(absolute);
-    var project_paths = try zts_cli.edit_simulate.discoverProjectPaths(allocator, absolute);
-    defer project_paths.deinit(allocator);
-    const policy_source: ?[]u8 = if (project_paths.policy) |policy_path|
-        zts.file_io.readFile(allocator, policy_path, 1024 * 1024) catch |err| switch (err) {
-            error.OutOfMemory => return err,
-            else => {
-                try unproven.appendSlice(allocator, goals);
-                return unproven.toOwnedSlice(allocator);
-            },
-        }
-    else
-        null;
-    defer if (policy_source) |src| allocator.free(src);
-
-    var check = zts_cli.precompile.runCheckOnlyFromSourceWithOptions(allocator, source, absolute, .{
-        .sql_schema_path = project_paths.sqlite,
-        .json_mode = true,
-        .policy_source = policy_source,
-    }) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => {
-            try unproven.appendSlice(allocator, goals);
-            return unproven.toOwnedSlice(allocator);
-        },
+    var check = common.runProductionCheck(allocator, source, path, null) catch |err| switch (err) {
+        error.OutOfMemory, error.PathOutsideWorkspace => return err,
+        else => return allocator.dupe(counterexample.PropertyTag, goals),
     };
     defer check.deinit(allocator);
+    return unprovenFromCheck(allocator, &check, goals);
+}
 
+fn unprovenFromCheck(
+    allocator: std.mem.Allocator,
+    check: *const zts_cli.precompile.CheckResult,
+    goals: []const counterexample.PropertyTag,
+) ![]counterexample.PropertyTag {
+    var unproven: std.ArrayList(counterexample.PropertyTag) = .empty;
+    errdefer unproven.deinit(allocator);
     for (goals) |goal| {
         const proven = if (check.properties) |p| check.flow_unresolved == 0 and propertyHolds(p, goal) else false;
         if (!proven) try unproven.append(allocator, goal);
@@ -572,4 +563,63 @@ test "execute fails a goal when an import does not resolve" {
     defer result.deinit(testing.allocator);
     try testing.expect(!result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"ok\":false") != null);
+}
+
+const import_leak_files: []const [2][]const u8 = &.{
+    .{
+        "handler.ts",
+        \\import { env } from "zttp:env";
+        \\import { wrap } from "./utils.ts";
+        \\
+        \\function handler(req: Request): Response {
+        \\  const secret = env("SECRET_KEY");
+        \\  if (secret !== undefined) {
+        \\    return Response.json({ leaked: wrap(secret) });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+        \\
+    },
+    .{
+        "utils.ts",
+        \\export structural Wrapped = string;
+        \\
+        \\export function wrap(value: string): Wrapped {
+        \\  return [value, "!"].join("");
+        \\}
+        \\
+    },
+};
+
+test "a goal check reads a secret leak that passes through a relative import" {
+    var result = try goalCheckIn(testing.allocator, "goal-import-leak", import_leak_files, "{\"path\":\"handler.ts\",\"goals\":[\"no_secret_leakage\"]}");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"ok\":false") != null);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, result.llm_text, "\"property\":\"no_secret_leakage\""));
+}
+
+test "a goal check on a file with no handler keeps its error" {
+    var result = try goalCheckIn(testing.allocator, "goal-no-handler", &.{.{
+        "handler.ts",
+        \\const x = 1;
+        \\
+    }}, "{\"path\":\"handler.ts\"}");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expectEqualStrings("pi_goal_check: no handler function found in file\n", result.llm_text);
+}
+
+test "a goal check stops at a type error and returns the production diagnostic" {
+    var result = try goalCheckIn(testing.allocator, "goal-type-error", &.{.{
+        "handler.ts",
+        \\function handler(req: Request): Response {
+        \\  const n: number = "a";
+        \\  return Response.json({ n: n });
+        \\}
+        \\
+    }}, "{\"path\":\"handler.ts\",\"goals\":[\"no_secret_leakage\"]}");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expectEqualStrings("{\"goals\":[\"no_secret_leakage\"],\"witnesses\":[],\"unproven\":[\"no_secret_leakage\"],\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS200\",\"severity\":\"error\",\"line\":2,\"column\":3,\"message\":\"type '\\\"a\\\"' is not assignable to type 'number'\"}],\"ok\":false}\n", result.llm_text);
 }

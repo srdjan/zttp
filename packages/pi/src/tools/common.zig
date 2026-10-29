@@ -342,40 +342,6 @@ pub fn isSecretPath(path: []const u8) bool {
     return false;
 }
 
-/// The `env.public` names of the project policy that governs `path`, parsed
-/// once. A bare `FlowChecker` takes them so an expert tool reaches the verdict
-/// the production check and the veto reach (D-014). No project, no policy, an
-/// unreadable policy, or a policy that does not parse gives no names, which
-/// keeps every `env` name secret; the production check reports the failure.
-pub const ProjectEnvPublic = struct {
-    policy: ?zts.HandlerPolicy = null,
-
-    pub fn names(self: *const ProjectEnvPublic) []const []const u8 {
-        return if (self.policy) |*policy| policy.envPublic() else &.{};
-    }
-
-    pub fn deinit(self: *ProjectEnvPublic, allocator: std.mem.Allocator) void {
-        if (self.policy) |*policy| policy.deinit(allocator);
-        self.policy = null;
-    }
-};
-
-pub fn discoverEnvPublic(allocator: std.mem.Allocator, path: []const u8) !ProjectEnvPublic {
-    const root = try workspaceRoot(allocator);
-    defer allocator.free(root);
-    const absolute = resolveInsideWorkspace(allocator, root, path) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return .{},
-    };
-    defer allocator.free(absolute);
-    const policy_source = zts_cli.edit_simulate.discoverProjectPolicySource(allocator, absolute) catch |err| switch (err) {
-        error.OutOfMemory => return err,
-        else => return .{},
-    } orelse return .{};
-    defer allocator.free(policy_source);
-    return .{ .policy = zts.parsePolicyJsonOrNull(allocator, policy_source) };
-}
-
 /// Run the production check once over `source`, as `zts check --json` runs it.
 /// `relative` is the workspace-relative handler path: it names the file in the
 /// result and keeps output independent of the workspace root. The project's
@@ -407,6 +373,40 @@ pub fn runProductionCheck(
         .policy_source = policy_source,
         .observer = observer,
     });
+}
+
+/// Write each production diagnostic as a JSON object, separated by commas.
+/// The caller owns the brackets around the list. Ids run `diag_001` onward.
+pub fn writeProductionDiagnostics(
+    writer: *std.Io.Writer,
+    diagnostics: []const zts_cli.json_diagnostics.JsonDiagnostic,
+) !void {
+    for (diagnostics, 0..) |diag, i| {
+        if (i > 0) try writer.writeByte(',');
+        var id_buf: [16]u8 = undefined;
+        const id = std.fmt.bufPrint(&id_buf, "diag_{d:0>3}", .{i + 1}) catch unreachable;
+        try writer.writeAll("{\"id\":");
+        try zts.writeJsonString(writer, id);
+        try writer.writeAll(",\"code\":");
+        try zts.writeJsonString(writer, diag.code);
+        try writer.writeAll(",\"severity\":");
+        try zts.writeJsonString(writer, diag.severity);
+        try writer.print(",\"line\":{d},\"column\":{d},\"message\":", .{ diag.line, diag.column });
+        try zts.writeJsonString(writer, diag.message);
+        if (diag.suggestion) |help| {
+            try writer.writeAll(",\"help\":");
+            try zts.writeJsonString(writer, help);
+        }
+        try writer.writeByte('}');
+    }
+}
+
+/// True when the check stopped before the verifier on a file with no handler
+/// that passed every earlier stage. The diagnostics list cannot tell this from
+/// other early stops: the spec stage adds a ZTS500 to a handler-less file.
+pub fn hasNoHandler(check: *const zts_cli.precompile.CheckResult) bool {
+    return check.has_handler == false and check.parse_errors == 0 and check.bool_errors == 0 and
+        check.type_errors == 0 and check.strict_errors == 0;
 }
 
 /// An in-process analyzer run shaped as a finished child process, so a tool

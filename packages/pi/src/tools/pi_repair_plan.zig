@@ -144,12 +144,10 @@ pub fn planFromSource(
     // diagnostics list cannot tell the two apart: the spec stage adds a ZTS500 to
     // a file with no handler.
     if (!observed.ran) {
-        if (check.has_handler == false and check.parse_errors == 0 and check.bool_errors == 0 and
-            check.type_errors == 0 and check.strict_errors == 0)
-        {
+        if (common.hasNoHandler(&check)) {
             return registry_mod.ToolResult.err(allocator, name ++ ": no handler function found in file\n");
         }
-        try writeProductionDiagnostics(&observed.body, check.json_diagnostics.items);
+        try writeEarlyStop(&observed.body, check.json_diagnostics.items);
     }
 
     // `properties` and `flow_unresolved` are set after the observer runs.
@@ -204,29 +202,12 @@ fn onChecked(context: *anyopaque, view: zts_cli.precompile.CheckedView) error{Ou
     observed.ran = true;
 }
 
-fn writeProductionDiagnostics(
+fn writeEarlyStop(
     body: *registry_mod.helpers.TextBuffer,
     diagnostics: []const zts_cli.json_diagnostics.JsonDiagnostic,
 ) !void {
     const w = body.writer();
-    for (diagnostics, 0..) |diag, i| {
-        if (i > 0) try w.writeByte(',');
-        var id_buf: [16]u8 = undefined;
-        const id = std.fmt.bufPrint(&id_buf, "diag_{d:0>3}", .{i + 1}) catch unreachable;
-        try w.writeAll("{\"id\":");
-        try writeJsonString(w, id);
-        try w.writeAll(",\"code\":");
-        try writeJsonString(w, diag.code);
-        try w.writeAll(",\"severity\":");
-        try writeJsonString(w, diag.severity);
-        try w.print(",\"line\":{d},\"column\":{d},\"message\":", .{ diag.line, diag.column });
-        try writeJsonString(w, diag.message);
-        if (diag.suggestion) |help| {
-            try w.writeAll(",\"help\":");
-            try writeJsonString(w, help);
-        }
-        try w.writeByte('}');
-    }
+    try common.writeProductionDiagnostics(w, diagnostics);
     try w.writeAll("],\"witnesses\":[],\"plans\":[]}\n");
 }
 

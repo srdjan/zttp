@@ -1,6 +1,6 @@
 //! zts_expert_narrow - per-path label flow report for a handler.
 //!
-//! Runs FlowChecker on the handler and reports each diagnostic together with
+//! Runs the production check on the handler and reports each diagnostic together with
 //! the path constraints that witness it (method comparisons, stub truthiness,
 //! result-ok narrowing). The expert uses this to suggest a discriminating
 //! guard that would close a leak on one branch without restructuring the
@@ -8,6 +8,7 @@
 
 const std = @import("std");
 const zts = @import("zts");
+const zts_cli = @import("zts_cli");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 const flow_checker = zts.flow_checker;
@@ -38,75 +39,71 @@ pub fn run(
     };
     defer allocator.free(source);
 
-    const source_kind = common.admitToolSource(allocator, source, path) catch |e| {
-        switch (e) {
-            error.InvalidSourceObservation => return e,
-            else => {},
-        }
-        return registry_mod.ToolResult.errFmt(
-            allocator,
-            name ++ ": TypeScript strip failed: {s}\n",
-            .{@errorName(e)},
-        );
+    var observed: Observed = .{
+        .body = registry_mod.helpers.TextBuffer.init(allocator),
     };
+    defer observed.body.deinit();
 
-    var atoms = zts.AtomTable.init(allocator);
-    defer atoms.deinit();
-    var js_parser = if (source_kind.isTyped())
-        try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile)
-    else
-        try zts.parser.JsParser.init(allocator, source);
-    defer js_parser.deinit();
-    js_parser.setAtomTable(&atoms);
-
-    const program_root = js_parser.parse() catch |e| {
-        return registry_mod.ToolResult.errFmt(
+    var check = common.runProductionCheck(allocator, source, path, .{
+        .context = &observed,
+        .on_checked = onChecked,
+    }) catch |e| switch (e) {
+        error.OutOfMemory => return e,
+        else => return registry_mod.ToolResult.errFmt(
             allocator,
-            name ++ ": parse failed: {s}\n",
+            name ++ ": production check failed: {s}\n",
             .{@errorName(e)},
-        );
+        ),
     };
-    const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    defer check.deinit(allocator);
 
-    const handler_fn = zts.findHandlerFunction(ir_view, program_root) orelse {
+    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
+    defer text_buf.deinit();
+    const w = text_buf.writer();
+    try w.writeAll("{\"path\":\"");
+    try w.writeAll(path);
+    if (observed.ran) {
+        try w.writeAll("\",\"witnesses\":[");
+        try w.writeAll(observed.body.written());
+        try w.writeAll("]}");
+        return .{ .ok = true, .llm_text = try text_buf.toOwnedSlice() };
+    }
+
+    // The check stopped before the verifier. A file with no handler that passed
+    // every earlier stage keeps its error; any other early stop is a refusal that
+    // `zts check` reports, and the tool reports it with no witnesses.
+    if (common.hasNoHandler(&check)) {
         return registry_mod.ToolResult.err(
             allocator,
             name ++ ": no handler function found in file\n",
         );
-    };
-
-    var env_public = try common.discoverEnvPublic(allocator, path);
-    defer env_public.deinit(allocator);
-    var checker = zts.FlowChecker.init(allocator, ir_view, &atoms);
-    defer checker.deinit();
-    checker.scopes = &js_parser.scopes;
-    checker.env_public = env_public.names();
-    _ = checker.check(handler_fn) catch |e| {
-        return registry_mod.ToolResult.errFmt(
-            allocator,
-            name ++ ": flow check failed: {s}\n",
-            .{@errorName(e)},
-        );
-    };
-
-    var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
-    defer text_buf.deinit();
-    try writeEnvelope(text_buf.writer(), path, checker.getDiagnostics());
-
-    return .{
-        .ok = true,
-        .llm_text = try text_buf.toOwnedSlice(),
-    };
+    }
+    try w.writeAll("\",\"diagnostics\":[");
+    try common.writeProductionDiagnostics(w, check.json_diagnostics.items);
+    try w.writeAll("],\"witnesses\":[]}");
+    return .{ .ok = false, .llm_text = try text_buf.toOwnedSlice() };
 }
 
-fn writeEnvelope(
+/// State the production check's observer fills. `body` holds the witness
+/// objects, separated by commas.
+const Observed = struct {
+    body: registry_mod.helpers.TextBuffer,
+    ran: bool = false,
+};
+
+fn onChecked(context: *anyopaque, view: zts_cli.precompile.CheckedView) error{OutOfMemory}!void {
+    const observed: *Observed = @ptrCast(@alignCast(context));
+    writeWitnesses(observed.body.writer(), view.flow_diagnostics) catch |e| switch (e) {
+        // A write into the in-memory buffer fails only when it cannot grow.
+        error.WriteFailed => return error.OutOfMemory,
+    };
+    observed.ran = true;
+}
+
+fn writeWitnesses(
     writer: *std.Io.Writer,
-    path: []const u8,
     diagnostics: []const flow_checker.Diagnostic,
 ) !void {
-    try writer.writeAll("{\"path\":\"");
-    try writer.writeAll(path);
-    try writer.writeAll("\",\"witnesses\":[");
     var emitted: usize = 0;
     for (diagnostics) |diag| {
         const witness = diag.witness orelse continue;
@@ -115,7 +112,6 @@ fn writeEnvelope(
         emitted += 1;
         try writeWitness(writer, tag, diag, witness);
     }
-    try writer.writeAll("]}");
 }
 
 fn writeWitness(
@@ -198,4 +194,81 @@ fn writeStubConstraint(
     try writer.writeAll(",\"func\":");
     try writeJsonString(writer, info.func);
     try writer.writeAll("}");
+}
+
+const testing = std.testing;
+const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
+const cwd_support = @import("../test_support/cwd.zig");
+
+fn narrowIn(
+    allocator: std.mem.Allocator,
+    label: []const u8,
+    files: []const [2][]const u8,
+) !registry_mod.ToolResult {
+    var tmp = try IsolatedTmp.init(allocator, label);
+    defer tmp.cleanup(allocator);
+    for (files) |file| try tmp.writeFile(allocator, file[0], file[1]);
+
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    try std.Io.Threaded.chdir(tmp.abs_path);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+
+    return run(allocator, "handler.ts");
+}
+
+test "narrow reads a secret leak that passes through a relative import" {
+    var result = try narrowIn(testing.allocator, "narrow-import-leak", &.{
+        .{
+            "handler.ts",
+            \\import { env } from "zttp:env";
+            \\import { wrap } from "./utils.ts";
+            \\
+            \\function handler(req: Request): Response {
+            \\  const secret = env("SECRET_KEY");
+            \\  if (secret !== undefined) {
+            \\    return Response.json({ leaked: wrap(secret) });
+            \\  }
+            \\  return Response.json({ ok: true });
+            \\}
+            \\
+        },
+        .{
+            "utils.ts",
+            \\export structural Wrapped = string;
+            \\
+            \\export function wrap(value: string): Wrapped {
+            \\  return [value, "!"].join("");
+            \\}
+            \\
+        },
+    });
+    defer result.deinit(testing.allocator);
+    try testing.expect(result.ok);
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, result.llm_text, "\"property\":\"no_secret_leakage\""));
+}
+
+test "narrow on a file with no handler keeps its error" {
+    var result = try narrowIn(testing.allocator, "narrow-no-handler", &.{.{
+        "handler.ts",
+        \\const x = 1;
+        \\
+    }});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expectEqualStrings("zts_expert_narrow: no handler function found in file\n", result.llm_text);
+}
+
+test "narrow stops at a type error and returns the production diagnostic" {
+    var result = try narrowIn(testing.allocator, "narrow-type-error", &.{.{
+        "handler.ts",
+        \\function handler(req: Request): Response {
+        \\  const n: number = "a";
+        \\  return Response.json({ n: n });
+        \\}
+        \\
+    }});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expectEqualStrings("{\"path\":\"handler.ts\",\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS200\",\"severity\":\"error\",\"line\":2,\"column\":3,\"message\":\"type '\\\"a\\\"' is not assignable to type 'number'\"}],\"witnesses\":[]}", result.llm_text);
 }
