@@ -17,7 +17,6 @@ pub const Sources = struct {
     root: ?[]const u8,
     zts_zon: ?[]const u8,
     runtime_zon: ?[]const u8,
-    readme: ?[]const u8,
     install: ?[]const u8,
 };
 
@@ -28,14 +27,12 @@ pub fn check(sources: Sources) Alignment {
     const root_bytes = sources.root orelse return .missing;
     const zts_zon_bytes = sources.zts_zon orelse return .missing;
     const runtime_zon_bytes = sources.runtime_zon orelse return .missing;
-    const readme_bytes = sources.readme orelse return .missing;
     const install_bytes = sources.install orelse return .missing;
     const version = extractVersionMarker(marker_bytes) orelse return .malformed_marker;
     if (!std.mem.eql(u8, extractZonVersion(zon_bytes) orelse "", version) or
         !rootHasVersion(root_bytes, version) or
         !std.mem.eql(u8, extractZonVersion(zts_zon_bytes) orelse "", version) or
         !std.mem.eql(u8, extractZonVersion(runtime_zon_bytes) orelse "", version) or
-        !std.mem.eql(u8, extractReadmeVersion(readme_bytes) orelse "", version) or
         !std.mem.eql(u8, extractInstallVersion(install_bytes) orelse "", version))
     {
         return .mismatch;
@@ -56,8 +53,6 @@ pub fn firstDrift(sources: Sources) ?[]const u8 {
     if (!std.mem.eql(u8, extractZonVersion(zts_zon) orelse "", version)) return "packages/zts/build.zig.zon";
     const runtime_zon = sources.runtime_zon orelse return "packages/runtime/build.zig.zon (unreadable)";
     if (!std.mem.eql(u8, extractZonVersion(runtime_zon) orelse "", version)) return "packages/runtime/build.zig.zon";
-    const readme = sources.readme orelse return "README.md (unreadable)";
-    if (!std.mem.eql(u8, extractReadmeVersion(readme) orelse "", version)) return "README.md";
     const install = sources.install orelse return "install.sh (unreadable)";
     if (!std.mem.eql(u8, extractInstallVersion(install) orelse "", version)) return "install.sh";
     return null;
@@ -70,20 +65,6 @@ pub fn extractZonVersion(bytes: []const u8) ?[]const u8 {
     const rest = bytes[value_start..];
     const value_end = std.mem.indexOfScalar(u8, rest, '"') orelse return null;
     return rest[0..value_end];
-}
-
-/// The version in the README heading line `# zttp vX.Y.Z`, without the `v`.
-pub fn extractReadmeVersion(bytes: []const u8) ?[]const u8 {
-    const heading = "# zttp v";
-    const start = if (std.mem.startsWith(u8, bytes, heading))
-        0
-    else if (std.mem.indexOf(u8, bytes, "\n" ++ heading)) |newline|
-        newline + 1
-    else
-        return null;
-    const rest = bytes[start + heading.len ..];
-    const end = std.mem.indexOfScalar(u8, rest, '\n') orelse rest.len;
-    return rest[0..end];
 }
 
 /// The version in the installer comment `(current: vX.Y.Z)`, without the `v`.
@@ -123,7 +104,6 @@ test "VERSION requires one SemVer line with a trailing newline" {
 
 const test_zon = ".{ .version = \"0.20.0\" }\n";
 const test_root = "pub const string = \"0.20.0\";\n";
-const test_readme = "<p></p>\n\n# zttp v0.20.0\n\nBody.\n";
 const test_install = "#   ZTTP_VERSION - pin (current: v0.20.0)\n";
 
 fn testSources() Sources {
@@ -133,7 +113,6 @@ fn testSources() Sources {
         .root = test_root,
         .zts_zon = test_zon,
         .runtime_zon = test_zon,
-        .readme = test_readme,
         .install = test_install,
     };
 }
@@ -161,16 +140,7 @@ test "alignment requires every release version source to agree" {
     try std.testing.expectEqualStrings("packages/zts/src/root.zig", firstDrift(stale_root) orelse "");
 }
 
-test "alignment names a drifted README heading and installer comment" {
-    var stale_readme = testSources();
-    stale_readme.readme = "\n# zttp v0.19.0\n";
-    try std.testing.expectEqual(Alignment.mismatch, check(stale_readme));
-    try std.testing.expectEqualStrings("README.md", firstDrift(stale_readme) orelse "");
-
-    var no_heading = testSources();
-    no_heading.readme = "# zttp without a version\n";
-    try std.testing.expectEqual(Alignment.mismatch, check(no_heading));
-
+test "alignment names a drifted installer comment" {
     var stale_install = testSources();
     stale_install.install = "(current: v0.19.0)\n";
     try std.testing.expectEqual(Alignment.mismatch, check(stale_install));

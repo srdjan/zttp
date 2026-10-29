@@ -319,8 +319,6 @@ fn addVersionCheck(allocator: std.mem.Allocator, passport: *ReleasePassport, zon
     defer if (zts_zon) |bytes| allocator.free(bytes);
     const runtime_zon = readOptionalFile(allocator, "packages/runtime/build.zig.zon", 256 * 1024);
     defer if (runtime_zon) |bytes| allocator.free(bytes);
-    const readme = readOptionalFile(allocator, "README.md", 1024 * 1024);
-    defer if (readme) |bytes| allocator.free(bytes);
     const install = readOptionalFile(allocator, "install.sh", 256 * 1024);
     defer if (install) |bytes| allocator.free(bytes);
 
@@ -330,14 +328,13 @@ fn addVersionCheck(allocator: std.mem.Allocator, passport: *ReleasePassport, zon
         .root = root,
         .zts_zon = zts_zon,
         .runtime_zon = runtime_zon,
-        .readme = readme,
         .install = install,
     };
     const alignment = release_version.check(sources);
     const row: struct { status: ReleaseCheckStatus, detail: []const u8 } = switch (alignment) {
-        .missing => .{ .status = .fail, .detail = "VERSION, a release package manifest, packages/zts/src/root.zig, README.md, or install.sh is missing" },
+        .missing => .{ .status = .fail, .detail = "VERSION, a release package manifest, packages/zts/src/root.zig, or install.sh is missing" },
         .malformed_marker => .{ .status = .fail, .detail = "VERSION must contain exactly one SemVer line ending in a newline" },
-        .mismatch => .{ .status = .fail, .detail = "a release version copy differs from VERSION: root and package manifests, the README heading, or the installer comment" },
+        .mismatch => .{ .status = .fail, .detail = "a release version copy differs from VERSION: root and package manifests, or the installer comment" },
         .aligned => .{ .status = .ok, .detail = "VERSION, root, zts, runtime, README, and installer versions agree" },
     };
     try passport.add(allocator, "version", "Version alignment", row.status, row.detail, "zig build release-check");
@@ -787,8 +784,6 @@ test "every release version copy in this repository equals VERSION" {
     defer if (zts_zon) |bytes| allocator.free(bytes);
     const runtime_zon = readOptionalFile(allocator, "packages/runtime/build.zig.zon", 256 * 1024);
     defer if (runtime_zon) |bytes| allocator.free(bytes);
-    const readme = readOptionalFile(allocator, "README.md", 1024 * 1024);
-    defer if (readme) |bytes| allocator.free(bytes);
     const install = readOptionalFile(allocator, "install.sh", 256 * 1024);
     defer if (install) |bytes| allocator.free(bytes);
 
@@ -798,7 +793,6 @@ test "every release version copy in this repository equals VERSION" {
         .root = root,
         .zts_zon = zts_zon,
         .runtime_zon = runtime_zon,
-        .readme = readme,
         .install = install,
     };
     const alignment = release_version.check(sources);
@@ -811,8 +805,26 @@ test "every release version copy in this repository equals VERSION" {
     try std.testing.expectEqual(release_version.Alignment.aligned, alignment);
 }
 
-test "release passport blocks a drifted README heading" {
-    try expectVersionFixtureBlocked(.stale_readme_heading);
+test "release passport version check ignores the README heading" {
+    const testing = std.testing;
+
+    var io_backend = std.Io.Threaded.init(testing.allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try chdirTmpForTest(&tmp);
+    defer testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    // The README heading is prose the owner writes; the version copies are the
+    // manifests, the zts version string, and the installer comment.
+    try writeReleaseDoctorFixture(io, &tmp, .{ .version_marker = .stale_readme_heading });
+
+    var passport = try collectReleasePassportWithProvenance(testing.allocator, true);
+    defer passport.deinit(testing.allocator);
+    try testing.expectEqual(ReleaseCheckStatus.ok, passport.checks.items[0].status);
 }
 
 test "release passport blocks a drifted installer comment" {
