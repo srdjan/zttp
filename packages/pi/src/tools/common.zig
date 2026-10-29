@@ -1101,6 +1101,8 @@ fn toolEnvelope(arena: std.mem.Allocator, llm_text: []const u8) !ToolEnvelope {
 
 test "R7c census: tool diagnostics equal production over tests/corpus" {
     const pi_repair_plan = @import("pi_repair_plan.zig");
+    const pi_goal_check = @import("pi_goal_check.zig");
+    const property_goals = @import("../property_goals.zig");
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
@@ -1148,8 +1150,8 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
     var error_codes: std.StringHashMapUnmanaged(void) = .empty;
     var helpless: std.ArrayList(u8) = .empty;
     var helpless_count: usize = 0;
-    var false_ok: std.ArrayList(u8) = .empty;
-    var false_ok_count: usize = 0;
+    var wrong_verdict: std.ArrayList(u8) = .empty;
+    var wrong_verdict_count: usize = 0;
 
     for (cases.items) |path| {
         const source = try zts.file_io.readFile(arena, path, 4 * 1024 * 1024);
@@ -1191,10 +1193,8 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
             try aw.writer.print("{s}: {s} has no plan that closes it\n", .{ path, id });
             try unplanned.appendSlice(arena, aw.written());
         }
-        var production_errors: usize = 0;
         for (check.json_diagnostics.items) |diag| {
             if (!std.mem.eql(u8, diag.severity, "error")) continue;
-            production_errors += 1;
             try error_codes.put(arena, diag.code, {});
             // Every error carries help text (R8).
             const help = diag.suggestion orelse "";
@@ -1216,12 +1216,22 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
             try aw.writer.print("{s}: {s}@{d}:{d} has no plan\n", .{ path, diag.code, diag.line, diag.column });
             try unplanned.appendSlice(arena, aw.written());
         }
-        // A remaining error must not read as a pass, in the tool result or its JSON (R3).
-        if (production_errors > 0 and (tool.ok or envelope.ok != false)) {
-            false_ok_count += 1;
+        // The verdict answers the requested goals (owner Decision 4(a)): it is
+        // false when the verifier did not run, a verifier or flow error remains,
+        // or a goal is unproven, in the tool result and in its JSON alike.
+        var goal_failure = !check.verify_ran;
+        for (check.json_diagnostics.items) |diag| {
+            if (!std.mem.eql(u8, diag.severity, "error")) continue;
+            if (isCodeFrom(.verifier, diag.code) or isCodeFrom(.flow, diag.code)) goal_failure = true;
+        }
+        const unproven = try pi_goal_check.unprovenFromCheck(arena, &check, &property_goals.supported_goals);
+        if (unproven.len > 0) goal_failure = true;
+        const expected_ok = !goal_failure;
+        if (tool.ok != expected_ok or envelope.ok != expected_ok) {
+            wrong_verdict_count += 1;
             var aw: std.Io.Writer.Allocating = .init(arena);
-            try aw.writer.print("{s}: {d} error(s) but the tool reports ok\n", .{ path, production_errors });
-            try false_ok.appendSlice(arena, aw.written());
+            try aw.writer.print("{s}: the requested goals give ok={} but the tool reports ok={}\n", .{ path, expected_ok, tool.ok });
+            try wrong_verdict.appendSlice(arena, aw.written());
         }
 
         if (expected.items.len > 0) with_diagnostics += 1;
@@ -1241,8 +1251,8 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
         .{ cases.items.len, compared, with_diagnostics, refused, diff_count },
     );
     std.debug.print(
-        "R7c census: error_codes={d} unplanned={d} helpless={d} false_ok={d} plans: result={d} intent={d} help={d} other={d}\n",
-        .{ error_codes.count(), unplanned_count, helpless_count, false_ok_count, tier_result, tier_intent, tier_help, tier_other },
+        "R7c census: error_codes={d} unplanned={d} helpless={d} wrong_verdict={d} plans: result={d} intent={d} help={d} other={d}\n",
+        .{ error_codes.count(), unplanned_count, helpless_count, wrong_verdict_count, tier_result, tier_intent, tier_help, tier_other },
     );
     if (unplanned_count != 0) {
         std.debug.print("{s}", .{unplanned.items});
@@ -1252,9 +1262,9 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
         std.debug.print("{s}", .{helpless.items});
         return error.CensusErrorWithoutHelp;
     }
-    if (false_ok_count != 0) {
-        std.debug.print("{s}", .{false_ok.items});
-        return error.CensusFalseOk;
+    if (wrong_verdict_count != 0) {
+        std.debug.print("{s}", .{wrong_verdict.items});
+        return error.CensusWrongVerdict;
     }
     if (diff_count != 0) {
         std.debug.print("{s}", .{differences.items});

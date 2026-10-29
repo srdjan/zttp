@@ -29,8 +29,9 @@ pub const tool: registry_mod.ToolDef = .{
     \\apply_repair_intent plan names a repair intent in edit_intent.kind:
     \\pass it to pi_apply_repair_plan. A follow_diagnostic_help plan has
     \\edit_intent.kind manual_edit: follow its summary by hand, because no
-    \\tool applies it. ok is false while any rejection remains. The
-    \\compiler does not edit files; apply one plan,
+    \\tool applies it. ok answers the requested goals: it is false while a
+    \\goal is unproven or a verifier error remains, and every rejection
+    \\still has a plan. The compiler does not edit files; apply one plan,
     \\then re-run the veto / goal check until the proof passes.
     ,
     .input_schema =
@@ -160,7 +161,7 @@ pub fn planFromSource(
     // `properties` and `flow_unresolved` are set after the observer runs.
     const unproven = try pi_goal_check.unprovenFromCheck(allocator, &check, goals.items);
     defer allocator.free(unproven);
-    const has_failures = !observed.ran or observed.has_failures or observed.reported_error or unproven.len > 0;
+    const has_failures = !observed.ran or observed.has_failures or unproven.len > 0;
 
     var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
     defer text_buf.deinit();
@@ -213,8 +214,6 @@ const Observed = struct {
     ran: bool = false,
     has_failures: bool = false,
     /// True when the tool reported a production diagnostic of error severity.
-    reported_error: bool = false,
-
     fn deinit(self: *Observed) void {
         self.diagnostics.deinit();
         self.witnesses.deinit();
@@ -256,7 +255,6 @@ fn writeProductionRest(
             if (diag.line != entry.line or diag.column != entry.column) continue;
             if (!std.mem.eql(u8, diag.code, entry.code)) continue;
             if (!std.mem.eql(u8, diag.severity, "error")) break;
-            observed.reported_error = true;
             try appendProductionPlan(observed, diag, "wit", entry.witness_index);
             break;
         }
@@ -299,7 +297,6 @@ fn appendProductionDiagnostic(
     observed.diag_count += 1;
     try common.writeProductionDiagnostic(w, observed.diag_count, diag);
     if (!std.mem.eql(u8, diag.severity, "error")) return;
-    observed.reported_error = true;
     try appendProductionPlan(observed, diag, "diag", observed.diag_count);
 }
 
@@ -1200,7 +1197,7 @@ test "repair plan: a type mismatch gets one follow_diagnostic_help plan with the
     try testing.expect(std.mem.indexOf(u8, text, "\"rp_002\"") == null);
 }
 
-test "repair plan: a spec assertion the handler does not satisfy is reported with a plan and ok false" {
+test "repair plan: a spec failure outside the requested goals is reported with a plan and leaves ok true" {
     const text = try planText(
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\    const count = Date.now();
@@ -1209,7 +1206,8 @@ test "repair plan: a spec assertion the handler does not satisfy is reported wit
         \\
     );
     defer testing.allocator.free(text);
-    try testing.expect(std.mem.startsWith(u8, text, "{\"ok\":false,"));
+    // The requested goals hold; the ZTS500 still gets its plan (Decision 4(a)).
+    try testing.expect(std.mem.startsWith(u8, text, "{\"ok\":true,"));
     try testing.expect(std.mem.indexOf(u8, text, "\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS500\",\"severity\":\"error\",\"line\":1,\"column\":17,") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\"plans\":[{\"id\":\"rp_001\",\"kind\":\"follow_diagnostic_help\",\"target\":{\"line\":1,\"column\":17},\"behavioral_change\":true,\"summary\":\"remove Date.now(), Math.random(), and performance.now() from the response path.\"") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\"closes\":[\"diag_001\"]") != null);
