@@ -57,6 +57,10 @@ pub const Diagnostic = struct {
     /// producer owns instance-specific preconditions such as purity and closed
     /// object shape.
     repair_intent: ?RepairIntent,
+    /// Result shape the producer recognised, with the Result binding it names.
+    /// Borrowed from the checker atom table like `message`.
+    result_shape: ?handler_verifier.ResultShape = null,
+    result_subject: ?[]const u8 = null,
 };
 
 pub const CodeEntry = struct {
@@ -97,6 +101,22 @@ pub fn project(comptime source: Source, diagnostic: anytype, ir_view: anytype) ?
         .end_offset = bytes.end,
         .suggestion = diagnostic.help,
         .repair_intent = projectRepairIntent(source, diagnostic),
+        .result_shape = projectResultShape(source, diagnostic),
+        .result_subject = projectResultSubject(source, diagnostic),
+    };
+}
+
+fn projectResultShape(comptime source: Source, diagnostic: anytype) ?handler_verifier.ResultShape {
+    return switch (source) {
+        .boolean, .strict, .type => diagnostic.result_shape,
+        .flow, .verifier => null,
+    };
+}
+
+fn projectResultSubject(comptime source: Source, diagnostic: anytype) ?[]const u8 {
+    return switch (source) {
+        .boolean, .strict, .type => diagnostic.result_subject,
+        .flow, .verifier => null,
     };
 }
 

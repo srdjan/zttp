@@ -11300,3 +11300,96 @@ test "observer is not called for a file with no handler" {
 
     try std.testing.expectEqual(@as(u32, 0), probe.calls);
 }
+
+const result_head =
+    \\import { parseJson } from "zttp:json";
+    \\
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const r = parseJson("1");
+    \\
+;
+
+/// Run the check on `source` and return the first JSON diagnostic with `code`
+/// after the check, and its atom table, has returned.
+fn checkFirstWithCode(source: []const u8, code: []const u8, result: *CheckResult) !json_diag.JsonDiagnostic {
+    result.* = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "shape.ts", .{
+        .json_mode = true,
+    });
+    for (result.json_diagnostics.items) |diagnostic| {
+        if (std.mem.eql(u8, diagnostic.code, code)) return diagnostic;
+    }
+    return error.DiagnosticNotReported;
+}
+
+test "ZTS620 on a Result ok member is tagged unrecognized_guard with its subject" {
+    var result: CheckResult = undefined;
+    const diagnostic = try checkFirstWithCode(result_head ++
+        \\  if (r.ok === true) {
+        \\    return Response.text("a");
+        \\  }
+        \\  return Response.text("b");
+        \\}
+    , "ZTS620", &result);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(zts.ResultShape.unrecognized_guard, diagnostic.result_shape.?);
+    try std.testing.expectEqualStrings("r", diagnostic.result_subject.?);
+    try std.testing.expect(diagnostic.result_subject_owned);
+}
+
+test "ZTS201 on a Result member is tagged unknown_member and a plain record is not" {
+    var result: CheckResult = undefined;
+    const diagnostic = try checkFirstWithCode(result_head ++
+        \\  const x = r.foo;
+        \\  return Response.text("b");
+        \\}
+    , "ZTS201", &result);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(zts.ResultShape.unknown_member, diagnostic.result_shape.?);
+    try std.testing.expectEqualStrings("r", diagnostic.result_subject.?);
+    // The atom table is gone: the JSON line is the one the check wrote before the tags existed.
+    var line: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer line.deinit();
+    try json_diag.writeDiagnosticJson(&line.writer, &diagnostic);
+    try std.testing.expectEqualStrings(
+        "{\"code\":\"ZTS201\",\"severity\":\"error\",\"message\":\"property does not exist on type\",\"file\":\"shape.ts\",\"line\":5,\"column\":14,\"suggestion\":\"Read a property that the type declares, or add the property to the type.\",\"repair_intent\":null}",
+        line.written(),
+    );
+
+    var plain: CheckResult = undefined;
+    const plain_diagnostic = try checkFirstWithCode(
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const p = { a: 1 };
+        \\  const x = p.foo;
+        \\  return Response.text("b");
+        \\}
+    , "ZTS201", &plain);
+    defer plain.deinit(std.testing.allocator);
+    try std.testing.expect(plain_diagnostic.result_shape == null);
+    try std.testing.expect(plain_diagnostic.result_subject == null);
+    try std.testing.expect(!plain_diagnostic.result_subject_owned);
+}
+
+test "ZTS204 on a returned Result is tagged returned with its subject" {
+    var result: CheckResult = undefined;
+    const diagnostic = try checkFirstWithCode(result_head ++
+        \\  return r;
+        \\}
+    , "ZTS204", &result);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(zts.ResultShape.returned, diagnostic.result_shape.?);
+    try std.testing.expectEqualStrings("r", diagnostic.result_subject.?);
+}
+
+test "ZTS100 on an isOk call is tagged method_call with its subject" {
+    var result: CheckResult = undefined;
+    const diagnostic = try checkFirstWithCode(result_head ++
+        \\  if (r.isOk()) {
+        \\    return Response.text("a");
+        \\  }
+        \\  return Response.text("b");
+        \\}
+    , "ZTS100", &result);
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(zts.ResultShape.method_call, diagnostic.result_shape.?);
+    try std.testing.expectEqualStrings("r", diagnostic.result_subject.?);
+}

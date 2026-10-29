@@ -49,11 +49,20 @@ pub const JsonDiagnostic = struct {
     /// computed from an inferred row has to be built at diagnosis time, so it
     /// cannot be a static string like most suggestions are.
     suggestion_owned: bool = false,
+    /// Result shape and subject name for a Result misuse. In-process only:
+    /// `writeDiagnosticJson` does not write them. The subject is a heap copy
+    /// owned by this diagnostic when `result_subject_owned`.
+    result_shape: ?zts.ResultShape = null,
+    result_subject: ?[]const u8 = null,
+    result_subject_owned: bool = false,
 
     pub fn deinit(self: *JsonDiagnostic, allocator: std.mem.Allocator) void {
         if (self.message_owned) allocator.free(self.message);
         if (self.suggestion_owned) {
             if (self.suggestion) |sug| allocator.free(sug);
+        }
+        if (self.result_subject_owned) {
+            if (self.result_subject) |subject| allocator.free(subject);
         }
     }
 };
@@ -229,6 +238,8 @@ pub fn fromCheckerDiagnostic(
     // A suggestion built at diagnosis time (the first missing `match` case)
     // dies with the checker, like the message, so it is copied the same way.
     const owned_suggestion: ?[]u8 = if (projected.suggestion) |s| (allocator.dupe(u8, s) catch null) else null;
+    // The subject names an atom the checker frees, so it is copied like the message.
+    const owned_subject: ?[]u8 = if (projected.result_subject) |s| (allocator.dupe(u8, s) catch null) else null;
     return .{
         .code = projected.code,
         .severity = projected.severity.label(),
@@ -242,6 +253,9 @@ pub fn fromCheckerDiagnostic(
         .repair_intent = projected.repair_intent,
         .message_owned = owned_msg != null,
         .suggestion_owned = owned_suggestion != null,
+        .result_shape = if (projected.result_subject != null and owned_subject == null) null else projected.result_shape,
+        .result_subject = owned_subject,
+        .result_subject_owned = owned_subject != null,
     };
 }
 

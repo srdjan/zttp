@@ -16,6 +16,7 @@
 
 const std = @import("std");
 const SourceView = @import("zts-base").source_diagnostics.SourceView;
+const handler_verifier = @import("handler_verifier.zig");
 const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const diagnostic_projection = @import("diagnostic_projection.zig");
 const ir = @import("zts-engine").parser.ir;
@@ -100,6 +101,9 @@ pub const Diagnostic = struct {
     /// Whether `help` was dynamically allocated. Only a witness-bearing help
     /// (the first missing `match` case) is built at diagnosis time.
     help_owned: bool = false,
+    /// Result shape and borrowed subject name, set when the subject is a Result.
+    result_shape: ?handler_verifier.ResultShape = null,
+    result_subject: ?[]const u8 = null,
 };
 
 // ---------------------------------------------------------------------------
@@ -915,6 +919,7 @@ pub const TypeChecker = struct {
         if (self.current_return_type == null_type_idx) return;
         const inferred = self.inferType(value);
         if (inferred != null_type_idx and !self.env.isAssignableTo(inferred, self.current_return_type)) {
+            const result_subject = if (self.env.pool.isResultRecord(self.env.pool.unwrapNominal(self.env.resolveRef(inferred)))) self.identifierName(value) else null;
             self.addDiagnostic(.{
                 .severity = .err,
                 .kind = .return_type_mismatch,
@@ -922,6 +927,8 @@ pub const TypeChecker = struct {
                 .message = "return type does not match declared return type",
                 .help = "the enclosing function's declared return type is what this value must match; " ++
                     "when it comes back from a virtual-module call, wrap it rather than returning it directly",
+                .result_shape = if (result_subject != null) .returned else null,
+                .result_subject = result_subject,
             });
         }
     }
@@ -2997,12 +3004,15 @@ pub const TypeChecker = struct {
             if (self.env.pool.lookupRecordField(obj_type, prop_name)) |field| {
                 return self.recordFieldReadType(obj_type, field);
             }
+            const result_subject = if (self.env.pool.isResultRecord(obj_type)) self.identifierName(member.object) else null;
             self.addInferenceDiagnostic(.{
                 .severity = .err,
                 .kind = .missing_field,
                 .node = node,
                 .message = "property does not exist on type",
                 .help = "Read a property that the type declares, or add the property to the type.",
+                .result_shape = if (result_subject != null) .unknown_member else null,
+                .result_subject = result_subject,
             });
             return null_type_idx;
         }
@@ -4698,6 +4708,13 @@ pub const TypeChecker = struct {
     // -------------------------------------------------------------------
     // Diagnostic helpers
     // -------------------------------------------------------------------
+
+    /// The name a plain identifier node reads, borrowed from the atom table.
+    fn identifierName(self: *const TypeChecker, node: NodeIndex) ?[]const u8 {
+        if (self.ir_view.getTag(node) != .identifier) return null;
+        const binding = self.ir_view.getBinding(node) orelse return null;
+        return self.resolveAtomName(binding.name_atom);
+    }
 
     fn addDiagnostic(self: *TypeChecker, diag: Diagnostic) void {
         self.diagnostics.append(self.allocator, diag) catch {

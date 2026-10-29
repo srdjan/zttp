@@ -655,6 +655,8 @@ test "stable AmbientCatalog and TypeSerialization publish the registries behind 
 }
 
 pub const DiagnosticProjection = diagnostic_projection;
+/// The Result shape a diagnostic can carry beside its subject name.
+pub const ResultShape = handler_verifier.ResultShape;
 pub const DiagnosticCatalog = compiler.diagnostic_catalog;
 
 test "DiagnosticProjection exposes stable tagged checker codes" {

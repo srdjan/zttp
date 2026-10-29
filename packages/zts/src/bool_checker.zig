@@ -13,6 +13,7 @@
 
 const std = @import("std");
 const SourceView = @import("zts-base").source_diagnostics.SourceView;
+const handler_verifier = @import("handler_verifier.zig");
 const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const diagnostic_projection = @import("diagnostic_projection.zig");
 const ir = @import("zts-engine").parser.ir;
@@ -114,6 +115,9 @@ pub const Diagnostic = struct {
     help: ?[]const u8,
     /// Whether the message was dynamically allocated (needs freeing).
     allocated: bool = false,
+    /// Result shape and borrowed subject name, set when the subject is a Result.
+    result_shape: ?handler_verifier.ResultShape = null,
+    result_subject: ?[]const u8 = null,
 };
 
 // ---------------------------------------------------------------------------
@@ -1010,12 +1014,29 @@ pub const BoolChecker = struct {
         else
             .condition_not_boolean;
 
+        // `r.isOk()` and `r.isErr()` name a method a Result does not have.
+        var result_subject: ?[]const u8 = null;
+        if (kind == .condition_not_boolean and self.ir_view.getTag(node) == .call) {
+            if (self.ir_view.getCall(node)) |call| {
+                if (self.ir_view.getMember(call.callee)) |member| {
+                    const method = self.resolveAtomName(member.property) orelse "";
+                    if ((std.mem.eql(u8, method, "isOk") or std.mem.eql(u8, method, "isErr")) and
+                        self.ir_view.getTag(member.object) == .identifier)
+                    {
+                        if (self.ir_view.getBinding(member.object)) |binding| result_subject = self.resolveAtomName(binding.name_atom);
+                    }
+                }
+            }
+        }
+
         self.addDiagnostic(.{
             .severity = .err,
             .kind = kind,
             .node = node,
             .message = "boolean context requires a value of type boolean",
             .help = "compare the value explicitly so the expression has type boolean",
+            .result_shape = if (result_subject != null) .method_call else null,
+            .result_subject = result_subject,
         });
     }
 

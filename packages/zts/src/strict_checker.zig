@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const SourceView = @import("zts-base").source_diagnostics.SourceView;
+const handler_verifier = @import("handler_verifier.zig");
 const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const diagnostic_projection = @import("diagnostic_projection.zig");
 const ir = @import("zts-engine").parser.ir;
@@ -150,6 +151,9 @@ pub const Diagnostic = struct {
     /// repair applies (e.g. implicit_unknown — needs a type annotation that
     /// can take several shapes).
     repair_intent: ?RepairIntent = null,
+    /// Result shape and borrowed subject name, set when the subject is a Result.
+    result_shape: ?handler_verifier.ResultShape = null,
+    result_subject: ?[]const u8 = null,
 };
 
 pub const ImportedFunction = struct {
@@ -1155,6 +1159,20 @@ pub const StrictChecker = struct {
         else
             "drop the comparison and negate the boolean directly: `!x`";
 
+        // A Result's `ok` member compared to a literal is the guard the proof does
+        // not recognise. The type confirms the object is a Result record.
+        var result_subject: ?[]const u8 = null;
+        if (self.ir_view.getMember(value_node)) |member| {
+            if (self.resolveAtomName(member.property)) |property| {
+                if (std.mem.eql(u8, property, "ok") and self.ir_view.getTag(member.object) == .identifier) {
+                    const object_type = tc.env.pool.unwrapNominal(tc.env.resolveRef(tc.inferTypeWithoutDiagnostics(member.object)));
+                    if (tc.env.pool.isResultRecord(object_type)) {
+                        if (self.ir_view.getBinding(member.object)) |binding| result_subject = self.resolveAtomName(binding.name_atom);
+                    }
+                }
+            }
+        }
+
         self.addDiagnostic(.{
             .severity = self.canonicalSeverity(),
             .kind = .canonical_redundant_bool_compare,
@@ -1162,6 +1180,8 @@ pub const StrictChecker = struct {
             .message = "comparing a boolean against a boolean literal is not canonical ZigTS",
             .help = help,
             .repair_intent = .drop_redundant_bool_compare,
+            .result_shape = if (result_subject != null) .unrecognized_guard else null,
+            .result_subject = result_subject,
         });
     }
 
