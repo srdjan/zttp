@@ -49,9 +49,19 @@ a pill: `[+]` proven, `[-]` not proven. They are grouped. `[-]` means the compil
 |---|---|
 | `exhaustive_returns` | every path returns a Response |
 | `results_safe` | every `Result.ok` is guarded before the value is used |
-| `optionals_safe` | every optional is narrowed before use |
+| `optionals_safe` | every read of a value whose type admits `undefined` is checked first |
 | `state_isolated` | no module-scope variable is mutated in the handler body |
 | `no_unreachable` | the handler has no dead code |
+
+The `optionals_safe` chip, and the `optional_safe` property in a `Proof` capsule, check a field read, index read, spread, or `for...of` on a value whose type admits `undefined`. A Dict member or index read, and a field read on the `.value` of `requestJson`, `parseJson`, or `parseJsonBytes`, are refused as ZTS201. The chip does not check these cases:
+
+- a read on a value of type `unknown`, which includes a fetch `.json()` value and any value that the source annotates `unknown`;
+- a read on `req.headers`, `req.query`, or `req.params`;
+- a value of type `T | null`;
+- a use that is not a read, call, index, spread, or iteration, such as arithmetic, a comparison, or a value placed in a response payload;
+- an expression that the type checker cannot type, such as a string index `s[5].length`.
+
+An unchecked read has a runtime effect. A member read of `undefined` gives `undefined`, so the response drops or misreports the field. A call on it fails with NotCallable and HTTP 500.
 
 **Properties** - behavioral guarantees:
 

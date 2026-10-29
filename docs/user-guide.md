@@ -157,6 +157,30 @@ Bind each call to a `const` and check it with `if (!parsed.ok)` or
 Optional-producing calls must be narrowed before use. The verifier enforces both
 patterns.
 
+A value whose type may be `undefined` must be checked before a field read, index
+read, spread, or `for...of`. An index read `xs[0]` is `T | undefined`: bind it to a
+`const`, then check `=== undefined`. The verifier refuses the unchecked read as
+ZTS309.
+
+Read a request body with a schema. `decodeJson` takes a schema name and the text:
+
+```ts
+const parsed = decodeJson("todo", req.body ?? "");
+if (!parsed.ok) {
+    return Response.json({ error: "invalid body" }, { status: 400 });
+}
+const todo = parsed.value;
+return Response.json({ title: todo.title });
+```
+
+The `.value` of `requestJson`, `parseJson`, and `parseJsonBytes` is a JSON value.
+A field read on it, such as `v.name`, is refused as ZTS201. To read without a
+schema, check `isDict(v)`, then call `dictGet(v, "name")` from `zttp:collections`.
+A Dict member or index read is also ZTS201: use `dictGet`. The same applies to a
+fetch response: pass `.text()` to `decodeJson` when its fields matter. A read on a
+`.json()` value, on `req.headers`, `req.query`, or `req.params`, and on a
+`T | null` value is not checked.
+
 ## Buffered SSE
 
 Use `sseEvents(body, bounds)` from `zttp:sse` to frame a buffered event stream.

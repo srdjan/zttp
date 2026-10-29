@@ -176,11 +176,15 @@ verify error[ZTS308]: optional value used without checking for undefined
            or provide a default: val ?? "fallback"
 ```
 
-Property access on an un-narrowed `optional_object` (from `routerMatch`) is also an error:
+A field read, index read, spread, or `for...of` on a value whose type may be `undefined` is refused as ZTS309, in every function of the file:
 
 ```
-verify error[ZTS309]: property access on optional value without checking for undefined
+verify error[ZTS309]: read on a value that may be undefined, without checking for undefined
 ```
+
+The type checker gives each such value its `undefined`. An index read `xs[0]` is `T | undefined`. So are an optional field, a `p?.q` result, an array callback parameter, and a union member that lacks the field. A read of `ps[0].age` on an empty array is refused until the code binds `ps[0]` to a `const` and checks it.
+
+At run time, a member read of `undefined` gives `undefined`, so the response drops or misreports the field. A call on `undefined` fails with NotCallable and HTTP 500.
 
 **Recognized narrowing patterns:**
 
@@ -189,6 +193,16 @@ verify error[ZTS309]: property access on optional value without checking for und
 - `const x = env("KEY") ?? "default"` - nullish coalesce resolves at declaration
 - `val = "override"` - reassignment to non-optional clears tracking
 - `val?.prop` - optional chaining is safe (not flagged)
+
+**What `optionals_safe` does not check.** Each item below passes the property without a check:
+
+- A read on a value of type `unknown`. This includes a fetch `.json()` value and any value that the source annotates `unknown`.
+- A read on `req.headers`, `req.query`, or `req.params`.
+- A value of type `T | null`.
+- A use that is not a read, call, index, spread, or iteration: arithmetic, a comparison, or a value placed in a response payload.
+- An expression that the type checker cannot type, such as a string index `s[5].length`.
+
+A Dict member or index read is refused as ZTS201: use `dictGet`. The `.value` of `requestJson`, `parseJson`, and `parseJsonBytes` is a JSON value. A field read on it is refused as ZTS201. Decode the value with `decodeJson` and a schema, or check `isDict(v)` and read with `dictGet(v, key)`.
 
 ### 7. State Isolation (Cross-Request Safety)
 

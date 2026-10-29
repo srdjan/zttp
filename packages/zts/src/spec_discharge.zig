@@ -121,7 +121,7 @@ const suggestion_rows = [_]SuggestionRow{
     .{ .name = "pure", .text = "remove side effects (virtual-module calls, Date.now, Math.random) from the handler body." },
     .{ .name = "stateless", .text = "move module-scope mutable state into the handler body or behind zttp:cache." },
     .{ .name = "result_safe", .text = "match every Result before unwrapping (no `.value` on an unchecked Result)." },
-    .{ .name = "optional_safe", .text = "guard every optional access with `?? fallback` or an explicit `if (x != undefined)` check." },
+    .{ .name = "optional_safe", .text = "bind each value that may be undefined to a `const`, then check `=== undefined` before you read it, or use `?.` and `?? fallback`. This property does not check a read on an `unknown` value, `req.headers`, `req.query`, `req.params`, a `null` value, or an expression that the checker cannot type." },
     .{ .name = "canonical", .text = "run `zts normalize <file> --write` to rewrite the handler into Canonical Normal Form, or fix the flagged ZTS6xx constructs by hand." },
     .{ .name = "cost_bounded", .text = "bound the loop source: iterate a literal array / range(n) / .slice(0, k), add LIMIT n to the SQL statement, or declare maxItems on the validated schema field." },
 };

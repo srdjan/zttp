@@ -32,6 +32,8 @@ ZigTS already cuts most of TypeScript. The one-way profile cuts further: for eve
 | Inert statements | Remove `debugger;` and standalone `;` statements |
 | Text construction | Refused: template interpolation and string `+`. Build a string array with explicit `String(...)` conversions and call `.join("")` |
 | Fallback | `??` for nullish defaults. Never `||` unless both operands are boolean |
+| Possibly undefined value | Bind it to a `const`, then check `=== undefined` before you read it. Or write `x?.prop` and `x ?? fallback`. An index read `xs[i]` is `T | undefined` |
+| Parsed request body | `decodeJson(schema, req.body ?? "")`. Or `isDict(v)`, then `dictGet(v, key)` from `zttp:collections`. Never `v.name` on a parsed JSON value |
 
 Most rows have a corresponding diagnostic and the compiler rejects violations. Truthy `||` fallback is already rejected by the boolean-only operator contract.
 
@@ -183,6 +185,39 @@ const body = parsed.value;
 Pass the Result itself only to a `zttp:result` function that takes a Result: `unwrapOr`, `collectAll` with an array literal, and `andThen` or `orElse` with an expression-bodied arrow. Read `.error` only after the failure check, or write `parsed.error ?? fallback`.
 
 Do not use `match`, `=== true`, `isOk()`, or `isErr()` on a Result. Do not copy a Result into another name, return it, store it in an object or an array, or spread it. Do not read `.value` from a call that you did not bind, such as `requestJson(req).value`. A closure needs its own `.ok` check.
+
+## Values that may be undefined (ZTS309)
+
+A field read, index read, spread, or `for...of` on a value whose type admits `undefined` is refused. This covers an index read `xs[0]`, an optional field, a `p?.q` result, an array callback parameter, and a union member that lacks the field. At run time a member read of `undefined` gives `undefined`, so the response drops or misreports the field. A call on `undefined` fails with HTTP 500.
+
+```ts
+// before
+const user = getUser(); return Response.text(user.name); // user may be undefined
+
+// after
+const user = getUser();
+if (user === undefined) {
+  return Response.json({ error: "not found" }, { status: 404 });
+}
+return Response.text(user.name);
+```
+
+Bind an index read to a `const` first: `const first = ps[0];`, then `if (first === undefined) return ...;`. The check does not cover a read on an `unknown` value, `req.headers`, `req.query`, `req.params`, or a `null` value.
+
+## Reading a parsed JSON value (ZTS201)
+
+The `.value` of `requestJson`, `parseJson`, and `parseJsonBytes` is a JSON value. A field read on it, and any member or index read on a Dict, is refused. Read the body with a schema:
+
+```ts
+const parsed = decodeJson("item", req.body ?? "");
+if (!parsed.ok) {
+  return Response.json({ error: parsed.error }, { status: 400 });
+}
+const item = parsed.value;
+return Response.json({ name: item.name });
+```
+
+To read without a schema, check `isDict(v)`, then call `dictGet(v, "name")`, which `zttp:collections` exports. When the fields of a fetch response matter, pass `.text()` to `decodeJson`. Do not read fields from `.json()`.
 
 ## Working rules for the agent
 

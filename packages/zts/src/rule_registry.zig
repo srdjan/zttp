@@ -118,9 +118,9 @@ const verifier_meta = [_]struct {
     .{
         .kind = .unchecked_optional_access,
         .code = "ZTS309",
-        .description = "A property on an optional value is accessed without narrowing.",
+        .description = "A value whose type the checker resolves and which admits undefined is read without a check.",
         .example = "const user = getUser(); return Response.text(user.name); // user may be undefined",
-        .help = "Check the value is defined before accessing properties.",
+        .help = "Check the value is defined before you read it.",
         .repair = .insert_guard_before_line,
     },
     .{

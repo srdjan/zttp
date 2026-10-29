@@ -19,4 +19,16 @@ For ZTS303 (a Result use that the proof refuses), the `summary` of the plan name
 - Closure read: check `.ok` inside the closure.
 - Read inside `assert`, `switch`, or `try`: check `.ok` in an `if` before that statement.
 
+For ZTS309 (a read on a value that may be undefined), repair each form as follows:
+- Plain binding `p.age`: add `if (p === undefined) return ...;` before the read, or write `p?.age ?? fallback`.
+- Index read `ps[0].age`: bind it with `const first = ps[0];`, then add `if (first === undefined) return ...;` before `first.age`.
+- Call result `find(xs).age`: bind the call to a `const`, then check it for undefined.
+- Do not delete the read to silence the diagnostic. Keep the response fields that the handler had.
+- A check does not cover an `unknown` value, `req.headers`, `req.query`, `req.params`, or a `null` value. Those reads are unchecked, so keep them safe by hand.
+
+For ZTS201 on a parsed JSON value or a Dict (a member or index read that yields undefined), repair each form as follows:
+- A field read on the `.value` of `requestJson`, `parseJson`, or `parseJsonBytes`: decode with `decodeJson(schema, req.body ?? "")` and read the decoded value.
+- Without a schema: check `isDict(v)`, then read with `dictGet(v, "name")` from `zttp:collections`. Never write `v.name`.
+- A Dict member or index read `d.key` or `d["key"]`: write `dictGet(d, "key")`.
+
 Do not introduce new violations while fixing existing ones. If a repair intent is unsupported, make the smallest manual edit that closes the reported diagnostic or witness.

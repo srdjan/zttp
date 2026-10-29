@@ -346,7 +346,8 @@ fn writePlan(
     try writer.writeAll("},\"behavioral_change\":");
     try writer.writeAll(if (plan.behavioral_change) "true" else "false");
     try writer.writeAll(",\"summary\":");
-    try writeJsonString(writer, plan.summary);
+    const unbound_optional = plan.kind == .narrow_optional_before_use and subject_name == null;
+    try writeJsonString(writer, if (unbound_optional) repair_plan.unbound_optional_summary else plan.summary);
     try writer.writeAll(",\"edit_intent\":{\"kind\":");
     try writeJsonString(writer, plan.edit_intent.kind.asString());
     try writer.writeAll(",\"line\":");
@@ -387,7 +388,9 @@ pub fn concreteTemplate(
             return allocator.print("if (!{s}.ok) return Response.json({{ error: {s}.error }}, {{ status: 400 }});", .{ name_text, name_text });
         },
         .narrow_optional_before_use => {
-            const name_text = subject_name orelse "value";
+            // No name: an inserted line cannot guard a variable that does not
+            // exist, so the template is a comment that carries the advice.
+            const name_text = subject_name orelse return allocator.dupe(u8, "// bind the value to a const, then check it for undefined before you read it");
             return allocator.print("if ({s} === undefined) return Response.json({{ error: \"missing value\" }}, {{ status: 400 }});", .{name_text});
         },
         else => allocator.dupe(u8, plan.edit_intent.template),
@@ -884,4 +887,41 @@ test "repair plan: any other use asks for plain member reads" {
         \\  return Response.json({ same: same });
         \\}
     , "Use a Result only through result.ok, result.value, result.error, and result.errors.", shape_guard);
+}
+
+// A3 part 2b (Decision 39): a read with no binding cannot take a guard line
+// that names a variable, so the plan tells the author to bind the value first.
+
+fn optionalReadPlan() !repair_plan.Plan {
+    return repair_plan.fromVerifierDiagnostic(
+        .{
+            .severity = .err,
+            .kind = .unchecked_optional_access,
+            .node = 0,
+            .message = "read on a value that may be undefined, without checking for undefined",
+            .help = null,
+        },
+        .{ .line = 4, .column = 20 },
+    ) orelse error.MissingPlan;
+}
+
+test "a plan for an optional read with no binding says to bind the value first" {
+    var text_buf = registry_mod.helpers.TextBuffer.init(testing.allocator);
+    defer text_buf.deinit();
+    try writePlan(text_buf.writer(), testing.allocator, 1, try optionalReadPlan(), "diag", 1, null);
+    const text = try text_buf.toOwnedSlice();
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "\"summary\":\"Bind the value to a const first, then check it for undefined.\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\"template\":\"// bind the value to a const, then check it for undefined before you read it\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "if (value === undefined)") == null);
+}
+
+test "a plan for an optional read on a named binding keeps the guard line" {
+    var text_buf = registry_mod.helpers.TextBuffer.init(testing.allocator);
+    defer text_buf.deinit();
+    try writePlan(text_buf.writer(), testing.allocator, 1, try optionalReadPlan(), "diag", 1, "appName");
+    const text = try text_buf.toOwnedSlice();
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.indexOf(u8, text, "\"summary\":\"Narrow the optional value, provide a fallback, or return before using it.\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\"template\":\"if (appName === undefined) return Response.json({ error: \\\"missing value\\\" }, { status: 400 });\"") != null);
 }

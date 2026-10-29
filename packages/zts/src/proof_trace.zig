@@ -198,8 +198,8 @@ const property_info = [_]PropertyInfo{
     .{
         .name = "optional_safe",
         .family = .path,
-        .passing = "Every optional value is narrowed before use.",
-        .failing = "An optional value is used without being narrowed first.",
+        .passing = "Every field read, index read, spread, and for...of on a value whose type admits undefined is checked first. Not checked: a read on an unknown value (a fetch .json() value included), req.headers, req.query, req.params, a null value, an expression that the checker cannot type, and a use that is not a read, such as arithmetic, a comparison, or a response payload.",
+        .failing = "A value that may be undefined is read without a check. A member read gives undefined, so the response drops or misreports the field. A call on it fails with HTTP 500.",
     },
     .{
         .name = "no_secret_leakage",

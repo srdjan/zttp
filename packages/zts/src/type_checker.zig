@@ -21,6 +21,9 @@ const diagnostic_projection = @import("diagnostic_projection.zig");
 const ir = @import("zts-engine").parser.ir;
 const ScopeAnalyzer = @import("zts-engine").parser.ScopeAnalyzer;
 const json_utils = @import("zts-base").json_utils;
+
+/// Help for a ZTS200 or ZTS203 whose source type has an absent case (A3, Decision 40).
+const undefined_source_help_text = "the value may be undefined: check it first, or use `?? fallback`";
 const object = @import("zts-engine").object;
 const context = @import("zts-engine").context;
 const type_pool_mod = @import("type_pool.zig");
@@ -560,8 +563,8 @@ pub const TypeChecker = struct {
                 .severity = .err,
                 .kind = .missing_field,
                 .node = read,
-                .message = "a parsed JSON value is a Dict: a member or index read yields undefined",
-                .help = "a parsed JSON value is a Dict: decode it with decodeJson(schema, text), or check isDict(v) and read with dictGet(v, key)",
+                .message = "a member or index read on a parsed JSON value yields undefined",
+                .help = "decode the value with decodeJson(schema, text), or check isDict(v) and read with dictGet(v, key)",
             });
             return;
         }
@@ -570,7 +573,7 @@ pub const TypeChecker = struct {
             .severity = .err,
             .kind = .missing_field,
             .node = read,
-            .message = "a Dict has no member or index read: the read yields undefined",
+            .message = "a member or index read on a Dict yields undefined",
             .help = "read a Dict entry with dictGet(d, key)",
         });
     }
@@ -4870,7 +4873,38 @@ pub const TypeChecker = struct {
         return self.env.isAssignableTo(inferred, base);
     }
 
+    /// Whether `raw` names `undefined` itself: `undefined`, `void`, `T | undefined`,
+    /// or a union with such a member. `unknown` and a generic parameter do not
+    /// count: the help below is advice for a value that has an absent case.
+    fn namesUndefined(self: *const TypeChecker, raw: TypeIndex, depth: u8) bool {
+        if (raw == null_type_idx or depth > 8) return false;
+        const pool = self.env.pool;
+        const t = pool.unwrapNominal(self.env.resolveRef(raw));
+        const tag = pool.getTag(t) orelse return false;
+        return switch (tag) {
+            .t_nullable => true,
+            // A bare `undefined` is not "may be": only a member of a union is.
+            .t_undefined, .t_void => depth > 0,
+            .t_union => blk: {
+                for (pool.getUnionMembers(t)) |m| {
+                    if (self.namesUndefined(m, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            // exhaustive: any other type has no absent case, so it earns no undefined help.
+            else => false,
+        };
+    }
+
+    /// The help line of a ZTS200 or ZTS203 whose source type has an absent case.
+    fn undefinedSourceHelp(self: *const TypeChecker, expected: TypeIndex, got: TypeIndex) ?[]const u8 {
+        if (self.namesUndefined(expected, 0)) return null;
+        if (!self.namesUndefined(got, 0)) return null;
+        return undefined_source_help_text;
+    }
+
     fn addTypeMismatch(self: *TypeChecker, node: NodeIndex, expected: TypeIndex, got: TypeIndex) void {
+        const help = self.undefinedSourceHelp(expected, got);
         var buf: [256]u8 = undefined;
         const expected_str = self.env.pool.formatType(expected, buf[0..128]);
         const got_str = self.env.pool.formatType(got, buf[128..256]);
@@ -4881,7 +4915,7 @@ pub const TypeChecker = struct {
                 .kind = .type_mismatch,
                 .node = node,
                 .message = "type mismatch",
-                .help = null,
+                .help = help,
             });
             return;
         };
@@ -4891,7 +4925,7 @@ pub const TypeChecker = struct {
             .kind = .type_mismatch,
             .node = node,
             .message = msg,
-            .help = null,
+            .help = help,
             .allocated = true,
         });
     }
@@ -4930,7 +4964,7 @@ pub const TypeChecker = struct {
             .kind = .arg_type_mismatch,
             .node = node,
             .message = msg,
-            .help = null,
+            .help = self.undefinedSourceHelp(expected, got),
             .allocated = !std.mem.eql(u8, msg, "argument type does not match parameter type"),
         });
     }
@@ -9439,4 +9473,60 @@ test "field names that differ after byte 255 are distinct types" {
         .atoms = &atoms,
     } })) |_| {} else |err| try std.testing.expectEqual(error.TypePoolCapacityExceeded, err);
     try std.testing.expectError(error.TypePoolCapacityExceeded, pool.ensureHealthy());
+}
+
+// A3 part 2b (Decision 40): a mismatch whose source type admits `undefined`
+// carries a help line that names the repair.
+
+const undefined_source_help = "the value may be undefined: check it first, or use `?? fallback`";
+// The test text above is a literal on purpose: it must not follow the constant.
+
+test "ZTS200 help names the undefined check when the source type admits undefined" {
+    const allocator = std.testing.allocator;
+    const seen = try typedDiagnostics(allocator,
+        \\function run(input: string | undefined): number {
+        \\  const n: string = input;
+        \\  return n.length;
+        \\}
+    , false);
+    defer freeSeenDiagnostics(allocator, seen);
+    try std.testing.expectEqual(@as(usize, 1), countKind(seen, .type_mismatch));
+    for (seen) |d| {
+        if (d.kind != .type_mismatch) continue;
+        try std.testing.expectEqualStrings(undefined_source_help, d.help.?);
+    }
+}
+
+test "ZTS203 help names the undefined check when the source type admits undefined" {
+    const allocator = std.testing.allocator;
+    const seen = try typedDiagnostics(allocator,
+        \\function needS(s: string): number {
+        \\  return s.length;
+        \\}
+        \\function run(input: string | undefined): number {
+        \\  return needS(input);
+        \\}
+    , false);
+    defer freeSeenDiagnostics(allocator, seen);
+    try std.testing.expectEqual(@as(usize, 1), countKind(seen, .arg_type_mismatch));
+    for (seen) |d| {
+        if (d.kind != .arg_type_mismatch) continue;
+        try std.testing.expectEqualStrings(undefined_source_help, d.help.?);
+    }
+}
+
+test "ZTS200 has no help when the source type cannot be undefined" {
+    const allocator = std.testing.allocator;
+    const seen = try typedDiagnostics(allocator,
+        \\function run(input: number): number {
+        \\  const n: string = input;
+        \\  return n.length;
+        \\}
+    , false);
+    defer freeSeenDiagnostics(allocator, seen);
+    try std.testing.expectEqual(@as(usize, 1), countKind(seen, .type_mismatch));
+    for (seen) |d| {
+        if (d.kind != .type_mismatch) continue;
+        try std.testing.expect(d.help == null);
+    }
 }

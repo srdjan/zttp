@@ -11197,7 +11197,7 @@ test "A3 part 2a: the ZTS201 repair on a parsed JSON value names decodeJson and 
     const diagnostic = result.json_diagnostics.items[0];
     try std.testing.expectEqualStrings("ZTS201", diagnostic.code);
     try std.testing.expectEqualStrings(
-        "a parsed JSON value is a Dict: decode it with decodeJson(schema, text), or check isDict(v) and read with dictGet(v, key)",
+        "decode the value with decodeJson(schema, text), or check isDict(v) and read with dictGet(v, key)",
         diagnostic.suggestion.?,
     );
 }

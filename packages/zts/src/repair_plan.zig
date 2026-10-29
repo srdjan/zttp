@@ -59,6 +59,10 @@ pub const Plan = struct {
     }
 };
 
+/// The summary of `narrow_optional_before_use` when the read has no binding to
+/// name, such as `ps[0].age`. No guard line can name a variable then.
+pub const unbound_optional_summary = "Bind the value to a const first, then check it for undefined.";
+
 /// The advice for one refused Result shape. A diagnostic with no shape gets
 /// the advice for an unchecked value read.
 fn resultSummary(shape: ?handler_verifier.ResultShape) []const u8 {
