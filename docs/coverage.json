@@ -1,5 +1,5 @@
 {
-  "runId": "5779f2c53b38-1793117734559-3673",
+  "runId": "ad93605c8f10-1793310099594-27512",
   "complete": true,
   "publishable": true,
   "publicationMode": true,
@@ -18,31 +18,29 @@
     "cachePolicy": "enabled"
   },
   "providerToolCount": 15,
-  "providerToolBytes": 9098,
+  "providerToolBytes": 9597,
   "corpusVersion": "db16cf2221a6fcc63c7b8cdfbee2c3df52bcad54c5ddf9bf59ba0670e7bc189e",
   "headlineInputHash": "db16cf2221a6fcc63c7b8cdfbee2c3df52bcad54c5ddf9bf59ba0670e7bc189e",
   "intentSuiteHash": "b89e34e79f1b928bc67ace815add4a8ae19d84c800c8b39e7e5b8bbbbd27a552",
   "securityProbeHash": "90d069bf5a0b79c142966f9e51a28e9d01226589fa34125239d7f63c2605e16a",
-  "thresholdHash": "b58a0117f8653c7241fa4fba20c983ed48e7b890edb616183f15ae7e9f9a7488",
-  "manifestHash": "1bd84c397b6349d7c555933efa3f0597ff5251324e5c4cb45f94cc18917fdb72",
-  "resultRunHash": "a2a2e30b80c5f1c32b84d776c9fe42438b3e4b4dfe695bd05c3a442ef5c7fccc",
+  "thresholdHash": "cb2737048cf27f6b9b7d91e3391d0dfa63408882332b03f40c1ff6e8fd4533ac",
+  "manifestHash": "088c7715b03e40393f907cc0e7a468575e7f6a8e15c97607c0b82fc2c8f8c40c",
+  "resultRunHash": "d64e7f628da1fb596796fa3cef296531f7f105af5f91932d6d90f1f67e64436d",
   "promptPersonaHash": "c14dd7a39fc83fcefac89b4110fa712bd0123333ab9b475b8fd2515c4438ac88",
-  "providerNeutralCatalogHash": "acb3686772207ba2a42b6b7afc41246247518afff2cc77f0e959f85186c852ae",
-  "providerSerializedCatalogHash": "ce0e5a62f2a2085befcf5a8a425075f549342c8aa05652702599b516efb8b829",
+  "providerNeutralCatalogHash": "f8d1aeb614463641a8c9d36f5b90d723046513506a99215dc2ea142074125ced",
+  "providerSerializedCatalogHash": "bbfcefa889f76ce0abccd1e813916181286e88a8eb84a3edf089bf7abc6460b6",
   "schemaHash": "c88e438ea0a1798a6824afa97e1d49c87db89377aa133636893a0cf9693f05d2",
-  "metaHash": "f8da8e8f83bca65e2aab9e1f4b58cb41c69e2a72aeb57b71e5dc7a2bfa8ed42d",
+  "metaHash": "97b92af30dbb3626bbeddbfd0591f4abcf4d75072e160e406c2bd013d923c3ab",
   "grammarHash": "8c555c6dfe5afb98cf73d034a548dd5f18db5a6b540f334a43f0ac871f4d73be",
   "semanticsHash": "83b822bd0dee8e5f9a9231501f0f95b34fa48a0f08c671ade7a8bee822b877b8",
   "diagnosticHash": "657967a5eab118485ffc7038480ab754ab8f8f95782e7ffe4f52424056525d15",
-  "policyHash": "0b6bd3b321d2d77ce5b2a8ffe2c68031244a86488fb0764fc697b2c3473a14fa",
-  "sourceCommit": "5779f2c53b382f6526dfa0ffa92580fb1f32c79d",
+  "policyHash": "9f85e0879e94be5a8f186eed47ac649fcc06b6b48281abf9e988f5035243baf5",
+  "sourceCommit": "ad93605c8f10463a6559e9e276a6703f07920ca6",
   "sourceDirty": false,
   "rulesTotal": 59,
-  "rulesTripped": 3,
+  "rulesTripped": 1,
   "tripped": [
-    "ZTS400",
-    "ZTS500",
-    "ZTS502"
+    "ZTS400"
   ],
   "untripped": [
     "ZTS302",
@@ -53,7 +51,9 @@
     "ZTS308",
     "ZTS309",
     "ZTS310",
+    "ZTS500",
     "ZTS501",
+    "ZTS502",
     "ZTS600",
     "ZTS629",
     "ZTS601",
@@ -103,10 +103,11 @@
     "ZTS408"
   ],
   "offRegistry": [
-    "ZTS203",
-    "ZTS207"
+    "ZTS001",
+    "ZTS056",
+    "ZTS203"
   ],
-  "recorded": "2026-10-27",
+  "recorded": "2026-10-29",
   "seedSuite": {
     "seedsTotal": 61,
     "verifiedRules": 58,
@@ -179,9 +180,9 @@
   },
   "corpusUnion": {
     "corpusVersion": "db16cf2221a6fcc63c7b8cdfbee2c3df52bcad54c5ddf9bf59ba0670e7bc189e",
-    "sourceTreeHash": "727460c3b55c6f77efa60e73d82c34c4787e7cfe",
-    "observations": 20,
-    "distinctSets": 6,
+    "sourceTreeHash": "37b63aa1f58397dd12c0741548275a5ed3fa90c8",
+    "observations": 21,
+    "distinctSets": 7,
     "smallestSet": 0,
     "largestSet": 3,
     "unionCount": 4,
