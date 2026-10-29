@@ -8805,16 +8805,24 @@ test "direct primitive slice binds a grouped and suffixed annotation" {
     try std.testing.expectEqual(@as(u16, 0), annotation.binding.scope_id);
 }
 
+test "direct parser reports a missing type at the colon and parses the initializer" {
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, "const value: = 1;", .compile);
+    defer parser.deinit();
+    try std.testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.errors.getErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(engine.parser.ErrorKind.unexpected_token, errors[0].kind);
+    try std.testing.expectEqual(@as(u32, 11), errors[0].location.offset);
+    try std.testing.expectEqualStrings("expected a type after `:`", errors[0].message);
+    try std.testing.expectEqualStrings("Write the type after the colon, or remove the colon.", errors[0].suggestion orelse "(null)");
+}
+
 test "direct parser reports missing and unmatched primitive locations" {
     const Expected = struct { kind: engine.parser.ErrorKind, offset: u32, end_offset: u32 };
     const cases = [_]struct {
         source: []const u8,
         errors: []const Expected,
     }{
-        .{ .source = "const value: = 1;", .errors = &.{
-            .{ .kind = .unexpected_token, .offset = 11, .end_offset = 12 },
-            .{ .kind = .missing_semicolon, .offset = 6, .end_offset = 11 },
-        } },
         .{ .source = "let n: (number;", .errors = &.{
             .{ .kind = .missing_semicolon, .offset = 4, .end_offset = 5 },
         } },

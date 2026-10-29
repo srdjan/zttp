@@ -1108,6 +1108,19 @@ pub const Parser = struct {
         return self.hasAdmissionTypeStart(keyword.start + keyword.len);
     }
 
+    /// True when the current colon is followed, after whitespace, by a single
+    /// `=`: a declaration that names no type before its initializer.
+    fn colonBeforeAssign(self: *const Parser) bool {
+        if (self.admission != null and self.admissionCoveredByRecovery(self.current.start)) return false;
+        var pos: usize = self.current.start + self.current.len;
+        while (pos < self.source.len and switch (self.source[pos]) {
+            ' ', '\t', '\r', '\n' => true,
+            else => false,
+        }) pos += 1;
+        if (pos >= self.source.len or self.source[pos] != '=') return false;
+        return pos + 1 >= self.source.len or self.source[pos + 1] != '=';
+    }
+
     fn hasAdmissionTypeStart(self: *const Parser, after_marker: u32) bool {
         if (self.admissionCoveredByRecovery(after_marker -| 1)) return false;
         var pos: usize = after_marker;
@@ -1997,6 +2010,14 @@ pub const Parser = struct {
             try self.parseVariableType(binding, name)
         else
             null;
+
+        // A colon followed by `=` names no type. Report the missing type at the
+        // colon and parse the initializer, rather than reading the colon as a
+        // missing initializer and the declaration as unterminated.
+        if (self.parse_type_syntax and self.check(.colon) and self.colonBeforeAssign()) {
+            self.errors.addErrorFmt(.unexpected_token, self.current.location(), "expected a type after `:`", .{}, "Write the type after the colon, or remove the colon.");
+            self.advance();
+        }
 
         // Parse initializer
         var init_node: NodeIndex = null_node;
@@ -7434,7 +7455,8 @@ test "admission type call sites preserve comment and empty colon errors" {
         .{ .source = "const x: /* closed */ any = 1;\n", .projected_errors = 2 },
         .{ .source = "function f(x: /* closed */ any) { return x; }\n", .projected_errors = 1 },
         .{ .source = "function f(): /* closed */ any { return 1; }\n", .projected_errors = 1 },
-        .{ .source = "const x: = 1;\n", .projected_errors = 2 },
+        // One error: the missing type at the colon. The initializer then parses.
+        .{ .source = "const x: = 1;\n", .projected_errors = 1 },
         .{ .source = "function f(x:) { return 1; }\n", .projected_errors = 1 },
     };
     for (refused) |case| {
