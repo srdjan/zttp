@@ -151,14 +151,9 @@ pub fn planFromSource(
     }
 
     // `properties` and `flow_unresolved` are set after the observer runs.
-    const unproven = !observed.ran or blk: {
-        for (goals.items) |goal| {
-            const props = check.properties orelse break :blk true;
-            if (check.flow_unresolved != 0 or !pi_goal_check.propertyHolds(props, goal)) break :blk true;
-        }
-        break :blk false;
-    };
-    const has_failures = !observed.ran or observed.has_failures or unproven;
+    const unproven = try pi_goal_check.unprovenFromCheck(allocator, &check, goals.items);
+    defer allocator.free(unproven);
+    const has_failures = !observed.ran or observed.has_failures or unproven.len > 0;
 
     var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
     defer text_buf.deinit();

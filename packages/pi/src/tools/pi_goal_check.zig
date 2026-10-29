@@ -367,7 +367,7 @@ pub fn unprovenGoals(
     return unprovenFromCheck(allocator, &check, goals);
 }
 
-fn unprovenFromCheck(
+pub fn unprovenFromCheck(
     allocator: std.mem.Allocator,
     check: *const zts_cli.precompile.CheckResult,
     goals: []const counterexample.PropertyTag,
@@ -381,7 +381,7 @@ fn unprovenFromCheck(
     return unproven.toOwnedSlice(allocator);
 }
 
-pub fn propertyHolds(p: zts.HandlerProperties, goal: counterexample.PropertyTag) bool {
+fn propertyHolds(p: zts.HandlerProperties, goal: counterexample.PropertyTag) bool {
     return switch (goal) {
         .no_secret_leakage => p.no_secret_leakage,
         .no_credential_leakage => p.no_credential_leakage,
