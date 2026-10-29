@@ -390,7 +390,7 @@ pub fn unprovenGoals(
     return unproven.toOwnedSlice(allocator);
 }
 
-fn propertyHolds(p: zts.HandlerProperties, goal: counterexample.PropertyTag) bool {
+pub fn propertyHolds(p: zts.HandlerProperties, goal: counterexample.PropertyTag) bool {
     return switch (goal) {
         .no_secret_leakage => p.no_secret_leakage,
         .no_credential_leakage => p.no_credential_leakage,

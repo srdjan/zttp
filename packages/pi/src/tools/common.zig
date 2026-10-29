@@ -376,6 +376,39 @@ pub fn discoverEnvPublic(allocator: std.mem.Allocator, path: []const u8) !Projec
     return .{ .policy = zts.parsePolicyJsonOrNull(allocator, policy_source) };
 }
 
+/// Run the production check once over `source`, as `zts check --json` runs it.
+/// `relative` is the workspace-relative handler path: it names the file in the
+/// result and keeps output independent of the workspace root. The project's
+/// policy and SQL schema are read as the CLI reads them, so `env_public` and
+/// the capability rules come from the policy. `observer` sees the typed
+/// verifier and flow lists while the check holds them; it runs only when the
+/// check reaches the verifier, so a caller must not treat "it did not run" as
+/// "nothing was found".
+pub fn runProductionCheck(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    relative: []const u8,
+    observer: ?zts_cli.precompile.CheckedObserver,
+) !zts_cli.precompile.CheckResult {
+    const root = try workspaceRoot(allocator);
+    defer allocator.free(root);
+    const absolute = try resolveInsideWorkspace(allocator, root, relative);
+    defer allocator.free(absolute);
+    var paths = try zts_cli.edit_simulate.discoverProjectPaths(allocator, absolute);
+    defer paths.deinit(allocator);
+    const policy_source: ?[]u8 = if (paths.policy) |policy_path|
+        try zts.file_io.readFile(allocator, policy_path, 1024 * 1024)
+    else
+        null;
+    defer if (policy_source) |src| allocator.free(src);
+    return zts_cli.precompile.runCheckOnlyFromSourceWithOptions(allocator, source, relative, .{
+        .sql_schema_path = paths.sqlite,
+        .json_mode = true,
+        .policy_source = policy_source,
+        .observer = observer,
+    });
+}
+
 /// An in-process analyzer run shaped as a finished child process, so a tool
 /// keeps its `commandOutcomeToToolResult` output. Copies both streams.
 pub fn inProcessOutcome(

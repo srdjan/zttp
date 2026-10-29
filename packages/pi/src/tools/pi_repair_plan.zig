@@ -2,6 +2,7 @@
 
 const std = @import("std");
 const zts = @import("zts");
+const zts_cli = @import("zts_cli");
 const registry_mod = @import("../registry/registry.zig");
 const common = @import("common.zig");
 const property_goals = @import("../property_goals.zig");
@@ -120,56 +121,52 @@ pub fn planFromSource(
         }
     }
 
-    const source_kind = common.admitToolSource(allocator, source, rel_path) catch |e| {
-        switch (e) {
-            error.InvalidSourceObservation => return e,
-            else => {},
+    var observed: Observed = .{
+        .allocator = allocator,
+        .goals = goals.items,
+        .source_view = .{ .text = source, .normalize_positions = true },
+        .body = registry_mod.helpers.TextBuffer.init(allocator),
+    };
+    defer observed.body.deinit();
+
+    var check = common.runProductionCheck(allocator, source, rel_path, .{
+        .context = &observed,
+        .on_checked = onChecked,
+    }) catch |e| switch (e) {
+        error.OutOfMemory => return e,
+        else => return registry_mod.ToolResult.errFmt(allocator, name ++ ": production check failed: {s}\n", .{@errorName(e)}),
+    };
+    defer check.deinit(allocator);
+
+    // The check stopped before the verifier. A file with no handler that passed
+    // every earlier stage keeps its error. Any other early stop is a refusal that
+    // `zts check` reports, and the tool reports it too (Decision 46(a)). The
+    // diagnostics list cannot tell the two apart: the spec stage adds a ZTS500 to
+    // a file with no handler.
+    if (!observed.ran) {
+        if (check.has_handler == false and check.parse_errors == 0 and check.bool_errors == 0 and
+            check.type_errors == 0 and check.strict_errors == 0)
+        {
+            return registry_mod.ToolResult.err(allocator, name ++ ": no handler function found in file\n");
         }
-        return registry_mod.ToolResult.errFmt(allocator, name ++ ": TypeScript strip failed: {s}\n", .{@errorName(e)});
+        try writeProductionDiagnostics(&observed.body, check.json_diagnostics.items);
+    }
+
+    // `properties` and `flow_unresolved` are set after the observer runs.
+    const unproven = !observed.ran or blk: {
+        for (goals.items) |goal| {
+            const props = check.properties orelse break :blk true;
+            if (check.flow_unresolved != 0 or !pi_goal_check.propertyHolds(props, goal)) break :blk true;
+        }
+        break :blk false;
     };
-
-    var atoms = zts.AtomTable.init(allocator);
-    defer atoms.deinit();
-    var js_parser = if (source_kind.isTyped())
-        try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile)
-    else
-        try zts.parser.JsParser.init(allocator, source);
-    defer js_parser.deinit();
-    js_parser.setAtomTable(&atoms);
-
-    const program_root = js_parser.parse() catch |e| {
-        return registry_mod.ToolResult.errFmt(allocator, name ++ ": parse failed: {s}\n", .{@errorName(e)});
-    };
-    const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    const handler_fn = zts.findHandlerFunction(ir_view, program_root) orelse {
-        return registry_mod.ToolResult.err(allocator, name ++ ": no handler function found in file\n");
-    };
-
-    var verifier = zts.HandlerVerifier.init(allocator, ir_view, &atoms, null, null);
-    defer verifier.deinit();
-    _ = try verifier.verify(handler_fn);
-
-    var env_public = try common.discoverEnvPublic(allocator, rel_path);
-    defer env_public.deinit(allocator);
-    var checker = zts.FlowChecker.init(allocator, ir_view, &atoms);
-    defer checker.deinit();
-    checker.scopes = &js_parser.scopes;
-    checker.env_public = env_public.names();
-    _ = try checker.check(handler_fn);
+    const has_failures = !observed.ran or observed.has_failures or unproven;
 
     var text_buf = registry_mod.helpers.TextBuffer.init(allocator);
     defer text_buf.deinit();
     const w = text_buf.writer();
-
     const policy_hash = zts.policyHash();
     try w.writeAll("{\"ok\":");
-    // The bare checker above raises no diagnostic for an unresolved construct
-    // or an unresolvable import, so the verdict also needs the production check.
-    const unproven = try pi_goal_check.unprovenGoals(allocator, source, rel_path, goals.items);
-    defer allocator.free(unproven);
-    const has_failures = hasVerifierErrors(verifier.getDiagnostics()) or
-        hasRequestedFlowDiagnostics(checker.getDiagnostics(), goals.items) or
-        unproven.len > 0;
     try w.writeAll(if (has_failures) "false" else "true");
     try w.writeAll(",\"policy_hash\":\"");
     try w.writeAll(&policy_hash);
@@ -179,12 +176,73 @@ pub fn planFromSource(
         try writeJsonString(w, g.asString());
     }
     try w.writeAll("],\"diagnostics\":[");
+    try w.writeAll(observed.body.written());
+
+    const llm_text = try text_buf.toOwnedSlice();
+    errdefer allocator.free(llm_text);
+    return .{ .ok = !has_failures, .llm_text = llm_text };
+}
+
+/// State the production check's observer fills. `body` holds the envelope from
+/// the first diagnostic to the closing brace.
+const Observed = struct {
+    allocator: std.mem.Allocator,
+    goals: []const counterexample.PropertyTag,
+    /// Maps the observer's raw positions to the ones `zts check --json` reports.
+    source_view: zts.SourceView,
+    body: registry_mod.helpers.TextBuffer,
+    ran: bool = false,
+    has_failures: bool = false,
+};
+
+fn onChecked(context: *anyopaque, view: zts_cli.precompile.CheckedView) error{OutOfMemory}!void {
+    const observed: *Observed = @ptrCast(@alignCast(context));
+    writeObserved(observed, view) catch |e| switch (e) {
+        // A write into the in-memory buffer fails only when it cannot grow.
+        error.OutOfMemory, error.WriteFailed => return error.OutOfMemory,
+    };
+    observed.ran = true;
+}
+
+fn writeProductionDiagnostics(
+    body: *registry_mod.helpers.TextBuffer,
+    diagnostics: []const zts_cli.json_diagnostics.JsonDiagnostic,
+) !void {
+    const w = body.writer();
+    for (diagnostics, 0..) |diag, i| {
+        if (i > 0) try w.writeByte(',');
+        var id_buf: [16]u8 = undefined;
+        const id = std.fmt.bufPrint(&id_buf, "diag_{d:0>3}", .{i + 1}) catch unreachable;
+        try w.writeAll("{\"id\":");
+        try writeJsonString(w, id);
+        try w.writeAll(",\"code\":");
+        try writeJsonString(w, diag.code);
+        try w.writeAll(",\"severity\":");
+        try writeJsonString(w, diag.severity);
+        try w.print(",\"line\":{d},\"column\":{d},\"message\":", .{ diag.line, diag.column });
+        try writeJsonString(w, diag.message);
+        if (diag.suggestion) |help| {
+            try w.writeAll(",\"help\":");
+            try writeJsonString(w, help);
+        }
+        try w.writeByte('}');
+    }
+    try w.writeAll("],\"witnesses\":[],\"plans\":[]}\n");
+}
+
+fn writeObserved(observed: *Observed, view: zts_cli.precompile.CheckedView) !void {
+    const allocator = observed.allocator;
+    const goals = observed.goals;
+    const ir_view = view.ir_view;
+    const w = observed.body.writer();
+    observed.has_failures = hasVerifierErrors(view.verifier_diagnostics) or
+        hasRequestedFlowDiagnostics(view.flow_diagnostics, goals);
 
     var plan_index: usize = 0;
     var diag_index: usize = 0;
     var first_diag = true;
-    for (verifier.getDiagnostics()) |diag| {
-        const loc = ir_view.getLoc(diag.node) orelse continue;
+    for (view.verifier_diagnostics) |diag| {
+        const loc = mappedLoc(observed, ir_view, diag.node) orelse continue;
         if (!first_diag) try w.writeByte(',');
         first_diag = false;
         diag_index += 1;
@@ -196,14 +254,15 @@ pub fn planFromSource(
 
     var first_witness = true;
     var witness_index: usize = 0;
-    for (checker.getDiagnostics()) |diag| {
+    for (view.flow_diagnostics) |diag| {
         // Use the shared diagnostic projection for counterexample generation.
         const projection = zts.DiagnosticProjection.projectFlowWitness(diag, ir_view) orelse continue;
-        if (!goalRequested(goals.items, projection.property)) continue;
+        if (!goalRequested(goals, projection.property)) continue;
+        const at = observed.source_view.position(projection.line, projection.column);
         var witness = zts.solveCounterexample(allocator, .{
             .property = projection.property,
-            .origin = .{ .line = projection.line, .column = projection.column },
-            .sink = .{ .line = projection.line, .column = projection.column },
+            .origin = .{ .line = at.line, .column = at.column },
+            .sink = .{ .line = at.line, .column = at.column },
             .summary = projection.summary,
             .constraints = projection.constraints,
             .io_calls = projection.io_calls,
@@ -221,11 +280,11 @@ pub fn planFromSource(
     try w.writeAll("],\"plans\":[");
     var first_plan = true;
     diag_index = 0;
-    for (verifier.getDiagnostics()) |diag| {
-        const loc = ir_view.getLoc(diag.node) orelse continue;
+    for (view.verifier_diagnostics) |diag| {
+        const loc = mappedLoc(observed, ir_view, diag.node) orelse continue;
         diag_index += 1;
         const plan = repair_plan.fromVerifierDiagnostic(diag, .{ .line = loc.line, .column = loc.column }) orelse continue;
-        const subject_name = repairSubjectName(ir_view, &atoms, diag);
+        const subject_name = repairSubjectName(ir_view, view.atoms, diag);
         plan_index += 1;
         if (!first_plan) try w.writeByte(',');
         first_plan = false;
@@ -233,10 +292,10 @@ pub fn planFromSource(
     }
 
     witness_index = 0;
-    for (checker.getDiagnostics()) |diag| {
+    for (view.flow_diagnostics) |diag| {
         const tag = flow_checker.propertyTagForKind(diag.kind) orelse continue;
-        if (!goalRequested(goals.items, tag)) continue;
-        const loc = ir_view.getLoc(diag.node) orelse continue;
+        if (!goalRequested(goals, tag)) continue;
+        const loc = mappedLoc(observed, ir_view, diag.node) orelse continue;
         witness_index += 1;
         const plan = repair_plan.fromFlowDiagnostic(diag, tag, .{ .line = loc.line, .column = loc.column }) orelse continue;
         plan_index += 1;
@@ -245,10 +304,12 @@ pub fn planFromSource(
         try writePlan(w, allocator, plan_index, plan, "wit", witness_index, null);
     }
     try w.writeAll("]}\n");
+}
 
-    const llm_text = try text_buf.toOwnedSlice();
-    errdefer allocator.free(llm_text);
-    return .{ .ok = !has_failures, .llm_text = llm_text };
+/// The position of `node` as `zts check --json` reports it.
+fn mappedLoc(observed: *const Observed, ir_view: zts.IrView, node: zts.parser.NodeIndex) ?zts.SourcePosition {
+    const loc = ir_view.getLoc(node) orelse return null;
+    return observed.source_view.position(loc.line, loc.column);
 }
 
 fn writeVerifierDiagnostic(
@@ -260,6 +321,8 @@ fn writeVerifierDiagnostic(
 ) !void {
     try writer.writeAll("{\"id\":");
     try writeJsonString(writer, id);
+    try writer.writeAll(",\"code\":");
+    try writeJsonString(writer, zts.DiagnosticProjection.code(.verifier, diag.kind));
     try writer.writeAll(",\"kind\":");
     try writeJsonString(writer, @tagName(diag.kind));
     try writer.writeAll(",\"severity\":");
@@ -494,10 +557,10 @@ test "execute rejects a property the solver does not model" {
 
 test "planFromSource plans repairs from an in-memory draft" {
     const source =
-        \\import { validateJson } from "zttp:validate";
+        \\import { parseJson } from "zttp:json";
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  const result = validateJson("item", req.body);
+        \\  const result = parseJson("1");
         \\  const data = result.value;
         \\  return Response.json({ data: data });
         \\}
@@ -557,10 +620,10 @@ test "a repair plan reads the same from two different workspaces" {
     // where the run lives makes the replayed transcript differ from the
     // recorded one, which fails the case rather than the tool.
     const source =
-        \\import { validateJson } from "zttp:validate";
+        \\import { parseJson } from "zttp:json";
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  const result = validateJson("item", req.body);
+        \\  const result = parseJson("1");
         \\  const data = result.value;
         \\  return Response.json({ data: data });
         \\}
@@ -585,6 +648,8 @@ test "a repair plan reads the same from two different workspaces" {
     var second = try planFromSource(testing.allocator, source, "handler.ts", &.{});
     defer second.deinit(testing.allocator);
 
+    // The source reaches the verifier, so the compared output holds a plan.
+    try testing.expect(std.mem.indexOf(u8, first_text, "\"plans\":[{\"id\":\"rp_001\"") != null);
     try testing.expectEqualStrings(first_text, second.llm_text);
 }
 
@@ -713,6 +778,18 @@ fn expectFirstPlan(source: []const u8, summary: []const u8, template: []const u8
     try testing.expect(std.mem.indexOf(u8, plans, expected_template) != null);
 }
 
+/// Production stops this source before the verifier, so the tool reports the
+/// stage's diagnostic as the first one and plans nothing.
+fn expectEarlyStop(source: []const u8, code: []const u8) !void {
+    var result = try planFromSource(testing.allocator, source, "handler.ts", &.{});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    const expected = try std.fmt.allocPrint(testing.allocator, "\"diagnostics\":[{{\"id\":\"diag_001\",\"code\":\"{s}\"", .{code});
+    defer testing.allocator.free(expected);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, expected) != null);
+    try testing.expect(std.mem.endsWith(u8, result.llm_text, "\"witnesses\":[],\"plans\":[]}\n"));
+}
+
 test "repair plan: an unguarded value read keeps the guard" {
     try expectFirstPlan(plan_head ++
         \\  const v = r.value;
@@ -739,14 +816,14 @@ test "repair plan: an error read on the ok path gets an ok-first guard" {
     , "Result.error is undefined on the ok path. Read it after if (result.ok) return ..., or write result.error ?? fallback.", "if (r.ok) return Response.json({ ok: true });");
 }
 
-test "repair plan: a comparison of ok with true is replaced by a plain check" {
-    try expectFirstPlan(plan_head ++
+test "repair plan: production refuses a comparison of ok with true before the verifier" {
+    try expectEarlyStop(plan_head ++
         \\  if (r.ok === true) {
         \\    return Response.json({ v: r.value });
         \\  }
         \\  return Response.text("no");
         \\}
-    , "Replace this check with if (!result.ok) return ... . The proof does not accept === true, isOk(), isErr(), or match as a check.", shape_guard);
+    , "ZTS620");
 }
 
 test "repair plan: a closure read gets a check inside the closure" {
@@ -767,12 +844,12 @@ test "repair plan: a read inside an assert gets a check before the statement" {
     , "Check result.ok in an if statement before the assert, throw, switch, or try statement that reads the Result.", shape_guard);
 }
 
-test "repair plan: an unknown member names its subject" {
-    try expectFirstPlan(plan_head ++
+test "repair plan: production refuses an unknown Result member before the verifier" {
+    try expectEarlyStop(plan_head ++
         \\  const x = r.foo;
         \\  return Response.json({ x: x });
         \\}
-    , "Read only result.ok, result.value, result.error, or result.errors, each with a plain member name.", shape_guard);
+    , "ZTS201");
 }
 
 test "repair plan: a computed key resolves its subject" {
@@ -784,14 +861,14 @@ test "repair plan: a computed key resolves its subject" {
     , "Read only result.ok, result.value, result.error, or result.errors, each with a plain member name.", shape_guard);
 }
 
-test "repair plan: a method call is replaced by result.ok" {
-    try expectFirstPlan(plan_head ++
+test "repair plan: production refuses a Result method call before the verifier" {
+    try expectEarlyStop(plan_head ++
         \\  if (r.isOk()) {
         \\    return Response.text("yes");
         \\  }
         \\  return Response.text("no");
         \\}
-    , "Use result.ok. A Result has no methods, so replace the method call with if (!result.ok) return ... .", shape_guard);
+    , "ZTS100");
 }
 
 test "repair plan: an alias asks for a check and result.value" {
@@ -818,14 +895,14 @@ test "repair plan: a Result argument asks for result.value" {
     , "Check result.ok in this function, then pass result.value, not the Result. Pass the Result itself only to a zttp:result function that takes a Result.", shape_guard);
 }
 
-test "repair plan: a returned Result asks for result.value" {
-    try expectFirstPlan(plan_head ++
+test "repair plan: production refuses a returned Result before the verifier" {
+    try expectEarlyStop(plan_head ++
         \\  if (req.method === "GET") {
         \\    return r;
         \\  }
         \\  return Response.text("ok");
         \\}
-    , "Check result.ok in this function, then return result.value or a Response, not the Result.", shape_guard);
+    , "ZTS204");
 }
 
 test "repair plan: a Result in an object asks for result.value" {
@@ -924,4 +1001,67 @@ test "a plan for an optional read on a named binding keeps the guard line" {
     defer testing.allocator.free(text);
     try testing.expect(std.mem.indexOf(u8, text, "\"summary\":\"Narrow the optional value, provide a fallback, or return before using it.\"") != null);
     try testing.expect(std.mem.indexOf(u8, text, "\"template\":\"if (appName === undefined) return Response.json({ error: \\\"missing value\\\" }, { status: 400 });\"") != null);
+}
+
+test "repair plan: an unguarded read of a possibly undefined value gets ZTS309 and one plan" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const xs: string[] = ["a"];
+        \\  const first = xs[0];
+        \\  return Response.json({ n: first.length });
+        \\}
+        \\
+    ;
+    var result = try planFromSource(testing.allocator, source, "handler.ts", &.{});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        result.llm_text,
+        "\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS309\",\"kind\":\"unchecked_optional_access\",\"severity\":\"error\",\"line\":4,\"column\":34,",
+    ) != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"diag_002\"") == null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"plans\":[{\"id\":\"rp_001\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"rp_002\"") == null);
+}
+
+test "repair plan: a type error stops the check and returns the production diagnostic" {
+    const source =
+        \\function handler(req: Request): Response {
+        \\  const n: number = "a";
+        \\  return Response.json({ n: n });
+        \\}
+        \\
+    ;
+    var result = try planFromSource(testing.allocator, source, "handler.ts", &.{});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.startsWith(u8, result.llm_text, "{\"ok\":false,"));
+    try testing.expect(std.mem.endsWith(
+        u8,
+        result.llm_text,
+        "\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS200\",\"severity\":\"error\",\"line\":2,\"column\":3,\"message\":\"type '\\\"a\\\"' is not assignable to type 'number'\"}],\"witnesses\":[],\"plans\":[]}\n",
+    ));
+}
+
+test "repair plan: a file with no handler returns the no-handler error" {
+    var result = try planFromSource(testing.allocator, "const x = 1;\n", "handler.ts", &.{});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expectEqualStrings("pi_repair_plan: no handler function found in file\n", result.llm_text);
+}
+
+test "repair plan: a .js path returns the production ZTS052 diagnostic" {
+    const source =
+        \\function handler(req) {
+        \\  return Response.json({ ok: true });
+        \\}
+        \\
+    ;
+    var result = try planFromSource(testing.allocator, source, "handler.js", &.{});
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"diagnostics\":[{\"id\":\"diag_001\",\"code\":\"ZTS052\",\"severity\":\"error\"") != null);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"diag_002\"") == null);
+    try testing.expect(std.mem.endsWith(u8, result.llm_text, "],\"witnesses\":[],\"plans\":[]}\n"));
 }

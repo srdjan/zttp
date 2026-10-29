@@ -526,10 +526,10 @@ const testing = std.testing;
 
 test "candidateFromSource verifies a guard repair in memory" {
     const source =
-        \\import { validateJson } from "zttp:validate";
+        \\import { parseJson } from "zttp:json";
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  const result = validateJson("item", req.body);
+        \\  const result = parseJson("1");
         \\  const data = result.value;
         \\  return Response.json({ data: data });
         \\}
@@ -582,10 +582,10 @@ test "execute returns verified candidate without writing the file" {
     defer tmp.cleanup(allocator);
 
     const source =
-        \\import { validateJson } from "zttp:validate";
+        \\import { parseJson } from "zttp:json";
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  const result = validateJson("item", req.body);
+        \\  const result = parseJson("1");
         \\  const data = result.value;
         \\  return Response.json({ data: data });
         \\}
@@ -626,10 +626,10 @@ test "execute does not persist witnesses to the on-disk corpus" {
     defer tmp.cleanup(allocator);
 
     const source =
-        \\import { validateJson } from "zttp:validate";
+        \\import { parseJson } from "zttp:json";
         \\
         \\function handler(req: Request): Proof<Response, "deterministic"> {
-        \\  const result = validateJson("item", req.body);
+        \\  const result = parseJson("1");
         \\  const data = result.value;
         \\  return Response.json({ data: data });
         \\}
