@@ -10,6 +10,15 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-10-29
+
+### Highlights
+
+This release makes the expert tools read the analysis that `zts check` runs,
+gives every rejection they report a repair plan, and lets the acceptance kernel
+re-derive `results_checked`. A flow property now reads as unproven until its
+pass proves it.
+
 ### Added
 
 - **The acceptance kernel re-derives `results_checked`.** The proof IR now
@@ -1421,7 +1430,8 @@ See git tags and `RELEASE_CHECKLIST.md` for the record of shipped items. Known-i
 - Static file path traversal via symlinks blocked with check-before-open + `follow_symlinks=false`.
 - HandlerPool test flake under the build runner (root cause was the closure destroyFull bug above).
 
-[Unreleased]: https://github.com/srdjan/zttp/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/srdjan/zttp/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/srdjan/zttp/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/srdjan/zttp/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/srdjan/zttp/compare/v0.22.3...v0.24.0
 [0.22.3]: https://github.com/srdjan/zigttp/compare/v0.22.2...v0.22.3

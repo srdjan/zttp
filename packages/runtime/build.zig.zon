@@ -1,6 +1,6 @@
 .{
     .name = .zttp_runtime,
-    .version = "0.25.0",
+    .version = "0.26.0",
     .fingerprint = 0x309e5ad3f606ff57,
     .minimum_zig_version = "0.17.0",
     .dependencies = .{
