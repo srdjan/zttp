@@ -3,7 +3,7 @@
   <p align="center"><a href="https://zigttp.timok.com/">Website</a> - <a href="docs/README.md">Documentation</a></p>
 </p>
 
-# zttp v0.25.0
+# Zttp - Runtime And Compiler Agent
 
 **The agent writes only what the compiler can prove.**
 
