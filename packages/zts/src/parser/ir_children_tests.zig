@@ -139,7 +139,7 @@ fn decision(comptime tag: NodeTag) Row {
 
 fn expectChildren(source: []const u8, tag: NodeTag, nth: usize, expected: []const NodeTag) !void {
     const allocator = std.testing.allocator;
-    var parser = try parse.Parser.init(allocator, source);
+    var parser = try parse.Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     if (parser.errors.hasErrors()) {
