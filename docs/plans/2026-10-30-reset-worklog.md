@@ -161,3 +161,13 @@ Probe in a clone with a warm replay: `update-convergence.sh` exit 0, then `updat
 Unit 8b: this commit. `bytecode_identity_golden.zig` is the `main` of the `test-bytecode-identity` gate, with `has_side_effects = true`, and the aggregate runs it once. `bytecode_identity_golden.txt` did not change. Write mode regenerated a byte-identical golden through the new step.
 Three warm-cache probes in a clone each exit 1: a changed handler, a changed import of a handler, and a new handler. Each prints `bytecode identity drift`.
 The aggregate test count falls, because 5 collected copies became one gate. A warm run prints no total, so Phase 11 states the count from a cold run.
+
+## Phase 9
+
+Unit 9a (CLI text corrections): `2d461822`. The surface digest moved for two rows only, `zttp-runtime --help` and `zttp expert --help`. Opus made the unit directly, because each correction is one line.
+A probe found that the scaffolded extension handler failed `zts compile` with ZTS601. The template now annotates its handler, and `scripts/smoke-v1.sh` compiles the scaffold. `zts compile` exits 0 and prints warning ZTS401, because the scaffold returns a credential in its response. That warning is left as is.
+
+Unit 9c (`unreachable_code` in CHECK): `242f6b52`. The new test failed without the fix on the `verification.unreachable_code` assertion. The digest did not move, and offline replay passed. Opus made the unit directly.
+
+Unit 9d (fetch summary): deferred under Decision 5. The edit passed `test-modules` and `test-docs-drift`. It failed `test-meta-drift` with `builtin_registry_hash` moved, `test-expert-golden` on `zts meta --json`, and `test-expert-app` with 11 cassettes that need a re-record. The cassettes are `health`, `validate-body`, `jwt-auth`, `weather-egress`, `sql-users`, `log-timestamp`, `cache-counter`, `egress-options`, `sibling-helper`, `egress-options-holes`, and `sibling-helper-holes`.
+The plan expected that a failure here would be possible. The edit is reverted, and the roadmap carries the row. No recorder ran.

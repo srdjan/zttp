@@ -219,6 +219,7 @@ Plans that earlier resets archived stay readable at the local tags `pre-rebase`,
 | Shared IR shape helpers | Deferred | A concrete new consumer, such as a build cache or incremental compile | Identify the repeated shape operation the consumer needs | A shared helper replaces measured duplication and preserves analyzer behavior |
 | Collector role | Measurement required | Reproduce remaining memory growth after the lifetime-arena fix | Attribute retained allocations before selecting any deletion | Repeatable allocation and RSS evidence identifies what grows and whether collection is required |
 | VM-loop deduplication | Deferred | Runtime hardening, engine facade, and the existing measurement gates | Revalidate the deferred plan (`pre-rebase:docs/archive/DEFERRED_VM_LOOP_DEDUPE_PLAN.md`) against the selected runtime path | Public behavior preserved and the plan's measurements justify the change |
+| `zttp:fetch` summary names `AgentTurnRefused` | Deferred | The next D-012 re-record window: the summary reaches `zts meta`, moves `builtin_registry_hash`, and stales 11 cassettes | Remove the sentence from the binding, regenerate the module spec, update the meta pin, and re-record | `AgentTurnRefused` has no match in live source and offline replay passes |
 
 ## Proposal Decisions
 
