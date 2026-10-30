@@ -127,7 +127,6 @@ pub const scanAdmissionQuotedRegion = type_syntax_scan_mod.scanAdmissionQuotedRe
 pub const scanAdmissionGenericList = type_syntax_scan_mod.scanAdmissionGenericList;
 pub const scanBalancedGenericList = type_syntax_scan_mod.scanBalancedGenericList;
 pub const isPrivateGenericListEligible = type_syntax_scan_mod.isPrivateGenericListEligible;
-pub const isPrivateErasedPrefixListEligible = type_syntax_scan_mod.isPrivateErasedPrefixListEligible;
 pub const scanAdmissionCallTypeArguments = type_syntax_scan_mod.scanAdmissionCallTypeArguments;
 pub const scanExplicitCallTypeArguments = type_syntax_scan_mod.scanExplicitCallTypeArguments;
 pub const scanAdmissionBraceBody = type_syntax_scan_mod.scanAdmissionBraceBody;

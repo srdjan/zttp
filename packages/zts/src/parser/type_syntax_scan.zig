@@ -941,10 +941,6 @@ pub fn isPrivateGenericListEligible(source: []const u8, scan: GenericListScan) b
     return !scan.suppressed_diagnostic and !hasRegexShapedGenericSource(source, scan.span);
 }
 
-pub fn isPrivateErasedPrefixListEligible(source: []const u8, scan: GenericListScan) bool {
-    return isPrivateGenericListEligible(source, scan) and scan.span.end - scan.span.start >= 2;
-}
-
 fn scanExplicitCallTypeArgumentsCore(
     allocator: std.mem.Allocator,
     source: []const u8,

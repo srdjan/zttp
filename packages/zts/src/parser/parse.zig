@@ -192,7 +192,6 @@ pub const Parser = struct {
     scopes: ScopeAnalyzer,
     errors: ErrorList,
     type_store: type_syntax.Store,
-    parse_type_syntax: bool,
     last_erased_type_span: ?type_syntax.Span,
     type_only_module_refusal: ?type_syntax.TypeOnlyModuleRefusal,
     type_only_module_exclusion: ?type_syntax.TypeOnlyModule,
@@ -292,7 +291,7 @@ pub const Parser = struct {
     }
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) !Parser {
-        return initWithProfile(allocator, allocator, source, false, false, null, false);
+        return initWithProfile(allocator, allocator, source, false, null, false);
     }
 
     /// Opt in before parsing only when source outlives this parser and any
@@ -303,7 +302,7 @@ pub const Parser = struct {
     }
 
     pub fn initExpression(allocator: std.mem.Allocator, source: []const u8) !Parser {
-        return initWithProfile(allocator, allocator, source, true, false, null, false);
+        return initWithProfile(allocator, allocator, source, true, null, false);
     }
 
     /// Private direct-source admission parser. It owns the syntax collector and
@@ -314,7 +313,7 @@ pub const Parser = struct {
         source: []const u8,
         mode: type_syntax.AdmissionMode,
     ) !Parser {
-        return initWithProfile(allocator, type_allocator, source, false, true, mode, false);
+        return initWithProfile(allocator, type_allocator, source, false, mode, false);
     }
 
     pub fn initSourceObserver(
@@ -323,7 +322,7 @@ pub const Parser = struct {
         source: []const u8,
         mode: type_syntax.AdmissionMode,
     ) !Parser {
-        return initWithProfile(allocator, type_allocator, source, false, true, mode, true);
+        return initWithProfile(allocator, type_allocator, source, false, mode, true);
     }
 
     fn initWithProfile(
@@ -331,7 +330,6 @@ pub const Parser = struct {
         type_allocator: std.mem.Allocator,
         source: []const u8,
         expression_profile: bool,
-        parse_type_syntax: bool,
         admission_mode: ?type_syntax.AdmissionMode,
         source_only: bool,
     ) !Parser {
@@ -353,7 +351,6 @@ pub const Parser = struct {
             .scopes = try ScopeAnalyzer.init(allocator),
             .errors = ErrorList.init(allocator, source),
             .type_store = type_syntax.Store.init(type_allocator, source),
-            .parse_type_syntax = parse_type_syntax,
             .last_erased_type_span = null,
             .type_only_module_refusal = null,
             .type_only_module_exclusion = null,
@@ -1217,7 +1214,7 @@ pub const Parser = struct {
 
     fn tryConsumeTypeOnlyModule(self: *Parser) !bool {
         if (self.admissionCoveredByRecovery(self.current.start)) return false;
-        if (!self.parse_type_syntax or !self.isTypeDeclarationBoundary()) return false;
+        if (self.admission == null or !self.isTypeDeclarationBoundary()) return false;
         if (self.current.type != .kw_import and self.current.type != .kw_export) return false;
 
         const cursor_checkpoint = self.cursorCheckpoint();
@@ -1239,7 +1236,7 @@ pub const Parser = struct {
             .not_type_only => return false,
             else => {},
         }
-        if (self.admission != null) {
+        {
             var selected = try presentation_origin.trackedWhitespaceAt(keyword.start + keyword.len);
             if (keyword.type == .kw_export) {
                 selected = try selected.trackedWhitespaceAt(selected.offset + @as(u32, "type".len));
@@ -1257,7 +1254,7 @@ pub const Parser = struct {
                 });
             }
         }
-        const module, const publish_record = switch (scan) {
+        const module = switch (scan) {
             .not_type_only => return false,
             .refused => |refusal| {
                 var origin_sink = self.admissionSink();
@@ -1276,17 +1273,10 @@ pub const Parser = struct {
                 try self.recordFatalAdmission(diagnostic);
                 return error.TypeOnlyModuleRefused;
             },
-            .excluded => |module| blk: {
-                if (self.admission != null) break :blk .{ module, true };
-                if (self.type_only_module_exclusion == null) {
-                    self.type_only_module_exclusion = module;
-                }
-                break :blk .{ module, false };
-            },
-            .scanned => |module| .{ module, true },
+            .excluded, .scanned => |module| module,
         };
 
-        if (publish_record and !self.source_only) try self.type_store.appendTypeOnlyModule(module);
+        if (!self.source_only) try self.type_store.appendTypeOnlyModule(module);
 
         try self.resumeAfterRawErasureObserved(
             module.raw_span.end,
@@ -1298,82 +1288,7 @@ pub const Parser = struct {
 
     fn tryConsumeTypeDeclaration(self: *Parser) !bool {
         if (self.admissionCoveredByRecovery(self.current.start)) return false;
-        if (!self.parse_type_syntax or !self.isTypeDeclarationBoundary()) return false;
-        if (self.admission != null) return self.tryConsumeAdmittedTypeDeclaration();
-
-        const publication_checkpoint = self.typePublicationCheckpoint();
-        const store_checkpoint = self.type_store.checkpoint();
-        errdefer self.type_store.rollback(store_checkpoint);
-        const saved_previous = self.previous;
-        var cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
-        var keyword = self.current;
-        var export_span: ?type_syntax.Span = null;
-        if (self.current.type == .kw_export) {
-            export_span = .{
-                .start = self.current.start,
-                .end = self.current.start + self.current.len,
-            };
-            keyword = cursor.current;
-            cursor.advance();
-        }
-        if (keyword.type != .identifier) return false;
-        const kind: type_syntax.DeclarationKind = if (std.mem.eql(u8, keyword.text(self.source), "structural"))
-            .structural
-        else if (std.mem.eql(u8, keyword.text(self.source), "nominal"))
-            .nominal
-        else
-            return false;
-
-        const outcome = try type_syntax.parseDeclarationAndStore(
-            &self.type_store,
-            self.source,
-            keyword,
-            export_span,
-            kind,
-            self.scopes.getCurrentScope().id,
-            &cursor,
-        );
-        const erased = switch (outcome) {
-            .not_declaration => return false,
-            .excluded => |excluded| {
-                if (excluded.reason == .nominal_base_not_scalar) {
-                    if (self.admission == null) return false;
-                    if (excluded.generic_list_span) |span| {
-                        try self.classifyAdmissionSpan(span, .removed_only);
-                    }
-                    try self.classifyAdmissionSpan(excluded.raw_span, .any_only);
-                    try self.recordAdmission(.nominal_base_not_scalar, excluded.raw_span, false);
-                    try self.resumeAfterRawErasureObserved(
-                        excluded.admission_end,
-                        saved_previous,
-                    );
-                    self.type_store.rollback(store_checkpoint);
-                    return true;
-                }
-                return false;
-            },
-            .parsed => |span| blk: {
-                for (self.type_store.generic_owners.items[store_checkpoint.generic_owners..]) |owner| {
-                    try self.classifyAdmissionSpan(owner.list_span, .removed_only);
-                }
-                for (self.type_store.declarations.items[store_checkpoint.declarations..]) |declaration| {
-                    switch (declaration.body) {
-                        .absent => {},
-                        .present => |body| try self.classifyAdmissionSpan(body.raw_span, .general_type),
-                    }
-                }
-                break :blk span;
-            },
-        };
-        try self.resumeAfterRawErasureObserved(erased.end, saved_previous);
-        self.last_erased_type_span = erased;
-        if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
-            self.type_store.rollback(store_checkpoint);
-        }
-        return true;
-    }
-
-    fn tryConsumeAdmittedTypeDeclaration(self: *Parser) !bool {
+        if (self.admission == null or !self.isTypeDeclarationBoundary()) return false;
         const publication_checkpoint = self.typePublicationCheckpoint();
         const store_checkpoint = self.type_store.checkpoint();
         errdefer self.type_store.rollback(store_checkpoint);
@@ -2004,9 +1919,8 @@ pub const Parser = struct {
             return error.TooManyLocals;
         };
 
-        const annotation_index = if (self.parse_type_syntax and self.check(.colon) and
-            (self.admission == null or
-                self.hasAdmissionTypeStart(self.current.start + self.current.len)))
+        const annotation_index = if (self.admission != null and self.check(.colon) and
+            self.hasAdmissionTypeStart(self.current.start + self.current.len))
             try self.parseVariableType(binding, name)
         else
             null;
@@ -2014,7 +1928,7 @@ pub const Parser = struct {
         // A colon followed by `=` names no type. Report the missing type at the
         // colon and parse the initializer, rather than reading the colon as a
         // missing initializer and the declaration as unterminated.
-        if (self.parse_type_syntax and self.check(.colon) and self.colonBeforeAssign()) {
+        if (self.admission != null and self.check(.colon) and self.colonBeforeAssign()) {
             self.errors.addErrorFmt(.unexpected_token, self.current.location(), "expected a type after `:`", .{}, "Write the type after the colon, or remove the colon.");
             self.advance();
         }
@@ -2409,7 +2323,7 @@ pub const Parser = struct {
             type_syntax.tokenStartsGenericList(self.source, self.current) and
             name.start + name.len < self.current.start and
             containsOnlyAdmissionWhitespace(self.source, name.start + name.len, self.current.start);
-        if (!self.parse_type_syntax or !type_syntax.tokenStartsGenericList(self.source, self.current) or
+        if (self.admission == null or !type_syntax.tokenStartsGenericList(self.source, self.current) or
             (name.start + name.len != self.current.start and !spaced_call_list))
         {
             if (self.admission != null) {
@@ -2434,7 +2348,7 @@ pub const Parser = struct {
             if (!cursor_committed) self.restoreCursorCheckpoint(cursor_checkpoint);
         };
 
-        const scanned = if (self.admission != null) blk: {
+        const scanned = blk: {
             var caught: std.ArrayListUnmanaged(type_syntax.AdmissionDiagnostic) = .empty;
             defer caught.deinit(self.type_store.allocator);
             const result = if (spaced_call_list)
@@ -2456,21 +2370,15 @@ pub const Parser = struct {
                 .not_matched, .lexical_nonmatch => return .{},
                 .nesting_too_deep => |offset| return try self.refuseAdmissionNesting(offset),
             };
-        } else (try type_syntax.scanBalancedGenericList(
-            self.type_store.allocator,
-            self.source,
-            self.current.start,
-        )) orelse return .{};
-        if (self.admission == null and
-            !type_syntax.isPrivateGenericListEligible(self.source, scanned)) return .{};
-        if (self.admission != null and named_header) {
+        };
+        if (named_header) {
             try self.classifyAdmissionGenericList(scanned.span);
         }
 
-        if (self.admission != null and named_header) {
+        if (named_header) {
             self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
         }
-        var cursor = if (self.admission != null) committed: {
+        const cursor = committed: {
             if (named_header) {
                 try self.resumeAfterRawErasureObserved(scanned.span.end, name);
                 cursor_committed = true;
@@ -2486,14 +2394,8 @@ pub const Parser = struct {
                 };
             }
             break :committed self.cursorAfterAdmittedGeneric(scanned.span.end, name);
-        } else type_syntax.Cursor.afterCurrent(self.tokenizer);
-        var previous = if (self.admission != null) name else self.current;
-        if (self.admission == null) while (cursor.current.type != .eof and
-            cursor.current.start < scanned.span.end)
-        {
-            previous = cursor.current;
-            cursor.advance();
         };
+        const previous = name;
         if (cursor.current.type != .lparen) return .{};
         const opener_gap = type_syntax.classifyNamedFunctionGap(self.source, .{
             .start = scanned.span.end,
@@ -2563,23 +2465,7 @@ pub const Parser = struct {
         if (spaced_call_list and scanned.span.end != cursor.current.start) return .{ .header_admission = .runtime_only };
 
         if (reservation.policy == .legacy_call) {
-            const call_scan = if (self.admission != null)
-                scanned
-            else switch (try type_syntax.scanExplicitCallTypeArguments(
-                self.type_store.allocator,
-                self.source,
-                scanned.span.start,
-            )) {
-                .not_call, .excluded => return .{},
-                .scanned => |value| value,
-            };
-            if (!std.meta.eql(call_scan.span, scanned.span) or
-                (self.admission == null and
-                    !type_syntax.isPrivateGenericListEligible(self.source, call_scan)))
-            {
-                return .{};
-            }
-            if (self.admission != null) try self.classifyAdmissionGenericList(scanned.span);
+            try self.classifyAdmissionGenericList(scanned.span);
         }
         const options: type_syntax.GenericOwnerOptions = .{
             .list_span = scanned.span,
@@ -2629,7 +2515,7 @@ pub const Parser = struct {
 
     fn selectArrowGeneric(self: *Parser) !ArrowGenericSelection {
         if (self.admissionCoveredByRecovery(self.current.start)) return .not_generic;
-        if (!self.parse_type_syntax or
+        if (self.admission == null or
             !type_syntax.tokenStartsGenericList(self.source, self.current)) return .not_generic;
 
         const cursor_checkpoint = self.cursorCheckpoint();
@@ -2650,7 +2536,7 @@ pub const Parser = struct {
             self.current.start,
         );
         const use_call_scanner = !has_dedicated_window and looks_like_comparison;
-        const scanned = if (self.admission != null) blk: {
+        const scanned = blk: {
             var caught: std.ArrayListUnmanaged(type_syntax.AdmissionDiagnostic) = .empty;
             defer caught.deinit(self.type_store.allocator);
             const result = if (use_call_scanner)
@@ -2666,32 +2552,12 @@ pub const Parser = struct {
                     return .not_generic,
                 .nesting_too_deep => |offset| return try self.refuseAdmissionNesting(offset),
             };
-        } else (try type_syntax.scanBalancedGenericList(
-            self.type_store.allocator,
-            self.source,
-            self.current.start,
-        )) orelse return .not_generic;
-        if (self.admission == null) {
-            try self.classifyAdmissionGenericList(scanned.span);
-            if (!type_syntax.isPrivateGenericListEligible(self.source, scanned)) {
-                return .not_generic;
-            }
-        } else {
-            try self.classifyAdmissionGenericList(scanned.span);
-        }
-
-        var cursor = if (self.admission != null)
-            self.cursorAfterAdmittedGeneric(scanned.span.end, runtime_previous)
-        else
-            type_syntax.Cursor.afterCurrent(self.tokenizer);
-        var previous = if (self.admission != null) runtime_previous else self.current;
-        if (self.admission == null) while (cursor.current.type != .eof and
-            cursor.current.start < scanned.span.end)
-        {
-            previous = cursor.current;
-            cursor.advance();
         };
-        if (self.admission != null and !use_call_scanner and cursor.current.type == .kw_extends and
+        try self.classifyAdmissionGenericList(scanned.span);
+
+        const cursor = self.cursorAfterAdmittedGeneric(scanned.span.end, runtime_previous);
+        const previous = runtime_previous;
+        if (!use_call_scanner and cursor.current.type == .kw_extends and
             containsOnlyAdmissionWhitespace(self.source, scanned.span.end, cursor.current.start))
         {
             self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
@@ -2733,21 +2599,7 @@ pub const Parser = struct {
                 },
             } }
         else if (looks_like_comparison) blk: {
-            const call_scan = if (self.admission != null)
-                scanned
-            else switch (try type_syntax.scanExplicitCallTypeArguments(
-                self.type_store.allocator,
-                self.source,
-                scanned.span.start,
-            )) {
-                .not_call, .excluded => return .rejected_call_grammar,
-                .scanned => |value| value,
-            };
-            if ((self.admission == null and
-                !type_syntax.isPrivateGenericListEligible(self.source, call_scan)) or
-                !std.meta.eql(call_scan.span, scanned.span) or
-                call_scan.span.end != cursor.current.start)
-            {
+            if (scanned.span.end != cursor.current.start) {
                 return .rejected_call_grammar;
             }
             break :blk .{ .policy = .legacy_call, .capture_spans = .{
@@ -2767,7 +2619,7 @@ pub const Parser = struct {
                 .end = cursor.current.start - 1,
             },
         } };
-        if (self.admission != null and reservation.policy != .legacy_call) {
+        if (reservation.policy != .legacy_call) {
             self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
         }
         const options: type_syntax.GenericOwnerOptions = .{
@@ -2789,40 +2641,25 @@ pub const Parser = struct {
 
     fn selectErasedTypePrefix(self: *Parser, context: enum { expression, block }) !?ErasedPrefixSelection {
         if (self.admissionCoveredByRecovery(self.current.start)) return null;
-        if (!self.parse_type_syntax or
+        if (self.admission == null or
             !type_syntax.tokenStartsGenericList(self.source, self.current) or
             type_syntax.rawLooksLikeComparison(self.source, self.current.start))
         {
             return null;
         }
 
-        const scanned = if (self.admission != null) switch (try self.scanObservedGenericList(
+        const scanned = switch (try self.scanObservedGenericList(
             self.current.start,
         )) {
             .scanned => |value| value,
             .not_matched, .lexical_nonmatch => return null,
             .nesting_too_deep => |offset| return try self.refuseAdmissionNesting(offset),
-        } else (try type_syntax.scanBalancedGenericList(
-            self.type_store.allocator,
-            self.source,
-            self.current.start,
-        )) orelse return null;
+        };
         try self.classifyAdmissionGenericList(scanned.span);
-        if (self.admission == null and
-            !type_syntax.isPrivateErasedPrefixListEligible(self.source, scanned)) return null;
 
         const runtime_previous = self.previous;
-        var cursor = if (self.admission != null)
-            self.cursorAfterAdmittedGeneric(scanned.span.end, runtime_previous)
-        else
-            type_syntax.Cursor.afterCurrent(self.tokenizer);
-        var previous = if (self.admission != null) runtime_previous else self.current;
-        if (self.admission == null) while (cursor.current.type != .eof and
-            cursor.current.start < scanned.span.end)
-        {
-            previous = cursor.current;
-            cursor.advance();
-        };
+        const cursor = self.cursorAfterAdmittedGeneric(scanned.span.end, runtime_previous);
+        const previous = runtime_previous;
         if (cursor.current.type != .lbrace and (context == .block or cursor.current.type != .lparen)) {
             return null;
         }
@@ -2859,9 +2696,7 @@ pub const Parser = struct {
         else
             .ignored_parameters;
 
-        if (self.admission != null) {
-            self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
-        }
+        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
         const options: type_syntax.ErasedTypePrefixOptions = .{
             .list_span = scanned.span,
             .capture_spans = capture_spans,
@@ -2950,29 +2785,20 @@ pub const Parser = struct {
 
     fn selectExplicitCall(self: *Parser) !?ExplicitCallSelection {
         if (self.admissionCoveredByRecovery(self.current.start)) return null;
-        if (!self.parse_type_syntax or
+        if (self.admission == null or
             !type_syntax.tokenStartsGenericList(self.source, self.current) or
             !type_syntax.rawLooksLikeComparison(self.source, self.current.start))
         {
             return null;
         }
-        const scanned = if (self.admission != null) switch (try self.scanObservedCallTypeArguments(
+        const scanned = switch (try self.scanObservedCallTypeArguments(
             self.current.start,
         )) {
             .scanned => |value| value,
             .not_matched, .lexical_nonmatch => return null,
             .nesting_too_deep => |offset| return try self.refuseAdmissionNesting(offset),
-        } else switch (try type_syntax.scanExplicitCallTypeArguments(
-            self.type_store.allocator,
-            self.source,
-            self.current.start,
-        )) {
-            .not_call, .excluded => return null,
-            .scanned => |value| value,
         };
         try self.classifyAdmissionGenericList(scanned.span);
-        if (self.admission == null and
-            !type_syntax.isPrivateGenericListEligible(self.source, scanned)) return null;
 
         const cursor_checkpoint = self.cursorCheckpoint();
         var accepted = false;
@@ -2981,17 +2807,8 @@ pub const Parser = struct {
         };
 
         const runtime_previous = self.previous;
-        var cursor = if (self.admission != null)
-            self.cursorAfterAdmittedGeneric(scanned.span.end, runtime_previous)
-        else
-            type_syntax.Cursor.afterCurrent(self.tokenizer);
-        var previous = if (self.admission != null) runtime_previous else self.current;
-        if (self.admission == null) while (cursor.current.type != .eof and
-            cursor.current.start < scanned.span.end)
-        {
-            previous = cursor.current;
-            cursor.advance();
-        };
+        const cursor = self.cursorAfterAdmittedGeneric(scanned.span.end, runtime_previous);
+        const previous = runtime_previous;
         if (cursor.current.type != .lparen or cursor.current.start != scanned.span.end) return null;
         const options: type_syntax.ExplicitCallOptions = .{
             .list_span = scanned.span,
@@ -3674,7 +3491,7 @@ pub const Parser = struct {
         const loc = self.current.location();
         const parameter_opener = self.current.start;
         const signature_publication_checkpoint = self.typePublicationCheckpoint();
-        var pending_signature: ?type_syntax.PendingFunctionSignature = if (self.parse_type_syntax and
+        var pending_signature: ?type_syntax.PendingFunctionSignature = if (self.admission != null and
             !self.admissionCoveredByRecovery(self.current.start) and header_admission == .typed)
             self.type_store.beginFunctionSignature()
         else
@@ -5643,7 +5460,7 @@ pub const Parser = struct {
     // ============ Arrow Function Detection ============
 
     fn isArrowFunction(self: *Parser) bool {
-        if (self.check(.lparen) and self.parse_type_syntax) {
+        if (self.check(.lparen) and self.admission != null) {
             const cursor = type_syntax.Cursor.afterCurrent(self.tokenizer);
             return type_syntax.scanParenthesizedArrowHeader(
                 self.source,
@@ -5686,9 +5503,9 @@ pub const Parser = struct {
         const loc = self.current.location();
         var flags = FunctionFlags{ .is_arrow = true };
         const parameter_opener: ?u32 = if (self.check(.lparen)) self.current.start else null;
-        var typed_header = self.parse_type_syntax and
+        var typed_header = self.admission != null and
             !self.admissionCoveredByRecovery(self.current.start) and parameter_opener != null;
-        if (typed_header and self.admission != null) {
+        if (typed_header) {
             const generic_span = if (pending_owner) |pending| pending.list_span else null;
             const dedicated = type_syntax.hasDedicatedAssignmentArrowWindow(
                 self.source,
