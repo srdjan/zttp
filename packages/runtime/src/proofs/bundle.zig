@@ -405,16 +405,7 @@ fn verifySemantics(
     defer if (raw) |*value| value.deinit();
     if (payload.contract_json) |json| {
         raw = contract_runtime.parseContractJson(allocator, json) catch null;
-        if (raw) |*value| {
-            const view = value.rawView();
-            identity = .{
-                .module_specifiers = view.modules,
-                .core_profile_id = view.source_identity.core_profile.id(),
-                .core_grammar_hash = view.source_identity.core_grammar_hash,
-                .semantics_hash = view.source_identity.semantics_hash,
-                .capability_hash = if (view.capabilities) |caps| caps.hash else @as([32]u8, @splat(0)),
-            };
-        }
+        if (raw) |*value| identity = artifact_graph.identityFromRuntimeContract(value.rawView());
     }
 
     const assessment = try @import("../proof_activation.zig").accept(allocator, .{

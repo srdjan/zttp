@@ -704,15 +704,7 @@ fn acceptArtifactCapability(
     };
     defer validated.deinit();
 
-    // The same projection `Server.observedArtifactIdentity` reads at startup.
-    const view = validated.view();
-    var identity = artifact_graph.Identity{
-        .module_specifiers = view.modules,
-        .core_profile_id = view.source_identity.core_profile.id(),
-        .core_grammar_hash = view.source_identity.core_grammar_hash,
-        .semantics_hash = view.source_identity.semantics_hash,
-    };
-    if (view.capabilities) |caps| identity.capability_hash = caps.hash;
+    const identity = artifact_graph.identityFromRuntimeContract(validated.view());
 
     const assessment = try proof_activation.accept(allocator, .{
         .certificate = input.certificate,

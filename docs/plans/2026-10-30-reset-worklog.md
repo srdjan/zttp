@@ -97,6 +97,14 @@ Sites that stay raw in this phase, and the unit that closes each:
 | 4 sites in `tests/frontend_fuzz.zig` | Stay: the file fuzzes the raw parser on purpose, and it already has an admission arm |
 | Raw tests in `parser/parse.zig` | Unit 9b |
 
+## Phase 4
+
+Status: complete. Unit 4a removed `parse_type_syntax`. The worker replaced 11 reads with `self.admission != null`, removed 34 constant checks, and kept the 2 reachable checks in `selectFunctionGeneric`: `spaced_call_list` and `typed_header`. Opus removed two more redundant checks in review.
+The swap is equivalent by reading. `init` and `initExpression` pass no mode. `initAdmission` and `initSourceObserver` pass a mode. `replaySourceAdmission` moves the admission state from the observer to the live parser and then drops the observer.
+Ruling: `isPrivateGenericListEligible` stays, because `type_syntax_parser.zig` still calls it.
+Ruling: `type_only_module_exclusion` has no assignment left in production. Its removal also removes `error.TypeOnlyModuleLexicallyExcluded` from two fuzz lists, so it goes to unit 9b and not to this unit.
+Gates on the working tree before the commit, each exit 0: protection check, build, `digest.sh`, `probe.sh`, `test-zts`, `test-diagnostic-corpus`, `test-contract-golden`, `test-grammar-drift`, `test-meta-drift`, `test-zruntime`, `test-examples`, `test-proof-checker`, `test-proof-swallow`, `zig build test`, and `check-spine`.
+
 ## Phase 5
 
 Status: complete at `60eec7d3`. `applyContractFacts` in `precompile_check_run.zig` is the one writer of the 12 contract fields. Each driver fills `ContractFacts` from its own analysis. `compileHandler` keeps its generator and does not call `analyzeHandlerPaths`.

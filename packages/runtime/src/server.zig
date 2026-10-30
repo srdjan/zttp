@@ -908,15 +908,7 @@ pub const Server = struct {
     /// validated rather than from the one the producer signed.
     fn observedArtifactIdentity(self: *Self) artifact_graph.Identity {
         const validated = self.contract orelse return .{};
-        const runtime_contract = validated.view().*;
-        var identity = artifact_graph.Identity{
-            .module_specifiers = runtime_contract.modules,
-            .core_profile_id = runtime_contract.source_identity.core_profile.id(),
-            .core_grammar_hash = runtime_contract.source_identity.core_grammar_hash,
-            .semantics_hash = runtime_contract.source_identity.semantics_hash,
-        };
-        if (runtime_contract.capabilities) |caps| identity.capability_hash = caps.hash;
-        return identity;
+        return artifact_graph.identityFromRuntimeContract(validated.view());
     }
 
     /// Derive the full capability policy from a freshly compiled

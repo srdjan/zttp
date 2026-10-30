@@ -13,6 +13,7 @@
 const std = @import("std");
 const zts = @import("zts");
 const pcc = @import("zttp_proof_checker");
+const contract_runtime = @import("contract_runtime.zig");
 
 const graph = pcc.executable_graph;
 
@@ -82,6 +83,18 @@ pub const Identity = struct {
 pub fn identityFromContract(contract: *const zts.HandlerContract) Identity {
     var identity = Identity{
         .module_specifiers = contract.modules.items,
+        .core_profile_id = contract.source_identity.core_profile.id(),
+        .core_grammar_hash = contract.source_identity.core_grammar_hash,
+        .semantics_hash = contract.source_identity.semantics_hash,
+    };
+    if (contract.capabilities) |caps| identity.capability_hash = caps.hash;
+    return identity;
+}
+
+/// Read the identity out of a runtime contract view, validated or raw.
+pub fn identityFromRuntimeContract(contract: *const contract_runtime.RuntimeContract) Identity {
+    var identity = Identity{
+        .module_specifiers = contract.modules,
         .core_profile_id = contract.source_identity.core_profile.id(),
         .core_grammar_hash = contract.source_identity.core_grammar_hash,
         .semantics_hash = contract.source_identity.semantics_hash,
