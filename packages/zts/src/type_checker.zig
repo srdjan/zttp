@@ -5049,7 +5049,7 @@ test "TypeChecker init and deinit" {
 
 test "TypeChecker fails closed when binding analysis cannot allocate" {
     const allocator = std.testing.allocator;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "let count = 1;");
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "let count = 1;", .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -5067,7 +5067,7 @@ test "TypeChecker fails closed when binding analysis cannot allocate" {
 
 test "TypeChecker fails closed when diagnostic storage cannot allocate" {
     const allocator = std.testing.allocator;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "");
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "", .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -5092,7 +5092,7 @@ test "TypeChecker fails closed when diagnostic storage cannot allocate" {
 
 test "TypeChecker ensureHealthy rejects a TypePool poisoned after check" {
     const allocator = std.testing.allocator;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "");
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "", .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -5121,7 +5121,7 @@ test "TypeChecker ensureHealthy rejects a TypePool poisoned after check" {
 
 test "TypeChecker ensureHealthy propagates TypePool capacity exhaustion" {
     const allocator = std.testing.allocator;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "");
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "", .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -6676,7 +6676,7 @@ test "TypeChecker import policy compares named kind and slot without scope or lo
             for ([_]bool{ false, true }) |same_kind| {
                 var atoms = context.AtomTable.init(allocator);
                 defer atoms.deinit();
-                var parser = try @import("zts-engine").parser.JsParser.init(allocator, "digest('a', 'b');");
+                var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "digest('a', 'b');", .compile);
                 defer parser.deinit();
                 parser.setAtomTable(&atoms);
                 const root = try parser.parse();
@@ -6741,7 +6741,7 @@ test "TypeChecker owned import cache survives moving a checked value" {
     const allocator = std.testing.allocator;
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "import { sha256 as digest } from 'zttp:crypto'; digest('a', 'b');");
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "import { sha256 as digest } from 'zttp:crypto'; digest('a', 'b');", .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -6769,7 +6769,7 @@ test "TypeChecker owned import cache survives moving a checked value" {
 
 test "TypeChecker import cache allocation failure stays unproven after allocator recovery" {
     const allocator = std.testing.allocator;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "import { sha256 } from 'zttp:crypto'; sha256('a', 'b');");
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "import { sha256 } from 'zttp:crypto'; sha256('a', 'b');", .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
