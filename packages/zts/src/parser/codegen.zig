@@ -2687,9 +2687,9 @@ test "a full constant pool refuses a fused modulo instead of emitting the operan
 test "constant expressions fold inside a handler without changing source IR" {
     const allocator = std.testing.allocator;
     const Parser = @import("parse.zig").Parser;
-    var parser = try Parser.init(allocator,
+    var parser = try Parser.initAdmission(allocator, allocator,
         \\function handler(req) { return 1.5 + 2.5; }
-    );
+    , .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const node_count = parser.nodes.tags.items.len;
@@ -2727,7 +2727,7 @@ test "a jump past the i16 range is refused in codegen" {
     for (0..15000) |_| try source.appendSlice(allocator, " y = y + 1;");
     try source.appendSlice(allocator, " } return y; }");
 
-    var parser = try Parser.init(allocator, source.items);
+    var parser = try Parser.initAdmission(allocator, allocator, source.items, .compile);
     defer parser.deinit();
     const root = try parser.parse();
     var gen = CodeGen.initWithIRStore(allocator, &parser.nodes, &parser.constants, &parser.scopes, null, null);
