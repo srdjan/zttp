@@ -13,7 +13,6 @@ const Io = std.Io;
 const net = std.Io.net;
 const HandlerPool = engine.HandlerPool;
 const RuntimeConfig = engine.RuntimeConfig;
-const retired_authority = @import("project_config").retired_authority;
 const execution_spec = @import("execution_spec.zig");
 const http_parser = @import("http_parser.zig");
 const http_types = @import("http_types.zig");
@@ -29,9 +28,8 @@ const RuntimeContract = contract_runtime.RuntimeContract;
 const ValidatedRuntimeContract = contract_runtime.ValidatedRuntimeContract;
 const proof_adapter = @import("proof_adapter.zig");
 const attest_header_strings = @import("attest/header_strings.zig");
-const artifact_graph = @import("artifact_graph.zig");
 const pcc = @import("zttp_proof_checker");
-const proof_activation = @import("proof_activation.zig");
+const activation = @import("server_activation.zig");
 const attest_envelope = @import("attest/envelope.zig");
 const attest_well_known = @import("attest/well_known.zig");
 const self_extract = @import("self_extract.zig");
@@ -251,60 +249,6 @@ fn installShutdownSignals() void {
     std.posix.sigaction(std.posix.SIG.INT, &act, null);
 }
 
-/// Why a swap may not proceed.
-///
-/// A live swap has no certificate or consumer acceptance run. Static resources
-/// remain safe because the compiler enumerates an exact contract allowlist. A
-/// computed resource may swap only when this same analysis parsed and checked a
-/// configured policy snapshot, which is installed atomically with the candidate
-/// generation. Without that checked pair, either guarded side is a refusal.
-///
-/// Kept at the server transition boundary so the decision is tested without a
-/// pool, a server, and a file watcher.
-const SwapRefusal = enum {
-    none,
-    candidate_uses_retired_authority,
-    installed_generation_is_guarded,
-    candidate_computes_a_capability_resource,
-};
-
-fn swapRefusal(
-    installed_generation_is_guarded: bool,
-    candidate: ?*const engine.HandlerContract,
-    candidate_policy_checked: bool,
-) SwapRefusal {
-    if (candidate) |contract| {
-        if (retired_authority.first(retired_authority.contractFacts(contract)) != null) {
-            return .candidate_uses_retired_authority;
-        }
-    }
-    if (installed_generation_is_guarded and !candidate_policy_checked) {
-        return .installed_generation_is_guarded;
-    }
-    const contract = candidate orelse return .none;
-    // The plain-swap and missing-contract branches arrive here with no
-    // candidate contract. They are covered by the first check: a swap with
-    // nothing to inspect may proceed only when the running generation has no
-    // guard to preserve.
-    if (!candidate_policy_checked and (contract.env.dynamic or
-        contract.egress.dynamic or
-        contract.cache.dynamic or
-        contract.sql.dynamic))
-    {
-        return .candidate_computes_a_capability_resource;
-    }
-    return .none;
-}
-
-fn requireSourceSwap(guarded: bool, candidate: ?*const engine.HandlerContract, policy_checked: bool) !void {
-    return switch (swapRefusal(guarded, candidate, policy_checked)) {
-        .none => {},
-        .candidate_uses_retired_authority => error.UnsupportedRuntimeAuthority,
-        .installed_generation_is_guarded => error.GuardedGenerationSwapRefused,
-        .candidate_computes_a_capability_resource => error.UncheckedDynamicCapability,
-    };
-}
-
 pub const Server = struct {
     config: ServerConfig,
     allocator: std.mem.Allocator,
@@ -393,7 +337,7 @@ pub const Server = struct {
         contract: ?*const engine.HandlerContract,
         configured: ?*const engine.HandlerPolicy,
     ) !SourceCandidate {
-        try requireSourceSwap(false, contract, configured != null);
+        try activation.requireSourceSwap(false, contract, configured != null);
         const bytes = code.* orelse return error.MissingHandlerSource;
         const owned_filename = try source_allocator.dupe(u8, filename);
         errdefer source_allocator.free(owned_filename);
@@ -420,7 +364,7 @@ pub const Server = struct {
         defer self.contract_lock.unlock();
         const pool = if (self.pool) |*p| p else return error.NoHandlerPool;
         const source = candidate.source orelse return error.MissingHandlerSource;
-        try requireSourceSwap(self.generationIsGuarded(), null, candidate.configured_policy_checked);
+        try activation.requireSourceSwap(self.generationIsGuarded(), null, candidate.configured_policy_checked);
         const invalidated = try pool.reloadSourceGeneration(source.code, source.filename, candidate.policy, self.sourceServingSettings());
         // Pool preparation is the final fallible operation. It no longer reads
         // the retired source under runtime-init before any backing is freed.
@@ -631,286 +575,6 @@ pub const Server = struct {
         }
     }
 
-    /// Cross-check the signed attestation claims against the hashes the server
-    /// actually loaded. `attest_envelope.verify` proves only that the JWS was
-    /// signed; it never compares claim hashes to the running artifact. Returns
-    /// false when the policy or bytecode hash in the claims disagrees with the
-    /// live contract. A live hash of all-zero means the contract carried no
-    /// sandbox block (e.g. live reload), so we skip that field rather than
-    /// reject it - mirroring the skip-on-zero semantics in
-    /// `contract_runtime.verifyPolicyHash` / `verifyArtifactHash`.
-    fn attestationClaimsMatchContract(
-        claims: attest_envelope.Claims,
-        contract: *const RuntimeContract,
-    ) bool {
-        if (!hexHashMatchesOrUnpinned(claims.policy_sha256, contract.policy_hash)) return false;
-        if (!hexHashMatchesOrUnpinned(claims.bytecode_sha256, contract.artifact_sha256)) return false;
-        if (!std.mem.eql(u8, claims.core_profile_id, contract.source_identity.core_profile.id())) return false;
-        if (!hexHashMatches(claims.core_grammar_sha256, contract.source_identity.core_grammar_hash)) return false;
-        if (!hexHashMatches(claims.semantics_sha256, contract.source_identity.semantics_hash)) return false;
-        return true;
-    }
-
-    fn hexHashMatches(claim_hex: []const u8, live: [32]u8) bool {
-        if (claim_hex.len != 64) return false;
-        const live_hex = std.fmt.bytesToHex(live, .lower);
-        return std.mem.eql(u8, &live_hex, claim_hex);
-    }
-
-    /// True when `live` is unpinned (all-zero) or its lowercase-hex form equals
-    /// `claim_hex`. A claim field that is not 64 hex chars cannot match a
-    /// pinned 32-byte hash and is rejected.
-    fn hexHashMatchesOrUnpinned(claim_hex: []const u8, live: [32]u8) bool {
-        if (std.mem.allEqual(u8, &live, 0)) return true;
-        if (claim_hex.len != 64) return false;
-        const live_hex = std.fmt.bytesToHex(live, .lower);
-        return std.mem.eql(u8, &live_hex, claim_hex);
-    }
-
-    /// True only when the signed `claim_hex` is pinned (64 non-all-zero hex
-    /// chars) AND equals sha256(bytecode). This binds the attestation to the
-    /// bytecode actually loaded into the pool, anchored on the untamperable
-    /// signed claim rather than the contract's self-reported `artifact_sha256`
-    /// field (which a tamperer can zero to slip past the all-zero skip in
-    /// `contract_runtime.validate`). An unpinned claim cannot bind a running
-    /// artifact, so it returns false: attestation is fail-closed.
-    fn bytecodeMatchesClaim(bytecode: []const u8, claim_hex: []const u8) bool {
-        if (claim_hex.len != 64) return false;
-        if (std.mem.allEqual(u8, claim_hex, '0')) return false;
-        var digest: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(bytecode, &digest, .{});
-        const live_hex = std.fmt.bytesToHex(digest, .lower);
-        return std.ascii.eqlIgnoreCase(&live_hex, claim_hex);
-    }
-
-    /// Validate the signed runtime-policy claim against the exact section-4
-    /// bytes parsed from a self-extract artifact. Unlike live contract hashes,
-    /// this claim cannot be unpinned: the deployed artifact always has section
-    /// 4, so an all-zero claim means it predates policy binding.
-    fn validateRuntimePolicyClaim(section_sha256: [32]u8, claim_hex: []const u8) !void {
-        if (std.mem.eql(u8, claim_hex, attest_envelope.unpinned_runtime_policy_sha256)) {
-            return error.RuntimePolicyClaimUnpinned;
-        }
-        if (claim_hex.len != 64) return error.RuntimePolicyClaimMismatch;
-        const section_hex = std.fmt.bytesToHex(section_sha256, .lower);
-        if (!std.ascii.eqlIgnoreCase(&section_hex, claim_hex)) {
-            return error.RuntimePolicyClaimMismatch;
-        }
-    }
-
-    fn validateEmbeddedRuntimePolicyAttestation(self: *Self) !void {
-        const jws = self.config.attestation_jws orelse return;
-        const section_sha256 = self.config.policy_section_sha256 orelse switch (self.config.handler) {
-            .appended_payload => {
-                if (!builtin.is_test) {
-                    std.log.err(
-                        "attestation: embedded runtime policy hash is missing; rebuild the artifact before serving",
-                        .{},
-                    );
-                }
-                return error.RuntimePolicySectionHashMissing;
-            },
-            else => return,
-        };
-        var verify_result = attest_envelope.verify(self.allocator, jws) catch |err| {
-            if (!builtin.is_test) {
-                switch (err) {
-                    error.UnsupportedAttestationVersion => std.log.err(
-                        "attestation: embedded receipt uses an unsupported format; rebuild the artifact before serving",
-                        .{},
-                    ),
-                    else => std.log.err(
-                        "attestation: embedded JWS failed self-verification ({s}); refusing to serve",
-                        .{@errorName(err)},
-                    ),
-                }
-            }
-            return error.InvalidEmbeddedAttestation;
-        };
-        defer verify_result.deinit();
-
-        validateRuntimePolicyClaim(
-            section_sha256,
-            verify_result.claims.runtime_policy_sha256,
-        ) catch |err| {
-            if (!builtin.is_test) {
-                switch (err) {
-                    error.RuntimePolicyClaimUnpinned => std.log.err(
-                        "attestation: artifact predates runtime policy binding and must be rebuilt; refusing to serve",
-                        .{},
-                    ),
-                    error.RuntimePolicyClaimMismatch => std.log.err(
-                        "attestation: embedded runtime policy does not match the signed claim; refusing to serve",
-                        .{},
-                    ),
-                }
-            }
-            return err;
-        };
-
-        try self.validateExecutableGraphClaim(
-            section_sha256,
-            verify_result.claims.executable_root_sha256,
-        );
-    }
-
-    /// Run consumer acceptance over the embedded certificate, and promote the
-    /// contract only if it passes.
-    ///
-    /// A production artifact - one serving from an appended payload - must
-    /// carry a certificate this consumer accepts. Anything else refuses to
-    /// serve. Dev, live reload, and `-Dhandler` builds carry no artifact and no
-    /// certificate; they run with no promotion at all, which means no proof
-    /// response cache, no unbounded runtime reuse, and no result-safety shortcut.
-    fn acceptEmbeddedCertificate(self: *Self) !void {
-        const validated = if (self.contract) |*contract| contract else null;
-        const is_production_artifact = switch (self.config.handler) {
-            .appended_payload => true,
-            else => false,
-        };
-
-        if (!is_production_artifact) {
-            if (self.config.certificate != null and !builtin.is_test) {
-                std.log.info("Proof certificate present but this is not a deployed artifact; running unpromoted", .{});
-            }
-            return;
-        }
-
-        const contract = validated orelse {
-            if (!builtin.is_test) {
-                std.log.err(
-                    "activation: deployed artifact carries no contract, so nothing can be checked; refusing to serve",
-                    .{},
-                );
-            }
-            return error.ProofContractMissing;
-        };
-
-        const bytecode = self.embedded_bytecode orelse return error.ProofBytecodeMissing;
-        const policy_digest = self.config.policy_section_sha256 orelse {
-            if (!builtin.is_test) {
-                std.log.err(
-                    "activation: deployed artifact carries no runtime policy section; refusing to serve",
-                    .{},
-                );
-            }
-            return error.RuntimePolicySectionHashMissing;
-        };
-
-        const assessment = try proof_activation.accept(self.allocator, .{
-            .certificate = self.config.certificate,
-            .bytecode = bytecode,
-            .dep_bytecodes = self.runtime_dep_bytecodes orelse &.{},
-            .contract_section = self.config.contract_json,
-            .policy_section_digest = policy_digest,
-            .policy_section = self.config.policy_section,
-            .identity = self.observedArtifactIdentity(),
-            .provenance = if (self.config.attestation_jws != null)
-                .signature_verified
-            else
-                .absent,
-        }, pcc.policy.production);
-
-        self.proof_checked = contract_runtime.promote(contract, assessment, policy_digest);
-        if (self.proof_checked == null) {
-            if (!builtin.is_test) {
-                if (assessment.rejection()) |rejection| {
-                    std.log.err(
-                        "activation: proof acceptance failed at {s} ({s}); refusing to serve. Rebuild {s}resolve this.",
-                        .{
-                            rejection.stage.name(),
-                            rejection.code.text(),
-                            if (rejection.recertifiable) "can " else "cannot ",
-                        },
-                    );
-                } else {
-                    std.log.err("activation: proof acceptance did not complete; refusing to serve", .{});
-                }
-            }
-            return error.ProofAcceptanceFailed;
-        }
-
-        if (!builtin.is_test) {
-            std.log.info(
-                "Proof accepted: weakest edge {s}, {d} disclosed edge(s){s}",
-                .{
-                    self.proof_checked.?.grade.name(),
-                    assessment.disclosed_edges,
-                    if (self.proof_checked.?.development_only) " (development artifact)" else "",
-                },
-            );
-        }
-    }
-
-    /// Rebuild the executable graph from the sections this process actually
-    /// loaded and compare it against the signed root.
-    ///
-    /// The bytecode hash the contract carries covers the entry module. This
-    /// covers the dependency modules, every nested function, every constant
-    /// pool, the module and native-module identities, the contract, the runtime
-    /// policy, and the source profile - all of which run, and none of which the
-    /// older claim reached.
-    fn validateExecutableGraphClaim(
-        self: *Self,
-        policy_section_sha256: [32]u8,
-        claimed_root_hex: []const u8,
-    ) !void {
-        if (std.mem.eql(u8, claimed_root_hex, attest_envelope.unpinned_executable_root)) {
-            if (!builtin.is_test) {
-                std.log.err(
-                    "attestation: artifact predates executable-graph binding and must be rebuilt; refusing to serve",
-                    .{},
-                );
-            }
-            return error.ExecutableGraphClaimUnpinned;
-        }
-
-        const bytecode = self.embedded_bytecode orelse return error.ExecutableGraphMissingBytecode;
-
-        const observed = proof_activation.observedRoot(self.allocator, .{
-            .certificate = self.config.certificate,
-            .bytecode = bytecode,
-            .dep_bytecodes = self.runtime_dep_bytecodes orelse &.{},
-            .contract_section = self.config.contract_json,
-            .policy_section_digest = policy_section_sha256,
-            .identity = self.observedArtifactIdentity(),
-        }) catch |err| {
-            if (!builtin.is_test) {
-                std.log.err(
-                    "attestation: could not rebuild the executable graph ({s}); refusing to serve",
-                    .{@errorName(err)},
-                );
-            }
-            return error.ExecutableGraphUnreadable;
-        } orelse {
-            if (!builtin.is_test) {
-                std.log.err(
-                    "attestation: could not rebuild the executable graph; refusing to serve",
-                    .{},
-                );
-            }
-            return error.ExecutableGraphUnreadable;
-        };
-
-        const observed_hex = std.fmt.bytesToHex(observed, .lower);
-        if (!std.mem.eql(u8, &observed_hex, claimed_root_hex)) {
-            if (!builtin.is_test) {
-                std.log.err(
-                    "attestation: the loaded executable graph does not match the signed root; refusing to serve",
-                    .{},
-                );
-            }
-            return error.ExecutableGraphMismatch;
-        }
-    }
-
-    /// The identity half of the graph, read from the contract this process
-    /// validated rather than from the one the producer signed.
-    fn observedArtifactIdentity(self: *Self) artifact_graph.Identity {
-        const validated = self.contract orelse return .{};
-        return artifact_graph.identityFromRuntimeContract(validated.view());
-    }
-
     /// Derive the full capability policy from a freshly compiled
     /// HandlerContract and push it onto the runtime pool (dev/serve live path
     /// only). Fail-closed on allocation failure so a proven-restricted handler
@@ -953,58 +617,7 @@ pub const Server = struct {
             std.log.info("Security events -> {s}", .{path});
         }
 
-        // Parse embedded contract (if present), then promote to Validated before
-        // prewarming the handler pool. This rejects artifact hash drift before
-        // appended bytecode is loaded into any runtime.
-        if (self.config.contract_json) |json| {
-            const raw = contract_runtime.parseContractJson(self.allocator, json) catch |err| {
-                if (!builtin.is_test) {
-                    std.log.err("sandbox: embedded handler artifact contract is malformed; binary will not serve: {}", .{err});
-                }
-                return err;
-            };
-            self.contract = contract_runtime.validate(raw, .{
-                .bytecode = self.embedded_bytecode,
-            }) catch |err| {
-                switch (err) {
-                    error.CapabilityMatrixMismatch => std.log.err(
-                        "sandbox: capability matrix drift - rebuild the handler contract against this runtime",
-                        .{},
-                    ),
-                    error.PolicyHashMismatch => std.log.err(
-                        "sandbox: policy hash drift - rebuild the handler contract against this runtime",
-                        .{},
-                    ),
-                    error.ArtifactHashMismatch => std.log.err(
-                        "sandbox: embedded bytecode does not match contract artifact hash",
-                        .{},
-                    ),
-                    error.SourceIdentityMissing => std.log.err(
-                        "sandbox: source identity is missing - rebuild the handler contract",
-                        .{},
-                    ),
-                    error.CoreGrammarHashMismatch,
-                    error.SemanticsHashMismatch,
-                    => std.log.err(
-                        "sandbox: source profile drift - rebuild the handler contract against this runtime",
-                        .{},
-                    ),
-                }
-                return err;
-            };
-        }
-
-        // Self-extract artifacts carry the enforcement policy as section 4.
-        // Bind those exact bytes before any runtime is prewarmed. Dev/live
-        // reload leaves policy_section_sha256 null and is intentionally exempt.
-        try self.validateEmbeddedRuntimePolicyAttestation();
-
-        // Semantic acceptance. Everything above is integrity: the same bytes,
-        // the same identities, a signature that validates. None of it says the
-        // handler does anything in particular. This does, and it runs before
-        // the pool exists, so a refusal is a refusal to serve rather than a
-        // handler that is already warm when somebody reads the log line.
-        try self.acceptEmbeddedCertificate();
+        try activation.activate(self);
 
         // Initialize runtime pool with embedded bytecode (must be set before prewarm)
         // Wire the server-level request timeout into the runtime config so the
@@ -1128,14 +741,14 @@ pub const Server = struct {
                         std.log.warn("attestation: JWS present but no embedded bytecode to bind it to (attestation disabled)", .{});
                         break :attest;
                     };
-                    if (!bytecodeMatchesClaim(live_bytecode, verify_result.claims.bytecode_sha256)) {
+                    if (!activation.bytecodeMatchesClaim(live_bytecode, verify_result.claims.bytecode_sha256)) {
                         std.log.err("attestation: running bytecode does not match the signed claim (attestation disabled)", .{});
                         break :attest;
                     }
 
                     // Defense in depth: cross-check the verified claim hashes
                     // against the live loaded contract.
-                    if (!attestationClaimsMatchContract(verify_result.claims, contract.view())) {
+                    if (!activation.attestationClaimsMatchContract(verify_result.claims, contract.view())) {
                         std.log.err("attestation: signed JWS claims do not match the loaded contract hashes (attestation disabled)", .{});
                         break :attest;
                     }
@@ -2583,27 +2196,27 @@ test "attestationClaimsMatchContract rejects JWS describing different bytecode" 
     };
 
     // Matching claims pass.
-    try std.testing.expect(Server.attestationClaimsMatchContract(claims, &live));
+    try std.testing.expect(activation.attestationClaimsMatchContract(claims, &live));
 
     // A validly-signed JWS that describes different bytecode is rejected.
     const wrong_artifact = std.fmt.bytesToHex(@as([32]u8, @splat(0x33)), .lower);
     claims.bytecode_sha256 = &wrong_artifact;
-    try std.testing.expect(!Server.attestationClaimsMatchContract(claims, &live));
+    try std.testing.expect(!activation.attestationClaimsMatchContract(claims, &live));
 
     // A different policy hash is rejected.
     claims.bytecode_sha256 = &artifact_hex;
     const wrong_policy = std.fmt.bytesToHex(@as([32]u8, @splat(0x44)), .lower);
     claims.policy_sha256 = &wrong_policy;
-    try std.testing.expect(!Server.attestationClaimsMatchContract(claims, &live));
+    try std.testing.expect(!activation.attestationClaimsMatchContract(claims, &live));
 
     // An unpinned (all-zero) live hash skips the field instead of rejecting,
     // mirroring contract_runtime's skip-on-zero semantics for live reload.
     live.policy_hash = @as([32]u8, @splat(0));
-    try std.testing.expect(Server.attestationClaimsMatchContract(claims, &live));
+    try std.testing.expect(activation.attestationClaimsMatchContract(claims, &live));
 
     const wrong_grammar = std.fmt.bytesToHex(@as([32]u8, @splat(0x55)), .lower);
     claims.core_grammar_sha256 = &wrong_grammar;
-    try std.testing.expect(!Server.attestationClaimsMatchContract(claims, &live));
+    try std.testing.expect(!activation.attestationClaimsMatchContract(claims, &live));
 }
 
 test "bytecodeMatchesClaim binds attestation to the running bytecode (fail-closed)" {
@@ -2613,14 +2226,14 @@ test "bytecodeMatchesClaim binds attestation to the running bytecode (fail-close
     const hex = std.fmt.bytesToHex(digest, .lower);
 
     // Pinned claim matching the running bytecode passes.
-    try std.testing.expect(Server.bytecodeMatchesClaim(bytecode, &hex));
+    try std.testing.expect(activation.bytecodeMatchesClaim(bytecode, &hex));
     // Swapped bytecode (the tamper case) fails - the signed claim no longer
     // describes what is loaded, so attestation is disabled.
-    try std.testing.expect(!Server.bytecodeMatchesClaim("other-bytecode", &hex));
+    try std.testing.expect(!activation.bytecodeMatchesClaim("other-bytecode", &hex));
     // An unpinned (all-zero) claim cannot bind a running artifact: fail closed.
-    try std.testing.expect(!Server.bytecodeMatchesClaim(bytecode, &@as([64:0]u8, @splat('0'))));
+    try std.testing.expect(!activation.bytecodeMatchesClaim(bytecode, &@as([64:0]u8, @splat('0'))));
     // A malformed (non-64-char) claim is rejected.
-    try std.testing.expect(!Server.bytecodeMatchesClaim(bytecode, "abc"));
+    try std.testing.expect(!activation.bytecodeMatchesClaim(bytecode, "abc"));
 }
 
 fn runtimePolicyClaimsForTest(runtime_policy_sha256: []const u8) attest_envelope.Claims {
@@ -2883,53 +2496,53 @@ test "a swap that would strand a guard is refused from either side" {
     defer contract.deinit(allocator);
 
     // Nothing guarded on either side: an ordinary dev swap.
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, &contract, false));
+    try std.testing.expectEqual(activation.SwapRefusal.none, activation.swapRefusal(false, &contract, false));
     // The plain-swap and missing-contract branches, which carry no candidate.
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, null, false));
+    try std.testing.expectEqual(activation.SwapRefusal.none, activation.swapRefusal(false, null, false));
 
     // Without a checked candidate policy, the running generation's guard
     // coverage belongs to the executable being replaced. No candidate, not
     // even a static one or none at all, may take over.
     try std.testing.expectEqual(
-        SwapRefusal.installed_generation_is_guarded,
-        swapRefusal(true, &contract, false),
+        activation.SwapRefusal.installed_generation_is_guarded,
+        activation.swapRefusal(true, &contract, false),
     );
     try std.testing.expectEqual(
-        SwapRefusal.installed_generation_is_guarded,
-        swapRefusal(true, null, false),
+        activation.SwapRefusal.installed_generation_is_guarded,
+        activation.swapRefusal(true, null, false),
     );
 
     // A candidate that computes a capability resource has no coverage at all,
     // because a live swap runs no acceptance. Each category answers for itself.
     contract.env.dynamic = true;
     try std.testing.expectEqual(
-        SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, &contract, false),
+        activation.SwapRefusal.candidate_computes_a_capability_resource,
+        activation.swapRefusal(false, &contract, false),
     );
     contract.env.dynamic = false;
     contract.egress.dynamic = true;
     try std.testing.expectEqual(
-        SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, &contract, false),
+        activation.SwapRefusal.candidate_computes_a_capability_resource,
+        activation.swapRefusal(false, &contract, false),
     );
     contract.egress.dynamic = false;
     contract.cache.dynamic = true;
     try std.testing.expectEqual(
-        SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, &contract, false),
+        activation.SwapRefusal.candidate_computes_a_capability_resource,
+        activation.swapRefusal(false, &contract, false),
     );
     contract.cache.dynamic = false;
     contract.sql.dynamic = true;
     try std.testing.expectEqual(
-        SwapRefusal.candidate_computes_a_capability_resource,
-        swapRefusal(false, &contract, false),
+        activation.SwapRefusal.candidate_computes_a_capability_resource,
+        activation.swapRefusal(false, &contract, false),
     );
 
     // A candidate checked against an explicit policy may replace either a
     // static or guarded generation because the checked pair is installed as
     // one pool generation.
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(false, &contract, true));
-    try std.testing.expectEqual(SwapRefusal.none, swapRefusal(true, &contract, true));
+    try std.testing.expectEqual(activation.SwapRefusal.none, activation.swapRefusal(false, &contract, true));
+    try std.testing.expectEqual(activation.SwapRefusal.none, activation.swapRefusal(true, &contract, true));
 }
 
 test "every retired module candidate leaves the serving generation active" {
@@ -2951,8 +2564,8 @@ test "every retired module candidate leaves the serving generation active" {
         // Preparation checks this result before the server replaces or retires
         // either retained code generation.
         try std.testing.expectEqual(
-            SwapRefusal.candidate_uses_retired_authority,
-            swapRefusal(false, &contract, true),
+            activation.SwapRefusal.candidate_uses_retired_authority,
+            activation.swapRefusal(false, &contract, true),
         );
     }
 }

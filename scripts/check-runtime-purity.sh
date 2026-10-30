@@ -98,7 +98,7 @@ done
 #    `if [ -f ... ]` with no else, so renaming or moving the file made the
 #    "enforced boundary" silently stop being enforced - in the very script
 #    a-gate-that-counts-nothing-still-reports-a-pass.md cites as the model.
-for server_src in packages/runtime/src/server.zig packages/runtime/src/server_connection_pool.zig; do
+for server_src in packages/runtime/src/server.zig packages/runtime/src/server_activation.zig packages/runtime/src/server_connection_pool.zig; do
   if [ ! -f "$server_src" ]; then
     echo "error: '$server_src' does not exist - the engine-import boundary this gate enforces has no input; point the gate at the file's new location" >&2
     exit 1

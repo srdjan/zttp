@@ -676,7 +676,7 @@ fn createArtifactCapability(
 }
 
 /// Run the consumer acceptance the served binary runs at startup
-/// (`Server.acceptEmbeddedCertificate`) over the sections about to be written.
+/// (`server_activation.acceptEmbeddedCertificate`) over the sections about to be written.
 /// A build that passes here produces a binary that production acceptance
 /// accepts; a build that fails here would have produced one that refuses to
 /// serve. Provenance is `.absent`: production policy requires none, and this
@@ -2265,7 +2265,7 @@ const LoadedArtifact = struct {
         self.payload.deinit(self.allocator);
     }
 
-    /// The same activation inputs `Server.acceptEmbeddedCertificate` builds.
+    /// The same activation inputs `server_activation.acceptEmbeddedCertificate` builds.
     fn activationInputs(self: *const LoadedArtifact) proof_activation.Inputs {
         const view = self.contract.view();
         return .{
