@@ -669,7 +669,7 @@ test "routed Result violation cannot borrow a handler counterexample" {
         \\}
     ;
 
-    var parser = try parser_mod.JsParser.init(allocator, source);
+    var parser = try parser_mod.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
