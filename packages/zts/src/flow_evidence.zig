@@ -318,7 +318,7 @@ const Harness = struct {
         const allocator = std.testing.allocator;
         self.atoms = .init(allocator);
         errdefer self.atoms.deinit();
-        self.parser = try engine.parser.JsParser.init(allocator, source);
+        self.parser = try engine.parser.JsParser.initAdmission(allocator, allocator, source, .compile);
         errdefer self.parser.deinit();
         self.parser.setAtomTable(&self.atoms);
         _ = try self.parser.parse();
