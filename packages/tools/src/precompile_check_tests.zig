@@ -2257,6 +2257,25 @@ test "check without a handler does not claim state isolation" {
     try std.testing.expect(!props.state_isolated);
 }
 
+test "check records unreachable code in the contract verification" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Response {
+        \\  return Response.text("ok");
+        \\  return Response.text("never");
+        \\}
+        \\
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), result.verify_errors);
+    try std.testing.expect(!result.no_unreachable);
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    const verification = contract.verification orelse return error.TestUnexpectedResult;
+    try std.testing.expect(verification.unreachable_code);
+}
+
 // The obligation past the sixteenth member of a generic intersection.
 //
 // `instantiateCompositeMembers` once copied members into a fixed `[16]TypeIndex`

@@ -820,15 +820,15 @@ fn runCheckOnParsedSource(
             result.exhaustive_returns = true;
             result.results_safe = true;
             result.optionals_safe = true;
-            verify_info = .{
-                .exhaustive_returns = true,
-                .results_safe = true,
-                .unreachable_code = false,
-                .bytecode_verified = false,
-            };
             result.no_unreachable = for (verifier_diags) |d| {
                 if (d.kind == .unreachable_after_return) break false;
             } else true;
+            verify_info = .{
+                .exhaustive_returns = true,
+                .results_safe = true,
+                .unreachable_code = !result.no_unreachable,
+                .bytecode_verified = false,
+            };
         }
 
         result.flow_errors = @intCast(checked.flow_error_count);
