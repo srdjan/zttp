@@ -608,7 +608,8 @@ pub const TypeEnvStorage = struct {
 // One-shot contract extraction
 // ---------------------------------------------------------------------------
 
-pub const ContractTypeCheckFn = *const fn (*TypeChecker, NodeIndex) anyerror!u32;
+/// Runs once per module during extraction, before the type check. An error stops the walk.
+pub const ModuleScanFn = *const fn (IrView) anyerror!void;
 
 pub const ExtractContractOptions = struct {
     strict: bool = true,
@@ -617,7 +618,7 @@ pub const ExtractContractOptions = struct {
     verification: ?VerificationInfo = null,
     source_types: ?ModuleSourceTypeInput = null,
     manifest_registry: ?*const manifest_registry_mod.Registry = null,
-    type_check: ContractTypeCheckFn = runContractTypeCheck,
+    module_scan: ?ModuleScanFn = null,
     read_file: ?modules_mod.module_graph.ReadFileFn = null,
     /// Shared import index for this compile. When set, `ContractBuilder` reads
     /// it instead of building an identical private one. Same lifetime rule as
@@ -686,10 +687,6 @@ pub const ContractExtraction = struct {
     }
 };
 
-fn runContractTypeCheck(type_checker: *TypeChecker, root: NodeIndex) anyerror!u32 {
-    return type_checker.check(root);
-}
-
 /// Owns the selected analysis passes for one parsed module.
 /// Initialize this value in final caller storage before calling complete.
 pub const ModuleAnalysisSession = struct {
@@ -754,11 +751,9 @@ pub const ModuleAnalysisSession = struct {
     contract_context: ContractContext = .{},
     state: SessionState = .uninitialized,
     type_env_storage: TypeEnvStorage = .{},
-    extraction_type_env_storage: TypeEnvStorage = .{},
     resolved: ?ResolvedModule = null,
     checked: ?CheckedModule = null,
-    /// The checker the contract pass owns when `resolved` has none: the standalone
-    /// session, or the custom `type_check` callback session. Never both.
+    /// The checker the contract pass owns when `resolved` has none: the standalone session.
     contract_checker: ?TypeChecker = null,
     standalone_flow_checker: ?FlowChecker = null,
     resolution_facts: ?ModuleFacts = null,
@@ -864,7 +859,6 @@ pub const ModuleAnalysisSession = struct {
         self.contract_checker = null;
         if (self.resolved) |*resolved| resolved.deinit();
         self.resolved = null;
-        self.extraction_type_env_storage.deinit(self.allocator);
         self.type_env_storage.deinit(self.allocator);
         if (self.contract_facts) |*owned_contract| owned_contract.deinit();
         self.contract_facts = null;
@@ -1050,13 +1044,13 @@ pub const ModuleAnalysisSession = struct {
         if (self.extraction_state != .ready) return error.ContractExtractionAlreadyAttempted;
         self.extraction_state = .attempted;
 
-        var extraction = switch (self.profile) {
-            .full, .contract_only => try self.extractDefaultResult(filename),
-            .sound_extraction => if (self.extraction_opts.type_check == runContractTypeCheck)
-                try self.extractDefaultResult(filename)
-            else
-                try self.extractCustomResult(filename),
-        };
+        if (self.profile == .sound_extraction) {
+            if (self.extraction_opts.module_scan) |scan| {
+                try scan(self.parsed.ir_view);
+                try self.finishSoundTypeSession();
+            }
+        }
+        var extraction = try self.extractDefaultResult(filename);
         errdefer extraction.deinit(self.allocator);
 
         if (self.resolved) |*resolved| {
@@ -1123,9 +1117,7 @@ pub const ModuleAnalysisSession = struct {
     }
 
     fn completeContractOnly(self: *ModuleAnalysisSession) !void {
-        if (self.extraction_opts.type_check != runContractTypeCheck) {
-            return error.IncompatibleAnalysisProfile;
-        }
+        if (self.extraction_opts.module_scan != null) return error.IncompatibleAnalysisProfile;
 
         try self.completeStandaloneTypeSession();
         try self.prepareContractFacts();
@@ -1171,8 +1163,14 @@ pub const ModuleAnalysisSession = struct {
 
         try self.prepareStandaloneFlow();
 
-        if (self.extraction_opts.type_check != runContractTypeCheck) return;
-        if (resolved.type_checker) |*checker| {
+        // A module scan runs in `extractContract`, before this tail.
+        if (self.extraction_opts.module_scan != null) return;
+        try self.finishSoundTypeSession();
+    }
+
+    /// The type check and contract facts of a sound-extraction session.
+    fn finishSoundTypeSession(self: *ModuleAnalysisSession) !void {
+        if (self.resolved.?.type_checker) |*checker| {
             try checker.ensureHealthy();
             self.contract_type_state = .completed;
         } else {
@@ -1223,7 +1221,7 @@ pub const ModuleAnalysisSession = struct {
             if (self.extraction_opts.module_facts) |injected| return injected;
         }
         if (self.contract_facts) |*owned_contract| return owned_contract;
-        // Graph import mapping precedes custom extraction callbacks.
+        // Graph import mapping precedes the module scan.
         if (self.resolution_facts) |*owned_resolution| return owned_resolution;
         unreachable;
     }
@@ -1268,29 +1266,6 @@ pub const ModuleAnalysisSession = struct {
         filename: []const u8,
     ) !ContractExtraction {
         const checker = try self.completedTypeChecker();
-        try checker.ensureHealthy();
-        return self.extractCheckedResult(filename, self.extraction_opts, checker);
-    }
-
-    fn extractCustomResult(
-        self: *ModuleAnalysisSession,
-        filename: []const u8,
-    ) !ContractExtraction {
-        try self.extraction_type_env_storage.initWithSource(
-            self.allocator,
-            try sourceTypeInput(self.parsed, self.source_types),
-        );
-        self.contract_checker = TypeChecker.init(
-            self.allocator,
-            self.parsed.ir_view,
-            self.parsed.atoms,
-            self.extraction_type_env_storage.envPtr().?,
-        );
-        const checker = &self.contract_checker.?;
-        checker.scopes = self.parsed.scopes;
-        checker.import_facts = if (self.resolution_facts) |*facts_value| facts_value else null;
-        _ = try self.extraction_opts.type_check(checker, self.parsed.root);
-        try self.prepareContractFacts();
         try checker.ensureHealthy();
         return self.extractCheckedResult(filename, self.extraction_opts, checker);
     }

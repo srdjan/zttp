@@ -128,13 +128,13 @@ const GraphCallbackProbe = struct {
 
 threadlocal var active_graph_callback_probe: ?*GraphCallbackProbe = null;
 
-fn graphCallbackModule(type_checker: *const TypeChecker) ?GraphCallbackModule {
-    for (0..type_checker.ir_view.nodeCount()) |idx| {
+fn graphCallbackModule(view: IrView) ?GraphCallbackModule {
+    for (0..view.nodeCount()) |idx| {
         const node: NodeIndex = @intCast(idx);
-        const tag = type_checker.ir_view.getTag(node) orelse continue;
+        const tag = view.getTag(node) orelse continue;
         if (tag != .import_decl) continue;
-        const import_decl = type_checker.ir_view.getImportDecl(node) orelse continue;
-        const module_name = type_checker.ir_view.getString(import_decl.module_idx) orelse continue;
+        const import_decl = view.getImportDecl(node) orelse continue;
+        const module_name = view.getString(import_decl.module_idx) orelse continue;
         if (std.mem.eql(u8, module_name, "zttp:sql")) return .shared;
         if (std.mem.eql(u8, module_name, "zttp:env")) return .left;
         if (std.mem.eql(u8, module_name, "zttp:cache")) return .right;
@@ -143,14 +143,13 @@ fn graphCallbackModule(type_checker: *const TypeChecker) ?GraphCallbackModule {
     return null;
 }
 
-fn recordGraphContractTypeCheck(type_checker: *TypeChecker, root: NodeIndex) anyerror!u32 {
+fn recordGraphModuleScan(view: IrView) anyerror!void {
     const probe = active_graph_callback_probe orelse return error.GraphCallbackProbeMissing;
     if (probe.count >= probe.modules.len) return error.GraphCallbackCountExceeded;
-    probe.modules[probe.count] = graphCallbackModule(type_checker) orelse
+    probe.modules[probe.count] = graphCallbackModule(view) orelse
         return error.GraphCallbackModuleUnknown;
     probe.count += 1;
     if (probe.fail_after == probe.count) return error.GraphCallbackRefused;
-    return type_checker.check(root);
 }
 
 fn serializeContractForTest(allocator: std.mem.Allocator, contract: *const HandlerContract) ![]u8 {
@@ -304,8 +303,8 @@ test "TypeEnvStorage rejects a second initialization before allocation" {
     try storage.pool.ensureHealthy();
 }
 
-fn rejectingContractTypeCheck(_: *TypeChecker, _: NodeIndex) anyerror!u32 {
-    return error.TestTypeCheckRan;
+fn rejectingModuleScan(_: IrView) anyerror!void {
+    return error.TestModuleScanRan;
 }
 
 test "ModuleAnalysisSession requires completion and permits one extraction" {
@@ -1139,16 +1138,14 @@ test "ModuleAnalysisSession runs a custom callback only during extraction" {
     try analysis.initSoundExtraction(allocator, parsed, .{
         .strict = false,
         .source_types = .direct,
-        .type_check = rejectingContractTypeCheck,
+        .module_scan = rejectingModuleScan,
         .capture_export_effects = true,
     });
     defer analysis.deinit();
 
     try analysis.complete();
-    try testing.expectError(error.TestTypeCheckRan, analysis.extractContract("custom.ts"));
-    try testing.expect(analysis.contract_checker != null);
+    try testing.expectError(error.TestModuleScanRan, analysis.extractContract("custom.ts"));
     try testing.expect(analysis.resolved.?.type_checker != null);
-    try testing.expect(&analysis.contract_checker.? != &analysis.resolved.?.type_checker.?);
     try testing.expect(analysis.contract_facts == null);
     try testing.expect(analysis.takeExportEffects() == null);
     try testing.expectError(
@@ -1503,13 +1500,8 @@ test "extractContract preserves single-file custom callback output" {
     const Callback = struct {
         var call_count: usize = 0;
 
-        fn check(type_checker: *TypeChecker, root: NodeIndex) anyerror!u32 {
-            const error_count = try type_checker.check(root);
-            try testing.expectEqual(@as(u32, 0), error_count);
-            try testing.expectEqual(@as(usize, 0), type_checker.getDiagnostics().len);
+        fn scan(_: IrView) anyerror!void {
             call_count += 1;
-            // Preserve acceptance of a nonzero callback count without diagnostics.
-            return 7;
         }
     };
 
@@ -1521,7 +1513,7 @@ test "extractContract preserves single-file custom callback output" {
     Callback.call_count = 0;
     var custom_contract = try extractContract(allocator, source, "handler.ts", .{
         .strict = false,
-        .type_check = Callback.check,
+        .module_scan = Callback.scan,
     });
     defer custom_contract.deinit(allocator);
 
@@ -1598,6 +1590,24 @@ test "extractContract keeps dependency annotations outside entry typing" {
     );
 }
 
+test "extractContract applies entry types in a module graph" {
+    const source =
+        \\import { helper } from "./dep.ts";
+        \\function handler(req: Request): Response {
+        \\  const port: number = "bad";
+        \\  return Response.text(helper() + String(port));
+        \\}
+    ;
+
+    try testing.expectError(
+        error.SoundModeViolation,
+        extractContract(testing.allocator, source, "/source-selection/entry.ts", .{
+            .strict = false,
+            .read_file = readSourceSelectionGraphFile,
+        }),
+    );
+}
+
 test "extractContract preserves graph callback order and merged contract bytes" {
     const allocator = testing.allocator;
     const source =
@@ -1612,7 +1622,7 @@ test "extractContract preserves graph callback order and merged contract bytes" 
     ;
     const options = ExtractContractOptions{
         .strict = false,
-        .type_check = recordGraphContractTypeCheck,
+        .module_scan = recordGraphModuleScan,
         .read_file = readGraphBaselineFile,
     };
 
@@ -2927,21 +2937,14 @@ test "source graph uses compiled direct entry types and omits dependency types" 
         var entries: usize = 0;
         var dependencies: usize = 0;
 
-        fn check(checker: *TypeChecker, root: NodeIndex) anyerror!u32 {
-            if (checker.env.getSourceFnSigByName("handler")) |signature| {
-                try testing.expectEqual(type_env_mod.SourceTypeMode.direct, checker.env.sourceTypeMode().?);
-                var names: std.ArrayListUnmanaged([]const u8) = .empty;
-                defer names.deinit(checker.env.allocator);
-                _ = try checker.env.extractProofMembers(signature.return_type, &names);
-                try testing.expectEqual(@as(usize, 1), names.items.len);
-                try testing.expectEqualStrings("pure", names.items[0]);
+        fn scan(view: IrView) anyerror!void {
+            for (0..view.nodeCount()) |index| {
+                const node: NodeIndex = @intCast(index);
+                if (view.getTag(node) != .import_decl) continue;
                 entries += 1;
-            } else {
-                try testing.expectEqual(type_env_mod.SourceTypeMode.omitted, checker.env.sourceTypeMode().?);
-                try testing.expect(checker.env.getSourceFnSigByName("helper") == null);
-                dependencies += 1;
+                return;
             }
-            return checker.check(root);
+            dependencies += 1;
         }
     };
     const selections = [_]?ModuleSourceTypeInput{ .direct, null };
@@ -2952,7 +2955,7 @@ test "source graph uses compiled direct entry types and omits dependency types" 
         var direct = try extractContract(allocator, sourceSelectionGraphEntry, "/source-selection/entry.ts", .{
             .source_types = selection,
             .read_file = readSourceSelectionGraphFile,
-            .type_check = Probe.check,
+            .module_scan = Probe.scan,
             .strict = false,
         });
         defer direct.deinit(allocator);

@@ -379,7 +379,7 @@ fn buildTestContractForSource(
     return contract;
 }
 
-fn failContractTypeCheck(_: *zts.TypeChecker, _: ir.NodeIndex) anyerror!u32 {
+fn failContractModuleScan(_: zts.IrView) anyerror!void {
     return error.OutOfMemory;
 }
 
@@ -397,7 +397,7 @@ test "contract construction propagates type-check allocation failure" {
     const parsed = zts.pipeline.ParsedModule.fromExisting(ir_view, root, &atoms);
 
     var analysis: zts.pipeline.ModuleAnalysisSession = .{};
-    try analysis.initSoundExtraction(allocator, parsed, .{ .type_check = failContractTypeCheck, .strict = false });
+    try analysis.initSoundExtraction(allocator, parsed, .{ .module_scan = failContractModuleScan, .strict = false });
     defer analysis.deinit();
     try analysis.complete();
     try std.testing.expectError(error.OutOfMemory, analysis.extractContract("<contract-type-oom>"));

@@ -361,7 +361,7 @@ fn validateSourceAuthority(allocator: std.mem.Allocator, config: ServerConfig) !
             defer allocator.free(source.code);
             const options: zts.pipeline.ExtractContractOptions = .{
                 .strict = false,
-                .type_check = refuseRetiredSourceImports,
+                .module_scan = refuseRetiredSourceImports,
                 .read_file = zts.file_io.readFileForModuleGraph,
             };
             var contract = (if (source.prepared_eval) |prepared|
@@ -422,8 +422,7 @@ fn renderParseRefusal(allocator: std.mem.Allocator, source: []const u8, filename
 
 /// Contract projection omits unresolved imports. Inspect the existing parsed
 /// imports first, including each local dependency, before startup creates a pool.
-fn refuseRetiredSourceImports(checker: *zts.TypeChecker, root: u32) anyerror!u32 {
-    const view = checker.ir_view;
+fn refuseRetiredSourceImports(view: zts.IrView) anyerror!void {
     for (0..view.nodeCount()) |index| {
         const node: u32 = @intCast(index);
         if (view.getTag(node) != .import_decl) continue;
@@ -431,7 +430,6 @@ fn refuseRetiredSourceImports(checker: *zts.TypeChecker, root: u32) anyerror!u32
         const specifier = view.getString(declaration.module_idx) orelse continue;
         if (retired_authority.isRetiredModule(specifier)) return error.UnsupportedRuntimeAuthority;
     }
-    return checker.check(root);
 }
 
 fn applyCheckedServePolicy(config: *ServerConfig, checked: *const serve_policy.CheckedPolicy) void {
@@ -1124,6 +1122,28 @@ test "source startup refuses retired authority in a local dependency" {
             serveCommand(command_arena.allocator(), &.{ handler_path, "--pool", "3" }),
         );
     }
+}
+
+test "source startup reports a sound-mode violation before a retired module" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(std.testing.io, .{
+        .sub_path = "handler.ts",
+        .data =
+        \\import { run } from "zttp:durable";
+        \\function handler(req: Request): Response {
+        \\  const port: number = "bad";
+        \\  return Response.text(String(port));
+        \\}
+        ,
+    });
+    const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "handler.ts", allocator);
+    defer allocator.free(handler_path);
+    try std.testing.expectError(
+        error.SoundModeViolation,
+        validateSourceAuthority(allocator, .{ .handler = .{ .file_path = handler_path } }),
+    );
 }
 
 test "serve policy validation never bypasses a configured policy" {
