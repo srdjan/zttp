@@ -7,18 +7,15 @@ const json_writer = @import("../providers/json_writer.zig");
 
 pub const default_output_limit: usize = 256 * 1024;
 /// Preserve the tool preparation boundary before runtime parsing and shared atoms.
-pub fn admitToolSource(allocator: std.mem.Allocator, source: []const u8, path: []const u8) !zts.SourceKind {
-    const kind = zts.classifySourcePath(path);
-    switch (kind) {
-        .unsupported => return error.UnsupportedSourceExtension,
-        .virtual_javascript => return kind,
+pub fn admitToolSource(allocator: std.mem.Allocator, source: []const u8, path: []const u8) !void {
+    switch (zts.classifySourcePath(path)) {
+        .unsupported, .virtual_javascript => return error.UnsupportedSourceExtension,
         .typescript => {},
     }
     if (try zts.checkSourceAdmission(allocator, source)) |failure| {
         zts.logAdmissionFailure(source, failure);
         return zts.prepareErrorForAdmissionFailure(failure);
     }
-    return kind;
 }
 
 /// Maximum provider-visible bytes for a replayable preview or structured
@@ -982,13 +979,13 @@ test "resolveBinaryPath returns null for a name not on PATH" {
     try testing.expect((try resolveBinaryPath(testing.allocator, io_backend.io(), "definitely_not_a_real_binary_zzqx")) == null);
 }
 
-test "tool preparation preserves typed and raw virtual source profiles" {
+test "tool preparation refuses a virtual path and an unmapped extension" {
     const allocator = std.testing.allocator;
     const typed = "const { value }: { value: any } = input;";
     try std.testing.expectError(error.UnsupportedAnyType, admitToolSource(allocator, typed, "handler.ts"));
-    try std.testing.expectEqual(zts.SourceKind.virtual_javascript, try admitToolSource(allocator, typed, "<eval>"));
+    try std.testing.expectError(error.UnsupportedSourceExtension, admitToolSource(allocator, typed, "<eval>"));
     try std.testing.expectError(error.UnsupportedSourceExtension, admitToolSource(allocator, typed, "handler.js"));
-    try std.testing.expectEqual(zts.SourceKind.typescript, try admitToolSource(allocator, "const broken = ;", "handler.ts"));
+    try admitToolSource(allocator, "const broken = ;", "handler.ts");
 }
 
 const Triple = struct {

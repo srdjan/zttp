@@ -10,6 +10,8 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+- A `.ts` import or an `-e` source that admission refuses now fails at start with the admission message. Some forms used to run, or to report a second and less exact message.
+
 ## [0.26.0] - 2026-10-29
 
 ### Highlights

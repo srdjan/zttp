@@ -484,7 +484,6 @@ const parser_errors = [_][]const u8{
     "TooManyConstants",
     "TooManyShapes",
     "JumpTooFar",
-    "TypeOnlyModuleLexicallyExcluded",
 };
 
 fn expectKnownParserError(err: anyerror) !void {

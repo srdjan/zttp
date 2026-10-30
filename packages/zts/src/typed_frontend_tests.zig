@@ -1009,7 +1009,6 @@ fn runExcludedModuleTypeAllocationSweep(
         error.MissingSemicolon => {
             // Admission publishes the excluded module beside the seed.
             try std.testing.expectEqual(@as(usize, 2), parser.type_store.type_only_modules.items.len);
-            try std.testing.expect(parser.type_only_module_exclusion == null);
             try std.testing.expectEqual(@as(usize, 1), parser.type_only_module_diagnostics.items.len);
             return;
         },

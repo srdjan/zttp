@@ -45,7 +45,6 @@ const parser_errors = [_][]const u8{
     "TooManyConstants",
     "TooManyShapes",
     "JumpTooFar",
-    "TypeOnlyModuleLexicallyExcluded",
 };
 
 /// Every error the type checker and the flow checker may return. The set is

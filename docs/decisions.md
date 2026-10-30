@@ -169,3 +169,16 @@ The flow analysis gave `env("NAME")` the label `config` when the literal `NAME` 
 - Gate: zig build test-flow-census
 
 The analyzer treated every numeric literal bound of `mask(text, visible)` as declassifying and accepted an omitted bound. `mask(secret, 39)` on a 40-byte secret then proved `no_secret_leakage` although it reveals 39 bytes, and four bounded calls over slices of one secret revealed all of it. The owner chose D4(a) and Decision 24(a) of the soundness plan, with Decisions 22(a) and 25(a), on 2026-10-26. A binding that declares `declassify_bound_arg` also declares `declassify_bound_max`, and `mask` declares `mask_visible_max`, which is 4. The declassification holds only when the bound is an integer literal from 0 to that ceiling and every other argument is an unmodified source value. An omitted bound, a float, a negative number, or a larger number keeps the labels. A value is an unmodified source value when the interpreter marks it `source_exact`: the result of `env` from `zttp:env`, the `authorization` header, or a plain copy of one. A join keeps the mark only when both sides hold it, and every operation that builds a new value drops it. The runtime default of 4 bytes for an omitted bound does not change. The change shares the flow analyzer version 8 of D-014, adds no policy field, and waits for the batched re-record window of D-012.
+
+## Source admission
+
+### D-016 Every source file and every -e source passes admission
+
+- Status: standing
+- Decided: 2026-10-30
+- Binds: packages/zts/src/modules/internal/module_graph.zig, packages/tools/src/module_graph_record.zig, packages/runtime/src/cli_shared.zig, packages/runtime/src/runtime_cli.zig, packages/zts/src/compiler.zig, packages/runtime/src/handler_instance.zig, packages/zts/src/kernel_identity.zig, packages/zts/src/source_frontend.zig
+- Gate: zig build test-precompile
+
+A `.ts` file that admission refused used to run through the untyped parser. The module graph and the module record printed "TypeScript strip failed" and then kept the file. A dependency with a trailing `/* open` answered HTTP 200 under `serve`, and 16 other refused forms reported a second and less exact message. The same fallback kept `-e` source that admission refused. The owner chose Decision 4, option (a), of the reset plan on 2026-10-30. A file and an `-e` source now pass admission, or they fail at start with the admission message. `SourceProfile`, `extractVirtualContract`, `compileWithOptions`, the `.virtual_javascript` arms of the check and compile tools, and the untyped branch of the expert effects tool are deleted. A virtual path such as `<eval>` is the identity of prepared evaluation and is not a file route.
+
+Four entries keep the untyped parser, each for a reason that is not a source file. `JsParser.initExpression` parses one expression for `kernel_identity`. `JsParser.initSourceObserver` is the admission observer itself. `compile` in `packages/zts/src/compiler.zig` compiles the fragments of the semantics corpus, which `zts spec-check` reads. The raw `Parser.init` arm in `loadCodeWithCachingInternal` serves `HandlerSource.inline_code`, which `docs/internals/api-reference.md` documents as embedding API. A new raw entry needs a superseding entry here.

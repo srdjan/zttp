@@ -44,30 +44,21 @@ pub const ReadFileError = error{
 pub const Module = struct {
     path: []const u8,
     source: []const u8,
-    source_profile: SourceProfile = .raw,
     dependencies: []ModuleIndex,
     state: DfsState,
 
     const DfsState = enum { unvisited, visiting, visited };
 
-    pub const SourceProfile = enum { direct, raw };
-
     pub fn initParser(self: *const Module, allocator: std.mem.Allocator) !zts_parser.JsParser {
-        return switch (self.source_profile) {
-            .direct => zts_parser.JsParser.initAdmission(allocator, allocator, self.source, .compile),
-            .raw => zts_parser.JsParser.init(allocator, self.source),
-        };
+        return zts_parser.JsParser.initAdmission(allocator, allocator, self.source, .compile);
     }
 
-    pub fn parse(self: *const Module, parser: *zts_parser.JsParser) !zts_parser.NodeIndex {
-        return switch (self.source_profile) {
-            .raw => parser.parse(),
-            .direct => switch (try parser.parseAdmission()) {
-                .accepted => |root| root,
-                .parser_refused => |refusal| return refusal.first_error,
-                .terminal_admission_refused => |failure| return source_frontend.prepareErrorForAdmissionFailure(failure),
-                .recovered_admission_refused => unreachable,
-            },
+    pub fn parse(_: *const Module, parser: *zts_parser.JsParser) !zts_parser.NodeIndex {
+        return switch (try parser.parseAdmission()) {
+            .accepted => |root| root,
+            .parser_refused => |refusal| return refusal.first_error,
+            .terminal_admission_refused => |failure| return source_frontend.prepareErrorForAdmissionFailure(failure),
+            .recovered_admission_refused => unreachable,
         };
     }
 
@@ -80,24 +71,25 @@ pub const Module = struct {
     }
 };
 
-fn selectSourceProfile(allocator: std.mem.Allocator, source: []const u8, path: []const u8) !Module.SourceProfile {
+/// Admit one module's source. A parser refusal passes here and is reported
+/// when the module is parsed for compilation.
+fn admitModule(allocator: std.mem.Allocator, source: []const u8, path: []const u8) !void {
     switch (source_frontend.classifyPath(path)) {
-        .unsupported => return error.UnsupportedSourceExtension,
-        .virtual_javascript => return .raw,
+        .unsupported, .virtual_javascript => return error.UnsupportedSourceExtension,
         .typescript => {},
     }
     var parser = try zts_parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
-    return switch (try parser.parseAdmission()) {
-        .accepted, .parser_refused => .direct,
+    switch (try parser.parseAdmission()) {
+        .accepted, .parser_refused => {},
         .recovered_admission_refused => unreachable,
-        .terminal_admission_refused => |failure| blk: {
-            std.debug.print("TypeScript strip failed for module '{s}': {}\n", .{
-                path, source_frontend.prepareErrorForAdmissionFailure(failure),
-            });
-            break :blk .raw;
+        .terminal_admission_refused => |failure| {
+            const line = try source_frontend.formatAdmissionRefusal(allocator, source, path, failure);
+            defer allocator.free(line);
+            std.debug.print("{s}\n", .{line});
+            return source_frontend.prepareErrorForAdmissionFailure(failure);
         },
-    };
+    }
 }
 
 pub const ModuleGraph = struct {
@@ -168,7 +160,7 @@ pub const ModuleGraph = struct {
             self.allocator.free(owned_path);
             return err;
         };
-        const entry_idx = try self.addModuleWithProfile(owned_path, owned_source, if (prepared_eval) .direct else null);
+        const entry_idx = try self.addModule(owned_path, owned_source, !prepared_eval);
 
         // Recursively discover dependencies
         try self.discoverDependencies(entry_idx, read_file, 0);
@@ -178,15 +170,12 @@ pub const ModuleGraph = struct {
     }
 
     /// Add a module to the graph. Takes ownership of both path and source.
-    fn addModule(self: *ModuleGraph, owned_path: []const u8, owned_source: []const u8) !ModuleIndex {
-        return self.addModuleWithProfile(owned_path, owned_source, null);
-    }
-
-    fn addModuleWithProfile(
+    /// A prepared-evaluation entry skips admission because its source was admitted earlier.
+    fn addModule(
         self: *ModuleGraph,
         owned_path: []const u8,
         owned_source: []const u8,
-        entry_profile: ?Module.SourceProfile,
+        admit: bool,
     ) !ModuleIndex {
         const idx: ModuleIndex = @intCast(self.module_list.items.len);
 
@@ -195,12 +184,11 @@ pub const ModuleGraph = struct {
             self.allocator.free(owned_path);
             self.allocator.free(owned_source);
         };
-        const source_profile = entry_profile orelse try selectSourceProfile(self.allocator, owned_source, owned_path);
+        if (admit) try admitModule(self.allocator, owned_source, owned_path);
 
         try self.module_list.append(self.allocator, .{
             .path = owned_path,
             .source = owned_source,
-            .source_profile = source_profile,
             .dependencies = &.{},
             .state = .unvisited,
         });
@@ -262,7 +250,7 @@ pub const ModuleGraph = struct {
                     };
 
                     // addModule takes ownership of resolved_path and dep_source
-                    const dep_idx = try self.addModule(resolved_path, dep_source);
+                    const dep_idx = try self.addModule(resolved_path, dep_source, true);
 
                     try deps.append(self.allocator, dep_idx);
 
@@ -412,25 +400,25 @@ test "module graph: typed preparation closes every allocation failure" {
     try std.testing.checkAllAllocationFailures(no_resize.allocator(), Context.run, .{});
 }
 
-test "graph source selection bounds every hard admission producer" {
-    const cases = [_]struct { kind: zts_parser.type_syntax.AdmissionKind, source: []const u8 }{
-        .{ .kind = .any_type, .source = "import type { A } /* ; */ from \"./a\";\nconst value: any = 1;\n" },
-        .{ .kind = .as_assertion, .source = "import type { A } /* ; */ from \"./a\";\nconst value = source as string;\n" },
-        .{ .kind = .satisfies_assertion, .source = "import type { A } /* ; */ from \"./a\";\nconst value = source satisfies string;\n" },
-        .{ .kind = .unterminated_string, .source = "import type { A } /* ; */ from \"./a\";\nconst value = \"open\nconst after = 1;\n" },
-        .{ .kind = .nominal_base_not_scalar, .source = "import type { A } /* ; */ from \"./a\";\nnominal Box = T;\n" },
-        .{ .kind = .interface_declaration, .source = "import type { A } /* ; */ from \"./a\";\ninterface Box { value: string }\n" },
-        .{ .kind = .type_alias_declaration, .source = "import type { A } /* ; */ from \"./a\";\ntype Box = string;\n" },
-        .{ .kind = .distinct_type_declaration, .source = "import type { A } /* ; */ from \"./a\";\ndistinct type Box = string;\n" },
-        .{ .kind = .legacy_types_import, .source = "import type { A } /* ; */ from \"./a\";\nimport type { Value } from '" ++ @import("zts-base").module_specifier.retired_types_module ++ "';\n" },
-        .{ .kind = .default_parameter, .source = "import type { A } /* ; */ from \"./a\";\nfunction f(value = 1) { return value; }\n" },
-        .{ .kind = .optional_parameter, .source = "import type { A } /* ; */ from \"./a\";\nfunction f(value?: string) { return value; }\n" },
-        .{ .kind = .default_export, .source = "import type { A } /* ; */ from \"./a\";\nexport default 1;\n" },
-        .{ .kind = .mutable_export, .source = "import type { A } /* ; */ from \"./a\";\nexport let value = 1;\n" },
-        .{ .kind = .array_type_alias, .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = Array<string>;\n" },
-        .{ .kind = .readonly_array_type_alias, .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = ReadonlyArray<string>;\n" },
-        .{ .kind = .void_type, .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = void;\n" },
-        .{ .kind = .nesting_too_deep, .source = "import type { A } /* ; */ from \"./a\";\nconst value: {{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{ string;\n" },
+test "graph refuses every hard admission producer" {
+    const cases = [_]struct { kind: zts_parser.type_syntax.AdmissionKind, err: anyerror, source: []const u8 }{
+        .{ .kind = .any_type, .err = error.UnsupportedAnyType, .source = "import type { A } /* ; */ from \"./a\";\nconst value: any = 1;\n" },
+        .{ .kind = .as_assertion, .err = error.UnsupportedAsAssertion, .source = "import type { A } /* ; */ from \"./a\";\nconst value = source as string;\n" },
+        .{ .kind = .satisfies_assertion, .err = error.UnsupportedSatisfiesAssertion, .source = "import type { A } /* ; */ from \"./a\";\nconst value = source satisfies string;\n" },
+        .{ .kind = .unterminated_string, .err = error.UnterminatedString, .source = "import type { A } /* ; */ from \"./a\";\nconst value = \"open\nconst after = 1;\n" },
+        .{ .kind = .nominal_base_not_scalar, .err = error.NominalBaseNotScalar, .source = "import type { A } /* ; */ from \"./a\";\nnominal Box = T;\n" },
+        .{ .kind = .interface_declaration, .err = error.InterfaceDeclaration, .source = "import type { A } /* ; */ from \"./a\";\ninterface Box { value: string }\n" },
+        .{ .kind = .type_alias_declaration, .err = error.TypeAliasDeclaration, .source = "import type { A } /* ; */ from \"./a\";\ntype Box = string;\n" },
+        .{ .kind = .distinct_type_declaration, .err = error.DistinctTypeDeclaration, .source = "import type { A } /* ; */ from \"./a\";\ndistinct type Box = string;\n" },
+        .{ .kind = .legacy_types_import, .err = error.LegacyTypesImport, .source = "import type { A } /* ; */ from \"./a\";\nimport type { Value } from '" ++ @import("zts-base").module_specifier.retired_types_module ++ "';\n" },
+        .{ .kind = .default_parameter, .err = error.DefaultParameter, .source = "import type { A } /* ; */ from \"./a\";\nfunction f(value = 1) { return value; }\n" },
+        .{ .kind = .optional_parameter, .err = error.OptionalParameter, .source = "import type { A } /* ; */ from \"./a\";\nfunction f(value?: string) { return value; }\n" },
+        .{ .kind = .default_export, .err = error.DefaultExport, .source = "import type { A } /* ; */ from \"./a\";\nexport default 1;\n" },
+        .{ .kind = .mutable_export, .err = error.MutableExport, .source = "import type { A } /* ; */ from \"./a\";\nexport let value = 1;\n" },
+        .{ .kind = .array_type_alias, .err = error.ArrayTypeAlias, .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = Array<string>;\n" },
+        .{ .kind = .readonly_array_type_alias, .err = error.ReadonlyArrayTypeAlias, .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = ReadonlyArray<string>;\n" },
+        .{ .kind = .void_type, .err = error.VoidType, .source = "import type { A } /* ; */ from \"./a\";\nstructural Box = void;\n" },
+        .{ .kind = .nesting_too_deep, .err = error.NestingTooDeep, .source = "import type { A } /* ; */ from \"./a\";\nconst value: {{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{ string;\n" },
     };
     try std.testing.expectEqual(@typeInfo(zts_parser.type_syntax.AdmissionKind).@"enum".field_names.len, cases.len);
     var seen = std.EnumSet(zts_parser.type_syntax.AdmissionKind).empty;
@@ -453,8 +441,7 @@ test "graph source selection bounds every hard admission producer" {
         }
         var graph = ModuleGraph.init(std.testing.allocator);
         defer graph.deinit();
-        try graph.build("entry.ts", case.source, Reader.read);
-        try std.testing.expectEqual(Module.SourceProfile.raw, graph.module_list.items[0].source_profile);
+        try std.testing.expectError(case.err, graph.build("entry.ts", case.source, Reader.read));
     }
     var comment = try zts_parser.JsParser.initAdmission(std.testing.allocator, std.testing.allocator, "/* unfinished\n", .compile);
     defer comment.deinit();
@@ -467,22 +454,37 @@ test "graph source selection bounds every hard admission producer" {
     }
     var comment_graph = ModuleGraph.init(std.testing.allocator);
     defer comment_graph.deinit();
-    try comment_graph.build("entry.ts", "/* unfinished\n", Reader.read);
-    try std.testing.expectEqual(Module.SourceProfile.raw, comment_graph.module_list.items[0].source_profile);
-    const contrasts = [_]struct { source: []const u8, path: []const u8, profile: Module.SourceProfile }{
-        .{ .source = "const value: any = 1;", .path = "<virtual>", .profile = .raw },
-        .{ .source = "const marker: \"open\n = \"open\"; export const value = 1;\n", .path = "entry.ts", .profile = .direct },
-        .{ .source = "const value: number = ;\n", .path = "entry.ts", .profile = .direct },
+    try std.testing.expectError(error.UnterminatedComment, comment_graph.build("entry.ts", "/* unfinished\n", Reader.read));
+    var virtual = ModuleGraph.init(std.testing.allocator);
+    defer virtual.deinit();
+    try std.testing.expectError(error.UnsupportedSourceExtension, virtual.build("<virtual>", "const value: any = 1;", Reader.read));
+    const accepted_contrasts = [_][]const u8{
+        "const marker: \"open\n = \"open\"; export const value = 1;\n",
+        "const value: number = ;\n",
     };
-    for (contrasts) |control| {
+    for (accepted_contrasts) |source| {
         var graph = ModuleGraph.init(std.testing.allocator);
         defer graph.deinit();
-        try graph.build(control.path, control.source, Reader.read);
-        try std.testing.expectEqual(control.profile, graph.module_list.items[0].source_profile);
+        try graph.build("entry.ts", source, Reader.read);
+        try std.testing.expectEqual(@as(usize, 1), graph.module_list.items.len);
     }
     var unsupported = ModuleGraph.init(std.testing.allocator);
     defer unsupported.deinit();
     try std.testing.expectError(error.UnsupportedSourceExtension, unsupported.build("entry.js", "", Reader.read));
+}
+
+test "graph refuses an imported module with an unterminated comment" {
+    const Reader = struct {
+        fn read(allocator: std.mem.Allocator, _: []const u8) ReadFileError![]const u8 {
+            return allocator.dupe(u8, "export const value = 1; /* open") catch return error.OutOfMemory;
+        }
+    };
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try std.testing.expectError(
+        error.UnterminatedComment,
+        graph.build("entry.ts", "import { value } from \"./lib.ts\";\nexport const result = value;\n", Reader.read),
+    );
 }
 
 test "graph build allocation failure cannot select raw" {
@@ -496,7 +498,6 @@ test "graph build allocation failure cannot select raw" {
             defer graph.deinit();
             try graph.build("entry.ts", source, read);
             try std.testing.expectEqual(@as(usize, 1), graph.module_list.items.len);
-            try std.testing.expectEqual(Module.SourceProfile.direct, graph.module_list.items[0].source_profile);
         }
     };
     var calibration = std.testing.FailingAllocator.init(std.testing.allocator, .{});
@@ -518,7 +519,7 @@ test "selected discovery parser distinguishes initialization and parse allocatio
     const source = "structural Label = string;\nconst label: Label = \"ready\";\nimport { value } from \"./dep.ts\";\n";
     const allocator = std.testing.allocator;
     var calibration = std.testing.FailingAllocator.init(allocator, .{});
-    var module: Module = .{ .path = "entry.ts", .source = source, .source_profile = .direct, .dependencies = &.{}, .state = .unvisited };
+    var module: Module = .{ .path = "entry.ts", .source = source, .dependencies = &.{}, .state = .unvisited };
     var parser = try module.initParser(calibration.allocator());
     defer parser.deinit();
     _ = try module.parse(&parser);
@@ -584,7 +585,6 @@ test "graph discovery retains its tolerant native parse boundary" {
             var graph = ModuleGraph.init(failing.allocator());
             defer graph.deinit();
             try graph.build("/probe/entry.ts", source, read);
-            try std.testing.expectEqual(Module.SourceProfile.direct, graph.module_list.items[0].source_profile);
             return graph.module_list.items.len;
         }
     };

@@ -1542,7 +1542,7 @@ test "extractContract rejects boolean diagnostics with strict disabled" {
     );
 }
 
-test "extractContract keeps typed and virtual entry source rules distinct" {
+test "extractContract refuses a virtual entry path and an unmapped extension" {
     const allocator = testing.allocator;
     const typed_source =
         \\function handler(req: Request): Response {
@@ -1556,14 +1556,10 @@ test "extractContract keeps typed and virtual entry source rules distinct" {
         extractContract(allocator, typed_source, "typed-entry.ts", .{ .strict = false }),
     );
 
-    var untyped_contract = try extractContract(
-        allocator,
-        "function handler(req) { const port = \"bad\"; return Response.text(String(port)); }",
-        "<untyped-entry>",
-        .{ .strict = false },
+    try testing.expectError(
+        error.UnsupportedSourceExtension,
+        extractContract(allocator, "function handler(req) { return Response.text(\"ok\"); }", "<untyped-entry>", .{ .strict = false }),
     );
-    defer untyped_contract.deinit(allocator);
-    try testing.expectEqualStrings("<untyped-entry>", untyped_contract.handler.path);
 
     try testing.expectError(
         error.UnsupportedSourceExtension,

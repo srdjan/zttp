@@ -226,6 +226,7 @@ pub const SourceObservationError = engine.source_frontend.SourceObservationError
 pub const checkSourceAdmission = engine.source_frontend.checkSourceAdmission;
 pub const sourceDiagnosticFromAdmission = engine.source_frontend.sourceDiagnosticFromAdmission;
 pub const logAdmissionFailure = engine.source_frontend.logAdmissionFailure;
+pub const formatAdmissionRefusal = engine.source_frontend.formatAdmissionRefusal;
 
 /// Returns one accepted capability set. The module borrows `source_owner` and
 /// must stop use before the owner is destroyed.

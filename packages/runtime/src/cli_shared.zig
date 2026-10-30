@@ -87,17 +87,18 @@ pub fn takeArg(i: *usize, argv: []const []const u8, missing: anyerror) ![]const 
 }
 
 /// Prepare inline evaluation and retain the original source bytes.
-/// The returned case owns its code buffer. Preparation refusal and OOM select raw parsing.
+/// The returned `.prepared_eval` owns its code buffer. Source that admission refuses
+/// prints its admission diagnostic and returns `error.SourceRefused`. An allocation
+/// failure returns `error.OutOfMemory`. The result is never `.inline_code`.
 pub fn prepareInlineSource(allocator: std.mem.Allocator, source: []const u8) !execution_spec.HandlerSource {
-    const prepared = prepared: {
-        const refusal = zts.checkSourceAdmission(allocator, source) catch |err| switch (err) {
-            error.OutOfMemory => break :prepared false,
-            error.InvalidSourceObservation => return err,
-        };
-        break :prepared refusal == null;
-    };
+    if (try zts.checkSourceAdmission(allocator, source)) |failure| {
+        const line = try zts.formatAdmissionRefusal(allocator, source, "<eval>", failure);
+        defer allocator.free(line);
+        std.debug.print("{s}\n", .{line});
+        return error.SourceRefused;
+    }
     const code = try allocator.dupe(u8, source);
-    return if (prepared) .{ .prepared_eval = .{ .code = code } } else .{ .inline_code = code };
+    return .{ .prepared_eval = .{ .code = code } };
 }
 
 pub fn printVersion() !void {
@@ -349,11 +350,10 @@ test "inline preparation retains original bytes and its fixed source case" {
         try std.testing.expectEqualStrings(source, prepared.prepared_eval.code);
         try std.testing.expect(prepared.prepared_eval.code.ptr != source.ptr);
     }
-    const refused_source = "function handler(req: any): Response { return Response.text(\"ok\"); }";
-    const refused = try prepareInlineSource(allocator, refused_source);
-    defer allocator.free(inlineTestCode(refused));
-    try std.testing.expect(refused == .inline_code);
-    try std.testing.expectEqualStrings(refused_source, refused.inline_code);
+    try std.testing.expectError(
+        error.SourceRefused,
+        prepareInlineSource(allocator, "function handler(req: any): Response { return Response.text(\"ok\"); }"),
+    );
 }
 
 const InlinePreparationFaultAllocator = struct {
@@ -391,38 +391,55 @@ const InlinePreparationFaultAllocator = struct {
 
 fn inlineTestCode(source: execution_spec.HandlerSource) []const u8 {
     return switch (source) {
-        .inline_code => |code| code,
         .prepared_eval => |prepared| prepared.code,
         else => unreachable,
     };
 }
 
-test "inline preparation recovers one allocation failure and propagates copy failure" {
-    const source = "function handler(req: Request): Response { const value: string = \"ok\"; return Response.text(value); }";
+test "inline preparation never turns an allocation failure into a different source case" {
+    const accepted = "function handler(req: Request): Response { const value: string = \"ok\"; return Response.text(value); }";
+    const refused = "function handler(req: any): Response { return Response.text(\"ok\"); }";
     var baseline: InlinePreparationFaultAllocator = .{ .backing = std.testing.allocator };
-    const prepared = try prepareInlineSource(baseline.allocator(), source);
+    const prepared = try prepareInlineSource(baseline.allocator(), accepted);
     std.testing.allocator.free(inlineTestCode(prepared));
     try std.testing.expect(prepared == .prepared_eval);
     try std.testing.expect(baseline.allocations > 0);
-    var raw_fallbacks: usize = 0;
-    var copy_failures: usize = 0;
+    var out_of_memory: usize = 0;
     for (0..baseline.allocations) |index| {
         var fault: InlinePreparationFaultAllocator = .{ .backing = std.testing.allocator, .fail_index = index };
-        const result = prepareInlineSource(fault.allocator(), source) catch |err| switch (err) {
-            error.OutOfMemory => {
-                try std.testing.expect(fault.induced);
-                copy_failures += 1;
-                continue;
-            },
-            else => return err,
+        const result = prepareInlineSource(fault.allocator(), accepted) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            out_of_memory += 1;
+            continue;
         };
+        // The parser reserves node capacity as a hint, and a refused hint is not an error.
         defer std.testing.allocator.free(inlineTestCode(result));
-        try std.testing.expectEqualStrings(source, inlineTestCode(result));
-        if (result == .inline_code) {
-            try std.testing.expect(fault.induced);
-            raw_fallbacks += 1;
+        try std.testing.expectEqualStrings(accepted, inlineTestCode(result));
+    }
+    try std.testing.expect(out_of_memory > 0);
+    var refused_baseline: InlinePreparationFaultAllocator = .{ .backing = std.testing.allocator };
+    try std.testing.expectError(error.SourceRefused, prepareInlineSource(refused_baseline.allocator(), refused));
+    for (0..refused_baseline.allocations) |index| {
+        var fault: InlinePreparationFaultAllocator = .{ .backing = std.testing.allocator, .fail_index = index };
+        const result = prepareInlineSource(fault.allocator(), refused);
+        if (result) |_| return error.TestUnexpectedResult else |err| switch (err) {
+            error.OutOfMemory, error.SourceRefused => {},
+            else => return err,
         }
     }
-    try std.testing.expect(raw_fallbacks > 0);
-    try std.testing.expect(copy_failures > 0);
+}
+
+test "inline refusal line carries the eval name, position, and message" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { source: []const u8, line: []const u8 }{
+        .{ .source = "function handler(req: any): Response { return Response.text(\"ok\"); }", .line = "<eval>:1:23: 'any' type is not supported; use specific types (string, number, object) or union types instead" },
+        .{ .source = "function handler(req: Request): Response { return Response.text(\"ok\"); } /* open", .line = "TypeScript strip error in <eval>: error.UnterminatedComment" },
+        .{ .source = "const s = \"open\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }", .line = "<eval>:1:16: unterminated string literal; close the quote, or write the newline as \\n" },
+    };
+    for (cases) |case| {
+        const failure = (try zts.checkSourceAdmission(allocator, case.source)).?;
+        const line = try zts.formatAdmissionRefusal(allocator, case.source, "<eval>", failure);
+        defer allocator.free(line);
+        try std.testing.expectEqualStrings(case.line, line);
+    }
 }

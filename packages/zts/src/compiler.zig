@@ -1,6 +1,8 @@
 //! Single-file compilation entry points.
 //!
-//! `compile` and `compileWithOptions` turn source into bytecode for one file.
+//! `compile` turns a source fragment into bytecode through the untyped parser.
+//! It serves the semantics corpus, whose fragments are not source files.
+//! Decision D-016 names this entry as one of the four that skip admission.
 
 const std = @import("std");
 const parser = @import("zts-engine").parser;
@@ -8,7 +10,6 @@ const bytecode = @import("zts-engine").bytecode;
 const value = @import("zts-engine").value;
 const string = @import("zts-engine").string;
 const context = @import("zts-engine").context;
-const source_frontend = @import("zts-engine").source_frontend;
 
 // ============================================================================
 // Simple Single-Threaded Compile API
@@ -26,69 +27,6 @@ pub fn compile(
     defer p.deinit();
 
     const code = try p.parse();
-
-    // Copy code and constants to output allocator (parser memory is freed on deinit)
-    const code_copy = try allocator.dupe(u8, code);
-    errdefer allocator.free(code_copy);
-
-    const constants_copy = try allocator.dupe(value.JSValue, p.constants.items);
-    errdefer allocator.free(constants_copy);
-
-    const line_table_copy = try allocator.dupe(bytecode.LineEntry, p.getLineTable());
-    errdefer allocator.free(line_table_copy);
-
-    const func = try allocator.create(bytecode.FunctionBytecode);
-    func.* = .{
-        .header = .{},
-        .name_atom = 0,
-        .arg_count = 0,
-        .local_count = @intCast(p.max_local_count),
-        .stack_size = @intCast(p.max_local_count + 16),
-        .flags = .{},
-        .upvalue_count = 0,
-        .upvalue_info = &.{},
-        .code = code_copy,
-        .constants = constants_copy,
-        .source_map = null,
-        .line_table = line_table_copy,
-    };
-
-    return func;
-}
-
-/// Compile with options
-pub const CompileOptions = struct {
-    strict_mode: bool = true,
-    filename: []const u8 = "<eval>",
-};
-
-pub fn compileWithOptions(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    options: CompileOptions,
-) !*bytecode.FunctionBytecode {
-    const kind = source_frontend.classifyPath(options.filename);
-    if (kind == .unsupported) return error.UnsupportedSourceExtension;
-    var strings = string.StringTable.init(allocator);
-    defer strings.deinit();
-
-    var p = if (kind.isTyped())
-        try parser.Parser.initTyped(allocator, allocator, source, &strings, null)
-    else
-        try parser.Parser.init(allocator, source, &strings, null);
-    defer p.deinit();
-    const code = if (kind.isTyped()) blk: {
-        switch (try p.parseTypedIr()) {
-            .accepted => {},
-            .terminal_admission_refused => |failure| {
-                source_frontend.logAdmissionFailure(source, failure);
-                return source_frontend.prepareErrorForAdmissionFailure(failure);
-            },
-            .parser_refused => |refusal| return refusal.first_error,
-            .recovered_admission_refused => return error.AdmissionRefused,
-        }
-        break :blk try p.generateParsed(allocator);
-    } else try p.parse();
 
     // Copy code and constants to output allocator (parser memory is freed on deinit)
     const code_copy = try allocator.dupe(u8, code);
@@ -160,23 +98,24 @@ test "simple compile API" {
     try std.testing.expectEqual(@backingInt(bytecode.Opcode.ret_undefined), func.code[func.code.len - 1]);
 }
 
-test "compile options retain raw virtual source and compilation without atoms" {
-    const source = "const value: number = 1; value;";
-    const raw = "const value         = 1; value;";
-    const typed = try compileWithOptions(std.testing.allocator, source, .{ .filename = "value.ts" });
-    defer freeCompileTestFunction(typed);
-    const legacy_shape = try compile(std.testing.allocator, raw);
-    defer freeCompileTestFunction(legacy_shape);
-    try std.testing.expectEqualSlices(u8, legacy_shape.code, typed.code);
-    try std.testing.expectEqualSlices(value.JSValue, legacy_shape.constants, typed.constants);
-    try std.testing.expectError(error.MissingSemicolon, compileWithOptions(std.testing.allocator, source, .{}));
-    try std.testing.expectError(error.UnsupportedSourceExtension, compileWithOptions(std.testing.allocator, raw, .{ .filename = "value.js" }));
-    try std.testing.expectError(error.UnsupportedAnyType, compileWithOptions(std.testing.allocator, "const { value }: { value: any } = input;", .{ .filename = "value.ts" }));
-}
-
-fn freeCompileTestFunction(function: *bytecode.FunctionBytecode) void {
-    std.testing.allocator.free(function.code);
-    std.testing.allocator.free(function.constants);
-    if (function.line_table) |lines| std.testing.allocator.free(lines);
-    std.testing.allocator.destroy(function);
+test "compile matches the typed path for a fragment with erased annotations" {
+    const allocator = std.testing.allocator;
+    var strings = string.StringTable.init(allocator);
+    defer strings.deinit();
+    var typed = try parser.Parser.initTyped(allocator, allocator, "const value: number = 1; value;", &strings, null);
+    defer typed.deinit();
+    switch (try typed.parseTypedIr()) {
+        .accepted => {},
+        else => return error.TestUnexpectedResult,
+    }
+    const typed_code = try typed.generateParsed(allocator);
+    const raw = try compile(allocator, "const value         = 1; value;");
+    defer {
+        allocator.free(raw.code);
+        allocator.free(raw.constants);
+        if (raw.line_table) |lines| allocator.free(lines);
+        allocator.destroy(raw);
+    }
+    try std.testing.expectEqualSlices(u8, raw.code, typed_code);
+    try std.testing.expectEqualSlices(value.JSValue, raw.constants, typed.constants.items);
 }

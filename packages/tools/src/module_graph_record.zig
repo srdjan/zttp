@@ -265,19 +265,13 @@ fn collectImports(
     queue: *std.ArrayList([]const u8),
     seen: *std.StringHashMap(void),
 ) !void {
-    const kind = zts.classifySourcePath(importer_rel);
-    if (kind == .unsupported) return error.UnsupportedSourceExtension;
-    const typed = if (kind.isTyped()) typed: {
-        if (try zts.checkSourceAdmission(allocator, source)) |failure| {
-            zts.logAdmissionFailure(source, failure);
-            break :typed false;
-        }
-        break :typed true;
-    } else false;
-    var js_parser = (if (typed)
-        parser.JsParser.initAdmission(allocator, allocator, source, .compile)
-    else
-        parser.JsParser.init(allocator, source)) catch |err| switch (err) {
+    if (zts.classifySourcePath(importer_rel) != .typescript) return error.UnsupportedSourceExtension;
+    if (try zts.checkSourceAdmission(allocator, source)) |failure| {
+        zts.logAdmissionFailure(source, failure);
+        try recordParseFailure(allocator, rejected, importer_rel);
+        return;
+    }
+    var js_parser = parser.JsParser.initAdmission(allocator, allocator, source, .compile) catch |err| switch (err) {
         // Init fails only on allocation.
         error.OutOfMemory => return error.OutOfMemory,
     };
@@ -706,15 +700,16 @@ test "tolerant graph observation preserves imports before failed top-level state
         .{ .source = "function wrapper() { const broken = ; import { env } from \"zttp:env\"; } import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{ .{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }, .{ .specifier = "zttp:clock", .kind = .unresolved, .target = "" } }, .rejected = &.{ parse_failed, .{ .specifier = "zttp:clock", .importer = "entry.ts", .reason = "unknown_specifier" } } },
         .{ .source = "function wrapper() { const broken = ; import { env } from \"zttp:env\"; }", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{parse_failed} },
         .{ .source = "import { env } from \"zttp:env\"; while (true) {} import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{parse_failed} },
-        .{ .source = "import { env } from \"zttp:env\"; const value: any = 1; import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{parse_failed} },
+        .{ .source = "import { env } from \"zttp:env\"; const value: any = 1; import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{}, .rejected = &.{parse_failed} },
         .{ .source = "const value: any = 1; import { env } from \"zttp:env\";", .modules = 1, .imports = &.{}, .rejected = &.{parse_failed} },
         .{ .source = "import { env } from \"zttp:env\"; import type { A } /* ; */ from \"./dep\"; import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{parse_failed} },
         .{ .source = "import { a } from \"unknown\"; import { b } from \"zttp-ext:missing\"; import { c } from \"../outside\"; import { answer } from \"./dep\";", .modules = 2, .imports = &.{ .{ .specifier = "unknown", .kind = .unresolved, .target = "" }, .{ .specifier = "zttp-ext:missing", .kind = .extension, .target = "" }, .{ .specifier = "../outside", .kind = .relative, .target = "" }, .{ .specifier = "./dep", .kind = .relative, .target = "dep.ts" } }, .rejected = &.{ .{ .specifier = "../outside", .importer = "entry.ts", .reason = "path_outside_project_root" }, .{ .specifier = "unknown", .importer = "entry.ts", .reason = "unknown_specifier" }, .{ .specifier = "zttp-ext:missing", .importer = "entry.ts", .reason = "extension_manifest_unavailable" } } },
         .{ .source = "structural Broken = number |; import { env } from \"zttp:env\";", .modules = 1, .imports = &.{.{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }}, .rejected = &.{} },
         .{ .source = "import { env } from \"zttp:env\"; function wrapper() { const broken = ; const value: number = 1; } import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{ .{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }, .{ .specifier = "zttp:clock", .kind = .unresolved, .target = "" } }, .rejected = &.{ parse_failed, .{ .specifier = "zttp:clock", .importer = "entry.ts", .reason = "unknown_specifier" } } },
         .{ .source = "function wrapper() { import { env } from \"zttp:env\"; const broken = ; } import { now } from \"zttp:clock\";", .modules = 1, .imports = &.{ .{ .specifier = "zttp:env", .kind = .builtin, .target = "zttp:env" }, .{ .specifier = "zttp:clock", .kind = .unresolved, .target = "" } }, .rejected = &.{ parse_failed, .{ .specifier = "zttp:clock", .importer = "entry.ts", .reason = "unknown_specifier" } } },
+        .{ .source = "import { env } from \"zttp:env\"; /* open", .modules = 1, .imports = &.{}, .rejected = &.{parse_failed} },
     };
-    try testing.expectEqual(@as(usize, 12), cases.len);
+    try testing.expectEqual(@as(usize, 13), cases.len);
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "entry.ts", .data = "" });

@@ -104,7 +104,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
 
     if (user_args.len == 0) {
         if (embedded_handler.bytecode.len > 0) {
-            try serveCommandWithEnviron(allocator, &.{}, init.environ);
+            try serveRefusingSource(allocator, &.{}, init.environ);
             return;
         }
         try printHelp();
@@ -112,7 +112,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     if (std.mem.eql(u8, command, "serve")) {
-        try serveCommandWithEnviron(allocator, user_args[1..], init.environ);
+        try serveRefusingSource(allocator, user_args[1..], init.environ);
         return;
     }
     if (std.mem.eql(u8, command, "attest")) {
@@ -129,7 +129,20 @@ pub fn main(init: std.process.Init.Minimal) !void {
     }
 
     // Backward-compatible default: treat bare `zttp <handler>` usage as `serve`.
-    try serveCommandWithEnviron(allocator, user_args, init.environ);
+    try serveRefusingSource(allocator, user_args, init.environ);
+}
+
+/// Serve, and exit 1 when the source was refused. The refusal text is already printed,
+/// so a returned error would add an error trace.
+fn serveRefusingSource(
+    allocator: std.mem.Allocator,
+    argv: []const []const u8,
+    environ: std.process.Environ,
+) !void {
+    serveCommandWithEnviron(allocator, argv, environ) catch |err| {
+        if (err == error.SourceRefused) std.process.exit(1);
+        return err;
+    };
 }
 
 fn attestCommand(allocator: std.mem.Allocator) !void {
@@ -368,10 +381,10 @@ fn validateSourceAuthority(allocator: std.mem.Allocator, config: ServerConfig) !
                 .module_scan = refuseRetiredSourceImports,
                 .read_file = zts.file_io.readFileForModuleGraph,
             };
-            var contract = (if (source.prepared_eval) |prepared|
-                zts.pipeline.extractPreparedEvalContract(allocator, prepared.code, source.filename, options)
+            var contract = (if (config.handler == .file_path)
+                zts.pipeline.extractContract(allocator, source.code, source.filename, options)
             else
-                zts.pipeline.extractContract(allocator, source.code, source.filename, options)) catch |err| {
+                zts.pipeline.extractPreparedEvalContract(allocator, source.code, source.filename, options)) catch |err| {
                 if (err != error.ParseError) return err;
                 printParseRefusal(allocator, source.code, source.filename);
                 return error.SourceRefused;
@@ -401,26 +414,17 @@ fn printParseRefusal(allocator: std.mem.Allocator, source: []const u8, filename:
 }
 
 fn renderParseRefusal(allocator: std.mem.Allocator, source: []const u8, filename: []const u8) !?[]u8 {
-    var view = zts.SourceView.of(source);
-    view.name = filename;
     var aw: std.Io.Writer.Allocating = .init(allocator);
     errdefer aw.deinit();
+    var frontend: zts.DirectCheckSource = undefined;
     if (zts.classifySourcePath(filename) == .virtual_javascript) {
-        var strings = zts.StringTable.init(allocator);
-        defer strings.deinit();
-        var parser = try zts.Parser.init(allocator, source, &strings, null);
-        defer parser.deinit();
-        _ = parser.js_parser.parse() catch {};
-        const errors = parser.js_parser.getErrors();
-        if (errors.len == 0) return null;
-        try zts.DiagnosticProjection.writeParseErrors(view, errors, &aw.writer);
+        try frontend.initPreparedEvalInPlace(allocator, allocator, source, filename);
     } else {
-        var frontend: zts.DirectCheckSource = undefined;
         try frontend.initCompileInPlace(allocator, allocator, source, filename);
-        defer frontend.deinit();
-        if (frontend.parse_outcome != .parser_refused) return null;
-        try zts.DiagnosticProjection.writeParseErrors(frontend.sourceView(), frontend.parserErrors(), &aw.writer);
     }
+    defer frontend.deinit();
+    if (frontend.parse_outcome != .parser_refused) return null;
+    try zts.DiagnosticProjection.writeParseErrors(frontend.sourceView(), frontend.parserErrors(), &aw.writer);
     return try aw.toOwnedSlice();
 }
 

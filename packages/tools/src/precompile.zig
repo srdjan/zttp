@@ -234,23 +234,18 @@ pub fn compileHandler(
     const generate_tests = opts.generate_tests;
     const manifest_registry = opts.manifest_registry;
 
-    const source_kind = zts.classifySourcePath(filename);
-    if (source_kind == .unsupported) return error.UnsupportedSourceExtension;
+    if (zts.classifySourcePath(filename) != .typescript) return error.UnsupportedSourceExtension;
     var diag_view = zts.SourceView.of(source);
     diag_view.name = filename;
-    diag_view.normalize_positions = source_kind.isTyped();
+    diag_view.normalize_positions = true;
     var strings = zts.StringTable.init(allocator);
     defer strings.deinit();
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
-    var js_parser = switch (source_kind) {
-        .typescript => try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile),
-        .virtual_javascript => try zts.parser.JsParser.init(allocator, source),
-        .unsupported => unreachable,
-    };
+    var js_parser = try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
-    const root = if (source_kind.isTyped()) switch (try js_parser.parseAdmission()) {
+    const root = switch (try js_parser.parseAdmission()) {
         .accepted => |accepted| accepted,
         .parser_refused => |refusal| {
             printParseErrors(allocator, diag_view, js_parser.getProjectedErrors());
@@ -266,9 +261,6 @@ pub fn compileHandler(
             return err;
         },
         .recovered_admission_refused => unreachable,
-    } else js_parser.parse() catch |err| {
-        printParseErrors(allocator, diag_view, js_parser.getProjectedErrors());
-        return err;
     };
 
     try validateVirtualModuleImports(
@@ -297,11 +289,8 @@ pub fn compileHandler(
     }
 
     const ir_view_check = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    if (source_kind.isTyped()) try js_parser.type_store.validateRuntimeOwners(allocator, ir_view_check);
-    var parsed = if (source_kind.isTyped())
-        zts.pipeline.ParsedModule.fromTypedExisting(ir_view_check, root, &atoms, &js_parser.type_store)
-    else
-        zts.pipeline.ParsedModule.fromExisting(ir_view_check, root, &atoms);
+    try js_parser.type_store.validateRuntimeOwners(allocator, ir_view_check);
+    var parsed = zts.pipeline.ParsedModule.fromTypedExisting(ir_view_check, root, &atoms, &js_parser.type_store);
     parsed.scopes = &js_parser.scopes;
 
     var analysis: zts.pipeline.ModuleAnalysisSession = .{};
@@ -309,7 +298,7 @@ pub fn compileHandler(
         allocator,
         parsed,
         .{
-            .source_types = if (source_kind.isTyped()) .direct else .omitted,
+            .source_types = .direct,
             .strict = opts.strict,
             .manifest_registry = manifest_registry,
             // Which sections the author wrote, not what is in them: the
@@ -349,25 +338,23 @@ pub fn compileHandler(
         if (!builtin.is_test) debugPrint("Boolean check passed\n", .{});
     }
 
-    if (source_kind.isTyped()) {
-        const tc_diags = resolved.typeDiagnostics();
-        if (tc_diags.len > 0 and !builtin.is_test) {
-            var tc_output: std.ArrayList(u8) = .empty;
-            defer tc_output.deinit(allocator);
-            var tc_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &tc_output);
-            resolved.formatTypeDiagnostics(diag_view, &tc_aw.writer) catch {};
-            tc_output = tc_aw.toArrayList();
-            if (tc_output.items.len > 0) {
-                debugPrint("{s}", .{tc_output.items});
-            }
+    const tc_diags = resolved.typeDiagnostics();
+    if (tc_diags.len > 0 and !builtin.is_test) {
+        var tc_output: std.ArrayList(u8) = .empty;
+        defer tc_output.deinit(allocator);
+        var tc_aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &tc_output);
+        resolved.formatTypeDiagnostics(diag_view, &tc_aw.writer) catch {};
+        tc_output = tc_aw.toArrayList();
+        if (tc_output.items.len > 0) {
+            debugPrint("{s}", .{tc_output.items});
         }
-        if (resolved.typeErrorCount() > 0) {
-            analysis.refuseResolution();
-            if (!builtin.is_test) debugPrint("\nType check failed for {s}\n", .{filename});
-            return error.SoundModeViolation;
-        }
-        if (!builtin.is_test) debugPrint("Type check passed\n", .{});
     }
+    if (resolved.typeErrorCount() > 0) {
+        analysis.refuseResolution();
+        if (!builtin.is_test) debugPrint("\nType check failed for {s}\n", .{filename});
+        return error.SoundModeViolation;
+    }
+    if (!builtin.is_test) debugPrint("Type check passed\n", .{});
 
     if (resolved.strict_checker != null) {
         const strict_diags = resolved.strictDiagnostics();

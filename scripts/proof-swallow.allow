@@ -449,9 +449,7 @@ packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@9
 packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@10
 packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@11
 packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@12
-packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@13
 packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-value
-packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-value@2
 packages/tools/src/precompile_contract.zig appendPolicyDiagnostics catch-block
 packages/tools/src/precompile_contract.zig reportCompletedFlow catch-block
 

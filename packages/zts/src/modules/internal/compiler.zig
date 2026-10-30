@@ -76,9 +76,7 @@ pub const ModuleCompiler = struct {
                 if (formatted.len > 0) if (!@import("builtin").is_test) std.log.err("{s}", .{formatted});
                 return err;
             };
-            if (module.source_profile == .direct) {
-                try parser.type_store.validateRuntimeOwners(self.allocator, zts_parser.IrView.fromIRStore(&parser.nodes, &parser.constants));
-            }
+            try parser.type_store.validateRuntimeOwners(self.allocator, zts_parser.IrView.fromIRStore(&parser.nodes, &parser.constants));
             const cg = &codegens[index];
             cg.* = zts_parser.CodeGen.initWithIRStore(self.allocator, &parser.nodes, &parser.constants, &parser.scopes, self.strings, self.atoms);
             errdefer {
@@ -128,7 +126,6 @@ test "compileAll returns a clean error instead of panicking when parser-init all
     try graph.module_list.append(allocator, .{
         .path = try allocator.dupe(u8, "entry.ts"),
         .source = try allocator.dupe(u8, "const x = 1;"),
-        .source_profile = .raw,
         .dependencies = &.{},
         .state = .visited,
     });
@@ -146,7 +143,7 @@ test "compileAll returns a clean error instead of panicking when parser-init all
     try std.testing.expectError(error.OutOfMemory, module_compiler.compileAll(&graph));
 }
 
-test "selected graph profiles preserve reads bytecode and complete atoms" {
+test "graph admission preserves reads bytecode and complete atoms" {
     const allocator = std.testing.allocator;
     const BytecodeExpectation = struct {
         len: usize,
@@ -155,35 +152,29 @@ test "selected graph profiles preserve reads bytecode and complete atoms" {
     const Case = struct {
         entry: []const u8,
         dependency: ?[]const u8 = null,
-        entry_profile: module_graph.Module.SourceProfile,
-        dependency_profile: module_graph.Module.SourceProfile = .direct,
         reads: usize,
+        build_error: ?anyerror = null,
         parse_error: ?anyerror = null,
         bytecode: []const BytecodeExpectation = &.{},
         atom_names: []const []const u8 = &.{},
     };
     const cases = [_]Case{
-        .{ .entry = "import { value } from \"./dep.ts\"; /* unfinished\n", .dependency = "export const value = 1;\n", .entry_profile = .raw, .reads = 1, .bytecode = &.{
+        .{ .entry = "import { value } from \"./dep.ts\"; /* unfinished\n", .dependency = "export const value = 1;\n", .reads = 0, .build_error = error.UnterminatedComment },
+        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "export const value = 1; /* unfinished\n", .reads = 1, .build_error = error.UnterminatedComment },
+        .{ .entry = "import { value } from \"./dep.ts\"; /* closed */\n", .dependency = "export const value = 1; /* closed */\n", .reads = 1, .bytecode = &.{
             .{ .len = 51, .sha256 = "aa6352585d0b7732aa25aefee8d07a573c4c62c9aa0ed3ebdc29377fc89e27c6" },
             .{ .len = 53, .sha256 = "a18994befbbfb3e5240251fef74d30491434ffdb9d3991b9299412834ae84636" },
         }, .atom_names = &.{"existing_prefix"} },
-        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "export const value = 1; /* unfinished\n", .entry_profile = .direct, .dependency_profile = .raw, .reads = 1, .bytecode = &.{
-            .{ .len = 51, .sha256 = "aa6352585d0b7732aa25aefee8d07a573c4c62c9aa0ed3ebdc29377fc89e27c6" },
-            .{ .len = 84, .sha256 = "66b7fd09c12f1f05040a1c27d93f5a1461020411d67a1802670ccbfe19338b04" },
-        }, .atom_names = &.{ "existing_prefix", "result" } },
-        .{ .entry = "import { value } from \"./dep.ts\"; /* closed */\n", .dependency = "export const value = 1; /* closed */\n", .entry_profile = .direct, .reads = 1, .bytecode = &.{
-            .{ .len = 51, .sha256 = "aa6352585d0b7732aa25aefee8d07a573c4c62c9aa0ed3ebdc29377fc89e27c6" },
-            .{ .len = 53, .sha256 = "a18994befbbfb3e5240251fef74d30491434ffdb9d3991b9299412834ae84636" },
-        }, .atom_names = &.{"existing_prefix"} },
-        .{ .entry = "/*\n", .entry_profile = .raw, .reads = 0, .bytecode = &.{.{ .len = 42, .sha256 = "2c78e9e9d91bb19892b64a6cfa0e59415c64094ea7352143f03170af42897e10" }}, .atom_names = &.{"existing_prefix"} },
-        .{ .entry = "import { value } from \"./dep.ts\"; /* unfinished", .dependency = "export const value = 1;\n", .entry_profile = .raw, .reads = 0, .parse_error = error.MissingSemicolon },
-        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "export const value = 1; /* unfinished", .entry_profile = .direct, .dependency_profile = .raw, .reads = 1, .parse_error = error.MissingSemicolon },
-        .{ .entry = "/*", .entry_profile = .raw, .reads = 0, .bytecode = &.{.{ .len = 42, .sha256 = "2c78e9e9d91bb19892b64a6cfa0e59415c64094ea7352143f03170af42897e10" }}, .atom_names = &.{"existing_prefix"} },
-        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "export const value: number = 1; /* unfinished\n", .entry_profile = .direct, .dependency_profile = .raw, .reads = 1, .parse_error = error.MissingSemicolon },
-        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "const marker: \"open\n = \"open\"; export const value = 1;\n", .entry_profile = .direct, .reads = 1, .bytecode = &.{
+        .{ .entry = "/*\n", .reads = 0, .build_error = error.UnterminatedComment },
+        .{ .entry = "import { value } from \"./dep.ts\"; /* unfinished", .dependency = "export const value = 1;\n", .reads = 0, .build_error = error.UnterminatedComment },
+        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "export const value = 1; /* unfinished", .reads = 1, .build_error = error.UnterminatedComment },
+        .{ .entry = "/*", .reads = 0, .build_error = error.UnterminatedComment },
+        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "export const value: number = 1; /* unfinished\n", .reads = 1, .build_error = error.UnterminatedComment },
+        .{ .entry = "import { value } from \"./dep.ts\"; export const result = value;\n", .dependency = "const marker: \"open\n = \"open\"; export const value = 1;\n", .reads = 1, .bytecode = &.{
             .{ .len = 89, .sha256 = "ecb3ef0fc0786551d6cd77934550dd9c5626190474e4ecfe8cb0e9dcfa9568a9" },
             .{ .len = 84, .sha256 = "a387c5d27495651f6d7b988fc430052958ce145a8e10175203148d20ceb491e7" },
         }, .atom_names = &.{ "existing_prefix", "marker", "result" } },
+        .{ .entry = "const value: number = ;\n", .reads = 0, .parse_error = error.UnexpectedToken },
     };
     const Reader = struct {
         var source: ?[]const u8 = null;
@@ -194,18 +185,21 @@ test "selected graph profiles preserve reads bytecode and complete atoms" {
             return a.dupe(u8, source orelse return error.FileNotFound);
         }
     };
-    try std.testing.expectEqual(@as(usize, 9), cases.len);
+    try std.testing.expectEqual(@as(usize, 10), cases.len);
     for (cases) |case| {
         Reader.source = case.dependency;
         Reader.reads = 0;
         var graph = module_graph.ModuleGraph.init(allocator);
         defer graph.deinit();
+        if (case.build_error) |expected| {
+            try std.testing.expectError(expected, graph.build("/probe/entry.ts", case.entry, Reader.read));
+            try std.testing.expectEqual(case.reads, Reader.reads);
+            continue;
+        }
         try graph.build("/probe/entry.ts", case.entry, Reader.read);
         try std.testing.expectEqual(case.reads, Reader.reads);
-        try std.testing.expectEqual(case.entry_profile, graph.module_list.items[0].source_profile);
         try std.testing.expectEqual(case.reads + 1, graph.module_list.items.len);
         if (case.reads != 0) {
-            try std.testing.expectEqual(case.dependency_profile, graph.module_list.items[1].source_profile);
             try std.testing.expectEqualSlices(module_graph.ModuleIndex, &.{ 1, 0 }, graph.execution_order);
             try std.testing.expectEqualSlices(module_graph.ModuleIndex, &.{1}, graph.module_list.items[0].dependencies);
         } else try std.testing.expectEqualSlices(module_graph.ModuleIndex, &.{0}, graph.execution_order);

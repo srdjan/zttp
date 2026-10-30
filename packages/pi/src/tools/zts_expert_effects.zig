@@ -34,7 +34,7 @@ pub fn run(
     };
     defer allocator.free(source);
 
-    const source_kind = common.admitToolSource(allocator, source, path) catch |e| {
+    common.admitToolSource(allocator, source, path) catch |e| {
         switch (e) {
             error.InvalidSourceObservation => return e,
             else => {},
@@ -48,10 +48,7 @@ pub fn run(
 
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
-    var js_parser = if (source_kind.isTyped())
-        try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile)
-    else
-        try zts.parser.JsParser.init(allocator, source);
+    var js_parser = try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 
@@ -80,11 +77,11 @@ pub fn run(
     var type_env = zts.TypeEnv.init(allocator, &type_pool);
     defer type_env.deinit();
     try type_pool.ensureHealthy();
-    try type_env.populateSourceTypes(if (source_kind.isTyped()) .{ .direct = .{
+    try type_env.populateSourceTypes(.{ .direct = .{
         .store = &js_parser.type_store,
         .ir_view = ir_view,
         .atoms = &atoms,
-    } } else .omitted);
+    } });
     try type_pool.ensureHealthy();
 
     const ctx: WriteContext = .{ .allocator = allocator, .env = &type_env, .ir_view = ir_view };

@@ -469,17 +469,12 @@ fn runCheckOnParsedSource(
     var source_owner_initialized = false;
     defer if (source_owner_initialized) source_owner.deinit();
 
-    var virtual_atoms = zts.AtomTable.init(allocator);
-    defer virtual_atoms.deinit();
-    var virtual_parser: ?zts.parser.JsParser = null;
-    defer if (virtual_parser) |*parser| parser.deinit();
-
     const parsed_input: struct {
         parser: *zts.parser.JsParser,
         atoms: *zts.AtomTable,
         root: ir.NodeIndex,
     } = switch (source_kind) {
-        .unsupported => {
+        .unsupported, .virtual_javascript => {
             if (!builtin.is_test) {
                 debugPrint("{s}: ZTS052 source files must use the .ts extension. Rename the handler to .ts.\n", .{handler_path});
             }
@@ -543,30 +538,6 @@ fn runCheckOnParsedSource(
                 },
             }
         },
-        .virtual_javascript => virtual: {
-            virtual_parser = try zts.parser.JsParser.init(allocator, source);
-            const parser = &virtual_parser.?;
-            parser.setAtomTable(&virtual_atoms);
-            result.stages_run.insert(.parse);
-            const root = parser.parse() catch {
-                const errors = parser.errors.getErrors();
-                if (json_mode) {
-                    for (errors) |parse_error| {
-                        var diagnostic = json_diag.fromParseErrorOwned(allocator, parse_error, handler_path);
-                        result.json_diagnostics.append(allocator, diagnostic) catch diagnostic.deinit(allocator);
-                    }
-                } else if (!builtin.is_test) {
-                    printParseErrors(allocator, .{ .text = source, .name = handler_path }, errors);
-                }
-                result.parse_errors = @intCast(errors.len);
-                return result;
-            };
-            break :virtual .{
-                .parser = parser,
-                .atoms = &virtual_atoms,
-                .root = root,
-            };
-        },
     };
     already_mapped.* = result.json_diagnostics.items.len;
     var diag_view = zts.SourceView.of(source);
@@ -614,10 +585,7 @@ fn runCheckOnParsedSource(
     const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
     const handler_fn = zts.findHandlerFunction(ir_view, root);
     result.has_handler = handler_fn != null;
-    var parsed = if (source_kind.isTyped())
-        zts.parsedModuleFromDirectCheck(&source_owner) orelse return error.DirectTypeSyntaxUnavailable
-    else
-        zts.pipeline.ParsedModule.fromExisting(ir_view, root, atoms);
+    var parsed = zts.parsedModuleFromDirectCheck(&source_owner) orelse return error.DirectTypeSyntaxUnavailable;
     parsed.scopes = &js_parser.scopes;
 
     // The policy is parsed once and stays alive for the whole analysis: the
@@ -637,7 +605,7 @@ fn runCheckOnParsedSource(
         allocator,
         parsed,
         .{
-            .source_types = if (source_kind.isTyped()) .direct else .omitted,
+            .source_types = .direct,
             .strict = true,
             .manifest_registry = null,
             // Which sections the project's policy declares, so a computed
@@ -686,28 +654,26 @@ fn runCheckOnParsedSource(
         }
     }
 
-    if (source_kind.isTyped()) {
-        result.stages_run.insert(.types);
-        const tc_diags = resolved.typeDiagnostics();
-        result.type_errors = @intCast(resolved.typeErrorCount());
-        if (tc_diags.len > 0) {
-            if (json_mode) {
-                for (tc_diags) |diag| {
-                    if (json_diag.fromCheckerDiagnostic(allocator, .type, diag, ir_view, handler_path)) |jd| {
-                        result.json_diagnostics.append(allocator, jd) catch {
-                            var owned = jd;
-                            owned.deinit(allocator);
-                        };
-                    }
+    result.stages_run.insert(.types);
+    const tc_diags = resolved.typeDiagnostics();
+    result.type_errors = @intCast(resolved.typeErrorCount());
+    if (tc_diags.len > 0) {
+        if (json_mode) {
+            for (tc_diags) |diag| {
+                if (json_diag.fromCheckerDiagnostic(allocator, .type, diag, ir_view, handler_path)) |jd| {
+                    result.json_diagnostics.append(allocator, jd) catch {
+                        var owned = jd;
+                        owned.deinit(allocator);
+                    };
                 }
-            } else {
-                var buf: std.ArrayList(u8) = .empty;
-                defer buf.deinit(allocator);
-                var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
-                resolved.formatTypeDiagnostics(diag_view, &aw.writer) catch {};
-                buf = aw.toArrayList();
-                if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
             }
+        } else {
+            var buf: std.ArrayList(u8) = .empty;
+            defer buf.deinit(allocator);
+            var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+            resolved.formatTypeDiagnostics(diag_view, &aw.writer) catch {};
+            buf = aw.toArrayList();
+            if (!builtin.is_test and buf.items.len > 0) debugPrint("{s}", .{buf.items});
         }
     }
 

@@ -121,6 +121,23 @@ pub fn logAdmissionFailure(source: []const u8, failure: parser.AdmissionFailure)
     }
 }
 
+/// One refusal line for a source named by `name`: the position and message when
+/// the refusal has a position, otherwise the strip error name.
+pub fn formatAdmissionRefusal(
+    allocator: std.mem.Allocator,
+    source: []const u8,
+    name: []const u8,
+    failure: parser.AdmissionFailure,
+) std.mem.Allocator.Error![]u8 {
+    return switch (failure) {
+        .unterminated_comment => std.fmt.allocPrint(allocator, "TypeScript strip error in {s}: {}", .{ name, prepareErrorForAdmissionFailure(failure) }),
+        .diagnostic => |diagnostic| blk: {
+            const mapped = sourceDiagnosticFromAdmission(source, diagnostic);
+            break :blk std.fmt.allocPrint(allocator, "{s}:{d}:{d}: {s}", .{ name, mapped.line, mapped.column, mapped.kind.message() });
+        },
+    };
+}
+
 pub const DirectCheckOutcome = parser.AdmissionParseOutcome;
 
 pub const AcceptedDirectCapabilities = struct {
@@ -154,6 +171,7 @@ pub const DirectCheckSource = struct {
             type_allocator,
             source,
             path,
+            .typescript,
             .collect,
         );
     }
@@ -170,6 +188,25 @@ pub const DirectCheckSource = struct {
             type_allocator,
             source,
             path,
+            .typescript,
+            .compile,
+        );
+    }
+
+    /// Initialize prepared evaluation source. Only a virtual path such as `<eval>` is accepted.
+    pub fn initPreparedEvalInPlace(
+        self: *DirectCheckSource,
+        allocator: std.mem.Allocator,
+        type_allocator: std.mem.Allocator,
+        source: []const u8,
+        path: []const u8,
+    ) anyerror!void {
+        try self.initWithModeInPlace(
+            allocator,
+            type_allocator,
+            source,
+            path,
+            .virtual_javascript,
             .compile,
         );
     }
@@ -180,12 +217,10 @@ pub const DirectCheckSource = struct {
         type_allocator: std.mem.Allocator,
         source: []const u8,
         path: []const u8,
+        accepted_kind: SourceKind,
         mode: parser.type_syntax.AdmissionMode,
     ) anyerror!void {
-        switch (classifyPath(path)) {
-            .typescript => {},
-            .virtual_javascript, .unsupported => return error.UnsupportedSourceExtension,
-        }
+        if (classifyPath(path) != accepted_kind) return error.UnsupportedSourceExtension;
 
         self.source = source;
         self.path = path;

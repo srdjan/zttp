@@ -194,7 +194,6 @@ pub const Parser = struct {
     type_store: type_syntax.Store,
     last_erased_type_span: ?type_syntax.Span,
     type_only_module_refusal: ?type_syntax.TypeOnlyModuleRefusal,
-    type_only_module_exclusion: ?type_syntax.TypeOnlyModule,
     type_only_module_diagnostics: std.ArrayListUnmanaged(type_syntax.TypeOnlyModuleDiagnostic),
     admission: ?type_syntax.AdmissionCollector,
     admission_observations: ?type_syntax.AdmissionObservationHistory,
@@ -353,7 +352,6 @@ pub const Parser = struct {
             .type_store = type_syntax.Store.init(type_allocator, source),
             .last_erased_type_span = null,
             .type_only_module_refusal = null,
-            .type_only_module_exclusion = null,
             .type_only_module_diagnostics = .empty,
             .admission = if (admission_mode) |mode|
                 type_syntax.AdmissionCollector.init(type_allocator, mode)
@@ -450,7 +448,6 @@ pub const Parser = struct {
                 error.StringLineContinuation,
                 error.TooManyConstants,
                 error.TooManyLocals,
-                error.TypeOnlyModuleLexicallyExcluded,
                 error.UnexpectedToken,
                 => {
                     try self.replaySourceAdmission();
@@ -733,9 +730,6 @@ pub const Parser = struct {
 
         if (self.admissionFailureResult()) |failure| return failure;
         if (self.type_only_module_refusal != null) return error.TypeOnlyModuleRefused;
-        if (self.type_only_module_exclusion != null) {
-            return error.TypeOnlyModuleLexicallyExcluded;
-        }
 
         if (self.admissionSelected()) return error.AdmissionRefused;
         if (self.admission_first_error) |first| return first;
@@ -794,7 +788,6 @@ pub const Parser = struct {
             error.StringLineContinuation,
             error.TooManyConstants,
             error.TooManyLocals,
-            error.TypeOnlyModuleLexicallyExcluded,
             error.TypeOnlyModuleRefused,
             error.UnexpectedToken,
             error.UnterminatedComment,
@@ -1742,8 +1735,7 @@ pub const Parser = struct {
             true
         else
             self.type_only_module_diagnostics.items.len == checkpoint.module_diagnostic_count and
-                self.type_only_module_refusal == null and
-                self.type_only_module_exclusion == null;
+                self.type_only_module_refusal == null;
         return self.errors.getErrors().len == checkpoint.error_count and
             !self.errors.outOfMemory() and
             module_state_healthy and
@@ -6241,12 +6233,10 @@ pub const Parser = struct {
         const store_checkpoint = self.type_store.checkpoint();
         const module_diagnostic_count = self.type_only_module_diagnostics.items.len;
         const module_refusal = self.type_only_module_refusal;
-        const module_exclusion = self.type_only_module_exclusion;
         defer {
             self.type_store.rollback(store_checkpoint);
             self.type_only_module_diagnostics.items.len = module_diagnostic_count;
             self.type_only_module_refusal = module_refusal;
-            self.type_only_module_exclusion = module_exclusion;
             self.restoreCursorCheckpoint(runtime_cursor);
             self.admission_presentation = runtime_presentation;
             self.admission_recovery_observing = false;
@@ -10498,8 +10488,7 @@ test "type-only module scan failure restores prior diagnostics" {
     var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source.items, .compile);
     defer parser.deinit();
     try std.testing.expect(try parser.tryConsumeTypeOnlyModule());
-    // Admission records the excluded module as a diagnostic and publishes it; only the typed-only mode sets the exclusion field.
-    try std.testing.expect(parser.type_only_module_exclusion == null);
+    // Admission records the excluded module as a diagnostic and publishes it.
     try std.testing.expectEqual(@as(usize, 1), parser.type_only_module_diagnostics.items.len);
     const prior_diagnostic = parser.type_only_module_diagnostics.items[0];
     const cursor_checkpoint = parser.cursorCheckpoint();
@@ -10529,7 +10518,6 @@ test "type-only module lexical exclusion and refusal keep root priority" {
         var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         try std.testing.expectError(error.AdmissionRefused, parser.parse());
-        try std.testing.expect(parser.type_only_module_exclusion == null);
         try std.testing.expect(parser.type_only_module_refusal != null);
         try std.testing.expect(parser.getAdmissionDiagnostics().len > 0);
         try std.testing.expectEqual(type_syntax.AdmissionKind.legacy_types_import, parser.getAdmissionDiagnostics()[parser.getAdmissionDiagnostics().len - 1].kind);
@@ -10545,8 +10533,7 @@ test "type-only module lexical exclusion and refusal keep root priority" {
         var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         try std.testing.expectError(error.AdmissionRefused, parser.parse());
-        try std.testing.expect(parser.type_only_module_exclusion == null);
-        // Admission records the refusal beside the lexical exclusion; the typed-only mode dropped it.
+        // Admission records the refusal beside the lexical exclusion.
         try std.testing.expect(parser.type_only_module_refusal != null);
         try std.testing.expectEqual(type_syntax.AdmissionKind.legacy_types_import, parser.getAdmissionDiagnostics()[0].kind);
         // The retired import is line 3 of the source.
@@ -10751,7 +10738,6 @@ test "later wrapper failures remove nested type-only module records" {
         try std.testing.expectEqual(@as(u32, 1), diagnostic.location.line);
         try std.testing.expectEqual(@as(u32, @intCast(source.len + 1)), diagnostic.location.column);
         try std.testing.expect(parser.type_only_module_refusal == null);
-        try std.testing.expect(parser.type_only_module_exclusion == null);
         var expected = std.mem.zeroes(type_syntax.Store.Checkpoint);
         expected.nodes = 1;
         expected.annotations = 1;

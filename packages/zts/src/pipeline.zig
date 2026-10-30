@@ -1370,9 +1370,6 @@ pub fn extractContract(
     filename: []const u8,
     opts: ExtractContractOptions,
 ) !HandlerContract {
-    if (source_frontend_mod.classifyPath(filename) == .virtual_javascript) {
-        return extractVirtualContract(allocator, source, filename, opts);
-    }
     var frontend: source_frontend_mod.DirectCheckSource = undefined;
     try frontend.initCompileInPlace(allocator, allocator, source, filename);
     defer frontend.deinit();
@@ -1434,31 +1431,6 @@ pub fn extractPreparedEvalContract(
         return extractMultiModuleContractWithEntry(allocator, source, filename, reader, &atoms, options, true);
     }
     var single_module_opts = options;
-    single_module_opts.flow = true;
-    var analysis: ModuleAnalysisSession = .{};
-    try analysis.initSoundExtraction(allocator, parsed, single_module_opts);
-    defer analysis.deinit();
-    try analysis.complete();
-    var contract = try analysis.extractContract(filename);
-    errdefer contract.deinit(allocator);
-    return contract;
-}
-
-fn extractVirtualContract(allocator: std.mem.Allocator, source: []const u8, filename: []const u8, opts: ExtractContractOptions) !HandlerContract {
-    var atoms = AtomTable.init(allocator);
-    defer atoms.deinit();
-    var parser = try parser_mod.JsParser.init(allocator, source);
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
-    var parsed = ParsedModule.fromExisting(view, root, &atoms);
-    parsed.scopes = &parser.scopes;
-    if (hasFileImports(view)) {
-        const read_file = opts.read_file orelse return error.FileImportReaderRequired;
-        return extractMultiModuleContract(allocator, source, filename, read_file, &atoms, opts);
-    }
-    var single_module_opts = opts;
     single_module_opts.flow = true;
     var analysis: ModuleAnalysisSession = .{};
     try analysis.initSoundExtraction(allocator, parsed, single_module_opts);
@@ -1537,10 +1509,7 @@ fn extractMultiModuleContractWithEntry(
         const module = &graph.module_list.items[graph_idx];
         const is_entry = idx == entry_index;
         const module_view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-        var parsed = if (module.source_profile == .direct)
-            ParsedModule.fromTypedExisting(module_view, compiled_module.root, atoms, &js_parser.type_store)
-        else
-            ParsedModule.fromExisting(module_view, compiled_module.root, atoms);
+        var parsed = ParsedModule.fromTypedExisting(module_view, compiled_module.root, atoms, &js_parser.type_store);
         parsed.scopes = &js_parser.scopes;
 
         var module_opts = opts;

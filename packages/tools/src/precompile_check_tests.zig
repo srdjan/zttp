@@ -4747,41 +4747,43 @@ test "CHECK preserves legacy preparation diagnostics and recovery boundaries" {
     try std.testing.expectEqual(compatibility_cases.len, compatibility_observed);
 }
 
-test "CHECK keeps TypeScript and virtual JavaScript routing distinct" {
+test "CHECK routes a TypeScript path and refuses a virtual path with ZTS052" {
     const source =
         \\function handler(req) {
         \\  return Response.json({ ok: true });
         \\}
     ;
-    const typed_stages = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
-    const virtual_stages = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .strict });
-    const cases = [_]struct {
-        path: []const u8,
-        is_typescript: bool,
-    }{
-        .{ .path = "routing.ts", .is_typescript = true },
-        .{ .path = "<routing>", .is_typescript = false },
-    };
+    var typed = try runCheckOnlyFromSourceWithOptions(
+        std.testing.allocator,
+        source,
+        "routing.ts",
+        .{ .json_mode = true },
+    );
+    defer typed.deinit(std.testing.allocator);
+    try std.testing.expect(typed.is_typescript);
+    try std.testing.expectEqual(StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict }), typed.stages_run);
+    try std.testing.expectEqual(@as(u32, 0), typed.parse_errors);
+    try std.testing.expectEqual(@as(u32, 1), typed.strict_errors);
+    try std.testing.expectEqual(@as(u32, 1), typed.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), typed.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS601", typed.json_diagnostics.items[0].code);
+    try std.testing.expect(!typed.verify_ran);
+    try std.testing.expect(typed.contract == null);
 
-    for (cases) |case| {
-        var result = try runCheckOnlyFromSourceWithOptions(
-            std.testing.allocator,
-            source,
-            case.path,
-            .{ .json_mode = true },
-        );
-        defer result.deinit(std.testing.allocator);
-
-        try std.testing.expectEqual(case.is_typescript, result.is_typescript);
-        try std.testing.expectEqual(if (case.is_typescript) typed_stages else virtual_stages, result.stages_run);
-        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
-        try std.testing.expectEqual(@as(u32, 1), result.strict_errors);
-        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
-        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try std.testing.expectEqualStrings("ZTS601", result.json_diagnostics.items[0].code);
-        try std.testing.expect(!result.verify_ran);
-        try std.testing.expect(result.contract == null);
-    }
+    var virtual = try runCheckOnlyFromSourceWithOptions(
+        std.testing.allocator,
+        source,
+        "<routing>",
+        .{ .json_mode = true },
+    );
+    defer virtual.deinit(std.testing.allocator);
+    try std.testing.expect(!virtual.is_typescript);
+    try std.testing.expectEqual(@as(u32, 1), virtual.parse_errors);
+    try std.testing.expectEqual(@as(u32, 1), virtual.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), virtual.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS052", virtual.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("<routing>", virtual.json_diagnostics.items[0].file);
+    try std.testing.expect(virtual.contract == null);
 }
 
 test "CHECK preserves source preparation allocation failure projection" {
