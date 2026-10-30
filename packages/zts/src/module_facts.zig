@@ -512,7 +512,7 @@ const Harness = struct {
         errdefer allocator.destroy(self);
 
         self.* = .{
-            .parser = try @import("zts-engine").parser.JsParser.init(allocator, source),
+            .parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile),
             .atoms = context.AtomTable.init(allocator),
         };
         errdefer {
@@ -976,7 +976,7 @@ test "the index resolves import names with no atom table" {
     // all. Pinned here so the fallback cannot be removed as dead code.
     const a = testing.allocator;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(a, "import { env } from \"zttp:env\";\n");
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(a, a, "import { env } from \"zttp:env\";\n", .compile);
     defer parser.deinit();
     // No setAtomTable: this is the standalone-parser path.
     _ = try parser.parse();
