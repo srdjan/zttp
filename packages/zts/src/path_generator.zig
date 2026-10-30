@@ -3826,7 +3826,7 @@ test "scanImports tracks virtual module functions with binding names" {
         \\const value = env("NAME");
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -3956,7 +3956,7 @@ const FailNextAllocation = struct {
 
 fn expectGenerationFailsOnFirstAllocation(source: []const u8) !void {
     const allocator = std.testing.allocator;
-    var parser = try parser_mod.JsParser.init(allocator, source);
+    var parser = try parser_mod.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -4001,7 +4001,7 @@ test "generate fails closed when handler binding allocation fails" {
 
 fn expectWalkFailsOnNextAllocation(source: []const u8) !void {
     const allocator = std.testing.allocator;
-    var parser = try parser_mod.JsParser.init(allocator, source);
+    var parser = try parser_mod.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -4060,7 +4060,7 @@ test "emitTestCase keeps argument signature allocation failure conservative" {
         \\  return Response.json(true);
         \\}
     ;
-    var parser = try parser_mod.JsParser.init(allocator, source);
+    var parser = try parser_mod.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -4126,7 +4126,7 @@ test "generate cleans every fatal allocation failure" {
         \\  return Response.json(true);
         \\}
     ;
-    var parser = try parser_mod.JsParser.init(allocator, source);
+    var parser = try parser_mod.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -4264,7 +4264,7 @@ fn generateFixtureScanned(
     source: []const u8,
     scans: ?[]const SpecifierScan,
 ) !PathGeneratorFixture {
-    var parser = try parser_mod.JsParser.init(allocator, source);
+    var parser = try parser_mod.JsParser.initAdmission(allocator, allocator, source, .compile);
     errdefer parser.deinit();
 
     var atoms = atom_table.AtomTable.init(allocator);
@@ -4396,9 +4396,9 @@ test "non-recursive helper keeps its constant cost bound" {
 
 test "unavailable effect facts conservatively report recursion" {
     const allocator = std.testing.allocator;
-    var parser = try parser_mod.JsParser.init(allocator,
+    var parser = try parser_mod.JsParser.initAdmission(allocator, allocator,
         \\export function handler(req) { return Response.json(true); }
-    );
+    , .compile);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -4846,11 +4846,11 @@ test "the import scan maps builtin slots to function metadata in both atom modes
     const allocator = std.testing.allocator;
 
     for ([_]bool{ true, false }) |use_atoms| {
-        var parser = try @import("zts-engine").parser.JsParser.init(allocator,
+        var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator,
             \\import { env } from "zttp:env";
             \\import { sha256 } from "zttp:crypto";
             \\import { thing } from "zttp-ext:unknown";
-        );
+        , .compile);
         defer parser.deinit();
         var atoms = atom_table.AtomTable.init(allocator);
         defer atoms.deinit();
@@ -4890,10 +4890,10 @@ test "this generator skips imports from unresolved modules" {
     // The filter difference: builtins only, unlike strict_checker and
     // effect_inference which record every import.
     const allocator = std.testing.allocator;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator,
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator,
         \\import { env } from "zttp:env";
         \\import { thing } from "zttp-ext:unknown";
-    );
+    , .compile);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -5156,7 +5156,7 @@ test "a partner import is unseen even when an answer calls it clean" {
         \\  return Response.text("ok");
         \\}
     ;
-    var parser = try parser_mod.JsParser.init(allocator, source);
+    var parser = try parser_mod.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -5187,7 +5187,7 @@ test "a partner import is unseen even when an answer calls it clean" {
 
 /// Parse `source` as an imported file and list what the scan core finds in it.
 fn scanImportedSource(allocator: std.mem.Allocator, source: []const u8) !usize {
-    var parser = try parser_mod.JsParser.init(allocator, source);
+    var parser = try parser_mod.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -5574,7 +5574,7 @@ test "generate cleans every fatal allocation failure through short-circuit cases
         \\  }
         \\}
     ;
-    var parser = try parser_mod.JsParser.init(allocator, source);
+    var parser = try parser_mod.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
