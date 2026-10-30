@@ -167,7 +167,7 @@ test "serialize writes the supported literal language exactly" {
         \\};
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -233,7 +233,7 @@ test "serialize refuses unsupported roots and partial literals without publishin
     const context: u8 = 0;
 
     for (sources) |source| {
-        var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+        var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
         defer parser.deinit();
         _ = try parser.parse();
         const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -249,9 +249,11 @@ test "serialize refuses unsupported roots and partial literals without publishin
 
 test "serialize rejects malformed object properties before decoding their payload" {
     const allocator = std.testing.allocator;
-    var parser = try @import("zts-engine").parser.JsParser.init(
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(
+        allocator,
         allocator,
         "const value = { key: \"value\" };",
+        .compile,
     );
     defer parser.deinit();
     _ = try parser.parse();
@@ -295,9 +297,11 @@ test "serialize rejects malformed object properties before decoding their payloa
 
 test "serialize resolves identifier keys through the caller" {
     const allocator = std.testing.allocator;
-    var parser = try @import("zts-engine").parser.JsParser.init(
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(
+        allocator,
         allocator,
         "const value = { original: \"value\" };",
+        .compile,
     );
     defer parser.deinit();
     _ = try parser.parse();
@@ -360,7 +364,7 @@ test "serialize releases every allocation when serialization fails" {
         \\  },
         \\};
     ;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
