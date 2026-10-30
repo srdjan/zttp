@@ -34,7 +34,7 @@ echo ">> building zttp (the intent checks drive it)"
 zig build
 
 echo ">> replaying the codegen corpus"
-if ! ZTTP_EVIDENCE_PUBLISH=1 zig build test-expert-app >"$replay_log" 2>&1; then
+if ! zig build test-expert-app -Devidence-publish=true >"$replay_log" 2>&1; then
   cat "$replay_log" >&2
   echo "error: the codegen replay failed; generated evidence is unchanged" >&2
   exit 1

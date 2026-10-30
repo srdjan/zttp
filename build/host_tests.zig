@@ -111,6 +111,8 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Result {
         @embedFile("../scripts/unseeded-rules.allow"),
     );
 
+    const evidence_publish = b.option(bool, "evidence-publish", "Rerun the expert replay and let it publish evidence") orelse false;
+
     var host_test_runs: [host_test_roots.len]*std.Build.Step.Run = undefined;
     var aggregate_runs: std.ArrayList(*std.Build.Step.Run) = .empty;
     var project_config_run: ?*std.Build.Step.Run = null;
@@ -143,6 +145,13 @@ pub fn add(ctx: Context, gates: proof_gates.Result) Result {
         if (root.aggregate) aggregate_runs.append(b.allocator, host_test_runs[i]) catch @panic("OOM");
         if (root.needs_install) {
             host_test_runs[i].step.dependOn(b.getInstallStep());
+        }
+        // The expert replay reads ZTTP_EVIDENCE_PUBLISH at run time, and the
+        // run cache does not key on it. A warm cache would skip the run step,
+        // and the publish scripts would fail with MissingOrDuplicateMarker.
+        if (evidence_publish and std.mem.eql(u8, root.step, "test-expert-app")) {
+            host_test_runs[i].has_side_effects = true;
+            host_test_runs[i].setEnvironmentVariable("ZTTP_EVIDENCE_PUBLISH", "1");
         }
         b.step(root.step, root.desc).dependOn(&host_test_runs[i].step);
         // The residual gate's source comparison is useful only if its
