@@ -3471,7 +3471,7 @@ test "collectImportedFailableCalls answers every non-builtin record" {
     try fixture.add("dep.ts", "export function enrich(): string { return \"x\"; }\n");
 
     const allocator = std.testing.allocator;
-    var parser = try zts.parser.JsParser.init(allocator, handler_source);
+    var parser = try zts.parser.JsParser.initAdmission(allocator, allocator, handler_source, .compile);
     defer parser.deinit();
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -3588,7 +3588,7 @@ test "retained flow loading borrows a virtual JavaScript parser" {
     const source = "import { greet } from \"./a.ts\"; function handler(req) { return greet(); }";
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try zts.parser.JsParser.init(allocator, source);
+    var parser = try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
