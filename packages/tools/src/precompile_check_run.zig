@@ -121,7 +121,7 @@ pub fn runCheckOnlyWithOptions(
     return runCheckOnlyFromSourceWithOptions(allocator, source, handler_path, opts);
 }
 
-const PathAnalysis = struct {
+pub const PathAnalysis = struct {
     paths_enumerated: u32,
     paths_exhaustive: bool,
     behaviors_exhaustive: bool,
@@ -148,7 +148,75 @@ const PathAnalysis = struct {
         for (self.behaviors.items) |*behavior| behavior.deinit(allocator);
         self.behaviors.deinit(allocator);
     }
+
+    /// Take the fault facts from a stamp. The snippet allocation moves here,
+    /// so the stamp no longer frees it.
+    pub fn takeFaultStamp(self: *PathAnalysis, stamp: *FaultStamp) void {
+        self.fault_coverage = stamp.coverage;
+        self.fault_clean = stamp.clean;
+        self.fault_unseen_cause = stamp.unseen_cause;
+        self.fault_unseen_snippet_owned = stamp.unseen_snippet_owned;
+        stamp.unseen_snippet_owned = null;
+    }
 };
+
+/// The verifier facts that a driver stamps on the contract properties. Each
+/// driver fills every field from its own verifier run; `false` means unproven.
+pub const VerifierFacts = struct {
+    state_isolated: bool,
+    result_safe: bool,
+    optional_safe: bool,
+};
+
+/// The facts a driver applies to a contract after its own analysis. A null
+/// member leaves that part of the contract untouched, so a driver applies the
+/// verifier facts first and the path facts after the passes that sit between.
+pub const ContractFacts = struct {
+    verifier: ?VerifierFacts = null,
+    /// Moved into the contract: the cost envelope, the behaviors, and the
+    /// fault cause snippet leave this value. The caller still calls `deinit`
+    /// on it for anything not moved.
+    paths: ?*PathAnalysis = null,
+};
+
+/// The one writer of the verifier, path, and fault facts on a contract. Both
+/// drivers (`compileHandler` and `runCheckOnParsedSource`) fill a
+/// `ContractFacts` from their own analysis and call this, so a new contract
+/// fact is added here once. It allocates nothing, so it cannot fail halfway.
+pub fn applyContractFacts(
+    allocator: std.mem.Allocator,
+    contract: *handler_contract.HandlerContract,
+    facts: ContractFacts,
+) void {
+    if (facts.verifier) |verifier| {
+        if (contract.properties) |*props| {
+            props.state_isolated = verifier.state_isolated;
+            props.result_safe = verifier.result_safe;
+            props.optional_safe = verifier.optional_safe;
+        }
+    }
+    if (facts.paths) |paths| {
+        if (contract.properties) |*props| {
+            props.max_io_depth = paths.max_io_depth;
+            props.cost_bounded = paths.cost_bounded;
+            props.fault_covered = paths.fault_clean;
+        }
+        contract.property_provenance.fault_covered = paths.fault_unseen_cause;
+        // The cause borrows its snippet, so the contract takes the
+        // allocation that backs it.
+        if (contract.owned_fault_cause_snippet) |old| allocator.free(old);
+        contract.owned_fault_cause_snippet = paths.fault_unseen_snippet_owned;
+        paths.fault_unseen_snippet_owned = null;
+        if (paths.cost_envelope) |envelope| {
+            contract.cost_envelope = envelope;
+            paths.cost_envelope = null;
+        }
+        contract.behaviors = paths.behaviors;
+        paths.behaviors = .empty;
+        contract.behaviors_exhaustive = paths.behaviors_exhaustive;
+        contract.fault_coverage = paths.fault_coverage;
+    }
+}
 
 fn analyzeHandlerPaths(
     state_allocator: std.mem.Allocator,
@@ -182,11 +250,8 @@ fn analyzeHandlerPaths(
     var checker = zts.FaultCoverageChecker.init(output_allocator, tests);
     defer checker.deinit();
     try checker.analyze();
-    const stamp = try stampFaultCoverage(output_allocator, ir_view, &generator, &checker);
-    analysis.fault_coverage = stamp.coverage;
-    analysis.fault_clean = stamp.clean;
-    analysis.fault_unseen_cause = stamp.unseen_cause;
-    analysis.fault_unseen_snippet_owned = stamp.unseen_snippet_owned;
+    var stamp = try stampFaultCoverage(output_allocator, ir_view, &generator, &checker);
+    analysis.takeFaultStamp(&stamp);
     return analysis;
 }
 
@@ -824,11 +889,11 @@ fn runCheckOnParsedSource(
     }
 
     if (result.contract) |*c| {
-        if (c.properties) |*props| {
-            props.state_isolated = result.state_isolated;
-            props.result_safe = result.results_safe;
-            props.optional_safe = result.optionals_safe;
-        }
+        applyContractFacts(allocator, c, .{ .verifier = .{
+            .state_isolated = result.state_isolated,
+            .result_safe = result.results_safe,
+            .optional_safe = result.optionals_safe,
+        } });
     }
     syncCheckResultProperties(&result);
 
@@ -860,25 +925,7 @@ fn runCheckOnParsedSource(
 
             // Populate behavioral contract
             if (result.contract) |*c| {
-                if (c.properties) |*props| {
-                    props.max_io_depth = result.max_io_depth;
-                    props.cost_bounded = path_analysis.cost_bounded;
-                    props.fault_covered = path_analysis.fault_clean;
-                }
-                c.property_provenance.fault_covered = path_analysis.fault_unseen_cause;
-                // The cause borrows its snippet, so the contract takes the
-                // allocation that backs it.
-                if (c.owned_fault_cause_snippet) |old| allocator.free(old);
-                c.owned_fault_cause_snippet = path_analysis.fault_unseen_snippet_owned;
-                path_analysis.fault_unseen_snippet_owned = null;
-                if (path_analysis.cost_envelope) |envelope| {
-                    c.cost_envelope = envelope;
-                    path_analysis.cost_envelope = null;
-                }
-                c.behaviors = path_analysis.behaviors;
-                path_analysis.behaviors = .empty;
-                c.behaviors_exhaustive = path_analysis.behaviors_exhaustive;
-                c.fault_coverage = path_analysis.fault_coverage;
+                applyContractFacts(allocator, c, .{ .paths = &path_analysis });
             }
         }
     }

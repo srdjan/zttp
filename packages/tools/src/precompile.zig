@@ -127,6 +127,8 @@ pub const readFailureReason = precompile_stderr_mod.readFailureReason;
 pub const runCheckOnlyWithOptions = precompile_check_run_mod.runCheckOnlyWithOptions;
 const stampFaultCoverage = precompile_check_run_mod.stampFaultCoverage;
 const summarizeGeneratedPaths = precompile_check_run_mod.summarizeGeneratedPaths;
+const PathAnalysis = precompile_check_run_mod.PathAnalysis;
+const applyContractFacts = precompile_check_run_mod.applyContractFacts;
 pub const runCheckOnlyFromSourceWithOptions = precompile_check_run_mod.runCheckOnlyFromSourceWithOptions;
 pub const runGenTests = precompile_gen_tests_mod.runGenTests;
 const validateVirtualModuleImports = precompile_virtual_imports_mod.validateVirtualModuleImports;
@@ -624,11 +626,11 @@ pub fn compileHandler(
         try precompile_contract_mod.disclosePublicEnv(allocator, &contract.?, env_public);
 
         // Inject verification-derived properties (Checks 2, 6, 7)
-        if (contract.?.properties) |*props| {
-            props.state_isolated = state_isolated;
-            props.result_safe = result_safe;
-            props.optional_safe = optional_safe;
-        }
+        applyContractFacts(allocator, &contract.?, .{ .verifier = .{
+            .state_isolated = state_isolated,
+            .result_safe = result_safe,
+            .optional_safe = optional_safe,
+        } });
         try refreshContractSpecDiagnostics(allocator, &contract.?);
     }
 
@@ -673,20 +675,11 @@ pub fn compileHandler(
                 generated_tests_jsonl = try jsonl_buf.toOwnedSlice(allocator);
             }
 
-            if (contract != null) {
-                var path_analysis = try summarizeGeneratedPaths(allocator, &gen, true);
-                defer path_analysis.deinit(allocator);
-                if (contract.?.properties) |*props| {
-                    props.max_io_depth = path_analysis.max_io_depth;
-                    props.cost_bounded = path_analysis.cost_bounded;
-                }
-                contract.?.cost_envelope = path_analysis.cost_envelope;
-                path_analysis.cost_envelope = null;
-
-                contract.?.behaviors = path_analysis.behaviors;
-                path_analysis.behaviors = .empty;
-                contract.?.behaviors_exhaustive = path_analysis.behaviors_exhaustive;
-            }
+            var path_analysis: ?PathAnalysis = if (contract != null)
+                try summarizeGeneratedPaths(allocator, &gen, true)
+            else
+                null;
+            defer if (path_analysis) |*summary| summary.deinit(allocator);
 
             // Fault coverage analysis on generated paths
             var fc = zts.FaultCoverageChecker.init(allocator, gen.getTests());
@@ -697,18 +690,12 @@ pub fn compileHandler(
             defer fault_stamp.deinit(allocator);
 
             // The check path and this path write the record and the property
-            // bit for every handler. A handler with no failable site holds
-            // `fault_covered` when the analysis is complete. The cause is
-            // stamped the way the check path stamps it.
-            if (contract) |*c| {
-                if (c.properties) |*props| props.fault_covered = fault_stamp.clean;
-                c.fault_coverage = fault_stamp.coverage;
-                c.property_provenance.fault_covered = fault_stamp.unseen_cause;
-                // The cause borrows its snippet, so the contract takes the
-                // allocation that backs it.
-                if (c.owned_fault_cause_snippet) |old| allocator.free(old);
-                c.owned_fault_cause_snippet = fault_stamp.unseen_snippet_owned;
-                fault_stamp.unseen_snippet_owned = null;
+            // bit for every handler through `applyContractFacts`. A handler
+            // with no failable site holds `fault_covered` when the analysis
+            // is complete.
+            if (path_analysis) |*summary| {
+                summary.takeFaultStamp(&fault_stamp);
+                applyContractFacts(allocator, &contract.?, .{ .paths = summary });
             }
 
             if (fc_report.total_failable > 0) {
