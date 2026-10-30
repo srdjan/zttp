@@ -182,12 +182,6 @@ pub const CompileOptions = struct {
     emit_proof_evidence: bool = false,
 };
 
-test "formatIsoTimestamp produces ISO-8601 UTC" {
-    var buf: [24]u8 = undefined;
-    const got = zts.pipeline.formatIsoTimestamp(&buf, 1_700_000_000);
-    try std.testing.expectEqualStrings("2023-11-14T22:13:20Z", got);
-}
-
 test "compile and check agree on summarized and exhaustive behavior paths" {
     const allocator = std.testing.allocator;
     const cases = [_]struct { source: []const u8, exhaustive: bool }{

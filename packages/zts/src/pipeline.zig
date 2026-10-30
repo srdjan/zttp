@@ -31,8 +31,6 @@
 //! drawing a boundary that does not exist today. Revisit only with a concrete
 //! consumer for a fourth phase, such as a build cache or an incremental
 //! compile. See `pre-rebase:docs/archive/plans/2026-07-30-007-lowered-module-plan.md`.
-//!
-//! See: /Users/srdjans/.claude/plans/study-following-doc-document-luminous-fog.md
 
 const std = @import("std");
 
@@ -1647,25 +1645,6 @@ fn extractMultiModuleContractWithEntry(
     }
 
     return merged;
-}
-
-/// Format seconds since epoch as UTC ISO-8601 with second precision.
-/// The 24-byte buffer leaves room for the full u16 year range.
-pub fn formatIsoTimestamp(buf: *[24]u8, seconds_since_epoch: i64) []const u8 {
-    const total_secs: u64 = @intCast(@max(0, seconds_since_epoch));
-    const epoch_seconds = std.time.epoch.EpochSeconds{ .secs = total_secs };
-    const epoch_day = epoch_seconds.getEpochDay();
-    const day_seconds = epoch_seconds.getDaySeconds();
-    const year_day = epoch_day.calculateYearDay();
-    const month_day = year_day.calculateMonthDay();
-    return std.fmt.bufPrint(buf, "{d:0>4}-{d:0>2}-{d:0>2}T{d:0>2}:{d:0>2}:{d:0>2}Z", .{
-        @as(u16, @intCast(year_day.year)),
-        @as(u4, @backingInt(month_day.month)),
-        @as(u5, month_day.day_index + 1),
-        day_seconds.getHoursIntoDay(),
-        day_seconds.getMinutesIntoHour(),
-        day_seconds.getSecondsIntoMinute(),
-    }) catch unreachable;
 }
 
 comptime {

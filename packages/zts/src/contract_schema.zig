@@ -411,17 +411,6 @@ comptime {
     if (schemaProblem(contract_types.HandlerContract, &entries, &wire_entries)) |problem| @compileError(problem);
 }
 
-/// Names of the fields whose diff reason is a gap, in declaration order.
-pub fn diffGaps() []const []const u8 {
-    comptime {
-        var names: []const []const u8 = &.{};
-        for (entries) |entry| {
-            if (startsWith(entry.diff_reason, "gap: ")) names = names ++ [_][]const u8{entry.field};
-        }
-        return names;
-    }
-}
-
 test "the census covers every HandlerContract field exactly once" {
     try std.testing.expectEqual(@typeInfo(contract_types.HandlerContract).@"struct".field_names.len, entries.len);
     var serialized: usize = 0;
@@ -448,12 +437,14 @@ test "the wire mirror table has one entry per ContractWire field" {
 }
 
 test "diff gaps are listed and each has a reason" {
-    const gaps = comptime diffGaps();
-    try std.testing.expect(gaps.len > 0);
-    inline for (gaps) |name| {
-        const entry = comptime entryFor(&entries, name).?;
-        try std.testing.expect(entry.diff != .diffed);
+    var gap_count: usize = 0;
+    inline for (entries) |entry| {
+        if (comptime startsWith(entry.diff_reason, "gap: ")) {
+            gap_count += 1;
+            try std.testing.expect(entry.diff != .diffed);
+        }
     }
+    try std.testing.expect(gap_count > 0);
 }
 
 const Probe = struct { alpha: u8, beta: u8 };

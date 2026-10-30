@@ -218,16 +218,6 @@ pub fn lookupIndex(module: []const u8, export_name: []const u8, arg_index: u8) ?
     return null;
 }
 
-/// Whether any argument of this export is guarded, for a caller that has a
-/// module and an export and no argument position yet.
-pub fn guardsAnyArgument(module: []const u8, export_name: []const u8) bool {
-    for (entries) |entry| {
-        if (std.mem.eql(u8, entry.module, module) and
-            std.mem.eql(u8, entry.export_name, export_name)) return true;
-    }
-    return false;
-}
-
 const testing = std.testing;
 
 test "classification is exhaustive over the surface" {
@@ -308,8 +298,6 @@ test "a row is found by module, export, and argument position together" {
     try testing.expect(lookup("zttp:cache", "cacheIncr", 1) == null);
     // Registering a statement is not executing a named query.
     try testing.expect(lookup("zttp:sql", "sql", 0) == null);
-    try testing.expect(guardsAnyArgument("zttp:fetch", "fetchWithRetry"));
-    try testing.expect(!guardsAnyArgument("zttp:fetch", "fetchSync"));
 }
 
 test "each kind names the policy section its author has to write" {

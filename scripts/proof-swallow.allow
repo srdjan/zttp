@@ -281,10 +281,6 @@ packages/zts/src/pipeline.zig extractMultiModuleContractWithEntry catch-block
 # The failure moves the result toward unproven.
 packages/zts/src/pipeline.zig pathEffectFacts catch-block
 
-# The output is 20 bytes: a four-digit year, five two-digit fields, and fixed
-# punctuation. The buffer holds 24 bytes, so bufPrint cannot overflow.
-packages/zts/src/pipeline.zig formatIsoTimestamp catch-trap
-
 # --- Proof IR lowering ---
 #
 # The collector stores the first error in `failed`, skips all later children,

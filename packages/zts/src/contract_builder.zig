@@ -5,8 +5,8 @@
 //! root.zig). The builder's tightly-coupled private helpers
 //! (containsApiParam, responseVariantMatches, schemaSpecFromCandidate,
 //! ParsedRouteKey, contentTypeFor, currentPolicyHashRaw, etc.) move with
-//! it; only `extractHost` and `containsString` stay in handler_contract.zig
-//! because they're referenced by other split files and external callers.
+//! it; only `containsString` stays in handler_contract.zig because other split
+//! files and external callers reference it.
 
 const std = @import("std");
 const handler_contract = @import("zts-contracts").handler_contract;

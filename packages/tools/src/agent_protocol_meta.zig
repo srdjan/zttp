@@ -1702,7 +1702,7 @@ test "meta publishes the verifier registry it will answer about" {
     var saw_results_safe = false;
     for (verifiers.items) |item| {
         const id = item.object.get("property").?.string;
-        try testing.expect(zts.proof_trace.isVerifier(id));
+        try testing.expect(zts.proof_trace.verifierKind(id) != null);
         if (std.mem.eql(u8, id, "results_safe")) saw_results_safe = true;
     }
     try testing.expect(saw_results_safe);

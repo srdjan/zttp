@@ -170,8 +170,8 @@ const Tree = struct {
 const mb = @import("zts-engine").module_binding;
 
 /// The ambient globals that return a Result. `abi_types.zig` registers each of
-/// them with `result_record`; a test below fails when the two lists differ.
-const result_globals = [_][]const u8{ "requestJson", "requestText" };
+/// them with `result_record`; a test below fails when the list differs.
+const result_globals = @import("handler_verifier.zig").result_globals;
 
 const ResultBinding = struct {
     scope_id: ir.ScopeId,

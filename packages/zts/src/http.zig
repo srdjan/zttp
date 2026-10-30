@@ -844,14 +844,6 @@ fn writeInt(writer: *std.Io.Writer, val: i32) RenderError!void {
     try writer.writeAll(buf[i..]);
 }
 
-/// Convert a JSValue to JSON string
-pub fn valueToJson(ctx: *context.Context, val: value.JSValue) ![]u8 {
-    const json = try valueToJsonScratch(ctx, val);
-    const owned = try ctx.allocator.dupe(u8, json);
-    ctx.json_writer.clearRetainingCapacity();
-    return owned;
-}
-
 /// Convert a JSValue to JSON in a reusable buffer (valid until next call).
 fn valueToJsonScratch(ctx: *context.Context, val: value.JSValue) ![]const u8 {
     const estimated = estimateJsonSize(val);
@@ -1314,7 +1306,7 @@ test "isVoidElement" {
     try std.testing.expect(!isVoidElement("span"));
 }
 
-test "valueToJson basic" {
+test "valueToJsonString basic" {
     const gc = @import("gc.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1328,34 +1320,30 @@ test "valueToJson basic" {
 
     // Integer
     {
-        const json = try valueToJson(ctx, value.JSValue.fromInt(42));
-        defer allocator.free(json);
+        const json = (try valueToJsonString(ctx, value.JSValue.fromInt(42))).data();
         try std.testing.expectEqualStrings("42", json);
     }
 
     // Min i32 regression
     {
-        const json = try valueToJson(ctx, value.JSValue.fromInt(std.math.minInt(i32)));
-        defer allocator.free(json);
+        const json = (try valueToJsonString(ctx, value.JSValue.fromInt(std.math.minInt(i32)))).data();
         try std.testing.expectEqualStrings("-2147483648", json);
     }
 
     // Boolean
     {
-        const json = try valueToJson(ctx, value.JSValue.true_val);
-        defer allocator.free(json);
+        const json = (try valueToJsonString(ctx, value.JSValue.true_val)).data();
         try std.testing.expectEqualStrings("true", json);
     }
 
     // Null
     {
-        const json = try valueToJson(ctx, value.JSValue.null_val);
-        defer allocator.free(json);
+        const json = (try valueToJsonString(ctx, value.JSValue.null_val)).data();
         try std.testing.expectEqualStrings("null", json);
     }
 }
 
-test "valueToJson object with properties" {
+test "valueToJsonString object with properties" {
     const gc = @import("gc.zig");
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
@@ -1378,8 +1366,7 @@ test "valueToJson object with properties" {
     const count_atom = try ctx.atoms.intern("count");
     try ctx.setPropertyChecked(obj, count_atom, value.JSValue.fromInt(42));
 
-    const json = try valueToJson(ctx, obj.toValue());
-    defer allocator.free(json);
+    const json = (try valueToJsonString(ctx, obj.toValue())).data();
 
     // Must contain both properties
     try std.testing.expect(std.mem.indexOf(u8, json, "\"hello\":\"world\"") != null);

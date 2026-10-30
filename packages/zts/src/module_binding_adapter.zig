@@ -167,10 +167,6 @@ pub inline fn sdkValue(v: value.JSValue) sdk.JSValue {
     return @bitCast(v);
 }
 
-pub inline fn internalValue(v: sdk.JSValue) value.JSValue {
-    return @bitCast(v);
-}
-
 pub inline fn internalArgs(args: []const sdk.JSValue) []const value.JSValue {
     return @ptrCast(args);
 }

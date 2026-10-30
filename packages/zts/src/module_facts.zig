@@ -312,11 +312,6 @@ pub const ModuleFacts = struct {
         self.imports.deinit(self.allocator);
     }
 
-    /// True when this handler imports `specifier`.
-    pub fn importsModule(self: *const ModuleFacts, specifier: []const u8) bool {
-        return containsString(self.modules.items, specifier);
-    }
-
     /// Preserve the type checker's named-import policy: slot and binding kind
     /// match, while scope/name do not participate. A missing export must not
     /// hide a later matching declaration that does name a builtin export.
@@ -549,7 +544,7 @@ test "module facts index a builtin import" {
     var facts = try ModuleFacts.build(allocator, h.view(), &h.atoms, null);
     defer facts.deinit();
 
-    try testing.expect(facts.importsModule("zttp:env"));
+    try testing.expect(containsString(facts.modules.items, "zttp:env"));
     try testing.expectEqual(@as(usize, 1), facts.functions.items.len);
     try testing.expectEqualStrings("zttp:env", facts.functions.items[0].module);
     try testing.expectEqualStrings("env", facts.functions.items[0].names.items[0]);
@@ -721,7 +716,7 @@ test "module facts skip a module that is neither builtin nor registered" {
     var facts = try ModuleFacts.build(allocator, h.view(), &h.atoms, null);
     defer facts.deinit();
 
-    try testing.expect(!facts.importsModule("zttp-ext:unknown"));
+    try testing.expect(!containsString(facts.modules.items, "zttp-ext:unknown"));
     try testing.expectEqual(@as(usize, 0), facts.functions.items.len);
 }
 
@@ -776,7 +771,7 @@ test "module facts index a partner import through the registry" {
     var facts = try ModuleFacts.build(allocator, h.view(), &h.atoms, &registry);
     defer facts.deinit();
 
-    try testing.expect(facts.importsModule("zttp-ext:stripe"));
+    try testing.expect(containsString(facts.modules.items, "zttp-ext:stripe"));
     try testing.expectEqual(@as(usize, 1), facts.functions.items.len);
     try testing.expectEqualStrings("zttp-ext:stripe", facts.functions.items[0].module);
     try testing.expectEqualStrings("chargeCard", facts.functions.items[0].names.items[0]);
@@ -993,5 +988,5 @@ test "the index resolves import names with no atom table" {
     try testing.expectEqual(@as(usize, 1), facts.imports.items.len);
     try testing.expectEqualStrings("zttp:env", facts.imports.items[0].module_specifier);
     try testing.expectEqualStrings("env", facts.imports.items[0].imported_name);
-    try testing.expect(facts.importsModule("zttp:env"));
+    try testing.expect(containsString(facts.modules.items, "zttp:env"));
 }

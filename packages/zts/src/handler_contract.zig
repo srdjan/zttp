@@ -80,25 +80,6 @@ pub const HandlerContract = contract_types.HandlerContract;
 
 pub const containsString = json_utils.containsString;
 
-/// Extract hostname from a URL string (e.g. "https://api.example.com/path" -> "api.example.com")
-pub fn extractHost(url: []const u8) []const u8 {
-    // Skip scheme
-    var start: usize = 0;
-    if (std.mem.indexOf(u8, url, "://")) |scheme_end| {
-        start = scheme_end + 3;
-    } else {
-        return "";
-    }
-
-    // Find end of host (first / or : after scheme, or end of string)
-    var end = start;
-    while (end < url.len) : (end += 1) {
-        if (url[end] == '/' or url[end] == ':') break;
-    }
-
-    if (end <= start) return "";
-    return url[start..end];
-}
 // Re-exports from contract_json_parser.zig and contract_json_writer.zig
 pub const parseFromJson = contract_json_parser.parseFromJson;
 pub const writeContractJson = contract_json_writer.writeContractJson;
@@ -672,14 +653,6 @@ test "parseFromJson roundtrip preserves api route response schema" {
     try std.testing.expectEqual(@as(usize, 1), route.responses.items.len);
     try std.testing.expectEqual(@as(u16, 200), route.responses.items[0].status.?);
     try std.testing.expectEqualStrings("user", route.response_schema_ref.?);
-}
-
-test "extractHost from URL" {
-    try std.testing.expectEqualStrings("api.example.com", extractHost("https://api.example.com/path"));
-    try std.testing.expectEqualStrings("api.example.com", extractHost("http://api.example.com:8080/path"));
-    try std.testing.expectEqualStrings("localhost", extractHost("http://localhost/test"));
-    try std.testing.expectEqualStrings("", extractHost("not-a-url"));
-    try std.testing.expectEqualStrings("", extractHost(""));
 }
 
 test "writeJsonString escapes correctly" {

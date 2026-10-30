@@ -58,14 +58,6 @@ pub const Plan = struct {
     edit_intent: EditIntent,
     /// For `check_result_before_value`: the refused Result shape.
     result_shape: ?handler_verifier.ResultShape = null,
-
-    pub fn closesProperty(self: Plan, tag: counterexample.PropertyTag) bool {
-        return switch (self.kind) {
-            .redact_sensitive_sink => tag == .no_secret_leakage or tag == .no_credential_leakage,
-            .validate_before_egress => tag == .injection_safe,
-            else => false,
-        };
-    }
 };
 
 /// The summary of `narrow_optional_before_use` when the read has no binding to
@@ -275,5 +267,4 @@ test "flow diagnostics map to property repair plans" {
     try std.testing.expectEqual(RepairKind.redact_sensitive_sink, plan.kind);
     try std.testing.expectEqual(EditIntentKind.insert_guard_before_line, plan.edit_intent.kind);
     try std.testing.expect(std.mem.indexOf(u8, plan.edit_intent.template, "return Response") != null);
-    try std.testing.expect(plan.closesProperty(.no_secret_leakage));
 }

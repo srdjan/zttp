@@ -89,14 +89,6 @@ pub const LawRegistry = struct {
     pub fn lookup(self: LawRegistry, module: []const u8, func: []const u8) ?LookupResult {
         return self.lookup_fn(module, func);
     }
-
-    pub fn hasLaw(self: LawRegistry, module: []const u8, func: []const u8, kind: LawKind) bool {
-        const hit = self.lookup(module, func) orelse return false;
-        for (hit.binding.laws) |law| {
-            if (std.meta.activeTag(law) == kind) return true;
-        }
-        return false;
-    }
 };
 
 fn defaultLookup(module: []const u8, func: []const u8) ?LookupResult {
@@ -520,11 +512,20 @@ test "canonicalize preserves route, status, and condition count" {
 }
 
 test "LawRegistry default lookup finds seeded laws" {
-    try testing.expect(LawRegistry.default.hasLaw("crypto", "sha256", .pure));
-    try testing.expect(LawRegistry.default.hasLaw("env", "env", .pure));
-    try testing.expect(LawRegistry.default.hasLaw("cache", "cacheSet", .idempotent_call));
-    try testing.expect(!LawRegistry.default.hasLaw("cache", "cacheIncr", .pure));
-    try testing.expect(!LawRegistry.default.hasLaw("cache", "cacheIncr", .idempotent_call));
+    const sha256 = LawRegistry.default.lookup("crypto", "sha256") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), sha256.binding.laws.len);
+    try testing.expectEqual(LawKind.pure, std.meta.activeTag(sha256.binding.laws[0]));
+
+    const env_read = LawRegistry.default.lookup("env", "env") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), env_read.binding.laws.len);
+    try testing.expectEqual(LawKind.pure, std.meta.activeTag(env_read.binding.laws[0]));
+
+    const cache_set = LawRegistry.default.lookup("cache", "cacheSet") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), cache_set.binding.laws.len);
+    try testing.expectEqual(LawKind.idempotent_call, std.meta.activeTag(cache_set.binding.laws[0]));
+
+    const cache_incr = LawRegistry.default.lookup("cache", "cacheIncr") orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 0), cache_incr.binding.laws.len);
 }
 
 test "LawRegistry lookup rejects wrong module name" {

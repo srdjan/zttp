@@ -456,8 +456,8 @@ const OptionalBindingState = struct {
 };
 
 /// The names of the ambient globals that return a Result. `abi_types.zig`
-/// registers each of them; `proof_ir.zig` holds the same list for the lowering.
-const result_globals = [_][]const u8{ "requestJson", "requestText" };
+/// registers each of them; `proof_ir.zig` reads this list for the lowering.
+pub const result_globals = [_][]const u8{ "requestJson", "requestText" };
 
 /// What a Result call names: the export that produces it, or null for an
 /// ambient global. Strings are borrowed from the module binding registry.

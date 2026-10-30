@@ -404,17 +404,6 @@ pub const RuntimePolicyIndex = struct {
         var ignored: usize = 0;
         return searchCounting(self.entries(section), candidate, &ignored);
     }
-
-    /// `allows`, reporting what it cost. The comparison bound is checked
-    /// against the search, not against a formula about the entry cap.
-    pub fn allowsCounting(
-        self: *const RuntimePolicyIndex,
-        section: Section,
-        candidate: []const u8,
-        comparisons: *usize,
-    ) bool {
-        return searchCounting(self.entries(section), candidate, comparisons);
-    }
 };
 
 fn searchCounting(values: []const []const u8, candidate: []const u8, comparisons: *usize) bool {
@@ -603,22 +592,6 @@ pub const endpoints_field = "allow_endpoints";
 /// The key this file used to read. Named here so the parser can say what
 /// replaced it rather than reporting an unknown key.
 pub const retired_hosts_field = "allow_hosts";
-
-/// The sections a policy file declares, read straight from its bytes.
-///
-/// A file that does not parse declares nothing here. That is not this
-/// function's message to deliver: the policy diagnostics path parses the same
-/// bytes and reports the parse failure with a code and a location, and a
-/// compile that cannot read its policy fails there rather than silently
-/// classifying against an imagined one.
-pub fn declaredSectionsFromJson(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-) guard_catalog.SectionSet {
-    var policy = parsePolicyJsonOrNull(allocator, source) orelse return .{};
-    defer policy.deinit(allocator);
-    return policy.declaredSections();
-}
 
 /// The policy `source` parses to, or null when it does not parse. The caller
 /// that analyzes a handler takes both the declared sections and `envPublic()`
@@ -1298,12 +1271,12 @@ test "the installed index answers inside the measured comparison bound" {
     index = 0;
     while (index < max_policy_entries) : (index += 1) {
         var comparisons: usize = 0;
-        try std.testing.expect(built.allowsCounting(.env, values[index], &comparisons));
+        try std.testing.expect(searchCounting(built.entries(.env), values[index], &comparisons));
         worst = @max(worst, comparisons);
     }
     for ([_][]const u8{ "a00000", "k00000x", "z00000" }) |absent| {
         var comparisons: usize = 0;
-        try std.testing.expect(!built.allowsCounting(.env, absent, &comparisons));
+        try std.testing.expect(!searchCounting(built.entries(.env), absent, &comparisons));
         worst = @max(worst, comparisons);
     }
     try std.testing.expectEqual(max_lookup_comparisons, worst);

@@ -8,7 +8,7 @@
 //! additive/breaking) by incorporating behavioral path comparison and property
 //! regressions with severity.
 //!
-//! Called by system_rollout.zig when behavioral data is available.
+//! Called by live_reload.zig in the runtime package.
 
 const std = @import("std");
 const zts = @import("zts");

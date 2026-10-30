@@ -406,16 +406,6 @@ pub const verifiers = blk: {
     break :blk frozen;
 };
 
-/// True when `id` is a property a client may ask about. A `verify` request
-/// naming anything else is answered, not rejected: an unknown id is a fact
-/// about the request that the response reports per property.
-pub fn isVerifier(id: []const u8) bool {
-    for (verifiers) |v| {
-        if (eql(v.id, id)) return true;
-    }
-    return false;
-}
-
 pub fn verifierKind(id: []const u8) ?ProofKind {
     for (verifiers) |v| {
         if (eql(v.id, id)) return v.kind;
@@ -1092,9 +1082,9 @@ test "the verifier registry covers every contract property" {
     // lose a row, and that the ids published are the wire spellings - a client
     // that asks about `result_safe` is asking about a name the wire never uses.
     try std.testing.expectEqual(property_info.len, verifiers.len);
-    try std.testing.expect(isVerifier("results_safe"));
-    try std.testing.expect(!isVerifier("result_safe"));
-    try std.testing.expect(!isVerifier("not_a_property"));
+    try std.testing.expect(verifierKind("results_safe") != null);
+    try std.testing.expect(verifierKind("result_safe") == null);
+    try std.testing.expect(verifierKind("not_a_property") == null);
 
     try std.testing.expectEqual(ProofKind.flow_trace, verifierKind("no_secret_leakage").?);
     try std.testing.expectEqual(ProofKind.path_enumeration, verifierKind("fault_covered").?);
