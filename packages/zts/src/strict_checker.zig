@@ -2293,7 +2293,7 @@ test "canonical_export_function_const survives the export annotation split" {
 
 test "strict checker flags avoidable let" {
     const source = "function handler(req) { let x = 1; return Response.json({ x: x }); }";
-    var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2306,7 +2306,7 @@ test "strict checker flags avoidable let" {
 
 test "strict checker accepts reassigned let" {
     const source = "function handler(req) { let x = 1; x = 2; return Response.json({ x: x }); }";
-    var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2326,7 +2326,7 @@ test "strict checker accepts reassigned let inside an exported function" {
     // reassigned, at error severity. `let` is an advertised admitted form with
     // no legal spelling until this descends.
     const source = "export function handler(req) { let x = 1; x = 2; return Response.json({ x: x }); }";
-    var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2342,7 +2342,7 @@ test "an exported function's let that is never reassigned is still flagged" {
     // The floor under the fix above: descending through `export_decl` must not
     // turn the rule off, only stop it firing on a binding that is assigned.
     const source = "export function handler(req) { let x = 1; return Response.json({ x: x }); }";
-    var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2358,7 +2358,7 @@ test "an exported function's let that is never reassigned is still flagged" {
 
 test "canonical profile warns on reused arrow helper" {
     const source = "const parse = (x) => x; function handler(req) { const a = parse(1); const b = parse(2); return Response.json({ a: a, b: b }); }";
-    var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2418,7 +2418,7 @@ test "canonical profile counts reused arrow helper after typed arrow" {
 
 test "strict checker accepts one-off arrow helper value" {
     const source = "const parse = (x) => x; function handler(req) { const a = parse(1); return Response.json({ a: a }); }";
-    var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2456,7 +2456,7 @@ fn countKind(checker: *const StrictChecker, kind: DiagnosticKind) usize {
 
 test "StrictChecker fails closed when profile facts cannot allocate" {
     const allocator = testing.allocator;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "let answer = 42;");
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "let answer = 42;", .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2468,7 +2468,7 @@ test "StrictChecker fails closed when profile facts cannot allocate" {
 }
 
 fn checkSource(source: []const u8) !StrictChecker {
-    var parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2501,7 +2501,7 @@ const TypedHarness = struct {
 fn checkSourceTyped(source: []const u8) !*TypedHarness {
     const h = try testing.allocator.create(TypedHarness);
     errdefer testing.allocator.destroy(h);
-    h.parser = try @import("zts-engine").parser.JsParser.init(testing.allocator, source);
+    h.parser = try @import("zts-engine").parser.JsParser.initAdmission(testing.allocator, testing.allocator, source, .compile);
     const root = try h.parser.parse();
     const view = IrView.fromIRStore(&h.parser.nodes, &h.parser.constants);
     h.pool = type_pool_mod.TypePool.init(testing.allocator);
@@ -3285,7 +3285,7 @@ test "the import scan records every specifier in order" {
         \\import { thing } from "zttp-ext:unknown";
         \\import { env } from "zttp:env";
     ;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -3318,7 +3318,7 @@ test "this checker records imports from unresolved modules" {
     const allocator = std.testing.allocator;
     const source = "import { thing } from \"zttp-ext:unknown\";\n";
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
