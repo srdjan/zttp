@@ -2604,7 +2604,7 @@ const ExpectedChild = struct {
 /// require that its expression children are exactly `expected`, in order.
 fn expectChildrenOf(source: []const u8, tag: NodeTag, nth: usize, expected: []const ExpectedChild) !void {
     const allocator = std.testing.allocator;
-    var parser = try @import("parse.zig").Parser.init(allocator, source);
+    var parser = try @import("parse.zig").Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try std.testing.expect(!parser.errors.hasErrors());
@@ -3104,7 +3104,7 @@ test "expressionChildren of an export specifier is its declaration word only" {
 
 test "subtreeContains finds a node inside an array spread operand" {
     const allocator = std.testing.allocator;
-    var parser = try @import("parse.zig").Parser.init(allocator, "const z = 1; const r = [...a.b];");
+    var parser = try @import("parse.zig").Parser.initAdmission(allocator, allocator, "const z = 1; const r = [...a.b];", .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -3122,7 +3122,7 @@ test "subtreeContains finds a node inside an array spread operand" {
 
 test "subtreeContains finds a node inside an object spread operand" {
     const allocator = std.testing.allocator;
-    var parser = try @import("parse.zig").Parser.init(allocator, "const z = 1; const r = { ...a };");
+    var parser = try @import("parse.zig").Parser.initAdmission(allocator, allocator, "const z = 1; const r = { ...a };", .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -3137,7 +3137,7 @@ test "subtreeContains finds a node inside an object spread operand" {
 
 test "subtreeContains finds a node inside an assert condition and an assert error expression" {
     const allocator = std.testing.allocator;
-    var parser = try @import("parse.zig").Parser.init(allocator, "assert a, b;");
+    var parser = try @import("parse.zig").Parser.initAdmission(allocator, allocator, "assert a, b;", .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
