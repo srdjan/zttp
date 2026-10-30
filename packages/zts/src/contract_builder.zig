@@ -2902,7 +2902,7 @@ fn buildTestContract(source: []const u8) !HandlerContract {
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
 
@@ -3421,7 +3421,7 @@ test "registered partner manifest contributes effect class to handler properties
         \\const r = chargeCard("tok");
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -3486,7 +3486,7 @@ test "partner manifest contractExtractions populate extensions section" {
         \\const r = charge("api.stripe.com", "card_charge");
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -3530,7 +3530,7 @@ test "a literal url the endpoint rule refuses proves no destination" {
         \\const r = fetch("https://allowed.example@evil.example/v1", { headers: {} });
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -3563,7 +3563,7 @@ test "builtin zttp:fetch extracts the Open-Meteo egress host from a literal url"
         \\const r = fetch("https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m&timezone=auto", { headers: { "Accept": "application/json" } });
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -3692,7 +3692,7 @@ test "missing manifest registry skips partner imports" {
         \\const r = unknownFn();
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
