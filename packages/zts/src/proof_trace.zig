@@ -1126,7 +1126,7 @@ fn checkPublicFlowTrace(source: []const u8, tag: counterexample.PropertyTag, con
     const engine = @import("zts-engine");
     var atoms = engine.atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try engine.parser.JsParser.init(allocator, source);
+    var parser = try engine.parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -1169,7 +1169,7 @@ test "contradictory supplied capsules never become public counterexamples" {
     const constraints = [_]counterexample.WitnessConstraint{ .{ .req_method = "GET" }, .{ .req_method = "POST" } };
     const diagnostic: flow_checker.Diagnostic = .{ .kind = .secret_in_response, .severity = .err, .node = 0, .message = "secret flow", .help = null, .witness = .{ .path_constraints = &constraints, .io_calls = &.{} } };
     const engine = @import("zts-engine");
-    var parser = try engine.parser.JsParser.init(testing.allocator, "function handler(req) { return 'public'; }");
+    var parser = try engine.parser.JsParser.initAdmission(testing.allocator, testing.allocator, "function handler(req) { return 'public'; }", .compile);
     defer parser.deinit();
     _ = try parser.parse();
     const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
