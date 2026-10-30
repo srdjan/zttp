@@ -53,21 +53,6 @@ pub const TextBuffer = struct {
     }
 };
 
-/// One-call form of `TextBuffer`: render through `write`, return the bytes.
-/// `args` is a tuple of the arguments after the writer, so
-/// `renderAlloc(a, writeFeaturesJson, .{})` and
-/// `renderAlloc(a, writeRuleJson, .{entry})` both work.
-pub fn renderAlloc(
-    allocator: std.mem.Allocator,
-    comptime write: anytype,
-    args: anytype,
-) anyerror![]u8 {
-    var out = TextBuffer.init(allocator);
-    errdefer out.deinit();
-    try @call(.auto, write, .{out.writer()} ++ args);
-    return out.toOwnedSlice();
-}
-
 const testing = std.testing;
 
 test "TextBuffer frees the buffer when a write fails" {
@@ -98,16 +83,4 @@ test "TextBuffer borrows written bytes without transferring ownership" {
     try testing.expectEqualStrings("hello", buf.written());
     buf.clearRetainingCapacity();
     try testing.expectEqualStrings("", buf.written());
-}
-
-test "renderAlloc passes trailing arguments through to the writer" {
-    const render = struct {
-        fn write(w: *std.Io.Writer, prefix: []const u8, n: u32) !void {
-            try w.print("{s}{d}", .{ prefix, n });
-        }
-    }.write;
-
-    const text = try renderAlloc(testing.allocator, render, .{ "count=", @as(u32, 7) });
-    defer testing.allocator.free(text);
-    try testing.expectEqualStrings("count=7", text);
 }

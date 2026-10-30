@@ -189,7 +189,7 @@ test "canonical request snapshot records the active projection cut" {
     defer transcript.deinit(testing.allocator);
     try transcript.append(testing.allocator, .{ .user_text = "old request" });
     try transcript.append(testing.allocator, .{ .model_text = "retained response" });
-    try transcript.replaceProjection(testing.allocator, "validated summary", 2);
+    try transcript.replaceProjectionWithFiles(testing.allocator, "validated summary", 2, &.{}, &.{});
 
     var snapshot = try model_request.createSnapshot(testing.allocator, .{
         .config = .{
@@ -552,7 +552,7 @@ test "simulator checkpoints bind request budgets normalized usage and projection
     defer transcript.deinit(testing.allocator);
     try transcript.append(testing.allocator, .{ .user_text = "old request" });
     try transcript.append(testing.allocator, .{ .model_text = "retained response" });
-    try transcript.replaceProjection(testing.allocator, "validated summary", 2);
+    try transcript.replaceProjectionWithFiles(testing.allocator, "validated summary", 2, &.{}, &.{});
 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

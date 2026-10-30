@@ -213,7 +213,7 @@ pub const TurnResult = struct {
     /// metrics key "handler advanced" on this, not on `end_reason`.
     applied_change_set: bool = false,
     /// Proof guarantees discharged / tracked on the applied edit, counted at the
-    /// veto (see PropertiesSnapshot.guaranteeCounts). Both 0 when no edit applied.
+    /// veto. Both 0 when no edit applied.
     proven_guarantees: u32 = 0,
     tracked_guarantees: u32 = 0,
     /// Host-classified workflow for this turn. The hint is advisory; compiler

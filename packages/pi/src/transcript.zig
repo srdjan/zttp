@@ -207,21 +207,6 @@ pub const Transcript = struct {
         return @intCast(projection.first_kept_entry_id - 1);
     }
 
-    pub fn replaceProjection(
-        self: *Transcript,
-        allocator: std.mem.Allocator,
-        summary: []const u8,
-        first_kept_entry_id: EntryId,
-    ) !void {
-        return self.replaceProjectionWithFiles(
-            allocator,
-            summary,
-            first_kept_entry_id,
-            &.{},
-            &.{},
-        );
-    }
-
     pub fn replaceProjectionWithFiles(
         self: *Transcript,
         allocator: std.mem.Allocator,

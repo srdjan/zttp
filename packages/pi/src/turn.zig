@@ -123,7 +123,6 @@ pub const TurnEvent = union(enum) {
     model_replied: AssistantReply,
     change_set_verified: ChangeSetOutcome,
     tool_batch_completed,
-    user_approved: bool,
     budget_exhausted,
 };
 
@@ -175,8 +174,7 @@ pub const TurnMachine = struct {
             .awaiting_model => self.fromAwaitingModel(event),
             .verifying_change_set => self.fromVerifyingChangeSet(event),
             .executing_tools => self.fromExecutingTools(event),
-            .awaiting_user => self.fromAwaitingUser(event),
-            .done => .none,
+            .awaiting_user, .done => .none,
         };
     }
 
@@ -244,16 +242,6 @@ pub const TurnMachine = struct {
             .tool_batch_completed => {
                 self.state = .awaiting_model;
                 return .request_model;
-            },
-            else => return .none,
-        }
-    }
-
-    fn fromAwaitingUser(self: *TurnMachine, event: TurnEvent) Action {
-        switch (event) {
-            .user_approved => {
-                self.state = .done;
-                return .end_turn;
             },
             else => return .none,
         }
@@ -396,13 +384,6 @@ test "budget_exhausted from any active state -> awaiting_user with prompt_user" 
             else => return error.TestFailed,
         }
     }
-}
-
-test "awaiting_user + user_approved -> done with end_turn" {
-    var m: TurnMachine = .{ .state = .awaiting_user };
-    const action = m.transition(.{ .user_approved = true });
-    try testing.expectEqual(TurnState.done, m.state);
-    try testing.expect(action == .end_turn);
 }
 
 test "out-of-order events return .none without changing state" {

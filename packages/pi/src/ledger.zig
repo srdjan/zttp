@@ -69,9 +69,7 @@ pub const ExportBundle = struct {
 pub const ReplayKind = enum {
     success,
     policy_drift,
-    violation_drift,
     prove_drift,
-    system_drift,
     apply_failure,
 };
 

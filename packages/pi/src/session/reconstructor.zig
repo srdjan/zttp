@@ -367,6 +367,11 @@ fn parseDisplayMessage(
 
 const testing = std.testing;
 
+fn recoverIncompleteTail(allocator: std.mem.Allocator, events_path: []const u8) !void {
+    var writer = try events.JournalWriter.openExisting(allocator, events_path);
+    writer.deinit();
+}
+
 const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
 
 fn initTmp(allocator: std.mem.Allocator) !IsolatedTmp {
@@ -625,7 +630,7 @@ test "reader recovery and reconstruction preserve additive journal fields" {
     try testing.expectEqualStrings(entry_payload, first);
     try testing.expectEqualStrings(checkpoint_payload, second);
 
-    try events.recoverIncompleteTail(allocator, path);
+    try recoverIncompleteTail(allocator, path);
     var tr = try reconstructTranscript(allocator, path, null);
     defer tr.deinit(allocator);
     try testing.expectEqual(@as(usize, 1), tr.len());
@@ -653,7 +658,7 @@ test "checkpoint recovery accepts omitted projection fields but reconstruction r
         "{\"v\":4,\"k\":\"compaction_checkpoint\",\"d\":{\"first_kept_entry_id\":1}}",
     );
 
-    try events.recoverIncompleteTail(allocator, path);
+    try recoverIncompleteTail(allocator, path);
     try testing.expectError(error.CorruptEventsLog, reconstructTranscript(allocator, path, null));
 }
 
@@ -671,7 +676,7 @@ test "checkpoint recovery rejects absent or malformed cut identity" {
     );
     try testing.expectError(
         error.CorruptEventsLog,
-        events.recoverIncompleteTail(allocator, absent_path),
+        recoverIncompleteTail(allocator, absent_path),
     );
 
     const malformed_path = try tmp.childPath(allocator, "checkpoint-malformed-cut.events");
@@ -683,7 +688,7 @@ test "checkpoint recovery rejects absent or malformed cut identity" {
     );
     try testing.expectError(
         error.CorruptEventsLog,
-        events.recoverIncompleteTail(allocator, malformed_path),
+        recoverIncompleteTail(allocator, malformed_path),
     );
 }
 
@@ -705,7 +710,7 @@ test "reader exposes a framed skipped identity while recovery and reconstruction
 
     try testing.expectError(
         error.CorruptEventsLog,
-        events.recoverIncompleteTail(allocator, path),
+        recoverIncompleteTail(allocator, path),
     );
     try testing.expectError(error.CorruptEventsLog, reconstructTranscript(allocator, path, null));
 }
@@ -738,7 +743,7 @@ test "reconstruction skips opaque session payloads that recovery rejects" {
     try testing.expect(tr.projection == null);
     try testing.expectError(
         error.CorruptEventsLog,
-        events.recoverIncompleteTail(allocator, path),
+        recoverIncompleteTail(allocator, path),
     );
 }
 
@@ -763,7 +768,7 @@ test "framed version mismatch preserves reconstruction and recovery errors" {
     );
     try testing.expectError(
         error.CorruptEventsLog,
-        events.recoverIncompleteTail(allocator, path),
+        recoverIncompleteTail(allocator, path),
     );
 }
 
@@ -1066,7 +1071,7 @@ test "reconstructTranscript is read-only and recovery requires the journal lock"
     _ = std.c.write(fd, "ZTE3partial".ptr, "ZTE3partial".len);
 
     try testing.expectError(error.CorruptEventsLog, reconstructTranscript(allocator, path, null));
-    try events.recoverIncompleteTail(allocator, path);
+    try recoverIncompleteTail(allocator, path);
     var tr = try reconstructTranscript(allocator, path, null);
     defer tr.deinit(allocator);
     try testing.expectEqual(@as(usize, 1), tr.len());

@@ -100,8 +100,8 @@ pub fn run(
     // turn that ended without an applied edit (veto exhausted, budget, approval
     // denied) must be distinguishable from a proven-edit/clean-answer turn by
     // `$?` alone. Hard errors already exited 1 inside runWithSession. Only the
-    // real (process-owning) entrypoint exits; the test-facing runWithClient path
-    // never reaches here.
+    // real (process-owning) entrypoint exits; tests call
+    // runWithSession directly and never reach here.
     const code = exitCodeForOutcome(session.metrics.last_outcome);
     if (code != 0) std.process.exit(code);
 }
@@ -117,22 +117,6 @@ fn exitCodeForOutcome(reason: session_events.TurnEndReason) u8 {
         .approval_denied => 4,
         .error_exit => 1,
     };
-}
-
-/// Test-facing variant that accepts an explicit `ModelClient` plus an
-/// optional writer. When `out_writer` is null, events go to stdout.
-pub fn runWithClient(
-    allocator: std.mem.Allocator,
-    registry: *const Registry,
-    client: loop.ModelClient,
-    flags: ExpertFlags,
-    policy: loop.ApprovalPolicy,
-    out_writer: ?*std.Io.Writer,
-) !void {
-    var session = agent.AgentSession.initStub();
-    defer session.deinit(allocator);
-
-    try runWithSession(allocator, &session, registry, flags, policy, client, out_writer);
 }
 
 fn runWithSession(
@@ -429,7 +413,7 @@ fn findLine(lines: []const []const u8, needle: []const u8) ?usize {
     return null;
 }
 
-test "runWithClient: json mode emits user_text, model_text, end in order" {
+test "runWithSession: json mode emits user_text, model_text, end in order" {
     const allocator = testing.allocator;
     var reg = try buildMiniRegistry(allocator);
     defer reg.deinit(allocator);
@@ -441,12 +425,15 @@ test "runWithClient: json mode emits user_text, model_text, end in order" {
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
 
-    try runWithClient(
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(allocator);
+    try runWithSession(
         allocator,
+        &session,
         &reg,
-        client.asModelClient(),
         .{ .print = "hello", .json_mode = true, .no_session = true },
         .auto_reject,
+        client.asModelClient(),
         buf.writer(),
     );
 
@@ -469,7 +456,7 @@ test "runWithClient: json mode emits user_text, model_text, end in order" {
     try testing.expect(std.mem.indexOf(u8, lines.items[user_line], "\"v\":4") != null);
 }
 
-test "runWithClient: non-json mode writes rendered text" {
+test "runWithSession: non-json mode writes rendered text" {
     const allocator = testing.allocator;
     var reg = try buildMiniRegistry(allocator);
     defer reg.deinit(allocator);
@@ -481,12 +468,15 @@ test "runWithClient: non-json mode writes rendered text" {
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
 
-    try runWithClient(
+    var session = agent.AgentSession.initStub();
+    defer session.deinit(allocator);
+    try runWithSession(
         allocator,
+        &session,
         &reg,
-        client.asModelClient(),
         .{ .print = "hello", .json_mode = false, .no_session = true },
         .auto_reject,
+        client.asModelClient(),
         buf.writer(),
     );
 

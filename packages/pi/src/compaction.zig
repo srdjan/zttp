@@ -111,10 +111,6 @@ pub const Ready = struct {
     prefix_end: ?usize = null,
     first_kept_index: usize,
     first_kept_entry_id: transcript_mod.EntryId,
-
-    pub fn isSplitTurn(self: Ready) bool {
-        return self.prefix_start != null;
-    }
 };
 
 pub const Preparation = union(enum) {
@@ -771,7 +767,7 @@ test "prepare prefers a whole external-user turn boundary" {
     // Wide enough for the whole two-entry turn and far short of the 700-byte
     // assistant answer before it, in the request density `entryTokens` uses.
     const ready = (try prepare(testing.allocator, &tr, 30)).ready;
-    try testing.expect(!ready.isSplitTurn());
+    try testing.expect(ready.prefix_start == null);
     try testing.expectEqual(@as(usize, 2), ready.first_kept_index);
     try testing.expectEqual(@as(transcript_mod.EntryId, 3), ready.first_kept_entry_id);
 }
@@ -791,7 +787,7 @@ test "prepare splits an oversized turn only at an assistant boundary" {
     } });
     try addText(&tr, .assistant, "late answer");
     const ready = (try prepare(testing.allocator, &tr, 30)).ready;
-    try testing.expect(ready.isSplitTurn());
+    try testing.expect(ready.prefix_start != null);
     try testing.expect(ready.first_kept_index != 3);
     try testing.expect(ready.first_kept_index < tr.len());
     try testing.expect(isAssistantBoundary(tr.entries.items[ready.first_kept_index]));
@@ -804,13 +800,13 @@ test "prepare repeatedly compacts an active split-turn suffix without its user e
     try addText(&tr, .assistant, &@as([(100) * ("early ").len]u8, @bitCast(@as([100][("early ").len]u8, @splat(("early ").*)))));
     try addText(&tr, .assistant, &@as([(100) * ("middle ").len]u8, @bitCast(@as([100][("middle ").len]u8, @splat(("middle ").*)))));
     try addText(&tr, .assistant, "retained answer");
-    try tr.replaceProjection(testing.allocator, "validated prior split summary", 2);
+    try tr.replaceProjectionWithFiles(testing.allocator, "validated prior split summary", 2, &.{}, &.{});
 
     const ready = (try prepare(testing.allocator, &tr, 10)).ready;
     try testing.expectEqual(@as(usize, 1), ready.summarize_start);
     try testing.expect(ready.summarize_end > ready.summarize_start);
     try testing.expectEqual(ready.summarize_end, ready.first_kept_index);
-    try testing.expect(!ready.isSplitTurn());
+    try testing.expect(ready.prefix_start == null);
 }
 
 test "prepare protects unresolved pairs and an oversized single user ask" {
@@ -901,7 +897,7 @@ test "prepare summarizes a completed oversized tool tail instead of retaining it
     const result = try prepare(testing.allocator, &tr, 20_000);
     switch (result) {
         .ready => |ready| {
-            try testing.expect(ready.isSplitTurn());
+            try testing.expect(ready.prefix_start != null);
             try testing.expectEqual(tr.len(), ready.first_kept_index);
             try testing.expectEqual(tr.nextEntryId(), ready.first_kept_entry_id);
             try testing.expectEqual(tr.len(), ready.prefix_end.?);

@@ -1,7 +1,7 @@
 //! In-process client for the version-2 ZTS agent protocol.
 //!
 //! Request projection and response decoding are pure. Filesystem access and
-//! protocol execution stay in `invokeAtRoot` / `invokeFromCwd`, where both the
+//! protocol execution stay in `invokeAtRoot`, where both the
 //! allocator and `std.Io` backend are explicit.
 
 const std = @import("std");
@@ -66,11 +66,6 @@ pub const Envelope = struct {
 
     pub fn operation(self: *const Envelope) []const u8 {
         return self.root().get("operation").?.string;
-    }
-
-    pub fn errorCode(self: *const Envelope) ?[]const u8 {
-        const value = self.root().get("error") orelse return null;
-        return value.object.get("code").?.string;
     }
 };
 
@@ -235,16 +230,6 @@ fn invokeAtRootWithReader(
     return decodeResponse(allocator, request.operation, response.written());
 }
 
-/// Production convenience boundary: derive the workspace from cwd using the
-/// caller's I/O backend, then pass the canonical root to `invokeAtRoot`.
-pub fn invokeFromCwd(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    request: Request,
-) Outcome {
-    return invokeAtRoot(allocator, io, ".", request);
-}
-
 /// Execute one discovery/read request with the package's explicit threaded-I/O
 /// boundary and preserve the complete version-2 envelope for the model-facing
 /// tool result. Invalid transport output is an internal error, never a guessed
@@ -357,6 +342,11 @@ fn renderEnvelope(allocator: std.mem.Allocator, envelope: *const Envelope) ![]u8
 
 const testing = std.testing;
 
+fn errorCode(envelope: *const Envelope) ?[]const u8 {
+    const value = envelope.root().get("error") orelse return null;
+    return value.object.get("code").?.string;
+}
+
 test "zts agent client projects an exact version-2 request" {
     const encoded = try encodeRequest(testing.allocator, "/workspace", .{
         .operation = .check,
@@ -394,14 +384,14 @@ test "zts agent client decodes success and refusal envelopes" {
     switch (refusal) {
         .refusal => |*value| {
             try testing.expectEqual(RefusalKind.protocol_error, value.kind);
-            try testing.expectEqualStrings("identity_mismatch", value.envelope.errorCode().?);
+            try testing.expectEqualStrings("identity_mismatch", errorCode(&value.envelope).?);
         },
         else => return error.TestExpectedRefusal,
     }
 }
 
 test "zts agent client propagates stale expected identity through the real protocol" {
-    var outcome = invokeFromCwd(testing.allocator, testing.io, .{
+    var outcome = invokeAtRoot(testing.allocator, testing.io, ".", .{
         .operation = .meta,
         .input_json = "{}",
         .expected = .{ .policy_hash = "stale-policy-hash" },
@@ -411,7 +401,7 @@ test "zts agent client propagates stale expected identity through the real proto
     switch (outcome) {
         .refusal => |*refusal| {
             try testing.expectEqual(RefusalKind.protocol_error, refusal.kind);
-            try testing.expectEqualStrings("identity_mismatch", refusal.envelope.errorCode().?);
+            try testing.expectEqualStrings("identity_mismatch", errorCode(&refusal.envelope).?);
             try testing.expectEqualStrings(
                 "expected.policy_hash",
                 refusal.envelope.root().get("error").?.object.get("field").?.string,
@@ -446,7 +436,7 @@ test "zts agent client returns an out-of-root protocol refusal" {
     switch (outcome) {
         .refusal => |*refusal| {
             try testing.expectEqual(RefusalKind.protocol_error, refusal.kind);
-            try testing.expectEqualStrings("path_outside_project_root", refusal.envelope.errorCode().?);
+            try testing.expectEqualStrings("path_outside_project_root", errorCode(&refusal.envelope).?);
         },
         else => return error.TestExpectedRefusal,
     }

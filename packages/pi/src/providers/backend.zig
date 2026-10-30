@@ -148,23 +148,10 @@ pub const ProviderBackend = struct {
         }
     }
 
-    pub fn requestTimeout(self: *const ProviderBackend) ?u64 {
-        return switch (self.transport) {
-            inline else => |transport| transport.request_timeout_ms,
-        };
-    }
-
     pub fn setRequestTimeout(self: *ProviderBackend, timeout_ms: ?u64) void {
         switch (self.transport) {
             inline else => |*transport| transport.request_timeout_ms = timeout_ms,
         }
-    }
-
-    pub fn stallTimeout(self: *const ProviderBackend) ?u64 {
-        return switch (self.transport) {
-            .deepseek => |transport| transport.stall_timeout_ms,
-            .local => null,
-        };
     }
 
     pub fn setStallTimeout(self: *ProviderBackend, timeout_ms: ?u64) void {

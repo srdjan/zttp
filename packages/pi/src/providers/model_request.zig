@@ -394,7 +394,7 @@ test "snapshot uses checkpoint summary and retained suffix without mutating raw 
     try transcript.append(testing.allocator, .{ .user_text = "old request" });
     try transcript.append(testing.allocator, .{ .model_text = "old answer" });
     try transcript.append(testing.allocator, .{ .user_text = "retained request" });
-    try transcript.replaceProjection(testing.allocator, "durable summary", 3);
+    try transcript.replaceProjectionWithFiles(testing.allocator, "durable summary", 3, &.{}, &.{});
 
     var snapshot = try createSnapshot(testing.allocator, .{
         .config = .{

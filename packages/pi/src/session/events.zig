@@ -88,8 +88,7 @@ pub const SessionSummary = struct {
     /// the first verified edit. 0 when no edit was applied this session.
     round_trips_to_first_green: u32 = 0,
     /// Proof guarantees discharged on the final verified handler, over the
-    /// number tracked (see PropertiesSnapshot.guaranteeCounts). Both 0 when the
-    /// session never reached a verified edit.
+    /// number tracked. Both 0 when the session never reached a verified edit.
     proven_properties: u32 = 0,
     tracked_properties: u32 = 0,
     workflow_hint_count: u32 = 0,
@@ -592,11 +591,6 @@ fn preadExact(fd: std.c.fd_t, bytes: []u8, offset: u64) !void {
         if (rc <= 0) return error.IncompleteEventFrame;
         read_total += @intCast(rc);
     }
-}
-
-pub fn recoverIncompleteTail(allocator: std.mem.Allocator, events_path: []const u8) !void {
-    var writer = try JournalWriter.openExisting(allocator, events_path);
-    writer.deinit();
 }
 
 fn recoverTail(

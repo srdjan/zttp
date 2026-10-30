@@ -23,13 +23,6 @@ pub const max_templates: usize = 8;
 /// to ground the model, not to dump the whole trace.
 pub const max_witness_stubs: usize = 4;
 
-/// True when the deterministic repair lane is worth running on a veto failure.
-/// SQL failures have their own escalation path in the loop, and a failure with
-/// zero NEW violations carries no plans to author from.
-pub fn shouldRunLane(sql_failure: bool, new_violations: u32) bool {
-    return !sql_failure and new_violations > 0;
-}
-
 const fix_header = "COMPILER-AUTHORED FIX. The analyzer already derived these exact repairs " ++
     "for your failed draft. Apply them at the given lines and emit a new, " ++
     "complete edit:\n";
@@ -178,12 +171,6 @@ fn writeWitness(w: *std.Io.Writer, wit: std.json.ObjectMap) !void {
 }
 
 const testing = std.testing;
-
-test "shouldRunLane gates on sql failure and new violations" {
-    try testing.expect(shouldRunLane(false, 1));
-    try testing.expect(!shouldRunLane(true, 1)); // sql has its own path
-    try testing.expect(!shouldRunLane(false, 0)); // nothing new to repair
-}
 
 test "buildRetryBlock surfaces compiler templates and smallest witness" {
     const plan_json =

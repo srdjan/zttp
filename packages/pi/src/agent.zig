@@ -227,16 +227,6 @@ pub const Destination = union(enum) {
     /// Carries the value as given. The endpoint policy requires HTTPS, so this
     /// is always a remote host.
     deepseek: []const u8,
-
-    /// True when the destination is on this machine, so source never reaches a
-    /// third party. Host-form check only: it reports what the user configured,
-    /// not what DNS would resolve to.
-    pub fn isLocal(self: Destination) bool {
-        return switch (self) {
-            .offline, .local => true,
-            .deepseek => false,
-        };
-    }
 };
 
 pub fn destinationForSession(session: *const AgentSession) Destination {
@@ -2339,48 +2329,12 @@ test "committed receipt retries failed session persistence before acknowledgemen
     try testing.expectEqual(@as(usize, 0), pending.len);
 }
 
-/// All proof-guarantee booleans set to `value`. Used to exercise the metrics
-/// fold without depending on a live analyzer run.
-fn snapshotAll(value: bool) ui_payload.PropertiesSnapshot {
-    return .{
-        .pure = value,
-        .read_only = value,
-        .stateless = value,
-        .retry_safe = value,
-        .deterministic = value,
-        .has_egress = value,
-        .no_secret_leakage = value,
-        .no_credential_leakage = value,
-        .input_validated = value,
-        .pii_contained = value,
-        .idempotent = value,
-        .injection_safe = value,
-        .state_isolated = value,
-        .fault_covered = value,
-        .result_safe = value,
-        .optional_safe = value,
-        .cost_bounded = value,
-        .post_only = value,
-        .canonical = value,
-    };
-}
-
-test "guaranteeCounts excludes has_egress and counts discharged guarantees" {
-    const all_true = snapshotAll(true).guaranteeCounts();
-    try testing.expectEqual(@as(u32, 18), all_true.tracked);
-    try testing.expectEqual(@as(u32, 18), all_true.proven);
-
-    const all_false = snapshotAll(false).guaranteeCounts();
-    try testing.expectEqual(@as(u32, 18), all_false.tracked);
-    try testing.expectEqual(@as(u32, 0), all_false.proven);
-}
-
 test "SessionMetrics folds a clarifying text turn then an applied edit" {
     var m: SessionMetrics = .{};
     // Turn 1: a clarifying question - plain text, ends approved, applies no edit.
     m.record(.{ .final_state = .done, .attempt = 0, .roundtrips = 1 });
     // Turn 2: the answer drives an applied, compiler-verified edit. The veto
-    // counts the proof guarantees (snapshotAll(true) -> 18/18, see guaranteeCounts).
+    // counts the proof guarantees.
     m.record(.{
         .final_state = .done,
         .attempt = 1,
@@ -2638,7 +2592,6 @@ test "a deepseek session declares a remote destination at whatever root it uses"
     defer hosted.deinit(testing.allocator);
     const hosted_destination = destinationForSession(&hosted);
     try testing.expectEqualStrings(deepseek_client.default_base_url, hosted_destination.deepseek);
-    try testing.expect(!hosted_destination.isLocal());
 
     var gateway = try AgentSession.initDeepSeek(
         testing.allocator,
@@ -2650,7 +2603,6 @@ test "a deepseek session declares a remote destination at whatever root it uses"
     defer gateway.deinit(testing.allocator);
     const gateway_destination = destinationForSession(&gateway);
     try testing.expectEqualStrings("https://gateway.example.com/v1", gateway_destination.deepseek);
-    try testing.expect(!gateway_destination.isLocal());
 }
 
 test "setModel moves a deepseek session between registered deepseek models only" {
@@ -2880,8 +2832,8 @@ test "setModel restamps before committing the full backend state" {
         "https://restamp-gateway.example/v1",
         session.backend.provider.endpoint(),
     );
-    try testing.expectEqual(@as(?u64, 1_234), session.backend.provider.requestTimeout());
-    try testing.expectEqual(@as(?u64, 5_678), session.backend.provider.stallTimeout());
+    try testing.expectEqual(@as(?u64, 1_234), session.backend.provider.transport.deepseek.request_timeout_ms);
+    try testing.expectEqual(@as(?u64, 5_678), session.backend.provider.transport.deepseek.stall_timeout_ms);
     try testing.expect(session.backend.provider.captureSink() == &capture);
     try testing.expect(session.last_normal_anchor == null);
     try testing.expect(session.compaction_bridge_anchor == null);

@@ -20,16 +20,10 @@ const zts = @import("zts");
 const file_io = zts.file_io;
 
 pub const Options = struct {
-    /// Primary filename checked at each level before the alternate.
-    filename_primary: []const u8 = "AGENTS.md",
-    /// Secondary filename; both are read if both are present.
-    filename_alternate: []const u8 = "CLAUDE.md",
     /// Maximum bytes read from a single file. Oversized files fail closed.
     per_file_cap: usize = 64 * 1024,
     /// Hard cap on the concatenated output. Crossing it fails explicitly.
     total_cap: usize = 512 * 1024,
-    /// Stop walking (inclusive) at the nearest `.git` root, or at the starting directory when none exists.
-    stop_at_git_root: bool = true,
 };
 
 /// Loads project context from the current working directory. Thin wrapper
@@ -70,16 +64,16 @@ pub fn loadFromDir(
     const cwd_owned = try allocator.dupe(u8, cwd_abs);
     defer allocator.free(cwd_owned);
     var current: []const u8 = cwd_owned;
-    const root: ?[]const u8 = if (options.stop_at_git_root) gitRootOrStart(allocator, cwd_owned) else null;
+    const root = gitRootOrStart(allocator, cwd_owned);
 
     while (true) {
         var level_buf: LevelBuf = .{};
         errdefer level_buf.deinit(allocator);
 
-        try readIfPresent(allocator, current, options.filename_primary, options.per_file_cap, &level_buf);
-        try readIfPresent(allocator, current, options.filename_alternate, options.per_file_cap, &level_buf);
+        try readIfPresent(allocator, current, "AGENTS.md", options.per_file_cap, &level_buf);
+        try readIfPresent(allocator, current, "CLAUDE.md", options.per_file_cap, &level_buf);
 
-        const at_root = if (root) |r| std.mem.eql(u8, current, r) else false;
+        const at_root = std.mem.eql(u8, current, root);
 
         if (level_buf.files.items.len > 0) {
             try levels.append(allocator, level_buf);
@@ -241,6 +235,7 @@ test "walks upward and emits outer-first" {
     var tree = try initTmp(testing.allocator);
     defer tree.cleanup(testing.allocator);
 
+    try tree.mkdir(testing.allocator, ".git");
     try tree.writeFile(testing.allocator, "AGENTS.md", "ROOT\n");
     try tree.mkdir(testing.allocator, "sub");
     try tree.writeFile(testing.allocator, "sub/AGENTS.md", "SUB\n");
@@ -248,7 +243,7 @@ test "walks upward and emits outer-first" {
     const sub_abs = try tree.childPath(testing.allocator, "sub");
     defer testing.allocator.free(sub_abs);
 
-    const result = (try loadFromDir(testing.allocator, sub_abs, .{ .stop_at_git_root = false })) orelse return error.TestExpected;
+    const result = (try loadFromDir(testing.allocator, sub_abs, .{})) orelse return error.TestExpected;
     defer testing.allocator.free(result);
 
     const root_pos = std.mem.indexOf(u8, result, "ROOT") orelse return error.TestExpected;

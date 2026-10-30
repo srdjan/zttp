@@ -64,14 +64,6 @@ pub fn currentProperties(
     return receipt.primary_properties;
 }
 
-/// Return the binary aggregate proof id of the latest receipt touching `file`.
-pub fn lastChangeSetHash(
-    transcript: *const transcript_mod.Transcript,
-    file: []const u8,
-) ?[32]u8 {
-    return changeSetHash(latestChangeSet(transcript, file) orelse return null);
-}
-
 pub fn changeSetHash(receipt: ui_payload.VerifiedChangeSetPayload) ?[32]u8 {
     if (receipt.transaction_id.len != 64) return null;
     var digest: [32]u8 = undefined;
@@ -198,7 +190,7 @@ test "provider projection does not hide raw proof state" {
     var props = zeroProps();
     props.retry_safe = true;
     try appendChangeSet(testing.allocator, &tr, "handler.ts", null, props);
-    try tr.replaceProjection(testing.allocator, "summary", tr.nextEntryId());
+    try tr.replaceProjectionWithFiles(testing.allocator, "summary", tr.nextEntryId(), &.{}, &.{});
 
     const current = currentProperties(&tr, "handler.ts") orelse return error.TestExpectedProperties;
     try testing.expect(current.retry_safe);
@@ -235,7 +227,7 @@ test "currentProperties is scoped per file" {
     try testing.expect(!cb.pure);
 }
 
-test "lastChangeSetHash returns the most recent hash for the file" {
+test "changeSetHash of the latest receipt is the most recent hash for the file" {
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(testing.allocator);
 
@@ -247,12 +239,12 @@ test "lastChangeSetHash returns the most recent hash for the file" {
     try appendChangeSet(testing.allocator, &tr, "handler.ts", h1, zeroProps());
     try appendChangeSet(testing.allocator, &tr, "handler.ts", h2, zeroProps());
 
-    const latest = lastChangeSetHash(&tr, "handler.ts");
+    const latest = changeSetHash(latestChangeSet(&tr, "handler.ts").?);
     try testing.expect(latest != null);
     try testing.expectEqualSlices(u8, &h2, &latest.?);
 }
 
-test "lastChangeSetHash returns null for a malformed transaction identity" {
+test "changeSetHash of the latest receipt is null for a malformed transaction identity" {
     var tr: transcript_mod.Transcript = .{};
     defer tr.deinit(testing.allocator);
 
@@ -261,6 +253,6 @@ test "lastChangeSetHash returns null for a malformed transaction identity" {
     latest_props.retry_safe = true;
     try appendChangeSet(testing.allocator, &tr, "handler.ts", null, latest_props);
 
-    try testing.expect(lastChangeSetHash(&tr, "handler.ts") == null);
+    try testing.expect(changeSetHash(latestChangeSet(&tr, "handler.ts").?) == null);
     try testing.expect(currentProperties(&tr, "handler.ts").?.retry_safe);
 }

@@ -40,23 +40,6 @@ const TextBuffer = @import("text_buffer.zig").TextBuffer;
 
 pub const AutoloopVerdict = session_events.AutoloopVerdict;
 
-/// Cooperative cancel token for external drivers. The driver calls
-/// `request()` and the worker checks `requested()` at phase boundaries: top of
-/// each iteration, between plans in `applyPlans`, and between
-/// witnesses in `accumulateReplays`. There is no pre-emption inside a
-/// running compiler tool or interpreter step.
-pub const Cancel = struct {
-    flag: std.atomic.Value(bool) = .init(false),
-
-    pub fn request(self: *Cancel) void {
-        self.flag.store(true, .release);
-    }
-
-    pub fn requested(self: *const Cancel) bool {
-        return self.flag.load(.acquire);
-    }
-};
-
 pub const Budget = struct {
     max_iterations: u32 = 8,
     max_wall_time_ms: i64 = 120_000,
@@ -73,16 +56,6 @@ pub const DriveOptions = struct {
     budget: Budget = .{},
     events_path: ?[]const u8 = null,
     journal_writer: ?*session_events.JournalWriter = null,
-    /// Optional stable witness key. When set, the autoloop terminates
-    /// `.achieved` as soon as no witness with this key remains, even
-    /// if other witnesses for the same property tag are still live.
-    /// Lets the witness pane drive convergence on one specific
-    /// counterexample instead of the whole property class.
-    focus_witness_key: ?[]const u8 = null,
-    /// Optional cooperative cancel token. When `requested()` reads
-    /// true, the loop short-circuits to `.cancelled` at the next phase
-    /// boundary. Null disables cancellation.
-    cancel: ?*const Cancel = null,
 };
 
 fn appendEvent(
@@ -106,11 +79,6 @@ fn appendEntryEvent(
     return session_events.appendEntryEvent(allocator, path, entry_id, null, record);
 }
 
-inline fn cancelRequested(options: DriveOptions) bool {
-    if (options.cancel) |c| return c.requested();
-    return false;
-}
-
 pub const Outcome = struct {
     verdict: AutoloopVerdict,
     iterations: u32,
@@ -131,9 +99,6 @@ pub fn drive(
     var last_goals_met_count: u32 = countMetGoals(transcript, options.file, options.goals);
 
     while (iter < options.budget.max_iterations) : (iter += 1) {
-        if (cancelRequested(options)) {
-            return finalize(allocator, transcript, options, .cancelled, iter);
-        }
         if (tools_common.nowUnixMs() - start_ms > options.budget.max_wall_time_ms) {
             return finalize(allocator, transcript, options, .exhausted_time, iter);
         }
@@ -142,7 +107,7 @@ pub fn drive(
         defer allocator.free(check);
         const check_result = try parseGoalCheckResult(allocator, check);
         defer ui_payload.freeWitnessBodySlice(allocator, check_result.witnesses);
-        if (focusedAchieved(check_result, options.focus_witness_key)) {
+        if (check_result.ok) {
             return finalize(allocator, transcript, options, .achieved, iter);
         }
 
@@ -165,9 +130,6 @@ pub fn drive(
 
         if (apply_outcome.regression) {
             return finalize(allocator, transcript, options, .regression_blocked, iter + 1);
-        }
-        if (cancelRequested(options)) {
-            return finalize(allocator, transcript, options, .cancelled, iter + 1);
         }
 
         const current_met = countMetGoals(transcript, options.file, options.goals);
@@ -193,18 +155,6 @@ pub fn drive(
     }
 
     return finalize(allocator, transcript, options, .exhausted_iters, iter);
-}
-
-/// Convergence predicate. Without a focus key the unfiltered
-/// `pi_goal_check` verdict wins; with one, drive declares achieved iff
-/// the focused witness has been defeated, regardless of unrelated
-/// witnesses still live for the same property tag.
-fn focusedAchieved(result: GoalCheckResult, focus_key: ?[]const u8) bool {
-    const key = focus_key orelse return result.ok;
-    for (result.witnesses) |w| {
-        if (std.mem.eql(u8, w.key, key)) return false;
-    }
-    return true;
 }
 
 fn countMetGoals(
@@ -700,7 +650,6 @@ fn applyPlans(
     defer ui_payload.freeWitnessBodySlice(allocator, pre_witnesses);
 
     for (plans) |plan| {
-        if (cancelRequested(options)) return .{ .applied = applied };
         if (plan.behavioral_change) continue;
         var candidate = invokeApply(allocator, options.file, plan.raw_json) catch |err| switch (err) {
             error.InvalidToolOutput, error.ToolFailed => continue,
@@ -860,12 +809,10 @@ fn accumulateReplays(
     handler_path: []const u8,
     bodies: []const ui_payload.WitnessBody,
     budget: usize,
-    cancel: ?*const Cancel,
 ) ReplayCounts {
     var counts: ReplayCounts = .{};
     for (bodies) |body| {
         if (counts.consumed >= budget) break;
-        if (cancel) |c| if (c.requested()) break;
         counts.consumed += 1;
         const verdict_or_err = witness_replay.replay(allocator, handler_path, body);
         if (verdict_or_err) |raw| {
@@ -901,7 +848,6 @@ fn emitWitnessReplaySummary(
         handler_path,
         witnesses_defeated,
         max_witness_replays,
-        options.cancel,
     );
     const new_budget = if (max_witness_replays > defeated.consumed)
         max_witness_replays - defeated.consumed
@@ -912,7 +858,6 @@ fn emitWitnessReplaySummary(
         handler_path,
         witnesses_new,
         new_budget,
-        options.cancel,
     );
 
     const done = defeated.consumed + new_w.consumed;
@@ -1057,31 +1002,6 @@ test "drive returns .achieved when goal_check reports ok on the first iteration"
     });
 
     try testing.expectEqual(AutoloopVerdict.achieved, outcome.verdict);
-    try testing.expectEqual(@as(u32, 0), outcome.iterations);
-}
-
-test "drive returns .cancelled when the cancel token is set before the first iteration" {
-    const allocator = testing.allocator;
-    var registry: registry_mod.Registry = .{};
-    defer registry.deinit(allocator);
-
-    try registry.register(allocator, goalCheckTool(StubTool.alwaysFailingGoalCheck));
-    try registry.register(allocator, repairPlanTool(StubTool.emptyRepairPlan));
-
-    var transcript: transcript_mod.Transcript = .{};
-    defer transcript.deinit(allocator);
-
-    var cancel: Cancel = .{};
-    cancel.request();
-
-    const outcome = try drive(allocator, &registry, &transcript, .{
-        .workspace_root = ".",
-        .file = "handler.ts",
-        .goals = &.{"retry_safe"},
-        .cancel = &cancel,
-    });
-
-    try testing.expectEqual(AutoloopVerdict.cancelled, outcome.verdict);
     try testing.expectEqual(@as(u32, 0), outcome.iterations);
 }
 
@@ -1565,68 +1485,4 @@ test "diffWitnessKeys returns empty slice when a is empty" {
     const diff = try diffWitnessKeys(allocator, a, b);
     defer allocator.free(diff);
     try testing.expectEqual(@as(usize, 0), diff.len);
-}
-
-test "focusedAchieved without focus key defers to result.ok" {
-    const result_ok: GoalCheckResult = .{ .ok = true, .witnesses = &.{} };
-    const result_unmet: GoalCheckResult = .{ .ok = false, .witnesses = &.{} };
-    try testing.expect(focusedAchieved(result_ok, null));
-    try testing.expect(!focusedAchieved(result_unmet, null));
-}
-
-test "focusedAchieved returns true when focused witness is gone, even if others remain" {
-    const others = [_]ui_payload.WitnessBody{
-        .{
-            .key = @constCast(&@as([(32) * ("cc").len]u8, @bitCast(@as([32][("cc").len]u8, @splat(("cc").*))))),
-            .property = @constCast("no_secret_leakage"),
-            .summary = @constCast(""),
-            .origin_line = 1,
-            .origin_column = 1,
-            .sink_line = 1,
-            .sink_column = 1,
-            .request_method = @constCast("GET"),
-            .request_url = @constCast("/"),
-            .request_has_auth = false,
-            .request_body = null,
-            .io_stubs = &.{},
-        },
-    };
-    const result: GoalCheckResult = .{ .ok = false, .witnesses = @constCast(&others) };
-    try testing.expect(focusedAchieved(result, &@as([(32) * ("aa").len]u8, @bitCast(@as([32][("aa").len]u8, @splat(("aa").*))))));
-}
-
-test "focusedAchieved returns false when focused witness is still live" {
-    const live = [_]ui_payload.WitnessBody{
-        .{
-            .key = @constCast(&@as([(32) * ("aa").len]u8, @bitCast(@as([32][("aa").len]u8, @splat(("aa").*))))),
-            .property = @constCast("no_secret_leakage"),
-            .summary = @constCast(""),
-            .origin_line = 1,
-            .origin_column = 1,
-            .sink_line = 1,
-            .sink_column = 1,
-            .request_method = @constCast("GET"),
-            .request_url = @constCast("/"),
-            .request_has_auth = false,
-            .request_body = null,
-            .io_stubs = &.{},
-        },
-        .{
-            .key = @constCast(&@as([(32) * ("bb").len]u8, @bitCast(@as([32][("bb").len]u8, @splat(("bb").*))))),
-            .property = @constCast("injection_safe"),
-            .summary = @constCast(""),
-            .origin_line = 1,
-            .origin_column = 1,
-            .sink_line = 1,
-            .sink_column = 1,
-            .request_method = @constCast("POST"),
-            .request_url = @constCast("/"),
-            .request_has_auth = false,
-            .request_body = null,
-            .io_stubs = &.{},
-        },
-    };
-    const result: GoalCheckResult = .{ .ok = false, .witnesses = @constCast(&live) };
-    try testing.expect(!focusedAchieved(result, &@as([(32) * ("aa").len]u8, @bitCast(@as([32][("aa").len]u8, @splat(("aa").*))))));
-    try testing.expect(!focusedAchieved(result, &@as([(32) * ("bb").len]u8, @bitCast(@as([32][("bb").len]u8, @splat(("bb").*))))));
 }

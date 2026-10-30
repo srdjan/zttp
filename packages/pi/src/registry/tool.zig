@@ -195,7 +195,6 @@ pub fn singleArg(allocator: std.mem.Allocator, value: []const u8) ![]const []con
 /// so every layer can import it without a cycle) and re-exported here because
 /// the tools reach it as `registry.helpers.TextBuffer`.
 pub const TextBuffer = text_buffer.TextBuffer;
-pub const renderAlloc = text_buffer.renderAlloc;
 
 pub fn decodeNoArgs(
     allocator: std.mem.Allocator,
