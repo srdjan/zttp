@@ -5479,7 +5479,7 @@ const Harness = struct {
         h.allocator = allocator;
         h.atoms = atom_table.AtomTable.init(allocator);
         errdefer h.atoms.deinit();
-        h.parser = try JsParser.init(allocator, source);
+        h.parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
         errdefer h.parser.deinit();
         h.parser.setAtomTable(&h.atoms);
         _ = try h.parser.parse();
