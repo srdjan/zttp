@@ -66,7 +66,7 @@ fn parseSourceForTest(allocator: std.mem.Allocator, source: []const u8) !struct 
     js_parser: JsParser,
     root: NodeIndex,
 } {
-    var js_parser = try JsParser.init(allocator, source);
+    var js_parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     errdefer js_parser.deinit();
     const root = try js_parser.parse();
     return .{ .js_parser = js_parser, .root = root };
@@ -168,7 +168,7 @@ fn extractSessionContractForTest(
 ) !ContractExtraction {
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -411,10 +411,10 @@ test "ModuleAnalysisSession freezes imported summaries for paths and contracts" 
     const allocator = testing.allocator;
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator,
+    var parser = try JsParser.initAdmission(allocator, allocator,
         \\import { run } from "./helper.ts";
         \\function handler(req) { run(); return Response.text("ok"); }
-    );
+    , .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -570,7 +570,7 @@ test "ModuleAnalysisSession publishes owned exports for both extraction profiles
     ;
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -830,7 +830,7 @@ test "late export capture failure releases a transferred rate limit namespace" {
     ;
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -1180,7 +1180,7 @@ test "ModuleAnalysisSession keeps resolution and contract facts distinct" {
     ;
     var atoms = AtomTable.init(allocator);
     defer atoms.deinit();
-    var js_parser = try JsParser.init(allocator, source);
+    var js_parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
     const root = try js_parser.parse();
@@ -1412,7 +1412,7 @@ test "pipeline.resolve flags pointless object truthy condition" {
     // Mirror bool_checker.zig:2258 — object literal in `if` is always truthy.
     const source: []const u8 = "if ({}) { let x = 1; }";
 
-    var js_parser = try JsParser.init(allocator, source);
+    var js_parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     defer js_parser.deinit();
     const root = try js_parser.parse();
     const ir_view = IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
@@ -1884,7 +1884,7 @@ test "with no injected index each analyzer still builds its own" {
 /// leaks nothing, and a sweep can only assert that against one function that
 /// owns the whole sequence.
 fn runCompilePhasesForTest(allocator: std.mem.Allocator, source: []const u8) !void {
-    var js_parser = try JsParser.init(allocator, source);
+    var js_parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     defer js_parser.deinit();
     const root = try js_parser.parse();
 
