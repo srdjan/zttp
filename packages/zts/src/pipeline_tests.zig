@@ -53,7 +53,6 @@ const ModuleSourceTypeInput = pipeline_mod.ModuleSourceTypeInput;
 const EffectFacts = pipeline_mod.EffectFacts;
 const extractPreparedEvalContract = pipeline_mod.extractPreparedEvalContract;
 const projectFlowProperties = pipeline_mod.projectFlowProperties;
-const FlowWithoutHandler = pipeline_mod.FlowWithoutHandler;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -1083,7 +1082,7 @@ test "ModuleAnalysisSession extraction runs the selected flow pass once" {
         return error.HandlerNotFound;
 
     var session: ModuleAnalysisSession = .{};
-    try session.initContractOnly(allocator, parsed, .{ .select_flow = true });
+    try session.initSoundExtraction(allocator, parsed, .{ .strict = false, .flow = true });
     defer session.deinit();
     try session.complete();
     var contract = try session.extractContract("flow-after.ts");
@@ -3741,23 +3740,21 @@ test "flow projection preserves independent determinism and retry constraints" {
     try testing.expect(!contract.properties.?.idempotent);
 }
 
-test "ModuleAnalysisSession leaves the flow properties unproven under both rules for a module with no handler" {
+test "ModuleAnalysisSession leaves the flow properties unproven for a module with no handler" {
     const allocator = testing.allocator;
-    inline for (.{ FlowWithoutHandler.keep_defaults, FlowWithoutHandler.unproven }) |rule| {
-        var parsed_state = try parseSourceForTest(allocator, "const value = 1;\n");
-        defer parsed_state.js_parser.deinit();
-        const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
-        const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+    var parsed_state = try parseSourceForTest(allocator, "const value = 1;\n");
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
 
-        var session: ModuleAnalysisSession = .{};
-        try session.initSoundExtraction(allocator, parsed, .{ .strict = false, .flow = rule });
-        defer session.deinit();
-        try session.complete();
-        var contract = try session.extractContract("no-handler.ts");
-        defer contract.deinit(allocator);
-        const properties = contract.properties orelse return error.PropertiesMissing;
-        try testing.expectEqual(false, properties.no_secret_leakage);
-        try testing.expectEqual(false, properties.injection_safe);
-        try testing.expect(!properties.deterministic);
-    }
+    var session: ModuleAnalysisSession = .{};
+    try session.initSoundExtraction(allocator, parsed, .{ .strict = false, .flow = true });
+    defer session.deinit();
+    try session.complete();
+    var contract = try session.extractContract("no-handler.ts");
+    defer contract.deinit(allocator);
+    const properties = contract.properties orelse return error.PropertiesMissing;
+    try testing.expectEqual(false, properties.no_secret_leakage);
+    try testing.expectEqual(false, properties.injection_safe);
+    try testing.expect(!properties.deterministic);
 }

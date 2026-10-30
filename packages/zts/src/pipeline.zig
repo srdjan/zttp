@@ -608,14 +608,6 @@ pub const TypeEnvStorage = struct {
 // One-shot contract extraction
 // ---------------------------------------------------------------------------
 
-/// What a selected flow pass projects onto a contract for a module with no handler function.
-pub const FlowWithoutHandler = enum {
-    /// Leave the builder defaults untouched.
-    keep_defaults,
-    /// Mark every flow property unproven.
-    unproven,
-};
-
 pub const ContractTypeCheckFn = *const fn (*TypeChecker, NodeIndex) anyerror!u32;
 
 pub const ExtractContractOptions = struct {
@@ -638,8 +630,8 @@ pub const ExtractContractOptions = struct {
     /// Return an owned export table beside the contract.
     capture_export_effects: bool = false,
     /// Select the flow pass for `.sound_extraction`: `extractContract` runs it and applies
-    /// the result to the contract. Null leaves the contract on the builder defaults.
-    flow: ?FlowWithoutHandler = null,
+    /// the result to the contract.
+    flow: bool = false,
 };
 
 pub const ModuleSourceTypeInput = union(type_env_mod.SourceTypeMode) {
@@ -736,15 +728,10 @@ pub const ModuleAnalysisSession = struct {
         policy_sections: guard_catalog.SectionSet = .{},
         select_verifier: bool = false,
         select_flow: bool = false,
-        flow_without_handler: FlowWithoutHandler = .keep_defaults,
     };
 
     pub const ContractOnlyOptions = struct {
         extraction: ExtractContractOptions = .{},
-        /// The policy's `env.public` names, borrowed through the session.
-        env_public: []const []const u8 = &.{},
-        select_flow: bool = false,
-        flow_without_handler: FlowWithoutHandler = .keep_defaults,
     };
 
     pub const ContractContext = struct {
@@ -783,7 +770,6 @@ pub const ModuleAnalysisSession = struct {
     contract_type_state: PassState = .skipped,
     verifier_state: PassState = .skipped,
     flow_state: PassState = .skipped,
-    flow_without_handler: FlowWithoutHandler = .keep_defaults,
     flow_error_count: u32 = 0,
     extraction_state: PassState = .skipped,
 
@@ -810,7 +796,6 @@ pub const ModuleAnalysisSession = struct {
             .contract_type_state = .ready,
             .verifier_state = if (opts.select_verifier) .ready else .skipped,
             .flow_state = if (opts.select_flow) .ready else .skipped,
-            .flow_without_handler = opts.flow_without_handler,
             .extraction_state = .ready,
         };
     }
@@ -827,14 +812,12 @@ pub const ModuleAnalysisSession = struct {
             .parsed = parsed,
             .profile = .contract_only,
             .extraction_opts = opts.extraction,
-            .env_public = opts.env_public,
             .source_types = .omitted,
             .contract_context = contextFromExtractOptions(opts.extraction),
             .state = .ready,
             .contract_type_state = .ready,
             .verifier_state = .skipped,
-            .flow_state = if (opts.select_flow) .ready else .skipped,
-            .flow_without_handler = opts.flow_without_handler,
+            .flow_state = .skipped,
             .extraction_state = .ready,
         };
     }
@@ -858,8 +841,7 @@ pub const ModuleAnalysisSession = struct {
             .resolution_state = .ready,
             .contract_type_state = .ready,
             .verifier_state = .skipped,
-            .flow_state = if (opts.flow != null) .ready else .skipped,
-            .flow_without_handler = opts.flow orelse .keep_defaults,
+            .flow_state = if (opts.flow) .ready else .skipped,
             .extraction_state = .ready,
         };
     }
@@ -1088,7 +1070,7 @@ pub const ModuleAnalysisSession = struct {
     }
 
     /// Apply the selected flow pass to the contract, running it first when it has not run.
-    /// A module with no handler function takes the `flow_without_handler` rule.
+    /// A module with no handler function keeps the builder defaults.
     fn applyFlow(self: *ModuleAnalysisSession, contract: *HandlerContract) !void {
         switch (self.flow_state) {
             .skipped => return,
@@ -1098,20 +1080,7 @@ pub const ModuleAnalysisSession = struct {
         const handler = handler_function_mod.findHandlerFunction(
             self.parsed.ir_view,
             self.parsed.root,
-        ) orelse {
-            switch (self.flow_without_handler) {
-                .keep_defaults => {},
-                .unproven => projectFlowProperties(contract, .{
-                    .no_secret_leakage = false,
-                    .no_credential_leakage = false,
-                    .input_validated = false,
-                    .pii_contained = false,
-                    .injection_safe = false,
-                    .deterministic = false,
-                }),
-            }
-            return;
-        };
+        ) orelse return;
         if (self.flow_state == .ready) _ = try self.runFlow(handler);
         projectFlowProperties(contract, (try self.completedFlow()).getProperties());
     }
@@ -1450,7 +1419,7 @@ pub fn extractContract(
     }
 
     var single_module_opts = contract_opts;
-    single_module_opts.flow = .unproven;
+    single_module_opts.flow = true;
     var analysis: ModuleAnalysisSession = .{};
     try analysis.initSoundExtraction(allocator, parsed, single_module_opts);
     defer analysis.deinit();
@@ -1490,7 +1459,7 @@ pub fn extractPreparedEvalContract(
         return extractMultiModuleContractWithEntry(allocator, source, filename, reader, &atoms, options, true);
     }
     var single_module_opts = options;
-    single_module_opts.flow = .unproven;
+    single_module_opts.flow = true;
     var analysis: ModuleAnalysisSession = .{};
     try analysis.initSoundExtraction(allocator, parsed, single_module_opts);
     defer analysis.deinit();
@@ -1515,7 +1484,7 @@ fn extractVirtualContract(allocator: std.mem.Allocator, source: []const u8, file
         return extractMultiModuleContract(allocator, source, filename, read_file, &atoms, opts);
     }
     var single_module_opts = opts;
-    single_module_opts.flow = .unproven;
+    single_module_opts.flow = true;
     var analysis: ModuleAnalysisSession = .{};
     try analysis.initSoundExtraction(allocator, parsed, single_module_opts);
     defer analysis.deinit();
@@ -1607,7 +1576,7 @@ fn extractMultiModuleContractWithEntry(
         }
         module_opts.read_file = null;
         module_opts.capture_export_effects = true;
-        module_opts.flow = null;
+        module_opts.flow = false;
         if (!is_entry) {
             module_opts.dispatch = null;
             module_opts.has_default_response = false;

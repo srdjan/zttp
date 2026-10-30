@@ -164,49 +164,6 @@ pub fn validateContractPolicyInputs(
     if (policy != null and !builtin.is_test) debugPrint("Capability policy check passed\n", .{});
 }
 
-fn buildContractOnlyFromParsed(
-    allocator: std.mem.Allocator,
-    parsed: zts.pipeline.ParsedModule,
-    filename: []const u8,
-    sql_schema_path: ?[]const u8,
-    manifest_registry: ?*const zts.ManifestRegistry,
-) !HandlerContract {
-    // This path has no policy, so `env_public` stays empty and every literal
-    // `env` name is secret: the verdict is conservative, never optimistic.
-    var analysis: zts.pipeline.ModuleAnalysisSession = .{};
-    try analysis.initContractOnly(
-        allocator,
-        parsed,
-        .{
-            .extraction = .{ .manifest_registry = manifest_registry },
-            .select_flow = true,
-        },
-    );
-    defer analysis.deinit();
-    try analysis.complete();
-
-    var contract = try extractContractFromAnalysis(
-        &analysis,
-        filename,
-        .{},
-    );
-    errdefer contract.deinit(allocator);
-
-    // `extractContract` ran the flow pass and applied it to the contract.
-    if (findHandlerFunction(parsed.ir_view, parsed.root) != null) {
-        try reportCompletedFlow(
-            allocator,
-            try analysis.completedFlow(),
-            analysis.flowErrorCount(),
-            true,
-            null,
-            parsed.ir_view,
-        );
-    }
-    try validateContractPolicyInputs(allocator, filename, &contract, sql_schema_path, null);
-    return contract;
-}
-
 pub fn buildMultiModuleContract(
     allocator: std.mem.Allocator,
     graph: *const zts.modules.ModuleGraph,
@@ -395,13 +352,31 @@ fn buildTestContractForSource(
 
     const root = try js_parser.parse();
     const view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    return buildContractOnlyFromParsed(
-        allocator,
-        zts.pipeline.ParsedModule.fromExisting(view, root, &atoms),
-        filename,
-        sql_schema_path,
-        null,
-    );
+    const parsed = zts.pipeline.ParsedModule.fromExisting(view, root, &atoms);
+
+    // This path has no policy, so `env_public` stays empty and every literal
+    // `env` name is secret: the verdict is conservative, never optimistic.
+    var analysis: zts.pipeline.ModuleAnalysisSession = .{};
+    try analysis.initSoundExtraction(allocator, parsed, .{ .strict = false, .flow = true });
+    defer analysis.deinit();
+    try analysis.complete();
+
+    var contract = try analysis.extractContract(filename);
+    errdefer contract.deinit(allocator);
+
+    // `extractContract` ran the flow pass and applied it to the contract.
+    if (findHandlerFunction(parsed.ir_view, parsed.root) != null) {
+        try reportCompletedFlow(
+            allocator,
+            try analysis.completedFlow(),
+            analysis.flowErrorCount(),
+            true,
+            null,
+            parsed.ir_view,
+        );
+    }
+    try validateContractPolicyInputs(allocator, filename, &contract, sql_schema_path, null);
+    return contract;
 }
 
 fn failContractTypeCheck(_: *zts.TypeChecker, _: ir.NodeIndex) anyerror!u32 {
@@ -731,12 +706,19 @@ test "contract-only extraction without source types preserves verifier propertie
         \\}
     ;
 
-    var contract = try buildTestContractForSource(
-        allocator,
-        source,
-        "shared-analysis-contract-only.js",
-        null,
-    );
+    var atoms = zts.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var js_parser = try zts.parser.JsParser.init(allocator, source);
+    defer js_parser.deinit();
+    js_parser.setAtomTable(&atoms);
+    const root = try js_parser.parse();
+    const view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+
+    var analysis: zts.pipeline.ModuleAnalysisSession = .{};
+    try analysis.initContractOnly(allocator, zts.pipeline.ParsedModule.fromExisting(view, root, &atoms), .{});
+    defer analysis.deinit();
+    try analysis.complete();
+    var contract = try analysis.extractContract("shared-analysis-contract-only.js");
     defer contract.deinit(allocator);
 
     const props = contract.properties orelse return error.MissingProperties;

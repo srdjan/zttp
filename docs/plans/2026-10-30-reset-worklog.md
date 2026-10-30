@@ -55,3 +55,26 @@ Observed defect rows, with `zts check` at exit 1 for each:
 Appendix B classification: 163 sites are in `test` blocks and 51 are in other functions. Phase 3 classifies the 51 by reading. The production feeders are `run` in `zts_expert_effects.zig`, the load path in `handler_instance.zig`, `renderParseRefusal`, `collectImports`, `runCheckOnParsedSource`, `runGenTests`, `compileHandler`, `compile` and `compileWithOptions`, `extractVirtualContract`, and the parse in `module_graph.zig`.
 
 The advisory `bench-check` did not run. It cannot fail this phase.
+
+## Phase 1
+
+Status: complete at `7e740d75`. Units 1a and 1b are `964d8e9e` and `7e740d75`. `test-doc-links`, `test-docs-drift`, `check-spine`, and `zig build test` each exited 0.
+The roadmap section "Reset And Simplification" became a short list. It dropped run measurements and owner quotes that remain only in the tagged worklogs: test counts, "all 13 named checks", and the 186-line growth figure.
+
+## Phase 2
+
+Units 2a and 2b ran in worktrees cut from local `main` at `7e740d75`. Each unit passed its gates on `main` after the cherry-pick: protection check, build, `digest.sh`, each named step, `zig build test`, and `check-spine`.
+
+Unit 2b: `e62a6b28` and `0ed9420f`. 16 of 17 rows are deleted, plus the Appendix A2 items for `autoloop.zig`, `DynamicHeaderOrder`, `ReplayKind`, `TurnEvent.user_approved`, and `project_context.Options`.
+Ruling: `setProviderStallTimeout` stays, because `expert_codegen_record.zig` calls it in the recorder path. The census missed that use because the recorder runs inside a gated `test` block, which the census removes.
+Ruling: `session_events.AutoloopVerdict.cancelled` stays, because stored journals can carry it.
+Ruling: the `zruntime_tests.zig` cached-teardown fixture gains one trivial `handler` function, because its only entry point, `loadCodeWithCachingNoHandler`, is gone. Its assertions do not change.
+
+Unit 2a: `8d9bb6ff` and `fbcccd73`. 18 of 22 rows are deleted. The analyzer and tools commits are squashed into `fbcccd73`, because the analyzer commit alone did not build `tools`.
+Ruling: four rows stay as test lookups, because moving each into its tests adds code and removes no production path: `findType`, `findByFeature`, `knownValue`, and `planApplicationBases`.
+`result_globals` has one list in `handler_verifier.zig`. The test in `proof_ir.zig` still compares that list with the registry count.
+
+Unit 2c: the helper `expectFunctionSliceRuntimeParity` is now `expectParsedStoreValid`, and its 61 call sites follow. `buildContractOnlyFromParsed` and `FlowWithoutHandler` are gone.
+10 of the 11 callers of `buildTestContractForSource` reach `initSoundExtraction` with `.strict = false`, and no expected value moved. The default `strict` mode refuses their fixtures.
+Ruling: the eleventh caller, "contract-only extraction without source types preserves verifier properties", calls `initContractOnly` directly, because its source holds `if (5)`, which sound extraction refuses. `buildMultiModuleContract` uses that same profile in production.
+Opus also removed `ContractOnlyOptions.select_flow` and `env_public`, which had no production reader. The one test that set them moved to `initSoundExtraction`, with no change to its assertions.

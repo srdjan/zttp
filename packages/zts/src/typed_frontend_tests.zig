@@ -665,29 +665,19 @@ fn expectSeedAnnotationLowersToNumber(parser: *const JsParser) !void {
     try std.testing.expectEqual(TypeTag.t_number, pool.getTag(number).?);
 }
 
-fn expectFunctionSliceRuntimeParity(
-    runtime_allocator: std.mem.Allocator,
+fn expectParsedStoreValid(
     source: []const u8,
     direct: *const JsParser,
     direct_root: NodeIndex,
-    direct_atoms: *AtomTable,
 ) !void {
-    _ = runtime_allocator;
-    _ = direct_atoms;
     try std.testing.expectEqualStrings(source, direct.type_store.source);
     try std.testing.expect(parserIrView(direct).getTag(direct_root) != null);
     try direct.type_store.validate();
     try direct.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(direct));
 }
 
-fn expectRuntimeParityAndShape(
-    source: []const u8,
-    direct: *const JsParser,
-    direct_root: NodeIndex,
-    direct_atoms: *AtomTable,
-    direct_alloc: CountingAllocator,
-) !void {
-    try expectFunctionSliceRuntimeParity(std.testing.allocator, source, direct, direct_root, direct_atoms);
+fn expectParsedStoreValidWithAllocations(source: []const u8, direct: *const JsParser, direct_root: NodeIndex, direct_alloc: CountingAllocator) !void {
+    try expectParsedStoreValid(source, direct, direct_root);
     try std.testing.expect(direct_alloc.alloc_calls > 0);
 }
 
@@ -733,13 +723,7 @@ fn runProjectedPrefixTypeAllocationSweep(
         else => return err,
     };
 
-    try expectRuntimeParityAndShape(
-        source,
-        &parser,
-        root,
-        &atoms,
-        runtime_count,
-    );
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
     try parser.type_store.validateRuntimeOwners(
         std.testing.allocator,
         parserIrView(&parser),
@@ -792,13 +776,7 @@ fn runObjectPrefixTypeAllocationSweep(
         else => return err,
     };
 
-    try expectRuntimeParityAndShape(
-        source,
-        &parser,
-        root,
-        &atoms,
-        runtime_count,
-    );
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
     try parser.type_store.validateRuntimeOwners(
         std.testing.allocator,
         parserIrView(&parser),
@@ -820,7 +798,7 @@ fn expectFirstTypeOnlyModuleEquivalent(source: []const u8) !void {
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
 
-    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_alloc);
+    try expectParsedStoreValidWithAllocations(source, &direct, direct_root, direct_alloc);
 
     try std.testing.expectEqual(@as(usize, 1), direct.type_store.type_only_modules.items.len);
     const module = direct.type_store.type_only_modules.items[0];
@@ -905,7 +883,7 @@ fn expectTypeOnlyModuleCaseRejectedAt(
 
     try std.testing.expectEqual(expect_runtime_success, direct_root != null);
     if (expect_runtime_success) {
-        try expectRuntimeParityAndShape(source, &direct, direct_root.?, &direct_atoms, direct_alloc);
+        try expectParsedStoreValidWithAllocations(source, &direct, direct_root.?, direct_alloc);
     } else {
         try std.testing.expect(direct_error != null);
         try std.testing.expect(direct.errors.getErrors().len > 0);
@@ -995,7 +973,7 @@ fn runCleanModuleTypeAllocationSweep(
         else => return err,
     };
 
-    try expectFunctionSliceRuntimeParity(std.testing.allocator, source, &parser, root, &atoms);
+    try expectParsedStoreValid(source, &parser, root);
     try std.testing.expectEqual(@as(usize, 2), parser.type_store.type_only_modules.items.len);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&parser));
 }
@@ -1048,13 +1026,7 @@ fn expectFirstFunctionSliceEquivalent(source: []const u8) !void {
     direct.setAtomTable(&direct_atoms);
 
     const direct_root = try direct.parse();
-    try expectFunctionSliceRuntimeParity(
-        std.testing.allocator,
-        source,
-        &direct,
-        direct_root,
-        &direct_atoms,
-    );
+    try expectParsedStoreValid(source, &direct, direct_root);
     try expectFirstFunctionSliceRecords(&direct, source);
     try expectFirstFunctionSliceLowering(&direct);
 }
@@ -1245,7 +1217,7 @@ fn runHeaderTypeAllocation(
         return err;
     };
 
-    try expectFunctionSliceRuntimeParity(std.testing.allocator, source, &parser, root, &atoms);
+    try expectParsedStoreValid(source, &parser, root);
     const view = parserIrView(&parser);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
     try std.testing.expect(parser.type_store.nodes.items.len > 0);
@@ -1336,7 +1308,7 @@ fn runGenericArrowTypeAllocation(
     };
 
     observations.successes += 1;
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&parser));
     try std.testing.expect(parser.type_store.nodes.items.len > 0);
     try expectSeedAnnotationLowersToNumber(&parser);
@@ -1417,7 +1389,7 @@ fn runNamedFunctionCommentTypeAllocation(
     };
 
     observations.successes += 1;
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&parser));
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
     try std.testing.expectEqual(@as(usize, 0), parser.type_store.function_signatures.items.len);
@@ -1466,13 +1438,7 @@ test "first erased object prefix preserves runtime and exact ownership" {
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
 
-    try expectRuntimeParityAndShape(
-        source,
-        &parser,
-        root,
-        &atoms,
-        runtime_count,
-    );
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
 
     const view = parserIrView(&parser);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
@@ -1692,13 +1658,7 @@ test "erased prefix matrix preserves runtime ownership and projection order" {
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
 
-        try expectRuntimeParityAndShape(
-            case.source,
-            &parser,
-            root,
-            &atoms,
-            runtime_count,
-        );
+        try expectParsedStoreValidWithAllocations(case.source, &parser, root, runtime_count);
         try expectDirectAccepted(case.source);
 
         const view = parserIrView(&parser);
@@ -1807,13 +1767,7 @@ test "spaced erased prefixes preserve assignment and general captures" {
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
-        try expectRuntimeParityAndShape(
-            case.source,
-            &parser,
-            root,
-            &atoms,
-            runtime_count,
-        );
+        try expectParsedStoreValidWithAllocations(case.source, &parser, root, runtime_count);
 
         const view = parserIrView(&parser);
         try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
@@ -2045,7 +1999,7 @@ test "prefix projections merge with callable generic parameters in source order"
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
 
     const view = parserIrView(&parser);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
@@ -2143,13 +2097,7 @@ test "recovered erased block removes nested syntax and retains progress" {
     defer control.deinit();
     control.setAtomTable(&control_atoms);
     const control_root = try control.parse();
-    try expectRuntimeParityAndShape(
-        control_source,
-        &control,
-        control_root,
-        &control_atoms,
-        runtime_count,
-    );
+    try expectParsedStoreValidWithAllocations(control_source, &control, control_root, runtime_count);
     try std.testing.expectEqual(@as(usize, 1), control.type_store.erased_type_prefixes.items.len);
     try control.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&control));
 
@@ -2214,7 +2162,7 @@ test "erased prefix relationships reject invalid intervals and owner swaps" {
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
-        try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+        try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
         const view = parserIrView(&parser);
         try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
         const prefixes = parser.type_store.erased_type_prefixes.items;
@@ -2255,7 +2203,7 @@ test "erased prefix relationships reject invalid intervals and owner swaps" {
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
-        try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+        try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
         const view = parserIrView(&parser);
         try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
         const prefixes = parser.type_store.erased_type_prefixes.items;
@@ -2627,7 +2575,7 @@ test "type-only module scanner leaves the comment semicolon survivor location ex
     );
 }
 
-test "type-only module matrix preserves template spill runtime parity" {
+test "type-only module matrix preserves template spill runtime validity" {
     var source: std.ArrayListUnmanaged(u8) = .empty;
     defer source.deinit(std.testing.allocator);
     try source.appendSlice(std.testing.allocator, "import type ");
@@ -2709,13 +2657,7 @@ test "typed predicate arrow owns its exact header syntax" {
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
 
-    try expectFunctionSliceRuntimeParity(
-        std.testing.allocator,
-        source,
-        &parser,
-        root,
-        &atoms,
-    );
+    try expectParsedStoreValid(source, &parser, root);
 
     const view = parserIrView(&parser);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
@@ -2806,7 +2748,7 @@ test "predicate arrows retain the first repeated parameter as target" {
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectFunctionSliceRuntimeParity(std.testing.allocator, source, &parser, root, &atoms);
+    try expectParsedStoreValid(source, &parser, root);
 
     const view = parserIrView(&parser);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
@@ -2840,7 +2782,7 @@ test "ordinary typed arrow owns parameter and return roots" {
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectFunctionSliceRuntimeParity(std.testing.allocator, source, &parser, root, &atoms);
+    try expectParsedStoreValid(source, &parser, root);
 
     const view = parserIrView(&parser);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
@@ -2919,13 +2861,7 @@ test "named and arrow returns retain predicate facets" {
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
-        try expectFunctionSliceRuntimeParity(
-            std.testing.allocator,
-            case.source,
-            &parser,
-            root,
-            &atoms,
-        );
+        try expectParsedStoreValid(case.source, &parser, root);
 
         const view = parserIrView(&parser);
         try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
@@ -3017,13 +2953,7 @@ test "ordinary predicates parse whole grammar compatibility roots" {
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
-        try expectFunctionSliceRuntimeParity(
-            std.testing.allocator,
-            case.source,
-            &parser,
-            root,
-            &atoms,
-        );
+        try expectParsedStoreValid(case.source, &parser, root);
 
         const view = parserIrView(&parser);
         try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
@@ -3088,13 +3018,7 @@ test "empty predicate narrowing retains the untrimmed whitespace tail" {
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
-        try expectFunctionSliceRuntimeParity(
-            std.testing.allocator,
-            case.source,
-            &parser,
-            root,
-            &atoms,
-        );
+        try expectParsedStoreValid(case.source, &parser, root);
 
         const view = parserIrView(&parser);
         try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
@@ -3145,7 +3069,7 @@ test "nested return function type selects the outer arrow" {
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectFunctionSliceRuntimeParity(std.testing.allocator, source, &parser, root, &atoms);
+    try expectParsedStoreValid(source, &parser, root);
 
     const view = parserIrView(&parser);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
@@ -3177,7 +3101,7 @@ test "arrow lookahead keeps grouped controls outside signatures" {
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
-        try expectFunctionSliceRuntimeParity(std.testing.allocator, source, &parser, root, &atoms);
+        try expectParsedStoreValid(source, &parser, root);
         try std.testing.expectEqual(@as(usize, 0), parser.type_store.function_signatures.items.len);
         try std.testing.expectEqual(@as(usize, 0), parser.type_store.parameter_annotations.items.len);
     }
@@ -3211,7 +3135,7 @@ test "predicate target validation rejects external runtime identity" {
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectFunctionSliceRuntimeParity(std.testing.allocator, source, &parser, root, &atoms);
+    try expectParsedStoreValid(source, &parser, root);
 
     const view = parserIrView(&parser);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
@@ -3265,7 +3189,7 @@ test "predicate compatibility range cannot own narrowing nodes" {
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectFunctionSliceRuntimeParity(std.testing.allocator, source, &parser, root, &atoms);
+    try expectParsedStoreValid(source, &parser, root);
 
     const view = parserIrView(&parser);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
@@ -3381,13 +3305,7 @@ test "nested function signatures publish in header order" {
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectFunctionSliceRuntimeParity(
-        std.testing.allocator,
-        source,
-        &parser,
-        root,
-        &atoms,
-    );
+    try expectParsedStoreValid(source, &parser, root);
     const view = engine.parser.IrView.fromIRStore(&parser.nodes, &parser.constants);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
     try std.testing.expectEqual(@as(usize, 2), parser.type_store.function_signatures.items.len);
@@ -3565,13 +3483,7 @@ test "function signature type allocation failures preserve published seed syntax
                 }
                 return err;
             };
-            try expectFunctionSliceRuntimeParity(
-                std.testing.allocator,
-                source,
-                &parser,
-                root,
-                &atoms,
-            );
+            try expectParsedStoreValid(source, &parser, root);
             try expectFirstFunctionSliceRecords(&parser, source);
             try expectFirstFunctionSliceLowering(&parser);
             try std.testing.expect(parser.type_store.nodes.items.len > 0);
@@ -5073,7 +4985,7 @@ test "generic-only function and explicit call use final runtime owners" {
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectFunctionSliceRuntimeParity(std.testing.allocator, source, &parser, root, &atoms);
+    try expectParsedStoreValid(source, &parser, root);
 
     try parser.type_store.validate();
     const view = parserIrView(&parser);
@@ -5170,7 +5082,7 @@ fn expectNamedFunctionCommentCompatibility(case: NamedFunctionCommentCase) !void
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
 
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
 
     const store = &parser.type_store;
     const view = parserIrView(&parser);
@@ -5719,7 +5631,7 @@ test "nominal generic type allocation failures restore the published seed" {
                 else => return err,
             };
 
-            try expectFunctionSliceRuntimeParity(std.testing.allocator, source, &parser, root, &atoms);
+            try expectParsedStoreValid(source, &parser, root);
             try parser.type_store.validate();
             const checkpoint = parser.type_store.checkpoint();
             try std.testing.expect(checkpoint.nodes >= 2);
@@ -6109,13 +6021,7 @@ test "typed generic arrows retain final owners and legacy projection windows" {
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
-        try expectRuntimeParityAndShape(
-            fixture.source,
-            &parser,
-            root,
-            &atoms,
-            runtime_count,
-        );
+        try expectParsedStoreValidWithAllocations(fixture.source, &parser, root, runtime_count);
         try expectTypedGenericArrowRecords(&parser, fixture.source, fixture.expected);
     }
     try std.testing.expectEqual(@as(usize, 5), fixtures.len);
@@ -6839,7 +6745,7 @@ test "nested legacy-call line-comment arrow retains captures and semantic projec
     parser.setAtomTable(&atoms);
 
     const root = try parser.parse();
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
     try expectTypedGenericArrowRecords(&parser, source, .{
         .list = "<<T>>",
         .actual_capture = "<<T>>",
@@ -6885,7 +6791,7 @@ test "generic arrow lookahead selects an outer arrow after a function return typ
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
 
     const view = parserIrView(&parser);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
@@ -7221,13 +7127,7 @@ test "recovered generic arrow wrappers remove current and nested type syntax" {
         defer control.deinit();
         control.setAtomTable(&control_atoms);
         const control_root = try control.parse();
-        try expectRuntimeParityAndShape(
-            control_source,
-            &control,
-            control_root,
-            &control_atoms,
-            runtime_count,
-        );
+        try expectParsedStoreValidWithAllocations(control_source, &control, control_root, runtime_count);
         try std.testing.expectEqual(@as(usize, 2), control.type_store.generic_owners.items.len);
         try std.testing.expectEqual(@as(usize, 2), control.type_store.function_signatures.items.len);
         try control.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&control));
@@ -7316,7 +7216,7 @@ const FinalNodeRollbackCase = struct {
     retained_signatures: usize = 0,
     retained_prefixes: usize = 0,
     retained_checkpoint: ?TypeSyntax.Store.Checkpoint = null,
-    runtime_parity: bool = false,
+    runtime_validation: bool = false,
     expected_current: union(enum) {
         eof,
         token: struct { kind: TokenType, location: engine.parser.SourceLocation },
@@ -7328,16 +7228,10 @@ fn expectFinalNodeAllocationRollback(case: FinalNodeRollbackCase) !void {
     defer control_atoms.deinit();
     var control = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
     defer control.deinit();
-    if (case.runtime_parity) control.setAtomTable(&control_atoms);
+    if (case.runtime_validation) control.setAtomTable(&control_atoms);
     const control_root = try control.parse();
-    if (case.runtime_parity) {
-        try expectFunctionSliceRuntimeParity(
-            std.testing.allocator,
-            case.source,
-            &control,
-            control_root,
-            &control_atoms,
-        );
+    if (case.runtime_validation) {
+        try expectParsedStoreValid(case.source, &control, control_root);
     }
     try control.type_store.validate();
     try control.type_store.validateRuntimeOwners(
@@ -7368,7 +7262,7 @@ fn expectFinalNodeAllocationRollback(case: FinalNodeRollbackCase) !void {
     defer parser_atoms.deinit();
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
     defer parser.deinit();
-    if (case.runtime_parity) parser.setAtomTable(&parser_atoms);
+    if (case.runtime_validation) parser.setAtomTable(&parser_atoms);
     const stable_node_allocator = parser.nodes.allocator;
     const node_capacity = parser.nodes.tags.capacity;
     try std.testing.expect(node_capacity >= target);
@@ -7540,7 +7434,7 @@ test "named function comment node failures remove pending compatibility owners" 
                 return error.TestUnexpectedResult),
             .control_owners = 2,
             .control_calls = 1,
-            .runtime_parity = true,
+            .runtime_validation = true,
         };
         try expectFinalNodeAllocationRollback(common);
         var wrapper = common;
@@ -7576,7 +7470,7 @@ test "arrow and wrapper allocation failures restore all header arrays" {
         .retained_call_arguments = 0,
         .retained_fragments = 0,
         .retained_checkpoint = seedCheckpoint(),
-        .runtime_parity = true,
+        .runtime_validation = true,
         .expected_current = .{ .token = .{
             .kind = .semicolon,
             .location = .{
@@ -7629,7 +7523,7 @@ test "typed generic arrow final node failures restore owner and signature arrays
         .retained_parameter_annotations = 0,
         .retained_signatures = 0,
         .retained_checkpoint = seedCheckpoint(),
-        .runtime_parity = true,
+        .runtime_validation = true,
         .expected_current = .{ .token = .{
             .kind = .semicolon,
             .location = .{
@@ -7683,7 +7577,7 @@ test "erased object prefix node failures restore every store array" {
         .retained_signatures = 0,
         .retained_prefixes = 0,
         .retained_checkpoint = seedCheckpoint(),
-        .runtime_parity = true,
+        .runtime_validation = true,
         .expected_current = .{ .token = .{
             .kind = .semicolon,
             .location = .{
@@ -9825,7 +9719,7 @@ test "global annotations retain exact repeated declaration owners" {
         defer parser.deinit();
         parser.setAtomTable(&atoms);
         const root = try parser.parse();
-        try expectRuntimeParityAndShape(case.source, &parser, root, &atoms, runtime_count);
+        try expectParsedStoreValidWithAllocations(case.source, &parser, root, runtime_count);
 
         const second_start: u32 = @intCast(std.mem.indexOf(u8, case.source, "\nconst") orelse
             return error.TestUnexpectedResult);
@@ -9883,7 +9777,7 @@ test "outer annotation keeps its index across a nested typed initializer" {
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
 
     const inner_start: u32 = @intCast(std.mem.indexOf(u8, source, "const inner") orelse
         return error.TestUnexpectedResult);
@@ -9913,7 +9807,7 @@ test "annotation runtime owners reject missing forged and exchanged declarations
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
 
     const store = &parser.type_store;
     const view = parserIrView(&parser);
@@ -10038,7 +9932,7 @@ test "variable and export allocation failures remove unfinished annotation owner
         .retained_call_arguments = 0,
         .retained_fragments = 0,
         .retained_checkpoint = seedCheckpoint(),
-        .runtime_parity = true,
+        .runtime_validation = true,
     };
     try expectFinalNodeAllocationRollback(common);
 
@@ -10065,7 +9959,7 @@ test "annotation owner census covers current syntax kinds" {
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
 
     const store = &parser.type_store;
     const view = parserIrView(&parser);
@@ -10162,7 +10056,7 @@ test "shadowed bindings and closure parameters retain their actual owners" {
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
     const store = &parser.type_store;
     const view = parserIrView(&parser);
     try store.validateRuntimeOwners(std.testing.allocator, view);
@@ -10249,7 +10143,7 @@ fn expectDirectGenericConsumer(
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
     const direct_view = parserIrView(&direct);
-    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
+    try expectParsedStoreValidWithAllocations(source, &direct, direct_root, direct_count);
 
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
@@ -10608,7 +10502,7 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
     const direct_view = parserIrView(&direct);
-    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
+    try expectParsedStoreValidWithAllocations(source, &direct, direct_root, direct_count);
 
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
@@ -10860,7 +10754,7 @@ fn expectDirectCallOrderRefusal(
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
 
     const expected_error: anyerror = switch (mutation) {
         .reversed_actual => blk: {
@@ -11001,7 +10895,7 @@ fn runDirectCallAllocationSweep(
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
     try std.testing.expectEqual(@as(usize, 2), parser.type_store.explicit_call_arguments.items.len);
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
 
@@ -11153,7 +11047,7 @@ fn expectDirectPredicateConsumerInner(
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
     const direct_view = parserIrView(&direct);
-    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
+    try expectParsedStoreValidWithAllocations(source, &direct, direct_root, direct_count);
 
     try std.testing.expectEqual(@as(usize, 1), direct.type_store.function_signatures.items.len);
     const syntax_signature = direct.type_store.function_signatures.items[0];
@@ -11508,7 +11402,7 @@ fn runPredicateAllocationSweep(
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.function_signatures.items.len);
@@ -11648,7 +11542,7 @@ test "direct callable bounds stop before excluded projected fragments" {
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
     const direct_view = parserIrView(&direct);
-    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
+    try expectParsedStoreValidWithAllocations(source, &direct, direct_root, direct_count);
 
     try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_owners.items.len);
     const owner = direct.type_store.generic_owners.items[0];
@@ -11752,7 +11646,7 @@ fn runDirectGenericAllocationSweep(
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
 
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -11822,7 +11716,7 @@ fn runDirectGenericMapAllocationSweep(
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
 
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -11924,7 +11818,7 @@ test "direct source pilot preserves runtime types owners checks and capsules" {
     defer direct.deinit();
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
-    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
+    try expectParsedStoreValidWithAllocations(source, &direct, direct_root, direct_count);
 
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
@@ -12047,7 +11941,7 @@ fn expectPilotCheckerContrast(
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
     const direct_view = parserIrView(&direct);
-    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
+    try expectParsedStoreValidWithAllocations(source, &direct, direct_root, direct_count);
 
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
@@ -12366,7 +12260,7 @@ fn expectDirectDeclarationConsumer(
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
     const direct_view = parserIrView(&direct);
-    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
+    try expectParsedStoreValidWithAllocations(source, &direct, direct_root, direct_count);
 
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
@@ -12890,7 +12784,7 @@ fn runDirectDeclarationAllocationSweep(
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
 
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -12947,7 +12841,7 @@ fn runDirectGenericDeclarationAllocationSweep(
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
-    try expectRuntimeParityAndShape(source, &parser, root, &atoms, runtime_count);
+    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
 
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);
@@ -13003,7 +12897,7 @@ test "direct source pilot compacts annotated parameters by final owner" {
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
     const direct_view = parserIrView(&direct);
-    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
+    try expectParsedStoreValidWithAllocations(source, &direct, direct_root, direct_count);
 
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
@@ -13045,7 +12939,7 @@ test "direct function specifications preserve variable arrow capsule absence" {
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
     const direct_view = parserIrView(&direct);
-    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
+    try expectParsedStoreValidWithAllocations(source, &direct, direct_root, direct_count);
 
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
@@ -13121,7 +13015,7 @@ fn expectDirectConsumerMatrixCase(
     direct.setAtomTable(&direct_atoms);
     const direct_root = try direct.parse();
     const direct_view = parserIrView(&direct);
-    try expectRuntimeParityAndShape(source, &direct, direct_root, &direct_atoms, direct_count);
+    try expectParsedStoreValidWithAllocations(source, &direct, direct_root, direct_count);
 
     var direct_pool = TypePool.init(std.testing.allocator);
     defer direct_pool.deinit(std.testing.allocator);
