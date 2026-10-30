@@ -13,6 +13,7 @@ const host_tests = @import("build/host_tests.zig");
 const repo_gates = @import("build/repo_gates.zig");
 const corpus = @import("build/corpus.zig");
 const flow_census = @import("build/flow_census.zig");
+const bytecode_identity = @import("build/bytecode_identity.zig");
 const tooling = @import("build/tooling.zig");
 const artifacts = @import("build/artifacts.zig");
 const goldens = @import("build/goldens.zig");
@@ -31,6 +32,7 @@ pub fn build(b: *std.Build) void {
     const host = host_tests.add(ctx, proofs);
     const diagnostic_corpus = corpus.add(ctx);
     const flow_census_gate = flow_census.add(ctx);
+    const bytecode_identity_gate = bytecode_identity.add(ctx);
     const capability_audit = repo_gates.addCapabilityAudit(ctx);
     const gates = repo_gates.add(ctx, tools);
     const gate_floor_probe = repo_gates.addGateFloorProbe(ctx, gates.kernel_safety_gate);
@@ -89,6 +91,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&proofs.diagnostic_producers.step);
     test_step.dependOn(diagnostic_corpus.step);
     test_step.dependOn(flow_census_gate.step);
+    test_step.dependOn(bytecode_identity_gate.step);
     test_step.dependOn(&proofs.script_reachability.step);
     test_step.dependOn(golden.expert_golden_step);
     test_step.dependOn(golden.contract_golden_step);

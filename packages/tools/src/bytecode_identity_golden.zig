@@ -1,6 +1,6 @@
 //! Bytecode identity golden (reset phase R0).
 //!
-//! Later reset phases refactor IR construction and split files. This test shows
+//! Later reset phases refactor IR construction and split files. This gate shows
 //! that the bytecode `zttp build` emits for each tracked handler does not move.
 //! Each input goes through `precompile.compileHandler` with the options of the
 //! build command (`build_command.zig` `compileCapability`), so the bytes are
@@ -13,12 +13,15 @@
 //!
 //! The golden is `golden_path`, one `<path> <sha256 | refused error>` line per
 //! input, sorted by path. Regenerate it only after a deliberate codegen change:
-//! run this suite with `ZTTP_WRITE_BYTECODE_GOLDEN=1` from a fresh cache,
-//! because the run step is cached and does not see the variable. Review the diff.
-//! The run step does not track the handler sources, so after you edit a handler
-//! run the suite from a fresh cache before you trust a pass.
+//! run `ZTTP_WRITE_BYTECODE_GOLDEN=1 zig build test-bytecode-identity`. Review
+//! the diff.
 //!
-//! Paths are repository-relative and the test reads them from the working
+//! This file is the `main` of the `test-bytecode-identity` gate, wired in
+//! build/bytecode_identity.zig. The gate step has side effects, so it runs on
+//! every invocation and reads the handler sources each time. A source edit
+//! cannot leave a stale pass. The gate exits 1 on any failure.
+//!
+//! Paths are repository-relative and the gate reads them from the working
 //! directory, which is the repository root under `zig build`, as in
 //! `flow_precision_expectations.zig`.
 
@@ -29,8 +32,8 @@ const precompile = @import("precompile.zig");
 const file_io = zts.file_io;
 
 const golden_path = "packages/tools/src/bytecode_identity_golden.txt";
-/// Embedded so that an edit to the golden rebuilds the test. The build cache
-/// does not track the handler sources, which are read at run time.
+/// Embedded so that an edit to the golden rebuilds the gate. The handler
+/// sources are read at run time, and the gate step reruns on every invocation.
 const golden = @embedFile("bytecode_identity_golden.txt");
 const input_roots = [_][]const u8{ "examples", "tests/corpus/check/good" };
 /// Measured 63 inputs on 2026-10-25 (33 examples, 30 corpus cases). A wrong
@@ -43,8 +46,7 @@ fn lessThan(_: void, a: []u8, b: []u8) bool {
 }
 
 /// Repository-relative paths of every `.ts` input, sorted. Caller frees.
-fn collectInputs(allocator: std.mem.Allocator) ![][]u8 {
-    const io = std.testing.io;
+fn collectInputs(allocator: std.mem.Allocator, io: std.Io) ![][]u8 {
     var paths: std.ArrayList([]u8) = .empty;
     errdefer {
         for (paths.items) |path| allocator.free(path);
@@ -98,10 +100,17 @@ fn containsLine(lines: []const []const u8, line: []const u8) bool {
     return false;
 }
 
-test "emitted bytecode matches the committed identity golden" {
-    const allocator = std.testing.allocator;
+pub fn main(init: std.process.Init) void {
+    run(init) catch |err| {
+        if (err != error.GoldenDrift) std.debug.print("bytecode identity: {s}\n", .{@errorName(err)});
+        std.process.exit(1);
+    };
+}
 
-    const paths = try collectInputs(allocator);
+fn run(init: std.process.Init) !void {
+    const allocator = init.gpa;
+
+    const paths = try collectInputs(allocator, init.io);
     defer {
         for (paths) |path| allocator.free(path);
         allocator.free(paths);
@@ -124,7 +133,10 @@ test "emitted bytecode matches the committed identity golden" {
         try actual.append(allocator, line);
     }
     // Refusing every input would satisfy the floor over a broken compile path.
-    try std.testing.expect(digested >= input_floor / 2);
+    if (digested < input_floor / 2) {
+        std.debug.print("bytecode identity: {d} inputs digested, floor is {d}\n", .{ digested, input_floor / 2 });
+        return error.DigestedFloor;
+    }
 
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(allocator);
@@ -133,7 +145,7 @@ test "emitted bytecode matches the committed identity golden" {
         try text.append(allocator, '\n');
     }
 
-    if (std.testing.environ.getPosix("ZTTP_WRITE_BYTECODE_GOLDEN") != null) {
+    if (init.environ_map.get("ZTTP_WRITE_BYTECODE_GOLDEN") != null) {
         try file_io.writeFile(allocator, golden_path, text.items);
         std.debug.print("bytecode identity: wrote {d} lines ({d} digested) to {s}\n", .{ actual.items.len, digested, golden_path });
         return;
@@ -157,7 +169,12 @@ test "emitted bytecode matches the committed identity golden" {
         }
         if (found) continue;
         std.debug.print("bytecode identity golden line has no match: {s}\n", .{line});
+        drifted += 1;
     }
-    try std.testing.expectEqual(@as(usize, 0), drifted);
-    try std.testing.expectEqualStrings(golden, text.items);
+    if (drifted != 0) return error.GoldenDrift;
+    if (!std.mem.eql(u8, golden, text.items)) {
+        std.debug.print("bytecode identity drift: golden text differs from the emitted text\n", .{});
+        return error.GoldenDrift;
+    }
+    std.debug.print("bytecode identity: {d} inputs match the golden ({d} digested)\n", .{ actual.items.len, digested });
 }

@@ -345,6 +345,15 @@
       "requiredWhen": "after flow-checker or binding-label changes"
     },
     {
+      "task": "test-bytecode-identity",
+      "route": "aggregate",
+      "intent": "verify",
+      "effect": "local-write",
+      "approval": "none",
+      "does": "checks emitted handler bytecode against the committed identity golden",
+      "requiredWhen": "after codegen, IR, or handler example changes"
+    },
+    {
       "task": "test-capability-audit",
       "route": "aggregate",
       "intent": "verify",

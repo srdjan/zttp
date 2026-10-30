@@ -1583,7 +1583,6 @@ test {
     _ = @import("pipeline_mutation_tests.zig");
     _ = @import("flow_false_proofs.zig");
     _ = @import("flow_precision_expectations.zig");
-    _ = @import("bytecode_identity_golden.zig");
     _ = @import("precompile_stderr.zig");
     _ = @import("precompile_cli.zig");
     _ = @import("precompile_contract.zig");

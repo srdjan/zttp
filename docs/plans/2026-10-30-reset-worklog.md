@@ -151,3 +151,13 @@ Ruling: the shared artifact pipeline, about 1,000 production lines, stays in `bu
 Ruling: `--no-attest` stays in `build_command.zig`, so `tooling/release_check.zig` reads the same fact from the same file. A copy with that text changed makes the `proof_surface` row of the passport fail.
 
 Gates on the working tree before each commit, each exit 0: protection check, build, `digest.sh`, the steps of each unit in the plan's gate table, `test-module-boundary`, `zig build test`, and `check-spine`. Unit 7d also ran `surface.sh` and `test-release-check`.
+
+## Phase 8
+
+Unit 8a: `75e43452`. The plan's action, a build-time read of `ZTTP_EVIDENCE_PUBLISH`, cannot work. Zig 0.17 caches the configuration, and a hit skips `build.zig`, so the build never sees the variable. The worker measured this: the replay ran only with `--cache-poison=poisoned`. Its fix called `poisonCache`, which disables the configuration cache for every build in the repository, so Opus replaced it.
+Ruling: the option `-Devidence-publish=true` reruns the replay and sets the variable on that run step. `scripts/update-convergence.sh` and `scripts/update-coverage.sh` pass it, and these two files were not in the plan's list. An ordinary build keeps both caches.
+Probe in a clone with a warm replay: `update-convergence.sh` exit 0, then `update-coverage.sh` exit 0. Control, by the worker at `1ce0c89c`: the same script on the same warm cache exit 1 with `MissingOrDuplicateMarker`.
+
+Unit 8b: this commit. `bytecode_identity_golden.zig` is the `main` of the `test-bytecode-identity` gate, with `has_side_effects = true`, and the aggregate runs it once. `bytecode_identity_golden.txt` did not change. Write mode regenerated a byte-identical golden through the new step.
+Three warm-cache probes in a clone each exit 1: a changed handler, a changed import of a handler, and a new handler. Each prints `bytecode identity drift`.
+The aggregate test count falls, because 5 collected copies became one gate. A warm run prints no total, so Phase 11 states the count from a cold run.

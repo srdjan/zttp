@@ -215,6 +215,7 @@ The audits and gates: `test-capability-audit`, `test-module-boundary`,
 `test-zts-layering`, `test-module-governance`,
 `test-runtime-purity`, `test-contract-golden`, `test-expert-golden`,
 `test-docs-drift`, `test-doc-links`, `test-diagnostic-corpus`, `test-flow-census`,
+`test-bytecode-identity`,
 `test-convergence-emitter`, `test-native-gates`,
 `test-production-branch-metric`,
 `test-generic-intersection-cli-matrix`.
@@ -268,6 +269,15 @@ Without that row the clean controls would read as secret.
 The hand probes `x26` to `x31` pin the `mask` rule of D-015: a literal bound of
 4 holds, and a bound of 5 or 63, a slice, a chain of slices, and a `truncate`
 refuse.
+
+`test-bytecode-identity` compiles every `.ts` file under `examples/` and
+`tests/corpus/check/good/` with the options of `zttp build` and compares the
+bytecode SHA-256 of each with `packages/tools/src/bytecode_identity_golden.txt`.
+The gate reads the handler sources at run time, so its Run step has side effects
+and runs on every invocation. A source edit cannot leave a stale pass. Drift,
+a golden line with no match, or fewer than 60 inputs exits 1. To regenerate the
+golden after a deliberate codegen change, run
+`ZTTP_WRITE_BYTECODE_GOLDEN=1 zig build test-bytecode-identity` and review the diff.
 
 The docs drift and link gates run here and only here. Neither Run step is
 cached, so `zig build test` always executes both scripts, and `verify.sh`

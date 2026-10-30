@@ -129,6 +129,7 @@ The native port and its limits are described in `docs/internals/agent-spine.md`.
 | `zig build test-expert-mlx-e2e` | uses the operator's configured MLX server for a real model flow | only when the operator requests local model use |
 | `zig build test-diagnostic-corpus` | checks diagnostic corpus cases against committed goldens | after diagnostics or corpus changes |
 | `zig build test-flow-census` | checks leak verdicts over the generated flow census | after flow-checker or binding-label changes |
+| `zig build test-bytecode-identity` | checks emitted handler bytecode against the committed identity golden | after codegen, IR, or handler example changes |
 | `zig build test-capability-audit` | checks capability helper declarations | after capability helper changes |
 | `zig build test-native-gates` | runs native repository gate tests | after native gate changes |
 | `zig build test-evidence-publish` | runs native evidence publisher tests | after evidence publisher changes |
