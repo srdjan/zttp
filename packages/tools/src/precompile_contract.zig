@@ -346,7 +346,7 @@ fn buildTestContractForSource(
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var js_parser = try zts.parser.JsParser.init(allocator, source);
+    var js_parser = try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
 
@@ -389,7 +389,7 @@ test "contract construction propagates type-check allocation failure" {
     defer atoms.deinit();
 
     const source = "function handler(req) { return Response.text('ok'); }";
-    var js_parser = try zts.parser.JsParser.init(allocator, source);
+    var js_parser = try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
     const root = try js_parser.parse();
@@ -708,7 +708,7 @@ test "contract-only extraction without source types preserves verifier propertie
 
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
-    var js_parser = try zts.parser.JsParser.init(allocator, source);
+    var js_parser = try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
     const root = try js_parser.parse();
