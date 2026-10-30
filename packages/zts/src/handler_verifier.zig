@@ -2550,7 +2550,7 @@ test "diagnostic formatting" {
 
 test "HandlerVerifier fails closed when a diagnostic cannot allocate" {
     const allocator = std.testing.allocator;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "function handler(req) {}");
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "function handler(req) {}", .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -3755,7 +3755,7 @@ const import_corpus = @import("tests/import_corpus.zig");
 /// so the totality classification can be probed per tag.
 fn totalityOfFirstNode(source: []const u8, tag: NodeTag) !bool {
     const allocator = std.testing.allocator;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -4227,7 +4227,7 @@ test "an expression-bodied arrow is a total function body" {
 /// tag lands on the wrong one.
 fn totalityOfFirstArrowBody(source: []const u8) !bool {
     const allocator = std.testing.allocator;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -4257,12 +4257,12 @@ test "the import scan splits tracked builtins into result and optional slots" {
     // implementation. The no-table divergence keeps its own test below.
     const allocator = std.testing.allocator;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator,
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator,
         \\import { jwtVerify } from "zttp:auth";
         \\import { env } from "zttp:env";
         \\import { sha256 } from "zttp:crypto";
         \\import { thing } from "zttp-ext:unknown";
-    );
+    , .compile);
     defer parser.deinit();
     var atoms = context.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -4296,7 +4296,7 @@ test "with no atom table the index resolves imports this verifier used to miss" 
     // sites are test blocks. All 11 of this file's tests pass either way.
     const allocator = std.testing.allocator;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "import { env } from \"zttp:env\";\n");
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "import { env } from \"zttp:env\";\n", .compile);
     defer parser.deinit();
     // Deliberately no setAtomTable.
     _ = try parser.parse();
