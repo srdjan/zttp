@@ -30,6 +30,10 @@ packages/pi/
   src/
     app.zig               # entrypoint; parses ExpertFlags, dispatches to REPL / print
     agent.zig             # AgentSession: transcript, backend union, resolved provider identity, persistence
+    agent_bootstrap.zig   # session startup: crash recovery, receipts, launch identity, resume
+    agent_compaction.zig  # manual and automatic transcript compaction
+    agent_admission.zig   # request controller, token budgets, overflow recovery
+    agent_fork.zig        # fork and in-place rebuild of a session
     loop.zig              # runTurnWith: drives turn.zig state machine, owns I/O + retries
     turn.zig              # pure state machine (idle → awaiting_model → verifying_edit → ...)
     expert_workflow.zig   # deterministic task routing hints before first model round-trip

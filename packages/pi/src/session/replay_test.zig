@@ -9,6 +9,7 @@ const std = @import("std");
 const zts = @import("zts");
 
 const agent = @import("../agent.zig");
+const agent_bootstrap = @import("../agent_bootstrap.zig");
 const registry_mod = @import("../registry/registry.zig");
 const turn = @import("../turn.zig");
 const loop = @import("../loop.zig");
@@ -67,7 +68,7 @@ fn buildSession(
     // The explicit test client is fed to `runOneTurnWithClient`, so construct
     // the session through the test-only null-registry seam. This keeps replay
     // tests independent of provider credentials and readiness.
-    return try agent.initFromEnvWithSessionConfig(allocator, null, .{
+    return try agent_bootstrap.initFromEnvWithSessionConfig(allocator, null, .{
         .resume_latest = resume_latest,
     });
 }

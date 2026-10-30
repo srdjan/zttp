@@ -11,6 +11,7 @@ const capture_sink = @import("../providers/capture_sink.zig");
 const cassette_client = @import("../providers/cassette_client.zig");
 const cassette_record = @import("../providers/cassette_record.zig");
 const agent = @import("../agent.zig");
+const agent_admission = @import("../agent_admission.zig");
 const compaction = @import("../compaction.zig");
 const context_budget = @import("../context_budget.zig");
 const model_client = @import("model_client.zig");
@@ -647,7 +648,7 @@ test "simulator recorder promotes and replays a compacted two-Turn flow" {
     const selected_model = try models.resolveForProvider(.deepseek, request_config.model);
     var session = agent.AgentSession.initControlled(testing.allocator, selected_model, request_config);
     defer session.deinit(testing.allocator);
-    var controller: agent.RequestController = .{
+    var controller: agent_admission.RequestController = .{
         .allocator = testing.allocator,
         .session = &session,
         .raw_client = client.asModelClient(),

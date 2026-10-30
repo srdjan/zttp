@@ -10,6 +10,9 @@ const zts = @import("zts");
 const registry_mod = @import("registry/registry.zig");
 const transcript_mod = @import("transcript.zig");
 const agent = @import("agent.zig");
+const agent_fork = @import("agent_fork.zig");
+const agent_compaction = @import("agent_compaction.zig");
+const agent_bootstrap = @import("agent_bootstrap.zig");
 const commands = @import("commands.zig");
 const loop = @import("loop.zig");
 const gate_record = @import("gate_record.zig");
@@ -90,12 +93,12 @@ pub fn processSubmit(
 
     if (isCompactSubmission(trimmed)) {
         const suffix = std.mem.trim(u8, trimmed["/compact".len..], " \t\r\n");
-        const result = try agent.compactManual(
+        const result = try agent_compaction.compactManual(
             allocator,
             session,
             if (suffix.len == 0) null else suffix,
         );
-        const message = try agent.renderCompactResult(allocator, result);
+        const message = try agent_compaction.renderCompactResult(allocator, result);
         const ok = switch (result) {
             .compacted, .no_change => true,
             .not_compactable, .unavailable, .failed => false,
@@ -752,7 +755,7 @@ pub fn run(
     // meta.json and restored on --resume without events.zig importing loop.zig.
     const policy_tag: ?[]const u8 = if (explicit_policy) |p| @tagName(p) else null;
 
-    var session = try agent.initFromEnvWithSessionConfig(allocator, registry, .{
+    var session = try agent_bootstrap.initFromEnvWithSessionConfig(allocator, registry, .{
         .no_session = flags.no_session,
         .no_persist_tool_output = flags.no_persist_tool_output,
         .no_context_files = flags.no_context_files,
@@ -859,22 +862,22 @@ pub fn run(
                     }
                 }
             },
-            .session_resume => agent.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{ .resume_latest = true })) catch |err| {
+            .session_resume => agent_fork.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{ .resume_latest = true })) catch |err| {
                 if (err != error.CrossProviderResume) return err;
                 const message = "Cannot resume a session from another provider in this process. Restart with --provider and optional --model.\n";
                 _ = std.c.write(std.c.STDERR_FILENO, message.ptr, message.len);
             },
-            .session_new => try agent.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{
+            .session_new => try agent_fork.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{
                 .provider = session.activeProvider(),
                 .model = session.currentModel(),
             })),
             .session_compact => {
-                const msg = try agent.compact(allocator, &session);
+                const msg = try agent_compaction.compact(allocator, &session);
                 defer allocator.free(msg);
                 _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
             },
             .session_fork => {
-                const msg = try agent.fork(allocator, &session);
+                const msg = try agent_fork.fork(allocator, &session);
                 defer allocator.free(msg);
                 _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
             },
@@ -973,7 +976,7 @@ const InteractiveCompactionCtx = struct {
         _: *anyopaque,
         phase: agent.CompactionPhase,
         reason: session_events.CompactionReason,
-        result: ?*const agent.CompactResult,
+        result: ?*const agent_compaction.CompactResult,
     ) void {
         if (phase != .end or reason == .manual) return;
         const present = result orelse return;

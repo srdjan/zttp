@@ -5,6 +5,7 @@ const zts = @import("zts");
 const artifact = @import("artifact.zig");
 const loop = @import("../loop.zig");
 const agent = @import("../agent.zig");
+const agent_admission = @import("../agent_admission.zig");
 const model_client = @import("model_client.zig");
 const model_request = @import("../providers/model_request.zig");
 const observation = @import("observation.zig");
@@ -170,7 +171,7 @@ pub const Runner = struct {
             self.request_config,
         );
         defer session.deinit(self.allocator);
-        var controller: agent.RequestController = .{
+        var controller: agent_admission.RequestController = .{
             .allocator = self.allocator,
             .session = &session,
             .raw_client = replay_client.asModelClient(),

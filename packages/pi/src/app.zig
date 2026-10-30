@@ -10,6 +10,7 @@ const ledger = @import("ledger.zig");
 const autoloop = @import("autoloop.zig");
 const transcript_mod = @import("transcript.zig");
 const agent = @import("agent.zig");
+const agent_bootstrap = @import("agent_bootstrap.zig");
 const session_state = @import("session_state.zig");
 const property_goals = @import("property_goals.zig");
 const models_registry = @import("providers/models.zig");
@@ -193,7 +194,7 @@ fn runAutoloop(
     // the resulting witnesses tab on the same patches. Without
     // session bootstrap the run is in-memory only (the original
     // behaviour, kept for `--no-session`).
-    var session = try agent.initFromEnvWithSessionConfig(allocator, registry, .{
+    var session = try agent_bootstrap.initFromEnvWithSessionConfig(allocator, registry, .{
         .model_free = true,
         .no_session = flags.no_session,
         .no_persist_tool_output = flags.no_persist_tool_output,

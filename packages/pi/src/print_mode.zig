@@ -10,6 +10,8 @@
 const std = @import("std");
 
 const agent = @import("agent.zig");
+const agent_compaction = @import("agent_compaction.zig");
+const agent_bootstrap = @import("agent_bootstrap.zig");
 const loop = @import("loop.zig");
 const gate_record = @import("gate_record.zig");
 const registry_mod = @import("registry/registry.zig");
@@ -46,7 +48,7 @@ const PrintCompactionCtx = struct {
         context: *anyopaque,
         phase: agent.CompactionPhase,
         reason: session_events.CompactionReason,
-        result: ?*const agent.CompactResult,
+        result: ?*const agent_compaction.CompactResult,
     ) void {
         const self: *@This() = @ptrCast(@alignCast(context));
         if (self.json_mode) {
@@ -75,7 +77,7 @@ pub fn run(
     flags: ExpertFlags,
     policy: loop.ApprovalPolicy,
 ) !void {
-    var session = try agent.initFromEnvWithSessionConfig(allocator, registry, .{
+    var session = try agent_bootstrap.initFromEnvWithSessionConfig(allocator, registry, .{
         .no_session = flags.no_session,
         .no_persist_tool_output = flags.no_persist_tool_output,
         .no_context_files = flags.no_context_files,
@@ -324,7 +326,7 @@ fn emitCompactionEvent(
     out: ?*std.Io.Writer,
     phase: agent.CompactionPhase,
     reason: session_events.CompactionReason,
-    result: ?*const agent.CompactResult,
+    result: ?*const agent_compaction.CompactResult,
 ) !void {
     var buf = TextBuffer.init(allocator);
     defer buf.deinit();
@@ -524,7 +526,7 @@ test "json compaction lifecycle is ordered and structured" {
     defer buf.deinit();
 
     try emitCompactionEvent(allocator, buf.writer(), .start, .threshold, null);
-    const result: agent.CompactResult = .{ .compacted = .{
+    const result: agent_compaction.CompactResult = .{ .compacted = .{
         .reason = .threshold,
         .first_kept_entry_id = 7,
         .tokens_before = 50_000,

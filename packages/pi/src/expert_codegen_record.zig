@@ -24,6 +24,8 @@ const transcript_mod = @import("transcript.zig");
 const loop = @import("loop.zig");
 const app = @import("app.zig");
 const agent = @import("agent.zig");
+const agent_admission = @import("agent_admission.zig");
+const agent_bootstrap = @import("agent_bootstrap.zig");
 const codegen = @import("expert_codegen_eval.zig");
 const codegen_types = @import("expert_codegen_types.zig");
 const evidence_identity = @import("expert_evidence_identity.zig");
@@ -403,7 +405,7 @@ fn replayCorpusTurn(
     const selected_model = try models.resolveForProvider(provider, flow_case.manifest.model);
     var session = agent.AgentSession.initControlled(allocator, selected_model, config);
     defer session.deinit(allocator);
-    var controller: agent.RequestController = .{
+    var controller: agent_admission.RequestController = .{
         .allocator = allocator,
         .session = &session,
         .raw_client = client.asModelClient(),
@@ -428,7 +430,7 @@ fn replayCorpusTurn(
     return .{ .result = result, .transcript = transcript };
 }
 
-/// Borrowed env-var read (no allocation), mirroring agent.zig's `envVar`:
+/// Borrowed env-var read (no allocation), mirroring agent_bootstrap.zig's `envVar`:
 /// std.process env helpers are not the 0.16 path; std.c.getenv is.
 fn envValue(name_z: [:0]const u8) ?[]const u8 {
     const raw = std.c.getenv(name_z) orelse return null;
@@ -2308,7 +2310,7 @@ test "record codegen baseline corpus (live, gated)" {
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);
     try applyToolAllowlist(&registry);
-    var session = try agent.initFromEnvWithSessionConfig(allocator, &registry, .{
+    var session = try agent_bootstrap.initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_session = true,
         .no_context_files = true,
         .provider = corpus_provider,

@@ -7,6 +7,7 @@ const std = @import("std");
 const zts = @import("zts");
 const app = @import("app.zig");
 const agent = @import("agent.zig");
+const agent_bootstrap = @import("agent_bootstrap.zig");
 const loop = @import("loop.zig");
 const session_events = @import("session/events.zig");
 const prove_probe = @import("test_support/prove_probe.zig");
@@ -105,7 +106,7 @@ test "local MLX expert flow" {
     var registry = try app.buildRegistry(allocator);
     defer registry.deinit(allocator);
 
-    var session = try agent.initFromEnvWithSessionConfig(allocator, &registry, .{
+    var session = try agent_bootstrap.initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_context_files = true,
         .provider = .local,
     });
@@ -201,7 +202,7 @@ test "local MLX expert flow" {
         meta.model orelse return error.TestUnexpectedResult,
     );
 
-    var resumed = try agent.initFromEnvWithSessionConfig(allocator, &registry, .{
+    var resumed = try agent_bootstrap.initFromEnvWithSessionConfig(allocator, &registry, .{
         .no_context_files = true,
         .resume_latest = true,
     });
