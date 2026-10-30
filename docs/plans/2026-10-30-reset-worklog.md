@@ -78,3 +78,29 @@ Unit 2c: the helper `expectFunctionSliceRuntimeParity` is now `expectParsedStore
 10 of the 11 callers of `buildTestContractForSource` reach `initSoundExtraction` with `.strict = false`, and no expected value moved. The default `strict` mode refuses their fixtures.
 Ruling: the eleventh caller, "contract-only extraction without source types preserves verifier properties", calls `initContractOnly` directly, because its source holds `if (5)`, which sound extraction refuses. `buildMultiModuleContract` uses that same profile in production.
 Opus also removed `ContractOnlyOptions.select_flow` and `env_public`, which had no production reader. The one test that set them moved to `initSoundExtraction`, with no change to its assertions.
+
+## Phase 3
+
+Status: complete. Units 3a, 3b, and 3c moved every test site in Appendix B to the production parse mode. No expected value moved, no source changed, and no verdict changed. Admission accepted every test source as written, including untyped parameters. The `test "` count of each file stayed equal.
+
+Unit 3a moved 55 sites in `effect_inference.zig`. Unit 3b moved 47 sites in `flow_checker_tests.zig`: the plan counted 46 lines that a text search matched, and the worker counted one more call site. Unit 3c moved the sites of 23 files in one commit per file, and Opus moved the 12 wrapper sites in `interpreter.zig` and `interpreter/trace.zig`.
+
+Ruling: the wrapper `Parser` from `parser/root.zig` reaches admission through `initTyped`, `parseTypedIr`, and `generateParsed`, so those 12 sites moved through a local test helper. No production code changed.
+Ruling: `parser.parse()` is the idiom after `initAdmission`, as `pipeline_tests.zig` shows. It delegates to `parseAdmission` and turns a refusal into an error, so a refused source fails the test.
+
+Sites that stay raw in this phase, and the unit that closes each:
+
+| Site | Closed by |
+|---|---|
+| `compile` in `compiler.zig` | Stays: D-016 names it for semantics corpus fragments |
+| `compileWithOptions`, `extractVirtualContract`, `module_graph.zig`, `collectImports`, `renderParseRefusal`, `run` in `zts_expert_effects.zig`, `compileHandler`, `runGenTests`, `runCheckOnParsedSource`, the load path in `handler_instance.zig` | Unit 9b |
+| 4 sites in `tests/frontend_fuzz.zig` | Stay: the file fuzzes the raw parser on purpose, and it already has an admission arm |
+| Raw tests in `parser/parse.zig` | Unit 9b |
+
+## Phase 5
+
+Status: complete at `60eec7d3`. `applyContractFacts` in `precompile_check_run.zig` is the one writer of the 12 contract fields. Each driver fills `ContractFacts` from its own analysis. `compileHandler` keeps its generator and does not call `analyzeHandlerPaths`.
+The function runs twice per driver, because each driver has a pass between the verifier facts and the path facts: `refreshContractSpecDiagnostics` in compile and `syncCheckResultProperties` in CHECK. The order stays the same.
+Compile used to assign `cost_envelope` when it was null, and CHECK did not. The shared function assigns only a value. Both are the same today, because extraction never sets that field.
+`unreachable_code` stays a value that each driver supplies, until unit 9c.
+Gates on `main`, each exit 0: protection check, `digest.sh`, `test-precompile`, `test-contract-golden`, `test-agent-protocol`, `test-proof-swallow`, `test-flow-census`, `test-zts`, `test-diagnostic-corpus`, `test-cli`, `test-zruntime`, `test-expert-app`, `zig build test`, and `check-spine`.
