@@ -32,8 +32,8 @@ inside Apple's `container` CLI.
 - [ ] Confirm `VERSION` holds the intended release. It is the authority.
 - [ ] Confirm `build.zig.zon`, `packages/zts/build.zig.zon`, and
       `packages/runtime/build.zig.zon` `.version` equal `VERSION`.
-- [ ] Confirm `packages/zts/src/root.zig` `version.string`, the `README.md`
-      heading, and the `install.sh` "current:" comment equal `VERSION`.
+- [ ] Confirm `packages/zts/src/root.zig` `version.string` and the `install.sh`
+      "current:" comment equal `VERSION`.
       `zig build test` fails on any difference.
 - [ ] In `zttp-website`, run `deno task sync-version` and commit.
 - [ ] Promote `CHANGELOG.md` `[Unreleased]` to `[X.Y.Z] - <date>`, open a fresh `[Unreleased]` section, and update the bottom compare-link anchors (`[Unreleased]` base + a new `[X.Y.Z]` link).
