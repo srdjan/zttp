@@ -1,8 +1,8 @@
-//! `zttp compile`, `zttp build`, and `zttp deploy --local` — the three
-//! commands that turn a handler into a self-contained binary. They share the
-//! artifact pipeline (prepareProjectArtifact + buildArtifact), so they live
-//! together. Dispatch and error-to-exit-code translation stay in dev_cli.main;
-//! the help printers are internal because only these commands invoke them.
+//! `zttp build` and the artifact pipeline that `zttp compile` and
+//! `zttp deploy --local` share (prepareProjectArtifact + buildArtifact).
+//! compile_command.zig and deploy_command.zig hold the other two commands.
+//! Dispatch and error-to-exit-code translation stay in dev_cli.main; the help
+//! printers are internal because only these commands invoke them.
 
 const std = @import("std");
 const writeAllFd = @import("posix_util.zig").writeAllFd;
@@ -27,51 +27,34 @@ const retired_authority = project_config_mod.retired_authority;
 const cli_paths = @import("cli_paths.zig");
 const cli_doctor = @import("cli_doctor.zig");
 const resolveRuntimeBinary = cli_paths.resolveRuntimeBinary;
+const compile_command = @import("compile_command.zig");
+const deploy_command = @import("deploy_command.zig");
+const parseCompileCommandArgs = compile_command.parseCompileCommandArgs;
+const discoverExplicitCompileContext = compile_command.discoverExplicitCompileContext;
+const LocalDeployArgError = deploy_command.LocalDeployArgError;
+const parseLocalDeployCommandArgs = deploy_command.parseLocalDeployCommandArgs;
 
-const no_attest_flag: []const u8 = "--no-attest";
+pub const no_attest_flag: []const u8 = "--no-attest";
 
 /// Shared help text describing `--no-attest`. Three command help printers
 /// all advertise the same flag; one source of truth prevents drift.
-const no_attest_help_block: []const u8 =
+pub const no_attest_help_block: []const u8 =
     \\  --no-attest           Skip proof-receipt signing for this build.
     \\                        Default is to sign with the persistent
     \\                        identity at ~/.zttp/attest/keypair.bin.
     \\
 ;
 
-const CompileCommandOptions = struct {
-    handler_path: []const u8,
-    output_path: []const u8,
-    attest_requested: bool,
-};
-
 const BuildCommandOptions = struct {
     output_override: ?[]const u8,
     attest_requested: bool,
 };
 
-const LocalDeployCommandOptions = struct {
-    attest_requested: bool,
-};
-
-const CommandArgError = union(enum) {
+pub const CommandArgError = union(enum) {
     missing_output_value,
     missing_handler_path,
     missing_output_flag,
     unknown_arg: []const u8,
-};
-
-const LocalDeployArgError = union(enum) {
-    missing_target_value,
-    duplicate_target,
-    unknown_target: []const u8,
-    unknown_arg: []const u8,
-};
-
-const CompileCommandParse = union(enum) {
-    help,
-    ok: CompileCommandOptions,
-    err: CommandArgError,
 };
 
 const BuildCommandParse = union(enum) {
@@ -80,110 +63,13 @@ const BuildCommandParse = union(enum) {
     err: CommandArgError,
 };
 
-const LocalDeployCommandParse = union(enum) {
-    help,
-    ok: LocalDeployCommandOptions,
-    err: LocalDeployArgError,
-};
-
-fn parseCompileCommandArgs(argv: []const []const u8) CompileCommandParse {
-    var handler_path: ?[]const u8 = null;
-    var output_path: ?[]const u8 = null;
-    var attest_requested = true;
-
-    var i: usize = 0;
-    while (i < argv.len) : (i += 1) {
-        const arg = argv[i];
-        if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
-            i += 1;
-            if (i >= argv.len) {
-                return .{ .err = .missing_output_value };
-            }
-            output_path = argv[i];
-        } else if (std.mem.eql(u8, arg, no_attest_flag)) {
-            attest_requested = false;
-        } else if (std.mem.eql(u8, arg, "--help")) {
-            return .help;
-        } else if (!std.mem.startsWith(u8, arg, "-")) {
-            handler_path = arg;
-        } else {
-            // Reject unknown `-`-prefixed flags rather than silently
-            // dropping them. Symmetric with buildCommand at :2106-2110.
-            // Without this branch, a typo like `--ouptut` was swallowed
-            // and the build proceeded against the wrong (or default)
-            // state with no diagnostic.
-            return .{ .err = .{ .unknown_arg = arg } };
-        }
-    }
-
-    if (handler_path == null) {
-        return .{ .err = .missing_handler_path };
-    }
-    if (output_path == null) {
-        return .{ .err = .missing_output_flag };
-    }
-
-    return .{ .ok = .{
-        .handler_path = handler_path.?,
-        .output_path = output_path.?,
-        .attest_requested = attest_requested,
-    } };
-}
-
-fn failCompileCommandArgs(err: CommandArgError) !void {
-    switch (err) {
-        .missing_output_value => {
-            std.log.err("-o requires an output path", .{});
-            return error.MissingArgument;
-        },
-        .missing_handler_path => {
-            std.log.err("handler file path required", .{});
-            try printCompileHelp();
-            return error.MissingArgument;
-        },
-        .missing_output_flag => {
-            std.log.err("-o <output> required", .{});
-            try printCompileHelp();
-            return error.MissingArgument;
-        },
-        .unknown_arg => |arg| {
-            std.log.err("Unknown argument: {s}", .{arg});
-            try printCompileHelp();
-            return error.UnknownOption;
-        },
-    }
-}
-
-pub fn compileCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    const opts = switch (parseCompileCommandArgs(argv)) {
-        .help => {
-            try printCompileHelp();
-            return;
-        },
-        .ok => |opts| opts,
-        .err => |err| return failCompileCommandArgs(err),
-    };
-
-    var compile_context = try discoverExplicitCompileContext(allocator, opts.handler_path);
-    defer compile_context.deinit(allocator);
-
-    try buildArtifact(allocator, .{
-        .handler_path = opts.handler_path,
-        .output_path = opts.output_path,
-        .sql_schema_path = compile_context.sql_schema_path,
-        .policy = compile_context.policyPtr(),
-        .policy_source = compile_context.policy_source,
-        .attest_requested = opts.attest_requested,
-    });
-}
-
-const ProjectCompileContext = struct {
+pub const ProjectCompileContext = struct {
     sql_schema_path: ?[]u8 = null,
     policy: ?zts.HandlerPolicy = null,
     /// The policy text, kept so the build check reads the policy that `zttp check` reads.
     policy_source: ?[]u8 = null,
 
-    fn init(
+    pub fn init(
         allocator: std.mem.Allocator,
         project: *const project_config_mod.ProjectConfig,
     ) !ProjectCompileContext {
@@ -213,43 +99,26 @@ const ProjectCompileContext = struct {
         return context;
     }
 
-    fn deinit(self: *ProjectCompileContext, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *ProjectCompileContext, allocator: std.mem.Allocator) void {
         if (self.sql_schema_path) |path| allocator.free(path);
         if (self.policy) |*policy| policy.deinit(allocator);
         if (self.policy_source) |source| allocator.free(source);
         self.* = .{};
     }
 
-    fn policyPtr(self: *const ProjectCompileContext) ?*const zts.HandlerPolicy {
+    pub fn policyPtr(self: *const ProjectCompileContext) ?*const zts.HandlerPolicy {
         return if (self.policy) |*policy| policy else null;
     }
 };
 
-/// Resolve project-owned analysis inputs for an explicit handler path. A
-/// handler outside a project remains a supported standalone compile, while a
-/// handler below zttp.json must use the same schema and capability
-/// policy as `build` and `deploy --local`.
-fn discoverExplicitCompileContext(
-    allocator: std.mem.Allocator,
-    handler_path: []const u8,
-) !ProjectCompileContext {
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-
-    var project = try project_config_mod.discover(allocator, io_backend.io(), handler_path);
-    defer if (project) |*config| config.deinit(allocator);
-    const config = if (project) |*value| value else return .{};
-    return try ProjectCompileContext.init(allocator, config);
-}
-
-const ProjectArtifact = struct {
+pub const ProjectArtifact = struct {
     project: project_config_mod.ProjectConfig,
     compile_context: ProjectCompileContext,
     handler_path: []u8,
     output_path: []u8,
     project_name: []const u8,
 
-    fn deinit(self: *ProjectArtifact, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *ProjectArtifact, allocator: std.mem.Allocator) void {
         allocator.free(self.handler_path);
         allocator.free(self.output_path);
         self.compile_context.deinit(allocator);
@@ -261,7 +130,7 @@ const ProjectArtifact = struct {
 /// output path under `<root>/.zttp/<subdir>/<project-name>`. Creates the
 /// parent dir for the default path; for an explicit override, trusts the
 /// caller (avoids macOS symlink quirks like `/tmp` → `/private/tmp`).
-fn prepareProjectArtifact(
+pub fn prepareProjectArtifact(
     allocator: std.mem.Allocator,
     io: std.Io,
     subdir: []const u8,
@@ -358,7 +227,7 @@ fn failBuildCommandArgs(err: CommandArgError) !void {
     }
 }
 
-fn projectRunCommand(allocator: std.mem.Allocator, artifact: *const ProjectArtifact) ![]u8 {
+pub fn projectRunCommand(allocator: std.mem.Allocator, artifact: *const ProjectArtifact) ![]u8 {
     return allocator.dupe(u8, artifact.output_path);
 }
 
@@ -395,125 +264,6 @@ pub fn buildCommand(allocator: std.mem.Allocator, argv: []const []const u8) !voi
         \\Run:   {s}
         \\
     , .{ artifact.output_path, run_command });
-}
-
-fn parseLocalDeployCommandArgs(argv: []const []const u8) LocalDeployCommandParse {
-    var attest_requested = true;
-    var target_seen = false;
-
-    var i: usize = 0;
-    while (i < argv.len) : (i += 1) {
-        const arg = argv[i];
-        if (std.mem.eql(u8, arg, "--help")) {
-            return .help;
-        }
-        if (std.mem.eql(u8, arg, no_attest_flag)) {
-            attest_requested = false;
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--local")) {
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--target")) {
-            if (target_seen) return .{ .err = .duplicate_target };
-            i += 1;
-            if (i >= argv.len or std.mem.startsWith(u8, argv[i], "-")) {
-                return .{ .err = .missing_target_value };
-            }
-            target_seen = true;
-            if (!std.mem.eql(u8, argv[i], "local")) {
-                return .{ .err = .{ .unknown_target = argv[i] } };
-            }
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--target=")) {
-            if (target_seen) return .{ .err = .duplicate_target };
-            const value = arg["--target=".len..];
-            if (value.len == 0) return .{ .err = .missing_target_value };
-            target_seen = true;
-            if (!std.mem.eql(u8, value, "local")) {
-                return .{ .err = .{ .unknown_target = value } };
-            }
-            continue;
-        }
-        return .{ .err = .{ .unknown_arg = arg } };
-    }
-
-    return .{ .ok = .{ .attest_requested = attest_requested } };
-}
-
-fn failLocalDeployCommandArgs(err: LocalDeployArgError) !void {
-    switch (err) {
-        .missing_target_value => {
-            std.debug.print("--target requires exactly one value: local.\n\n", .{});
-            try printLocalDeployHelp();
-            return error.MissingArgument;
-        },
-        .duplicate_target => {
-            std.debug.print("Pass --target only once.\n\n", .{});
-            try printLocalDeployHelp();
-            return error.InvalidArgument;
-        },
-        .unknown_target => |target| {
-            std.debug.print("Unknown deploy target: {s}. Only 'local' is supported.\n\n", .{target});
-            try printLocalDeployHelp();
-            return error.InvalidArgument;
-        },
-        .unknown_arg => |arg| {
-            std.debug.print("Unknown argument for `zttp deploy --local`: {s}\n\n", .{arg});
-            try printLocalDeployHelp();
-            return error.UnknownOption;
-        },
-    }
-}
-
-pub fn localDeployCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    const opts = switch (parseLocalDeployCommandArgs(argv)) {
-        .help => {
-            try printLocalDeployHelp();
-            return;
-        },
-        .ok => |opts| opts,
-        .err => |err| return failLocalDeployCommandArgs(err),
-    };
-
-    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
-    defer io_backend.deinit();
-
-    var artifact = try prepareProjectArtifact(allocator, io_backend.io(), "deploy", null);
-    defer artifact.deinit(allocator);
-
-    // proof_ledger.appendEvent writes the relative path `.zttp/proofs.jsonl`,
-    // so anchor CWD at the project root before buildArtifact emits the ledger
-    // row. The summary block below advertises the ledger; failure here must
-    // surface, not silently warn.
-    try std.Io.Threaded.chdir(artifact.project.root_dir);
-
-    try buildArtifact(allocator, .{
-        .handler_path = artifact.handler_path,
-        .output_path = artifact.output_path,
-        .sql_schema_path = artifact.compile_context.sql_schema_path,
-        .policy = artifact.compile_context.policyPtr(),
-        .policy_source = artifact.compile_context.policy_source,
-        .ledger_service_name = artifact.project_name,
-        .attest_requested = opts.attest_requested,
-    });
-
-    const run_command = try projectRunCommand(allocator, &artifact);
-    defer allocator.free(run_command);
-    std.debug.print(
-        \\
-        \\Deployed: {s}
-        \\Run:      {s}
-        \\Try:      curl http://{s}:{d}/
-        \\Ledger:   .zttp/proofs.jsonl (kind=deploy)
-        \\
-        \\Note:     serves plain HTTP and binds 127.0.0.1 by default. For public
-        \\          traffic, terminate TLS at a reverse proxy and set the host.
-        \\
-        \\Inspect the proof ledger: zttp proofs list
-        \\
-    , .{ artifact.output_path, run_command, artifact.project.host, artifact.project.port });
 }
 
 /// Produces a compact JWS committing to (contract_json, bytecode,
@@ -1062,7 +812,7 @@ fn appendLedgerCapability(
 
 const production_build_capabilities = BuildCapabilities{};
 
-fn buildArtifact(allocator: std.mem.Allocator, request: BuildRequest) !void {
+pub fn buildArtifact(allocator: std.mem.Allocator, request: BuildRequest) !void {
     _ = try runBuild(allocator, request, production_build_capabilities);
 }
 
@@ -1238,28 +988,6 @@ fn codesignAdHoc(allocator: std.mem.Allocator, path: []const u8) void {
     }
 }
 
-fn printCompileHelp() !void {
-    const help =
-        \\zttp compile <handler.ts> -o <output>
-        \\
-        \\Compile a handler into a self-contained binary.
-        \\Verification is mandatory: the handler must pass all checks.
-        \\The output binary wraps the zttp runtime template, which must be
-        \\installed alongside zttp as `zttp-runtime`.
-        \\
-        \\Options:
-        \\  -o, --output <PATH>   Output binary path (required)
-        \\
-    ++ no_attest_help_block ++
-        \\  --help                Show this help
-        \\
-        \\For a no-args version that auto-detects from zttp.json, use
-        \\`zttp build` instead.
-        \\
-    ;
-    try writeAllFd(std.c.STDOUT_FILENO, help);
-}
-
 fn printBuildHelp() !void {
     const help =
         \\zttp build [-o <output>] [--no-attest]
@@ -1270,30 +998,6 @@ fn printBuildHelp() !void {
         \\
         \\Options:
         \\  -o, --output <PATH>   Override the output binary path
-        \\
-    ++ no_attest_help_block ++
-        \\  --help                Show this help
-        \\
-    ;
-    try writeAllFd(std.c.STDOUT_FILENO, help);
-}
-
-fn printLocalDeployHelp() !void {
-    const help =
-        \\zttp deploy [--no-attest]
-        \\  (--local is an accepted alias; deploy takes no arguments)
-        \\
-        \\Build a self-contained binary for the handler in this project and
-        \\record the deploy in the local proof ledger. No cloud credentials,
-        \\Docker, or network access required.
-        \\
-        \\Reads zttp.json from the current directory or any parent.
-        \\Output: .zttp/deploy/<project-name>
-        \\Ledger: .zttp/proofs.jsonl (appends a kind=deploy row)
-        \\
-        \\Options:
-        \\  --local               Use the local target (this command)
-        \\  --target local        Same as --local
         \\
     ++ no_attest_help_block ++
         \\  --help                Show this help

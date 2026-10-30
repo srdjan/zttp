@@ -30,6 +30,8 @@ const template_choices = cli_args.template_choices;
 const test_command = @import("test_command.zig");
 const init_command = @import("init_command.zig");
 const build_command = @import("build_command.zig");
+const compile_command = @import("compile_command.zig");
+const deploy_command = @import("deploy_command.zig");
 const dev_command = @import("dev_command.zig");
 const cli_help = @import("cli_help.zig");
 
@@ -270,7 +272,7 @@ fn cmdTest(ctx: cli_help.Ctx) anyerror!void {
 }
 
 fn cmdCompile(ctx: cli_help.Ctx) anyerror!void {
-    build_command.compileCommand(ctx.allocator, ctx.args) catch |err| {
+    compile_command.compileCommand(ctx.allocator, ctx.args) catch |err| {
         if (err == error.NoProjectConfig) {
             printNoProjectConfigDiagnostic(ctx.command);
             std.process.exit(1);
@@ -337,7 +339,7 @@ fn cmdDeploy(ctx: cli_help.Ctx) anyerror!void {
         );
         std.process.exit(1);
     }
-    build_command.localDeployCommand(ctx.allocator, ctx.args) catch |err| {
+    deploy_command.localDeployCommand(ctx.allocator, ctx.args) catch |err| {
         if (err == error.NoProjectConfig) {
             printNoProjectConfigDiagnostic(ctx.command);
             std.process.exit(1);

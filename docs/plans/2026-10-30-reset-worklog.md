@@ -130,3 +130,24 @@ Behavior change, disclosed: in the `zttp` binary, a flag token in a value positi
 Unit 6d: `expert_flags` in `app.zig` is the one table of the 18 expert flags, and `lookupExpertFlag` reads it for both parsers. The switch in `parseExpertFlags` has no `else`, so a new tag fails the build until it has an arm. No expected value moved. The surface digests equal Phase 0.
 
 Gates on the working tree before each commit, each exit 0: protection check, build, `digest.sh`, the steps of each unit in the plan's gate table, `zig build test`, and `check-spine`. Units 6b, 6c, and 6d also ran `surface.sh`. Units 6b and 6c also ran `probe.sh`.
+
+## Phase 7
+
+Status: complete. Each unit is motion only. The reviewer compared the sets of lines before and after each split, ignoring indentation. Each difference is a `pub`, an import or alias, a file header, a moved signature, or a call site.
+
+Gate references found before each unit: `check-runtime-purity.sh` for `server.zig`; `check-proof-swallow.sh` and `zts-tiers.allow` for `flow_interp.zig`; no hit for `agent.zig`; two sites in `tooling/release_check.zig` for `build_command.zig`.
+
+Unit 7a: `bfdd2a02`. `server_activation.zig` holds the pre-pool activation block and the swap refusal. `Server.start` calls `activation.activate`. The purity gate scans the new file, and a copy with a direct `zts` import exits 1 and names the file.
+Ruling: the attestation-header block in `start` stays, because it runs after pool creation. Moving it needs a second activation call.
+
+Unit 7b: `38985ea8` and `efa9a7d3`. `flow_value.zig` holds the value model and `flow_rules.zig` holds the rule tables. `FlowInterp` stays whole. The swallow gate now lists 34 files and reports 0 unreviewed. A discarded error in either new file exits 1 and names the file. `scripts/proof-swallow.allow` did not change.
+Ruling: three anchors in `docs/solutions` moved with their symbols, because `check-spine` refused the old paths.
+
+Unit 7c: `ca14c591`. `agent_bootstrap.zig`, `agent_compaction.zig`, `agent_admission.zig`, and `agent_fork.zig` hold the four blocks. Every moved declaration was already a free function or a type, so no method changed form. `agent.zig` binds the moved names through private aliases, so its 64 tests did not change.
+The bootstrap block is 541 lines and not the 321 lines of N15, because the cut is contiguous and takes the receipt helpers with it. `mlx_e2e_test.zig` compiles, which a run with a filter that selects no test confirmed without a model call.
+
+Unit 7d: this commit. `compile_command.zig` and `deploy_command.zig` hold their commands, and `dev_cli.zig` calls them there.
+Ruling: the shared artifact pipeline, about 1,000 production lines, stays in `build_command.zig`, because all three commands use it and the plan names three files. A fourth file is possible later.
+Ruling: `--no-attest` stays in `build_command.zig`, so `tooling/release_check.zig` reads the same fact from the same file. A copy with that text changed makes the `proof_surface` row of the passport fail.
+
+Gates on the working tree before each commit, each exit 0: protection check, build, `digest.sh`, the steps of each unit in the plan's gate table, `test-module-boundary`, `zig build test`, and `check-spine`. Unit 7d also ran `surface.sh` and `test-release-check`.
