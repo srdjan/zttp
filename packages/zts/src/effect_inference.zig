@@ -2937,7 +2937,7 @@ fn analyzeNamedRow(source: []const u8, name: []const u8) !EffectRow {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -2978,7 +2978,7 @@ test "module holders retain their effects without an atom table" {
     );
     const source = try output.toOwnedSlice();
     defer allocator.free(source);
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -3010,7 +3010,7 @@ test "supplied sibling outcomes preserve legacy charges and add completed effect
         \\function missing() { return absent(); }
         \\function pureSibling() { return pure(); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3090,10 +3090,10 @@ test "incomplete sibling rows include possible writes and egress" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator,
+    var parser = try JsParser.initAdmission(allocator, allocator,
         \\import { run } from "./helper.ts";
         \\function handler() { return run(); }
-    );
+    , .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3149,7 +3149,7 @@ test "export projection owns names and classifies callables data and blocked val
             \\export const factoryResult = factory();
             \\function hidden() { cacheSet("hidden", "k", "v", 10); }
         ;
-        var parser = try JsParser.init(allocator, source);
+        var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
         parser.setAtomTable(&atoms);
         defer parser.deinit();
         const root = try parser.parse();
@@ -3207,7 +3207,7 @@ test "export projection keeps supplied data aliases as data" {
         \\import { config } from "./config.ts";
         \\export const localConfig = config;
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3237,10 +3237,10 @@ test "export projection closes every allocation failure" {
         fn run(allocator: std.mem.Allocator) !void {
             var atoms = atom_table.AtomTable.init(allocator);
             defer atoms.deinit();
-            var parser = try JsParser.init(allocator,
+            var parser = try JsParser.initAdmission(allocator, allocator,
                 \\export function first() { return second(); }
                 \\export function second() { return 2; }
-            );
+            , .compile);
             parser.setAtomTable(&atoms);
             defer parser.deinit();
             const root = try parser.parse();
@@ -3261,7 +3261,7 @@ test "effect facts own immutable call and recursion results" {
     {
         var atoms = atom_table.AtomTable.init(allocator);
         defer atoms.deinit();
-        var parser = try JsParser.init(allocator,
+        var parser = try JsParser.initAdmission(allocator, allocator,
             \\export function direct() { return direct(); }
             \\function caller() { return direct(); }
             \\function mutualA() { return mutualB(); }
@@ -3271,7 +3271,7 @@ test "effect facts own immutable call and recursion results" {
             \\function valueA() { const refs = [valueB]; return refs; }
             \\function valueB() { const refs = [valueA]; return refs; }
             \\function unknown(run) { return run(); }
-        );
+        , .compile);
         parser.setAtomTable(&atoms);
         defer parser.deinit();
         const root = try parser.parse();
@@ -3319,7 +3319,7 @@ test "effect facts refuse an unrequested contract projection" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator, "function handler() { return 1; }");
+    var parser = try JsParser.initAdmission(allocator, allocator, "function handler() { return 1; }", .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3334,7 +3334,7 @@ test "completed contract facts retain selected handler identity" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator, "function handler() { return 1; }");
+    var parser = try JsParser.initAdmission(allocator, allocator, "function handler() { return 1; }", .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3363,9 +3363,9 @@ test "completed no-handler facts remain distinct from an unrequested projection"
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator,
+    var parser = try JsParser.initAdmission(allocator, allocator,
         \\import { cacheGet, cacheSet } from "zttp:cache";
-    );
+    , .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3391,7 +3391,7 @@ test "an export clone outlives its effect facts" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator, "export function visible() { return 1; }");
+    var parser = try JsParser.initAdmission(allocator, allocator, "export function visible() { return 1; }", .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3415,11 +3415,11 @@ test "effect facts close every allocation failure" {
         fn run(allocator: std.mem.Allocator) !void {
             var atoms = atom_table.AtomTable.init(allocator);
             defer atoms.deinit();
-            var parser = try JsParser.init(allocator,
+            var parser = try JsParser.initAdmission(allocator, allocator,
                 \\export function first() { return second(); }
                 \\function second() { return second(); }
                 \\function handler() { return first(); }
-            );
+            , .compile);
             parser.setAtomTable(&atoms);
             defer parser.deinit();
             const root = try parser.parse();
@@ -3457,10 +3457,10 @@ test "export clone closes every allocation failure" {
         fn run(allocator: std.mem.Allocator) !void {
             var atoms = atom_table.AtomTable.init(allocator);
             defer atoms.deinit();
-            var parser = try JsParser.init(allocator,
+            var parser = try JsParser.initAdmission(allocator, allocator,
                 \\export function first() { return second(); }
                 \\export function second() { return 2; }
-            );
+            , .compile);
             parser.setAtomTable(&atoms);
             defer parser.deinit();
             const root = try parser.parse();
@@ -3478,7 +3478,7 @@ test "leaf pure function has empty effect row" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator, "function clean(s) { return s; }");
+    var parser = try JsParser.initAdmission(allocator, allocator, "function clean(s) { return s; }", .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3498,7 +3498,7 @@ test "Date.now marks the enclosing function non-deterministic" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator, "function nowSeconds() { return Date.now(); }");
+    var parser = try JsParser.initAdmission(allocator, allocator, "function nowSeconds() { return Date.now(); }", .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3520,7 +3520,7 @@ test "transitive non-determinism flows through callers" {
         \\function inner() { return Date.now(); }
         \\function outer() { return inner(); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3549,7 +3549,7 @@ test "a call chain too deep to converge marks every row a lower bound" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator,
+    var parser = try JsParser.initAdmission(allocator, allocator,
         \\function f1() { return f2(); }
         \\function f2() { return f3(); }
         \\function f3() { return f4(); }
@@ -3570,7 +3570,7 @@ test "a call chain too deep to converge marks every row a lower bound" {
         \\function f18() { return f19(); }
         \\function f19() { return f20(); }
         \\function f20() { return Date.now(); }
-    );
+    , .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3595,7 +3595,7 @@ test "an unmatched recursion query returns false without allocation" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator, "function work() { return 1; }");
+    var parser = try JsParser.initAdmission(allocator, allocator, "function work() { return 1; }", .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -3616,7 +3616,7 @@ test "self-recursive function is flagged" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator, "function loop(n) { return loop(n); }");
+    var parser = try JsParser.initAdmission(allocator, allocator, "function loop(n) { return loop(n); }", .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3637,7 +3637,7 @@ test "mutual recursion is flagged for both participants" {
         \\function a(n) { return b(n); }
         \\function b(n) { return a(n); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3656,7 +3656,7 @@ test "Math.random marks function non-deterministic" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator, "function pick() { return Math.random(); }");
+    var parser = try JsParser.initAdmission(allocator, allocator, "function pick() { return Math.random(); }", .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3677,7 +3677,7 @@ test "pure helper next to non-deterministic helper stays pure" {
         \\function clean(s) { return s; }
         \\function rnd() { return Math.random(); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3702,7 +3702,7 @@ test "calling a write-classified import marks the function as writing" {
         \\function store(k) { return cacheSet("ns", k, "v"); }
         \\function clean(s) { return s; }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3728,7 +3728,7 @@ test "a write-classified import handed to a callback slot marks the function as 
         \\function store(items) { return items.forEach(cacheSet); }
         \\function clean(items) { return items.map(String); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3754,7 +3754,7 @@ test "write effect propagates transitively to callers" {
         \\function inner(k) { return cacheSet("ns", k, "v"); }
         \\function outer(k) { return inner(k); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3935,7 +3935,7 @@ test "partner write-classified import marks function and callers as writing" {
         \\function wrapper(tok) { return charge(tok); }
         \\function clean(tok) { return tok; }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3969,7 +3969,7 @@ test "a tightened export carries only what it reaches" {
         \\function readToken(h) { return parseBearer(h); }
         \\function checkToken(t, s) { return jwtVerify(t, s); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -3998,7 +3998,7 @@ test "uuid does not reach the clock, ulid does" {
         \\function mintUuid() { return uuid(); }
         \\function mintUlid() { return ulid(); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4029,7 +4029,7 @@ test "a cache delete does not reach the clock, a get does" {
         \\function evict(ns, k) { return cacheDelete(ns, k); }
         \\function lookup(ns, k) { return cacheGet(ns, k); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4059,7 +4059,7 @@ test "base64 does not reach crypto, sha256 does" {
         \\function encode(s) { return base64Encode(s); }
         \\function digest(s) { return sha256(s); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4091,7 +4091,7 @@ test "a discarded write-effect clock read does not demote determinism" {
         \\  return Response.json({ ok: true });
         \\}
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4121,7 +4121,7 @@ test "a bound write-effect result still demotes determinism" {
         \\  return Response.json({ r: r });
         \\}
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4154,7 +4154,7 @@ test "a clock read after a discarded log call still demotes determinism" {
         \\  return items.map(jwtVerify);
         \\}
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4179,7 +4179,7 @@ test "a read-effect clock or random call still demotes determinism" {
         \\import { uuid } from "zttp:id";
         \\function handler(req) { return Response.json({ id: uuid() }); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4204,7 +4204,7 @@ test "an export with no declared set inherits its module's" {
         \\import { env } from "zttp:env";
         \\function region() { return env("REGION"); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4246,7 +4246,7 @@ test "a partner module's declared capabilities reach the caller's row" {
         \\import { chargeCard } from "zttp-ext:stripe";
         \\function charge(tok) { return chargeCard(tok); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4273,7 +4273,7 @@ test "a module neither registry resolves fails closed with every capability" {
         \\import { thing } from "zttp-ext:unregistered";
         \\function use(x) { return thing(x); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4303,7 +4303,7 @@ test "a named helper passed as a callback reaches the caller's row" {
         \\function fmt(x) { return env("PREFIX") + x; }
         \\function render(items) { return items.map(fmt); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4335,7 +4335,7 @@ test "a Result combinator's row is the join of its callback's" {
         \\function via_named(r) { return mapResult(r, named_cb); }
         \\function pure_cb(r) { return mapResult(r, (x) => x + 1); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4367,7 +4367,7 @@ test "a call through a function-typed parameter marks the row a lower bound" {
         \\function direct(n) { return n + 1; }
         \\function callsDirect(n) { return direct(n); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4403,7 +4403,7 @@ test "an effectful arm contributes its effect to the row" {
         \\  };
         \\}
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4430,7 +4430,7 @@ test "a match whose arms are all pure keeps a pure row" {
         \\  };
         \\}
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4452,7 +4452,7 @@ test "a lower bound propagates to callers" {
         \\function outer(n) { return apply(direct, n); }
         \\function direct(n) { return n + 1; }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4473,7 +4473,7 @@ test "a hole does not make the enclosing row a lower bound" {
     // row a lower bound, no ceiling could discharge and the promise that the
     // rest of the program still verifies would be empty.
     const source = "function pending(x) { return hole(); }";
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4494,7 +4494,7 @@ test "a call to a runtime-provided global is not a lower bound" {
     // capability. Marking them would turn every JSX handler into a lower
     // bound and drown the signal that the flag exists to carry.
     const source = "function rows(n) { return range(n); }";
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4511,7 +4511,7 @@ test "empty program is a no-op" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator, "");
+    var parser = try JsParser.initAdmission(allocator, allocator, "", .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4731,10 +4731,10 @@ test "a value reference does not create recursion but a callback call still does
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator,
+    var parser = try JsParser.initAdmission(allocator, allocator,
         \\function a(xs) { return xs.map(b); }
         \\function b(x) { return a([x]); }
-    );
+    , .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4749,10 +4749,10 @@ test "a value reference does not create recursion but a callback call still does
 
     // The value edge is visible to a reachability walk, the call edge is not
     // widened by it.
-    var vparser = try JsParser.init(allocator,
+    var vparser = try JsParser.initAdmission(allocator, allocator,
         \\function w() { return 1; }
         \\function handler() { const t = [w]; return t; }
-    );
+    , .compile);
     vparser.setAtomTable(&atoms);
     defer vparser.deinit();
     const vroot = try vparser.parse();
@@ -4865,11 +4865,11 @@ test "a route function that references the route table is not recursive" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator,
+    var parser = try JsParser.initAdmission(allocator, allocator,
         \\function listUsers(req) { return Object.keys(routes); }
         \\function getUser(req) { return Object.keys(routes); }
         \\const routes = [{ path: "/u", run: listUsers }, { path: "/u/1", run: getUser }];
-    );
+    , .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -4991,7 +4991,7 @@ fn expectEscape(source: []const u8, expected_name: ?[]const u8) !void {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -5103,7 +5103,7 @@ test "a sibling module's escaped function value reaches every function of the im
         \\function viaRun() { return run(1); }
         \\function viaOther() { return other(1); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -5148,7 +5148,7 @@ test "a clean sibling module leaves the importer's escape flag clear" {
         \\import { other } from "./helper.ts";
         \\function viaOther() { return other(1); }
     ;
-    var parser = try JsParser.init(allocator, source);
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -5181,10 +5181,10 @@ test "exports of a module with an escaped function value carry the flag" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator,
+    var parser = try JsParser.initAdmission(allocator, allocator,
         \\export function plain(n) { return n; }
         \\export const ops = { a: (n) => n };
-    );
+    , .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
@@ -5221,7 +5221,7 @@ fn nestedChainSummary(allocator: std.mem.Allocator, chain_len: usize, depth: usi
     try writer.print("function handler(req) {{ return g{d}(req); }}\n", .{chain_len - 1});
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try JsParser.init(allocator, output.written());
+    var parser = try JsParser.initAdmission(allocator, allocator, output.written(), .compile);
     parser.setAtomTable(&atoms);
     defer parser.deinit();
     const root = try parser.parse();
