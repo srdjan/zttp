@@ -6,12 +6,14 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [v0.26.0: proof trust](2026-10-27-v0.26.0-plan.md) | Active authority for 0.26.0; revision 2 after the audit re-check and one Fable round; execution record in the same file | Owner chose 1(a), 2(a), 3(a) and 4(a) to 8(a) with "as recommended" on 2026-10-27 |
+| [Reset implementation, 2026-10-30](2026-10-30-reset-implementation-plan.md) | Active authority for the 2026-10-30 reset; findings, target design, phases, and owner decisions | Owner chose the recommended option for Decisions 1 to 6 on 2026-10-30 |
+| [Reset worklog, 2026-10-30](2026-10-30-reset-worklog.md) | Execution record, commands, exit statuses, and deviations for the 2026-10-30 reset | Records the owner decisions of the 2026-10-30 reset plan |
+| [v0.26.0: proof trust](2026-10-27-v0.26.0-plan.md) | Complete; v0.26.0 published 2026-10-30; revision 2 after the audit re-check and one Fable round; execution record in the same file | Owner chose 1(a), 2(a), 3(a) and 4(a) to 8(a) with "as recommended" on 2026-10-27 |
 | [v0.26.0 C2 design](2026-10-28-v0.26.0-c2-design.md) | Design for C2a, C2b, R3, and C2c: the consumer re-derives `results_checked` | Owner chose 13(a) and 14(a) on 2026-10-28 |
 | [v0.26.0 P1 and R2 design](2026-10-28-v0.26.0-p1r2-design.md) | Design for P1 and R2: four false `equivalent` verdicts of the behavior diff, with Revision 1 from Fable | Owner chose (a) for 17 to 24 and 26 to 29 on 2026-10-28 |
 | [v0.26.0 A3 design](2026-10-28-v0.26.0-a3-design.md) | Design for A3 under Decision 31: a read of a value that may be undefined is refused as ZTS309; Revision 1 after Fable | Owner chose (a) for 32 to 41 and 43, and (b) for 42, on 2026-10-28 |
-| [Release fixes, 2026-10-26](2026-10-26-release-fixes-plan.md) | Active authority for the release-review fixes; units 007 to 014, U2, and U3; execution record in the same file | Owner chose option (a) for Decisions 16 to 20 with "as recommended" on 2026-10-26 |
-| [Reset implementation, 2026-10-25](2026-10-25-reset-implementation-plan.md) | Reset authority; complete through R13, 2026-10-25; open owner decisions are in the [roadmap](../roadmap.md) | Owner approved R0 to R13 with "as recommended" (Decisions 1 to 5, option a), chose Decision 6 (a), and chose option (a) for Decisions 8 to 11 on 2026-10-26 |
+| [Release fixes, 2026-10-26](2026-10-26-release-fixes-plan.md) | Complete; shipped as 0.25.0; release-review fixes, units 007 to 014, U2, and U3; execution record in the same file | Owner chose option (a) for Decisions 16 to 20 with "as recommended" on 2026-10-26 |
+| [Reset implementation, 2026-10-25](2026-10-25-reset-implementation-plan.md) | Complete through R13, 2026-10-25; no longer the reset authority (superseded by the 2026-10-30 plan) | Owner approved R0 to R13 with "as recommended" (Decisions 1 to 5, option a), chose Decision 6 (a), and chose option (a) for Decisions 8 to 11 on 2026-10-26 |
 | [Eager recycle rebuild](2026-10-25-eager-recycle-rebuild-plan.md) | Plan 2026-10-25; the worker builds the replacement runtime after the response is sent; this index records no completion | Owner chose Decision 3 option A on 2026-10-25 |
 | [Zig book hardening](2026-10-25-zig-book-hardening-plan.md) | Plan 2026-10-25; the worklog records the execution and lists open items (a ZTS200 alias-chain cost and a `bench-check` failure under host load) | Owner chose 1a; slot-buffer reuse waits for the recycle p99 |
 | [Zig book hardening worklog](2026-10-25-zig-book-hardening-worklog.md) | Execution record, decisions, and open items for the Zig book hardening plan | Records the owner decisions of that plan |
@@ -88,7 +90,7 @@ Pruning round 2 (decision 5A) deleted 15 completed or superseded plans and workl
 Each stays readable at the local `pre-round-2-archive` tag, for example
 `pre-round-2-archive:docs/plans/2026-10-11-feature-removal-worklog.md`. The tag marks the commit before the deletion.
 The round 2 worklog (`pre-reset-archive-2026-10-25:docs/plans/2026-10-21-pruning-round-2-worklog.md`, section "U8 archive") lists every deleted file.
-The 2026-10-14 reset plan and worklog stay as the record of U1 to U20 and of the open benchmark result. The 2026-10-25 reset plan is the active authority.
+The 2026-10-14 reset plan and worklog stay as the record of U1 to U20 and of the open benchmark result. The 2026-10-30 reset plan is the active authority.
 
 Pruning round 3 (decision D7) deleted six completed plans that no tracked file outside `docs/plans/` cites, and advisor plan 006.
 Each stays readable at the local `pre-round-3-archive` tag, for example

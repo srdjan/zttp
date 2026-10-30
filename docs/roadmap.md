@@ -9,18 +9,15 @@ work from reference designs. Product proposals (`pre-rebase:docs/zttp-next/READM
 
 ## Milestones
 
-The 2026-10-25 reset is complete through R13 (2026-10-25).
-The [reset plan](plans/2026-10-25-reset-implementation-plan.md) is its authority.
-The [reset worklog](plans/2026-10-25-reset-worklog.md) records the execution, the commands, and the exit statuses.
-Plans that the reset archived stay readable at the local tag `pre-reset-archive-2026-10-25`.
+The [2026-10-30 reset plan](plans/2026-10-30-reset-implementation-plan.md) is the active reset authority.
+The [2026-10-30 reset worklog](plans/2026-10-30-reset-worklog.md) records its execution, commands, and exit statuses.
+The 2026-10-25 reset is complete through R13 (2026-10-25). Its [plan](plans/2026-10-25-reset-implementation-plan.md) and [worklog](plans/2026-10-25-reset-worklog.md) are records, not an authority.
 The [2026-10-14 reset plan](plans/2026-10-14-reset-implementation-plan.md) is also complete (U1 to U20) and is not an authority.
+Release v0.26.0 was published on 2026-10-30. The release fixes plan shipped as 0.25.0.
 
-Open owner decisions after the reset:
-- Decision 2 (batched re-record window, D-012 in [decisions.md](decisions.md)). Model-visible changes wait for one window. The window holds the R7c move of the three pi tools onto the production session, the missing-type location of R4 row 18, and the deferred H10 and U12 defaults. Units 013, U2, and U3 of the [release fixes plan](plans/2026-10-26-release-fixes-plan.md) used one re-record on 2026-10-27 (`20248887`).
+Standing rule D-012 in [decisions.md](decisions.md): a model-visible change waits for one batched re-record window. The v0.26.0 window ran on 2026-10-29. The owner runs any later window.
 
-The owner decided Decisions 8 to 11 on 2026-10-26; the [reset worklog](plans/2026-10-25-reset-worklog.md) records each result.
-
-Next work: the [v0.26.0 plan](plans/2026-10-27-v0.26.0-plan.md), theme proof trust. Its unit W is the batched re-record window of Decision 2 below. The release fixes plan is complete and shipped as 0.25.0.
+Next work: the 2026-10-30 reset.
 
 M1, M2, and M3 are complete.
 M4 is complete: T1a to T7 were delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 2 later removed both runtime products. No release date is assigned.
@@ -120,6 +117,7 @@ contract must identify which ones it needs.
 | Server rate limiting | Conditional | Standalone unproxied server selected as a product target | Decide whether application limits through `zttp:ratelimit` are insufficient | Approved server policy and accept-path tests, or a recorded decision to retain application limits |
 | Computed SQL guards | Deferred | Policy preserves read/write authority | Design that policy distinction before enabling the family | Consumer coverage and sink tests reject cross-authority use; guard drift gate passes |
 | Certificate assurance | Open, incremental | Select one property or opcode family | Add a producer case and an independent checker rule or witness | Checker rejects a mutation; `test-proof-ratchet` and `test-proof-ratchet-drift` pass with the revised disclosed boundary |
+| Runtime cost fuse | Open product question | The server, the CLI, and the build do not set `cost_ceilings` in `RuntimeConfig`; only tests set it | Decide whether to wire the fuse into the server or to delete it (unit 9g of the [reset plan](plans/2026-10-30-reset-implementation-plan.md)). The code stays until the owner decides | A shipped binary records the incident, or the field and `CostMeter` are deleted; [Verification](verification.md) matches |
 
 Socket health/readiness, in-flight shutdown-drain, and grace-expiry tests exist in
 `packages/runtime/src/server.zig`. The HTTP implementation and native helpers
@@ -198,78 +196,29 @@ or generic-instantiation case. This is an investigation, not a confirmed bypass.
 
 ## Reset And Simplification
 
-Phase 1 of [plan 005](plans/2026-10-11-feature-removal-phase-1.md) is complete (2026-10-12).
-It removed Studio, the demo and proof quest, the edge runtime, the AOT native-handler path,
-the WASM playground, the Claude and OpenAI providers, the SMT layer, RPC mode,
-the performance and equivalence receipt writers, the provable-reach tooling,
-and the dead code those removals left behind. Groups G1 to G15 changed no model-visible
-input, and the policy, module registry, and spec hashes equal their baselines.
-The worklog (`pre-round-2-archive:docs/plans/2026-10-11-feature-removal-worklog.md`) records each group, the
-deleted and kept plans, and the recount of files and lines.
-Studio and edge are not part of "Supported Now".
-Phase 2 is complete. It removed runtime tool routes, agent turns, application invariants, and consumer declarations.
-New artifacts use payload format 7 and certificate schema 5. The updated reader refuses the previous formats.
-The Phase 2 worklog (`pre-round-2-archive:docs/plans/2026-10-12-feature-removal-phase-2-worklog.md`) records offline verification, unchanged compiler identities, and review limits.
-Phase 3 source cuts removed orchestration, TSX, source `comptime()`, hypermedia,
-and the deferred PI tools. Phase 3 is complete, including coupling cleanup and offline evidence publication.
-The 0.22.0 convergence and coverage pages carry the current published evidence.
+The [2026-10-30 reset plan](plans/2026-10-30-reset-implementation-plan.md) is the active reset authority.
+The [2026-10-30 reset worklog](plans/2026-10-30-reset-worklog.md) records its execution.
+Earlier reset work is complete. Each plan below is a record of its own work, not a second authority.
 
-The owner approved the first shared-analysis unit (`pre-round-2-archive:docs/plans/2026-10-11-shared-analysis-first-unit.md`) on 2026-10-11.
-The unit preserves documented features and initial wire formats. Its worklog (`pre-round-2-archive:docs/plans/2026-10-11-shared-analysis-worklog.md`) records execution evidence.
-The unit is complete. Single-module coordinators own their analysis, and private contract operations consume completed results.
-All 13 named checks pass. Fixed public JSON and generated compiler output match the baseline exactly.
-The worklog records review coverage limits. Whole-graph migration remains outside this unit.
+- Plan 005 Phase 1 ([plan](plans/2026-10-11-feature-removal-phase-1.md)), 2026-10-12. It removed Studio, the demo and proof quest, the edge runtime, the AOT native-handler path, the WASM playground, the Claude and OpenAI providers, the SMT layer, RPC mode, the receipt writers for performance and equivalence, and the provable-reach tooling. Groups G1 to G15 changed no model-visible input. The policy, module registry, and spec hashes equal their baselines. Studio and edge are not part of "Supported Now".
+- Plan 005 Phase 2 ([plan](plans/2026-10-12-1109-refactor-feature-removal-phase-two-plan.md)), 2026-10-12. It removed runtime tool routes, agent turns, application invariants, and consumer declarations. New artifacts use payload format 7 and certificate schema 5, and the reader refuses the previous formats.
+- Plan 005 Phase 3 ([plan](plans/2026-10-12-1444-refactor-feature-removal-phase-three-plan.md)). It removed orchestration, TSX, source `comptime()`, hypermedia, and the deferred PI tools.
+- Shared analysis, 2026-10-11. Single-module coordinators own their analysis. The multi-module phase moved both default graph producers onto completed per-module contract analysis from one owner. Fixed public JSON and generated compiler output match the baseline exactly. Custom callbacks keep their compatibility branch.
+- CHECK facts reuse ([plan](plans/2026-10-13-1113-refactor-check-facts-reuse-plan.md)), Phase 4. CHECK keeps its own import traversal, because strict graph reuse would change its verdicts and revision reads. Full convergence between CHECK and compilation is follow-up work.
+- Reset of 2026-10-14 ([plan](plans/2026-10-14-reset-implementation-plan.md), [worklog](plans/2026-10-15-reset-worklog.md)). U1 to U20 are complete. The unresolved advisory benchmark result is in the worklog.
+- Reset of 2026-10-25 ([plan](plans/2026-10-25-reset-implementation-plan.md), [worklog](plans/2026-10-25-reset-worklog.md)). Complete through R13.
 
-The owner approved the multi-module contract phase (`pre-round-2-archive:docs/plans/2026-10-11-1608-refactor-multi-module-contract-analysis-plan.md`) with "yes, execute".
-That phase is complete. Both default graph producers now consume completed per-module contract analysis from one owner.
-Custom callbacks retain their existing compatibility branch. Pass selection, diagnostic acceptance, and initial wire formats remain unchanged.
-All nine required named checks pass: 10769 tests passed and six were skipped.
-
-Four public comparisons preserve exact generated code and contract bytes. Two compiling mutations confirm that required analysis and dependency merges remain necessary.
-The multi-module worklog (`pre-round-2-archive:docs/plans/2026-10-11-multi-module-analysis-worklog.md`) records review limits, cleanup measurements, and responsibility changes.
-Production code grows by 186 lines in this phase. The change consolidates analysis ownership and adds completion guards.
-
-CHECK retains its current import traversal because strict graph reuse would change its verdicts and revision reads.
-Full convergence between CHECK and compilation remains follow-up work.
-The owner selected Phase 4 on 2026-10-13.
-The [CHECK facts plan](plans/2026-10-13-1113-refactor-check-facts-reuse-plan.md) defines the first bounded unit.
-That unit removes duplicate root facts construction from CHECK path analysis through the existing borrowed-input mechanism.
-It preserves imported traversal, reader calls, public verdicts, and current formats.
-The owner selected execution with "D12: 1".
-The source change and focused checks are complete. Offline evidence publication and final release verification follow the source closure commit.
-The Phase 4 worklog (`pre-round-2-archive:docs/plans/2026-10-13-feature-removal-phase-4-worklog.md`) records exact output comparisons, reader characterization, cleanup measurements, and review limits.
-Later Phase 4 units address imported analysis, binding semantics, and a typed frontend prototype.
-
-The reset ledger (`pre-rebase:docs/archive/plans/2026-07-28-001-reset-simplification-plan.md`) is historical.
-The shared import and binding index shipped. The old parser-deletion estimate
-is obsolete.
-
-The [2026-10-14 reset plan](plans/2026-10-14-reset-implementation-plan.md)
-records the direct typed parser, shared analysis, workspace owner, and retired
-state removal. U1 to U20 are complete. Its
-[worklog](plans/2026-10-15-reset-worklog.md) records test receipts, sandbox
-limits, and the unresolved advisory benchmark result. The
-[2026-10-25 reset plan](plans/2026-10-25-reset-implementation-plan.md) is the
-authority for the later reset, which is complete through R13. The historical
-phase plans remain evidence of their own completed work, not a second
-implementation authority.
+The shared import and binding index shipped. The old parser-deletion estimate is obsolete.
+The orchestration move stays declined: no selected consumer needs another `LoweredModule` phase.
+The bounded rederive (`pre-rebase:docs/archive/plans/2026-09-20-rederive-implementation-plan.md`) closed the schema-writer, journal-decoding, and recovery-planning work.
+The owner accepted the nine decisions of plan 005 on 2026-10-11 with "your recommendations". Reopening a removal needs a product decision and current usage evidence.
+Plans that earlier resets archived stay readable at the local tags `pre-rebase`, `pre-round-2-archive`, `pre-round-3-archive`, and `pre-reset-archive-2026-10-25`.
 
 | Work | Status | Dependency | Next action | Completion evidence |
 |---|---|---|---|---|
 | Shared IR shape helpers | Deferred | A concrete new consumer, such as a build cache or incremental compile | Identify the repeated shape operation the consumer needs | A shared helper replaces measured duplication and preserves analyzer behavior |
 | Collector role | Measurement required | Reproduce remaining memory growth after the lifetime-arena fix | Attribute retained allocations before selecting any deletion | Repeatable allocation and RSS evidence identifies what grows and whether collection is required |
 | VM-loop deduplication | Deferred | Runtime hardening, engine facade, and the existing measurement gates | Revalidate the deferred plan (`pre-rebase:docs/archive/DEFERRED_VM_LOOP_DEDUPE_PLAN.md`) against the selected runtime path | Public behavior preserved and the plan's measurements justify the change |
-
-The reset's orchestration move remains declined. It has no selected consumer
-for another `LoweredModule` phase and no measured correctness or performance
-benefit. The bounded rederive (`pre-rebase:docs/archive/plans/2026-09-20-rederive-implementation-plan.md`)
-closed the selected schema-writer, journal-decoding, and recovery-planning work.
-
-The reset ledger's owner-decision and retention sections are historical
-suggestions. Plan 005 superseded their default of keeping every capability that
-was still present. The owner accepted its nine decisions on 2026-10-11 with
-"your recommendations", and Phase 1 removed the surfaces it listed.
-Reopening a removal requires a product decision and current usage evidence.
 
 ## Proposal Decisions
 
