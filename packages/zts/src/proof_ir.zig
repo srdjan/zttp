@@ -1576,7 +1576,7 @@ fn parseAndLowerWith(
 ) !Lowered {
     const parser = try allocator.create(JsParser);
     errdefer allocator.destroy(parser);
-    parser.* = try JsParser.init(allocator, source);
+    parser.* = try JsParser.initAdmission(allocator, allocator, source, .compile);
     errdefer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2070,7 +2070,7 @@ test "a program deeper than the walk bound is refused, not truncated" {
         while (i < n) : (i += 1) try source.appendSlice(allocator, "  }\n");
         try source.appendSlice(allocator, "}\n");
 
-        var parser = JsParser.init(allocator, source.items) catch {
+        var parser = JsParser.initAdmission(allocator, allocator, source.items, .compile) catch {
             parser_refused_at = n;
             break;
         };
