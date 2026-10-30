@@ -65,11 +65,14 @@ pub const ProjectConfig = struct {
     }
 };
 
-pub fn discover(
+/// The path of the nearest `zttp.json` at or above `start_path`, or null when
+/// no manifest exists. A null `start_path` starts at the current directory.
+/// Caller frees the returned path. `discover` loads this manifest.
+pub fn nearestManifestPath(
     allocator: std.mem.Allocator,
     io: std.Io,
     start_path: ?[]const u8,
-) !?ProjectConfig {
+) !?[]u8 {
     const start_dir = try findStartDir(allocator, io, start_path);
     defer allocator.free(start_dir);
 
@@ -78,13 +81,15 @@ pub fn discover(
 
     while (true) {
         const manifest_path = try std.fs.path.resolve(allocator, &.{ current, "zttp.json" });
-        defer allocator.free(manifest_path);
 
         if (std.Io.Dir.accessAbsolute(io, manifest_path, .{})) |_| {
-            return try loadAbsolute(allocator, io, manifest_path);
-        } else |err| switch (err) {
-            error.FileNotFound => {},
-            else => return err,
+            return manifest_path;
+        } else |err| {
+            allocator.free(manifest_path);
+            switch (err) {
+                error.FileNotFound => {},
+                else => return err,
+            }
         }
 
         const parent = std.fs.path.dirname(current) orelse break;
@@ -96,6 +101,16 @@ pub fn discover(
     }
 
     return null;
+}
+
+pub fn discover(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    start_path: ?[]const u8,
+) !?ProjectConfig {
+    const manifest_path = try nearestManifestPath(allocator, io, start_path) orelse return null;
+    defer allocator.free(manifest_path);
+    return try loadAbsolute(allocator, io, manifest_path);
 }
 
 pub fn loadAbsolute(
@@ -413,4 +428,23 @@ test "project discovery refuses automatic system configuration" {
         error.UnsupportedRuntimeAuthority,
         discover(allocator, io, manifest),
     );
+}
+
+test "nearestManifestPath names the manifest nearest to the start path" {
+    const allocator = std.testing.allocator;
+    const io = std.testing.io;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(io, "app/sub");
+    try tmp.dir.writeFile(io, .{ .sub_path = "app/zttp.json", .data = "{}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "app/sub/zttp.json", .data = "{}" });
+    try tmp.dir.writeFile(io, .{ .sub_path = "app/sub/handler.ts", .data = "" });
+
+    const handler = try tmp.dir.realPathFileAlloc(io, "app/sub/handler.ts", allocator);
+    defer allocator.free(handler);
+    const expected = try tmp.dir.realPathFileAlloc(io, "app/sub/zttp.json", allocator);
+    defer allocator.free(expected);
+    const nearest = (try nearestManifestPath(allocator, io, handler)).?;
+    defer allocator.free(nearest);
+    try std.testing.expectEqualStrings(expected, nearest);
 }

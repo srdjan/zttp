@@ -207,19 +207,7 @@ fn appendedCommandNoArgs(argv: []const []const u8, tag: std.meta.Tag(AppendedInv
 }
 
 pub fn serveCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void {
-    return serveCommandWithDebugPanicPath(allocator, argv, null);
-}
-
-pub fn serveCommandWithEnviron(
-    allocator: std.mem.Allocator,
-    argv: []const []const u8,
-    environ: std.process.Environ,
-) !void {
-    const env_panic_path: ?[]const u8 = if (runtime_config_mod.debug_hooks_enabled)
-        environ.getPosix("ZTTP_DEBUG_PANIC_PATH")
-    else
-        null;
-    return serveCommandWithDebugPanicPath(allocator, argv, env_panic_path);
+    return serveCommandWithEnviron(allocator, argv, .empty);
 }
 
 /// Parse `--_debug-panic-path`. ReleaseFast and ReleaseSmall builds refuse the
@@ -243,26 +231,42 @@ fn applyDebugPanicPathDefault(config: *ServerConfig, debug_panic_path: ?[]const 
     }
 }
 
-fn serveCommandWithDebugPanicPath(
+pub fn serveCommandWithEnviron(
     allocator: std.mem.Allocator,
     argv: []const []const u8,
-    debug_panic_path: ?[]const u8,
+    environ: std.process.Environ,
 ) !void {
-    const feature_flags = parseServeFeatureFlags(argv);
-    if (feature_flags.watch_enabled and !feature_options.enable_live_reload) {
-        std.log.err("--watch is not available in zttp-runtime; use the zttp developer CLI", .{});
-        std.process.exit(1);
+    const debug_panic_path: ?[]const u8 = if (runtime_config_mod.debug_hooks_enabled)
+        environ.getPosix("ZTTP_DEBUG_PANIC_PATH")
+    else
+        null;
+
+    // The internal runtime has no live reload. Refuse every `--watch` token
+    // before parsing, so a flag value that spells it keeps the same refusal.
+    if (!feature_options.enable_live_reload) {
+        for (argv) |arg| {
+            if (std.mem.eql(u8, arg, "--watch")) {
+                std.log.err("--watch is not available in zttp-runtime; use the zttp developer CLI", .{});
+                std.process.exit(1);
+            }
+        }
     }
 
-    var config = parseServeArgs(allocator, argv) catch |err| {
+    var request = parseServeArgs(allocator, argv) catch |err| {
         if (err == error.HelpRequested) return;
         return err;
     };
+    const feature_flags = request.flags;
+    var config = request.config;
     applyDebugPanicPathDefault(&config, debug_panic_path);
     warnDangerousServeFlags(feature_flags.force_swap, config.skip_env_check);
 
     var configured_policy = switch (config.handler) {
-        .file_path => |path| try serve_policy.discoverConfiguredPolicy(allocator, path),
+        .file_path => |path| try serve_policy.configuredPolicy(
+            allocator,
+            path,
+            if (request.project) |*project| project else null,
+        ),
         else => null,
     };
     defer if (configured_policy) |*policy| policy.deinit(allocator);
@@ -488,21 +492,20 @@ fn formatAddressInUse(buf: []u8, port: u16) ![]const u8 {
     );
 }
 
+/// The `serve` flags that only the developer start reads.
 const ServeFeatureFlags = struct {
     watch_enabled: bool = false,
     prove_enabled: bool = false,
     force_swap: bool = false,
 };
 
-fn parseServeFeatureFlags(argv: []const []const u8) ServeFeatureFlags {
-    var flags = ServeFeatureFlags{};
-    for (argv) |arg| {
-        if (std.mem.eql(u8, arg, "--watch")) flags.watch_enabled = true;
-        if (std.mem.eql(u8, arg, "--prove")) flags.prove_enabled = true;
-        if (std.mem.eql(u8, arg, "--force-swap")) flags.force_swap = true;
-    }
-    return flags;
-}
+/// One parsed `serve` command line. `config` borrows strings from `project`,
+/// so the project stays alive for the rest of the process.
+const ServeRequest = struct {
+    config: ServerConfig,
+    flags: ServeFeatureFlags,
+    project: ?project_config_mod.ProjectConfig,
+};
 
 /// Parse a single flag shared between `serve` and `serve --appended`.
 /// Returns true if `arg` (at index `i.*`) was recognized. Advances `i.*`
@@ -552,7 +555,7 @@ fn parseCommonServeFlag(
     return false;
 }
 
-fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !ServerConfig {
+fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !ServeRequest {
     var io_backend = shared.threadedIo(allocator);
     defer io_backend.deinit();
     const io = io_backend.io();
@@ -589,15 +592,16 @@ fn parseServeArgs(allocator: std.mem.Allocator, argv: []const []const u8) !Serve
         }
     }
 
+    var flags = ServeFeatureFlags{};
     var handler_set = has_embedded or project != null;
-    try applyServeFlags(allocator, argv, &config, &handler_set, null);
+    try applyServeFlags(allocator, argv, &config, &handler_set, &flags, null);
 
     if (!handler_set) {
         std.log.err("No handler specified. Use `zttp init`, `zttp serve <file>`, or build with -Dhandler=<path>.", .{});
         return error.NoHandler;
     }
 
-    return config;
+    return .{ .config = config, .flags = flags, .project = project };
 }
 
 /// The `serve` flag grammar, applied to `config`. Split out of `parseServeArgs`
@@ -608,6 +612,7 @@ fn applyServeFlags(
     argv: []const []const u8,
     config: *ServerConfig,
     handler_set: *bool,
+    flags: *ServeFeatureFlags,
     rejected: ?*?[]const u8,
 ) !void {
     var i: usize = 0;
@@ -653,12 +658,12 @@ fn applyServeFlags(
             config.runtime_config.replay_file_path = try shared.takeArg(&i, argv, error.MissingReplayFile);
         } else if (std.mem.eql(u8, arg, "--test")) {
             config.runtime_config.test_file_path = try shared.takeArg(&i, argv, error.MissingTestFile);
-        } else if (std.mem.eql(u8, arg, "--watch") or
-            std.mem.eql(u8, arg, "--prove") or
-            std.mem.eql(u8, arg, "--force-swap"))
-        {
-            // Handled by serveCommand before parseServeArgs is called
-            continue;
+        } else if (std.mem.eql(u8, arg, "--watch")) {
+            flags.watch_enabled = true;
+        } else if (std.mem.eql(u8, arg, "--prove")) {
+            flags.prove_enabled = true;
+        } else if (std.mem.eql(u8, arg, "--force-swap")) {
+            flags.force_swap = true;
         } else if (!std.mem.startsWith(u8, arg, "-")) {
             config.handler = .{ .file_path = arg };
             handler_set.* = true;
@@ -677,7 +682,8 @@ pub fn validateServeFlags(allocator: std.mem.Allocator, argv: []const []const u8
     defer arena.deinit();
     var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
     var handler_set = false;
-    try applyServeFlags(arena.allocator(), argv, &config, &handler_set, null);
+    var flags = ServeFeatureFlags{};
+    try applyServeFlags(arena.allocator(), argv, &config, &handler_set, &flags, null);
 }
 
 /// The flag `serve` refuses as unknown in `argv`, or null. It runs the same
@@ -689,8 +695,9 @@ pub fn unknownServeFlag(argv: []const []const u8) ?[]const u8 {
     defer arena.deinit();
     var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
     var handler_set = false;
+    var flags = ServeFeatureFlags{};
     var rejected: ?[]const u8 = null;
-    applyServeFlags(arena.allocator(), argv, &config, &handler_set, &rejected) catch {};
+    applyServeFlags(arena.allocator(), argv, &config, &handler_set, &flags, &rejected) catch {};
     return rejected;
 }
 
@@ -984,7 +991,7 @@ test "parseServeArgs parses internal debug panic path flag" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
 
-    const config = try parseServeArgs(arena.allocator(), &.{ "handler.ts", "--_debug-panic-path", "/flag" });
+    const config = (try parseServeArgs(arena.allocator(), &.{ "handler.ts", "--_debug-panic-path", "/flag" })).config;
     try std.testing.expectEqualStrings("/flag", config.runtime_config.debug_panic_path.?);
 }
 
@@ -995,9 +1002,10 @@ test "every serve_value_flags entry is a value flag in applyServeFlags" {
     for (shared.serve_value_flags) |flag| {
         var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
         var handler_set = false;
+        var flags = ServeFeatureFlags{};
         // A value flag with no value fails in takeArg; an unknown flag fails
         // with UnknownOption and a flag without a value succeeds.
-        if (applyServeFlags(arena.allocator(), &.{flag}, &config, &handler_set, null)) |_| {
+        if (applyServeFlags(arena.allocator(), &.{flag}, &config, &handler_set, &flags, null)) |_| {
             return error.FlagTakesNoValue;
         } else |err| try std.testing.expect(err != error.UnknownOption);
     }
@@ -1007,7 +1015,7 @@ test "parseServeArgs finds the handler path after --_debug-panic-path" {
     var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
     defer arena.deinit();
 
-    const config = try parseServeArgs(arena.allocator(), &.{ "--_debug-panic-path", "/x", "handler.ts" });
+    const config = (try parseServeArgs(arena.allocator(), &.{ "--_debug-panic-path", "/x", "handler.ts" })).config;
     try std.testing.expectEqualStrings("handler.ts", config.handler.file_path);
 }
 
@@ -1035,8 +1043,27 @@ test "parseServeArgs refuses a zero outbound timeout" {
         error.InvalidOutboundTimeout,
         parseServeArgs(arena.allocator(), &.{ "handler.ts", "--outbound-timeout-ms", "0" }),
     );
-    const config = try parseServeArgs(arena.allocator(), &.{ "handler.ts", "--outbound-timeout-ms", "1" });
+    const config = (try parseServeArgs(arena.allocator(), &.{ "handler.ts", "--outbound-timeout-ms", "1" })).config;
     try std.testing.expectEqual(@as(u32, 1), config.runtime_config.outbound_timeout_ms);
+}
+
+test "parseServeArgs reads the developer flags from flag positions only" {
+    var arena: std.heap.ArenaAllocator = .init(std.testing.allocator);
+    defer arena.deinit();
+
+    const flagged = (try parseServeArgs(arena.allocator(), &.{ "handler.ts", "--watch", "--prove", "--force-swap" })).flags;
+    try std.testing.expect(flagged.watch_enabled);
+    try std.testing.expect(flagged.prove_enabled);
+    try std.testing.expect(flagged.force_swap);
+
+    const valued = try parseServeArgs(arena.allocator(), &.{ "handler.ts", "--host", "--prove", "--static", "--force-swap" });
+    try std.testing.expectEqualStrings("--prove", valued.config.host);
+    try std.testing.expectEqualStrings("--force-swap", valued.config.static_dir.?);
+    try std.testing.expect(!valued.flags.watch_enabled);
+    try std.testing.expect(!valued.flags.prove_enabled);
+    try std.testing.expect(!valued.flags.force_swap);
+
+    try std.testing.expectError(error.InvalidPoolSize, parseServeArgs(arena.allocator(), &.{ "handler.ts", "--pool", "--watch" }));
 }
 
 test "every retired module refuses supported startup modes" {
@@ -1211,7 +1238,7 @@ test "serve installs the checked configured policy for a computed env key" {
 
     const handler_path = try tmp.dir.realPathFileAlloc(std.testing.io, "src/handler.ts", allocator);
     defer allocator.free(handler_path);
-    var discovered = (try serve_policy.discoverConfiguredPolicy(allocator, handler_path)) orelse
+    var discovered = (try serve_policy.configuredPolicy(allocator, handler_path, null)) orelse
         return error.TestExpectedPolicy;
     defer discovered.deinit(allocator);
     var checked = try serve_policy.validateConfiguredPolicy(
