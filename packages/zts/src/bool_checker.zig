@@ -1674,7 +1674,7 @@ pub const BoolChecker = struct {
 
 test "BoolChecker fails closed when analysis state cannot allocate" {
     const allocator = std.testing.allocator;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "if ({}) { const enabled = true; }");
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "if ({}) { const enabled = true; }", .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -1692,7 +1692,7 @@ fn checkSource(source: []const u8, expect_errors: u32) !void {
 fn checkSourceFull(source: []const u8, expect_errors: u32, expect_warnings: ?u32) !void {
     const allocator = std.testing.allocator;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     const root = try parser.parse();
@@ -1905,7 +1905,7 @@ test "sound: untracked function call fails closed" {
 test "sound: diagnostic gives explicit boolean repair" {
     const allocator = std.testing.allocator;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, "if ({}) { let x = 1; }");
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "if ({}) { let x = 1; }", .compile);
     defer parser.deinit();
 
     const root = try parser.parse();
@@ -2588,11 +2588,11 @@ test "the import scan maps builtin slots to return types in both atom modes" {
     const allocator = std.testing.allocator;
 
     for ([_]bool{ true, false }) |use_atoms| {
-        var parser = try @import("zts-engine").parser.JsParser.init(allocator,
+        var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator,
             \\import { env } from "zttp:env";
             \\import { jwtVerify } from "zttp:auth";
             \\import { thing } from "zttp-ext:unknown";
-        );
+        , .compile);
         defer parser.deinit();
         var atoms = context.AtomTable.init(allocator);
         defer atoms.deinit();
