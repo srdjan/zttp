@@ -2696,6 +2696,12 @@ test "Interpreter modulo INT_MIN % -1 does not panic" {
     try std.testing.expectEqual(@as(f64, 0.0), as_num);
 }
 
+/// Run the production admission parse on `p` and generate its bytecode.
+fn admittedCodeForTest(p: *@import("parser/root.zig").Parser, allocator: std.mem.Allocator) ![]const u8 {
+    if ((try p.parseTypedIr()) != .accepted) return error.TestUnexpectedResult;
+    return p.generateParsed(allocator);
+}
+
 /// Parse `source` with the context's atom table, run it, and return the value
 /// of the global `result` that the program assigns.
 fn runAndReadResultGlobal(
@@ -2704,9 +2710,9 @@ fn runAndReadResultGlobal(
     strings: *@import("string.zig").StringTable,
     source: []const u8,
 ) !?value.JSValue {
-    var p = try @import("parser/root.zig").Parser.init(allocator, source, strings, &ctx.atoms);
+    var p = try @import("parser/root.zig").Parser.initTyped(allocator, allocator, source, strings, &ctx.atoms);
     defer p.deinit();
-    const code = try p.parse();
+    const code = try admittedCodeForTest(&p, allocator);
     const shapes = p.getShapes();
     if (shapes.len > 0) try ctx.materializeShapes(shapes);
     var func = bytecode.FunctionBytecode{
@@ -2751,10 +2757,10 @@ test "End-to-end: parse and execute JS" {
     var strings = string_mod.StringTable.init(allocator);
     defer strings.deinit();
 
-    var p = try parser_mod.Parser.init(allocator, "function f() { return 1 + 2; } f();", &strings, null);
+    var p = try parser_mod.Parser.initTyped(allocator, allocator, "function f() { return 1 + 2; } f();", &strings, null);
     defer p.deinit();
 
-    const code = try p.parse();
+    const code = try admittedCodeForTest(&p, allocator);
     try std.testing.expect(code.len > 0);
 
     var func = bytecode.FunctionBytecode{
@@ -2817,10 +2823,10 @@ test "Hybrid: reject arena escape to global" {
         \\let x = { a: 1 };
     ;
 
-    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.initTyped(allocator, allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
 
-    const code = try p.parse();
+    const code = try admittedCodeForTest(&p, allocator);
     try std.testing.expect(code.len > 0);
 
     var func = bytecode.FunctionBytecode{
@@ -2863,10 +2869,10 @@ test "End-to-end: closure captures local" {
         \\let result = f();
     ;
 
-    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.initTyped(allocator, allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
 
-    const code = try p.parse();
+    const code = try admittedCodeForTest(&p, allocator);
     try std.testing.expect(code.len > 0);
 
     var func = bytecode.FunctionBytecode{
@@ -3209,10 +3215,10 @@ test "End-to-end: function declaration" {
     defer strings.deinit();
 
     const code_str = "function outer() { function add(a, b) { return a + b; } return add(3, 4); } outer();";
-    var p = try parser_mod.Parser.init(allocator, code_str, &strings, null);
+    var p = try parser_mod.Parser.initTyped(allocator, allocator, code_str, &strings, null);
     defer p.deinit();
 
-    const code = try p.parse();
+    const code = try admittedCodeForTest(&p, allocator);
     try std.testing.expect(code.len > 0);
 
     var func = bytecode.FunctionBytecode{
@@ -3357,10 +3363,10 @@ test "End-to-end: optional method call short-circuits on nullish receiver" {
 
     var strings = string_mod.StringTable.init(allocator);
     const code_str = "function outer() { const a = undefined; return a?.foo(); } outer();";
-    var p = try parser_mod.Parser.init(allocator, code_str, &strings, null);
+    var p = try parser_mod.Parser.initTyped(allocator, allocator, code_str, &strings, null);
     defer p.deinit();
 
-    const code = try p.parse();
+    const code = try admittedCodeForTest(&p, allocator);
     try std.testing.expect(code.len > 0);
 
     var func = bytecode.FunctionBytecode{
@@ -4148,10 +4154,10 @@ test "End-to-end: a match evaluates exactly one arm" {
         \\let result = firstCalls * 100 + secondCalls * 10 + picked;
     ;
 
-    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.initTyped(allocator, allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
 
-    const code = try p.parse();
+    const code = try admittedCodeForTest(&p, allocator);
     try std.testing.expect(code.len > 0);
 
     const shapes = p.getShapes();
@@ -4204,10 +4210,10 @@ fn runMatchProgram(source: []const u8, comptime check: fn (*context.Context) any
     var strings = string_mod.StringTable.init(allocator);
     defer strings.deinit();
 
-    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.initTyped(allocator, allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
 
-    const code = try p.parse();
+    const code = try admittedCodeForTest(&p, allocator);
     try std.testing.expect(code.len > 0);
 
     const shapes = p.getShapes();
@@ -4603,10 +4609,10 @@ test "End-to-end: computed compound assignment evaluates key once (object)" {
         \\let result = calls * 1000 + obj.x;
     ;
 
-    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.initTyped(allocator, allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
 
-    const code = try p.parse();
+    const code = try admittedCodeForTest(&p, allocator);
     try std.testing.expect(code.len > 0);
 
     const shapes = p.getShapes();
@@ -4663,10 +4669,10 @@ test "End-to-end: computed compound assignment evaluates key once (array)" {
         \\let result = n * 1000 + arr[1];
     ;
 
-    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.initTyped(allocator, allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
 
-    const code = try p.parse();
+    const code = try admittedCodeForTest(&p, allocator);
     try std.testing.expect(code.len > 0);
 
     var func = bytecode.FunctionBytecode{
@@ -4902,10 +4908,10 @@ test "End-to-end: polymorphic property access" {
         \\let result = getX(a) + getX(b) + getX(c) + getX(d);
     ;
 
-    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.initTyped(allocator, allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
 
-    const code = try p.parse();
+    const code = try admittedCodeForTest(&p, allocator);
     try std.testing.expect(code.len > 0);
 
     // Materialize object literal shapes before execution

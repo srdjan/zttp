@@ -185,10 +185,11 @@ test "interpreter TypeError records source line" {
         \\handler(undefined);
     ;
 
-    var p = try parser_mod.Parser.init(allocator, source, &strings, &ctx.atoms);
+    var p = try parser_mod.Parser.initTyped(allocator, allocator, source, &strings, &ctx.atoms);
     defer p.deinit();
 
-    const code = try p.parse();
+    if ((try p.parseTypedIr()) != .accepted) return error.TestUnexpectedResult;
+    const code = try p.generateParsed(allocator);
     var func = bytecode.FunctionBytecode{
         .header = .{},
         .name_atom = 0,
