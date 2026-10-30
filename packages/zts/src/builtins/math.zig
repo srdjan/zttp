@@ -196,16 +196,6 @@ pub fn mathRandom(ctx: *context.Context, this: value.JSValue, args: []const valu
     return result;
 }
 
-pub fn mathSign(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    _ = this;
-    if (args.len == 0) return value.JSValue.undefined_val;
-    const n = toNumber(args[0]) orelse return value.JSValue.undefined_val;
-    if (std.math.isNan(n)) return allocFloat(ctx, std.math.nan(f64));
-    if (n > 0) return value.JSValue.fromInt(1);
-    if (n < 0) return value.JSValue.fromInt(-1);
-    return value.JSValue.fromFloat(n);
-}
-
 /// Math constants
 pub const math_constants = struct {
     pub const PI: f64 = 3.141592653589793;
@@ -217,25 +207,3 @@ pub const math_constants = struct {
     pub const SQRT2: f64 = 1.4142135623730951;
     pub const SQRT1_2: f64 = 0.7071067811865476;
 };
-
-test "Math.sign preserves signed zero" {
-    const allocator = std.testing.allocator;
-    const gc_mod = @import("../gc.zig");
-    const heap_mod = @import("../heap.zig");
-
-    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
-    defer gc_state.deinit();
-
-    var heap_state = heap_mod.Heap.init(allocator, .{});
-    defer heap_state.deinit();
-    gc_state.setHeap(&heap_state);
-
-    var ctx = try context.Context.init(allocator, &gc_state, .{});
-    defer ctx.deinit();
-
-    const pos_zero = mathSign(ctx, value.JSValue.undefined_val, &.{value.JSValue.fromFloat(0.0)});
-    try std.testing.expectEqual(value.JSValue.fromFloat(0.0).raw, pos_zero.raw);
-
-    const neg_zero = mathSign(ctx, value.JSValue.undefined_val, &.{value.JSValue.fromFloat(-0.0)});
-    try std.testing.expectEqual(value.JSValue.fromFloat(-0.0).raw, neg_zero.raw);
-}

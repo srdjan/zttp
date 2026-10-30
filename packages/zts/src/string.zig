@@ -226,11 +226,6 @@ pub const SliceString = extern struct {
         return try createString(allocator, self.data());
     }
 
-    /// Flatten using arena allocation
-    pub fn flattenWithArena(self: *const SliceString, arena: *arena_mod.Arena) ?*JSString {
-        return createStringWithArena(arena, self.data());
-    }
-
     /// Check equality with a byte slice
     pub fn eqlBytes(self: *const SliceString, bytes: []const u8) bool {
         if (self.len != bytes.len) return false;
@@ -288,11 +283,6 @@ pub fn createSliceWithArena(arena: *arena_mod.Arena, parent: *JSString, offset: 
         .offset = offset,
     };
     return slice;
-}
-
-/// Free a SliceString (does not free the parent)
-pub fn freeSlice(allocator: std.mem.Allocator, slice: *SliceString) void {
-    allocator.destroy(slice);
 }
 
 // ============================================================================
@@ -1159,7 +1149,7 @@ test "SliceString creation and data access" {
 
     // Create a slice of "world"
     const slice = try createSlice(allocator, parent, 6, 5);
-    defer freeSlice(allocator, slice);
+    defer allocator.destroy(slice);
 
     try std.testing.expectEqualStrings("world", slice.data());
     try std.testing.expectEqual(@as(u32, 5), slice.length());
@@ -1173,7 +1163,7 @@ test "SliceString inherits ASCII flag" {
     defer freeString(allocator, ascii_parent);
 
     const slice = try createSlice(allocator, ascii_parent, 0, 5);
-    defer freeSlice(allocator, slice);
+    defer allocator.destroy(slice);
 
     try std.testing.expect(slice.flags.is_ascii);
 }
@@ -1185,7 +1175,7 @@ test "SliceString flatten" {
     defer freeString(allocator, parent);
 
     const slice = try createSlice(allocator, parent, 4, 5); // "quick"
-    defer freeSlice(allocator, slice);
+    defer allocator.destroy(slice);
 
     const flat = try slice.flatten(allocator);
     defer freeString(allocator, flat);
@@ -1201,7 +1191,7 @@ test "SliceString eqlBytes" {
     defer freeString(allocator, parent);
 
     const slice = try createSlice(allocator, parent, 0, 5); // "hello"
-    defer freeSlice(allocator, slice);
+    defer allocator.destroy(slice);
 
     try std.testing.expect(slice.eqlBytes("hello"));
     try std.testing.expect(!slice.eqlBytes("world"));
@@ -1215,7 +1205,7 @@ test "SliceString startsWith and endsWith" {
     defer freeString(allocator, parent);
 
     const slice = try createSlice(allocator, parent, 0, 11); // "hello world"
-    defer freeSlice(allocator, slice);
+    defer allocator.destroy(slice);
 
     try std.testing.expect(slice.startsWith("hello"));
     try std.testing.expect(!slice.startsWith("world"));

@@ -66,24 +66,6 @@ pub inline fn lessThan(a: value.JSValue, b: value.JSValue) bool {
     return o == .lt;
 }
 
-/// `a <= b` with ECMAScript unordered-is-false semantics.
-pub inline fn lessEqual(a: value.JSValue, b: value.JSValue) bool {
-    const o = compareValues(a, b) orelse return false;
-    return o == .lt or o == .eq;
-}
-
-/// `a > b` with ECMAScript unordered-is-false semantics.
-pub inline fn greaterThan(a: value.JSValue, b: value.JSValue) bool {
-    const o = compareValues(a, b) orelse return false;
-    return o == .gt;
-}
-
-/// `a >= b` with ECMAScript unordered-is-false semantics.
-pub inline fn greaterEqual(a: value.JSValue, b: value.JSValue) bool {
-    const o = compareValues(a, b) orelse return false;
-    return o == .gt or o == .eq;
-}
-
 /// Loose equality (==)
 pub inline fn looseEquals(a: value.JSValue, b: value.JSValue) bool {
     // Same type - strict equals; NaN != NaN even under loose equality
@@ -136,22 +118,18 @@ test "regression: string relational comparison orders lexicographically" {
 
     try std.testing.expect(lessThan(a_val, b_val));
     try std.testing.expect(!lessThan(b_val, a_val));
-    try std.testing.expect(greaterThan(b_val, a_val));
-    try std.testing.expect(lessEqual(a_val, a_val));
-    try std.testing.expect(greaterEqual(a_val, a_val));
     try std.testing.expect(!lessThan(a_val, a_val));
 
     // Slice representation: "bc" sliced from "abc" orders after "a".
     const abc = try string.createString(allocator, "abc");
     defer string.freeString(allocator, abc);
     const slice = try string.createSlice(allocator, abc, 1, 2);
-    defer string.freeSlice(allocator, slice);
+    defer allocator.destroy(slice);
     try std.testing.expect(lessThan(a_val, value.JSValue.fromPtr(slice)));
 
     // Mixed string/number stays unordered (analyzer rejects it; runtime must
     // not invent a coercion).
     try std.testing.expect(!lessThan(a_val, value.JSValue.fromInt(5)));
-    try std.testing.expect(!greaterThan(a_val, value.JSValue.fromInt(5)));
 }
 
 test "regression: getAnyStringLength handles all string types" {
@@ -165,7 +143,7 @@ test "regression: getAnyStringLength handles all string types" {
 
     // SliceString
     const slice = try string.createSlice(allocator, flat, 1, 3);
-    defer string.freeSlice(allocator, slice);
+    defer allocator.destroy(slice);
     const slice_val = value.JSValue.fromPtr(slice);
     try std.testing.expectEqual(value.JSValue.fromInt(3), getAnyStringLength(slice_val));
 }
