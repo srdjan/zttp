@@ -38,10 +38,6 @@ pub fn connectionValue(keep_alive: bool) []const u8 {
     return if (keep_alive) "keep-alive" else "close";
 }
 
-pub fn formatStaticError(buf: []u8, status: u16, body: []const u8, keep_alive: bool) ![]const u8 {
-    return formatHttpError(buf, status, body, keep_alive, null);
-}
-
 /// Single source of truth for HTTP error response framing. Callers pick the
 /// sink (buffer, fd, Writer interface) and pass the formatted bytes through.
 pub fn formatHttpError(
@@ -86,15 +82,6 @@ pub fn formatStaticOkHeader(
         .{ size, content_type, etag, connectionValue(keep_alive) },
     );
 }
-
-pub const DynamicHeaderOrder = enum {
-    /// Historical threaded path order: handler headers, attestation,
-    /// Content-Length, then Connection.
-    sync,
-    /// Historical evented path order: Content-Length, Connection,
-    /// filtered handler headers, then attestation.
-    evented,
-};
 
 pub fn appendStatusLine(buf: []u8, pos: *usize, status: u16, prefer_precomputed: bool) !void {
     if (prefer_precomputed) {
@@ -154,35 +141,19 @@ pub fn buildDynamicResponseHeader(
     response: *const HttpResponse,
     keep_alive: bool,
     attestation_headers: ?attest_header_strings.HeaderStrings,
-    order: DynamicHeaderOrder,
 ) !usize {
     var pos: usize = 0;
-    try appendStatusLine(buf, &pos, response.status, order == .sync);
+    try appendStatusLine(buf, &pos, response.status, true);
 
-    switch (order) {
-        .sync => {
-            for (response.headers.items) |header| {
-                if (isFramingHeader(header.key)) continue;
-                try appendHeaderLine(buf, &pos, header.key, header.value);
-            }
-            pos = try appendAttestationHeaders(attestation_headers, buf, pos);
-            if (statusAllowsBody(response.status)) {
-                try appendContentLengthHeader(buf, &pos, response.body.len);
-            }
-            try appendConnectionHeader(buf, &pos, keep_alive);
-        },
-        .evented => {
-            if (statusAllowsBody(response.status)) {
-                try appendContentLengthHeader(buf, &pos, response.body.len);
-            }
-            try appendConnectionHeader(buf, &pos, keep_alive);
-            for (response.headers.items) |header| {
-                if (isFramingHeader(header.key)) continue;
-                try appendHeaderLine(buf, &pos, header.key, header.value);
-            }
-            pos = try appendAttestationHeaders(attestation_headers, buf, pos);
-        },
+    for (response.headers.items) |header| {
+        if (isFramingHeader(header.key)) continue;
+        try appendHeaderLine(buf, &pos, header.key, header.value);
     }
+    pos = try appendAttestationHeaders(attestation_headers, buf, pos);
+    if (statusAllowsBody(response.status)) {
+        try appendContentLengthHeader(buf, &pos, response.body.len);
+    }
+    try appendConnectionHeader(buf, &pos, keep_alive);
 
     try appendHeaderTerminator(buf, &pos);
     return pos;
@@ -357,11 +328,9 @@ test "dynamic response headers omit content length when status forbids a body" {
         response.status = status;
         response.body = "unexpected body";
 
-        inline for (std.meta.tags(DynamicHeaderOrder)) |order| {
-            var buf: [256]u8 = undefined;
-            const len = try buildDynamicResponseHeader(&buf, &response, true, null, order);
-            try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "Content-Length:") == null);
-        }
+        var buf: [256]u8 = undefined;
+        const len = try buildDynamicResponseHeader(&buf, &response, true, null);
+        try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "Content-Length:") == null);
     }
 }
 
@@ -371,7 +340,7 @@ test "dynamic 200 response header keeps content length" {
     response.body = "hello";
 
     var buf: [256]u8 = undefined;
-    const len = try buildDynamicResponseHeader(&buf, &response, true, null, .sync);
+    const len = try buildDynamicResponseHeader(&buf, &response, true, null);
     try std.testing.expect(std.mem.indexOf(u8, buf[0..len], "Content-Length: 5\r\n") != null);
 }
 

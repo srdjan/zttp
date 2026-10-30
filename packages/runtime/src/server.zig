@@ -2448,19 +2448,12 @@ test "buildDynamicResponseHeader filters handler supplied framing headers" {
     };
 
     var sync_buf: [512]u8 = undefined;
-    const sync_len = try buildDynamicResponseHeader(&sync_buf, &response, true, attestation, .sync);
+    const sync_len = try buildDynamicResponseHeader(&sync_buf, &response, true, attestation);
     const sync = sync_buf[0..sync_len];
     try std.testing.expect(std.mem.startsWith(u8, sync, "HTTP/1.1 201 Created\r\nX-Test: one\r\nZttp-Proofs: pure\r\nZttp-Attest: jws\r\nContent-Length: 7\r\nConnection: keep-alive\r\n\r\n"));
     try std.testing.expect(std.mem.indexOf(u8, sync, "Content-Length: 999") == null);
     try std.testing.expect(std.mem.indexOf(u8, sync, "Connection: close") == null);
     try std.testing.expect(std.mem.indexOf(u8, sync, "Transfer-Encoding: chunked") == null);
-
-    var evented_buf: [512]u8 = undefined;
-    const evented_len = try buildDynamicResponseHeader(&evented_buf, &response, false, attestation, .evented);
-    const evented = evented_buf[0..evented_len];
-    try std.testing.expect(std.mem.startsWith(u8, evented, "HTTP/1.1 201 Created\r\nContent-Length: 7\r\nConnection: close\r\nX-Test: one\r\nZttp-Proofs: pure\r\nZttp-Attest: jws\r\n\r\n"));
-    try std.testing.expect(std.mem.indexOf(u8, evented, "Content-Length: 999") == null);
-    try std.testing.expect(std.mem.indexOf(u8, evented, "Transfer-Encoding: chunked") == null);
 }
 
 test "parseRequestFromBuffer rejects invalid content length" {

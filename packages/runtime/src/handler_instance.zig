@@ -825,10 +825,6 @@ pub const HandlerInstance = struct {
         return self.loadCodeWithCachingInternal(code, filename, cache_buffer, true, false);
     }
 
-    pub fn loadCodeWithCachingNoHandler(self: *Self, code: []const u8, filename: []const u8, cache_buffer: ?[]u8) !?[]const u8 {
-        return self.loadCodeWithCachingInternal(code, filename, cache_buffer, false, false);
-    }
-
     pub fn loadPreparedEval(self: *Self, source: execution_spec.PreparedEvalSource, filename: []const u8) !void {
         _ = try self.loadCodeWithCachingInternal(source.code, filename, null, true, true);
     }

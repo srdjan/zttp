@@ -3149,11 +3149,14 @@ fn writeCachedTeardownFixture(allocator: std.mem.Allocator, buffer: []u8) ![]con
         \\  const cachedInner = () => 1;
         \\  return cachedInner;
         \\}
+        \\function handler() {
+        \\  return 1;
+        \\}
     ;
 
     const source_rt = try HandlerInstance.init(allocator, .{});
     defer source_rt.deinit();
-    return (try source_rt.loadCodeWithCachingNoHandler(
+    return (try source_rt.loadCodeWithCaching(
         source,
         "<cached-teardown-source>",
         buffer,

@@ -693,7 +693,6 @@ pub const ConnectionPool = struct {
             response,
             keep_alive,
             self.server.attestation_headers,
-            .sync,
         );
 
         if (is_head) {
