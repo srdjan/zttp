@@ -526,7 +526,7 @@ fn observe(
 ) !Observation {
     var observed = Observation{ .ran = false, .fork = false, .stub_fails = false, .counted = false };
 
-    var parser = parser_mod.JsParser.init(allocator, source) catch return observed;
+    var parser = parser_mod.JsParser.initAdmission(allocator, allocator, source, .compile) catch return observed;
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
