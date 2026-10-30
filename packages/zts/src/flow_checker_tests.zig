@@ -25,7 +25,7 @@ test "candidate facade owns captures and retains warning diagnostics" {
     const allocator = std.testing.allocator;
     var atoms = engine.atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
-    var parser = try engine.parser.JsParser.init(allocator, "function handler(req) { function read() { return req.headers.authorization; } return read(); }");
+    var parser = try engine.parser.JsParser.initAdmission(allocator, allocator, "function handler(req) { function read() { return req.headers.authorization; } return read(); }", .compile);
     defer parser.deinit();
     parser.setAtomTable(&atoms);
     const root = try parser.parse();
@@ -46,7 +46,7 @@ test "candidate facade owns captures and retains warning diagnostics" {
 test "FlowChecker fails closed when taint state cannot allocate" {
     const allocator = std.testing.allocator;
     const source = "function handler(req) { return Response.json(req); }";
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -66,7 +66,7 @@ test "FlowChecker fails closed when taint state cannot allocate" {
 test "FlowChecker fails closed when diagnostic storage cannot allocate" {
     const allocator = std.testing.allocator;
     const source = "function handler() { return Response.json({ ok: true }); }";
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -82,7 +82,7 @@ test "FlowChecker fails closed when diagnostic storage cannot allocate" {
     try std.testing.expectEqual(@as(u32, 0), try checker.check(handler_fn));
     try std.testing.expectEqual(@as(usize, 0), checker.getDiagnostics().len);
 
-    var leaking = try @import("zts-engine").parser.JsParser.init(allocator, "function handler(req) { return Response.json(req.headers.authorization); }");
+    var leaking = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, "function handler(req) { return Response.json(req.headers.authorization); }", .compile);
     var leaking_atoms = atom_table.AtomTable.init(allocator);
     defer leaking_atoms.deinit();
     leaking.setAtomTable(&leaking_atoms);
@@ -122,7 +122,7 @@ test "FlowChecker captures witness constraints on secret-in-response" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -178,7 +178,7 @@ test "FlowChecker does not leak sibling-branch I/O calls into the witness" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -224,7 +224,7 @@ test "FlowChecker captures stub_present on if-else with absent condition" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -267,7 +267,7 @@ test "FlowChecker captures req_method constraint from literal comparison" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -310,7 +310,7 @@ test "FlowChecker captures AND chain as multiple constraints" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -369,7 +369,7 @@ test "FlowChecker captures one concrete negated request constraint for else AND 
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -426,7 +426,7 @@ test "FlowChecker keeps repeated module call constraints tied to call index" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -498,7 +498,7 @@ test "FlowChecker captures result_ok constraint on validated path" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -533,7 +533,7 @@ test "FlowChecker captures result_ok constraint on validated path" {
 /// Test harness: the JSONL of the witness that the solver builds for the first
 /// `secret_in_response` diagnostic of `source`. The caller frees the result.
 fn secretWitnessJsonl(allocator: std.mem.Allocator, source: []const u8) ![]u8 {
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -809,7 +809,7 @@ test "FlowChecker records validated defended path reaching egress body" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -856,7 +856,7 @@ test "FlowChecker flags a secret reaching a module fetch body" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -891,7 +891,7 @@ test "FlowChecker flags a secret reaching a var-bound module fetch body" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -925,7 +925,7 @@ test "FlowChecker flags a secret reaching a module fetch query field" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -960,7 +960,7 @@ test "FlowChecker flags a secret reaching egress via an options spread" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -990,7 +990,7 @@ test "FlowChecker proves no_secret_leakage for a benign module fetch" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -1019,7 +1019,7 @@ test "FlowChecker records validated defended path reaching an HTML response" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -1347,7 +1347,7 @@ test "FlowChecker names the guard of a validated value under a unary operator" {
         ,
     };
     for (sources) |source| {
-        var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+        var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
         var atoms = atom_table.AtomTable.init(allocator);
         defer atoms.deinit();
         parser.setAtomTable(&atoms);
@@ -1384,7 +1384,7 @@ test "FlowChecker records never_reached defended path for unused secret" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -1422,7 +1422,7 @@ test "FlowChecker records no defended path for a leaking secret" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -1593,7 +1593,7 @@ test "a real secret leak offers no repair intent" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -1632,7 +1632,7 @@ test "FlowChecker flags secret returned through a variable-held response" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -1665,7 +1665,7 @@ test "FlowChecker flags unvalidated input in a variable-held Response.html" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -1699,7 +1699,7 @@ test "FlowChecker flags secret returned through a ternary response" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -1735,7 +1735,7 @@ test "FlowChecker keeps taint through a user-defined wrapper call" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -1772,7 +1772,7 @@ test "FlowChecker keeps validated label through a wrapper returning a validator 
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -1837,7 +1837,7 @@ fn runWithImportedFunctionPublic(
         try std.testing.expectEqual(@as(u32, 0), try imported_type_checker.?.check(imported_root));
     }
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2078,7 +2078,7 @@ test "typed object methods resolve their actual bodies across imports" {
 /// Shared harness: parse `source`, run the FlowChecker on its handler, and
 /// return whether no_secret_leakage was proven. Frees everything it owns.
 fn runNoSecretLeakage(allocator: std.mem.Allocator, source: []const u8) !bool {
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2099,7 +2099,7 @@ fn runNoSecretLeakage(allocator: std.mem.Allocator, source: []const u8) !bool {
 /// Shared harness: parse `source`, run the FlowChecker on its handler, and
 /// return whether no_credential_leakage was proven.
 fn runNoCredentialLeakage(allocator: std.mem.Allocator, source: []const u8) !bool {
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2122,7 +2122,7 @@ fn runNoCredentialLeakage(allocator: std.mem.Allocator, source: []const u8) !boo
 /// harnesses above - it checks the label a validator is entitled to discharge
 /// rather than the ones it must not.
 fn runInputValidated(allocator: std.mem.Allocator, source: []const u8) !bool {
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2152,7 +2152,7 @@ fn runFlowPropertiesPublic(
     source: []const u8,
     env_public: []const []const u8,
 ) !FlowProperties {
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -2365,7 +2365,7 @@ fn runFlowDiagnostics(
     kind: DiagnosticKind,
     help_buf: []u8,
 ) !FlowDiagnosticReport {
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -3813,7 +3813,7 @@ test "FlowChecker isolates route witness IO from other roots" {
         \\  return Response.json({ ok: true });
         \\}
     ;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -4441,12 +4441,12 @@ test "imported functions preserve secret provenance in both atom modes" {
     const allocator = std.testing.allocator;
 
     for ([_]bool{ true, false }) |use_atoms| {
-        var parser = try @import("zts-engine").parser.JsParser.init(allocator,
+        var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator,
             \\import { env } from "zttp:env";
             \\import { sha256 } from "zttp:crypto";
             \\import { thing } from "zttp-ext:unknown";
             \\function handler(req) { return Response.text(sha256(env("SECRET_KEY"))); }
-        );
+        , .compile);
         defer parser.deinit();
         var atoms = atom_table.AtomTable.init(allocator);
         defer atoms.deinit();
@@ -4468,11 +4468,11 @@ test "imported functions preserve secret provenance in both atom modes" {
 
 test "an aliased env import preserves secrets beside an unresolved import" {
     const allocator = std.testing.allocator;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator,
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator,
         \\import { env as e } from "zttp:env";
         \\import { thing } from "zttp-ext:unknown";
         \\function handler(req) { return Response.text(e("SECRET_KEY")); }
-    );
+    , .compile);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
@@ -4505,7 +4505,7 @@ test "FlowChecker flags a secret carried in an array literal" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -4543,7 +4543,7 @@ test "FlowChecker taints the base object through a member-access assignment" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -4582,7 +4582,7 @@ test "FlowChecker taints the base object through a computed-access assignment" {
         \\}
     ;
 
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -4615,7 +4615,7 @@ test "a clock-reading export labels its result nondeterministic" {
         \\  return Response.json({ id: id });
         \\}
     ;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -4643,7 +4643,7 @@ test "a capability-free export is not labelled nondeterministic" {
         \\  return Response.json({ present: t !== undefined });
         \\}
     ;
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -4665,7 +4665,7 @@ test "a capability-free export is not labelled nondeterministic" {
 /// Run the flow checker over `source` and report whether it still proves
 /// `deterministic`.
 fn runDeterministic(allocator: std.mem.Allocator, source: []const u8) !bool {
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -5552,7 +5552,7 @@ fn collectFlowDiagnosticKinds(
     source: []const u8,
     seen: *std.EnumSet(DiagnosticKind),
 ) !void {
-    var parser = try @import("zts-engine").parser.JsParser.init(allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
@@ -5582,7 +5582,7 @@ fn collectFlowDiagnosticKinds(
 
 test "FlowChecker reports every property unproven before check runs" {
     const source = "function handler(req) { return Response.text(\"ok\"); }";
-    var parser = try @import("zts-engine").parser.JsParser.init(std.testing.allocator, source);
+    var parser = try @import("zts-engine").parser.JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     var atoms = atom_table.AtomTable.init(std.testing.allocator);
     defer atoms.deinit();
     parser.setAtomTable(&atoms);
