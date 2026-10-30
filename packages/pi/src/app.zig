@@ -50,9 +50,77 @@ pub const bundleTools = tool_registry.bundleTools;
 pub const buildMinimalRegistry = tool_registry.buildMinimalRegistry;
 pub const buildRegistry = tool_registry.buildRegistry;
 
-/// Long flags whose next token is a value. `zts_main.zig` consults this
-/// list so it can skip the value while scanning for stray positional args.
-pub const value_taking_flags = [_][]const u8{ "--session-id", "--print", "--mode", "--tools", "--fork", "--goal", "--max-iters", "--handler", "--provider", "--model", "--gate-log" };
+pub const ExpertFlagTag = enum {
+    yes,
+    no_edit,
+    no_session,
+    no_persist_tool_output,
+    no_context_files,
+    resume_latest,
+    fork,
+    tools,
+    session_id,
+    gate_log,
+    print,
+    mode,
+    goal,
+    max_iters,
+    handler,
+    model,
+    provider,
+};
+
+pub const ExpertFlagRow = struct {
+    name: []const u8,
+    tag: ExpertFlagTag,
+    takes_value: bool,
+};
+
+/// The expert launch flags. `parseExpertFlags` and `validateExpertArgs` both
+/// read this table, so a new flag needs one row here and one switch arm in
+/// `parseExpertFlags`.
+pub const expert_flags = [_]ExpertFlagRow{
+    .{ .name = "--yes", .tag = .yes, .takes_value = false },
+    .{ .name = "--no-edit", .tag = .no_edit, .takes_value = false },
+    .{ .name = "--no-session", .tag = .no_session, .takes_value = false },
+    .{ .name = "--no-persist-tool-output", .tag = .no_persist_tool_output, .takes_value = false },
+    .{ .name = "--no-context-files", .tag = .no_context_files, .takes_value = false },
+    .{ .name = "--resume", .tag = .resume_latest, .takes_value = false },
+    .{ .name = "--continue", .tag = .resume_latest, .takes_value = false },
+    .{ .name = "--fork", .tag = .fork, .takes_value = true },
+    .{ .name = "--tools", .tag = .tools, .takes_value = true },
+    .{ .name = "--session-id", .tag = .session_id, .takes_value = true },
+    .{ .name = "--gate-log", .tag = .gate_log, .takes_value = true },
+    .{ .name = "--print", .tag = .print, .takes_value = true },
+    .{ .name = "--mode", .tag = .mode, .takes_value = true },
+    .{ .name = "--goal", .tag = .goal, .takes_value = true },
+    .{ .name = "--max-iters", .tag = .max_iters, .takes_value = true },
+    .{ .name = "--handler", .tag = .handler, .takes_value = true },
+    .{ .name = "--model", .tag = .model, .takes_value = true },
+    .{ .name = "--provider", .tag = .provider, .takes_value = true },
+};
+
+pub const ExpertFlagHit = struct {
+    row: ExpertFlagRow,
+    /// The text after `=` in `--name=value`. Null when the token is the bare name.
+    value: ?[]const u8,
+};
+
+/// Find the table row that a token names. A value flag also matches
+/// `--name=value`. A bare flag matches only its exact name.
+pub fn lookupExpertFlag(token: []const u8) ?ExpertFlagHit {
+    for (expert_flags) |row| {
+        if (std.mem.eql(u8, token, row.name)) return .{ .row = row, .value = null };
+        if (row.takes_value and
+            token.len > row.name.len and
+            std.mem.startsWith(u8, token, row.name) and
+            token[row.name.len] == '=')
+        {
+            return .{ .row = row, .value = token[row.name.len + 1 ..] };
+        }
+    }
+    return null;
+}
 
 var captured_argv: ?[]const []const u8 = null;
 
@@ -360,93 +428,25 @@ pub fn parseExpertFlags(argv: []const []const u8) !ExpertFlags {
     var saw_no_edit = false;
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
-        const arg = argv[i];
-        if (std.mem.eql(u8, arg, "--yes")) saw_yes = true;
-        if (std.mem.eql(u8, arg, "--no-edit")) saw_no_edit = true;
-        if (std.mem.eql(u8, arg, "--no-session")) out.no_session = true;
-        if (std.mem.eql(u8, arg, "--no-persist-tool-output")) out.no_persist_tool_output = true;
-        if (std.mem.eql(u8, arg, "--no-context-files")) out.no_context_files = true;
-        if (std.mem.eql(u8, arg, "--resume") or std.mem.eql(u8, arg, "--continue")) out.resume_latest = true;
-        if (std.mem.eql(u8, arg, "--fork")) {
-            out.fork_session_id = try takeArg(&i, argv, error.MissingForkSessionId);
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--fork=")) {
-            out.fork_session_id = arg["--fork=".len..];
-        }
-        if (std.mem.eql(u8, arg, "--tools")) {
-            out.tools_preset = try parseToolsPreset(try takeArg(&i, argv, error.MissingToolsPreset));
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--tools=")) {
-            out.tools_preset = try parseToolsPreset(arg["--tools=".len..]);
-        }
-        if (std.mem.eql(u8, arg, "--session-id")) {
-            out.session_id = try takeArg(&i, argv, error.MissingSessionId);
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--gate-log")) {
-            out.gate_log = try takeArg(&i, argv, error.MissingGateLogPath);
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--gate-log=")) {
-            out.gate_log = arg["--gate-log=".len..];
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--session-id=")) {
-            out.session_id = arg["--session-id=".len..];
-        }
-        if (std.mem.eql(u8, arg, "--print")) {
-            out.print = try takeArg(&i, argv, error.MissingPrintPrompt);
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--print=")) {
-            out.print = arg["--print=".len..];
-            continue;
-        }
-        if (std.mem.eql(u8, arg, "--mode")) {
-            try setMode(&out, try takeArg(&i, argv, error.MissingModeValue));
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--mode=")) {
-            try setMode(&out, arg["--mode=".len..]);
-        }
-        if (std.mem.eql(u8, arg, "--goal")) {
-            out.goals = try takeArg(&i, argv, error.MissingGoalValue);
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--goal=")) {
-            out.goals = arg["--goal=".len..];
-        }
-        if (std.mem.eql(u8, arg, "--max-iters")) {
-            out.max_iters = try parseMaxIters(try takeArg(&i, argv, error.MissingMaxItersValue));
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--max-iters=")) {
-            out.max_iters = try parseMaxIters(arg["--max-iters=".len..]);
-        }
-        if (std.mem.eql(u8, arg, "--handler")) {
-            out.handler = try takeArg(&i, argv, error.MissingHandlerValue);
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--handler=")) {
-            out.handler = arg["--handler=".len..];
-        }
-        if (std.mem.eql(u8, arg, "--model")) {
-            out.model = try resolveModelId(try takeArg(&i, argv, error.MissingModelValue));
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--model=")) {
-            out.model = try resolveModelId(arg["--model=".len..]);
-        }
-        if (std.mem.eql(u8, arg, "--provider")) {
-            const value = try takeArg(&i, argv, error.MissingProviderValue);
-            out.provider = models_registry.Provider.parsePublic(value) orelse return error.UnsupportedProvider;
-            continue;
-        }
-        if (std.mem.startsWith(u8, arg, "--provider=")) {
-            const value = arg["--provider=".len..];
-            out.provider = models_registry.Provider.parsePublic(value) orelse return error.UnsupportedProvider;
+        const hit = lookupExpertFlag(argv[i]) orelse continue;
+        switch (hit.row.tag) {
+            .yes => saw_yes = true,
+            .no_edit => saw_no_edit = true,
+            .no_session => out.no_session = true,
+            .no_persist_tool_output => out.no_persist_tool_output = true,
+            .no_context_files => out.no_context_files = true,
+            .resume_latest => out.resume_latest = true,
+            .fork => out.fork_session_id = hit.value orelse try takeArg(&i, argv, error.MissingForkSessionId),
+            .tools => out.tools_preset = try parseToolsPreset(hit.value orelse try takeArg(&i, argv, error.MissingToolsPreset)),
+            .session_id => out.session_id = hit.value orelse try takeArg(&i, argv, error.MissingSessionId),
+            .gate_log => out.gate_log = hit.value orelse try takeArg(&i, argv, error.MissingGateLogPath),
+            .print => out.print = hit.value orelse try takeArg(&i, argv, error.MissingPrintPrompt),
+            .mode => try setMode(&out, hit.value orelse try takeArg(&i, argv, error.MissingModeValue)),
+            .goal => out.goals = hit.value orelse try takeArg(&i, argv, error.MissingGoalValue),
+            .max_iters => out.max_iters = try parseMaxIters(hit.value orelse try takeArg(&i, argv, error.MissingMaxItersValue)),
+            .handler => out.handler = hit.value orelse try takeArg(&i, argv, error.MissingHandlerValue),
+            .model => out.model = try resolveModelId(hit.value orelse try takeArg(&i, argv, error.MissingModelValue)),
+            .provider => out.provider = models_registry.Provider.parsePublic(hit.value orelse try takeArg(&i, argv, error.MissingProviderValue)) orelse return error.UnsupportedProvider,
         }
     }
     if (saw_yes and saw_no_edit) return error.MutuallyExclusiveApprovalFlags;
@@ -1028,4 +1028,24 @@ test "FileGateSink appends one JSONL line per record" {
     const contents = try tmp.dir.readFileAlloc(io, "gate.jsonl", std.testing.allocator, .limited(64 * 1024));
     defer std.testing.allocator.free(contents);
     try std.testing.expectEqual(@as(usize, 2), std.mem.count(u8, contents, "\n"));
+}
+
+test "parseExpertFlags: a value flag takes a following --token as its value" {
+    const argv = [_][]const u8{ "--handler", "h.ts", "--goal", "--yes" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqualStrings("--yes", flags.goals.?);
+    try testing.expectEqual(null, flags.policy);
+}
+
+test "parseExpertFlags: a bare flag with = matches no flag" {
+    const argv = [_][]const u8{ "--yes=1", "--no-session=1" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqual(null, flags.policy);
+    try testing.expectEqual(false, flags.no_session);
+}
+
+test "parseExpertFlags: --goal= takes an empty value" {
+    const argv = [_][]const u8{ "--handler", "h.ts", "--goal=" };
+    const flags = try parseExpertFlags(argv[0..]);
+    try testing.expectEqualStrings("", flags.goals.?);
 }

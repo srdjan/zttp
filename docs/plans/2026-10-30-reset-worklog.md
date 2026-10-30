@@ -112,3 +112,21 @@ The function runs twice per driver, because each driver has a pass between the v
 Compile used to assign `cost_envelope` when it was null, and CHECK did not. The shared function assigns only a value. Both are the same today, because extraction never sets that field.
 `unreachable_code` stays a value that each driver supplies, until unit 9c.
 Gates on `main`, each exit 0: protection check, `digest.sh`, `test-precompile`, `test-contract-golden`, `test-agent-protocol`, `test-proof-swallow`, `test-flow-census`, `test-zts`, `test-diagnostic-corpus`, `test-cli`, `test-zruntime`, `test-expert-app`, `zig build test`, and `check-spine`.
+
+## Phase 6
+
+Unit 6a: `8ea63aeb`. `identityFromRuntimeContract` in `artifact_graph.zig` replaces the three copies. Opus made this unit directly, because it is a 13-line function and three call sites. `identityFromContract` stays, because `HandlerContract` is a different type.
+
+Unit 6b: `cf892b54`. The `type_check` option is now the `module_scan` hook, which takes the IR view. `extractCustomResult` and the second type environment are gone. The hook runs after the sound-mode refusal and before the type check, so the order of startup refusals does not change.
+Ruling: "source graph uses compiled direct entry types and omits dependency types" read the type environment through the old callback, and the plan's list of kept assertions did not name that test. The hook cannot see the environment, and the contract of that fixture shows no difference between the two source selections. The test keeps its module counts and its read count. A new test, "extractContract applies entry types in a module graph", asserts the entry half through public behavior. "extractContract keeps dependency annotations outside entry typing" already asserted the dependency half.
+Three mutants measured this. A dependency on direct types fails only the dependency test. A graph entry on omitted types fails only the new test, so that mutant would have survived without it. The scan before resolution fails only the new test in `runtime_cli.zig`.
+Ruling: the two assertions that compared `contract_checker` with the resolved checker went, because they asserted the removed checker. The `Callback` test lost its two assertions on the checker inside the hook, for the same reason.
+
+Unit 6c: `18471824`. `parseServeArgs` returns a `ServeRequest`, and `parseServeFeatureFlags` is gone. An ordinary `serve` start loads `zttp.json` once.
+Ruling: the plan assumed that the discovered config can pass down unchanged. Reading showed that `parseServeArgs` and the old policy lookup can anchor at different paths, so a nearer `zttp.json` could supply the policy. `configuredPolicy` keeps that result: it reuses the project only when the project is the nearest manifest of the handler. This added `nearestManifestPath` to `project_config.zig`, a file that the plan did not list.
+Ruling: `buildWatchSet` keeps its own discovery, because it runs only with `--watch`.
+Behavior change, disclosed: in the `zttp` binary, a flag token in a value position no longer sets the flag, which is the defect that N12 names. Seven cases ran on the `1d009062` binary and on the new binary. Six gave the same result. `zttp serve handler.ts --sqlite --watch` used to start watch mode and now serves without it. The `--eval --watch` and `--eval --prove` cases have equal stderr. The four Phase 0 rows and the probe table did not change.
+
+Unit 6d: `expert_flags` in `app.zig` is the one table of the 18 expert flags, and `lookupExpertFlag` reads it for both parsers. The switch in `parseExpertFlags` has no `else`, so a new tag fails the build until it has an arm. No expected value moved. The surface digests equal Phase 0.
+
+Gates on the working tree before each commit, each exit 0: protection check, build, `digest.sh`, the steps of each unit in the plan's gate table, `zig build test`, and `check-spine`. Units 6b, 6c, and 6d also ran `surface.sh`. Units 6b and 6c also ran `probe.sh`.

@@ -132,11 +132,10 @@ pub const ExpertArgValidation = union(enum) {
     unexpected_arg: []const u8,
 };
 
-/// Validate `zttp expert` argv against the documented flag set before the
-/// agent loop starts, so a typo'd flag or stray subcommand fails fast with a
-/// clear message instead of being silently ignored. Value-taking flags are
-/// resolved against `pi_app.value_taking_flags` so this list stays in sync
-/// with the expert CLI's own parser.
+/// Validate `zttp expert` argv against `pi_app.expert_flags` before the agent
+/// loop starts, so a typo'd flag or stray subcommand fails fast with a clear
+/// message instead of being silently ignored. A value flag at the end of argv
+/// is accepted here and refused later by `pi_app.parseExpertFlags`.
 pub fn validateExpertArgs(argv: []const []const u8) ExpertArgValidation {
     var i: usize = 0;
     while (i < argv.len) : (i += 1) {
@@ -147,47 +146,14 @@ pub fn validateExpertArgs(argv: []const []const u8) ExpertArgValidation {
         {
             continue;
         }
-        if (isExpertBareFlag(arg)) continue;
-        if (std.mem.startsWith(u8, arg, "--")) {
-            if (isExpertValueTakingFlag(arg)) {
-                if (i + 1 < argv.len) i += 1;
-                continue;
-            }
-            if (isExpertValueTakingFlagEq(arg)) continue;
-            return .{ .unknown_flag = arg };
+        if (pi_app.lookupExpertFlag(arg)) |hit| {
+            if (hit.row.takes_value and hit.value == null and i + 1 < argv.len) i += 1;
+            continue;
         }
+        if (std.mem.startsWith(u8, arg, "--")) return .{ .unknown_flag = arg };
         return .{ .unexpected_arg = arg };
     }
     return .ok;
-}
-
-fn isExpertBareFlag(arg: []const u8) bool {
-    return std.mem.eql(u8, arg, "--yes") or
-        std.mem.eql(u8, arg, "--no-edit") or
-        std.mem.eql(u8, arg, "--no-session") or
-        std.mem.eql(u8, arg, "--no-persist-tool-output") or
-        std.mem.eql(u8, arg, "--no-context-files") or
-        std.mem.eql(u8, arg, "--resume") or
-        std.mem.eql(u8, arg, "--continue");
-}
-
-fn isExpertValueTakingFlag(arg: []const u8) bool {
-    for (pi_app.value_taking_flags) |name| {
-        if (std.mem.eql(u8, arg, name)) return true;
-    }
-    return false;
-}
-
-fn isExpertValueTakingFlagEq(arg: []const u8) bool {
-    for (pi_app.value_taking_flags) |name| {
-        if (arg.len > name.len and
-            std.mem.startsWith(u8, arg, name) and
-            arg[name.len] == '=')
-        {
-            return true;
-        }
-    }
-    return false;
 }
 
 test "commandAcceptsHandlerPath only includes the positional-path commands" {
@@ -231,5 +197,16 @@ test "validateExpertArgs rejects unknown expert flags and subcommands" {
     switch (validateExpertArgs(&.{"diagnose"})) {
         .unexpected_arg => |arg| try std.testing.expectEqualStrings("diagnose", arg),
         else => return error.ExpectedUnexpectedExpertArg,
+    }
+}
+
+test "validateExpertArgs follows the expert flag table for each token shape" {
+    try std.testing.expectEqual(ExpertArgValidation.ok, validateExpertArgs(&.{ "--goal", "--yes" }));
+    try std.testing.expectEqual(ExpertArgValidation.ok, validateExpertArgs(&.{"--goal="}));
+    try std.testing.expectEqual(ExpertArgValidation.ok, validateExpertArgs(&.{"--goal"}));
+    try std.testing.expectEqual(ExpertArgValidation.ok, validateExpertArgs(&.{ "--help", "-h", "help" }));
+    switch (validateExpertArgs(&.{"--yes=1"})) {
+        .unknown_flag => |flag| try std.testing.expectEqualStrings("--yes=1", flag),
+        else => return error.ExpectedUnknownExpertFlag,
     }
 }
