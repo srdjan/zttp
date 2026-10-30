@@ -10,6 +10,7 @@ set -euo pipefail
 ZIG="${ZIG:-zig}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ZTTP="${ZTTP:-$REPO_ROOT/zig-out/bin/zttp}"
+ZTS="${ZTS:-$REPO_ROOT/zig-out/bin/zts}"
 
 # Random ports in the ephemeral range; reduces flake when smoke runs concurrently.
 BASE_PORT=$((RANDOM % 1000 + 5000))
@@ -139,6 +140,11 @@ leak_status=0
 leak_out=$(cd "$BROKEN_APP_DIR" && "$ZTTP" test 2>&1 </dev/null) || leak_status=$?
 [ "$leak_status" -ne 0 ] || fail "test succeeded for a handler that leaks a secret"
 printf '%s' "$leak_out" | grep -q "ZTS400" || fail "test counted a flow error and did not print it: $leak_out"
+
+step "init --extension scaffolds a handler that compiles as its README says"
+(cd "$TMP_DIR" && "$ZTTP" init --extension demo-ext >/dev/null) || fail "init --extension"
+(cd "$TMP_DIR/demo-ext" && "$ZTS" compile --module-manifest zttp-module.json handler.ts handler.zig >/dev/null 2>&1) ||
+    fail "the extension scaffold handler did not compile"
 
 step "init $APP_NAME under $TMP_DIR"
 (cd "$TMP_DIR" && "$ZTTP" init "$APP_NAME" >/dev/null) || fail "init"

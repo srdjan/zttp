@@ -896,16 +896,16 @@ fn printHelp() !void {
 }
 
 const runtime_help_text =
-    \\zttp - serverless runtime
+    \\zttp-runtime - serverless runtime
     \\
     \\Usage:
-    \\  zttp serve [options] [handler.ts]    Run handler
-    \\  zttp attest                           Inspect embedded proof artifact
-    \\  zttp version                          Show version
-    \\  zttp help                             Show this help
+    \\  zttp-runtime serve [options] [handler.ts]    Run handler
+    \\  zttp-runtime attest                          Inspect embedded proof artifact
+    \\  zttp-runtime version                         Show version
+    \\  zttp-runtime help                            Show this help
     \\
-    \\For compile, prove, and expert commands, use `zts`.
-    \\For init, dev, and deploy commands, use `zttp`.
+    \\For compile and prove commands, use `zts`.
+    \\For init, dev, deploy, and expert commands, use `zttp`.
     \\
 ;
 
@@ -1347,9 +1347,9 @@ test "the runtime help lists every verb the runtime dispatches" {
     // This binary's dispatch is small enough not to need a command table.
     for (dispatched_verbs) |verb| {
         var needle: [48]u8 = undefined;
-        const line = try std.fmt.bufPrint(&needle, "  zttp {s}", .{verb});
+        const line = try std.fmt.bufPrint(&needle, "  zttp-runtime {s}", .{verb});
         std.testing.expect(std.mem.indexOf(u8, runtime_help_text, line) != null) catch |err| {
-            std.debug.print("runtime help does not list `zttp {s}`\n", .{verb});
+            std.debug.print("runtime help does not list `zttp-runtime {s}`\n", .{verb});
             return err;
         };
     }

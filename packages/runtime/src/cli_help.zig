@@ -214,6 +214,7 @@ const expert_help =
     \\  --handler <path>           handler path for autoloop repair
     \\  --goal <csv>               property goals for autoloop repair
     \\  --max-iters <N>            autoloop iteration budget
+    \\  --gate-log <path>          append one tool-contract JSON line per turn
     \\
     \\Inside the session, type /help for slash commands
     \\  (/model, /status, /compact, /resume, /tree, ...).
@@ -239,7 +240,7 @@ const expert_help =
     \\  zttp meta
     \\  zttp verify-paths <file>...
     \\  zttp verify-modules --builtins --strict --json
-    \\  zttp proofs export --session <id> --out <path>
+    \\  zttp proofs export --format md --ref HEAD
     \\
 ;
 

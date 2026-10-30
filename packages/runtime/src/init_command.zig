@@ -704,7 +704,7 @@ const extension_build_zon_template =
 const extension_handler_ts_template =
     \\import { greet } from "zttp-ext:{{name}}";
     \\
-    \\function handler(req) {
+    \\function handler(req: Request): Response {
     \\    if (req.method === "GET" && req.path === "/") {
     \\        return Response.text(greet("zttp"));
     \\    }
@@ -725,8 +725,8 @@ const extension_readme_template =
     \\- `src/root.zig` - the native Zig binding that implements the export.
     \\- `build.zig` / `build.zig.zon` - Zig build wiring against `zttp-sdk`.
     \\- `handler.ts` - a sibling handler that imports `zttp-ext:{{name}}` so
-    \\  you can verify end-to-end with `zts check` once the manifest is
-    \\  registered via `--module-manifest`.
+    \\  you can verify end-to-end with
+    \\  `zts compile --module-manifest zttp-module.json handler.ts handler.zig`.
     \\
     \\## Wire up `zttp-sdk`
     \\
