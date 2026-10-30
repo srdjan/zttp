@@ -60,6 +60,8 @@ proof_files=(
   packages/zts/src/fault_coverage.zig
   packages/zts/src/flow_checker.zig
   packages/zts/src/flow_interp.zig
+  packages/zts/src/flow_rules.zig
+  packages/zts/src/flow_value.zig
   packages/zts/src/function_specs.zig
   packages/zts/src/handler_contract.zig
   packages/zts/src/handler_function.zig

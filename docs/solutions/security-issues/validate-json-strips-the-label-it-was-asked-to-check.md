@@ -136,7 +136,7 @@ is the convention it sits under.
 
 **2026-10-20, analyzer v7.** Production now preserves provenance labels through
 validation and represents acceptance as the separate `schema_checked` defense
-in `packages/zts/src/flow_interp.zig#Defenses`. The `defense_sources` table and
+in `packages/zts/src/flow_value.zig#Defenses`. The `defense_sources` table and
 `evalExportValues` establish that defense for the parsed value while retaining
 its input labels, including secret and credential. No evaluated value carries
 the old `validated` provenance bit. The discharge rule and walker functions

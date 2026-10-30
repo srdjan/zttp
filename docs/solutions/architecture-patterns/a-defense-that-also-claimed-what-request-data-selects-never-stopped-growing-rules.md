@@ -34,9 +34,9 @@ proves: zig build test-zts
 ## Context
 
 P6 of the flow-checker redesign added defense facts beside the provenance
-labels in `packages/zts/src/flow_interp.zig#Defense`. `html_escaped` is
+labels in `packages/zts/src/flow_value.zig#Defense`. `html_escaped` is
 the fact that `escapeHtml` establishes and that the HTML response sink
-accepts (`packages/zts/src/flow_interp.zig#requirement`).
+accepts (`packages/zts/src/flow_rules.zig#requirement`).
 
 **2026-10-20, analyzer v7.** The interpreter now supplies the production flow
 verdict through the `FlowChecker` facade. `html_escaped` and `schema_checked`
