@@ -466,10 +466,14 @@ Results appear in:
 - Deployment manifest tags (`zttp:costClass`, `zttp:costBound`,
   `zttp:costSource`, `zttp:costWorstCase` evaluated at `--max-body-size`)
   and the `kind=deploy` receipt
-- A runtime cost fuse: the interpreter counts module calls per request at the
+- A runtime cost fuse, for a caller that sets `cost_ceilings` in `RuntimeConfig`.
+  With that field set, the interpreter counts module calls per request at the
   capability-enforcement chokepoint and, on an excess over the proven envelope,
   records a `cost_bounded` soundness incident (log-only, with the arena
-  high-water as evidence; it never alters the response)
+  high-water as evidence; it never alters the response). The server, the CLI,
+  and the build do not set the field, so `zttp` and `zttp-runtime` never record
+  this incident. Only tests in `packages/runtime/src/zruntime_tests.zig` set it
+  today.
 
 ## Artifact-Level Proof-Carrying Code
 
