@@ -431,7 +431,7 @@ const SourceFaultCoverage = struct {
 };
 
 fn analyzeSourceFaultCoverage(allocator: std.mem.Allocator, source: []const u8) !SourceFaultCoverage {
-    var parser = try parser_mod.JsParser.init(allocator, source);
+    var parser = try parser_mod.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();
