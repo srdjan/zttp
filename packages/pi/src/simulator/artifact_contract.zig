@@ -248,11 +248,11 @@ pub const ModelCheckpoint = struct {
     request_context_sha256: Sha256Hex,
     transient_user_text_sha256: ?Sha256Hex,
     wire_request_sha256: ?Sha256Hex = null,
-    /// Complete provider-neutral request accounting. Historical artifacts
-    /// omit it; every new recording writes it.
+    /// Complete provider-neutral request accounting. Every recording writes
+    /// it, and replay refuses a checkpoint without it.
     request_budget: ?context_budget.RequestBudget = null,
     /// Provider-reported logical input after cache fields are normalized.
-    /// Historical artifacts omit it; every new recording writes it.
+    /// Every recording writes it, and replay refuses a checkpoint without it.
     normalized_input_tokens: ?u64 = null,
     /// Stable raw-entry cut used by the active model projection, when any.
     projection_first_kept_entry_id: ?u64 = null,

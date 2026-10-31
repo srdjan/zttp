@@ -83,6 +83,7 @@ test "flow runner continues a real multi-Turn transcript and preserves exact wor
             .transient_user_text_sha256 = null,
             .wire_request_sha256 = .{ .bytes = first_snapshot.wire_request_sha256.?.bytes },
             .request_budget = first_snapshot.budget,
+            .normalized_input_tokens = 12,
             .projection_first_kept_entry_id = first_snapshot.projection_first_kept_entry_id,
         },
         .{
@@ -95,6 +96,7 @@ test "flow runner continues a real multi-Turn transcript and preserves exact wor
             .transient_user_text_sha256 = null,
             .wire_request_sha256 = .{ .bytes = second_snapshot.wire_request_sha256.?.bytes },
             .request_budget = second_snapshot.budget,
+            .normalized_input_tokens = 12,
             .projection_first_kept_entry_id = second_snapshot.projection_first_kept_entry_id,
         },
     };

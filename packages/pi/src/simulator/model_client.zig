@@ -132,10 +132,10 @@ pub const Client = struct {
             else => return self.failResponseFixture(.malformed),
         };
         const reported_input = try context_budget.normalizeLogicalInput(self.script.provider, result.usage);
-        if (checkpoint.normalized_input_tokens) |expected_input| {
-            if (reported_input != expected_input) {
-                return self.fail(.{ .normalized_input_mismatch = self.detailFor(.trace, checkpoint) });
-            }
+        const expected_input = checkpoint.normalized_input_tokens orelse
+            return self.fail(.{ .normalized_input_mismatch = self.detailFor(.trace, checkpoint) });
+        if (reported_input != expected_input) {
+            return self.fail(.{ .normalized_input_mismatch = self.detailFor(.trace, checkpoint) });
         }
         // Production tracks stable normal-request usage only. Summarization is
         // separately accounted and a compaction projection starts a new usage
@@ -336,12 +336,12 @@ pub const Client = struct {
             }
             return self.fail(.{ .transcript_or_transient_prompt_mismatch = self.detailFor(.trace, checkpoint) });
         }
-        if (checkpoint.request_budget) |expected_budget| {
-            const actual_budget = snapshot.budget orelse
-                return self.fail(.{ .request_budget_mismatch = self.detailFor(.trace, checkpoint) });
-            if (!requestBudgetEql(actual_budget, expected_budget)) {
-                return self.fail(.{ .request_budget_mismatch = self.detailFor(.trace, checkpoint) });
-            }
+        const expected_budget = checkpoint.request_budget orelse
+            return self.fail(.{ .request_budget_mismatch = self.detailFor(.trace, checkpoint) });
+        const actual_budget = snapshot.budget orelse
+            return self.fail(.{ .request_budget_mismatch = self.detailFor(.trace, checkpoint) });
+        if (!requestBudgetEql(actual_budget, expected_budget)) {
+            return self.fail(.{ .request_budget_mismatch = self.detailFor(.trace, checkpoint) });
         }
         return checkpoint;
     }

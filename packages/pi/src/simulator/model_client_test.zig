@@ -259,7 +259,9 @@ test "simulator client rejects a semantic mismatch without consuming the respons
         .extra_user_text = null,
     });
     _ = try model_client.prepareSnapshot(arena.allocator(), &expected);
-    const checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&expected)};
+    var checkpoint = checkpointFromSnapshot(&expected);
+    checkpoint.normalized_input_tokens = 12;
+    const checkpoints = [_]artifact.ModelCheckpoint{checkpoint};
     const bound_cassette = try bindLocalCassette(arena.allocator(), expected.wire_request_sha256.?);
     const responses = [_]artifact.ResponseFixture{.{
         .index = 0,
@@ -348,7 +350,9 @@ test "simulator summarizer consumes a purpose-specific request checkpoint" {
         .transcript = &summary_transcript,
     });
     _ = try model_client.prepareSnapshot(allocator, &snapshot);
-    const checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&snapshot)};
+    var checkpoint = checkpointFromSnapshot(&snapshot);
+    checkpoint.normalized_input_tokens = 12;
+    const checkpoints = [_]artifact.ModelCheckpoint{checkpoint};
     const bound_cassette = try bindLocalCassette(allocator, snapshot.wire_request_sha256.?);
     const responses = [_]artifact.ResponseFixture{.{
         .index = 0,
@@ -508,9 +512,14 @@ test "every Chat Completions provider rebuilds its wire digest on replay" {
             .max_tokens = request_config.max_output_tokens,
             .tools_json = request_config.tools_json,
         }, &transcript, null);
+        // Preparation fills the request budget. The digest from the independent
+        // body then replaces the prepared digest, so the check still binds it.
+        _ = try model_client.prepareSnapshot(arena.allocator(), &expected);
         expected.wire_request_sha256 = model_request.Sha256Hex.fromRawBytes(body);
 
-        var checkpoints = [_]artifact.ModelCheckpoint{checkpointFromSnapshot(&expected)};
+        var checkpoint = checkpointFromSnapshot(&expected);
+        checkpoint.normalized_input_tokens = 0;
+        var checkpoints = [_]artifact.ModelCheckpoint{checkpoint};
         const response =
             "{\"choices\":[{\"finish_reason\":\"stop\",\"message\":{\"content\":\"ok\"}}]}";
         const cassette = try testing.allocator.print("{{\"v\":1,\"provider\":\"{s}\",\"stream\":false,\"request_sha256\":\"{s}\"}}\n{{\"body\":{f}}}\n", .{
@@ -674,6 +683,109 @@ test "simulator checkpoints bind request budgets normalized usage and projection
         );
         try testing.expect(std.meta.activeTag(client.lastMismatch().?) == .normalized_input_mismatch);
     }
+}
+
+test "replay refuses a checkpoint with no request budget" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "inspect handler.ts" });
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const request_config: model_request.Config = .{
+        .provider = .local,
+        .model = local_client.default_model,
+        .max_output_tokens = 8192,
+        .system_prompt = "persona",
+        .tools_json = null,
+    };
+    var expected = try model_request.createSnapshot(arena.allocator(), .{
+        .config = request_config,
+        .transcript = &transcript,
+    });
+    _ = try model_client.prepareSnapshot(arena.allocator(), &expected);
+    var checkpoint = checkpointFromSnapshot(&expected);
+    checkpoint.normalized_input_tokens = 12;
+    checkpoint.request_budget = null;
+    const checkpoints = [_]artifact.ModelCheckpoint{checkpoint};
+    const bound_cassette = try bindLocalCassette(arena.allocator(), expected.wire_request_sha256.?);
+    const responses = [_]artifact.ResponseFixture{.{
+        .index = 0,
+        .turn_index = 0,
+        .call_index = 0,
+        .path = "responses/0.jsonl",
+        .sha256 = artifact.Sha256Hex.fromBytes(bound_cassette),
+    }};
+    const fixtures = [_]artifact.LoadedFixture{.{
+        .role = .response,
+        .path = "responses/0.jsonl",
+        .bytes = bound_cassette,
+    }};
+    var client = model_client.Client.init(.{
+        .provider = .local,
+        .model = local_client.default_model,
+        .checkpoints = &checkpoints,
+        .responses = &responses,
+        .fixtures = &fixtures,
+    }, request_config);
+
+    try testing.expectError(
+        error.ReplayMismatch,
+        client.asModelClient().request(arena.allocator(), &transcript, null),
+    );
+    try testing.expectEqual(@as(usize, 0), client.consumedCount());
+    try testing.expect(std.meta.activeTag(client.lastMismatch().?) == .request_budget_mismatch);
+}
+
+test "replay refuses a checkpoint with no normalized input tokens" {
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(testing.allocator);
+    try transcript.append(testing.allocator, .{ .user_text = "inspect handler.ts" });
+
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const request_config: model_request.Config = .{
+        .provider = .local,
+        .model = local_client.default_model,
+        .max_output_tokens = 8192,
+        .system_prompt = "persona",
+        .tools_json = null,
+    };
+    var expected = try model_request.createSnapshot(arena.allocator(), .{
+        .config = request_config,
+        .transcript = &transcript,
+    });
+    _ = try model_client.prepareSnapshot(arena.allocator(), &expected);
+    var checkpoint = checkpointFromSnapshot(&expected);
+    checkpoint.normalized_input_tokens = null;
+    const checkpoints = [_]artifact.ModelCheckpoint{checkpoint};
+    const bound_cassette = try bindLocalCassette(arena.allocator(), expected.wire_request_sha256.?);
+    const responses = [_]artifact.ResponseFixture{.{
+        .index = 0,
+        .turn_index = 0,
+        .call_index = 0,
+        .path = "responses/0.jsonl",
+        .sha256 = artifact.Sha256Hex.fromBytes(bound_cassette),
+    }};
+    const fixtures = [_]artifact.LoadedFixture{.{
+        .role = .response,
+        .path = "responses/0.jsonl",
+        .bytes = bound_cassette,
+    }};
+    var client = model_client.Client.init(.{
+        .provider = .local,
+        .model = local_client.default_model,
+        .checkpoints = &checkpoints,
+        .responses = &responses,
+        .fixtures = &fixtures,
+    }, request_config);
+
+    try testing.expectError(
+        error.ReplayMismatch,
+        client.asModelClient().request(arena.allocator(), &transcript, null),
+    );
+    try testing.expectEqual(@as(usize, 0), client.consumedCount());
+    try testing.expect(std.meta.activeTag(client.lastMismatch().?) == .normalized_input_mismatch);
 }
 
 test "adversarial request mutations fail before releasing a response" {

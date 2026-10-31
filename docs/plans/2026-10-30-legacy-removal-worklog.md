@@ -147,3 +147,13 @@ Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`
 The new test `a second handler parameter reads undefined` failed on the old path with `expected undefined, found object`. It loads the source through `loadPreparedEval`, because `loadHandler` refuses type annotations on a `<...>` filename.
 
 The fallback in `interpreter/call.zig` returns `error.NotCallable`, which `doCall` already returns for a value that cannot be called. No test reaches that line: it needs a callable object with no native, closure, or bytecode payload, and no public path makes one.
+
+## L3f
+
+Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`, `test-zruntime`, `test-expert-app`, `test-simulator`, `test-cassette`, `zig build test`, `check-spine`. The comparison script moved 0 of 648 rows.
+
+The new tests `replay refuses a checkpoint with no request budget` and `replay refuses a checkpoint with no normalized input tokens` failed on the old path: `expected error.ReplayMismatch, found` a successful result. Only those two tests failed in that run: 856 of 858 passed.
+
+An absent field uses the failure of a mismatch: `request_budget_mismatch` and `normalized_input_mismatch`. The decoder still accepts an absent field, so a hand-made recording fails at replay with a named failure. No file under `packages/pi/src/simulator/testdata` changed, and every committed trace holds both fields.
+
+The fixture in `every Chat Completions provider rebuilds its wire digest on replay` now calls `prepareSnapshot` to fill the budget. The digest from the independent body still replaces the prepared digest, so the digest check stays bound to that body. The comments on the two fields in `artifact_contract.zig` now state the replay refusal.
