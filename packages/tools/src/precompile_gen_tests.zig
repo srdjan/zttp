@@ -32,10 +32,7 @@ pub fn runGenTests(
     }
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
-    var js_parser = if (source_kind.isTyped())
-        try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile)
-    else
-        try zts.parser.JsParser.init(allocator, source);
+    var js_parser = try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile);
     defer js_parser.deinit();
     js_parser.setAtomTable(&atoms);
     var source_view = zts.SourceView.of(source);
