@@ -465,10 +465,9 @@ test "source-only admission observes the unterminated string after a colon" {
 // Parser contract
 // ----------------------------------------------------------------------------
 
-const ParseMode = enum { program, expression };
-
-/// Every error `Parser.parse` and `parseExpressionOnly` may return. The set is
-/// closed on purpose: an error that is not here is new behavior to classify.
+/// Every error that `parseExpressionOnly` or a parser refusal of the typed
+/// parse may return. The set is closed on purpose: an error that is not here
+/// is new behavior to classify.
 const parser_errors = [_][]const u8{
     "OutOfMemory",
     "ParseError",
@@ -491,25 +490,14 @@ fn expectKnownParserError(err: anyerror) !void {
     return error.UnclassifiedParserError;
 }
 
-/// Parse the original input and check its result and diagnostic positions.
-fn checkParseInput(
-    allocator: std.mem.Allocator,
-    input: []const u8,
-    mode: ParseMode,
-    stats: *Stats,
-) !void {
-    var parser = (switch (mode) {
-        .program => Parser.init(allocator, input),
-        .expression => Parser.initExpression(allocator, input),
-    }) catch |err| switch (err) {
+/// Parse the original input as an expression and check its result and diagnostic positions.
+fn checkExpression(allocator: std.mem.Allocator, input: []const u8, stats: *Stats) !void {
+    var parser = Parser.initExpression(allocator, input) catch |err| switch (err) {
         error.OutOfMemory => return,
     };
     defer parser.deinit();
 
-    const outcome = switch (mode) {
-        .program => parser.parse(),
-        .expression => parser.parseExpressionOnly(),
-    };
+    const outcome = parser.parseExpressionOnly();
     if (outcome) |_| {
         stats.ok += 1;
         try std.testing.expect(!parser.hasErrors());
@@ -530,19 +518,11 @@ fn checkParseInput(
     }
 }
 
-fn checkParser(allocator: std.mem.Allocator, src: []const u8, stats: *Stats) !void {
-    try checkParseInput(allocator, src, .program, stats);
-}
-
-fn checkExpression(allocator: std.mem.Allocator, src: []const u8, stats: *Stats) !void {
-    try checkParseInput(allocator, src, .expression, stats);
-}
-
 // ----------------------------------------------------------------------------
 // Targets
 // ----------------------------------------------------------------------------
 
-const Target = enum { tokenizer, typed_compile, typed_collect, parser, expression };
+const Target = enum { tokenizer, typed_compile, typed_collect, expression };
 
 fn checkOne(target: Target, src: []const u8, stats: *Stats) !void {
     const allocator = std.testing.allocator;
@@ -553,7 +533,6 @@ fn checkOne(target: Target, src: []const u8, stats: *Stats) !void {
         .tokenizer => try checkTokenizer(src, stats),
         .typed_compile => try checkTyped(allocator, src, .compile, stats),
         .typed_collect => try checkTyped(allocator, src, .collect, stats),
-        .parser => try checkParser(allocator, src, stats),
         .expression => try checkExpression(allocator, src, stats),
     }
 }
@@ -1032,51 +1011,34 @@ test "nesting: the tokenizer terminates on templates and braces of any depth" {
 // Allocation failure
 // ----------------------------------------------------------------------------
 
-const AllocationTarget = enum { parser, compile_runtime, compile_types, collect_runtime, collect_types };
+const AllocationTarget = enum { compile_runtime, compile_types, collect_runtime, collect_types };
 
 /// Runtime and syntax allocations fail independently. A classified refusal
 /// remains fail-closed after allocation failure; claiming acceptance does not.
 fn oomStage(allocator: std.mem.Allocator, target: AllocationTarget, src: []const u8) !void {
-    switch (target) {
-        .parser => try oomParse(allocator, src),
-        .compile_runtime, .compile_types, .collect_runtime, .collect_types => {
-            const runtime_allocator = switch (target) {
-                .compile_runtime, .collect_runtime => allocator,
-                else => std.testing.allocator,
-            };
-            const type_allocator = switch (target) {
-                .compile_types, .collect_types => allocator,
-                else => std.testing.allocator,
-            };
-            const mode: TypeSyntax.AdmissionMode = switch (target) {
-                .compile_runtime, .compile_types => .compile,
-                else => .collect,
-            };
-            var owner: source_frontend.DirectCheckSource = undefined;
-            try initTypedOwner(&owner, runtime_allocator, type_allocator, src, mode);
-            defer owner.deinit();
-            switch (owner.outcome().*) {
-                .accepted => {},
-                .parser_refused => |refusal| {
-                    try expectKnownParserError(refusal.first_error);
-                    return error.Refused;
-                },
-                .recovered_admission_refused, .terminal_admission_refused => return error.Refused,
-            }
-        },
-    }
-}
-
-fn oomParse(allocator: std.mem.Allocator, src: []const u8) !void {
-    var parser = Parser.init(allocator, src) catch return error.OutOfMemory;
-    defer parser.deinit();
-    _ = parser.parse() catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => {
-            try expectKnownParserError(err);
+    const runtime_allocator = switch (target) {
+        .compile_runtime, .collect_runtime => allocator,
+        else => std.testing.allocator,
+    };
+    const type_allocator = switch (target) {
+        .compile_types, .collect_types => allocator,
+        else => std.testing.allocator,
+    };
+    const mode: TypeSyntax.AdmissionMode = switch (target) {
+        .compile_runtime, .compile_types => .compile,
+        else => .collect,
+    };
+    var owner: source_frontend.DirectCheckSource = undefined;
+    try initTypedOwner(&owner, runtime_allocator, type_allocator, src, mode);
+    defer owner.deinit();
+    switch (owner.outcome().*) {
+        .accepted => {},
+        .parser_refused => |refusal| {
+            try expectKnownParserError(refusal.first_error);
             return error.Refused;
         },
-    };
+        .recovered_admission_refused, .terminal_admission_refused => return error.Refused,
+    }
 }
 
 /// Fail each allocation of one stage configuration in turn, the way
@@ -1161,13 +1123,6 @@ test "fuzz: direct compile holds its contract on every seed" {
     try expectTypedStats(try runSeeds(.typed_compile), .compile, true);
 }
 
-test "fuzz: parser holds its contract on every seed" {
-    const stats = try runSeeds(.parser);
-    try std.testing.expect(stats.ok > 0);
-    try std.testing.expect(stats.rejected > 0);
-    try std.testing.expect(stats.located > 0);
-}
-
 test "fuzz: parser expression profile holds its contract on every seed" {
     const stats = try runSeeds(.expression);
     try std.testing.expect(stats.ok > 0);
@@ -1194,10 +1149,8 @@ test "stress: direct admission holds its contract on generated input in both mod
     try expectTypedStats(try runStress(.typed_collect, 0x70C3_0002, 400), .collect, false);
 }
 
-test "stress: parser holds its contract on generated input" {
-    const stats = try runStress(.parser, 0x70C3_0004, 1000);
-    try std.testing.expect(stats.ok > 0);
-    try std.testing.expect(stats.rejected > 0);
+test "stress: direct compile holds its contract on the parser input stream" {
+    try expectTypedStats(try runStress(.typed_compile, 0x70C3_0004, 1000), .compile, false);
 }
 
 test "stress: parser expression profile holds its contract on generated input" {

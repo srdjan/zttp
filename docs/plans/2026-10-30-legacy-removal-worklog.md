@@ -283,3 +283,29 @@ Renamed tests:
 |---|---|
 | `prepared evaluation caches bytecode and reload restores raw virtual parsing` | `prepared evaluation caches bytecode and reload refuses an any annotation in virtual source` |
 | `prepared evaluation omits authored types while raw virtual and file profiles remain distinct` | `prepared evaluation omits authored types while virtual source refuses any and file profile checks types` |
+
+## L5c
+
+Status: complete. `JsParser.init` and the wrapper `Parser.init` are gone, so D-016's two entries are the only untyped entries. Each test file has its own commit. `parser.parse`, `ParseResult`, `ParseOptions`, `Parser.parse`, and `Parser.parseWithCodegenAllocator` also left, because each one reached the raw entry and no production code called it. `typed_phase` is no longer optional, because only `initTyped` builds the wrapper.
+
+This is a public Zig API move. Decision 4 names the raw entry, and L9 adds a `CHANGELOG.md` line.
+
+The plan said that no expected value moves. Five of the 149 sites could not meet that, so I decided them as follows.
+
+| Site | Reason | Result |
+|---|---|---|
+| `export default is refused with a named export repair` | The raw text reaches no user. `zts check` prints the admission text | Asserts `error.AdmissionRefused`, `.default_export`, span start 0 |
+| `export let is refused with an export const repair` | The same reason | Asserts `error.AdmissionRefused`, `.mutable_export`, span start 0 |
+| `unsupported: default parameter` | The same reason | Asserts `error.AdmissionRefused`, `.default_parameter`, span start 22 |
+| `fuzz: parser holds its contract on every seed` | The `.parser` target ran the raw entry. `fuzz: direct compile holds its contract on every seed` runs the same seeds through production | Removed |
+| `stress: parser holds its contract on generated input` | The same target. Its volume has value | Renamed `stress: direct compile holds its contract on the parser input stream`, with the same seed and 1000 iterations through `.typed_compile` |
+
+`oomParse` and the `.parser` allocation target left for the same reason. `compile_runtime` and `compile_types` sweep the production path.
+
+The worker said that moved tests might now pass for another reason. I measured that with a temporary shadow raw parse of each moved `parse.zig` site, which I removed after the run. The first run reported 0 comparisons because my line map failed to load, so I fixed it and reran. Result over 256 `parse` calls: 180 identical, 69 injected allocation failures, 5 with the same first error and one more recorded error, 1 with the same message under `error.AdmissionRefused`, and 1 artifact, because the shadow parser did not copy `allow_asi`. No first error text changed. The audit reads `parse` calls only.
+
+A normalized comparison shows that the `parse.zig` test move changed only call sites.
+
+Removed `error.InvalidParserPhase` rows, each because the method left: 2 raw rows, 2 `parse` rows in the typed tests, 1 `parseWithCodegenAllocator` row, and 1 more `parse` row in `typed generation failures clean published float and nested function payloads`.
+
+Observation for later pruning: a parser refusal text such as "default exports are not supported" still runs, but `parseAdmission` replaces it with the admission text. So those texts have no reader on a program parse. They are not legacy under this plan's definition, because the parser branch still refuses, and this plan leaves them.

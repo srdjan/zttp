@@ -9,15 +9,16 @@
 //! Usage:
 //!   const parser = @import("parser/root.zig");
 //!
-//!   // Parse source code (new API)
-//!   var p = parser.JsParser.init(allocator, source);
+//!   // Parse source code through admission
+//!   var p = try parser.JsParser.initAdmission(allocator, allocator, source, .compile);
 //!   defer p.deinit();
-//!   const ast = try p.parse();
+//!   const outcome = try p.parseAdmission();
 //!
 //!   // Or use the stable `zts.Parser` wrapper:
-//!   var p = parser.Parser.init(allocator, source, &strings, &atoms);
+//!   var p = try parser.Parser.initTyped(allocator, allocator, source, &strings, &atoms);
 //!   defer p.deinit();
-//!   const bytecode = try p.parse();
+//!   const outcome = try p.parseTypedIr();
+//!   const bytecode = try p.generateParsed(allocator);
 //!   // Access: p.max_local_count, p.constants.items
 
 const std = @import("std");
@@ -78,78 +79,16 @@ pub const AdmissionParseOutcome = @import("parse.zig").AdmissionParseOutcome;
 pub const CodeGen = @import("codegen.zig").CodeGen;
 pub const ir_opt = @import("ir_opt.zig");
 
-/// Parse options
-pub const ParseOptions = struct {
-    module_mode: bool = false,
-    strict_mode: bool = true,
-};
-
-/// Parse result containing IR and any errors
-pub const ParseResult = struct {
-    nodes: IRStore,
-    constants: ConstantPool,
-    scopes: ScopeAnalyzer,
-    errors: ErrorList,
-    type_store: type_syntax.Store,
-    root: NodeIndex,
-
-    pub fn deinit(self: *ParseResult) void {
-        self.nodes.deinit();
-        self.constants.deinit();
-        self.scopes.deinit();
-        self.errors.deinit();
-        self.type_store.deinit();
-    }
-
-    pub fn hasErrors(self: *const ParseResult) bool {
-        return self.errors.hasErrors();
-    }
-};
-
-/// High-level parse function
-pub fn parse(
-    allocator: std.mem.Allocator,
-    source: []const u8,
-    options: ParseOptions,
-) !ParseResult {
-    _ = options;
-    var p = try JsParser.init(allocator, source);
-    // The result adopts permanent parser storage, not reusable list scratch.
-    defer p.scratch_nodes.deinit(allocator);
-
-    // Note: strict_mode is always true in zts (var keyword rejected)
-    // Note: module_mode affects import/export handling (future)
-
-    const root = p.parse() catch {
-        return ParseResult{
-            .nodes = p.nodes,
-            .constants = p.constants,
-            .scopes = p.scopes,
-            .errors = p.errors,
-            .type_store = p.type_store,
-            .root = @import("ir.zig").null_node,
-        };
-    };
-
-    return ParseResult{
-        .nodes = p.nodes,
-        .constants = p.constants,
-        .scopes = p.scopes,
-        .errors = p.errors,
-        .type_store = p.type_store,
-        .root = root,
-    };
-}
-
 // ============================================================================
 // Parser wrapper - the stable `zts.Parser`
 // ============================================================================
 
 /// Parser wrapper behind the stable `zts.Parser` that zruntime.zig and embedders use
 /// Usage:
-///   var p = Parser.init(allocator, source, &strings, &atoms);
+///   var p = try Parser.initTyped(allocator, allocator, source, &strings, &atoms);
 ///   defer p.deinit();
-///   const bytecode = try p.parse();
+///   const outcome = try p.parseTypedIr();
+///   const bytecode = try p.generateParsed(allocator);
 ///   // Access: p.max_local_count, p.constants.items
 pub const Parser = struct {
     allocator: std.mem.Allocator,
@@ -163,7 +102,7 @@ pub const Parser = struct {
     max_local_count: u8,
     constants: ConstantsList,
     root_node: NodeIndex = @import("ir.zig").null_node,
-    typed_phase: ?TypedPhase = null,
+    typed_phase: TypedPhase,
 
     // Strings and atoms that CodeGen receives
     strings: *string.StringTable,
@@ -175,31 +114,6 @@ pub const Parser = struct {
     pub const ConstantsList = struct {
         items: []const value.JSValue,
     };
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        source: []const u8,
-        strings: *string.StringTable,
-        atoms: ?*atom_table_mod.AtomTable,
-    ) !Parser {
-        var p = Parser{
-            .allocator = allocator,
-            .source = source,
-            .js_parser = try JsParser.init(allocator, source),
-            .code_gen = null,
-            .max_local_count = 0,
-            .constants = .{ .items = &.{} },
-            .strings = strings,
-            .atoms = atoms,
-        };
-        // This wrapper already borrows source for its complete lifetime, and
-        // codegen copies strings into the runtime StringTable before teardown.
-        p.js_parser.borrowSourceStrings();
-        if (atoms) |atom_table| {
-            p.js_parser.setAtomTable(atom_table);
-        }
-        return p;
-    }
 
     pub fn initTyped(
         allocator: std.mem.Allocator,
@@ -269,38 +183,6 @@ pub const Parser = struct {
             cg.deinit();
         }
         self.js_parser.deinit();
-    }
-
-    /// Parse and generate bytecode, returns bytecode slice
-    pub fn parse(self: *Parser) ![]const u8 {
-        if (self.typed_phase != null) return error.InvalidParserPhase;
-        return self.parseWithCodegenAllocator(self.allocator);
-    }
-
-    /// Parse and generate bytecode, using `codegen_alloc` for the CodeGen pass.
-    /// The tokenizer/parser/IR still use `self.allocator`. Used by the
-    /// compile-time microbench to isolate codegen allocation from parser/IR
-    /// allocation; production paths call `parse()` with both identical.
-    pub fn parseWithCodegenAllocator(self: *Parser, codegen_alloc: std.mem.Allocator) ![]const u8 {
-        if (self.typed_phase != null) return error.InvalidParserPhase;
-        const root = try self.js_parser.parse();
-        self.root_node = root;
-
-        self.code_gen = CodeGen.initWithIRStore(
-            codegen_alloc,
-            &self.js_parser.nodes,
-            &self.js_parser.constants,
-            &self.js_parser.scopes,
-            self.strings,
-            self.atoms,
-        );
-
-        const func_bc = try self.code_gen.?.generate(root);
-
-        self.max_local_count = @intCast(func_bc.local_count);
-        self.constants = .{ .items = func_bc.constants };
-
-        return func_bc.code;
     }
 
     /// Get the object literal shapes collected during compilation.
@@ -403,17 +285,6 @@ test "root module imports" {
     _ = JsParser;
     _ = CodeGen;
     _ = ir_opt;
-}
-
-test "parse result owns permanent lists after scratch teardown" {
-    var result = try parse(std.testing.allocator, "function f(a) { return [a, [1, 2]]; }", .{});
-    defer result.deinit();
-    try std.testing.expect(!result.hasErrors());
-    const view = IrView.fromIRStore(&result.nodes, &result.constants);
-    const program = view.getBlock(result.root).?;
-    try std.testing.expectEqual(@as(u16, 1), program.stmts_count);
-    const decl = view.getVarDecl(view.getListIndex(program.stmts_start, 0)).?;
-    try std.testing.expectEqual(@as(u8, 1), view.getFunction(decl.init).?.params_count);
 }
 
 // Pull in tests from submodules
@@ -601,8 +472,6 @@ test "typed parser delays generation and matches equivalent JavaScript bytecode 
     defer typed.deinit();
     const before = typed.js_parser.tokens_advanced;
     try std.testing.expectError(error.InvalidParserPhase, typed.generateParsed(allocator));
-    try std.testing.expectError(error.InvalidParserPhase, typed.parse());
-    try std.testing.expectError(error.InvalidParserPhase, typed.parseWithCodegenAllocator(allocator));
     try std.testing.expectEqual(before, typed.js_parser.tokens_advanced);
     try std.testing.expectEqual(@as(usize, 1), typed_atoms.count());
     const root = switch (try typed.parseTypedIr()) {
@@ -664,7 +533,6 @@ test "typed compatibility refusals consume the parse attempt" {
         const progress = parser.js_parser.tokens_advanced;
         try std.testing.expectError(error.InvalidParserPhase, parser.parseTypedIr());
         try std.testing.expectError(error.InvalidParserPhase, parser.generateParsed(std.testing.allocator));
-        try std.testing.expectError(error.InvalidParserPhase, parser.parse());
         try std.testing.expectEqual(progress, parser.js_parser.tokens_advanced);
         try std.testing.expectEqual(null_node, parser.root_node);
         try std.testing.expect(parser.code_gen == null);
@@ -827,7 +695,6 @@ test "typed parse and validation allocation failures consume the attempt" {
                         const progress = parser.js_parser.tokens_advanced;
                         try std.testing.expectError(error.InvalidParserPhase, parser.parseTypedIr());
                         try std.testing.expectError(error.InvalidParserPhase, parser.generateParsed(std.testing.allocator));
-                        try std.testing.expectError(error.InvalidParserPhase, parser.parse());
                         try std.testing.expectEqual(progress, parser.js_parser.tokens_advanced);
                         try std.testing.expectEqual(null_node, parser.root_node);
                         try std.testing.expect(parser.code_gen == null);

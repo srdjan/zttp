@@ -291,10 +291,6 @@ pub const Parser = struct {
         return .{ .parser = self, .start = self.scratch_nodes.items.len };
     }
 
-    pub fn init(allocator: std.mem.Allocator, source: []const u8) !Parser {
-        return initWithProfile(allocator, allocator, source, false, null, false);
-    }
-
     /// Opt in before parsing only when source outlives this parser and any
     /// transferred constant pool. The default parser owns its string copies.
     pub fn borrowSourceStrings(self: *Parser) void {
@@ -306,8 +302,7 @@ pub const Parser = struct {
         return initWithProfile(allocator, allocator, source, true, null, false);
     }
 
-    /// Private direct-source admission parser. It owns the syntax collector and
-    /// never changes the behavior of `init`.
+    /// Private direct-source admission parser. It owns the syntax collector.
     pub fn initAdmission(
         allocator: std.mem.Allocator,
         type_allocator: std.mem.Allocator,
@@ -412,18 +407,15 @@ pub const Parser = struct {
 
     /// Parse the entire program
     pub fn parse(self: *Parser) anyerror!NodeIndex {
-        if (self.admission != null) {
-            return switch (try self.parseAdmission()) {
-                .accepted => |root| root,
-                .recovered_admission_refused => error.AdmissionRefused,
-                .parser_refused => |refusal| refusal.first_error,
-                .terminal_admission_refused => |failure| switch (failure) {
-                    .diagnostic => error.AdmissionRefused,
-                    .unterminated_comment => error.UnterminatedComment,
-                },
-            };
-        }
-        return self.parseProgram();
+        return switch (try self.parseAdmission()) {
+            .accepted => |root| root,
+            .recovered_admission_refused => error.AdmissionRefused,
+            .parser_refused => |refusal| refusal.first_error,
+            .terminal_admission_refused => |failure| switch (failure) {
+                .diagnostic => error.AdmissionRefused,
+                .unterminated_comment => error.UnterminatedComment,
+            },
+        };
     }
 
     pub fn parseAdmission(self: *Parser) anyerror!AdmissionParseOutcome {
@@ -9166,12 +9158,13 @@ test "export default is refused with a named export repair" {
         \\export default function handler() {}
     ;
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
-    try std.testing.expectError(error.ParseError, parser.parse());
-    try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, parser.getErrors()[0].kind);
-    try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "named export") != null);
+    try std.testing.expectError(error.AdmissionRefused, parser.parse());
+    const diagnostic = parser.getAdmissionFailure().?.diagnostic;
+    try std.testing.expectEqual(.default_export, diagnostic.kind);
+    try std.testing.expectEqual(@as(u32, 0), diagnostic.span.start);
 }
 
 test "export let is refused with an export const repair" {
@@ -9180,12 +9173,13 @@ test "export let is refused with an export const repair" {
         \\export let version = 1;
     ;
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
-    try std.testing.expectError(error.ParseError, parser.parse());
-    try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, parser.getErrors()[0].kind);
-    try std.testing.expect(std.mem.indexOf(u8, parser.getErrors()[0].message, "export const") != null);
+    try std.testing.expectError(error.AdmissionRefused, parser.parse());
+    const diagnostic = parser.getAdmissionFailure().?.diagnostic;
+    try std.testing.expectEqual(.mutable_export, diagnostic.kind);
+    try std.testing.expectEqual(@as(u32, 0), diagnostic.span.start);
 }
 
 test "unsupported: export re-export braces" {
@@ -9377,17 +9371,13 @@ test "unsupported: default parameter" {
     const allocator = std.testing.allocator;
     const source = "function label(prefix = 'item') { return prefix; }";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
-    _ = parser.parse() catch {};
 
-    try std.testing.expect(parser.hasErrors());
-    var found = false;
-    for (parser.getErrors()) |err| {
-        if (err.kind == error_mod.ErrorKind.unsupported_feature and
-            std.mem.indexOf(u8, err.message, "default parameters") != null) found = true;
-    }
-    try std.testing.expect(found);
+    try std.testing.expectError(error.AdmissionRefused, parser.parse());
+    const diagnostic = parser.getAdmissionFailure().?.diagnostic;
+    try std.testing.expectEqual(.default_parameter, diagnostic.kind);
+    try std.testing.expectEqual(@as(u32, 22), diagnostic.span.start);
 }
 
 test "unsupported: public modifier" {
