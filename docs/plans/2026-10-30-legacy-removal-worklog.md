@@ -224,3 +224,37 @@ Tests outside Appendix A changed, because each one held a removed form or named 
 `CHECK preserves admitted generic prefixes without function owners` left, because each of its 10 rows held a removed form. In `frontend_fuzz.zig`, the `erased_prefixes` counter and its floor left, and the seed `const value = <T>(1);` stays as a refused input.
 
 Observations that this unit did not cause, on the base binary and now: `function mk(): number { return (value: string): string => value; }` reports no ZTS204. `const isS = (x: unknown): x is string => true;` reports no ZTS211, and the same predicate as a function declaration does. I will measure both after the plan and report them.
+
+## L4c
+
+Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`, `test-zts`, `test-zruntime`, `test-server`, `test-precompile`, `test-diagnostic-corpus`, `test-standin`, `test-flow-census`, `test-proof-swallow`, `zig build test`, `check-spine`. `zts meta --json` is identical. The comparison script moved 12 of 648 rows: `_probe/ex/e7.ts` and the 11 rows of the earlier units.
+
+The new test `CHECK refuses an empty predicate narrowing at the token after is` failed on the old path in two ways. For `x is` newline `{ return true; }`, the base reports ZTS204 at `return`, not ZTS003 at the brace. For `x is ` with a trailing space and a newline, the base accepts the program: `expected 1, found 0` diagnostics. On a tree where only the second parse is gone, the first form also reports 0 diagnostics, which confirms the A5 trap.
+
+Correction to the plan: "The A5 trap" says that the old second parse supplied the refusal. That holds only for a header with no literal " is ". A header with that literal, such as `x is ` then a newline, was already an accepted empty narrowing on the base binary. `populateDirectReturn` returned at `.absent`, so the function had no declared return type. This unit closes both shapes.
+
+An empty narrowing now reports ZTS003 `unexpected token` with the suggestion `type annotation`, at the first token after `is`:
+
+| Form | Base | Now |
+|---|---|---|
+| `x is` newline `{`, and a tab or CRLF variant | ZTS204 | ZTS003 at `{` |
+| `x is ` newline `{`, and more trailing spaces | Accepted | ZTS003 at `{` |
+| `x is` newline `=> true` | ZTS204 | ZTS003 at `=>` |
+| `x is => true` | Accepted | ZTS003 at `=>` |
+| `x is /* c */ {`, `x is // c` newline `{` | ZTS000, an internal stop | ZTS003 at `{` |
+
+`x is{ return true; }` keeps ZTS204, because that header is not a predicate. A real narrowing keeps ZTS211, including a tab or a newline after `is`.
+
+`LegacyReturnKind`, `hasLegacyGuardFacet`, `legacy_return_kind`, and `legacy_ordinary_prefix` left, because no reader remained. `validateReturnSyntax` refuses a hand-built record with an empty narrowing. My review changed the `.absent` arm in `populateDirectReturn` from `return` to `error.InvalidReturnSyntax`, because that arm was the fail-open.
+
+Tests outside the L4c rows of Appendix A that changed:
+
+| Test | Change |
+|---|---|
+| `CHECK preserves typed arrow return forms and parameter refusals` | Four rows for an empty narrowing now assert ZTS003 at the parse stage |
+
+`predicate compatibility range cannot own narrowing nodes` left, because the range left. `direct predicates preserve construction and checker behavior` lost its `empty_narrowing` case, which the new test covers.
+
+Test names that still say "legacy" in `typed_frontend_tests.zig` wait for the L9 list.
+
+Observation that this unit did not cause, on the base binary and now: `function isS(y: unknown): x is string { return true; }` reports 0 errors, because `populateDirectReturn` returns at an unresolved target and the function has no declared return type. I will measure it after the plan and report it with the other two.

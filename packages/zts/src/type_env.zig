@@ -1006,8 +1006,7 @@ pub const TypeEnv = struct {
     ) !void {
         const ordinary_value: ?TypeSyntax.TypeValue = switch (syntax.structure) {
             .value => |value| value,
-            // Keep the existing refusal path for malformed empty narrowing.
-            .predicate => |predicate| if (predicate.narrowed.root == .absent) syntax.legacy_ordinary_prefix else null,
+            .predicate => null,
         };
         if (ordinary_value) |value| {
             const type_idx = try self.lowerDirectHeaderRoot(
@@ -1051,7 +1050,7 @@ pub const TypeEnv = struct {
                 .resolved => {},
             }
             switch (predicate.narrowed.root) {
-                .absent => return,
+                .absent => return error.InvalidReturnSyntax,
                 .present => {},
             }
             const compact_position = directPredicateParameterIndex(

@@ -48,7 +48,6 @@ pub const AnnotationRuntimeOwner = type_syntax_store_mod.AnnotationRuntimeOwner;
 pub const TypeValue = type_syntax_store_mod.TypeValue;
 pub const ParameterOwner = type_syntax_store_mod.ParameterOwner;
 pub const ParameterAnnotation = type_syntax_store_mod.ParameterAnnotation;
-pub const LegacyReturnKind = type_syntax_store_mod.LegacyReturnKind;
 pub const PredicateTarget = type_syntax_store_mod.PredicateTarget;
 pub const PredicateSyntax = type_syntax_store_mod.PredicateSyntax;
 pub const ReturnStructure = type_syntax_store_mod.ReturnStructure;

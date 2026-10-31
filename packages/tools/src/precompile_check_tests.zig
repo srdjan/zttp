@@ -1470,6 +1470,42 @@ test "CHECK refuses an erased type prefix with ZTS002 at the angle bracket" {
     }
 }
 
+test "CHECK refuses an empty predicate narrowing at the token after is" {
+    const allocator = std.testing.allocator;
+    const handler_line = "export function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
+    const missing = "type annotation";
+    const unverified = "Return one admitted narrowing test over the named parameter, combined with &&, || or !.";
+    const cases = [_]struct {
+        source: []const u8,
+        parse_errors: u32,
+        diagnostic: CompoundDiagnostic,
+    }{
+        // Narrowing ends at a newline.
+        .{ .source = handler_line ++ "function isS(x: unknown): x is\n{ return true; }\n", .parse_errors = 1, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 3, .column = 1, .suggestion = missing } },
+        // Narrowing ends at a trailing space and a newline.
+        .{ .source = handler_line ++ "function isS(x: unknown): x is \n{ return true; }\n", .parse_errors = 1, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 3, .column = 1, .suggestion = missing } },
+        // Narrowing ends at two spaces, a newline, and an indented brace.
+        .{ .source = handler_line ++ "function isS(x: unknown): x is  \n  { return true; }\n", .parse_errors = 1, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 3, .column = 3, .suggestion = missing } },
+        // Arrow forms.
+        .{ .source = handler_line ++ "const isS = (x: unknown): x is\n=> true;\n", .parse_errors = 1, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 3, .column = 1, .suggestion = missing } },
+        .{ .source = handler_line ++ "const isS = (x: unknown): x is => true;\n", .parse_errors = 1, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 2, .column = 32, .suggestion = missing } },
+        // A comment after is leaves the narrowing empty.
+        .{ .source = handler_line ++ "function isS(x: unknown): x is /* c */ { return true; }\n", .parse_errors = 1, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 2, .column = 40, .suggestion = missing } },
+        .{ .source = handler_line ++ "function isS(x: unknown): x is // c\n{ return true; }\n", .parse_errors = 1, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 3, .column = 1, .suggestion = missing } },
+        // A real narrowing keeps the ZTS211 verdict of the body check.
+        .{ .source = handler_line ++ "function isS(x: unknown): x is\tstring { return true; }\n", .parse_errors = 0, .diagnostic = .{ .code = "ZTS211", .message = "type predicate 'isS' is not verified by its body", .line = 2, .column = 1, .suggestion = unverified } },
+        .{ .source = handler_line ++ "function isS(x: unknown): x is\nstring { return true; }\n", .parse_errors = 0, .diagnostic = .{ .code = "ZTS211", .message = "type predicate 'isS' is not verified by its body", .line = 2, .column = 1, .suggestion = unverified } },
+        .{ .source = handler_line ++ "function isS(x: unknown): x is string { return true; }\n", .parse_errors = 0, .diagnostic = .{ .code = "ZTS211", .message = "type predicate 'isS' is not verified by its body", .line = 2, .column = 1, .suggestion = unverified } },
+    };
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try std.testing.expectEqual(case.parse_errors, result.parse_errors);
+    }
+}
+
 test "CHECK keeps the current tolerated annotation text suffix" {
     const source =
         \\function handler(req: Request): Response {
@@ -5752,10 +5788,10 @@ test "CHECK preserves typed arrow return forms and parameter refusals" {
         .{ .source = "const choice = true ? \"a\" : \"b\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
         .{ .source = "const choice = true ? (1) : (2);\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
         .{ .source = "const make = (): (value: string) => string;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "unexpected ')'", .line = 1, .column = 16, .suggestion = null } },
-        .{ .source = "function guard(value: unknown): value is { return true; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
-        .{ .source = "const guard = (value: unknown): value is => true;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
-        .{ .source = "function guard(value: unknown): value\tis { return true; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 1, .column = 44, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" } },
-        .{ .source = "const guard = (value: unknown): value\tis => true;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 1, .column = 15, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" } },
+        .{ .source = "function guard(value: unknown): value is { return true; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 42, .suggestion = "type annotation" } },
+        .{ .source = "const guard = (value: unknown): value is => true;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 42, .suggestion = "type annotation" } },
+        .{ .source = "function guard(value: unknown): value\tis { return true; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 42, .suggestion = "type annotation" } },
+        .{ .source = "const guard = (value: unknown): value\tis => true;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 42, .suggestion = "type annotation" } },
         .{ .source = "function guard(value: unknown): value is string   { return true; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .types, .diagnostic = .{ .code = "ZTS211", .message = "type predicate 'guard' is not verified by its body", .line = 1, .column = 1, .suggestion = "Return one admitted narrowing test over the named parameter, combined with &&, || or !." } },
         .{ .source = "const guard = (value: unknown): value is string   => true;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
     };

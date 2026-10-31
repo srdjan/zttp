@@ -14,7 +14,6 @@ const projectedListBody = parser_mod.projectedListBody;
 const appendAuthoredCallArguments = parser_mod.appendAuthoredCallArguments;
 const appendProjectedCallFragments = parser_mod.appendProjectedCallFragments;
 const scanRawTypeOnlyModule = scan_mod.scanRawTypeOnlyModule;
-const hasLegacyGuardFacet = parser_mod.hasLegacyGuardFacet;
 const predicateHeader = parser_mod.predicateHeader;
 const spanContainsOnlyTypeWhitespace = scan_mod.spanContainsOnlyTypeWhitespace;
 const isIdentifierStart = parser_mod.isIdentifierStart;
@@ -533,11 +532,6 @@ pub const ParameterAnnotation = struct {
     value: TypeValue,
 };
 
-pub const LegacyReturnKind = enum {
-    ordinary,
-    type_guard,
-};
-
 pub const PredicateTarget = union(enum) {
     resolved: ParameterOwner,
     unresolved,
@@ -556,9 +550,7 @@ pub const ReturnStructure = union(enum) {
 
 pub const ReturnSyntax = struct {
     raw_span: Span,
-    legacy_return_kind: LegacyReturnKind,
     structure: ReturnStructure,
-    legacy_ordinary_prefix: ?TypeValue,
 };
 
 pub const FunctionSignature = struct {
@@ -1609,13 +1601,6 @@ pub const Store = struct {
                 ordinary_uses,
             ),
         }
-        if (value.legacy_ordinary_prefix) |compatibility| {
-            try self.validateApplicationBasesForTypeValue(
-                compatibility,
-                base_uses,
-                ordinary_uses,
-            );
-        }
     }
 
     fn validateSharedRangeOwners(
@@ -1792,16 +1777,10 @@ pub const Store = struct {
 
     pub fn validateReturnSyntax(self: *const Store, value: ReturnSyntax) !void {
         try self.validateSpan(value.raw_span);
-        const expected_kind: LegacyReturnKind = if (hasLegacyGuardFacet(self.source, value.raw_span))
-            .type_guard
-        else
-            .ordinary;
-        if (value.legacy_return_kind != expected_kind) return error.InvalidReturnSyntax;
         switch (value.structure) {
             .value => |type_value| {
                 if (!std.meta.eql(value.raw_span, type_value.raw_span)) return error.InvalidTypeSpan;
                 try self.validateTypeValue(type_value);
-                if (value.legacy_ordinary_prefix != null) return error.InvalidReturnSyntax;
             },
             .predicate => |predicate| {
                 try self.validateSpan(predicate.target_span);
@@ -1812,31 +1791,15 @@ pub const Store = struct {
                 {
                     return error.InvalidReturnSyntax;
                 }
-                const empty_narrowing = childIsAbsent(predicate.narrowed.root);
-                const whitespace_tail = spanContainsOnlyTypeWhitespace(
-                    self.source,
-                    header.narrowed_span,
-                );
-                if (empty_narrowing != whitespace_tail or
-                    (empty_narrowing and
-                        (predicate.narrowed.node_range.count != 0 or
-                            predicate.narrowed.admission_end != value.raw_span.end or
-                            predicate.narrowed.semantic_prefix_end != header.narrowed_span.end)))
+                // The parser refuses an empty narrowing with a located diagnostic.
+                // A record that carries one never came from the parser.
+                if (childIsAbsent(predicate.narrowed.root) or
+                    spanContainsOnlyTypeWhitespace(self.source, header.narrowed_span))
                 {
                     return error.InvalidReturnSyntax;
                 }
                 try self.validateTypeValue(predicate.narrowed);
-                if (value.legacy_return_kind == .ordinary and value.legacy_ordinary_prefix == null) {
-                    return error.InvalidReturnSyntax;
-                }
-                if (value.legacy_return_kind == .type_guard and value.legacy_ordinary_prefix != null) {
-                    return error.InvalidReturnSyntax;
-                }
             },
-        }
-        if (value.legacy_ordinary_prefix) |compatibility| {
-            try self.validateTypeValue(compatibility);
-            if (!std.meta.eql(value.raw_span, compatibility.raw_span)) return error.InvalidTypeSpan;
         }
     }
 
@@ -2398,13 +2361,6 @@ pub const Store = struct {
                     predicate.narrowed.node_range,
                     error.OverlappingTypeNodeOwnership,
                 ),
-            }
-            if (return_syntax.legacy_ordinary_prefix) |compatibility| {
-                try claimRange(
-                    owners,
-                    compatibility.node_range,
-                    error.OverlappingTypeNodeOwnership,
-                );
             }
         }
     }
@@ -3150,138 +3106,51 @@ fn parseReturnForTest(store: *Store) !ReturnSyntax {
     };
 }
 
-test "empty predicate narrowing retains its raw whitespace interval" {
-    const source = "value is \t ";
+fn expectMissingNarrowing(source: []const u8, expected_token_start: u32) !void {
     var store = Store.init(std.testing.allocator, source);
     defer store.deinit();
-
-    const value = try parseReturnForTest(&store);
-    try std.testing.expectEqual(LegacyReturnKind.type_guard, value.legacy_return_kind);
-    try std.testing.expect(value.legacy_ordinary_prefix == null);
-    try std.testing.expectEqual(
-        Span{ .start = 0, .end = @intCast(source.len) },
-        value.raw_span,
-    );
-    const predicate = switch (value.structure) {
-        .predicate => |predicate| predicate,
-        .value => return error.TestExpectedPredicate,
-    };
-    try std.testing.expectEqual(Span{ .start = 0, .end = 5 }, predicate.target_span);
-    try std.testing.expectEqual(
-        Span{ .start = 8, .end = @intCast(source.len) },
-        predicate.narrowed.raw_span,
-    );
-    try std.testing.expect(childIsAbsent(predicate.narrowed.root));
-    try std.testing.expectEqual(@as(u32, 0), predicate.narrowed.node_range.count);
-    try std.testing.expectEqual(@as(u32, @intCast(source.len)), predicate.narrowed.admission_end);
-    try std.testing.expectEqual(@as(u32, @intCast(source.len)), predicate.narrowed.semantic_prefix_end);
-    try std.testing.expectEqual(@as(usize, 0), store.nodes.items.len);
-}
-
-test "ordinary empty predicate retains the complete compatibility parse" {
-    const source = "readonly\tis\t ";
-    var store = Store.init(std.testing.allocator, source);
-    defer store.deinit();
-
-    const value = try parseReturnForTest(&store);
-    try std.testing.expectEqual(LegacyReturnKind.ordinary, value.legacy_return_kind);
-    const predicate = switch (value.structure) {
-        .predicate => |predicate| predicate,
-        .value => return error.TestExpectedPredicate,
-    };
-    try std.testing.expectEqual(
-        Span{ .start = 11, .end = @intCast(source.len) },
-        predicate.narrowed.raw_span,
-    );
-    try std.testing.expect(childIsAbsent(predicate.narrowed.root));
-    try std.testing.expectEqual(@as(u32, 0), predicate.narrowed.node_range.count);
-
-    const compatibility = value.legacy_ordinary_prefix orelse
-        return error.TestExpectedCompatibilityRoot;
-    try std.testing.expectEqual(value.raw_span, compatibility.raw_span);
-    try std.testing.expectEqual(@as(u32, 2), compatibility.node_range.count);
-    const compatibility_root = switch (compatibility.root) {
-        .absent => return error.TestExpectedCompatibilityRoot,
-        .present => |index| store.node(index) orelse return error.TestExpectedCompatibilityRoot,
-    };
-    const compatibility_child = switch (compatibility_root.data) {
-        .readonly_modifier => |child| child,
-        else => return error.TestExpectedReadonlyCompatibility,
-    };
-    const child_node = switch (compatibility_child) {
-        .absent => return error.TestExpectedCompatibilityRoot,
-        .present => |index| store.node(index) orelse return error.TestExpectedCompatibilityRoot,
-    };
-    const name_span = switch (child_node.data) {
-        .named_reference => |span| span,
-        else => return error.TestExpectedCompatibilityReference,
-    };
-    try std.testing.expectEqualStrings("is", name_span.text(source));
-}
-
-test "return validation enforces empty predicate and compatibility facets" {
-    {
-        var store = Store.init(std.testing.allocator, "value\tis\t ");
-        defer store.deinit();
-        const parsed = try parseReturnForTest(&store);
-
-        var wrong_facet = parsed;
-        wrong_facet.legacy_return_kind = .type_guard;
-        var wrong_facet_pending = store.beginFunctionSignature();
-        defer store.cancelFunctionSignature(&wrong_facet_pending);
-        try std.testing.expectError(
-            error.InvalidReturnSyntax,
-            store.setFunctionReturn(&wrong_facet_pending, wrong_facet),
-        );
-
-        var missing_compatibility = parsed;
-        missing_compatibility.legacy_ordinary_prefix = null;
-        var missing_pending = store.beginFunctionSignature();
-        defer store.cancelFunctionSignature(&missing_pending);
-        try std.testing.expectError(
-            error.InvalidReturnSyntax,
-            store.setFunctionReturn(&missing_pending, missing_compatibility),
-        );
+    var cursor = Cursor.init(store.source);
+    switch (try parseFunctionReturnAndStore(&store, 0, &cursor)) {
+        .failure => |failure| switch (failure) {
+            .missing_type => |token| try std.testing.expectEqual(expected_token_start, token.start),
+            else => return error.TestUnexpectedReturnOutcome,
+        },
+        .parsed, .excluded => return error.TestUnexpectedReturnOutcome,
     }
+    try std.testing.expectEqual(@as(usize, 0), store.nodes.items.len);
+    try store.validate();
+}
 
+test "empty predicate narrowing is refused at the token after is" {
+    try expectMissingNarrowing("value is \t ", 11);
+    try expectMissingNarrowing("readonly\tis\t ", 13);
+    try expectMissingNarrowing("value is /* c */ ", 17);
+}
+
+test "return validation refuses an empty predicate narrowing" {
     {
         var store = Store.init(std.testing.allocator, "value is \t ");
         defer store.deinit();
-        const parsed = try parseReturnForTest(&store);
-        const predicate = switch (parsed.structure) {
-            .predicate => |predicate| predicate,
-            .value => return error.TestExpectedPredicate,
+        const end: u32 = 11;
+        const empty: ReturnSyntax = .{
+            .raw_span = .{ .start = 0, .end = end },
+            .structure = .{ .predicate = .{
+                .target_span = .{ .start = 0, .end = 5 },
+                .target = .unresolved,
+                .narrowed = .{
+                    .root = .absent,
+                    .node_range = .{ .start = 0, .count = 0 },
+                    .raw_span = .{ .start = 8, .end = end },
+                    .admission_end = end,
+                    .semantic_prefix_end = end,
+                },
+            } },
         };
-
-        var forbidden_compatibility = parsed;
-        forbidden_compatibility.legacy_ordinary_prefix = predicate.narrowed;
-        var forbidden_pending = store.beginFunctionSignature();
-        defer store.cancelFunctionSignature(&forbidden_pending);
+        var pending = store.beginFunctionSignature();
+        defer store.cancelFunctionSignature(&pending);
         try std.testing.expectError(
             error.InvalidReturnSyntax,
-            store.setFunctionReturn(&forbidden_pending, forbidden_compatibility),
-        );
-
-        var rooted_empty = parsed;
-        var rooted_predicate = predicate;
-        rooted_predicate.narrowed.root = .{ .present = 0 };
-        rooted_empty.structure = .{ .predicate = rooted_predicate };
-        var root_pending = store.beginFunctionSignature();
-        defer store.cancelFunctionSignature(&root_pending);
-        try std.testing.expectError(
-            error.InvalidReturnSyntax,
-            store.setFunctionReturn(&root_pending, rooted_empty),
-        );
-
-        var ranged_empty = parsed;
-        var ranged_predicate = predicate;
-        ranged_predicate.narrowed.node_range.count = 1;
-        ranged_empty.structure = .{ .predicate = ranged_predicate };
-        var range_pending = store.beginFunctionSignature();
-        defer store.cancelFunctionSignature(&range_pending);
-        try std.testing.expectError(
-            error.InvalidReturnSyntax,
-            store.setFunctionReturn(&range_pending, ranged_empty),
+            store.setFunctionReturn(&pending, empty),
         );
     }
 

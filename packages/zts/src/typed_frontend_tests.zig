@@ -559,8 +559,6 @@ fn expectFirstFunctionSliceRecords(parser: *const JsParser, source: []const u8) 
     try std.testing.expectEqualStrings("string", parameter.value.raw_span.text(source));
 
     const return_syntax = signature.return_syntax orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(TypeSyntax.LegacyReturnKind.ordinary, return_syntax.legacy_return_kind);
-    try std.testing.expect(return_syntax.legacy_ordinary_prefix == null);
     const return_value = switch (return_syntax.structure) {
         .value => |value| value,
         .predicate => return error.TestUnexpectedResult,
@@ -1119,30 +1117,11 @@ fn runHeaderTypeAllocation(
         .value => return error.TestUnexpectedResult,
     };
     try std.testing.expect(predicate.narrowed.node_range.count > 0);
-    switch (case) {
-        .mixed => {
-            const values = [_]TypeSyntax.TypeValue{
-                parser.type_store.parameter_annotations.items[0].value,
-                predicate.narrowed,
-            };
-            try expectOrderedTypeValueTags(&parser, &values, &.{ .t_unknown_type, .t_string });
-        },
-        .tab => {
-            const compatibility = return_syntax.legacy_ordinary_prefix orelse
-                return error.TestUnexpectedResult;
-            try std.testing.expect(compatibility.node_range.count > 0);
-            const values = [_]TypeSyntax.TypeValue{
-                parser.type_store.parameter_annotations.items[0].value,
-                predicate.narrowed,
-                compatibility,
-            };
-            try expectOrderedTypeValueTags(
-                &parser,
-                &values,
-                &.{ .t_unknown_type, .t_string, .t_ref },
-            );
-        },
-    }
+    const values = [_]TypeSyntax.TypeValue{
+        parser.type_store.parameter_annotations.items[0].value,
+        predicate.narrowed,
+    };
+    try expectOrderedTypeValueTags(&parser, &values, &.{ .t_unknown_type, .t_string });
 }
 
 const GenericArrowAllocationCase = enum {
@@ -1794,8 +1773,6 @@ test "typed predicate arrow owns its exact header syntax" {
     try std.testing.expectEqualStrings("unknown", annotation.value.raw_span.text(source));
 
     const return_syntax = if (signature.return_syntax) |*value| value else return error.TestUnexpectedResult;
-    try std.testing.expectEqual(TypeSyntax.LegacyReturnKind.type_guard, return_syntax.legacy_return_kind);
-    try std.testing.expect(return_syntax.legacy_ordinary_prefix == null);
     const predicate = switch (return_syntax.structure) {
         .predicate => |*value| value,
         .value => return error.TestUnexpectedResult,
@@ -1907,8 +1884,6 @@ test "ordinary typed arrow owns parameter and return roots" {
     const signature = parser.type_store.function_signatures.items[0];
     try std.testing.expectEqual(engine.parser.NodeTag.arrow_function, view.getTag(signature.owner).?);
     const return_syntax = signature.return_syntax orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(TypeSyntax.LegacyReturnKind.ordinary, return_syntax.legacy_return_kind);
-    try std.testing.expect(return_syntax.legacy_ordinary_prefix == null);
     const return_value = switch (return_syntax.structure) {
         .value => |value| value,
         .predicate => return error.TestUnexpectedResult,
@@ -1987,8 +1962,6 @@ test "named and arrow returns retain predicate facets" {
         const return_syntax = signature.return_syntax orelse return error.TestUnexpectedResult;
         switch (case.shape) {
             .quoted => {
-                try std.testing.expectEqual(TypeSyntax.LegacyReturnKind.type_guard, return_syntax.legacy_return_kind);
-                try std.testing.expect(return_syntax.legacy_ordinary_prefix == null);
                 const value = switch (return_syntax.structure) {
                     .value => |actual| actual,
                     .predicate => return error.TestUnexpectedResult,
@@ -2004,8 +1977,6 @@ test "named and arrow returns retain predicate facets" {
                 };
                 switch (case.shape) {
                     .mixed => {
-                        try std.testing.expectEqual(TypeSyntax.LegacyReturnKind.type_guard, return_syntax.legacy_return_kind);
-                        try std.testing.expect(return_syntax.legacy_ordinary_prefix == null);
                         const target = switch (predicate.target) {
                             .resolved => |actual| actual,
                             .unresolved => return error.TestUnexpectedResult,
@@ -2019,8 +1990,6 @@ test "named and arrow returns retain predicate facets" {
                         try std.testing.expectEqual(@as(usize, 1), parser.type_store.parameter_annotations.items.len);
                     },
                     .unresolved => {
-                        try std.testing.expectEqual(TypeSyntax.LegacyReturnKind.type_guard, return_syntax.legacy_return_kind);
-                        try std.testing.expect(return_syntax.legacy_ordinary_prefix == null);
                         try std.testing.expectEqualStrings("missing", predicate.target_span.text(case.source));
                         switch (predicate.target) {
                             .unresolved => {},
@@ -2028,13 +1997,9 @@ test "named and arrow returns retain predicate facets" {
                         }
                     },
                     .tab => {
-                        try std.testing.expectEqual(TypeSyntax.LegacyReturnKind.ordinary, return_syntax.legacy_return_kind);
-                        const compatibility = return_syntax.legacy_ordinary_prefix orelse
-                            return error.TestUnexpectedResult;
                         try std.testing.expectEqualStrings("value\tis\tstring ", return_syntax.raw_span.text(case.source));
-                        try std.testing.expectEqualStrings(return_syntax.raw_span.text(case.source), compatibility.raw_span.text(case.source));
-                        const values = [_]TypeSyntax.TypeValue{ predicate.narrowed, compatibility };
-                        try expectOrderedTypeValueTags(&parser, &values, &.{ .t_string, .t_ref });
+                        const values = [_]TypeSyntax.TypeValue{predicate.narrowed};
+                        try expectOrderedTypeValueTags(&parser, &values, &.{.t_string});
                     },
                     .quoted => unreachable,
                 }
@@ -2044,22 +2009,22 @@ test "named and arrow returns retain predicate facets" {
     try std.testing.expectEqual(@as(usize, 8), cases.len);
 }
 
-test "ordinary predicates parse whole grammar compatibility roots" {
+test "predicates with a keyword-spelled target parse only the narrowing" {
     const Case = struct {
         source: []const u8,
-        compatibility_tag: TypeSyntax.NodeTag,
-        lowered_tag: TypeTag,
+        target: []const u8,
+        narrowed_tag: TypeTag,
     };
     const cases = [_]Case{
         .{
             .source = "function byReadonly(readonly: unknown): readonly\tis\tstring { return true; }",
-            .compatibility_tag = .readonly_modifier,
-            .lowered_tag = .t_ref,
+            .target = "readonly",
+            .narrowed_tag = .t_string,
         },
         .{
             .source = "function byPrimitive(string: unknown): string\tis\tnumber { return true; }",
-            .compatibility_tag = .primitive,
-            .lowered_tag = .t_string,
+            .target = "string",
+            .narrowed_tag = .t_number,
         },
     };
     for (cases) |case| {
@@ -2079,53 +2044,20 @@ test "ordinary predicates parse whole grammar compatibility roots" {
             .predicate => |actual| actual,
             .value => return error.TestUnexpectedResult,
         };
-        const compatibility = return_syntax.legacy_ordinary_prefix orelse
-            return error.TestUnexpectedResult;
-        const compatibility_node = parser.type_store.node(try syntaxChildIndex(compatibility.root)) orelse
-            return error.TestUnexpectedResult;
-        try std.testing.expectEqual(case.compatibility_tag, compatibility_node.tag);
-        if (compatibility_node.tag == .readonly_modifier) {
-            const child = switch (compatibility_node.data) {
-                .readonly_modifier => |actual| actual,
-                else => unreachable,
-            };
-            const child_node = parser.type_store.node(try syntaxChildIndex(child)) orelse
-                return error.TestUnexpectedResult;
-            try std.testing.expectEqual(TypeSyntax.NodeTag.named_reference, child_node.tag);
-            const child_span = switch (child_node.data) {
-                .named_reference => |span| span,
-                else => unreachable,
-            };
-            try std.testing.expectEqualStrings("is", child_span.text(case.source));
-        } else {
-            const primitive = switch (compatibility_node.data) {
-                .primitive => |actual| actual,
-                else => unreachable,
-            };
-            try std.testing.expectEqual(TypeSyntax.Primitive.string, primitive);
-        }
-        const values = [_]TypeSyntax.TypeValue{ predicate.narrowed, compatibility };
-        const narrowed_tag: TypeTag = if (case.compatibility_tag == .primitive) .t_number else .t_string;
-        try expectOrderedTypeValueTags(&parser, &values, &.{ narrowed_tag, case.lowered_tag });
+        try std.testing.expectEqualStrings(case.target, predicate.target_span.text(case.source));
+        try expectOrderedTypeValueTags(&parser, &.{predicate.narrowed}, &.{case.narrowed_tag});
     }
     try std.testing.expectEqual(@as(usize, 2), cases.len);
 }
 
-test "empty predicate narrowing retains the untrimmed whitespace tail" {
+test "predicate narrowing retains the untrimmed whitespace tail" {
     const Case = struct {
         source: []const u8,
         expected_raw: []const u8,
-        expected_narrowed: []const u8,
-        kind: TypeSyntax.LegacyReturnKind,
-        empty: bool,
     };
     const cases = [_]Case{
-        .{ .source = "function guard(value: unknown): value is { return true; }", .expected_raw = "value is ", .expected_narrowed = " ", .kind = .type_guard, .empty = true },
-        .{ .source = "const guard = (value: unknown): value is => true;", .expected_raw = "value is ", .expected_narrowed = " ", .kind = .type_guard, .empty = true },
-        .{ .source = "function guard(value: unknown): value\tis\t{ return true; }", .expected_raw = "value\tis\t", .expected_narrowed = "\t", .kind = .ordinary, .empty = true },
-        .{ .source = "const guard = (value: unknown): value\tis\t=> true;", .expected_raw = "value\tis\t", .expected_narrowed = "\t", .kind = .ordinary, .empty = true },
-        .{ .source = "function guard(value: unknown): value is string   { return true; }", .expected_raw = "value is string   ", .expected_narrowed = "string", .kind = .type_guard, .empty = false },
-        .{ .source = "const guard = (value: unknown): value is string   => true;", .expected_raw = "value is string   ", .expected_narrowed = "string", .kind = .type_guard, .empty = false },
+        .{ .source = "function guard(value: unknown): value is string   { return true; }", .expected_raw = "value is string   " },
+        .{ .source = "const guard = (value: unknown): value is string   => true;", .expected_raw = "value is string   " },
     };
     for (cases) |case| {
         var atoms = AtomTable.init(std.testing.allocator);
@@ -2140,41 +2072,51 @@ test "empty predicate narrowing retains the untrimmed whitespace tail" {
         try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
         const return_syntax = parser.type_store.function_signatures.items[0].return_syntax orelse
             return error.TestUnexpectedResult;
-        try std.testing.expectEqual(case.kind, return_syntax.legacy_return_kind);
         try std.testing.expectEqualStrings(case.expected_raw, return_syntax.raw_span.text(case.source));
         const predicate = switch (return_syntax.structure) {
             .predicate => |actual| actual,
             .value => return error.TestUnexpectedResult,
         };
-        try std.testing.expectEqualStrings(case.expected_narrowed, predicate.narrowed.raw_span.text(case.source));
-        if (case.empty) {
-            switch (predicate.narrowed.root) {
-                .absent => {},
-                .present => return error.TestUnexpectedResult,
-            }
-            try std.testing.expectEqual(@as(u32, 0), predicate.narrowed.node_range.count);
-            try std.testing.expectEqual(return_syntax.raw_span.end, predicate.narrowed.admission_end);
-            try std.testing.expectEqual(predicate.narrowed.raw_span.end, predicate.narrowed.semantic_prefix_end);
-        } else {
-            try std.testing.expect(predicate.narrowed.node_range.count > 0);
-            switch (predicate.narrowed.root) {
-                .present => {},
-                .absent => return error.TestUnexpectedResult,
-            }
-            try expectOrderedTypeValueTags(&parser, &.{predicate.narrowed}, &.{.t_string});
+        try std.testing.expectEqualStrings("string", predicate.narrowed.raw_span.text(case.source));
+        try std.testing.expect(predicate.narrowed.node_range.count > 0);
+        switch (predicate.narrowed.root) {
+            .present => {},
+            .absent => return error.TestUnexpectedResult,
         }
-        if (case.kind == .ordinary) {
-            const compatibility = return_syntax.legacy_ordinary_prefix orelse
-                return error.TestUnexpectedResult;
-            try std.testing.expect(compatibility.node_range.count > 0);
-            // The ordinary prefix `value` is a named reference.
-            try expectOrderedTypeValueTags(&parser, &.{compatibility}, &.{.t_ref});
-            try std.testing.expectEqualStrings(case.expected_raw, compatibility.raw_span.text(case.source));
-        } else {
-            try std.testing.expect(return_syntax.legacy_ordinary_prefix == null);
-        }
+        try expectOrderedTypeValueTags(&parser, &.{predicate.narrowed}, &.{.t_string});
     }
-    try std.testing.expectEqual(@as(usize, 6), cases.len);
+    try std.testing.expectEqual(@as(usize, 2), cases.len);
+}
+
+test "empty predicate narrowing is a parse error at the token after is" {
+    const Case = struct {
+        source: []const u8,
+        column: u32,
+        token_text: []const u8,
+    };
+    const cases = [_]Case{
+        .{ .source = "function guard(value: unknown): value is { return true; }", .column = 42, .token_text = "{" },
+        .{ .source = "const guard = (value: unknown): value is => true;", .column = 42, .token_text = "=>" },
+        .{ .source = "function guard(value: unknown): value\tis\t{ return true; }", .column = 42, .token_text = "{" },
+        .{ .source = "const guard = (value: unknown): value\tis\t=> true;", .column = 42, .token_text = "=>" },
+        .{ .source = "function guard(value: unknown): value is /* c */ { return true; }", .column = 50, .token_text = "{" },
+    };
+    for (cases) |case| {
+        var atoms = AtomTable.init(std.testing.allocator);
+        defer atoms.deinit();
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
+        defer parser.deinit();
+        parser.setAtomTable(&atoms);
+        try std.testing.expectError(error.ParseError, parser.parse());
+        const errors = parser.errors.getErrors();
+        try std.testing.expectEqual(@as(usize, 1), errors.len);
+        try std.testing.expectEqual(@as(u32, 1), errors[0].location.line);
+        try std.testing.expectEqual(case.column, errors[0].location.column);
+        try std.testing.expectEqualStrings(case.token_text, errors[0].token_text orelse "(null)");
+        try std.testing.expectEqualStrings("type annotation", errors[0].expected orelse "(null)");
+        try std.testing.expectEqual(@as(u32, 0), @as(u32, @intCast(parser.type_store.function_signatures.items.len)));
+    }
+    try std.testing.expectEqual(@as(usize, 5), cases.len);
 }
 
 test "nested return function type selects the outer arrow" {
@@ -2294,43 +2236,6 @@ test "predicate target validation rejects external runtime identity" {
         .resolved => |target| target.binding,
         .unresolved => return error.TestUnexpectedResult,
     }));
-    try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-}
-
-test "predicate compatibility range cannot own narrowing nodes" {
-    const source = "const guard = (value: unknown): value\tis\tstring => true;";
-    var atoms = AtomTable.init(std.testing.allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-    try expectParsedStoreValid(source, &parser, root);
-
-    const view = parserIrView(&parser);
-    try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-    const return_syntax = if (parser.type_store.function_signatures.items[0].return_syntax) |*value|
-        value
-    else
-        return error.TestUnexpectedResult;
-    const predicate = switch (return_syntax.structure) {
-        .predicate => |actual| actual,
-        .value => return error.TestUnexpectedResult,
-    };
-    const compatibility = if (return_syntax.legacy_ordinary_prefix) |*value|
-        value
-    else
-        return error.TestUnexpectedResult;
-    const original_root = compatibility.root;
-    const original_range = compatibility.node_range;
-    compatibility.root = predicate.narrowed.root;
-    compatibility.node_range = predicate.narrowed.node_range;
-    try std.testing.expectError(
-        error.OverlappingTypeNodeOwnership,
-        parser.type_store.validateRuntimeOwners(std.testing.allocator, view),
-    );
-    compatibility.root = original_root;
-    compatibility.node_range = original_range;
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
 }
 
@@ -2986,7 +2891,7 @@ const DeclarationCase = enum {
     generic_app_structural_compare,
     nominal_structural_compare,
     generic_declaration,
-    unsupported_legacy_spelling_refusal,
+    unsupported_spelling_refusal,
     invalid_nominal_base_refusal,
 };
 
@@ -3067,7 +2972,7 @@ const declaration_fixtures = [_]DeclarationFixture{
     .{ .case = .generic_app_structural_compare, .source = "structural Items = string[];\nstructural View = { field: readonly Items };", .probe = .equivalent },
     .{ .case = .nominal_structural_compare, .source = "nominal Id = string;", .probe = .equivalent },
     .{ .case = .generic_declaration, .source = "structural Box<T> = T;", .probe = .equivalent },
-    .{ .case = .unsupported_legacy_spelling_refusal, .source = "type Alias = number;", .probe = .{ .admission_refused = .type_alias_declaration } },
+    .{ .case = .unsupported_spelling_refusal, .source = "type Alias = number;", .probe = .{ .admission_refused = .type_alias_declaration } },
     .{ .case = .invalid_nominal_base_refusal, .source = "nominal Bad = { value: number };", .probe = .{ .admission_refused = .nominal_base_not_scalar } },
 };
 
@@ -3902,7 +3807,7 @@ fn assertDeclarationSemanticProperty(case: DeclarationCase, source: []const u8) 
         .block_indented_refusal,
         .runtime_structural_collision,
         .runtime_nominal_collision,
-        .unsupported_legacy_spelling_refusal,
+        .unsupported_spelling_refusal,
         .invalid_nominal_base_refusal,
         => return error.TestUnexpectedResult,
     }
@@ -4450,7 +4355,7 @@ const NominalGenericExpectation = struct {
     base: TypeSyntax.Primitive,
     constraint: ?[]const u8 = null,
     authored_default: ?[]const u8 = null,
-    legacy_bound: ?[]const u8 = null,
+    projected_bound: ?[]const u8 = null,
 };
 
 fn expectNominalGenericOwner(
@@ -4496,9 +4401,9 @@ fn expectNominalGenericOwner(
     } else {
         try std.testing.expect(recognized.default_span == null);
     }
-    if (expected.legacy_bound) |legacy_bound| {
+    if (expected.projected_bound) |projected_bound| {
         const span = projected[0].bound_span orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqualStrings(legacy_bound, span.text(store.source));
+        try std.testing.expectEqualStrings(projected_bound, span.text(store.source));
     } else {
         try std.testing.expect(projected[0].bound_span == null);
     }
@@ -4586,7 +4491,7 @@ test "nominal generic scalar matrix retains ignored bounds and declaration order
         .list = "<T extends string>",
         .base = .number,
         .constraint = "string",
-        .legacy_bound = "string",
+        .projected_bound = "string",
     });
     try expectNominalGenericOwner(&parser.type_store, .{
         .declaration_index = 2,
@@ -4602,7 +4507,7 @@ test "nominal generic scalar matrix retains ignored bounds and declaration order
         .base = .string,
         .constraint = "string",
         .authored_default = "boolean",
-        .legacy_bound = "string = boolean",
+        .projected_bound = "string = boolean",
     });
     for (parser.type_store.projected_generic_parameters.items) |parameter| {
         try std.testing.expect(parameter.bound_fragment == null);
@@ -4701,7 +4606,7 @@ test "nominal generic type allocation failures restore the published seed" {
                 .base = .string,
                 .constraint = "string",
                 .authored_default = "boolean",
-                .legacy_bound = "string = boolean",
+                .projected_bound = "string = boolean",
             });
         }
     };
@@ -4823,7 +4728,7 @@ test "first generic function slice parses unsafe generic list scans for the stri
 const GenericArrowExpectation = struct {
     list: []const u8,
     actual_capture: []const u8,
-    legacy_capture: []const u8,
+    recorded_capture: []const u8,
     projected_name: []const u8,
 };
 
@@ -4885,7 +4790,7 @@ fn expectTypedGenericArrowRecords(
         owner.capture_spans.actual_erased_span.text(source),
     );
     try std.testing.expectEqualStrings(
-        expected.legacy_capture,
+        expected.recorded_capture,
         owner.capture_spans.recorded_span.text(source),
     );
     try std.testing.expectEqual(@as(u32, 0), owner.authored_parameters.start);
@@ -4921,8 +4826,6 @@ fn expectTypedGenericArrowRecords(
     try std.testing.expectEqualStrings("T", parameter_root.semantic_span.text(source));
 
     const return_syntax = signature.return_syntax orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(TypeSyntax.LegacyReturnKind.ordinary, return_syntax.legacy_return_kind);
-    try std.testing.expect(return_syntax.legacy_ordinary_prefix == null);
     const return_value = switch (return_syntax.structure) {
         .value => |value| value,
         .predicate => return error.TestUnexpectedResult,
@@ -4950,7 +4853,7 @@ fn expectTypedGenericArrowRecords(
     try expectGenericArrowOrderedProjection(parser, expected);
 }
 
-test "typed generic arrows retain final owners and legacy projection windows" {
+test "typed generic arrows retain final owners and recorded projection windows" {
     const Fixture = struct {
         source: []const u8,
         expected: GenericArrowExpectation,
@@ -4961,7 +4864,7 @@ test "typed generic arrows retain final owners and legacy projection windows" {
             .expected = .{
                 .list = "<T>",
                 .actual_capture = "<T>",
-                .legacy_capture = "T",
+                .recorded_capture = "T",
                 .projected_name = "T",
             },
         },
@@ -4970,7 +4873,7 @@ test "typed generic arrows retain final owners and legacy projection windows" {
             .expected = .{
                 .list = "<T>",
                 .actual_capture = "<T> ",
-                .legacy_capture = "T>",
+                .recorded_capture = "T>",
                 .projected_name = "T>",
             },
         },
@@ -4979,7 +4882,7 @@ test "typed generic arrows retain final owners and legacy projection windows" {
             .expected = .{
                 .list = "<T>",
                 .actual_capture = "<T> ",
-                .legacy_capture = "T>",
+                .recorded_capture = "T>",
                 .projected_name = "T>",
             },
         },
@@ -4988,7 +4891,7 @@ test "typed generic arrows retain final owners and legacy projection windows" {
             .expected = .{
                 .list = "<T>",
                 .actual_capture = "<T>",
-                .legacy_capture = "T",
+                .recorded_capture = "T",
                 .projected_name = "T",
             },
         },
@@ -4997,7 +4900,7 @@ test "typed generic arrows retain final owners and legacy projection windows" {
             .expected = .{
                 .list = "<T = string>",
                 .actual_capture = "<T = string> ",
-                .legacy_capture = "T = string>",
+                .recorded_capture = "T = string>",
                 .projected_name = "T",
             },
         },
@@ -5747,7 +5650,7 @@ test "nested line-comment arrow retains captures and semantic projection" {
     try expectTypedGenericArrowRecords(&parser, source, .{
         .list = "<<T>>",
         .actual_capture = "<<T>>",
-        .legacy_capture = "<T>",
+        .recorded_capture = "<T>",
         .projected_name = "T",
     });
 }
@@ -8943,14 +8846,12 @@ test "annotation owner census covers current syntax kinds" {
             try std.testing.expect(std.meta.eql(parameter.owner.binding, view.paramBinding(parameter.owner.pattern).?));
             const return_syntax = signature.return_syntax orelse return error.TestUnexpectedResult;
             if (function_count == 0) {
-                try std.testing.expectEqual(TypeSyntax.LegacyReturnKind.ordinary, return_syntax.legacy_return_kind);
                 try std.testing.expectEqualStrings("U ", return_syntax.raw_span.text(source));
                 switch (return_syntax.structure) {
                     .value => {},
                     .predicate => return error.TestUnexpectedResult,
                 }
             } else {
-                try std.testing.expectEqual(TypeSyntax.LegacyReturnKind.type_guard, return_syntax.legacy_return_kind);
                 const predicate = switch (return_syntax.structure) {
                     .predicate => |value| value,
                     .value => return error.TestUnexpectedResult,
@@ -9747,7 +9648,6 @@ const DirectPredicateCase = enum {
     arrow_ordinary_tab,
     readonly_tab,
     quoted_value,
-    empty_narrowing,
     unresolved_target,
     mixed_untyped_target,
     compact_target_position,
@@ -9928,37 +9828,20 @@ fn expectDirectPredicateConsumerInner(
 
     switch (case) {
         .named_value, .arrow_value, .trailing_ordinary => {
-            try std.testing.expectEqual(
-                TypeSyntax.LegacyReturnKind.ordinary,
-                return_syntax.legacy_return_kind,
-            );
+            switch (return_syntax.structure) {
+                .value => {},
+                .predicate => return error.TestUnexpectedResult,
+            }
             try std.testing.expectEqual(direct_pool.idx_string, direct_signature.return_type);
         },
         .ordinary_tab, .arrow_ordinary_tab, .readonly_tab, .ordinary_newline => {
-            try std.testing.expectEqual(
-                TypeSyntax.LegacyReturnKind.ordinary,
-                return_syntax.legacy_return_kind,
-            );
-            try std.testing.expect(return_syntax.legacy_ordinary_prefix != null);
+            switch (return_syntax.structure) {
+                .predicate => {},
+                .value => return error.TestUnexpectedResult,
+            }
             try std.testing.expectEqual(direct_pool.idx_boolean, direct_signature.return_type);
         },
-        .empty_narrowing => {
-            const predicate = switch (return_syntax.structure) {
-                .predicate => |value| value,
-                .value => return error.TestUnexpectedResult,
-            };
-            switch (predicate.narrowed.root) {
-                .absent => {},
-                .present => return error.TestUnexpectedResult,
-            }
-            try std.testing.expectEqual(@as(u32, 0), predicate.narrowed.node_range.count);
-            try std.testing.expectEqualStrings(" ", predicate.narrowed.raw_span.text(source));
-        },
         .quoted_value => {
-            try std.testing.expectEqual(
-                TypeSyntax.LegacyReturnKind.type_guard,
-                return_syntax.legacy_return_kind,
-            );
             switch (return_syntax.structure) {
                 .value => {},
                 .predicate => return error.TestUnexpectedResult,
@@ -9967,10 +9850,6 @@ fn expectDirectPredicateConsumerInner(
             try std.testing.expectEqualStrings("x is y", direct_pool.getLiteralStringValue(direct_signature.return_type).?);
         },
         .quoted_marker_tab => {
-            try std.testing.expectEqual(
-                TypeSyntax.LegacyReturnKind.type_guard,
-                return_syntax.legacy_return_kind,
-            );
             const predicate = switch (return_syntax.structure) {
                 .predicate => |value| value,
                 .value => return error.TestUnexpectedResult,
@@ -9996,10 +9875,6 @@ fn expectDirectPredicateConsumerInner(
             try std.testing.expectEqual(direct_pool.idx_boolean, direct_signature.return_type);
         },
         .quoted_marker_space => {
-            try std.testing.expectEqual(
-                TypeSyntax.LegacyReturnKind.type_guard,
-                return_syntax.legacy_return_kind,
-            );
             const predicate = switch (return_syntax.structure) {
                 .predicate => |value| value,
                 .value => return error.TestUnexpectedResult,
@@ -10013,10 +9888,6 @@ fn expectDirectPredicateConsumerInner(
             try std.testing.expectEqual(direct_pool.idx_boolean, direct_signature.return_type);
         },
         .unresolved_target => {
-            try std.testing.expectEqual(
-                TypeSyntax.LegacyReturnKind.type_guard,
-                return_syntax.legacy_return_kind,
-            );
             const predicate = switch (return_syntax.structure) {
                 .predicate => |value| value,
                 .value => return error.TestUnexpectedResult,
@@ -10036,10 +9907,10 @@ fn expectDirectPredicateConsumerInner(
         .target_after_sixteen,
         .captured_generic,
         => {
-            try std.testing.expectEqual(
-                TypeSyntax.LegacyReturnKind.type_guard,
-                return_syntax.legacy_return_kind,
-            );
+            switch (return_syntax.structure) {
+                .predicate => {},
+                .value => return error.TestUnexpectedResult,
+            }
             try std.testing.expectEqual(direct_pool.idx_boolean, direct_signature.return_type);
         },
     }
@@ -10101,7 +9972,6 @@ test "direct predicates preserve construction and checker behavior" {
         .{ .case = .arrow_ordinary_tab, .source = "const guard = (candidate: unknown): candidate\tis\tstring => true;", .predicate = .{ .parameter = 0 }, .return_spelling = null },
         .{ .case = .readonly_tab, .source = "function guard(readonly: unknown): readonly\tis\tstring { return true; }", .predicate = .{ .parameter = 0 }, .return_spelling = null },
         .{ .case = .quoted_value, .source = "const text = (): \"x is y\" => true;", .predicate = .absent, .return_spelling = "\"x is y\" " },
-        .{ .case = .empty_narrowing, .source = "function guard(candidate: unknown): candidate is { return true; }", .predicate = .absent, .return_spelling = null },
         .{ .case = .unresolved_target, .source = "function guard(candidate: unknown): missing is string[] { return true; }\n", .predicate = .absent, .return_spelling = null },
         .{ .case = .mixed_untyped_target, .source = "function guard(candidate, marker: unknown): candidate is string[] { return true; }\n", .predicate = .absent, .return_spelling = null },
         .{ .case = .compact_target_position, .source = "const guard = (lead, marker: unknown, candidate: unknown): candidate is string => true;", .predicate = .{ .parameter = 1 }, .return_spelling = null },

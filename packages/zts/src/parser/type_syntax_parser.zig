@@ -21,7 +21,6 @@ const trimWhitespaceEnd = scan_mod.trimWhitespaceEnd;
 const advanceCursorTo = scan_mod.advanceCursorTo;
 const containsOnlyTypeWhitespace = scan_mod.containsOnlyTypeWhitespace;
 const isTypeWhitespace = scan_mod.isTypeWhitespace;
-const LegacyReturnKind = store_mod.LegacyReturnKind;
 const Annotation = store_mod.Annotation;
 const SemanticFragment = store_mod.SemanticFragment;
 const DeclarationKind = store_mod.DeclarationKind;
@@ -46,7 +45,6 @@ const Node = store_mod.Node;
 const Primitive = store_mod.Primitive;
 const support_mod = @import("type_syntax_support.zig");
 const TestRuntime = support_mod.TestRuntime;
-const rangesOverlap = store_mod.rangesOverlap;
 const seedNumberAnnotation = support_mod.seedNumberAnnotation;
 const validateAfterAllocationFailure = support_mod.validateAfterAllocationFailure;
 
@@ -103,7 +101,7 @@ pub const ExcludedType = struct {
     admission_end: u32,
 };
 
-/// Legacy source admission rejects the next ordinary delimiter at this depth.
+/// Source admission rejects the next ordinary delimiter at this depth.
 pub const max_type_depth: u16 = 512;
 
 /// The iterative parser declines syntax that exceeds this private frame budget.
@@ -301,10 +299,6 @@ pub fn predicateHeader(source: []const u8, raw_span: Span) ?PredicateHeader {
     };
 }
 
-pub fn hasLegacyGuardFacet(source: []const u8, raw_span: Span) bool {
-    return std.mem.indexOf(u8, raw_span.text(source), " is ") != null;
-}
-
 pub fn parseFunctionReturnAndStore(
     store: *Store,
     raw_start_offset: u32,
@@ -365,11 +359,6 @@ pub fn parseAdmittedFunctionReturnAndStore(
     if (input.raw_span.end != input.admission_end) return error.InvalidTypeSpan;
 
     const source = store.source;
-    const legacy_return_kind: LegacyReturnKind = if (hasLegacyGuardFacet(source, input.raw_span))
-        .type_guard
-    else
-        .ordinary;
-
     var result: ReturnSyntax = undefined;
     if (predicateHeader(source, input.raw_span)) |header| {
         const narrowed = switch (try parseAdmittedTypeValueOutcome(
@@ -382,22 +371,18 @@ pub fn parseAdmittedFunctionReturnAndStore(
             .parsed => |value| value,
             .excluded => |excluded| return .{ .excluded = excluded },
         };
-        const compatibility: ?TypeValue = if (legacy_return_kind == .ordinary)
-            switch (try parseAdmittedTypeValueOutcome(store, input)) {
-                .parsed => |value| value,
-                .excluded => |excluded| return .{ .excluded = excluded },
-            }
-        else
-            null;
+        if (narrowed.root == .absent) {
+            return .{ .failure = .{
+                .missing_type = tokenAtOffset(source, header.narrowed_span.start),
+            } };
+        }
         result = .{
             .raw_span = input.raw_span,
-            .legacy_return_kind = legacy_return_kind,
             .structure = .{ .predicate = .{
                 .target_span = header.target_span,
                 .target = .unresolved,
                 .narrowed = narrowed,
             } },
-            .legacy_ordinary_prefix = compatibility,
         };
     } else {
         const value = switch (try parseAdmittedTypeValueOutcome(store, input)) {
@@ -406,9 +391,7 @@ pub fn parseAdmittedFunctionReturnAndStore(
         };
         result = .{
             .raw_span = input.raw_span,
-            .legacy_return_kind = legacy_return_kind,
             .structure = .{ .value = value },
-            .legacy_ordinary_prefix = null,
         };
     }
     try store.validateReturnSyntax(result);
@@ -482,7 +465,7 @@ fn parsedTypeFromValue(value: TypeValue) ParsedType {
 }
 
 /// Parse one already-admitted generic fragment without ordinary annotation
-/// admission. The caller owns the raw split and its legacy projection rules.
+/// admission. The caller owns the raw split and its projection rules.
 pub fn parseSemanticFragmentAndStore(store: *Store, raw_span: Span) !u32 {
     const checkpoint = store.checkpoint();
     errdefer store.rollback(checkpoint);
@@ -2349,7 +2332,7 @@ test "admitted type bounds reject inconsistent trailing bytes atomically" {
     try store.validate();
 }
 
-test "admitted return preserves spelling and disjoint compatibility roots" {
+test "admitted return preserves spelling and the predicate narrowing root" {
     const source = "value\tis\tstring   {";
     const admission_end: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{').?);
     var store = Store.init(std.testing.allocator, source);
@@ -2363,7 +2346,6 @@ test "admitted return preserves spelling and disjoint compatibility roots" {
         .failure, .excluded => return error.TestUnexpectedResult,
     };
     try std.testing.expectEqualStrings("value\tis\tstring   ", value.raw_span.text(source));
-    try std.testing.expectEqual(LegacyReturnKind.ordinary, value.legacy_return_kind);
     const predicate = switch (value.structure) {
         .predicate => |predicate| predicate,
         .value => return error.TestUnexpectedResult,
@@ -2374,13 +2356,7 @@ test "admitted return preserves spelling and disjoint compatibility roots" {
         .resolved => return error.TestUnexpectedResult,
     }
     try std.testing.expectEqualStrings("string", predicate.narrowed.raw_span.text(source));
-    const compatibility = value.legacy_ordinary_prefix orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expect(std.meta.eql(value.raw_span, compatibility.raw_span));
-    try std.testing.expect(!rangesOverlap(
-        predicate.narrowed.node_range,
-        compatibility.node_range,
-    ));
+    try std.testing.expectEqual(@as(u32, 1), predicate.narrowed.node_range.count);
     try store.validateReturnSyntax(value);
 }
 
