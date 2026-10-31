@@ -459,3 +459,63 @@ I ran both binaries with a temporary home that held an `anthropic` key:
 | `zttp auth revoke openai` with no stored key | Exit 0, `No stored openai key. Nothing to revoke.` | The same |
 
 I added no unit test through `authCommand`, because `printAuthHelp` writes to stdout and that would corrupt the protocol of the test runner. Probable: that is the effect, and I did not run it. The table above is the evidence for this move. `docs/cli.md` and `docs/user-guide.md` say that `zttp auth claude` is refused, and that stays true.
+
+## L9
+
+Status: complete, with one open item: `bench-check` has not passed on a quiet host at this commit.
+
+The first L9 gate stopped during its cold `zig build test`, at about 12:24 on 2026-10-31, with no `Build Summary` and no exit status. Probable: the session that started it ended. That partial run is not evidence.
+
+Before the second run I closed the test-name item that L4 left for this list. L2 renames a test name where the word "legacy" is false. Five names in `typed_frontend_tests.zig` said "legacy" about current behavior, and they now omit the word. The test local `legacy` in `packages/pi/src/agent.zig` held a session with no provider, and it is now `providerless`. The canonicalize comment left too, because the v1 surface that it named is gone. `scripts/corpus-uncovered.allow` no longer calls the `JSON.parse` profile legacy, because that profile is current.
+
+`git grep -n -i legacy -- packages build tooling scripts ':!packages/zts/deps'` now prints 19 lines. Each line has one row:
+
+| File | Text | Reason it stays |
+|---|---|---|
+| `packages/pi/src/mlx_e2e_test.zig` | `{ legacy: true }` | Handler data in a test fixture |
+| `packages/pi/src/session/reconstructor.zig` | `"d":"legacy"` | A schema 2 journal line. The test asserts `SchemaVersionUnsupported`, as row B5 requires |
+| `packages/runtime/src/attest/envelope.zig` | `verify refuses a legacy receipt without source identity` | The word is true: the test pins the refusal of an old receipt |
+| `packages/runtime/src/proof_activation.zig` | `not a legacy allowance` | The comment states that no such allowance exists |
+| `packages/tools/src/instruction_counter.zig` | `ri_cpu_time_qos_legacy` | Row B18: it mirrors a macOS struct field |
+| `packages/zts/src/modules/internal/module_graph.zig` | `error.LegacyTypesImport` | `zts check` prints this Zig error name on stderr, so the name is protected output. L2 records the measurement |
+| `packages/zts/src/source_diagnostics.zig` | `LegacyTypesImport` | The same protected error name |
+| `packages/zts/src/source_frontend.zig` | `.retired_types_import => error.LegacyTypesImport` | The same protected error name |
+| `packages/zts/src/source_frontend.zig` | `.expected = error.LegacyTypesImport` | The same protected error name |
+| `packages/zts/src/source_frontend.zig` | `refuses legacy source extensions` | The word is true: the test pins the ZTS052 refusal of old source forms |
+| `packages/zts/src/source_frontend.zig` | `interface Legacy` | A fixture name in a source that the test refuses |
+| `packages/zts/src/parser/parse.zig` | `Legacy octal` comment | "Legacy octal" is the ECMAScript term for `0755` |
+| `packages/zts/src/parser/parse.zig` | `legacy octal literals are not supported` | The same term, in the ZTS012 message. A change moves diagnostic text |
+| `packages/zts/src/parser/parse.zig` | `a legacy octal literal is refused` | The same term, in the test of that message |
+| `packages/zts/src/pipeline_tests.zig` | `legacy.example` | A fixture host |
+| `packages/zts/src/pipeline_tests.zig` | `zttp-ext:legacy-summary` in the manifest | A fixture module name |
+| `packages/zts/src/pipeline_tests.zig` | `zttp-ext:legacy-summary` in the import | The same fixture module name |
+| `packages/zts/src/restriction_registry.zig` | `restriction.legacy-types-module` | Row A10: `restriction_matrix_hash` covers this id |
+| `scripts/check-docs-drift.sh` | `legacy types-import gate` | The failure text of the gate for the same ZTS053 refusal |
+
+The second gate ran with the scrubbed environment:
+
+| Check | Result |
+|---|---|
+| `zig build test` from an empty cache | Exit 0. 8469 of 8475 tests pass, with 6 skipped, on 214 of 214 steps. L0 recorded 8478 of 8484, with 6 skipped |
+| `bash scripts/verify.sh` from an empty cache | Exit 0 |
+| Comparison script | Exit 0. 352 of 648 rows moved, each row is on the allow list, and no allowed row stayed |
+| `zts meta --json` | Identical to base |
+| `eprobe.sh` | Identical to base after the timing and address normalization |
+| Stored-data set | Identical to base |
+| Protection diff | Exit 0, with the four fixtures that L7b and L7c changed on purpose |
+| `test-panic-isolation`, `test-module-scope-panic`, `test-modules`, `test-module-governance` | Each exit 0 |
+| `smoke-v1`, `smoke-getting-started`, `test-examples` | Each exit 0 |
+| `check-spine` | Exit 0 |
+
+`surface.sh` compares with a baseline that L8a replaced, so I compared the L9 table directly with the table saved at the base. No exit status moved, and 4 of 38 rows moved. `zttp proofs --help` lost `--no-sign` in L8a. `zts spec-check --help`, `zts spec-hash --help`, and `zts spec-render --help` print the semantics hash and the node census, which L6 moved from 69 nodes to 42.
+
+`zig build bench-check -Doptimize=ReleaseFast` exited 1 at load 23.5 with a 5.00% geomean regression. Another session held the host busy, so I waited 40 minutes for a load below 3.0. The lowest load was 3.38. That run does not say whether the code is slower, and the L5 section records the same effect.
+
+I then compared L9 with L6, the last commit that passed on a quiet host: exit 0 at load 2.7, with a 1.17% geomean regression. Both benchmark binaries came from one worktree path. `HEAD` stands for L9, because the uncommitted L9 edits touch only test code, a comment, an allow file, and documents. Each comparison used 301 interleaved rounds over 13 benchmarks, at a load from 30 to 65:
+
+| Comparison | Geomean of the medians | Geomean of the best rounds | Worst median |
+|---|---|---|---|
+| L6 against L6, the control | -0.18% | -0.43% | `intArithmetic` -0.80% |
+| L6 against L9 | +0.16% | +0.82% | `intArithmetic` -1.02% |
+
+The difference is inside the noise that this load allows. Since L6, the changed engine source is the contract files and the CLI files, and no interpreter file changed. Reset Phase 11 runs `bench-check` again, if the host is quiet. The stored baseline stays unchanged.

@@ -5904,7 +5904,7 @@ test "explicit call depth exclusion does not fall back to comparison admission" 
     try expectDirectAccepted("const seed: number = 1; const result=seed << 1;");
 }
 
-test "function bounds stop at the compact legacy parameter count" {
+test "function bounds stop at the compact parameter count" {
     const source =
         "const seed: number = 1; function ignored<T, =string, U extends 1>() { return seed; }";
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
@@ -6562,7 +6562,7 @@ test "generic function publication rejects a swallowed diagnostic allocation fai
     try parser.type_store.validate();
 }
 
-test "generic parameter projection retains legacy u32 depth arithmetic" {
+test "generic parameter projection retains u32 depth arithmetic" {
     var source: std.ArrayListUnmanaged(u8) = .empty;
     defer source.deinit(std.testing.allocator);
     try source.appendSlice(std.testing.allocator, "structural Box<\"");
@@ -6965,7 +6965,7 @@ test "direct compound slice keeps ordered record fields and nested arrays" {
     try pool.ensureHealthy();
 }
 
-test "direct compound families and semantic quirks match ordered legacy types" {
+test "direct compound families and semantic quirks match ordered types" {
     const Fixture = struct {
         annotation: []const u8,
         family: ?CompoundFamily = null,
@@ -7055,7 +7055,7 @@ test "direct compound families and semantic quirks match ordered legacy types" {
     }
 }
 
-test "direct compound boundaries preserve legacy structure before key comparison" {
+test "direct compound boundaries preserve ordered structure before key comparison" {
     const allocator = std.testing.allocator;
     var function: std.ArrayListUnmanaged(u8) = .empty;
     defer function.deinit(allocator);
@@ -7227,7 +7227,7 @@ fn assertApplicationCapacityShape(
     }
 }
 
-test "application lowering matches legacy compact node capacity and order" {
+test "application lowering matches compact node capacity and order" {
     const allocator = std.testing.allocator;
     inline for (std.meta.tags(ApplicationCapacityCase)) |case| {
         const type_source = switch (case) {

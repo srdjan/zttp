@@ -182,3 +182,14 @@ The analyzer treated every numeric literal bound of `mask(text, visible)` as dec
 A `.ts` file that admission refused used to run through the untyped parser. The module graph and the module record printed "TypeScript strip failed" and then kept the file. A dependency with a trailing `/* open` answered HTTP 200 under `serve`, and 16 other refused forms reported a second and less exact message. The same fallback kept `-e` source that admission refused. The owner chose Decision 4, option (a), of the reset plan on 2026-10-30. A file and an `-e` source now pass admission, or they fail at start with the admission message. `SourceProfile`, `extractVirtualContract`, `compileWithOptions`, the `.virtual_javascript` arms of the check and compile tools, and the untyped branch of the expert effects tool are deleted. A virtual path such as `<eval>` is the identity of prepared evaluation and is not a file route.
 
 Two entries keep the untyped parser, each for a reason that is not a source file. `JsParser.initExpression` parses one expression for `kernel_identity`. `JsParser.initSourceObserver` is the admission observer itself. A new raw entry needs a superseding entry here.
+
+### D-017 Stored user data keeps a reader after its writer leaves
+
+- Status: standing
+- Decided: 2026-10-30
+- Binds: packages/runtime/src/proof_ledger.zig, packages/runtime/src/cli_auth.zig, packages/pi/src/session/reconstructor.zig, packages/zts/src/contract_json_parser.zig
+- Gate: zig build test-cli
+
+A file on a user machine outlives the binary that wrote it. The owner chose Decisions 5, 6, 8, and 10 of the legacy removal plan on 2026-10-30. Those decisions removed writers and payload types, and each one keeps the smallest reader that stops a failure or a stranded secret.
+
+`parseLine` refuses an unknown ledger kind, so `kind=perf` and `kind=equivalence` stay in `EventKind` as opaque rows. Without them, `zttp proofs list` fails for a project that holds one such row. `zttp auth revoke claude` and `zttp auth revoke openai` stay, because a stored key has no other way off the disk. A journal line that holds `body` still loads. A contract that holds the scalar response keys still parses, and the parser ignores them. A reader here leaves only with a superseding entry.

@@ -102,6 +102,12 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
 - Computed SQL resources remain refused. The configured SQL policy cannot
   distinguish read from write authority. Other residual-guard limits are in
   [Verification](verification.md#residual-runtime-guard-boundary).
+- Three type checker gaps stay open. Each one was measured on 2026-10-31, on
+  the commit before the legacy removal and after it. An arrow function returned
+  from a function with a `number` return type reports no ZTS204. A type
+  predicate on an arrow function reports no ZTS211, while the same predicate on
+  a function declaration does. A predicate that names a different parameter,
+  such as `(y: unknown): x is string`, reports no error.
 
 ## Runtime And Product Work
 
@@ -207,6 +213,7 @@ Earlier reset work is complete. Each plan below is a record of its own work, not
 - CHECK facts reuse ([plan](plans/2026-10-13-1113-refactor-check-facts-reuse-plan.md)), Phase 4. CHECK keeps its own import traversal, because strict graph reuse would change its verdicts and revision reads. Full convergence between CHECK and compilation is follow-up work.
 - Reset of 2026-10-14 ([plan](plans/2026-10-14-reset-implementation-plan.md), [worklog](plans/2026-10-15-reset-worklog.md)). U1 to U20 are complete. The unresolved advisory benchmark result is in the worklog.
 - Reset of 2026-10-25 ([plan](plans/2026-10-25-reset-implementation-plan.md), [worklog](plans/2026-10-25-reset-worklog.md)). Complete through R13.
+- Legacy removal of 2026-10-30 ([plan](plans/2026-10-30-legacy-removal-plan.md), [worklog](plans/2026-10-30-legacy-removal-worklog.md)). Complete through L9. It took over reset units 9e and 9f. The next release republishes `docs/convergence.json` and `docs/coverage.json`, which hold the earlier `semanticsHash`.
 
 The shared import and binding index shipped. The old parser-deletion estimate is obsolete.
 The orchestration move stays declined: no selected consumer needs another `LoweredModule` phase.

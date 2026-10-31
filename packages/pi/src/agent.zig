@@ -2106,14 +2106,14 @@ test "providerless resume migrates once and cross-provider rebuild is atomic" {
     defer sessions.restore(allocator);
 
     const meta_path = blk: {
-        var legacy = try initFromEnvWithSessionConfig(allocator, null, .{ .no_context_files = true });
-        defer legacy.deinit(allocator);
+        var providerless = try initFromEnvWithSessionConfig(allocator, null, .{ .no_context_files = true });
+        defer providerless.deinit(allocator);
         try zts.file_io.writeFile(
             allocator,
-            legacy.events_path orelse return error.TestUnexpectedResult,
+            providerless.events_path orelse return error.TestUnexpectedResult,
             "",
         );
-        const providerless_meta_path = legacy.meta_path orelse return error.TestUnexpectedResult;
+        const providerless_meta_path = providerless.meta_path orelse return error.TestUnexpectedResult;
         var meta = try session_events.readMeta(allocator, providerless_meta_path);
         defer session_events.freeMeta(allocator, &meta);
         try session_events.writeMeta(allocator, providerless_meta_path, .{

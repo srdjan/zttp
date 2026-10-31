@@ -11,6 +11,21 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 ## [Unreleased]
 
 - A `.ts` import or an `-e` source that admission refuses now fails at start with the admission message. Some forms used to run, or to report a second and less exact message.
+- Rebuild and redeploy earlier artifacts. `semanticsHash` moved, so the new runtime refuses an artifact from an earlier binary with `SemanticsHashMismatch`. A self-extracting binary keeps running.
+- An erased type prefix now reports ZTS002, such as `const x = <T>(1);` and `const x = <T> { id: 1 };`. Remove the prefix.
+- A generic arrow after `return` or after a line comment now reads like the same arrow in an assignment. `return <T>(value: T): T => value;` is accepted. Update a check that expects ZTS002 there.
+- An empty type predicate now reports ZTS003 at the first token after `is`. Write the narrowed type after `is`.
+- A handler with a second parameter now reads `undefined` there, not an empty object. Remove the parameter.
+- A call on a value with no callable payload now stops with `NotCallable`. No tracked program reaches this call. Report a program that stops with this error.
+- `HandlerSource.inline_code` now passes admission, so inline source that admission refuses fails at load. Type annotations in inline source load unchecked. Use a `.ts` file for the type check.
+- The Zig API no longer has `zts.Parser.init`, `Parser.parse`, `Parser.parseWithCodegenAllocator`, `parser.parse`, `ParseResult`, `ParseOptions`, `zts.pathsMatch`, or `HandlerInstance.loadHandler`, and `Runtime.destroy` takes no allocator. Use `JsParser.initAdmission`, `routePatternsMatch`, and `loadCode`.
+- `zts canonicalize --json` now prints the repair intent names. Update a check that matches an old name: `canonicalize_arrow_helper` is `replace_arrow_with_function`, `canonicalize_export_function` is `replace_export_arrow_with_function`, `canonicalize_let_const` is `replace_let_with_const`, `canonicalize_compound_assign` is `replace_compound_assign_with_explicit`, and `canonicalize_redundant_bool_compare` is `drop_redundant_bool_compare`.
+- Contract JSON no longer holds the route keys `responseStatus`, `responseContentType`, `responseSchemaRef`, `responseSchema`, and `responseSchemaDynamic`, or their version 2 forms. Read `responses`. A contract that holds these keys still parses.
+- A static route with two or more responses now compares each response. A changed status, content type, or response count reports `breaking`, where it used to report `unchanged`, so a `dev --prove` hot-swap can stop for that route. Review the reported change.
+- A session journal no longer stores `body` in a tool result. Read `llm_text`. An older journal still loads.
+- `zttp proofs gate` no longer accepts `--no-sign`. Remove the flag from scripts. Old `kind=perf` and `kind=equivalence` ledger rows still load, and the reader does not read their payloads.
+- `zttp auth claude` and `zttp auth openai` now report an unknown subcommand. `zttp auth revoke claude` and `zttp auth revoke openai` still delete a stored key.
+- `install.sh` no longer installs releases with `zigttp-*` assets, so `ZTTP_VERSION=v0.18.0` or older stops installing. Select `v0.19.0` or later.
 
 ## [0.26.0] - 2026-10-29
 
