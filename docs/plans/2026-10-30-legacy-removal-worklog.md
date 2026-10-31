@@ -121,3 +121,11 @@ The new test `parseFromJson leaves API route collections empty when the arrays a
 The two pin tests left on purpose. They held the synthesis of one response from scalar fields, and of one `application/json` body from `requestSchemaRefs`. Only a hand-made contract older than `sourceIdentity` reaches that behavior.
 
 The backfill also set `request_bodies_dynamic` and `responses_dynamic` on a parsed route. `contract_builder.zig` sets both flags at build time, and `contract_diff.zig` reads each flag with its scalar partner, so no current contract depends on the parsed form.
+
+## L3c
+
+Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`, `test-zruntime`, `test-flow-census`, `test-evidence-publish`, `test-evidence-marker`, `test-native-gates`, `test-precompile`, `test-expert-app`, `zig build test`, `check-spine`. `zts meta --json` is identical, so `semanticsHash` did not move and the field in row E22 is outside the hash. The comparison script moved 0 of 648 rows.
+
+The test `the old-checker miss table equals the observed misses` left on purpose. It compared the table with the observed misses, and the table is gone. `every expected property holds` fails on any miss.
+
+`docs/zts-formal-spec-northstar-advanced.md` is a tracked document, so the two "northstar" comments in `semantics.zig` name a current future plan. They stay.

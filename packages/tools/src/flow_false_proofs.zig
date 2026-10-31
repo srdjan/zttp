@@ -8,7 +8,7 @@
 //! A fixture is never deleted and its expectation is never weakened. A change
 //! to an expectation needs a reason in the commit message.
 //!
-//! After the P9 cutover these are permanent regressions: 33 fixtures are
+//! These are permanent regressions: 33 fixtures are
 //! refused, and five persistent-state readers stay unproven because their
 //! stored value is unknown. Neither outcome may become a proof. Exact
 //! verdicts also prevent an unknown value from acquiring a false refusal

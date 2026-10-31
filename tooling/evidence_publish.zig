@@ -161,21 +161,6 @@ fn renderConvergenceJson(
     return output.toOwnedSlice();
 }
 
-fn replaceFirst(
-    allocator: std.mem.Allocator,
-    text: []const u8,
-    old: []const u8,
-    replacement: []const u8,
-) ![]u8 {
-    const at = std.mem.indexOf(u8, text, old) orelse return allocator.dupe(u8, text);
-    var output: std.Io.Writer.Allocating = .init(allocator);
-    errdefer output.deinit();
-    try output.writer.writeAll(text[0..at]);
-    try output.writer.writeAll(replacement);
-    try output.writer.writeAll(text[at + old.len ..]);
-    return output.toOwnedSlice();
-}
-
 fn tableCells(allocator: std.mem.Allocator, line: []const u8) !std.ArrayList([]const u8) {
     var cells: std.ArrayList([]const u8) = .empty;
     errdefer cells.deinit(allocator);
@@ -263,40 +248,16 @@ fn validateConvergenceTable(
     return last;
 }
 
-const old_intro =
-    "The headline figure is **first-draft veto-pass rate**: how often the model's\n" ++
-    "first attempt at a prompt clears the compiler veto with no retries. It is a\n" ++
-    "counted result over a frozen corpus, not an estimate.\n";
-
-const new_intro =
-    "The headline figure is **raw first-draft veto-pass rate**: how often the exact\n" ++
-    "model-authored bytes clear the compiler veto before normalization, repair, or\n" ++
-    "retry. **First-attempt green** is reported beside it and includes compiler\n" ++
-    "normalization or repair on that attempt. Both are counted results over a frozen\n" ++
-    "corpus, not estimates.\n";
-
 fn renderConvergenceMarkdown(
     allocator: std.mem.Allocator,
     existing: []const u8,
     row: []const u8,
 ) ![]u8 {
-    const intro_migrated = try replaceFirst(allocator, existing, old_intro, new_intro);
-    defer allocator.free(intro_migrated);
-
-    // The qualification product leaves with its dedicated measurement section.
-    // Retain historical result rows with their original corpus identities.
-    const migrated = if (std.mem.indexOf(u8, intro_migrated, "## Repeatability\n")) |start| block: {
-        const end = start + (std.mem.indexOf(u8, intro_migrated[start..], "## Results\n") orelse
-            return error.InvalidExistingMarkdown);
-        break :block try allocator.print("{s}{s}", .{ intro_migrated[0..start], intro_migrated[end..] });
-    } else try allocator.dupe(u8, intro_migrated);
-    defer allocator.free(migrated);
-
     var arena_state = std.heap.ArenaAllocator.init(allocator);
     defer arena_state.deinit();
     const arena = arena_state.allocator();
     var lines: std.ArrayList([]const u8) = .empty;
-    var split = std.mem.splitScalar(u8, migrated, '\n');
+    var split = std.mem.splitScalar(u8, existing, '\n');
     while (split.next()) |line| try lines.append(arena, line);
     if (lines.items.len != 0 and lines.items[lines.items.len - 1].len == 0) _ = lines.pop();
 

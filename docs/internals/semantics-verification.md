@@ -42,9 +42,9 @@ mathematical integers and fails on the engine's value model:
 - involution of `!`, which fails on truthiness coercion,
 - involution of unary `-`, which fails on number coercion.
 
-`excluded_laws` and each row's `audit_timeout_ms` stay in `semantics.zig` as
-data. They are hashed into `semanticsHash` and rendered into the spec. No code
-checks them against a solver any more. An earlier SMT layer proved the value
+`excluded_laws` stays in `semantics.zig` as
+data. It is hashed into `semanticsHash` and rendered into the spec. No code
+checks it against a solver any more. An earlier SMT layer proved the value
 rules with `z3` and refuted the excluded laws over a faithful value model. That
 layer, with its `--audit` flag and the `ZTTP_Z3` variable, was removed in plan
 005. The code lives at the `pre-rebase` tag as

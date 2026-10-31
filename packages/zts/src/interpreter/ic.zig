@@ -1,6 +1,6 @@
 //! Polymorphic Inline Cache (PIC) for property access optimization, plus
-//! the tunables (ZTS_PIC_MEGA_RECOVERY_WINDOW, ZTS_PIC_DISABLE_RECOVERY) that
-//! govern megamorphic recovery behavior.
+//! the tunable (ZTS_PIC_MEGA_RECOVERY_WINDOW) that governs megamorphic
+//! recovery behavior.
 //!
 //! PIC layout (PolymorphicInlineCache, PICEntry, PIC_ENTRIES) is consumed
 //! only by the interpreter.
@@ -10,19 +10,12 @@ const object = @import("../object.zig");
 const env_cache = @import("env_cache.zig");
 
 var pic_mega_recovery_window_cache: ?u16 = null;
-var pic_recovery_disabled_cache: ?bool = null;
 
 /// Number of consecutive monomorphic observations after a PIC goes megamorphic
 /// before it is allowed to reset and re-specialize on the dominant shape.
 /// Overridable via ZTS_PIC_MEGA_RECOVERY_WINDOW.
 pub fn getPicMegaRecoveryWindow() u16 {
     return env_cache.cachedUintNonzero(u16, "ZTS_PIC_MEGA_RECOVERY_WINDOW", &pic_mega_recovery_window_cache, 32);
-}
-
-/// When ZTS_PIC_DISABLE_RECOVERY is set, PICs stay megamorphic permanently
-/// (legacy behavior) instead of attempting recovery after a stable shape window.
-pub fn isPicRecoveryDisabled() bool {
-    return env_cache.cachedBoolPresent("ZTS_PIC_DISABLE_RECOVERY", &pic_recovery_disabled_cache);
 }
 
 /// Single entry in a polymorphic inline cache
@@ -89,7 +82,6 @@ pub const PolymorphicInlineCache = struct {
     /// If recovery triggers, `just_recovered` is set so callers can observe it.
     pub inline fn update(self: *PolymorphicInlineCache, hidden_class_idx: object.HiddenClassIndex, slot_offset: u16) bool {
         if (self.megamorphic) {
-            if (isPicRecoveryDisabled()) return false;
             if (self.recovery_candidate == hidden_class_idx and hidden_class_idx != .none) {
                 self.consec_same_shape +|= 1;
                 if (self.consec_same_shape >= getPicMegaRecoveryWindow()) {

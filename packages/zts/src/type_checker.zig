@@ -546,11 +546,6 @@ pub const TypeChecker = struct {
         return out;
     }
 
-    /// The receiver type the walk saw for a read whose operand may be undefined.
-    pub fn absentReceiverOf(self: *const TypeChecker, read: NodeIndex) ?TypeIndex {
-        return self.absent_receivers.get(read);
-    }
-
     /// Refuse a member or index read whose operand is a Dict, or a union or
     /// nullable with a Dict member. On every Dict the runtime builds, such a
     /// read yields `undefined`, so a guard on the result always takes the

@@ -503,72 +503,45 @@ pub fn opcodeDisposition(op: Opcode) Disposition {
 /// so they are declared as data. They are spec content (claims about the language), so they are
 /// hashed into `semanticsHash` and rendered into the spec artifact.
 ///
-/// SOUNDNESS BOUNDARY - read before adding a law. The SMT encoder abstracts the
-/// engine's number type (i32 that promotes to IEEE-754 f64 on overflow; see
-/// interpreter.zig `addValues`) as the unbounded mathematical integers Z. That
-/// abstraction is sound ONLY for a law whose truth does not depend on JS
-/// coercion, string concatenation, truthiness, float rounding, integer overflow,
-/// NaN, or signed zero. A law valid over Z but not over the engine's value
-/// behavior would be falsely "proven" and folded into the signed receipt.
+/// SOUNDNESS BOUNDARY - read before adding a law. A law must hold under the
+/// engine's value model, not merely over the mathematical integers Z. The
+/// engine's number type is an i32 that promotes to IEEE-754 f64 on overflow (see
+/// interpreter.zig `addValues`). A law valid over Z is sound ONLY when its truth
+/// does not depend on JS coercion, string concatenation, truthiness, float
+/// rounding, integer overflow, NaN, or signed zero.
 ///
 /// Associativity of addition is the canonical numeric boundary: it holds over Z
 /// but FAILS on the engine, because a `child` can be a large float (e.g. a
 /// mul-overflow result past 2^53) and f64 addition is not associative there.
 /// Likewise, generic `+` can concatenate strings and `!` returns a boolean via
 /// JS truthiness, so `a + b == b + a` and `!!x == x` are not slice-wide laws.
-/// Faithful f64 and heap/string encoding is northstar work; until then, a law
-/// must hold under the engine's value model, not merely under Z.
 pub const Law = struct {
     name: []const u8,
     lhs: []const Term,
     rhs: []const Term,
-    /// Solver budget for this row's audit query, in milliseconds. `null` took
-    /// the removed audit's default budget (`pre-rebase:packages/zts/src/semantics_audit.zig`). It is a per-row property
-    /// because refutation cost is not uniform: three of the four excluded laws
-    /// refute on a type mix and return in under a second, while the f64
-    /// associativity counterexample search is two orders of magnitude slower
-    /// (see the measurements beside each row). A single shared ceiling has to
-    /// be set for the slowest row, which then hands every later row the same
-    /// long rope and lets a genuinely undecidable one burn it in full.
-    ///
-    /// Deliberately outside `semanticsHash`: the hash covers what the registry
-    /// CLAIMS (names and denotations), and a solver budget changes how long the
-    /// machine may look for the answer, never what the answer is.
-    audit_timeout_ms: ?u32 = null,
 };
 
 // No unconditioned algebraic law survives the engine's polymorphic, coercing
-// value model: every tempting equivalence is in `excluded_laws` below (machine-
-// refuted). Asserting laws that hold only for a restricted operand type needs the
-// reachability / type-precondition layer (the deferred faithful-model work), so
-// this table is intentionally empty for now. Mechanism 3 still proves every value
-// node's denote == exec(lower) and the refinements; the algebraic-law slot is
-// where guarded laws will land once preconditions exist.
+// value model: every tempting equivalence is in `excluded_laws` below.
+// Asserting laws that hold only for a restricted operand type needs a
+// reachability / type-precondition layer, so this table is intentionally empty.
+// Mechanism 3 still proves every value node's denote == exec(lower) and the
+// refinements; the algebraic-law slot is where guarded laws would land once
+// preconditions exist.
 pub const algebraic_laws = [_]Law{};
 
 /// Excluded laws: equivalences that are tempting but FALSE under the engine's
-/// faithful value model, declared here so the exclusion is machine-checked rather
-/// than only asserted in the SOUNDNESS BOUNDARY comment above. Each has a
-/// counterexample over a faithful tagged-value model. They are data:
-/// hashed into `semanticsHash` and rendered into the spec. They reuse the `Law`
-/// shape; they are read as non-laws.
+/// value model, declared here as spec content so the exclusion is stated beside
+/// the SOUNDNESS BOUNDARY comment above. No code checks these rows against a
+/// solver. They are hashed into `semanticsHash` and rendered into the spec. They
+/// reuse the `Law` shape; they are read as non-laws.
 pub const excluded_laws = [_]Law{
     // associativity of +  - holds over ℤ, fails on f64 rounding past 2^53.
-    // Two orders of magnitude slower to refute than every other row here: the
-    // counterexample needs three unconstrained `Val`s to land on a rounding
-    // witness past 2^53. Measured 2026-08-26 on z3 5.1.0, idle, seven runs:
-    // 28.78 28.81 28.91 29.07 29.16 29.76 29.82 seconds, and the same figures
-    // under a 600-second ceiling, so that is the solve cost and not a timeout
-    // artifact. 180 seconds is ~6x the slowest of those.
     .{
         .name = "add_associative",
-        .audit_timeout_ms = 180_000,
         .lhs = &.{ .{ .child = 0 }, .{ .child = 1 }, .{ .binop = .add }, .{ .child = 2 }, .{ .binop = .add } },
         .rhs = &.{ .{ .child = 0 }, .{ .child = 1 }, .{ .child = 2 }, .{ .binop = .add }, .{ .binop = .add } },
     },
-    // The three rows below refute on a type mix rather than a numeric search and
-    // take the default budget. Measured the same day and the same way:
-    // add_commutative 0.32s, not_involution and neg_involution under 0.01s.
     // commutativity of +  - generic `+` concatenates strings: "a"+"b" != "b"+"a".
     .{
         .name = "add_commutative",
@@ -582,8 +555,8 @@ pub const excluded_laws = [_]Law{
         .rhs = &.{.{ .child = 0 }},
     },
     // involution of unary -  - `-` coerces to number, so `-(-"5") === "5"` is
-    // false (number 5 !== string "5"). It is machine-refuted here, not asserted
-    // over the ℤ tier.
+    // false (number 5 !== string "5"). It is declared here as a non-law, not
+    // asserted over the ℤ tier.
     .{
         .name = "neg_involution",
         .lhs = &.{ .{ .child = 0 }, .{ .unop = .neg }, .{ .unop = .neg } },
@@ -770,7 +743,7 @@ fn computeSemanticsHash() [64]u8 {
         hasher.update(disposition.reason);
         hasher.update("\x01");
     }
-    // algebraic laws (the SMT-certified non-structural equivalences) are spec
+    // algebraic laws (the declared non-structural equivalences) are spec
     // content too, so a change to any law moves the hash.
     for (algebraic_laws) |law| {
         hasher.update(law.name);
@@ -780,7 +753,7 @@ fn computeSemanticsHash() [64]u8 {
         hashTerms(&hasher, law.rhs);
         hasher.update("\x01");
     }
-    // excluded laws (machine-refuted non-laws) are spec content too: the claim
+    // excluded laws (declared non-laws) are spec content too: the claim
     // "these are NOT laws" is part of the soundness boundary.
     hasher.update("excluded\x00");
     for (excluded_laws) |law| {
@@ -974,8 +947,8 @@ fn hasExcludedForTest(name: []const u8) bool {
 test "JS coercive identities are excluded, not asserted" {
     // None of these hold under the engine's polymorphic, coercing value model, so
     // none may be an asserted algebraic law; each must instead be an excluded law
-    // the faithful audit refutes. neg_involution moved here from the law table
-    // once the audit existed (string coercion: -(-"5") !== "5").
+    // the value model refutes. neg_involution is excluded because of string
+    // coercion: -(-"5") !== "5".
     for ([_][]const u8{ "add_commutative", "not_involution", "neg_involution", "add_associative" }) |name| {
         try std.testing.expect(!hasLawForTest(name));
         try std.testing.expect(hasExcludedForTest(name));
