@@ -6,7 +6,7 @@ This document is the plan authority for the removal of legacy code.
 It owns the definition of legacy, the verdict for each item, the phase order, the verification, and the owner decisions.
 The worklog `docs/plans/2026-10-30-legacy-removal-worklog.md` records execution and evidence. Phase L0 creates that worklog.
 
-Status: draft, not approved. No removal has started.
+Status: approved on 2026-10-30. The owner selected option (a) for Decisions 1 to 13. The worklog records the execution.
 No push, tag push, provider call, or corpus re-record is authorized by this plan.
 This plan edits no file in `packages/proof-checker`.
 
