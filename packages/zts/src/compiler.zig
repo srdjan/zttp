@@ -1,11 +1,12 @@
 //! Single-file compilation entry points.
 //!
-//! `compile` turns a source fragment into bytecode through the untyped parser.
-//! It serves the semantics corpus, whose fragments are not source files.
-//! Decision D-016 names this entry as one of the four that skip admission.
+//! `compile` turns a source fragment into bytecode through the typed parser
+//! and its admission step. It serves the semantics corpus, whose fragments
+//! are not source files.
 
 const std = @import("std");
 const parser = @import("zts-engine").parser;
+const source_frontend = @import("zts-engine").source_frontend;
 const bytecode = @import("zts-engine").bytecode;
 const value = @import("zts-engine").value;
 const string = @import("zts-engine").string;
@@ -23,10 +24,16 @@ pub fn compile(
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    var p = try parser.Parser.init(allocator, source, &strings, null);
+    var p = try parser.Parser.initTyped(allocator, allocator, source, &strings, null);
     defer p.deinit();
 
-    const code = try p.parse();
+    switch (try p.parseTypedIr()) {
+        .accepted => {},
+        .parser_refused => |refusal| return refusal.first_error,
+        .terminal_admission_refused => |failure| return source_frontend.prepareErrorForAdmissionFailure(failure),
+        .recovered_admission_refused => unreachable,
+    }
+    const code = try p.generateParsed(allocator);
 
     // Copy code and constants to output allocator (parser memory is freed on deinit)
     const code_copy = try allocator.dupe(u8, code);
@@ -98,24 +105,22 @@ test "simple compile API" {
     try std.testing.expectEqual(@backingInt(bytecode.Opcode.ret_undefined), func.code[func.code.len - 1]);
 }
 
-test "compile matches the typed path for a fragment with erased annotations" {
+test "compile erases annotations from a fragment" {
     const allocator = std.testing.allocator;
-    var strings = string.StringTable.init(allocator);
-    defer strings.deinit();
-    var typed = try parser.Parser.initTyped(allocator, allocator, "const value: number = 1; value;", &strings, null);
-    defer typed.deinit();
-    switch (try typed.parseTypedIr()) {
-        .accepted => {},
-        else => return error.TestUnexpectedResult,
-    }
-    const typed_code = try typed.generateParsed(allocator);
-    const raw = try compile(allocator, "const value         = 1; value;");
+    const annotated = try compile(allocator, "const value: number = 1; value;");
     defer {
-        allocator.free(raw.code);
-        allocator.free(raw.constants);
-        if (raw.line_table) |lines| allocator.free(lines);
-        allocator.destroy(raw);
+        allocator.free(annotated.code);
+        allocator.free(annotated.constants);
+        if (annotated.line_table) |lines| allocator.free(lines);
+        allocator.destroy(annotated);
     }
-    try std.testing.expectEqualSlices(u8, raw.code, typed_code);
-    try std.testing.expectEqualSlices(value.JSValue, raw.constants, typed.constants.items);
+    const plain = try compile(allocator, "const value         = 1; value;");
+    defer {
+        allocator.free(plain.code);
+        allocator.free(plain.constants);
+        if (plain.line_table) |lines| allocator.free(lines);
+        allocator.destroy(plain);
+    }
+    try std.testing.expectEqualSlices(u8, plain.code, annotated.code);
+    try std.testing.expectEqualSlices(value.JSValue, plain.constants, annotated.constants);
 }

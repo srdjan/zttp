@@ -258,3 +258,9 @@ Tests outside the L4c rows of Appendix A that changed:
 Test names that still say "legacy" in `typed_frontend_tests.zig` wait for the L9 list.
 
 Observation that this unit did not cause, on the base binary and now: `function isS(y: unknown): x is string { return true; }` reports 0 errors, because `populateDirectReturn` returns at an unresolved target and the function has no declared return type. I will measure it after the plan and report it with the other two.
+
+## L5a
+
+Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`, `test-zts`, `test-modules`, `test-zruntime`, `zig build test`, `check-spine`, and `bash scripts/check-semantics-spec.sh`. `zts meta --json` is identical. The comparison script moved no row beyond the 12 rows of L4.
+
+`compile` now takes the typed entry, so D-016 names three untyped entries. `compile matches the typed path for a fragment with erased annotations` compared one path with itself after this change. It is now `compile erases annotations from a fragment`, which compares the bytes of an annotated fragment and of the same fragment with no annotation.
