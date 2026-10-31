@@ -945,7 +945,7 @@ test "nesting: the parser refuses value nesting past its limit with a nesting di
         for ([_]usize{ 1, 8 }) |depth| {
             var source = try buildNested(allocator, shape, depth);
             defer source.deinit(allocator);
-            var parser = try Parser.init(allocator, source.items);
+            var parser = try Parser.initAdmission(allocator, allocator, source.items, .compile);
             defer parser.deinit();
             if (is_template) {
                 try std.testing.expectError(error.ParseError, parser.parse());
@@ -956,7 +956,7 @@ test "nesting: the parser refuses value nesting past its limit with a nesting di
         for ([_]usize{ 513, 2000, deep_guarded }) |depth| {
             var source = try buildNested(allocator, shape, depth);
             defer source.deinit(allocator);
-            var parser = try Parser.init(allocator, source.items);
+            var parser = try Parser.initAdmission(allocator, allocator, source.items, .compile);
             defer parser.deinit();
             if (parser.parse()) |_| {
                 return error.NestingAcceptedPastTheLimit;
