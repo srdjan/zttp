@@ -16,3 +16,9 @@ The area imports the SDK contract. No import boundary applies because no current
 D-007
 
 D-013 permits one shared store: the `zttp:ratelimit` `RateStore`. A handler pool owns it and every access holds its mutex. It holds no JS value.
+
+## Rule detail
+
+These sentences hold the reasons behind the persistent-read rule in the root `AGENTS.md`.
+
+A persistent read hands back a value some separate write put there, and the read call holds no reference to that value, so no dataflow rule can reach it and only the binding knows. `derives_from_args` cannot close that finding: `argDerivedLabels` unions only the current call's own arguments, which for `cacheGet("ns", "k")` are two string literals. `derives_from_args` is the right answer for a pass-through, where the return *is* an argument; the retired `returns_from_param` binding field is no longer part of the API. Expect `.unknown` to move a verdict from PROVEN to unproven rather than to refused; an export deriving its result from the limiter's or the generator's own state, like `rateCheck` or `uuid`, is not this shape.
