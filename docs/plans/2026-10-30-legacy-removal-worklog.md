@@ -111,3 +111,13 @@ Tests that left, each with the behavior that it held:
 The fixture in `reader recovery and reconstruction preserve additive journal fields` used a body-only record, so it now uses `llm_text`. That test is about unknown keys, and its assertions did not change.
 
 Ruling on the `tool_use` event kind: it stays. `zttp expert --mode json` prints it through `emitEntry` in `print_mode.zig`, so it is a current output. My follow-up to remove it was wrong, and the worker stopped before it edited a file. The journal writer emits `tool_use_batch`, and `reconstructor.zig` refuses a single `tool_use` record, as it did before this unit.
+
+## L3b
+
+Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`, the stored-data set, `test-zruntime`, `test-contract-golden`, `test-proof-checker`, `test-proof-checker-mutants`, `test-proof-ratchet`, `test-kernel-safety`, `test-expert-app`, `zig build test`, `check-spine`. The comparison script moved 0 of 648 rows.
+
+The new test `parseFromJson leaves API route collections empty when the arrays are absent` failed on the old parser with `expected 0, found 1`.
+
+The two pin tests left on purpose. They held the synthesis of one response from scalar fields, and of one `application/json` body from `requestSchemaRefs`. Only a hand-made contract older than `sourceIdentity` reaches that behavior.
+
+The backfill also set `request_bodies_dynamic` and `responses_dynamic` on a parsed route. `contract_builder.zig` sets both flags at build time, and `contract_diff.zig` reads each flag with its scalar partner, so no current contract depends on the parsed form.

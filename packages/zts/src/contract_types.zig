@@ -288,8 +288,7 @@ pub const ApiRouteInfo = struct {
     responses: std.ArrayList(ApiResponseInfo) = .empty,
     responses_dynamic: bool = false,
     // Legacy scalar response fields, kept for backward compatibility with
-    // older contract.json consumers. backfillApiRouteCollections bridges
-    // these into the responses collection during deserialization.
+    // older contract.json consumers.
     response_status: ?u16 = null,
     response_content_type: ?[]const u8 = null, // owned when present
     response_schema_ref: ?[]const u8 = null, // owned when present

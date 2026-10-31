@@ -1122,7 +1122,6 @@ fn projectApiRoutes(
         else
             null;
         route.response_schema_dynamic = wire.responseSchemaDynamic;
-        try backfillApiRouteCollections(allocator, &route);
         routes.appendAssumeCapacity(route);
     }
 }
@@ -1224,70 +1223,6 @@ fn projectWireSchemaSpec(
         if (schema_json) |value| value.bytes else null,
         dynamic,
     );
-}
-
-fn backfillApiRouteCollections(
-    allocator: std.mem.Allocator,
-    route: *ApiRouteInfo,
-) !void {
-    if (route.request_bodies.items.len == 0) {
-        route.request_bodies_dynamic = route.request_bodies_dynamic or route.request_schema_dynamic;
-        for (route.request_schema_refs.items) |schema_ref| {
-            if (containsRequestBodySchemaRef(route.request_bodies.items, schema_ref)) continue;
-            var body = ApiBodyInfo{
-                .content_type = try allocator.dupe(u8, "application/json"),
-                .schema = .none,
-            };
-            errdefer body.deinit(allocator);
-            // The dupe lands in a local first. Assigning the union expression
-            // straight into `body.schema` gives it the result location, so a
-            // failing dupe leaves the tag written and the payload undefined,
-            // and the errdefer above then frees a garbage slice.
-            const schema_ref_owned = try allocator.dupe(u8, schema_ref);
-            body.schema = .{ .ref = schema_ref_owned };
-            try route.request_bodies.append(allocator, body);
-        }
-    }
-    if (route.responses.items.len == 0 and
-        (route.response_status != null or
-            route.response_content_type != null or
-            route.response_schema_ref != null or
-            route.response_schema_json != null or
-            route.response_schema_dynamic))
-    {
-        var response = ApiResponseInfo{
-            .status = route.response_status,
-            .content_type = if (route.response_content_type) |value|
-                try allocator.dupe(u8, value)
-            else
-                null,
-            .schema = .none,
-        };
-        errdefer response.deinit(allocator);
-        // Landed in a local for the same reason as the request body above: a
-        // failing allocation inside `projectSchemaSpec` must not leave a written
-        // tag over an undefined payload for the errdefer to free.
-        const response_schema = try projectSchemaSpec(
-            allocator,
-            route.response_schema_ref,
-            route.response_schema_json,
-            route.response_schema_dynamic,
-        );
-        response.schema = response_schema;
-        try route.responses.append(allocator, response);
-        route.responses_dynamic = route.responses_dynamic or route.response_schema_dynamic;
-    }
-}
-
-fn containsRequestBodySchemaRef(
-    items: []const ApiBodyInfo,
-    needle: []const u8,
-) bool {
-    for (items) |item| {
-        const schema_ref = item.schema.schemaRef() orelse continue;
-        if (std.mem.eql(u8, schema_ref, needle)) return true;
-    }
-    return false;
 }
 
 fn projectVerification(
@@ -1835,41 +1770,22 @@ const valid_agent_provider = "{\"endpoint\":\"https://api.example:443\",\"creden
 const valid_agent_limits = "{\"rounds\":4,\"toolCalls\":8,\"toolCallsPerRound\":4,\"argumentBytes\":4096,\"resultBytes\":16384,\"turnDeadlineMs\":20000,\"providerRequestBytes\":32768}";
 const valid_agent_credentials = "[{\"name\":\"provider\",\"endpoint\":\"https://api.example:443\"}]";
 
-test "parseFromJson compatibility matrix preserves legacy API response backfill" {
-    const allocator = std.testing.allocator;
-    const json =
-        \\{
-        \\  "api": {"routes": [{
-        \\    "method": "GET",
-        \\    "path": "/legacy",
-        \\    "responseStatus": 204,
-        \\    "responseContentType": "text/plain",
-        \\    "responseSchemaRef": "LegacyResponse"
-        \\  }]}
-        \\}
-    ;
-    var contract = try parseFromJson(allocator, json);
-    defer contract.deinit(allocator);
-    const route = contract.api.routes.items[0];
-    try std.testing.expectEqual(@as(usize, 1), route.responses.items.len);
-    try std.testing.expectEqual(@as(?u16, 204), route.responses.items[0].status);
-    try std.testing.expectEqualStrings("text/plain", route.responses.items[0].content_type orelse unreachable);
-    try std.testing.expectEqualStrings("LegacyResponse", route.responses.items[0].schema.schemaRef() orelse unreachable);
-}
-
-test "parseFromJson legacy request backfill deduplicates schema refs" {
+test "parseFromJson leaves API route collections empty when the arrays are absent" {
     const json =
         \\{"api":{"routes":[{
         \\  "method":"POST",
-        \\  "path":"/legacy",
-        \\  "requestSchemaRefs":["LegacyBody","LegacyBody"]
+        \\  "path":"/scalar",
+        \\  "requestSchemaRefs":["Body"],
+        \\  "responseStatus":204,
+        \\  "responseContentType":"text/plain",
+        \\  "responseSchemaRef":"Reply"
         \\}]}}
     ;
     var contract = try parseFromJson(std.testing.allocator, json);
     defer contract.deinit(std.testing.allocator);
     const route = contract.api.routes.items[0];
-    try std.testing.expectEqual(@as(usize, 1), route.request_bodies.items.len);
-    try std.testing.expectEqualStrings("LegacyBody", route.request_bodies.items[0].schema.schemaRef() orelse unreachable);
+    try std.testing.expectEqual(@as(usize, 0), route.responses.items.len);
+    try std.testing.expectEqual(@as(usize, 0), route.request_bodies.items.len);
 }
 
 test "parseFromJson preserves escaped extension map keys" {
