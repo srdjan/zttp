@@ -139,3 +139,11 @@ The 3 pin tests failed on the old checks: `expected error.CapabilityMatrixMismat
 The 6 fixture tests take `stampLiveForTest` or `stampLiveHandlerForTest`, which set the values that the writer stamps. `validate` still runs in each test. In `validate promotes Raw to Validated when integrity checks pass`, the assertion `capabilities == null` became a zero-length matrix, because the fixture now carries a matrix.
 
 `verifyArtifactHash` is unchanged, as row E14 requires.
+
+## L3e
+
+Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`, the stored-data set, `test-zruntime`, `test-server`, `test-examples`, `test-expert-app`, `zig build test`, `check-spine`. The comparison script moved 0 of 648 rows.
+
+The new test `a second handler parameter reads undefined` failed on the old path with `expected undefined, found object`. It loads the source through `loadPreparedEval`, because `loadHandler` refuses type annotations on a `<...>` filename.
+
+The fallback in `interpreter/call.zig` returns `error.NotCallable`, which `doCall` already returns for a value that cannot be called. No test reaches that line: it needs a callable object with no native, closure, or bytecode payload, and no public path makes one.

@@ -744,6 +744,33 @@ test "built-in module import runs under capability wrapper context" {
     try std.testing.expectEqualStrings("{\"uuidLen\":36,\"nanoLen\":4}", response.body);
 }
 
+test "a second handler parameter reads undefined" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+
+    const handler_code =
+        \\function handler(req: Request, second: unknown): Response {
+        \\  return Response.text(typeof second);
+        \\}
+    ;
+    try rt.loadPreparedEval(.{ .code = handler_code }, "<second-parameter>");
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, "GET"),
+        .url = try allocator.dupe(u8, "/"),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var response = try rt.executeHandler(request.asView());
+    defer response.deinit();
+    try std.testing.expectEqualStrings("undefined", response.body);
+}
+
 test "runtime type fault is preserved as HandlerTypeFault for proof-explained 500" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

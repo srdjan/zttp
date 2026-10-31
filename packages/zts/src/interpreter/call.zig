@@ -115,6 +115,6 @@ pub fn doCall(self: *Interpreter, argc: u8, is_method: bool) InterpreterError!vo
         return;
     }
 
-    // Unknown callable shape -- preserve historical behavior of pushing undefined.
-    try self.ctx.push(value.JSValue.undefined_val);
+    // A callable that is neither native nor bytecode has no body to run.
+    return error.NotCallable;
 }

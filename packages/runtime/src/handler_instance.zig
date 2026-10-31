@@ -144,7 +144,6 @@ pub const HandlerInstance = struct {
     owned_strings: ?zq.StringTable,
     handler_atom: ?zq.Atom,
     cached_handler_obj: ?*zq.JSObject,
-    cached_handler_arg_count: u8,
     cached_dispatch: ?*const zq.PatternDispatchTable,
     config: RuntimeConfig,
     /// Policy tuple retained for this runtime's full lifetime.
@@ -271,7 +270,6 @@ pub const HandlerInstance = struct {
             .owned_strings = zq.StringTable.init(allocator),
             .handler_atom = null,
             .cached_handler_obj = null,
-            .cached_handler_arg_count = 1,
             .cached_dispatch = null,
             .config = config,
             .policy_generation = null,
@@ -344,7 +342,6 @@ pub const HandlerInstance = struct {
             .owned_strings = null,
             .handler_atom = null,
             .cached_handler_obj = null,
-            .cached_handler_arg_count = 1,
             .cached_dispatch = null,
             .config = config,
             .policy_generation = retained_policy,
@@ -434,7 +431,6 @@ pub const HandlerInstance = struct {
         // Use predefined handler atom
         self.handler_atom = zq.Atom.handler;
         self.cached_handler_obj = null;
-        self.cached_handler_arg_count = 1;
         self.cached_dispatch = null;
 
         try self.installHttpConstructors();
@@ -1024,8 +1020,6 @@ pub const HandlerInstance = struct {
 
         if (handler_obj.getBytecodeFunctionData()) |bc_data| {
             self.cached_dispatch = bc_data.bytecode.pattern_dispatch;
-            // Detect handler arg count for capability injection support
-            self.cached_handler_arg_count = @intCast(@min(bc_data.bytecode.arg_count, 255));
         } else {
             self.cached_dispatch = null;
         }
@@ -1269,13 +1263,9 @@ pub const HandlerInstance = struct {
         // Create Request object from HttpRequest
         const request_obj = try self.createRequestObject(request);
 
-        // Build argument array: 1-arg (backward compat) or 2-arg (with capabilities)
-        var args_buf: [2]zq.JSValue = undefined;
-        args_buf[0] = request_obj;
-        const args: []const zq.JSValue = if (self.cached_handler_arg_count >= 2) blk: {
-            args_buf[1] = try self.createCapabilitiesObject();
-            break :blk args_buf[0..2];
-        } else args_buf[0..1];
+        // The handler receives one argument: the Request.
+        const args_buf = [1]zq.JSValue{request_obj};
+        const args: []const zq.JSValue = args_buf[0..1];
 
         // === SLOW PATH: Full bytecode execution ===
 
@@ -1445,21 +1435,6 @@ pub const HandlerInstance = struct {
     // Retained for embedding callers; the helper implementation has one owner.
     pub const parseQueryInt = natives.parseQueryInt;
     pub const headerKeyToAtom = natives.headerKeyToAtom;
-
-    /// Create a capabilities object for 2-arg handler invocation.
-    /// The caps object contains virtual module functions grouped by namespace.
-    /// For now, all registered virtual module functions are included.
-    /// The type checker validates that the handler only accesses
-    /// capabilities declared in its type annotation.
-    fn createCapabilitiesObject(self: *Self) !zq.JSValue {
-        // Create a plain empty object as the capabilities container.
-        // Virtual module functions are already available via imports;
-        // the caps object provides an alternative DI-style access pattern.
-        // Full population with module namespaces is done lazily: the type
-        // checker ensures only declared capabilities are accessed.
-        const caps_obj = try self.ctx.createObject(null);
-        return zq.JSValue.fromPtr(caps_obj);
-    }
 
     /// pub for the request-object tests in zruntime_tests.zig.
     pub fn createRequestObject(self: *Self, request: HttpRequestView) !zq.JSValue {
