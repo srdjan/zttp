@@ -87,10 +87,9 @@ pub fn maybeRemapObserved(
             if (!std.mem.eql(u8, calls[0].name, tool_name)) return reply;
 
             // Ordered to attribute, not merely to refuse. The accept set is
-            // identical to the single-error version this replaces - every
-            // condition below still has to hold - but a missing field, an extra
-            // field and a forged host-authoritative field now report as three
-            // different things instead of one.
+            // fixed by the conditions below - every one has to hold - and a
+            // missing field, an extra field and a forged host-authoritative
+            // field report as three different things instead of one.
             const parsed = std.json.parseFromSliceLeaky(std.json.Value, arena, calls[0].args_json, .{
                 .duplicate_field_behavior = .@"error",
             }) catch return remapFailure(stop_reason, .args_not_json, observed);

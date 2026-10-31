@@ -21,8 +21,8 @@ pub const routes = [_]Route{
     .{ .label = "strict semantics specification", .argv = &.{ "bash", "scripts/check-semantics-spec.sh" } },
     .{ .label = "curated release notes", .argv = &.{ "sh", "scripts/test-release-notes.sh" }, .release_only = true },
     .{ .label = "release evidence provenance", .argv = &.{ "zig", "build", "release-provenance" }, .release_only = true },
-    // Release-only checks previously called directly by release.sh. Keeping
-    // them here makes their executable route and classification one fact.
+    // Release-only checks. Keeping them here makes their executable route and
+    // classification one fact.
     .{ .label = "getting started smoke", .argv = &.{ "zig", "build", "smoke-getting-started" }, .release_only = true, .release_pipeline = true },
     .{ .label = "release passport", .argv = &.{ "zig", "build", "release-check", "--", "--json" }, .release_only = true, .release_pipeline = true },
     .{ .label = "advisory benchmark", .argv = &.{ "zig", "build", "bench-check" }, .release_only = true, .release_pipeline = true },

@@ -524,11 +524,8 @@ test "simulator recorder rejects undeclared credential file before workspace rea
 }
 
 test "simulator recorder skips agent scratch but still refuses undeclared source" {
-    // `pi_goal_check` persists witnesses under `.zttp/witnesses/<hash>/`. That
-    // is agent-owned state, not case source, and its directory name carries a
-    // per-run hash, so capturing it would make a case differ from itself on the
-    // next recording. Skipping it must not weaken the refusal for a real file
-    // the case never declared.
+    // `.zttp/` is tool-owned state, not case source. Skipping it must not weaken
+    // the refusal for a real file the case never declared.
     var tree = try IsolatedTmp.init(testing.allocator, "flow-recorder-scratch");
     defer tree.cleanup(testing.allocator);
     try tree.mkdir(testing.allocator, "workspace");

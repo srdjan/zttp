@@ -717,9 +717,8 @@ fn validateSafePathOrFail(loader: *Loader, path: []const u8, component: Componen
     if (!isSafeRelativePath(path)) return loader.fail(.unsafe_path, component, path);
 }
 
-/// Workspace state the agent's own tools write, which is never case source and
-/// never part of what a replay compares: `pi_goal_check` persists witnesses to
-/// `.zttp/witnesses/<hash>/`. Both the recorder's capture and the runner's
+/// Workspace state under `.zttp/`, which is never case source and never part of
+/// what a replay compares. Both the recorder's capture and the runner's
 /// replay comparison consult this one predicate, because a file that one side
 /// skips and the other side counts fails every replay of that case.
 pub fn isAgentScratch(path: []const u8) bool {

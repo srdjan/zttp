@@ -14,11 +14,6 @@
 //! hash identifies the committed packages tree that contains the cassettes,
 //! corpus, and compiler. A source tree not yet in history joins every aggregate.
 //!
-//! Ported from `scripts/coverage-union.sh`, which computed this in a python3
-//! heredoc. The port is not cosmetic: the shell version refused outright when
-//! no published run carried the identity asked for, which made the first
-//! publication of any new corpus impossible.
-//!
 //! That guard was probed, and the probe passed: its commit names three floors
 //! and records that "All three were probed and refuse". A probe shows the
 //! branch executes and that

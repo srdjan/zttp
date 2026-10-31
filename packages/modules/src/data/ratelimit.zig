@@ -106,7 +106,7 @@ pub const RateStore = struct {
     pub fn sharedDeinit(_: *anyopaque) callconv(.c) void {}
 
     fn evictExpired(self: *RateStore, now: i64) void {
-        // Drain ALL expired keys this sweep. The old fixed 64-key cap let
+        // Drain ALL expired keys this sweep. A fixed key cap would let
         // expired entries accumulate faster than they were reclaimed under a
         // high-cardinality key space (e.g. per-IP limiting under an IP flood),
         // growing the map without bound. Collecting into a heap list (this runs

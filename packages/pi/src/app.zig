@@ -552,7 +552,6 @@ test "every model tool declares an explicit context policy" {
     }
     const query = reg.findByName("zts_expert_query") orelse return error.TestFailed;
     try testing.expectEqual(registry_mod.ContextPolicy.exact, query.context_policy);
-    // The removed memory and witness tools owned the digest policy.
     try testing.expectEqual(@as(usize, 0), digest);
 }
 

@@ -936,16 +936,16 @@ test "the socket read timeout is never the first thing to expire" {
 
     // Every poll the request makes has to expire first, so a stall surfaces as a
     // typed error rather than as a dead process. Checked at the recording budget
-    // and at a nearly spent one, which is the case the old code got wrong.
+    // and at a nearly spent one.
     const recording_budget: i32 = 600_000;
     const stall: u64 = 300_000;
     try testing.expect(effectiveStallCeilingMs(stall, recording_budget) < socket_read_timeout_ms);
     try testing.expect(effectiveStallCeilingMs(stall, 1_000) < socket_read_timeout_ms);
     try testing.expect(effectiveStallCeilingMs(null, recording_budget) < socket_read_timeout_ms);
 
-    // And the request budget itself, which the socket used to be set from, is
-    // always at or below the ceiling - so setting the socket from it could only
-    // ever make the socket expire first or tie.
+    // And the request budget itself is always at or below the ceiling - so
+    // setting the socket from it could only ever make the socket expire first
+    // or tie.
     try testing.expect(effectiveRequestTimeoutMs(600_000, generation_ceiling_ms) < socket_read_timeout_ms);
     try testing.expectEqual(
         socket_read_timeout_ms,

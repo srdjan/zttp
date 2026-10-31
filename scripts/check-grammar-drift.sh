@@ -29,8 +29,7 @@ cd "$(dirname "$0")/.."
 spec_doc="docs/zts-formal-spec-northstar-advanced.md"
 registry_file="packages/zts/src/grammar_registry.zig"
 
-# The production count measured on 2026-08-16 after the model-minimal cutover
-# removed the legacy TypeDecl and DistinctDecl productions.
+# The production count measured on 2026-08-16.
 MIN_ROWS=66
 
 fail() {

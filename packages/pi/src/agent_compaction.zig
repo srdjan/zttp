@@ -33,8 +33,8 @@ pub const CompactResult = union(enum) {
     failed: anyerror,
 };
 
-/// Compatibility text wrapper for the current TTY command. U8 exposes the
-/// same controller's structured result directly to command surfaces.
+/// Text wrapper for the TTY command. `compactManual` returns the structured
+/// result of the same controller.
 pub fn compact(
     allocator: std.mem.Allocator,
     session: *AgentSession,

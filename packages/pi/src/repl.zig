@@ -1571,7 +1571,7 @@ test "selectApprovalFn: ask resolves to the interactive approveEdit" {
 test "EXP-5: hotkeys help no longer claims Ctrl-C interrupts a blocked turn" {
     var result = try renderHotkeys(testing.allocator);
     defer result.deinit(testing.allocator);
-    // No SIGINT handler exists, so the old "interrupt / cancel" text was a lie.
+    // No SIGINT handler exists, so the hotkeys text must not claim "interrupt / cancel".
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "interrupt") == null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "Ctrl-C         stop the session") != null);
 }

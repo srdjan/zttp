@@ -185,12 +185,12 @@ fn sameRepairIdentity(a: RepairIdentity, b: RepairIdentity) bool {
         std.mem.eql(u8, a.semantics_hash, b.semantics_hash);
 }
 
-/// Internal compatibility seam for the autonomous semantic-repair lane.
+/// Internal seam for the autonomous semantic-repair lane.
 ///
-/// The model-facing tool is being cut to the bound v2 repair protocol. The
-/// autoloop and goal-candidate reducer still consume proof-diagnostic plans,
-/// which are a different ADT. Keeping that lane behind a named helper prevents
-/// it from depending on the public tool schema while it is migrated separately.
+/// The model-facing tool uses the bound v2 repair protocol. The autoloop and
+/// goal-candidate reducer consume proof-diagnostic plans, which are a
+/// different ADT. Keeping that lane behind a named helper prevents it from
+/// depending on the public tool schema.
 pub fn executeSemanticPlan(
     allocator: std.mem.Allocator,
     args: []const []const u8,

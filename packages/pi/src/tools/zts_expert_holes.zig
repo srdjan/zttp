@@ -73,7 +73,7 @@ pub fn renderFromSource(
         null;
     defer if (policy_source) |bytes| allocator.free(bytes);
     // The analyzer's own failures are results, not Zig errors leaving the tool.
-    // `MissingSqlSchema` used to escape `execute` and reach the autoloop as an
+    // `MissingSqlSchema` must not escape `execute`: it would reach the autoloop as an
     // aborting error and the model as opaque text with no frames.
     var check = zts_cli.precompile.runCheckOnlyFromSourceWithOptions(
         allocator,
@@ -93,10 +93,10 @@ pub fn renderFromSource(
     };
     defer check.deinit(allocator);
 
-    // Grown, not a fixed 32 KB frame. Overflow used to become
-    // `error.StreamTooLong`, which escaped `execute` as a Zig error rather than
-    // a ToolResult: the autoloop aborted the run and the model got opaque text
-    // with no hole frames at all. The cap still applies, but it is applied to a
+    // Grown, not a fixed 32 KB frame. Overflow would become
+    // `error.StreamTooLong`, which would escape `execute` as a Zig error rather
+    // than a ToolResult: the autoloop would abort the run and the model would
+    // get opaque text with no hole frames at all. The cap still applies, but it is applied to a
     // complete projection - and when the full one does not fit, the holes are
     // published without the diagnostics rather than nothing being published.
     var aw: std.Io.Writer.Allocating = .init(allocator);
@@ -219,11 +219,11 @@ test "in-process publisher fails closed when a contract has verification errors"
 }
 
 test "in-process publisher answers a zttp:sql handler with a result, not a Zig error" {
-    // The publisher used to hard-code `sql_schema_path = null`, so
-    // `validateSqlContract` returned `MissingSqlSchema`, and with no catch the
-    // error left `execute` entirely: the autoloop aborted and the model got
-    // opaque text with no hole frames. The path is discovered now, and a
-    // failure that survives discovery is a ToolResult the caller can read.
+    // Without a discovered `sql_schema_path`, `validateSqlContract` returns
+    // `MissingSqlSchema`, and with no catch the error would leave `execute`
+    // entirely: the autoloop would abort and the model would get opaque text
+    // with no hole frames. The publisher discovers the path, and a failure
+    // that survives discovery is a ToolResult the caller can read.
     const source =
         \\import { sqlOne } from "zttp:sql";
         \\function handler(req: Request): Response {

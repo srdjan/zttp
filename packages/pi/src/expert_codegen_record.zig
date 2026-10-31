@@ -146,8 +146,7 @@ fn resolveCurrentCaseStepsForTest(
 }
 
 /// Where committed empirical flow artifacts live, relative to the repo root (the
-/// cwd when the recorder runs via `zig build`). The retired Claude and OpenAI
-/// corpora are not here: they live at the `pre-rebase` tag.
+/// cwd when the recorder runs via `zig build`).
 pub const local_empirical_flow_root = "packages/pi/src/simulator/testdata/empirical/local/codegen";
 pub const deepseek_empirical_flow_root = "packages/pi/src/simulator/testdata/empirical/deepseek/codegen";
 
@@ -834,8 +833,8 @@ const record_corpus = [_]RecordCase{
             "verified claims or secret, and never use a fallback secret.",
         // An invalid bearer token makes the secret lookup mandatory regardless
         // of whether the handler checks configuration before or after parsing
-        // the header. The old missing-token request still declared an exact env
-        // I/O event; a correct header-first handler returned 401 without reading
+        // the header. A missing-token request would still declare an exact env
+        // I/O event; a correct header-first handler returns 401 without reading
         // env, leaving the mock unconsumed and failing intent for call order
         // rather than behavior.
         // Test mode also replays both authentication helpers. Each native call
@@ -1146,11 +1145,9 @@ const record_corpus = [_]RecordCase{
         // The whole-file sibling `cache-counter` absorbs that fence, because
         // there the model authors the Spec and narrowing it is the behaviour
         // being measured. Hole mode hands the capsule over as fixed input, so
-        // the old capsule made the task impossible and every cohort recorded
-        // the honest outcome: the model spent its tool budget on fills that
-        // could not pass, then reported that it had applied no edit rather than
-        // inventing one. The case was measuring an unsatisfiable request, not
-        // the agent.
+        // a capsule that carried the fence would make the task impossible: the
+        // model would spend its tool budget on fills that could not pass. The
+        // case would then measure an unsatisfiable request, not the agent.
         .name = "cache-counter-holes",
         .prompt = "handler.ts reads the \"hits\" counter from the \"counters\" namespace and " ++
             "has a hole() on each branch. Fill them so the handler returns the counter as " ++
@@ -2518,8 +2515,8 @@ fn coverageBaseline(
         !std.mem.eql(u8, headline_input.slice(), "db16cf2221a6fcc63c7b8cdfbee2c3df52bcad54c5ddf9bf59ba0670e7bc189e"))
         return null;
     // The 2026-10-29 recording trips ZTS400 (sibling-helper-holes) and, outside
-    // the registry, ZTS056 and ZTS001. Its handlers no longer leave a proof
-    // spec undischarged, so ZTS500 and ZTS502 stay only in the published union.
+    // the registry, ZTS056 and ZTS001. Its handlers leave no proof
+    // spec undischarged, so ZTS500 and ZTS502 appear only in the published union.
     return .{ .minimum_rules = &.{"ZTS400"} };
 }
 
@@ -3234,8 +3231,7 @@ test "codegen baseline replays at the committed first-attempt green rate" {
 
     // Floor on the model read, before the column it feeds means anything. A
     // header-format change would leave `corpus_model` null on every case and
-    // the column would silently fall back to the constant it used to assert -
-    // the same defect this replaced, reintroduced quietly. Require every
+    // the column would silently fall back to a constant. Require every
     // replayed case to have yielded a model.
     if (corpus_model == null or models_read != record_corpus.len) {
         std.debug.print(
@@ -3574,9 +3570,8 @@ test "codegen baseline replays at the committed first-attempt green rate" {
 
 // Every headline case must resolve to a loadable recording.
 //
-// This assertion used to read "uniformly current or quarantined as stale" and
-// accepted an all-stale cohort because all-stale is uniform. An all-stale
-// cohort is not a tidy quarantine, it is the corpus being gone: every replay
+// An all-stale cohort is uniform, yet it is not a tidy quarantine, it is the
+// corpus being gone: every replay
 // skips, no evidence marker is emitted, and the suite still exits zero. That
 // state shipped in `f2252b31`, which bumped the artifact schema to 2 and left
 // all recordings at 1, and it survived four commits because the one test
@@ -3646,7 +3641,7 @@ test "every current corpus case resolves to exactly one recording source" {
         try std.testing.expect(resolved.responseCount() > 0);
         if (resolved.source == .flow_artifact) flow_backed += 1;
     }
-    // Every case resolves to a flow artifact; the flat-cassette lane is retired.
+    // Every case resolves to a flow artifact.
     try std.testing.expectEqual(record_corpus.len, flow_backed);
 }
 

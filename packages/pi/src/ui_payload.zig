@@ -165,7 +165,7 @@ pub const RepairCandidatePayload = struct {
 };
 
 /// A v2 repair selection that the compiler simulated against one exact source
-/// and identity tuple. Unlike `RepairCandidatePayload`, this carries no legacy
+/// and identity tuple. Unlike `RepairCandidatePayload`, this carries no
 /// plan id: the protocol has no stable candidate id, so provenance is the
 /// exact repair array plus its binding.
 pub const ProtocolRepairPayload = struct {

@@ -51,9 +51,7 @@ fi
 #
 # Every command the two dispatch registries advertise must appear in
 # docs/cli.md as `zttp <name>`. Without this, a command can ship, be listed by
-# `zttp help --all`, and never reach the reference: doctor, build, compile,
-# ratchet, ledger, witnesses, and version each had zero mentions when this gate
-# was written. `.unlisted` entries (the deprecated `proof` alias, `help`) are
+# `zttp help --all`, and never reach the reference. `.unlisted` entries (`help`) are
 # exempt, because `help --all` does not advertise them either.
 # ---------------------------------------------------------------------------
 
@@ -236,13 +234,6 @@ done < <(host_root_steps)
 #   paths    space-separated files/directories to search
 #   exclude  grep -E pattern for hits to ignore, or "-" for none
 #   message  what the author should do instead
-#
-# Retired when this became a table: a ban on the full path
-# "packages/runtime/src/generated/embedded_handler.zig", which the shorter
-# "src/generated/embedded_handler.zig" row already covers as a substring. Every
-# other row still has a live target - checked when the table was written; the
-# only absent file is docs/capabilities.md, which is exactly what its row
-# enforces.
 # ---------------------------------------------------------------------------
 
 prose_docs="docs README.md CHANGELOG.md SECURITY.md RELEASE_CHECKLIST.md"
@@ -261,9 +252,7 @@ prose_bans=(
 # Dated plan and decision records under docs/plans/ are excluded from every
 # row. These bans exist to keep the docs a reader is pointed at accurate; a
 # plan that records retiring a path has to be able to name the path it
-# retired. The gate proved this the hard way: two rows
-# fired on the paragraph in 2026-07-28-001-reset-simplification-plan.md that
-# documents this very table.
+# retired.
 plans_exclude='^docs/plans/'
 
 for row in "${prose_bans[@]}"; do
@@ -326,7 +315,7 @@ if [[ -n "${removed_parameter_hits//[[:space:]]/}" ]]; then
 fi
 
 # Public declarations have one spelling and module state is constant. Keep the
-# refusal probes in Zig, but no tracked handler may retain either legacy form.
+# refusal probes in Zig, but no tracked handler may retain either form.
 removed_module_export_hits="$({
   git ls-files -z -- '*.ts' '*.tsx' |
     xargs -0 bash -c "$rg_scan_body" rg_scan -n --pcre2 -- '^\s*export\s+(?:default|let)\b'

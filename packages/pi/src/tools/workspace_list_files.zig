@@ -160,11 +160,9 @@ fn renderPage(
     return .{ .ok = ok, .llm_text = llm_text };
 }
 
-/// `.zttp` is agent-owned state, not workspace source. `pi_repair_plan`
-/// persists witnesses to `.zttp/witnesses/<short_hash>/`, where the hash is
-/// sha256 of the handler's absolute path and `handler.path` holds that path
-/// verbatim. Listing it makes this tool's output depend on which directory the
-/// run happens to occupy, which is what made a recorded flow replay to a
+/// `.zttp` is tool-owned state, not workspace source. Its files can hold
+/// absolute paths. Listing it would make this tool's output depend on which
+/// directory the run happens to occupy, and a recorded flow would replay to a
 /// different transcript in a fresh workspace.
 const excluded_names = [_][]const u8{ ".git", "zig-out", ".zig-cache", "node_modules", ".zttp" };
 

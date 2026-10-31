@@ -36,9 +36,8 @@ cd "$(dirname "$0")/.."
 spec_doc="docs/zts-formal-spec-northstar-advanced.md"
 registry_file="packages/zts/src/idiom_registry.zig"
 
-# The row count measured on 2026-08-16 after template interpolation, string
-# addition, and declaration destructuring left the language. Removed forms are
-# restrictions, not non-idiomatic alternatives.
+# The row count measured on 2026-08-16. Removed forms are restrictions, not
+# non-idiomatic alternatives.
 MIN_ROWS=18
 
 fail() {

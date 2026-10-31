@@ -442,7 +442,7 @@ pub const Candidate = struct {
 
 /// Run the deterministic repair lane over an in-memory `source` snapshot and
 /// return a compiler-verified candidate (or the reason none could be built).
-/// Side-effect free: it plans from `source` (persist_witnesses=false) and
+/// Side-effect free: it plans from `source` and
 /// dry-runs each supported repair through pi_apply_repair_plan in memory; it
 /// never writes files or calls the model. The apply loop mirrors `execute`'s
 /// (parse plans, sort by line desc, apply each, keep the verified source) but
@@ -630,12 +630,8 @@ test "execute returns verified candidate without writing the file" {
 }
 
 test "execute does not persist witnesses to the on-disk corpus" {
-    // Regression: pi_goal_candidate declares effect=.analyze, and the RPC
-    // surface denies .persist_agent_state. Routing execute through
-    // pi_repair_plan.execute persisted witnesses (planFromSource with
-    // persist_witnesses=true), which unconditionally creates
-    // .zttp/witnesses/<hash>/ on disk - an effect-boundary bypass. The
-    // non-persisting plan path must leave the corpus untouched.
+    // pi_goal_candidate declares effect=.analyze, and the RPC surface denies
+    // .persist_agent_state, so execute must create no file under .zttp.
     const allocator = testing.allocator;
     const IsolatedTmp = @import("../test_support/tmp.zig").IsolatedTmp;
     const cwdPathAlloc = @import("../test_support/cwd.zig").cwdPathAlloc;
@@ -661,8 +657,7 @@ test "execute does not persist witnesses to the on-disk corpus" {
 
     var result = try execute(allocator, &.{"{\"path\":\"handler.ts\",\"max_repairs\":1}"});
     defer result.deinit(allocator);
-    // A verified candidate proves the repair lane ran over the failing handler,
-    // so persist_witnesses=true would have created the corpus by this point.
+    // A verified candidate proves the repair lane ran over the failing handler.
     try testing.expect(result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"reason\":\"candidate_verified\"") != null);
 

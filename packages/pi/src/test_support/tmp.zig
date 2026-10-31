@@ -1,7 +1,6 @@
-//! Shared test scaffolding for isolated `/tmp` directories. Consolidates
-//! the previously-per-file `IsolatedTmp` helpers into one definition. Each
-//! caller supplies its own label prefix so failure messages still indicate
-//! which test created the directory.
+//! Shared test scaffolding for isolated `/tmp` directories. Each caller
+//! supplies its own label prefix so failure messages indicate which test
+//! created the directory.
 
 const std = @import("std");
 

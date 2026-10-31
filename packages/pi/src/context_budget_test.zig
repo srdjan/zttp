@@ -435,8 +435,8 @@ test "pinned estimator fixtures reject undercounts and excessive overestimates" 
 
 test "anchored estimate stays calibrated across captured DeepSeek health flow" {
     // Captured from the rejected 2026-08-15 health recapture. Call 4 is the
-    // regression: its input grew by 745 tokens, while the old tool-heavy floor
-    // added 8,192 and exceeded the calibration ceiling.
+    // regression: its input grew by 745 tokens, while a fixed tool-heavy floor
+    // would add 8,192 and exceed the calibration ceiling.
     const captured = [_]CapturedDeepSeekInput{
         .{ .wire_bytes = 28_217, .history_bytes = 503, .actual_tokens = 7_001 },
         .{ .wire_bytes = 29_193, .history_bytes = 1_130, .actual_tokens = 7_300 },

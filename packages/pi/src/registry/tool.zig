@@ -300,8 +300,8 @@ test "withSessionTree duplicates llm_text and payload nodes" {
 }
 
 test "decodeJsonPassthrough returns a heap-owned slice usable after the call" {
-    // Regression: the decoder used to `return &.{dupe(...)}`, a pointer to a
-    // stack temporary that dangles after return (segfaults under ReleaseFast).
+    // Regression: `return &.{dupe(...)}` is a pointer to a stack temporary
+    // that dangles after return (segfaults under ReleaseFast).
     // Drive it through an arena exactly like invokeJson does, then read the
     // result after the decode frame is gone.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);

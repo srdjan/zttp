@@ -1,6 +1,6 @@
 const std = @import("std");
 
-// Measured after Phase 2 removes the three retired kernel decoders.
+// Floors measured on the kernel sources.
 const minimum_files = 13;
 const minimum_functions = 246;
 

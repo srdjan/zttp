@@ -34,9 +34,9 @@ pub const binding = sdk.ModuleBinding{
             .arg_count = 2,
             .effect = .read,
             .returns = .optional_string,
-            // cacheGet(namespace, key): both required. The old single-`.string`
-            // declaration under-required, so `cacheGet("ns")` type-checked but
-            // always returned undefined at runtime (impl needs args.len >= 2).
+            // cacheGet(namespace, key): both required. A single-`.string`
+            // declaration would under-require, so `cacheGet("ns")` would type-check but
+            // always return undefined at runtime (impl needs args.len >= 2).
             .param_types = &.{ .string, .string },
             .param_names = &.{ "namespace", "key" },
             .required_arg_count = 2,
@@ -60,8 +60,8 @@ pub const binding = sdk.ModuleBinding{
             .arg_count = 4,
             .effect = .write,
             .returns = .boolean,
-            // cacheSet(namespace, key, value, ttl?): the old `{string,string}`
-            // declaration let `cacheSet("ns", value)` (missing the key, or value)
+            // cacheSet(namespace, key, value, ttl?): a `{string,string}`
+            // declaration would let `cacheSet("ns", value)` (missing the key, or value)
             // type-check clean while the impl silently returned false (no write).
             .param_types = &.{ .string, .string, .string, .number },
             .param_names = &.{ "namespace", "key", "value", "ttlSeconds" },

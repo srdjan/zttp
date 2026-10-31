@@ -678,10 +678,7 @@ pub const Recorder = struct {
         while (try walker.next(io)) |entry| {
             if (entry.kind == .directory) continue;
             if (entry.kind != .file or !artifact.isSafeRelativePath(entry.path)) return error.UnsafePath;
-            // `.zttp/` is agent-owned scratch, not case source: `pi_goal_check`
-            // persists witnesses to `.zttp/witnesses/<hash>/`. The directory
-            // name carries a per-run hash, so capturing it would make the
-            // expected workspace differ from itself on the next recording.
+            // `.zttp/` is tool-owned scratch, not case source.
             if (artifact.isAgentScratch(entry.path)) continue;
             if (!self.workspacePathAllowed(entry.path)) {
                 // Name the path. The refusal is usually a model that wrote a

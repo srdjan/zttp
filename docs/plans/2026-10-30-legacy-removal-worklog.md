@@ -46,3 +46,38 @@ Status: complete. All checks ran in the scratch directory, and only this worklog
 | `zig build test`, cold | Exit 0. 8478 of 8484 tests pass, with 6 skipped, on 214 of 214 steps |
 
 The ledger in the stored-data set holds, in order: one `deploy` row, the `perf` and `equivalence` fixtures from `proof_ledger.zig`, and one `deploy` row.
+
+## L1
+
+Status: complete. Units L1a to L1d changed text only. Workers ran in parallel on disjoint paths, and one gate ran over the combined tree before the four commits.
+
+| Check | Result |
+|---|---|
+| Comment-only check on each Zig and shell file | Exit 0 for L1c and L1d. For L1b it reports `value.zig`, where the difference is a trailing comment on a line with a quote. I read that line, and no code token changed |
+| Protection diff, build, `surface.sh`, `test-zruntime`, `zig build test`, `check-spine` | Each exit 0 |
+| Comparison script | 0 of 648 rows moved |
+| `test-doc-links`, `test-docs-drift` after L1a | Exit 0 |
+| `git grep -n -i 'injectDriftNote\|witness_corpus\|witness corpus'` outside plans, solutions, and the changelog | No match |
+
+Text changed by cluster:
+
+| Unit | Files | Lines added | Lines removed |
+|---|---|---|---|
+| L1a, documents | 8 | 24 | 141 |
+| L1b, `packages/zts` | 56 | 205 | 250 |
+| L1c, `packages/runtime`, `packages/tools`, `build` | 30 | 72 | 119 |
+| L1d, `packages/pi`, `packages/modules`, `scripts`, `tooling` | 31 | 88 | 132 |
+
+Deviations:
+
+- Rows E4, E6, E8, and C16 in `root.zig` and C15 in `capabilities.zig` live in `packages/zts`, so L1b made them. The plan table names other units for those rows.
+- Row E19 lists native `Result` fields `ok` and `value`. L1b found no such comment text.
+- `AGENTS.md` no longer says that two comments name the old heredoc, because L1c and L1d removed both comments.
+
+Text that the plan did not name:
+
+- `packages/pi/src/simulator/artifact.zig`, `recorder.zig`, `recorder_test.zig`, `tools/workspace_list_files.zig`, and `tools/pi_goal_candidate.zig` said that a tool persists witnesses under `.zttp/witnesses`. No code writes there, and `persist_witnesses` exists only in those comments. The comments now state the current reason to skip `.zttp`.
+- `packages/tools/src/proof_checker_mutants.zig` said that the suite runs 195 tests, next to a floor of 231. The comment is gone.
+- `packages/tools/tests/fixtures/contract/plain_ts.ts` keeps a comment that names `.zttp/witnesses`, because it is a protected fixture.
+
+Open rows that this review found go to the ledger as E21 to E23.

@@ -24,12 +24,10 @@ zts_bin="$3"
 # packages/pi/src/providers/ must appear here: the floor below is per family, so
 # a family with no marker fails instead of being covered by a sibling's.
 #
-# The list once named only the Anthropic and OpenAI hosts and omitted DeepSeek,
-# which is the shipped default, and the local MLX server. A single-marker floor
-# was satisfied by the legacy strings, so the gate printed "runtime purity OK"
-# without ever asserting that the provider a user actually gets is absent from
-# the shipped binary. Those two providers were removed with their clients, so
-# their rows went with them.
+# The list names DeepSeek, which is the shipped default, and the local MLX
+# server. A single-marker floor could be satisfied by one stale string, so the
+# gate would print "runtime purity OK" without asserting that the provider a
+# user actually gets is absent from the shipped binary.
 markers=(
   "deepseek:api.deepseek.com"
   "local:http://127.0.0.1:8080"

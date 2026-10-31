@@ -38,10 +38,9 @@ const build_gate_markers = [_][]const u8{
     "test-capability-audit",
     "test-docs-drift",
     "test-evidence-marker",
-    // The example suites moved here from `verify_script_markers` when they
-    // stopped being a `verify.sh` line of their own and became a dependency of
-    // `zig build test`. The gate follows the wiring rather than the old call
-    // site, so it still asserts that something runs them.
+    // The example suites are a dependency of `zig build test`. The gate follows
+    // the wiring rather than a call site, so it still asserts that something
+    // runs them.
     "test-examples",
 };
 

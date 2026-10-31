@@ -1396,7 +1396,7 @@ const DraftVisibilityClient = struct {
             1 => .{ .reply = .{ .response = .{ .change_set = .{ .file = "handler.ts", .content = bad_handler } } } },
             // Retry: the failed draft and its diagnostic must already be in the
             // transcript. Respond with a TOOL CALL rather than a new edit - the
-            // mid-repair interleave that used to wipe the transient retry prompt.
+            // mid-repair interleave must not wipe the transient retry prompt.
             2 => blk: {
                 self.saw_on_retry = DraftVisibilityClient.draftAndDiagVisible(transcript);
                 break :blk .{ .reply = .{ .response = .{ .tool_calls = &stub_calls } } };

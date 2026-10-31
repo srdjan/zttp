@@ -796,7 +796,7 @@ test "reconstructTranscript preserves parse allocation error compatibility" {
 
     // Reader.open allocates the path first and Reader.next allocates the frame
     // payload second. The next allocation enters std.json parsing, whose
-    // historical public error is CorruptEventsLog rather than OutOfMemory.
+    // public error is CorruptEventsLog rather than OutOfMemory.
     var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = 2 });
     try testing.expectError(
         error.CorruptEventsLog,
@@ -825,9 +825,9 @@ test "reconstructTranscript cleans every allocation failure" {
         } else |err| {
             try testing.expect(failing.has_induced_failure);
             switch (err) {
-                // JSON parse allocation failure has historically been translated
-                // to corruption. All later owned projection allocations preserve
-                // OutOfMemory. Both paths must clean their partial ownership.
+                // JSON parse allocation failure is translated to corruption. All later
+                // owned projection allocations preserve OutOfMemory. Both paths must
+                // clean their partial ownership.
                 error.CorruptEventsLog, error.OutOfMemory => {},
                 else => return err,
             }
