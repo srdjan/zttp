@@ -1341,8 +1341,8 @@ fn compareResponses(
     }
 
     {
-        const old_dyn = old.responses_dynamic or old.response_schema_dynamic;
-        const new_dyn = new.responses_dynamic or new.response_schema_dynamic;
+        const old_dyn = responsesDynamic(old);
+        const new_dyn = responsesDynamic(new);
         if (old_dyn or new_dyn) {
             // `.dynamic` means LOST provability (was provable, now unprovable) -
             // that cannot be certified equivalent and is breaking. A response
@@ -1366,6 +1366,16 @@ fn compareResponses(
     }
 
     return if (has_addition) .additive else .unchanged;
+}
+
+/// True when the route lost track of its responses (`responses_dynamic`) or
+/// when any listed response has a dynamic schema.
+fn responsesDynamic(route: *const ApiRouteInfo) bool {
+    if (route.responses_dynamic) return true;
+    for (route.responses.items) |response| {
+        if (response.schema.isDynamic()) return true;
+    }
+    return false;
 }
 
 fn findResponse(
@@ -2424,6 +2434,113 @@ test "diffContracts unchanged already-dynamic response is NOT breaking" {
     try std.testing.expectEqual(ApiResponseChange.unchanged, diff.api_route_changes.items[0].response);
     try std.testing.expectEqual(Classification.equivalent, diff.classify());
     try std.testing.expectEqual(Classification.equivalent, diff.behavioralVerdict());
+}
+
+const TestResponse = struct {
+    status: ?u16,
+    content_type: ?[]const u8,
+    schema_json: ?[]const u8,
+    dynamic: bool,
+};
+
+const ok_json: TestResponse = .{ .status = 200, .content_type = "application/json", .schema_json = "{\"type\":\"object\"}", .dynamic = false };
+const created_json: TestResponse = .{ .status = 201, .content_type = "application/json", .schema_json = "{\"type\":\"object\"}", .dynamic = false };
+const missing_json: TestResponse = .{ .status = 404, .content_type = "application/json", .schema_json = "{\"type\":\"string\"}", .dynamic = false };
+const missing_text: TestResponse = .{ .status = 404, .content_type = "text/plain", .schema_json = "{\"type\":\"string\"}", .dynamic = false };
+const gone_json: TestResponse = .{ .status = 410, .content_type = "application/json", .schema_json = "{\"type\":\"string\"}", .dynamic = false };
+const error_json: TestResponse = .{ .status = 500, .content_type = "application/json", .schema_json = "{\"type\":\"string\"}", .dynamic = false };
+const computed: TestResponse = .{ .status = 200, .content_type = "application/json", .schema_json = null, .dynamic = true };
+
+/// Appends a route whose `responses` hold `specs`. The scalar fields get the
+/// values `syncLegacyRouteResponse` gives them, because the contract builder
+/// sets them before any diff.
+fn appendTestResponseRoute(
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+    specs: []const TestResponse,
+    responses_dynamic: bool,
+) !void {
+    var route: ApiRouteInfo = .{
+        .method = try allocator.dupe(u8, "GET"),
+        .path = try allocator.dupe(u8, "/users/:id"),
+        .request_schema_refs = .empty,
+        .request_schema_dynamic = false,
+        .requires_bearer = false,
+        .requires_jwt = false,
+        .responses_dynamic = responses_dynamic,
+        .response_schema_dynamic = responses_dynamic,
+    };
+    errdefer route.deinit(allocator);
+    for (specs) |spec| {
+        const content_type = if (spec.content_type) |value| try allocator.dupe(u8, value) else null;
+        errdefer if (content_type) |value| allocator.free(value);
+        const schema: handler_contract.SchemaSpec = if (spec.dynamic)
+            .dynamic
+        else if (spec.schema_json) |value|
+            .{ .inline_json = try allocator.dupe(u8, value) }
+        else
+            .none;
+        errdefer schema.deinitOwned(allocator);
+        try route.responses.append(allocator, .{ .status = spec.status, .content_type = content_type, .schema = schema });
+    }
+    if (specs.len > 1) route.response_schema_dynamic = true;
+    if (specs.len == 1) {
+        if (specs[0].dynamic) {
+            route.response_schema_dynamic = true;
+        } else {
+            route.response_status = specs[0].status;
+            if (specs[0].content_type) |value| route.response_content_type = try allocator.dupe(u8, value);
+            if (specs[0].schema_json) |value| route.response_schema_json = try allocator.dupe(u8, value);
+        }
+    }
+    try contract.api.routes.append(allocator, route);
+}
+
+test "response shapes classify through diffContracts" {
+    const allocator = std.testing.allocator;
+    const Row = struct {
+        name: []const u8,
+        old: []const TestResponse,
+        old_dynamic: bool = false,
+        new: []const TestResponse,
+        new_dynamic: bool = false,
+        expected: ApiResponseChange,
+    };
+    const rows = [_]Row{
+        .{ .name = "a one static 200, same", .old = &.{ok_json}, .new = &.{ok_json}, .expected = .unchanged },
+        .{ .name = "b one static 200 becomes 201", .old = &.{ok_json}, .new = &.{created_json}, .expected = .breaking },
+        .{ .name = "c two static, same", .old = &.{ ok_json, missing_json }, .new = &.{ ok_json, missing_json }, .expected = .unchanged },
+        .{ .name = "d two static, 404 becomes 410", .old = &.{ ok_json, missing_json }, .new = &.{ ok_json, gone_json }, .expected = .breaking },
+        .{ .name = "e two static, 404 content type changes", .old = &.{ ok_json, missing_json }, .new = &.{ ok_json, missing_text }, .expected = .breaking },
+        .{ .name = "f two static become three", .old = &.{ ok_json, missing_json }, .new = &.{ ok_json, missing_json, error_json }, .expected = .breaking },
+        .{ .name = "g one static becomes one dynamic", .old = &.{ok_json}, .new = &.{computed}, .expected = .dynamic },
+        .{ .name = "h one dynamic becomes one static", .old = &.{computed}, .new = &.{ok_json}, .expected = .unchanged },
+        .{ .name = "i one dynamic, same", .old = &.{computed}, .new = &.{computed}, .expected = .unchanged },
+        .{ .name = "j two responses with one dynamic, same", .old = &.{ ok_json, computed }, .new = &.{ ok_json, computed }, .expected = .unchanged },
+        .{ .name = "k two static become two with one dynamic", .old = &.{ ok_json, missing_json }, .new = &.{ ok_json, computed }, .expected = .dynamic },
+        .{ .name = "l dynamic flag with empty list, same", .old = &.{}, .old_dynamic = true, .new = &.{}, .new_dynamic = true, .expected = .unchanged },
+        .{ .name = "m empty list becomes dynamic flag", .old = &.{}, .new = &.{}, .new_dynamic = true, .expected = .dynamic },
+        .{ .name = "n empty list, same", .old = &.{}, .new = &.{}, .expected = .unchanged },
+        .{ .name = "o one static 200 becomes 200 and 404", .old = &.{ok_json}, .new = &.{ ok_json, missing_json }, .expected = .breaking },
+        .{ .name = "p 200 and 404 become one static 200", .old = &.{ ok_json, missing_json }, .new = &.{ok_json}, .expected = .breaking },
+    };
+
+    for (rows) |row| {
+        var old = try makeTestContract(allocator);
+        defer old.deinit(allocator);
+        try appendTestResponseRoute(allocator, &old, row.old, row.old_dynamic);
+        var new = try makeTestContract(allocator);
+        defer new.deinit(allocator);
+        try appendTestResponseRoute(allocator, &new, row.new, row.new_dynamic);
+
+        var diff = try diffContracts(allocator, &old, &new);
+        defer diff.deinit(allocator);
+
+        std.testing.expectEqual(row.expected, diff.api_route_changes.items[0].response) catch |err| {
+            std.debug.print("row {s}: got {s}\n", .{ row.name, @tagName(diff.api_route_changes.items[0].response) });
+            return err;
+        };
+    }
 }
 
 test "generateRecommendation equivalent" {
