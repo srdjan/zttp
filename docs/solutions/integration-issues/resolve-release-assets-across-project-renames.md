@@ -28,6 +28,10 @@ tags:
 
 # Resolve Release Assets Across Project Renames
 
+Status: superseded for the `zigttp-*` fallback. Unit L7d of the legacy removal
+plan removed that fallback, so `ZTTP_VERSION=v0.18.0` or older no longer
+installs. The rest of this note records the earlier fix.
+
 ## Problem
 
 The default installer selected release v0.18.0 but assumed every selected tag

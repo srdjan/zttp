@@ -387,3 +387,15 @@ Status: complete. `canonicalize --json` prints the tag name of each repair inten
 The two goldens each moved one line, with three names changed. The comparison script moved 13 more rows, all inputs that trigger a rewrite. I ran the base and new binaries over the 648 inputs with the two hash values and the ten names masked. Only the 12 rows that earlier units moved still differ. So those 13 rows differ only by the hash and the five names.
 
 At review I rewrote the comments in `packages/tools/src/agent_protocol_canon.zig` and `packages/tools/src/agent_protocol_simulate.zig`, because each one called the old name a current form. The test that sends `canonicalize_let_const` to `simulate_edit` stays, and that input is still refused as `unknown_intent`.
+
+## L7d
+
+Status: complete. `install.sh` accepts one asset form, `zttp-<version>-<os>-<arch>.tar.gz`, so `ZTTP_VERSION=v0.18.0` or older stops installing and reports the missing-archive error. `gh release view` shows that the latest release, v0.26.0, has `zttp-*` assets, so the default install is not affected.
+
+Review found a coverage loss in the worker's change. The removed `LEGACY_` block held the only test of `check_existing`. I added a case with current-name binaries at the requested version: the installer reports "is already installed" and requests no download.
+
+Decision 11 names the asset fallback and not the version prefixes. `check_existing` also accepted `zigttp` and `zigts` version output, and no installer path can now produce that binary. I removed those prefixes as the same rename, and `binary_has_expected_version` now takes one prefix. A second new case asserts that old-name version output does not count as an existing install.
+
+Three temporary mutants of `install.sh` each failed the script: any version accepted, no exit after the "already installed" line, and a wrong `zts` prefix.
+
+`docs/solutions/integration-issues/resolve-release-assets-across-project-renames.md` now opens with a status line, and its history stays. `bash scripts/test-install-archive-safety.sh` exited 0, and `zig build test-release-workflow` exited 0. `zig build verify` routes that script, and L9 runs it there.

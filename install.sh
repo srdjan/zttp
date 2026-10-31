@@ -68,9 +68,9 @@ main() {
     BACKUP_DIR="${TRANSACTION_DIR}/backup"
     mkdir "$BACKUP_DIR"
 
-    stage_binary "$PAYLOAD_DIR" "$ZTTP_SOURCE" "$ZTTP_STAGE"
-    stage_binary "$PAYLOAD_DIR" "$ZTS_SOURCE" "$ZIGTS_STAGE"
-    stage_binary "$PAYLOAD_DIR" "$RUNTIME_SOURCE" "$RUNTIME_STAGE"
+    stage_binary "$PAYLOAD_DIR" zttp "$ZTTP_STAGE"
+    stage_binary "$PAYLOAD_DIR" zts "$ZIGTS_STAGE"
+    stage_binary "$PAYLOAD_DIR" zttp-runtime "$RUNTIME_STAGE"
     verify_binary "$ZTTP_STAGE" zttp staged
     verify_binary "$ZIGTS_STAGE" zts staged
     verify_binary "$RUNTIME_STAGE" zttp-runtime staged
@@ -196,28 +196,17 @@ resolve_release_assets() {
     fi
 
     current_root="zttp-${VERSION}-${OS}-${ARCH}"
-    legacy_root="zigttp-${VERSION}-${OS}-${ARCH}"
 
     if release_has_asset "$RELEASE_METADATA" "${current_root}.tar.gz" &&
         release_has_asset "$RELEASE_METADATA" "${current_root}.tar.gz.sha256"; then
         PAYLOAD_ROOT="$current_root"
-        ZTTP_SOURCE="zttp"
-        ZTS_SOURCE="zts"
-        RUNTIME_SOURCE="zttp-runtime"
-    elif release_has_asset "$RELEASE_METADATA" "${legacy_root}.tar.gz" &&
-        release_has_asset "$RELEASE_METADATA" "${legacy_root}.tar.gz.sha256"; then
-        PAYLOAD_ROOT="$legacy_root"
-        ZTTP_SOURCE="zigttp"
-        ZTS_SOURCE="zigts"
-        RUNTIME_SOURCE="zigttp-runtime"
     else
         if [ "$OS" = "macos" ] && [ "$ARCH" = "x86_64" ]; then
             printf "Error: zttp publishes no Intel macOS build from 0.22.3 on. Build from source, or pin ZTTP_VERSION to v0.21.0 or earlier.\n" >&2
             exit 1
         fi
         printf "Error: release %s has no complete archive/checksum pair for %s/%s\n" "$VERSION" "$OS" "$ARCH" >&2
-        printf "Expected either %s or %s and its exact .sha256 asset\n" \
-            "${current_root}.tar.gz" "${legacy_root}.tar.gz" >&2
+        printf "Expected %s and its exact .sha256 asset\n" "${current_root}.tar.gz" >&2
         exit 1
     fi
 
@@ -491,7 +480,7 @@ cleanup() {
 
 binary_has_expected_version() {
     name="$1"
-    shift
+    prefix="$2"
 
     if [ ! -x "${BIN_DIR}/${name}" ]; then
         return 1
@@ -500,19 +489,14 @@ binary_has_expected_version() {
         return 1
     fi
 
-    for prefix in "$@"; do
-        if [ "$version_output" = "${prefix} ${VERSION}" ] ||
-            [ "$version_output" = "${prefix} ${VERSION#v}" ]; then
-            return 0
-        fi
-    done
-    return 1
+    [ "$version_output" = "${prefix} ${VERSION}" ] ||
+        [ "$version_output" = "${prefix} ${VERSION#v}" ]
 }
 
 check_existing() {
-    if binary_has_expected_version zttp zttp zigttp &&
-        binary_has_expected_version zts zts zigts &&
-        binary_has_expected_version zttp-runtime zttp zigttp; then
+    if binary_has_expected_version zttp zttp &&
+        binary_has_expected_version zts zts &&
+        binary_has_expected_version zttp-runtime zttp; then
         printf "zttp %s is already installed at %s\n" "$VERSION" "$BIN_DIR"
         exit 0
     fi

@@ -62,48 +62,28 @@ if validate_archive_paths "$TMPDIR/symlink.tar.gz" "$EXPECTED_ROOT" 2>/dev/null;
     fail "archive with symlink member accepted"
 fi
 
-LEGACY_VERSION="v0.18.0"
-LEGACY_PLATFORM="macos-aarch64"
-LEGACY_ROOT="zigttp-${LEGACY_VERSION}-${LEGACY_PLATFORM}"
-LEGACY_TARBALL="${TMPDIR}/${LEGACY_ROOT}.tar.gz"
-LEGACY_CHECKSUM="${LEGACY_TARBALL}.sha256"
-LEGACY_METADATA="${TMPDIR}/legacy-release.json"
-LEGACY_INSTALL_DIR="${TMPDIR}/legacy-install"
-LEGACY_INSTALL_OUTPUT="${TMPDIR}/legacy-install.out"
-LEGACY_EXISTING_OUTPUT="${TMPDIR}/legacy-existing.out"
-
-mkdir -p "${TMPDIR}/${LEGACY_ROOT}"
-printf '%s\n' '#!/bin/sh' 'printf "zigttp 0.18.0\n"' > "${TMPDIR}/${LEGACY_ROOT}/zigttp"
-printf '%s\n' '#!/bin/sh' 'printf "zigts 0.18.0\n"' > "${TMPDIR}/${LEGACY_ROOT}/zigts"
-printf '%s\n' '#!/bin/sh' 'printf "zigttp 0.18.0\n"' > "${TMPDIR}/${LEGACY_ROOT}/zigttp-runtime"
-chmod +x \
-    "${TMPDIR}/${LEGACY_ROOT}/zigttp" \
-    "${TMPDIR}/${LEGACY_ROOT}/zigts" \
-    "${TMPDIR}/${LEGACY_ROOT}/zigttp-runtime"
-tar czf "$LEGACY_TARBALL" -C "$TMPDIR" "$LEGACY_ROOT"
-
-if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$TMPDIR" && sha256sum "$(basename "$LEGACY_TARBALL")" > "$(basename "$LEGACY_CHECKSUM")")
-else
-    (cd "$TMPDIR" && shasum -a 256 "$(basename "$LEGACY_TARBALL")" > "$(basename "$LEGACY_CHECKSUM")")
-fi
+# A release that holds only the old zigttp-* assets is not installable.
+OLD_NAME_VERSION="v0.18.0"
+OLD_NAME_ROOT="zigttp-${OLD_NAME_VERSION}-macos-aarch64"
+OLD_NAME_METADATA="${TMPDIR}/old-name-release.json"
+OLD_NAME_ERROR="${TMPDIR}/old-name-install.err"
 
 printf '%s\n' \
     '{' \
     '  "tag_name": "v0.18.0",' \
     '  "assets": [' \
     '    {' \
-    "      \"name\": \"${LEGACY_ROOT}.tar.gz\"" \
+    "      \"name\": \"${OLD_NAME_ROOT}.tar.gz\"" \
     '    },' \
     '    {' \
-    "      \"name\": \"${LEGACY_ROOT}.tar.gz.sha256\"" \
+    "      \"name\": \"${OLD_NAME_ROOT}.tar.gz.sha256\"" \
     '    }' \
     '  ]' \
-    '}' > "$LEGACY_METADATA"
+    '}' > "$OLD_NAME_METADATA"
 
-if ! (
-        ZTTP_VERSION="$LEGACY_VERSION"
-        INSTALL_DIR="$LEGACY_INSTALL_DIR"
+if (
+        ZTTP_VERSION="$OLD_NAME_VERSION"
+        INSTALL_DIR="${TMPDIR}/old-name-install"
         BIN_DIR="${INSTALL_DIR}/bin"
         export ZTTP_VERSION
 
@@ -113,68 +93,61 @@ if ! (
         }
 
         download_stdout() {
-            [ "$1" = "https://api.github.com/repos/${REPO}/releases/tags/${LEGACY_VERSION}" ] ||
-                fail "unexpected metadata URL: $1"
-            command cat "$LEGACY_METADATA"
+            command cat "$OLD_NAME_METADATA"
         }
 
         download() {
-            case "$1" in
-                *"/${LEGACY_ROOT}.tar.gz")
-                    cp "$LEGACY_TARBALL" "$2"
-                    ;;
-                *"/${LEGACY_ROOT}.tar.gz.sha256")
-                    cp "$LEGACY_CHECKSUM" "$2"
-                    ;;
-                *)
-                    fail "unexpected asset URL: $1"
-                    ;;
-            esac
+            fail "old-name release triggered an asset request: $1"
         }
 
         main
-) > "$LEGACY_INSTALL_OUTPUT"; then
-    fail "legacy v0.18.0 installation failed"
+) > /dev/null 2> "$OLD_NAME_ERROR"; then
+    fail "release with only zigttp-* assets was installed"
 fi
 
-grep -Fq "Installed zttp v0.18.0" "$LEGACY_INSTALL_OUTPUT" ||
-    fail "legacy installation did not complete"
-[ "$("${LEGACY_INSTALL_DIR}/bin/zttp" version)" = "zigttp 0.18.0" ] ||
-    fail "legacy zigttp binary was not mapped to zttp"
-[ "$("${LEGACY_INSTALL_DIR}/bin/zts" version)" = "zigts 0.18.0" ] ||
-    fail "legacy zigts binary was not mapped to zts"
-[ "$("${LEGACY_INSTALL_DIR}/bin/zttp-runtime" version)" = "zigttp 0.18.0" ] ||
-    fail "legacy runtime binary was not mapped to zttp-runtime"
-[ ! -e "${LEGACY_INSTALL_DIR}/bin/zigttp" ] ||
-    fail "legacy source binary name was installed"
-[ ! -e "${LEGACY_INSTALL_DIR}/bin/zigts" ] ||
-    fail "legacy source binary name was installed"
+grep -Fqx "Error: release v0.18.0 has no complete archive/checksum pair for macos/aarch64" "$OLD_NAME_ERROR" ||
+    fail "old-name release did not report the missing archive pair"
+grep -Fqx "Expected zttp-v0.18.0-macos-aarch64.tar.gz and its exact .sha256 asset" "$OLD_NAME_ERROR" ||
+    fail "old-name release did not name the expected asset"
 
-if ! (
-        ZTTP_VERSION="$LEGACY_VERSION"
-        INSTALL_DIR="$LEGACY_INSTALL_DIR"
-        BIN_DIR="${INSTALL_DIR}/bin"
-        export ZTTP_VERSION
+# An existing install at the requested version needs no download.
+EXISTING_VERSION="v0.26.0"
+EXISTING_DIR="${TMPDIR}/existing-install"
+EXISTING_OUTPUT="${TMPDIR}/existing-install.out"
 
-        detect_platform() {
-            OS="macos"
-            ARCH="aarch64"
-        }
+mkdir -p "${EXISTING_DIR}/bin"
+printf '#!/bin/sh\necho "zttp 0.26.0"\n' > "${EXISTING_DIR}/bin/zttp"
+printf '#!/bin/sh\necho "zts 0.26.0"\n' > "${EXISTING_DIR}/bin/zts"
+printf '#!/bin/sh\necho "zttp 0.26.0"\n' > "${EXISTING_DIR}/bin/zttp-runtime"
+chmod +x "${EXISTING_DIR}/bin/zttp" "${EXISTING_DIR}/bin/zts" "${EXISTING_DIR}/bin/zttp-runtime"
 
-        download_stdout() {
-            fail "already-installed legacy binaries triggered a metadata request"
-        }
+(
+    VERSION="$EXISTING_VERSION"
+    BIN_DIR="${EXISTING_DIR}/bin"
 
-        download() {
-            fail "already-installed legacy binaries triggered an asset request"
-        }
+    download_stdout() {
+        fail "existing install triggered a metadata request: $1"
+    }
 
-        main
-) > "$LEGACY_EXISTING_OUTPUT"; then
-    fail "legacy installed-version detection failed"
+    download() {
+        fail "existing install triggered an asset request: $1"
+    }
+
+    check_existing
+    fail "existing install did not stop the installer"
+) > "$EXISTING_OUTPUT" || fail "existing install check failed"
+
+grep -Fqx "zttp v0.26.0 is already installed at ${EXISTING_DIR}/bin" "$EXISTING_OUTPUT" ||
+    fail "existing install did not report the installed version"
+
+# A binary with the old name in its version output is not the requested release.
+printf '#!/bin/sh\necho "zigttp 0.26.0"\n' > "${EXISTING_DIR}/bin/zttp"
+if (
+        VERSION="$EXISTING_VERSION"
+        BIN_DIR="${EXISTING_DIR}/bin"
+        binary_has_expected_version zttp zttp
+); then
+    fail "old-name version output counted as an existing install"
 fi
-
-grep -Fq "zttp v0.18.0 is already installed" "$LEGACY_EXISTING_OUTPUT" ||
-    fail "legacy version prefixes were not accepted"
 
 printf "install archive safety OK\n"
