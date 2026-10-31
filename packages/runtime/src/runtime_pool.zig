@@ -2173,7 +2173,7 @@ test "HandlerPool high contention stress" {
     try std.testing.expectEqual(pool.exhausted_count.load(.acquire), @as(u64, error_count));
 }
 
-test "prepared evaluation caches bytecode and reload restores raw virtual parsing" {
+test "prepared evaluation caches bytecode and reload refuses an any annotation in virtual source" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -2202,9 +2202,10 @@ test "prepared evaluation caches bytecode and reload restores raw virtual parsin
         try std.testing.expectEqual(@as(u64, 1), pool.cache.hits.load(.monotonic));
         try std.testing.expect(!pool.cache_disabled.load(.monotonic));
     }
-    _ = try pool.reloadSourceGeneration(source, "<inline>", null, null);
+    const refused_source = "function handler(req) { const later: any = 1; return Response.text(\"never\"); }";
+    _ = try pool.reloadSourceGeneration(refused_source, "<inline>", null, null);
     try std.testing.expectEqual(@as(usize, 0), pool.cache.count());
-    try std.testing.expectError(error.UnexpectedToken, pool.executeHandler(request.asView()));
+    try std.testing.expectError(error.UnsupportedAnyType, pool.executeHandler(request.asView()));
     _ = try pool.reloadSourceGeneration("function handler(req) { return Response.text(\"reloaded\"); }", "<inline>", null, null);
     var response = try pool.executeHandler(request.asView());
     defer response.deinit();

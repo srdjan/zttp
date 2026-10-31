@@ -838,41 +838,35 @@ pub const HandlerInstance = struct {
         const source_kind = zq.classifySourcePath(filename);
         if (source_kind == .unsupported) return error.UnsupportedSourceExtension;
         if (prepared_eval and source_kind != .virtual_javascript) return error.UnsupportedSourceExtension;
-        const typed_parse = source_kind.isTyped() or prepared_eval;
+        // Every source passes admission. A `.ts` file also gets type checking and
+        // normalized diagnostic positions. A virtual source (inline code or prepared
+        // eval) leaves authored annotations unchecked and generates bytecode right
+        // after admission. Prepared eval implies a virtual source.
+        const typed_file = source_kind.isTyped();
         var diag_view = zq.SourceView.of(code);
         diag_view.name = filename;
-        diag_view.normalize_positions = source_kind.isTyped();
-        var p = if (typed_parse)
-            try zq.Parser.initTyped(self.allocator, self.allocator, code, self.strings, &self.ctx.atoms)
-        else
-            try zq.Parser.init(self.allocator, code, self.strings, &self.ctx.atoms);
+        diag_view.normalize_positions = typed_file;
+        var p = try zq.Parser.initTyped(self.allocator, self.allocator, code, self.strings, &self.ctx.atoms);
         defer p.deinit();
         var bytecode_data: []const u8 = undefined;
-        if (typed_parse) {
-            switch (try p.parseTypedIr()) {
-                .accepted => {},
-                .parser_refused => |refusal| {
-                    logParseErrors(self.allocator, diag_view, p.js_parser.getProjectedErrors());
-                    return refusal.first_error;
-                },
-                .terminal_admission_refused => |failure| {
-                    const err = zq.prepareErrorForAdmissionFailure(failure);
-                    std.log.err("TypeScript strip error in {s}: {}", .{ filename, err });
-                    return err;
-                },
-                .recovered_admission_refused => unreachable,
-            }
-            if (prepared_eval) bytecode_data = try p.generateParsed(self.allocator);
-        } else {
-            bytecode_data = p.parse() catch |err| {
-                logParseErrors(self.allocator, diag_view, p.js_parser.getErrors());
+        switch (try p.parseTypedIr()) {
+            .accepted => {},
+            .parser_refused => |refusal| {
+                logParseErrors(self.allocator, diag_view, p.js_parser.getProjectedErrors());
+                return refusal.first_error;
+            },
+            .terminal_admission_refused => |failure| {
+                const err = zq.prepareErrorForAdmissionFailure(failure);
+                if (!builtin.is_test) std.log.err("TypeScript strip error in {s}: {}", .{ filename, err });
                 return err;
-            };
+            },
+            .recovered_admission_refused => unreachable,
         }
+        if (!typed_file) bytecode_data = try p.generateParsed(self.allocator);
 
         {
             const ir_view = zq.IrView.fromIRStore(&p.js_parser.nodes, &p.js_parser.constants);
-            var parsed = if (source_kind.isTyped() and !prepared_eval)
+            var parsed = if (typed_file)
                 zq.pipeline.ParsedModule.fromTypedExisting(ir_view, p.root_node, &self.ctx.atoms, &p.js_parser.type_store)
             else
                 zq.pipeline.ParsedModule.fromExisting(ir_view, p.root_node, &self.ctx.atoms);
@@ -880,7 +874,7 @@ pub const HandlerInstance = struct {
 
             var type_env_storage: zq.pipeline.TypeEnvStorage = .{};
             defer type_env_storage.deinit(self.allocator);
-            if (source_kind.isTyped() and !prepared_eval) {
+            if (typed_file) {
                 try type_env_storage.initWithSource(self.allocator, .{ .direct = .{
                     .store = &p.js_parser.type_store,
                     .ir_view = ir_view,
@@ -933,7 +927,7 @@ pub const HandlerInstance = struct {
             }
         }
 
-        if (source_kind.isTyped() and !prepared_eval) bytecode_data = try p.generateParsed(self.allocator);
+        if (typed_file) bytecode_data = try p.generateParsed(self.allocator);
 
         // Resolve module imports and register virtual module native functions
         const has_file_imports = try self.resolveModuleImports(&p);

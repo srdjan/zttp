@@ -3962,11 +3962,15 @@ test "sseEvents returns events and a tagged framing failure through the JS API" 
     try std.testing.expectEqual(@as(i64, 0), output.get("errorOffset").?.integer);
 }
 
-test "prepared evaluation omits authored types while raw virtual and file profiles remain distinct" {
+test "prepared evaluation omits authored types while virtual source refuses any and file profile checks types" {
     const source = "function handler(req: Request): Response { const value: number = \"ok\"; return Response.text(value); }";
-    const raw = try HandlerInstance.init(std.testing.allocator, .{});
-    defer raw.deinit();
-    try std.testing.expectError(error.UnexpectedToken, raw.loadCode(source, "<eval>"));
+    const refused_source = "function handler(req) { const later: any = 1; return Response.text(\"never\"); }";
+    const refused_virtual = try HandlerInstance.init(std.testing.allocator, .{});
+    defer refused_virtual.deinit();
+    try std.testing.expectError(error.UnsupportedAnyType, refused_virtual.loadCode(refused_source, "<eval>"));
+    const virtual = try HandlerInstance.init(std.testing.allocator, .{});
+    defer virtual.deinit();
+    try virtual.loadCode(source, "<eval>");
     const file = try HandlerInstance.init(std.testing.allocator, .{});
     defer file.deinit();
     try std.testing.expectError(error.SoundModeViolation, file.loadCode(source, "handler.ts"));
@@ -3980,6 +3984,9 @@ test "prepared evaluation omits authored types while raw virtual and file profil
         .body = null,
     };
     defer request.deinit(std.testing.allocator);
+    var virtual_response = try virtual.executeHandler(request.asView());
+    defer virtual_response.deinit();
+    try std.testing.expectEqualStrings("ok", virtual_response.body);
     var response = try prepared.executeHandler(request.asView());
     defer response.deinit();
     try std.testing.expectEqualStrings("ok", response.body);

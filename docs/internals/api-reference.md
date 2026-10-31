@@ -47,6 +47,7 @@ pub fn main() !void {
 
 `HandlerSource` is a union: `.inline_code`, `.file_path`, `.embedded_bytecode`
 (from `-Dhandler=`), and `.appended_payload` (from a self-extracting binary).
+The runtime loads `.inline_code` through admission, so a source that admission refuses fails at load. The runtime does not type-check an inline source.
 
 ### Configuration Fields
 

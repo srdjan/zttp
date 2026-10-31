@@ -264,3 +264,22 @@ Observation that this unit did not cause, on the base binary and now: `function 
 Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`, `test-zts`, `test-modules`, `test-zruntime`, `zig build test`, `check-spine`, and `bash scripts/check-semantics-spec.sh`. `zts meta --json` is identical. The comparison script moved no row beyond the 12 rows of L4.
 
 `compile` now takes the typed entry, so D-016 names three untyped entries. `compile matches the typed path for a fragment with erased annotations` compared one path with itself after this change. It is now `compile erases annotations from a fragment`, which compares the bytes of an annotated fragment and of the same fragment with no annotation.
+
+## L5b
+
+Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`, `test-zruntime`, `test-server`, `test-cli`, `test-examples`, `zig build test`, and `check-spine`. `zts meta --json` is identical. The comparison script moved 12 rows, all listed, and 0 unexpected rows.
+
+The pin test failed before the change with `expected error.UnsupportedAnyType, found error.ParseError`. `loadCodeWithCachingInternal` now has one typed entry, and only a `.ts` file gets the type check. D-016 names two untyped entries: `JsParser.initExpression` and `JsParser.initSourceObserver`.
+
+Move that Decision 4 does not name: an inline source with type annotations loaded nothing on the base binary, because the raw parser stopped at the first annotation with `error.UnexpectedToken`. That source now loads, and the runtime does not check its annotations. The plan measured this path, and the pin test asserts the new result with the response body `ok`. `zttp -e` already loads an annotated source unchecked. The annotation adds no runtime behavior, because base loads the same source with its annotations removed. No production code produces `.inline_code`. L9 adds a `CHANGELOG.md` line.
+
+My review made one wrong change and reversed it. I added the type check to `.inline_code` to keep that refusal. That change hung `test-zruntime` for almost five hours in `probeFetchWithRetry`, because `method: 1` failed at load and the deferred `join` waited in `accept`. After a fixture fix, 12 tests failed with `error.SoundModeViolation` or a related type error, because those fixtures load values that the type check refuses so they can reach runtime guards. Decision 4 authorizes admission refusal only, so I removed the type check. The fixture fix stays as its own commit.
+
+The worker's `if (!builtin.is_test)` guard stops the admission log line from failing the test runner, which counts each logged error as a failure.
+
+Renamed tests:
+
+| Old name | New name |
+|---|---|
+| `prepared evaluation caches bytecode and reload restores raw virtual parsing` | `prepared evaluation caches bytecode and reload refuses an any annotation in virtual source` |
+| `prepared evaluation omits authored types while raw virtual and file profiles remain distinct` | `prepared evaluation omits authored types while virtual source refuses any and file profile checks types` |
