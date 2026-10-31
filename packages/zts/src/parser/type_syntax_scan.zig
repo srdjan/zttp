@@ -104,7 +104,7 @@ pub fn scanRawTypeOnlyModule(
         .kind = kind,
         .raw_span = .{ .start = start, .end = @intCast(end) },
     };
-    const refused = kind == .import_type and containsLegacyTypesImport(module.raw_span.text(source));
+    const refused = kind == .import_type and containsRetiredTypesImport(module.raw_span.text(source));
     return .{
         .module = module,
         .refused = refused,
@@ -120,7 +120,7 @@ fn literalKeywordAt(source: []const u8, start: usize, keyword: []const u8) bool 
     return end == source.len or !isIdentifierContinue(source[end]);
 }
 
-fn containsLegacyTypesImport(statement: []const u8) bool {
+fn containsRetiredTypesImport(statement: []const u8) bool {
     return std.mem.indexOf(u8, statement, "\"" ++ retired_types_module ++ "\"") != null or
         std.mem.indexOf(u8, statement, "'" ++ retired_types_module ++ "'") != null;
 }
@@ -213,7 +213,7 @@ const RawModuleScanner = struct {
     }
 
     fn scanOrdinaryString(self: *RawModuleScanner, start: usize, quote: u8) !usize {
-        const scanned = scanLegacyPlainQuoted(self.source, start, quote);
+        const scanned = scanPlainQuoted(self.source, start, quote);
         if (scanned.unterminated_line) {
             try self.recordDiagnostic(.unterminated_string, scanned.end);
         }
@@ -375,17 +375,17 @@ pub const ExplicitCallScan = union(enum) {
     scanned: GenericListScan,
 };
 
-const LegacyTemplateFrame = struct {
+const TemplateFrame = struct {
     interpolation_depth: u16 = 0,
     propagate_errors: bool,
 };
 
-const LegacyQuoteFailure = union(enum) {
+const QuoteFailure = union(enum) {
     unterminated_string: u32,
     nesting_too_deep: u32,
 };
 
-const LegacyMatchingBracketScan = union(enum) {
+const MatchingBracketScan = union(enum) {
     complete: usize,
     nesting_too_deep: u32,
 };
@@ -492,8 +492,8 @@ fn scanProbeQuote(
     const checkpoint = caught.items.len;
     errdefer caught.items.len = checkpoint;
     var suppressed = false;
-    var failure: ?LegacyQuoteFailure = null;
-    const ending = try scanLegacyGenericQuotedCore(
+    var failure: ?QuoteFailure = null;
+    const ending = try scanGenericQuotedCore(
         allocator,
         source,
         start,
@@ -503,7 +503,7 @@ fn scanProbeQuote(
         caught,
         &failure,
     );
-    if (ending == null) try appendLegacyQuoteFailure(allocator, caught, failure orelse
+    if (ending == null) try appendQuoteFailure(allocator, caught, failure orelse
         return error.InvalidAdmissionQuoteResult);
     const context: AdmissionPresentation = .{
         .source = source,
@@ -521,7 +521,7 @@ fn scanProbeQuote(
     return ending;
 }
 
-fn scanLegacyPlainQuoted(source: []const u8, start: usize, quote: u8) struct {
+fn scanPlainQuoted(source: []const u8, start: usize, quote: u8) struct {
     end: usize,
     unterminated_line: bool,
 } {
@@ -538,7 +538,7 @@ fn scanLegacyPlainQuoted(source: []const u8, start: usize, quote: u8) struct {
     return .{ .end = source.len, .unterminated_line = false };
 }
 
-fn scanLegacyGenericQuoted(
+fn scanGenericQuoted(
     allocator: std.mem.Allocator,
     source: []const u8,
     start: usize,
@@ -546,8 +546,8 @@ fn scanLegacyGenericQuoted(
     propagate_errors: bool,
     suppressed_diagnostic: *bool,
 ) !?usize {
-    var failure: ?LegacyQuoteFailure = null;
-    return scanLegacyGenericQuotedCore(
+    var failure: ?QuoteFailure = null;
+    return scanGenericQuotedCore(
         allocator,
         source,
         start,
@@ -559,7 +559,7 @@ fn scanLegacyGenericQuoted(
     );
 }
 
-fn scanLegacyGenericQuotedCore(
+fn scanGenericQuotedCore(
     allocator: std.mem.Allocator,
     source: []const u8,
     start: usize,
@@ -567,10 +567,10 @@ fn scanLegacyGenericQuotedCore(
     propagate_errors: bool,
     suppressed_diagnostic: *bool,
     caught: ?*std.ArrayListUnmanaged(AdmissionDiagnostic),
-    failure: *?LegacyQuoteFailure,
+    failure: *?QuoteFailure,
 ) !?usize {
     if (quote != '`') {
-        const scanned = scanLegacyPlainQuoted(source, start, quote);
+        const scanned = scanPlainQuoted(source, start, quote);
         if (scanned.unterminated_line and propagate_errors) {
             failure.* = .{ .unterminated_string = @intCast(scanned.end) };
             return null;
@@ -585,7 +585,7 @@ fn scanLegacyGenericQuotedCore(
         return scanned.end;
     }
 
-    var frames: std.ArrayListUnmanaged(LegacyTemplateFrame) = .empty;
+    var frames: std.ArrayListUnmanaged(TemplateFrame) = .empty;
     defer frames.deinit(allocator);
     try frames.append(allocator, .{ .propagate_errors = propagate_errors });
     var pos = start + 1;
@@ -611,7 +611,7 @@ fn scanLegacyGenericQuotedCore(
         }
 
         if (source[pos] == '"' or source[pos] == '\'') {
-            const nested = scanLegacyPlainQuoted(source, pos, source[pos]);
+            const nested = scanPlainQuoted(source, pos, source[pos]);
             if (nested.unterminated_line) {
                 suppressed_diagnostic.* = true;
                 if (caught) |items| try items.append(allocator, .{
@@ -669,8 +669,8 @@ pub fn scanAdmissionQuotedRegion(
     const caught_checkpoint = options.caught.items.len;
     errdefer options.caught.items.len = caught_checkpoint;
     var suppressed_diagnostic = false;
-    var failure: ?LegacyQuoteFailure = null;
-    const end = try scanLegacyGenericQuotedCore(
+    var failure: ?QuoteFailure = null;
+    const end = try scanGenericQuotedCore(
         allocator,
         options.source,
         options.start,
@@ -695,10 +695,10 @@ pub fn scanAdmissionQuotedRegion(
     return .{ .terminal = terminal };
 }
 
-fn appendLegacyQuoteFailure(
+fn appendQuoteFailure(
     allocator: std.mem.Allocator,
     caught: ?*std.ArrayListUnmanaged(AdmissionDiagnostic),
-    failure: LegacyQuoteFailure,
+    failure: QuoteFailure,
 ) !void {
     const items = caught orelse return;
     const diagnostic: AdmissionDiagnostic = switch (failure) {
@@ -714,14 +714,14 @@ fn appendLegacyQuoteFailure(
     try items.append(allocator, diagnostic);
 }
 
-fn scanLegacyMatchingBracketCore(
+fn scanMatchingBracketCore(
     allocator: std.mem.Allocator,
     source: []const u8,
     start: usize,
     open: u8,
     suppressed_diagnostic: *bool,
     caught: ?*std.ArrayListUnmanaged(AdmissionDiagnostic),
-) !LegacyMatchingBracketScan {
+) !MatchingBracketScan {
     return switch (try scanObservedMatchingBracket(
         allocator,
         source,
@@ -767,8 +767,8 @@ fn scanObservedMatchingBracket(
                     return error.InvalidAdmissionQuoteResult, position)) orelse return .not_matched;
                 continue;
             }
-            var failure: ?LegacyQuoteFailure = null;
-            pos = (try scanLegacyGenericQuotedCore(
+            var failure: ?QuoteFailure = null;
+            pos = (try scanGenericQuotedCore(
                 allocator,
                 source,
                 pos,
@@ -812,8 +812,8 @@ fn scanBalancedGenericListCore(
     while (pos < source.len and angle_depth > 0) {
         const byte = source[pos];
         if (byte == '"' or byte == '\'' or byte == '`') {
-            var failure: ?LegacyQuoteFailure = null;
-            pos = (try scanLegacyGenericQuotedCore(
+            var failure: ?QuoteFailure = null;
+            pos = (try scanGenericQuotedCore(
                 allocator,
                 source,
                 pos,
@@ -823,7 +823,7 @@ fn scanBalancedGenericListCore(
                 caught,
                 &failure,
             )) orelse {
-                try appendLegacyQuoteFailure(
+                try appendQuoteFailure(
                     allocator,
                     caught,
                     failure orelse return error.InvalidAdmissionQuoteResult,
@@ -856,7 +856,7 @@ fn scanBalancedGenericListCore(
                 angle_depth -= 1;
             },
             '(', '[', '{' => {
-                switch (try scanLegacyMatchingBracketCore(
+                switch (try scanMatchingBracketCore(
                     allocator,
                     source,
                     pos,
@@ -963,8 +963,8 @@ fn scanExplicitCallTypeArgumentsCore(
     while (pos < source.len) {
         const byte = source[pos];
         if (byte == '"' or byte == '\'' or byte == '`') {
-            var failure: ?LegacyQuoteFailure = null;
-            pos = (try scanLegacyGenericQuotedCore(
+            var failure: ?QuoteFailure = null;
+            pos = (try scanGenericQuotedCore(
                 allocator,
                 source,
                 pos,
@@ -974,7 +974,7 @@ fn scanExplicitCallTypeArgumentsCore(
                 caught,
                 &failure,
             )) orelse {
-                try appendLegacyQuoteFailure(
+                try appendQuoteFailure(
                     allocator,
                     caught,
                     failure orelse return error.InvalidAdmissionQuoteResult,
@@ -1098,7 +1098,7 @@ pub fn scanAdmissionBraceBody(
         return error.InvalidAdmissionSpan;
     }
     var suppressed_diagnostic = false;
-    return switch (try scanLegacyMatchingBracketCore(
+    return switch (try scanMatchingBracketCore(
         allocator,
         options.source,
         options.start,
@@ -1341,8 +1341,8 @@ fn scanAdmissionQuoted(
     caught: *std.ArrayListUnmanaged(AdmissionDiagnostic),
 ) !AdmissionQuoteScan {
     var suppressed_diagnostic = false;
-    var failure: ?LegacyQuoteFailure = null;
-    const end = try scanLegacyGenericQuotedCore(
+    var failure: ?QuoteFailure = null;
+    const end = try scanGenericQuotedCore(
         allocator,
         source,
         start,
@@ -2130,9 +2130,9 @@ fn skipAdmissionAnyQuoted(
     quote: u8,
 ) !usize {
     const bounded = source[0..end];
-    if (quote != '`') return scanLegacyPlainQuoted(bounded, start, quote).end;
+    if (quote != '`') return scanPlainQuoted(bounded, start, quote).end;
     var suppressed_diagnostic = false;
-    return (try scanLegacyGenericQuoted(
+    return (try scanGenericQuoted(
         allocator,
         bounded,
         start,
@@ -2197,7 +2197,7 @@ pub fn isScalarNominalBase(text: []const u8) bool {
         std.mem.eql(u8, trimmed, "boolean");
 }
 
-test "explicit call scanner keeps legacy operator and touching filters" {
+test "explicit call scanner keeps operator and touching filters" {
     const refused = [_][]const u8{
         "id<T && U>(value)",
         "id<T || U>(value)",
@@ -2518,7 +2518,7 @@ fn expectTypeSpanDiagnostics(
     }
 }
 
-test "bounded admission policies preserve legacy any and removed spelling order" {
+test "bounded admission policies preserve any and removed spelling order" {
     const source = "{ any: string; value: many; alias: Array<string>; later: Many }";
     const span: Span = .{ .start = 0, .end = @intCast(source.len) };
 
@@ -3058,7 +3058,7 @@ test "admission endpoint reports only committed unfinished comments" {
     );
 }
 
-test "parameter endpoint follows legacy delimiter depth rules" {
+test "parameter endpoint follows delimiter depth rules" {
     const source = "{ value: string; nested: number } = fallback, next)";
     var caught: std.ArrayListUnmanaged(AdmissionDiagnostic) = .empty;
     defer caught.deinit(std.testing.allocator);
@@ -3218,7 +3218,7 @@ test "admission quoted region preserves complete and terminal boundaries" {
 
 test "admission quoted region restores caught rows on allocation failure" {
     const prefix = "`outer${\"first\n";
-    const nested_count = comptime std.ArrayListUnmanaged(LegacyTemplateFrame).growCapacity(1);
+    const nested_count = comptime std.ArrayListUnmanaged(TemplateFrame).growCapacity(1);
     const source = prefix ++ (@as([(nested_count) * ("`nested${").len]u8, @bitCast(@as([nested_count][("`nested${").len]u8, @splat(("`nested${").*))))) ++ "value" ++ (@as([(nested_count) * ("}`").len]u8, @bitCast(@as([nested_count][("}`").len]u8, @splat(("}`").*))))) ++ "}`";
     var observed_failures: usize = 0;
     try std.testing.checkAllAllocationFailures(

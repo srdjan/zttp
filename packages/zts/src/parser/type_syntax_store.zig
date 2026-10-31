@@ -54,7 +54,7 @@ pub const AdmissionKind = enum {
     interface_declaration,
     type_alias_declaration,
     distinct_type_declaration,
-    legacy_types_import,
+    retired_types_import,
     default_parameter,
     optional_parameter,
     default_export,
@@ -625,7 +625,7 @@ pub const TypeOnlyModuleScan = union(enum) {
 
 pub const GenericCaptureSpans = struct {
     actual_erased_span: Span,
-    legacy_recorded_span: Span,
+    recorded_span: Span,
 };
 
 pub const ErasedTypePrefixOwner = union(enum) {
@@ -708,7 +708,7 @@ pub const AuthoredGenericParameter = struct {
 pub const ProjectedGenericParameter = struct {
     raw_span: Span,
     name_span: Span,
-    legacy_bound_span: ?Span,
+    bound_span: ?Span,
     bound_fragment: ?u32,
 };
 
@@ -1025,7 +1025,7 @@ pub const Store = struct {
         try appendAuthoredGenericParameters(self, options.list_span);
         const projection = try appendProjectedParametersWithBounds(
             self,
-            projectedListBody(self.source, options.capture_spans.legacy_recorded_span),
+            projectedListBody(self.source, options.capture_spans.recorded_span),
             options.policy == .callable,
         );
 
@@ -1038,7 +1038,7 @@ pub const Store = struct {
                 const fragment_start = std.math.cast(u32, self.semantic_fragments.items.len) orelse
                     return error.TooManyTypeItems;
                 try appendAuthoredCallArguments(self, options.list_span);
-                try appendProjectedCallFragments(self, options.capture_spans.legacy_recorded_span);
+                try appendProjectedCallFragments(self, options.capture_spans.recorded_span);
                 break :blk .{ .legacy_call_arguments = .{
                     .authored_arguments = .{
                         .start = argument_start,
@@ -1152,7 +1152,7 @@ pub const Store = struct {
         const projected_start = std.math.cast(u32, self.semantic_fragments.items.len) orelse
             return error.TooManyTypeItems;
         try appendAuthoredCallArguments(self, options.list_span);
-        try appendProjectedCallFragments(self, options.capture_spans.legacy_recorded_span);
+        try appendProjectedCallFragments(self, options.capture_spans.recorded_span);
 
         const record_index = std.math.cast(u32, self.explicit_call_arguments.items.len) orelse
             return error.TooManyTypeItems;
@@ -1306,7 +1306,7 @@ pub const Store = struct {
             .legacy_parameter_projection => blk: {
                 const projection = try appendProjectedParametersWithBounds(
                     self,
-                    projectedListBody(self.source, options.capture_spans.legacy_recorded_span),
+                    projectedListBody(self.source, options.capture_spans.recorded_span),
                     true,
                 );
                 break :blk .{ .legacy_parameter_projection = .{
@@ -1590,7 +1590,7 @@ pub const Store = struct {
             try self.validateSpan(parameter.raw_span);
             try self.validateSpan(parameter.name_span);
             if (!spanContains(parameter.raw_span, parameter.name_span)) return error.InvalidTypeSpan;
-            if (parameter.legacy_bound_span) |span| {
+            if (parameter.bound_span) |span| {
                 try self.validateSpan(span);
                 if (!spanContains(parameter.raw_span, span)) return error.InvalidTypeSpan;
             }
@@ -2233,7 +2233,7 @@ pub const Store = struct {
                     return error.InvalidTypeRange;
                 if (parameters.len > 8 or fragments.len > 8) return error.InvalidTypeRange;
                 for (parameters) |parameter| {
-                    if (!spanContains(prefix.capture_spans.legacy_recorded_span, parameter.raw_span)) {
+                    if (!spanContains(prefix.capture_spans.recorded_span, parameter.raw_span)) {
                         return error.InvalidErasedTypePrefix;
                     }
                     if (parameter.bound_fragment) |fragment_index| {
@@ -2248,7 +2248,7 @@ pub const Store = struct {
                             return error.InvalidErasedTypePrefix;
                         }
                         const fragment = self.semantic_fragments.items[fragment_index];
-                        const bound_span = parameter.legacy_bound_span orelse
+                        const bound_span = parameter.bound_span orelse
                             return error.InvalidErasedTypePrefix;
                         if (!std.meta.eql(fragment.raw_span, bound_span)) {
                             return error.InvalidErasedTypePrefix;
@@ -2270,16 +2270,16 @@ pub const Store = struct {
             return error.InvalidErasedTypePrefix;
         const legacy_end = list_span.end - 1;
         const assignment_capture = std.meta.eql(capture_spans.actual_erased_span, list_span) and
-            capture_spans.legacy_recorded_span.start == legacy_start and
-            capture_spans.legacy_recorded_span.end == legacy_end;
+            capture_spans.recorded_span.start == legacy_start and
+            capture_spans.recorded_span.end == legacy_end;
         const legacy_projected_end = std.math.add(
             u32,
-            capture_spans.legacy_recorded_span.end,
+            capture_spans.recorded_span.end,
             1,
         ) catch return error.InvalidErasedTypePrefix;
         const general_capture = capture_spans.actual_erased_span.start == list_span.start and
             capture_spans.actual_erased_span.end >= list_span.end and
-            capture_spans.legacy_recorded_span.start == legacy_start and
+            capture_spans.recorded_span.start == legacy_start and
             legacy_projected_end == capture_spans.actual_erased_span.end and
             containsOnlyTypeWhitespace(
                 self.source,
@@ -2534,7 +2534,7 @@ pub const Store = struct {
 
     fn validateCaptureSpans(self: *const Store, capture_spans: GenericCaptureSpans) !void {
         try self.validateSpan(capture_spans.actual_erased_span);
-        try self.validateSpan(capture_spans.legacy_recorded_span);
+        try self.validateSpan(capture_spans.recorded_span);
     }
 
     fn validateOwnerCaptureSpans(
@@ -2545,7 +2545,7 @@ pub const Store = struct {
         try self.validateCaptureSpans(capture_spans);
         if (capture_spans.actual_erased_span.start != list_span.start or
             !spanContains(capture_spans.actual_erased_span, list_span) or
-            !spanContains(capture_spans.actual_erased_span, capture_spans.legacy_recorded_span))
+            !spanContains(capture_spans.actual_erased_span, capture_spans.recorded_span))
         {
             return error.InvalidGenericOwner;
         }
@@ -2631,7 +2631,7 @@ pub const Store = struct {
                         return error.InvalidTypeRange;
                     }
                     const fragment = self.semantic_fragments.items[fragment_index];
-                    const bound_span = parameter.legacy_bound_span orelse return error.InvalidGenericOwner;
+                    const bound_span = parameter.bound_span orelse return error.InvalidGenericOwner;
                     if (!std.meta.eql(fragment.raw_span, bound_span)) return error.InvalidGenericOwner;
                 };
             },
@@ -2644,7 +2644,7 @@ pub const Store = struct {
                         return error.InvalidTypeRange;
                     }
                     const fragment = self.semantic_fragments.items[fragment_index];
-                    const bound_span = parameter.legacy_bound_span orelse return error.InvalidGenericOwner;
+                    const bound_span = parameter.bound_span orelse return error.InvalidGenericOwner;
                     if (!std.meta.eql(fragment.raw_span, bound_span)) return error.InvalidGenericOwner;
                 };
             },
@@ -2669,8 +2669,8 @@ pub const Store = struct {
         const ignored_function_comment = switch (owner.identity) {
             .function => std.meta.activeTag(owner.compatibility) == .ignored_declaration_parameters and
                 std.meta.eql(owner.list_span, owner.capture_spans.actual_erased_span) and
-                owner.capture_spans.legacy_recorded_span.start == owner.list_span.start + 1 and
-                owner.capture_spans.legacy_recorded_span.end == owner.list_span.end - 1 and
+                owner.capture_spans.recorded_span.start == owner.list_span.start + 1 and
+                owner.capture_spans.recorded_span.end == owner.list_span.end - 1 and
                 switch (classifyNamedFunctionGap(self.source, .{
                     .start = owner.list_span.end,
                     .end = location.offset,
@@ -3060,7 +3060,7 @@ test "explicit call reservation owns its record and rolls back every array" {
                 .list_span = .{ .start = first_start, .end = first_lparen },
                 .capture_spans = .{
                     .actual_erased_span = .{ .start = first_start, .end = first_lparen },
-                    .legacy_recorded_span = .{ .start = first_start + 1, .end = first_lparen - 1 },
+                    .recorded_span = .{ .start = first_start + 1, .end = first_lparen - 1 },
                 },
             });
             try store.finishExplicitCall(&first, first_call, runtime.view());
@@ -3079,7 +3079,7 @@ test "explicit call reservation owns its record and rolls back every array" {
                 .list_span = .{ .start = second_start, .end = second_lparen },
                 .capture_spans = .{
                     .actual_erased_span = .{ .start = second_start, .end = second_lparen },
-                    .legacy_recorded_span = .{ .start = second_start + 1, .end = second_lparen - 1 },
+                    .recorded_span = .{ .start = second_start + 1, .end = second_lparen - 1 },
                 },
             }) catch |err| switch (err) {
                 error.OutOfMemory => {
@@ -3108,7 +3108,7 @@ test "explicit call reservation owns its record and rolls back every array" {
                 .list_span = .{ .start = second_start, .end = second_lparen },
                 .capture_spans = .{
                     .actual_erased_span = .{ .start = second_start, .end = second_lparen },
-                    .legacy_recorded_span = .{ .start = second_start + 1, .end = second_lparen - 1 },
+                    .recorded_span = .{ .start = second_start + 1, .end = second_lparen - 1 },
                 },
             });
             store.cancelExplicitCall(&canceled);
@@ -3142,7 +3142,7 @@ test "explicit call validation rejects more than eight projected arguments" {
         .list_span = .{ .start = list_start, .end = lparen },
         .capture_spans = .{
             .actual_erased_span = .{ .start = list_start, .end = lparen },
-            .legacy_recorded_span = .{ .start = list_start + 1, .end = lparen - 1 },
+            .recorded_span = .{ .start = list_start + 1, .end = lparen - 1 },
         },
     });
     try store.finishExplicitCall(&pending, call, runtime.view());
@@ -3170,7 +3170,7 @@ test "generic and call finalizers reject incompatible runtime owners" {
     const arrow = try runtime.addFunction(.arrow_function, 3);
     const capture_spans: GenericCaptureSpans = .{
         .actual_erased_span = .{ .start = 0, .end = 3 },
-        .legacy_recorded_span = .{ .start = 1, .end = 2 },
+        .recorded_span = .{ .start = 1, .end = 2 },
     };
 
     var structural = try store.reserveGenericOwner(.{
@@ -3291,7 +3291,7 @@ test "only ignored named functions accept one bounded after-list comment gap" {
                 .list_span = .{ .start = 0, .end = 3 },
                 .capture_spans = .{
                     .actual_erased_span = .{ .start = 0, .end = 3 },
-                    .legacy_recorded_span = .{ .start = 1, .end = 2 },
+                    .recorded_span = .{ .start = 1, .end = 2 },
                 },
                 .policy = policy,
             });
@@ -3307,12 +3307,12 @@ test "only ignored named functions accept one bounded after-list comment gap" {
                     store.validateRuntimeOwners(std.testing.allocator, runtime.view()),
                 );
                 store.generic_owners.items[0].capture_spans.actual_erased_span.end -= 1;
-                store.generic_owners.items[0].capture_spans.legacy_recorded_span = .{ .start = 0, .end = 3 };
+                store.generic_owners.items[0].capture_spans.recorded_span = .{ .start = 0, .end = 3 };
                 try std.testing.expectError(
                     error.InvalidGenericOwner,
                     store.validateRuntimeOwners(std.testing.allocator, runtime.view()),
                 );
-                store.generic_owners.items[0].capture_spans.legacy_recorded_span = .{ .start = 1, .end = 2 };
+                store.generic_owners.items[0].capture_spans.recorded_span = .{ .start = 1, .end = 2 };
                 try store.validateRuntimeOwners(std.testing.allocator, runtime.view());
             } else {
                 try std.testing.expectError(
@@ -3366,7 +3366,7 @@ test "generic and call owners reject unrelated captures and invalid openers" {
                 .list_span = .{ .start = 1, .end = 4 },
                 .capture_spans = .{
                     .actual_erased_span = .{ .start = 0, .end = 4 },
-                    .legacy_recorded_span = .{ .start = 2, .end = 3 },
+                    .recorded_span = .{ .start = 2, .end = 3 },
                 },
                 .policy = .callable,
             }),
@@ -3378,7 +3378,7 @@ test "generic and call owners reject unrelated captures and invalid openers" {
                 .list_span = .{ .start = 1, .end = 4 },
                 .capture_spans = .{
                     .actual_erased_span = .{ .start = 1, .end = 4 },
-                    .legacy_recorded_span = .{ .start = 5, .end = 5 },
+                    .recorded_span = .{ .start = 5, .end = 5 },
                 },
             }),
         );
@@ -3394,7 +3394,7 @@ test "generic and call owners reject unrelated captures and invalid openers" {
                 .list_span = .{ .start = 0, .end = 3 },
                 .capture_spans = .{
                     .actual_erased_span = .{ .start = 1, .end = 2 },
-                    .legacy_recorded_span = .{ .start = 1, .end = 2 },
+                    .recorded_span = .{ .start = 1, .end = 2 },
                 },
                 .policy = .callable,
             }),
@@ -3408,7 +3408,7 @@ test "generic and call owners reject unrelated captures and invalid openers" {
                 .list_span = .{ .start = 0, .end = 3 },
                 .capture_spans = .{
                     .actual_erased_span = .{ .start = 0, .end = 3 },
-                    .legacy_recorded_span = .{ .start = 1, .end = 2 },
+                    .recorded_span = .{ .start = 1, .end = 2 },
                 },
                 .policy = .callable,
             });
@@ -3426,7 +3426,7 @@ test "generic and call owners reject unrelated captures and invalid openers" {
                 .list_span = .{ .start = 0, .end = 3 },
                 .capture_spans = .{
                     .actual_erased_span = .{ .start = 0, .end = 3 },
-                    .legacy_recorded_span = .{ .start = 1, .end = 2 },
+                    .recorded_span = .{ .start = 1, .end = 2 },
                 },
                 .policy = .callable,
             });
@@ -3451,7 +3451,7 @@ test "generic and call owners reject unrelated captures and invalid openers" {
             .list_span = .{ .start = 0, .end = 3 },
             .capture_spans = .{
                 .actual_erased_span = .{ .start = 0, .end = 3 },
-                .legacy_recorded_span = .{ .start = 1, .end = 2 },
+                .recorded_span = .{ .start = 1, .end = 2 },
             },
         });
         try std.testing.expectError(
@@ -3471,7 +3471,7 @@ test "generic and call owners reject unrelated captures and invalid openers" {
             .list_span = .{ .start = 0, .end = @intCast(source.len) },
             .capture_spans = .{
                 .actual_erased_span = .{ .start = 0, .end = @intCast(source.len) },
-                .legacy_recorded_span = .{ .start = 1, .end = @intCast(source.len - 1) },
+                .recorded_span = .{ .start = 1, .end = @intCast(source.len - 1) },
             },
         });
         try std.testing.expectError(
@@ -3491,7 +3491,7 @@ test "runtime owners reject captures extending through their opener" {
     const before = store.checkpoint();
     const captures: GenericCaptureSpans = .{
         .actual_erased_span = .{ .start = 0, .end = 4 },
-        .legacy_recorded_span = .{ .start = 1, .end = 2 },
+        .recorded_span = .{ .start = 1, .end = 2 },
     };
     inline for (.{ ir.NodeTag.function_expr, ir.NodeTag.arrow_function }) |tag| {
         const owner = try runtime.addFunction(tag, 3);
@@ -3533,7 +3533,7 @@ test "legacy compatibility and explicit calls own distinct shared ranges" {
     const call = try runtime.addCall(8);
     const capture_spans: GenericCaptureSpans = .{
         .actual_erased_span = .{ .start = 0, .end = 8 },
-        .legacy_recorded_span = .{ .start = 0, .end = 8 },
+        .recorded_span = .{ .start = 0, .end = 8 },
     };
 
     var compatibility = try store.reserveGenericOwner(.{
@@ -3887,7 +3887,7 @@ test "admission vocabulary retains seventeen ordered kinds" {
         .interface_declaration,
         .type_alias_declaration,
         .distinct_type_declaration,
-        .legacy_types_import,
+        .retired_types_import,
         .default_parameter,
         .optional_parameter,
         .default_export,

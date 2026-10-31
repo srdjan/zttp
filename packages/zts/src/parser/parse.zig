@@ -1253,7 +1253,7 @@ pub const Parser = struct {
                 var origin_sink = self.admissionSink();
                 if (origin_sink) |*sink| sink.presentation = presentation_origin;
                 const raw_diagnostic: type_syntax.AdmissionDiagnostic = .{
-                    .kind = .legacy_types_import,
+                    .kind = .retired_types_import,
                     .span = .{
                         .start = refusal.original_location.offset,
                         .end = refusal.original_location.end_offset,
@@ -2404,7 +2404,7 @@ pub const Parser = struct {
             .policy = .legacy_call,
             .capture_spans = .{
                 .actual_erased_span = scanned.span,
-                .legacy_recorded_span = .{ .start = scanned.span.start + 1, .end = scanned.span.end - 1 },
+                .recorded_span = .{ .start = scanned.span.start + 1, .end = scanned.span.end - 1 },
             },
             .header_admission = .runtime_only,
         } else switch (name_gap) {
@@ -2413,7 +2413,7 @@ pub const Parser = struct {
                     .policy = .callable,
                     .capture_spans = .{
                         .actual_erased_span = scanned.span,
-                        .legacy_recorded_span = .{
+                        .recorded_span = .{
                             .start = scanned.span.start + 1,
                             .end = scanned.span.end - 1,
                         },
@@ -2424,7 +2424,7 @@ pub const Parser = struct {
                     .policy = .ignored,
                     .capture_spans = .{
                         .actual_erased_span = scanned.span,
-                        .legacy_recorded_span = .{
+                        .recorded_span = .{
                             .start = scanned.span.start + 1,
                             .end = scanned.span.end - 1,
                         },
@@ -2439,7 +2439,7 @@ pub const Parser = struct {
                         .policy = .legacy_call,
                         .capture_spans = .{
                             .actual_erased_span = scanned.span,
-                            .legacy_recorded_span = .{
+                            .recorded_span = .{
                                 .start = scanned.span.start + 1,
                                 .end = scanned.span.end - 1,
                             },
@@ -2465,7 +2465,7 @@ pub const Parser = struct {
             .policy = reservation.policy,
         };
         try self.recordRecoveryErasure(options.capture_spans.actual_erased_span);
-        try self.recordPrintableRegion(.{ .recorded_generic = options.capture_spans.legacy_recorded_span });
+        try self.recordPrintableRegion(.{ .recorded_generic = options.capture_spans.recorded_span });
         accepted = true;
         return .{
             .options = options,
@@ -2585,7 +2585,7 @@ pub const Parser = struct {
             (!self.source_only or dedicated_header))
             .{ .policy = .callable, .capture_spans = .{
                 .actual_erased_span = scanned.span,
-                .legacy_recorded_span = .{
+                .recorded_span = .{
                     .start = scanned.span.start + 1,
                     .end = scanned.span.end - 1,
                 },
@@ -2596,7 +2596,7 @@ pub const Parser = struct {
             }
             break :blk .{ .policy = .legacy_call, .capture_spans = .{
                 .actual_erased_span = scanned.span,
-                .legacy_recorded_span = .{
+                .recorded_span = .{
                     .start = scanned.span.start + 1,
                     .end = scanned.span.end - 1,
                 },
@@ -2606,7 +2606,7 @@ pub const Parser = struct {
                 .start = scanned.span.start,
                 .end = cursor.current.start,
             },
-            .legacy_recorded_span = .{
+            .recorded_span = .{
                 .start = scanned.span.start + 1,
                 .end = cursor.current.start - 1,
             },
@@ -2620,7 +2620,7 @@ pub const Parser = struct {
             .policy = reservation.policy,
         };
         try self.recordRecoveryErasure(options.capture_spans.actual_erased_span);
-        try self.recordPrintableRegion(.{ .recorded_generic = options.capture_spans.legacy_recorded_span });
+        try self.recordPrintableRegion(.{ .recorded_generic = options.capture_spans.recorded_span });
         accepted = true;
         return .{ .selected = .{ .options = options, .cursor = cursor, .previous = previous } };
     }
@@ -2667,7 +2667,7 @@ pub const Parser = struct {
         const capture_spans: type_syntax.GenericCaptureSpans = if (dedicated)
             .{
                 .actual_erased_span = scanned.span,
-                .legacy_recorded_span = .{
+                .recorded_span = .{
                     .start = scanned.span.start + 1,
                     .end = scanned.span.end - 1,
                 },
@@ -2678,7 +2678,7 @@ pub const Parser = struct {
                     .start = scanned.span.start,
                     .end = cursor.current.start,
                 },
-                .legacy_recorded_span = .{
+                .recorded_span = .{
                     .start = scanned.span.start + 1,
                     .end = cursor.current.start - 1,
                 },
@@ -2695,7 +2695,7 @@ pub const Parser = struct {
             .policy = policy,
         };
         try self.recordRecoveryErasure(options.capture_spans.actual_erased_span);
-        try self.recordPrintableRegion(.{ .recorded_generic = options.capture_spans.legacy_recorded_span });
+        try self.recordPrintableRegion(.{ .recorded_generic = options.capture_spans.recorded_span });
         return .{ .options = options, .cursor = cursor, .previous = previous };
     }
 
@@ -2806,14 +2806,14 @@ pub const Parser = struct {
             .list_span = scanned.span,
             .capture_spans = .{
                 .actual_erased_span = scanned.span,
-                .legacy_recorded_span = .{
+                .recorded_span = .{
                     .start = scanned.span.start + 1,
                     .end = scanned.span.end - 1,
                 },
             },
         };
         try self.recordRecoveryErasure(options.capture_spans.actual_erased_span);
-        try self.recordPrintableRegion(.{ .recorded_generic = options.capture_spans.legacy_recorded_span });
+        try self.recordPrintableRegion(.{ .recorded_generic = options.capture_spans.recorded_span });
         accepted = true;
         return .{ .options = options, .cursor = cursor, .previous = previous };
     }
@@ -6771,7 +6771,7 @@ test "admission parser reaches each syntax-owned refusal producer" {
         .{ .source = "interface Box { value: string }\n", .kind = .interface_declaration },
         .{ .source = "type Box = string;\n", .kind = .type_alias_declaration },
         .{ .source = "distinct type Box = string;\n", .kind = .distinct_type_declaration },
-        .{ .source = "import type { Value } from \"" ++ retired_types_module ++ "\";\n", .kind = .legacy_types_import },
+        .{ .source = "import type { Value } from \"" ++ retired_types_module ++ "\";\n", .kind = .retired_types_import },
         .{ .source = "function f(value = 1) { return value; }\n", .kind = .default_parameter },
         .{ .source = "function f(value?: string) { return value; }\n", .kind = .optional_parameter },
         .{ .source = "export default 1;\n", .kind = .default_export },
@@ -7001,10 +7001,10 @@ test "admission parser preserves seven measured string and recovery boundaries" 
         .{ .source = "const value = \"open\n\";\nimport type { Spec } from \"" ++ retired_types_module ++ "\";\n", .kind = .unterminated_string, .marker = "\n" },
         .{ .source = "const value = { \"open\nkey\": 1 };\n", .kind = .unterminated_string, .marker = "\n" },
         .{ .source = "import { value } from \"open\npath\";\n", .kind = .unterminated_string, .marker = "\n" },
-        .{ .source = "const value = `${\"open\n}`;\nimport type { Spec } from \"" ++ retired_types_module ++ "\";\n", .kind = .legacy_types_import, .marker = "import type" },
-        .{ .source = "const value: \"open\n = 1;\nimport type { Spec } from \"" ++ retired_types_module ++ "\";\n", .kind = .legacy_types_import, .marker = "import type" },
+        .{ .source = "const value = `${\"open\n}`;\nimport type { Spec } from \"" ++ retired_types_module ++ "\";\n", .kind = .retired_types_import, .marker = "import type" },
+        .{ .source = "const value: \"open\n = 1;\nimport type { Spec } from \"" ++ retired_types_module ++ "\";\n", .kind = .retired_types_import, .marker = "import type" },
         .{ .source = "const broken = ;\n\"open\n\";\n", .kind = .unterminated_string, .marker = "\n\"open\n" },
-        .{ .source = "const broken =\nimport type { Spec } from \"" ++ retired_types_module ++ "\";\n", .kind = .legacy_types_import, .marker = "import type" },
+        .{ .source = "const broken =\nimport type { Spec } from \"" ++ retired_types_module ++ "\";\n", .kind = .retired_types_import, .marker = "import type" },
     };
     try std.testing.expectEqual(@as(usize, 7), cases.len);
     for (cases) |case| {
@@ -7028,7 +7028,7 @@ test "admission parser preserves seven measured string and recovery boundaries" 
             if (diagnostic.span.start == expected_offset) found = true;
         }
         try std.testing.expect(found);
-        if (case.kind == .legacy_types_import) {
+        if (case.kind == .retired_types_import) {
             try std.testing.expect(parser.type_only_module_refusal != null);
         }
     }
@@ -7597,7 +7597,7 @@ test "admission type allocation failures preserve a published seed" {
     try std.testing.expect(post_seed_failures > 0);
 }
 
-test "admission header recovery preserves ordered legacy events without owners" {
+test "admission header recovery preserves ordered events without owners" {
     const Expected = struct { kind: type_syntax.AdmissionKind, offset: u32 };
     const cases = [_]struct {
         source: []const u8,
@@ -8867,7 +8867,7 @@ test "kernel expression parsing decodes unicode escapes like programs" {
     try std.testing.expectEqualStrings("café", view.getString(view.getStringIdx(root).?).?);
 }
 
-test "kernel expression unary before exponent preserves its legacy grammar" {
+test "kernel expression unary before exponent preserves its grammar" {
     const allocator = std.testing.allocator;
 
     var expression_parser = try Parser.initExpression(allocator, "-3 ** 2");
@@ -10518,7 +10518,7 @@ test "type-only module lexical exclusion and refusal keep root priority" {
         try std.testing.expectError(error.AdmissionRefused, parser.parse());
         try std.testing.expect(parser.type_only_module_refusal != null);
         try std.testing.expect(parser.getAdmissionDiagnostics().len > 0);
-        try std.testing.expectEqual(type_syntax.AdmissionKind.legacy_types_import, parser.getAdmissionDiagnostics()[parser.getAdmissionDiagnostics().len - 1].kind);
+        try std.testing.expectEqual(type_syntax.AdmissionKind.retired_types_import, parser.getAdmissionDiagnostics()[parser.getAdmissionDiagnostics().len - 1].kind);
         try std.testing.expectEqual(@as(usize, 1), parser.type_only_module_diagnostics.items.len);
         try std.testing.expectEqual(@as(usize, 0), parser.errors.getErrors().len);
     }
@@ -10533,7 +10533,7 @@ test "type-only module lexical exclusion and refusal keep root priority" {
         try std.testing.expectError(error.AdmissionRefused, parser.parse());
         // Admission records the refusal beside the lexical exclusion.
         try std.testing.expect(parser.type_only_module_refusal != null);
-        try std.testing.expectEqual(type_syntax.AdmissionKind.legacy_types_import, parser.getAdmissionDiagnostics()[0].kind);
+        try std.testing.expectEqual(type_syntax.AdmissionKind.retired_types_import, parser.getAdmissionDiagnostics()[0].kind);
         // The retired import is line 3 of the source.
         try std.testing.expectEqual(@as(u32, 3), parser.getAdmissionDiagnostics()[0].positionIn(source).line);
         try std.testing.expect(parser.errors.getErrors().len > 0);
@@ -10662,7 +10662,7 @@ test "nested type-only module refusal removes enclosing type syntax" {
         try std.testing.expectEqual(refusal_column, refusal.original_location.column);
         const diagnostics = parser.getAdmissionDiagnostics();
         try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
-        try std.testing.expectEqual(type_syntax.AdmissionKind.legacy_types_import, diagnostics[0].kind);
+        try std.testing.expectEqual(type_syntax.AdmissionKind.retired_types_import, diagnostics[0].kind);
         const diagnostic_position = diagnostics[0].positionIn(source);
         try std.testing.expectEqual(refusal_line, diagnostic_position.line);
         try std.testing.expectEqual(refusal_column, diagnostic_position.column);
@@ -11321,10 +11321,10 @@ test "admission preserves measured module export and operand prefixes" {
             .{ .kind = .any_type, .span = .{ .start = 43, .end = 46 }, .presentation = .{ .line = 2, .column = 14 } },
         } },
         .{ .source = "const seed =\r1;import\r type { X } from '" ++ retired_types_module ++ "';\n", .fatal = true, .diagnostics = &.{
-            .{ .kind = .legacy_types_import, .span = .{ .start = 15, .end = 21 }, .presentation = .{ .line = 1, .column = 15 } },
+            .{ .kind = .retired_types_import, .span = .{ .start = 15, .end = 21 }, .presentation = .{ .line = 1, .column = 15 } },
         } },
         .{ .source = "import\r type `${\"open\n}` from '" ++ retired_types_module ++ "';\n", .fatal = true, .diagnostics = &.{
-            .{ .kind = .legacy_types_import, .span = .{ .start = 0, .end = 6 }, .presentation = .{ .line = 1, .column = 1 } },
+            .{ .kind = .retired_types_import, .span = .{ .start = 0, .end = 6 }, .presentation = .{ .line = 1, .column = 1 } },
         } },
         .{ .source = "const seed =\r1;export\r default\r 1; const later: any = 1;\n", .fatal = false, .diagnostics = &.{
             .{ .kind = .default_export, .span = .{ .start = 15, .end = 21 }, .presentation = .{ .line = 1, .column = 15 } },
@@ -11409,7 +11409,7 @@ test "retired module refusal retains caught history under its selected prefix" {
             },
             else => return error.TestUnexpectedResult,
         };
-        try std.testing.expectEqual(type_syntax.AdmissionKind.legacy_types_import, diagnostic.kind);
+        try std.testing.expectEqual(type_syntax.AdmissionKind.retired_types_import, diagnostic.kind);
         const history = parser.admission_observations.?.items();
         try std.testing.expectEqual(@as(usize, 2), history.len);
         try std.testing.expectEqualDeep(type_syntax.AdmissionDiagnostic{
@@ -11448,7 +11448,7 @@ test "admission spaced function lists retain call arguments and runtime headers"
             else => return error.TestUnexpectedResult,
         }
         try std.testing.expectEqualStrings("<T>", owner.list_span.text(source));
-        try std.testing.expectEqualStrings("T", owner.capture_spans.legacy_recorded_span.text(source));
+        try std.testing.expectEqualStrings("T", owner.capture_spans.recorded_span.text(source));
         try std.testing.expectEqual(@as(u32, 1), owner.authored_parameters.count);
         try std.testing.expectEqual(@as(u32, 1), owner.projected_parameters.count);
         const arguments = switch (owner.compatibility) {

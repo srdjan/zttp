@@ -1033,7 +1033,7 @@ test "admission call scanner retains caught rows before a grammar nonmatch" {
     }
 }
 
-test "admission interface brace scanner preserves raw legacy boundaries" {
+test "admission interface brace scanner preserves raw boundaries" {
     const quoted_source = "interface X extends { field: \"open\n next: any } trailing";
     const body_start: u32 = @intCast(std.mem.indexOfScalar(u8, quoted_source, '{').?);
     const body_end: u32 = @intCast(std.mem.indexOfScalar(u8, quoted_source, '}').? + 1);
@@ -1357,7 +1357,7 @@ test "nominal generic declaration owns its ignored parameter list" {
     }
     try std.testing.expectEqualStrings("<T>", owner.list_span.text(source));
     try std.testing.expect(std.meta.eql(owner.list_span, owner.capture_spans.actual_erased_span));
-    try std.testing.expect(std.meta.eql(owner.list_span, owner.capture_spans.legacy_recorded_span));
+    try std.testing.expect(std.meta.eql(owner.list_span, owner.capture_spans.recorded_span));
     const authored = store.genericParameterSlice(owner.authored_parameters) orelse
         return error.TestUnexpectedResult;
     const projected = store.projectedGenericParameterSlice(owner.projected_parameters) orelse
@@ -1476,7 +1476,7 @@ test "generic syntax resumes combined operator tokens at exact boundaries" {
         const owner = store.generic_owners.items[0];
         try std.testing.expectEqualStrings("<<T>>", owner.list_span.text(source));
         try std.testing.expect(std.meta.eql(owner.list_span, owner.capture_spans.actual_erased_span));
-        try std.testing.expect(std.meta.eql(owner.list_span, owner.capture_spans.legacy_recorded_span));
+        try std.testing.expect(std.meta.eql(owner.list_span, owner.capture_spans.recorded_span));
         const projected = store.projectedGenericParameterSlice(owner.projected_parameters) orelse
             return error.TestUnexpectedResult;
         try std.testing.expectEqual(@as(usize, 1), projected.len);

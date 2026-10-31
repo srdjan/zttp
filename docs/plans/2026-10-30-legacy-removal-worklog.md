@@ -81,3 +81,15 @@ Text that the plan did not name:
 - `packages/tools/tests/fixtures/contract/plain_ts.ts` keeps a comment that names `.zttp/witnesses`, because it is a protected fixture.
 
 Open rows that this review found go to the ledger as E21 to E23.
+
+## L2
+
+Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`, `test-zruntime`, `test-expert-app`, `zig build test`, `check-spine`. `zts meta --json` is identical. The comparison script moved 0 of 648 rows.
+
+The first gate run moved one row: `tests/corpus/parse/bad/legacy_types_import.ts`. `zts check` prints the Zig error name on stderr, so renaming the error `LegacyTypesImport` changed protected output. I restored that error name. The Zig tag is `retired_types_import` and the scan function is `containsRetiredTypesImport`, because neither name reaches an output. The error name stays, with this reason.
+
+Names that the worker chose: `in_zts_modules_dir`, `StepCapturingClient` (because `CapturingClient` exists in the same file), `v1_key`, `removed_name`, `removed_query_names`, and `SessionProviderMissing`.
+
+`eprobe.sh` table rows hold a pool timing and leak addresses, so the unit gate normalizes both before it compares. The `parse-error` row of that table shows a `SafeAllocator` leak report on the debug binary at the base commit. This plan did not cause it, and no unit here changes it.
+
+Names that wait for L4 to L8: `legacy_return_kind`, `LegacyReturnKind`, `hasLegacyGuardFacet`, `legacy_ordinary_prefix`, `legacy_call`, `legacy_call_arguments`, `legacy_parameter_projection`, `legacy_start`, `legacy_end`, `legacy_projected_end`, `legacy_capture`, `original_legacy_capture`, `legacy_bound`, `unsupported_legacy_spelling_refusal`.

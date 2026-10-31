@@ -8,7 +8,7 @@
 const std = @import("std");
 const tool_registry = @import("tool_registry.zig");
 const query_tool = @import("tools/zts_expert_query.zig");
-const legacy_query_names = [_][]const u8{
+const removed_query_names = [_][]const u8{
     "zts_expert_meta",
     "zts_expert_features",
     "zts_expert_restrictions",
@@ -27,7 +27,7 @@ test "registry excludes retired model authority" {
     defer live.deinit(testing.allocator);
 
     try testing.expect(live.findByName(query_tool.tool.name) != null);
-    for (legacy_query_names) |legacy_name| try testing.expect(live.findByName(legacy_name) == null);
+    for (removed_query_names) |removed_name| try testing.expect(live.findByName(removed_name) == null);
     inline for (&.{
         "zts_expert_review_patch",
         "zts_expert_system_proof",

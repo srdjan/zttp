@@ -1695,8 +1695,8 @@ pub const Analyzer = struct {
         return null;
     }
 
-    /// Merge a supplied sibling result after the legacy relative-import
-    /// charge. The legacy charge stays intact, so a clean sibling does not
+    /// Merge a supplied sibling result after the relative-import
+    /// charge. The charge stays intact, so a clean sibling does not
     /// establish new purity, capability, or determinism claims.
     fn mergeImportedEffect(
         self: *const Analyzer,
@@ -2996,7 +2996,7 @@ test "module holders retain their effects without an atom table" {
     try testing.expect(row.lower_bound);
 }
 
-test "supplied sibling outcomes preserve legacy charges and add completed effects" {
+test "supplied sibling outcomes preserve relative-import charges and add completed effects" {
     const allocator = testing.allocator;
     var atoms = atom_table.AtomTable.init(allocator);
     defer atoms.deinit();

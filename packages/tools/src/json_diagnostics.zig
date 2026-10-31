@@ -1345,7 +1345,7 @@ test "admission diagnostics preserve byte coordinates and static text" {
     try std.testing.expectEqual(@as(u32, 5), first_line.column);
 }
 
-test "admission diagnostics retain the legacy column clamp" {
+test "admission diagnostics retain the column clamp" {
     const offset = @as(usize, std.math.maxInt(u16)) + 1;
     const source = try std.testing.allocator.alloc(u8, offset + 3);
     defer std.testing.allocator.free(source);
@@ -1369,7 +1369,7 @@ test "unsupported source extensions have one exact repair" {
     );
 }
 
-test "admission diagnostics preserve explicit presentation before legacy clamping" {
+test "admission diagnostics preserve explicit presentation before column clamping" {
     const source = "é\r any";
     const explicit = fromAdmissionError(source, .{
         .kind = .any_type,

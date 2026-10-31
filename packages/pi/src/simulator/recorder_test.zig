@@ -427,7 +427,7 @@ const CapturingClient = struct {
     }
 };
 
-const LegacyCapturingClient = struct {
+const StepCapturingClient = struct {
     config: model_request.Config,
     capture: *capture_sink.CaptureSink,
     steps: []const []const u8,
@@ -439,7 +439,7 @@ const LegacyCapturingClient = struct {
         transcript: *const transcript_mod.Transcript,
         extra_user_text: ?[]const u8,
     ) anyerror!loop.ModelCallResult {
-        const self: *LegacyCapturingClient = @ptrCast(@alignCast(context));
+        const self: *StepCapturingClient = @ptrCast(@alignCast(context));
         if (self.cursor >= self.steps.len) return error.CassetteSequenceExhausted;
         var snapshot = try model_request.createSnapshot(arena, .{
             .config = self.config,
@@ -455,7 +455,7 @@ const LegacyCapturingClient = struct {
         return result;
     }
 
-    fn asModelClient(self: *LegacyCapturingClient) loop.ModelClient {
+    fn asModelClient(self: *StepCapturingClient) loop.ModelClient {
         return .{ .context = self, .request_fn = requestFn };
     }
 };
@@ -818,7 +818,7 @@ test "simulator recorder captures approved and denied real edit flows" {
         defer recorder.deinit();
         try recorder.captureInitialWorkspace(workspace_abs);
         var sink = recorder.captureSink();
-        var client = LegacyCapturingClient{
+        var client = StepCapturingClient{
             .config = request_config,
             .capture = &sink,
             .steps = steps,
@@ -961,7 +961,7 @@ test "simulator runner preserves an approved edit into the next real Turn" {
     defer recorder.deinit();
     try recorder.captureInitialWorkspace(workspace_abs);
     var sink = recorder.captureSink();
-    var client = LegacyCapturingClient{
+    var client = StepCapturingClient{
         .config = request_config,
         .capture = &sink,
         .steps = steps,

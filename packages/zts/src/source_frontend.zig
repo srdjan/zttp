@@ -42,7 +42,7 @@ pub fn prepareErrorForAdmissionFailure(failure: parser.AdmissionFailure) Prepare
             .interface_declaration => error.InterfaceDeclaration,
             .type_alias_declaration => error.TypeAliasDeclaration,
             .distinct_type_declaration => error.DistinctTypeDeclaration,
-            .legacy_types_import => error.LegacyTypesImport,
+            .retired_types_import => error.LegacyTypesImport,
             .default_parameter => error.DefaultParameter,
             .optional_parameter => error.OptionalParameter,
             .default_export => error.DefaultExport,
@@ -88,7 +88,7 @@ pub fn sourceDiagnosticFromAdmission(
         .interface_declaration => .interface_declaration,
         .type_alias_declaration => .type_alias_declaration,
         .distinct_type_declaration => .distinct_type_declaration,
-        .legacy_types_import => .legacy_types_import,
+        .retired_types_import => .retired_types_import,
         .default_parameter => .default_parameter,
         .optional_parameter => .optional_parameter,
         .default_export => .default_export,
@@ -873,7 +873,7 @@ test "direct source keeps parser-owned syntax in its IR" {
     try std.testing.expectEqual(@as(usize, 0), owner.selectedAdmissionDiagnostics().len);
 }
 
-test "admission failures retain measured legacy preparation errors" {
+test "admission failures retain measured preparation errors" {
     const Kind = parser.type_syntax.AdmissionKind;
     const cases = [_]struct { kind: Kind, expected: anyerror }{
         .{ .kind = .any_type, .expected = error.UnsupportedAnyType },
@@ -884,7 +884,7 @@ test "admission failures retain measured legacy preparation errors" {
         .{ .kind = .interface_declaration, .expected = error.InterfaceDeclaration },
         .{ .kind = .type_alias_declaration, .expected = error.TypeAliasDeclaration },
         .{ .kind = .distinct_type_declaration, .expected = error.DistinctTypeDeclaration },
-        .{ .kind = .legacy_types_import, .expected = error.LegacyTypesImport },
+        .{ .kind = .retired_types_import, .expected = error.LegacyTypesImport },
         .{ .kind = .default_parameter, .expected = error.DefaultParameter },
         .{ .kind = .optional_parameter, .expected = error.OptionalParameter },
         .{ .kind = .default_export, .expected = error.DefaultExport },

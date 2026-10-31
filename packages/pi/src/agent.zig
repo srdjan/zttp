@@ -2042,7 +2042,7 @@ test "named session with events and missing metadata fails without truncation" {
     try testing.expectEqualStrings(expected_events, actual_events);
 }
 
-test "model-free legacy resume bypasses provider identity and preserves metadata" {
+test "model-free resume bypasses provider identity and preserves metadata" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -2094,7 +2094,7 @@ test "model-free legacy resume bypasses provider identity and preserves metadata
     try testing.expect(meta.model == null);
 }
 
-test "legacy resume migrates once and cross-provider rebuild is atomic" {
+test "providerless resume migrates once and cross-provider rebuild is atomic" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -2113,10 +2113,10 @@ test "legacy resume migrates once and cross-provider rebuild is atomic" {
             legacy.events_path orelse return error.TestUnexpectedResult,
             "",
         );
-        const legacy_meta_path = legacy.meta_path orelse return error.TestUnexpectedResult;
-        var meta = try session_events.readMeta(allocator, legacy_meta_path);
+        const providerless_meta_path = legacy.meta_path orelse return error.TestUnexpectedResult;
+        var meta = try session_events.readMeta(allocator, providerless_meta_path);
         defer session_events.freeMeta(allocator, &meta);
-        try session_events.writeMeta(allocator, legacy_meta_path, .{
+        try session_events.writeMeta(allocator, providerless_meta_path, .{
             .session_id = meta.session_id,
             .workspace_realpath = meta.workspace_realpath,
             .created_at_unix_ms = meta.created_at_unix_ms,
@@ -2125,12 +2125,12 @@ test "legacy resume migrates once and cross-provider rebuild is atomic" {
             .provider = null,
             .model = null,
         });
-        break :blk try allocator.dupe(u8, legacy_meta_path);
+        break :blk try allocator.dupe(u8, providerless_meta_path);
     };
     defer allocator.free(meta_path);
 
     try testing.expectError(
-        error.LegacySessionIdentity,
+        error.SessionProviderMissing,
         initFromEnvWithSessionConfig(allocator, null, .{
             .no_context_files = true,
             .resume_latest = true,

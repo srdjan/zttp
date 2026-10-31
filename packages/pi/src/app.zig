@@ -306,7 +306,7 @@ pub fn modeErrorMessage(err: anyerror) ?[]const u8 {
         error.InvalidDeepSeekBaseUrl => "error: DEEPSEEK_BASE_URL must be an HTTPS root carrying no credential, such as https://api.deepseek.com\n",
         error.ProjectInstructionsTooLarge => "error: complete AGENTS.md/CLAUDE.md instructions do not fit Pi's 48 KiB system-prompt cap; reduce the applicable project instructions before launching\n",
         error.ProtectedPromptTooLarge => "error: Pi's protected expert prompt exceeds its 16 KiB safety gate; update the Pi build before launching\n",
-        error.LegacySessionIdentity => "error: this historical session has no provider identity; resume once with --provider local|deepseek and optional --model\n",
+        error.SessionProviderMissing => "error: this historical session has no provider identity; resume once with --provider local|deepseek and optional --model\n",
         error.SchemaVersionUnsupported => "error: this session was journaled by an older schema that this build cannot read; its files are untouched under ~/.zttp/sessions, and a new session starts with `zttp expert`\n",
         error.SessionProtocolMismatch => "error: this session was created with a different expert persona, compiler protocol, or tool catalog; start a new session with `zttp expert` instead of replaying stale authority\n",
         error.InvalidStoredProvider => "error: the stored session provider is invalid; restart with --provider and optional --model to override it\n",

@@ -1553,7 +1553,7 @@ test "runCheckOnlyFromSource refuses unbound comptime and resource through ZTS62
     }
 }
 
-test "runCheckOnlyFromSource refuses legacy zttp types import with ZTS053" {
+test "runCheckOnlyFromSource refuses the retired zttp types import with ZTS053" {
     const allocator = std.testing.allocator;
     const source =
         \\import type { Spec } from "zttp:types";
@@ -3992,7 +3992,7 @@ test "ordinary calls and explicit HTML rendering remain accepted" {
     try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
 }
 
-const LegacyCompoundDiagnostic = struct {
+const CompoundDiagnostic = struct {
     code: []const u8,
     message: []const u8,
     line: u32,
@@ -4000,16 +4000,16 @@ const LegacyCompoundDiagnostic = struct {
     suggestion: ?[]const u8 = null,
 };
 
-fn legacyCompoundSource(allocator: std.mem.Allocator, annotation: []const u8) ![]u8 {
+fn compoundSource(allocator: std.mem.Allocator, annotation: []const u8) ![]u8 {
     return allocator.print("function handler(req: Request): Response {{\n" ++
         "  const value: {s} = undefined;\n" ++
         "  return Response.text(\"ok\");\n" ++
         "}}\n", .{annotation});
 }
 
-fn expectLegacyCompoundDiagnostic(
+fn expectCompoundDiagnostic(
     actual: json_diag.JsonDiagnostic,
-    expected: LegacyCompoundDiagnostic,
+    expected: CompoundDiagnostic,
 ) !void {
     try std.testing.expectEqualStrings(expected.code, actual.code);
     try std.testing.expectEqualStrings("error", actual.severity);
@@ -4049,7 +4049,7 @@ test "CHECK preserves repeated-name fallback through growth and source offsets" 
         count: usize,
         layout: Layout,
         leading_spaces: usize,
-        diagnostics: []const LegacyCompoundDiagnostic,
+        diagnostics: []const CompoundDiagnostic,
     }{
         .{ .count = 6, .layout = .plain, .leading_spaces = 0, .diagnostics = &.{
             .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected number, got string", .line = 8, .column = 9, .suggestion = null },
@@ -4173,7 +4173,7 @@ test "CHECK preserves repeated-name fallback through growth and source offsets" 
         try std.testing.expectEqual(error_count, result.totalErrors());
         try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
         for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
-            try expectLegacyCompoundDiagnostic(actual, expected);
+            try expectCompoundDiagnostic(actual, expected);
         }
         observed += 1;
     }
@@ -4181,7 +4181,7 @@ test "CHECK preserves repeated-name fallback through growth and source offsets" 
     try std.testing.expectEqual(cases.len, observed);
 }
 
-test "CHECK preserves legacy compound type diagnostics and semantic prefixes" {
+test "CHECK preserves compound type diagnostics and semantic prefixes" {
     const allocator = std.testing.allocator;
     const cases = [_]struct {
         annotation: []const u8,
@@ -4222,7 +4222,7 @@ test "CHECK preserves legacy compound type diagnostics and semantic prefixes" {
     const expected_stages = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
     var observed: usize = 0;
     for (cases) |case| {
-        const source = try legacyCompoundSource(allocator, case.annotation);
+        const source = try compoundSource(allocator, case.annotation);
         defer allocator.free(source);
         var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
             .json_mode = true,
@@ -4235,7 +4235,7 @@ test "CHECK preserves legacy compound type diagnostics and semantic prefixes" {
         try std.testing.expectEqual(@as(u32, 1), result.type_errors);
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], .{
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
             .code = "ZTS200",
             .message = case.message,
             .line = 2,
@@ -4248,7 +4248,7 @@ test "CHECK preserves legacy compound type diagnostics and semantic prefixes" {
     try std.testing.expectEqual(cases.len, observed);
 }
 
-test "CHECK preserves legacy compound root admission parse diagnostics" {
+test "CHECK preserves compound root admission parse diagnostics" {
     const allocator = std.testing.allocator;
     const annotations = [_][]const u8{
         "| number | string",
@@ -4261,7 +4261,7 @@ test "CHECK preserves legacy compound root admission parse diagnostics" {
         "/*c*/ number",
     };
     const expected_stages = StageSet.initMany(&.{ .strip, .parse });
-    const expected = [_]LegacyCompoundDiagnostic{
+    const expected = [_]CompoundDiagnostic{
         .{
             .code = "ZTS002",
             .message = "const declarations must have an initializer",
@@ -4277,7 +4277,7 @@ test "CHECK preserves legacy compound root admission parse diagnostics" {
     };
     var observed: usize = 0;
     for (annotations) |annotation| {
-        const source = try legacyCompoundSource(allocator, annotation);
+        const source = try compoundSource(allocator, annotation);
         defer allocator.free(source);
         var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
             .json_mode = true,
@@ -4291,7 +4291,7 @@ test "CHECK preserves legacy compound root admission parse diagnostics" {
         try std.testing.expectEqual(@as(u32, 2), result.totalErrors());
         try std.testing.expectEqual(expected.len, result.json_diagnostics.items.len);
         for (result.json_diagnostics.items, expected) |actual, diagnostic| {
-            try expectLegacyCompoundDiagnostic(actual, diagnostic);
+            try expectCompoundDiagnostic(actual, diagnostic);
         }
         try std.testing.expect(result.contract == null);
         observed += 1;
@@ -4300,7 +4300,7 @@ test "CHECK preserves legacy compound root admission parse diagnostics" {
     try std.testing.expectEqual(annotations.len, observed);
 }
 
-test "CHECK preserves legacy compound unclosed syntax diagnostics" {
+test "CHECK preserves compound unclosed syntax diagnostics" {
     const allocator = std.testing.allocator;
     const annotations = [_][]const u8{
         "{ x: number",
@@ -4309,7 +4309,7 @@ test "CHECK preserves legacy compound unclosed syntax diagnostics" {
         "number [",
     };
     const expected_stages = StageSet.initMany(&.{ .strip, .parse });
-    const expected = [_]LegacyCompoundDiagnostic{
+    const expected = [_]CompoundDiagnostic{
         .{
             .code = "ZTS002",
             .message = "const declarations must have an initializer",
@@ -4325,7 +4325,7 @@ test "CHECK preserves legacy compound unclosed syntax diagnostics" {
     };
     var observed: usize = 0;
     for (annotations) |annotation| {
-        const source = try legacyCompoundSource(allocator, annotation);
+        const source = try compoundSource(allocator, annotation);
         defer allocator.free(source);
         var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
             .json_mode = true,
@@ -4339,7 +4339,7 @@ test "CHECK preserves legacy compound unclosed syntax diagnostics" {
         try std.testing.expectEqual(@as(u32, 2), result.totalErrors());
         try std.testing.expectEqual(expected.len, result.json_diagnostics.items.len);
         for (result.json_diagnostics.items, expected) |actual, diagnostic| {
-            try expectLegacyCompoundDiagnostic(actual, diagnostic);
+            try expectCompoundDiagnostic(actual, diagnostic);
         }
         try std.testing.expect(result.contract == null);
         observed += 1;
@@ -4348,12 +4348,12 @@ test "CHECK preserves legacy compound unclosed syntax diagnostics" {
     try std.testing.expectEqual(annotations.len, observed);
 }
 
-test "CHECK preserves legacy preparation diagnostics and recovery boundaries" {
+test "CHECK preserves preparation diagnostics and recovery boundaries" {
     const allocator = std.testing.allocator;
     const any_suggestion = "use specific types (string, number, object) or union types instead";
     const cases = [_]struct {
         annotation: []const u8,
-        diagnostics: []const LegacyCompoundDiagnostic,
+        diagnostics: []const CompoundDiagnostic,
     }{
         .{
             .annotation = "(x?: number) => number",
@@ -4437,7 +4437,7 @@ test "CHECK preserves legacy preparation diagnostics and recovery boundaries" {
     };
     var observed: usize = 0;
     for (cases) |case| {
-        const source = try legacyCompoundSource(allocator, case.annotation);
+        const source = try compoundSource(allocator, case.annotation);
         defer allocator.free(source);
         var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
             .json_mode = true,
@@ -4453,7 +4453,7 @@ test "CHECK preserves legacy preparation diagnostics and recovery boundaries" {
         try std.testing.expectEqual(count, result.totalErrors());
         try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
         for (result.json_diagnostics.items, case.diagnostics) |actual, diagnostic| {
-            try expectLegacyCompoundDiagnostic(actual, diagnostic);
+            try expectCompoundDiagnostic(actual, diagnostic);
         }
         try std.testing.expect(result.contract == null);
         observed += 1;
@@ -4473,7 +4473,7 @@ test "CHECK preserves legacy preparation diagnostics and recovery boundaries" {
         source: []const u8,
         stage: CompatibilityStage,
         parse_errors: u32,
-        diagnostics: []const LegacyCompoundDiagnostic,
+        diagnostics: []const CompoundDiagnostic,
     }{
         .{
             .name = "caught_then_comment",
@@ -4738,7 +4738,7 @@ test "CHECK preserves legacy preparation diagnostics and recovery boundaries" {
         try std.testing.expectEqual(expected_errors, result.totalErrors());
         try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
         for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
-            try expectLegacyCompoundDiagnostic(actual, expected);
+            try expectCompoundDiagnostic(actual, expected);
         }
         compatibility_observed += 1;
     }
@@ -4881,7 +4881,7 @@ test "CHECK reports absent compound analysis failures as ZTS000" {
     };
     var observed: usize = 0;
     for (annotations) |annotation| {
-        const source = try legacyCompoundSource(allocator, annotation);
+        const source = try compoundSource(allocator, annotation);
         defer allocator.free(source);
         var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
             .json_mode = true,
@@ -4921,7 +4921,7 @@ test "CHECK preserves declaration admission and named type outcomes" {
         name: []const u8,
         source: []const u8,
         stage: FailureStage,
-        diagnostic: LegacyCompoundDiagnostic,
+        diagnostic: CompoundDiagnostic,
     }{
         .{ .name = "root", .source = "structural Alias = number;\nconst value: Alias = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostic = .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } },
         .{ .name = "leading_spaces", .source = "  structural Alias = number;\nconst value: Alias = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 3, .suggestion = null } },
@@ -4963,7 +4963,7 @@ test "CHECK preserves declaration admission and named type outcomes" {
         });
         defer result.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         switch (case.stage) {
             .parse => {
@@ -4996,7 +4996,7 @@ test "CHECK preserves declaration suffix refusals and empty bodies" {
     const cases = [_]struct {
         source: []const u8,
         strip_refusal: bool,
-        diagnostic: LegacyCompoundDiagnostic,
+        diagnostic: CompoundDiagnostic,
     }{
         .{ .source = "structural Alias = number any;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, object) or union types instead" } },
         .{ .source = "structural Alias = number void;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 27, .suggestion = "write `undefined`" } },
@@ -5016,7 +5016,7 @@ test "CHECK preserves declaration suffix refusals and empty bodies" {
         });
         defer result.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expectEqual(@as(u32, 0), result.type_errors);
         if (case.strip_refusal) {
@@ -5039,7 +5039,7 @@ test "CHECK preserves nominal refusals and keyword alias names" {
     const cases = [_]struct {
         source: []const u8,
         strip_refusal: bool,
-        diagnostic: LegacyCompoundDiagnostic,
+        diagnostic: CompoundDiagnostic,
     }{
         .{ .source = "nominal Bad = void;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
         .{ .source = "nominal Bad = Array<string>;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
@@ -5061,7 +5061,7 @@ test "CHECK preserves nominal refusals and keyword alias names" {
         });
         defer result.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expect(result.contract == null);
         if (case.strip_refusal) {
@@ -5093,7 +5093,7 @@ test "CHECK retains distinct nominal any and scalar refusal positions" {
     try std.testing.expectEqual(@as(u32, 0), result.type_errors);
     try std.testing.expectEqual(@as(u32, 2), result.totalErrors());
     try std.testing.expect(result.contract == null);
-    const expected = [_]LegacyCompoundDiagnostic{
+    const expected = [_]CompoundDiagnostic{
         .{
             .code = "ZTS041",
             .message = "'any' type is not supported",
@@ -5111,7 +5111,7 @@ test "CHECK retains distinct nominal any and scalar refusal positions" {
     };
     try std.testing.expectEqual(expected.len, result.json_diagnostics.items.len);
     for (result.json_diagnostics.items, expected) |actual, diagnostic| {
-        try expectLegacyCompoundDiagnostic(actual, diagnostic);
+        try expectCompoundDiagnostic(actual, diagnostic);
     }
 }
 
@@ -5135,7 +5135,7 @@ test "CHECK admits declaration literals and blank-line continuations" {
         try std.testing.expectEqual(@as(u32, 1), result.type_errors);
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expect(result.contract == null);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], .{
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
             .code = "ZTS200",
             .message = case.message,
             .line = case.line,
@@ -5151,7 +5151,7 @@ test "CHECK preserves comment gaps around type declarations" {
     const allocator = std.testing.allocator;
     const cases = [_]struct {
         source: []const u8,
-        diagnostic: LegacyCompoundDiagnostic,
+        diagnostic: CompoundDiagnostic,
     }{
         .{ .source = "structural /*c*/ A = number;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .diagnostic = .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 1, .suggestion = null } },
         .{ .source = "structural A /*c*/ = number;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .diagnostic = .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 20, .suggestion = null } },
@@ -5161,7 +5161,7 @@ test "CHECK preserves comment gaps around type declarations" {
         var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{ .json_mode = true });
         defer result.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
         try std.testing.expectEqual(@as(u32, 0), result.type_errors);
@@ -5177,7 +5177,7 @@ test "CHECK preserves generic admission and projection outcomes" {
         name: []const u8,
         source: []const u8,
         stage: FailureStage,
-        diagnostics: []const LegacyCompoundDiagnostic,
+        diagnostics: []const CompoundDiagnostic,
     }{
         .{ .name = "adjacent_function", .source = "function id<T>(x: T): T { return x; }\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "spaced_function", .source = "function id <T>(x: T): T { return x; }\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 18, .suggestion = "')'" }} },
@@ -5272,7 +5272,7 @@ test "CHECK preserves generic admission and projection outcomes" {
         try std.testing.expect(case.diagnostics.len > 0);
         try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
         for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
-            try expectLegacyCompoundDiagnostic(actual, expected);
+            try expectCompoundDiagnostic(actual, expected);
         }
         const errors: u32 = @intCast(case.diagnostics.len);
         try std.testing.expectEqual(errors, result.totalErrors());
@@ -5334,7 +5334,7 @@ test "CHECK preserves ignored generic syntax and raw semantic projection" {
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expect(result.contract == null);
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], .{
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
             .code = "ZTS200",
             .message = "type '\"x\"' is not assignable to type 'number'",
             .line = 2,
@@ -5362,7 +5362,7 @@ test "CHECK preserves a caught generic string diagnostic" {
     try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
     try std.testing.expect(result.contract == null);
     try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-    try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], .{
+    try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
         .code = "ZTS008",
         .message = "unterminated string literal",
         .line = 1,
@@ -5385,7 +5385,7 @@ test "CHECK preserves the any suffix refusal in a generic alias name" {
     try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
     try std.testing.expect(result.contract == null);
     try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-    try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], .{
+    try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
         .code = "ZTS041",
         .message = "'any' type is not supported",
         .line = 2,
@@ -5409,14 +5409,14 @@ test "CHECK preserves the general generic arrow window after an assignment comme
     try std.testing.expectEqual(@as(u32, 2), result.totalErrors());
     try std.testing.expect(result.contract == null);
     try std.testing.expectEqual(@as(usize, 2), result.json_diagnostics.items.len);
-    try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], .{
+    try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
         .code = "ZTS208",
         .message = "no argument determines type parameter 'T>'",
         .line = 2,
         .column = 25,
         .suggestion = "Name the type argument at the call site.",
     });
-    try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[1], .{
+    try expectCompoundDiagnostic(result.json_diagnostics.items[1], .{
         .code = "ZTS200",
         .message = "type 'T' is not assignable to type 'number'",
         .line = 2,
@@ -5429,7 +5429,7 @@ test "CHECK preserves arrow capture after line comment text" {
     const cases = [_]struct {
         source: []const u8,
         parse_refusal: bool,
-        diagnostics: []const LegacyCompoundDiagnostic,
+        diagnostics: []const CompoundDiagnostic,
     }{
         .{
             .source = "const id = // note\n<T>(value: T): T => value;\n" ++
@@ -5468,7 +5468,7 @@ test "CHECK preserves arrow capture after line comment text" {
         try std.testing.expectEqual(@as(u32, @intCast(case.diagnostics.len)), result.totalErrors());
         try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
         for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
-            try expectLegacyCompoundDiagnostic(actual, expected);
+            try expectCompoundDiagnostic(actual, expected);
         }
         try std.testing.expect(result.contract == null);
         if (case.parse_refusal) {
@@ -5491,7 +5491,7 @@ test "CHECK classifies predicate targets and quoted return types" {
     const cases = [_]struct {
         source: []const u8,
         type_failure: bool,
-        diagnostic: LegacyCompoundDiagnostic,
+        diagnostic: CompoundDiagnostic,
     }{
         .{ .source = "function guard(value: unknown): missing is string { return true; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .type_failure = false, .diagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." } },
         .{ .source = "function guard(value: unknown): \"x is y\" { return true; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .type_failure = true, .diagnostic = .{ .code = "ZTS204", .message = "return type does not match declared return type", .line = 1, .column = 44, .suggestion = "the enclosing function's declared return type is what this value must match; when it comes back from a virtual-module call, wrap it rather than returning it directly" } },
@@ -5506,7 +5506,7 @@ test "CHECK classifies predicate targets and quoted return types" {
         var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{ .json_mode = true });
         defer result.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
         if (case.type_failure) {
@@ -5527,7 +5527,7 @@ test "CHECK preserves nominal declarations with ignored generic lists" {
     const cases = [_]struct {
         source: []const u8,
         strip_refusal: bool,
-        diagnostic: LegacyCompoundDiagnostic,
+        diagnostic: CompoundDiagnostic,
     }{
         .{ .source = "nominal Id<T> = string;\nconst value: Id = 1;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = false, .diagnostic = .{ .code = "ZTS200", .message = "type '1' is not assignable to type 'Id'", .line = 2, .column = 1, .suggestion = null } },
         .{ .source = "nominal Id<T> = T;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 17, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
@@ -5536,7 +5536,7 @@ test "CHECK preserves nominal declarations with ignored generic lists" {
         var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{ .json_mode = true });
         defer result.deinit(allocator);
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expect(result.contract == null);
         if (case.strip_refusal) {
@@ -5569,7 +5569,7 @@ test "CHECK preserves orphan generic prefix refusal positions" {
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expect(result.contract == null);
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], .{
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
             .code = "ZTS002",
             .message = "expected expression",
             .line = 1,
@@ -5599,7 +5599,7 @@ test "CHECK preserves admitted generic prefixes without function owners" {
         .strip, .parse,    .imports, .boolean, .types, .strict,    .verifier,
         .flow,  .contract, .paths,   .trace,   .spec,  .canonical,
     });
-    const diagnostic: LegacyCompoundDiagnostic = .{
+    const diagnostic: CompoundDiagnostic = .{
         .code = "ZTS500",
         .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
         .line = 2,
@@ -5618,7 +5618,7 @@ test "CHECK preserves admitted generic prefixes without function owners" {
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expect(result.contract != null);
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], diagnostic);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], diagnostic);
         observed += 1;
     }
     try std.testing.expectEqual(@as(usize, 10), cases.len);
@@ -5645,7 +5645,7 @@ test "CHECK preserves adjacent generic prefix refusals" {
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expect(result.contract == null);
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], .{
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
             .code = "ZTS002",
             .message = "raw JSX is not supported; use ordinary TypeScript expressions",
             .line = 1,
@@ -5693,7 +5693,7 @@ test "CHECK preserves typed parameter refusals across function header comments" 
             try std.testing.expectEqual(StageSet.initMany(&.{ .strip, .parse }), result.stages_run);
             try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
             try std.testing.expectEqual(@as(u32, 0), result.type_errors);
-            try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], .{
+            try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
                 .code = "ZTS003",
                 .message = "unexpected token",
                 .line = 1,
@@ -5704,7 +5704,7 @@ test "CHECK preserves typed parameter refusals across function header comments" 
             try std.testing.expectEqual(StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict }), result.stages_run);
             try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
             try std.testing.expectEqual(@as(u32, 1), result.type_errors);
-            try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], .{
+            try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
                 .code = "ZTS200",
                 .message = "type 'string' is not assignable to type 'number'",
                 .line = 2,
@@ -5720,11 +5720,11 @@ test "CHECK preserves typed parameter refusals across function header comments" 
 
 test "CHECK preserves typed arrow return forms and parameter refusals" {
     const FailureStage = enum { strip, parse, types, strict, contract };
-    const proof_diagnostic: LegacyCompoundDiagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." };
+    const proof_diagnostic: CompoundDiagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." };
     // A module whose function value sits in a record or is returned by another function
     // proves no termination claim, so `cost_bounded` leaves the demanded profile.
-    const proof_diagnostic_without_cost: LegacyCompoundDiagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: cost_bounded, deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\">`." };
-    const cases = [_]struct { source: []const u8, stage: FailureStage, diagnostic: LegacyCompoundDiagnostic }{
+    const proof_diagnostic_without_cost: CompoundDiagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: cost_bounded, deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\">`." };
+    const cases = [_]struct { source: []const u8, stage: FailureStage, diagnostic: CompoundDiagnostic }{
         .{ .source = "const guard = (candidate, marker: unknown): candidate is string => typeof candidate === \"string\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .strict, .diagnostic = .{ .code = "ZTS601", .message = "strict ZigTS requires explicit function parameter and return types", .line = 1, .column = 15, .suggestion = "annotate each parameter and the return type, for example `function handler(req: Request): Response`" } },
         .{ .source = "const echo = (value: string): string => value;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = proof_diagnostic },
         .{ .source = "const echo = (value?: string): string => value;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .strip, .diagnostic = .{ .code = "ZTS055", .message = "optional parameter shorthand is not part of this profile", .line = 1, .column = 20, .suggestion = "replace `name?: T` with `name: T | undefined`" } },
@@ -5759,7 +5759,7 @@ test "CHECK preserves typed arrow return forms and parameter refusals" {
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
         const expected_stages = switch (case.stage) {
             .strip => StageSet.initMany(&.{.strip}),
             .parse => StageSet.initMany(&.{ .strip, .parse }),
@@ -5782,7 +5782,7 @@ test "CHECK preserves predicate marker classification" {
     const cases = [_]struct {
         source: []const u8,
         stage: FailureStage,
-        diagnostic: LegacyCompoundDiagnostic,
+        diagnostic: CompoundDiagnostic,
     }{
         .{
             .source = "function guard(candidate: unknown): candidate is \"a is b\" { return true; }\n",
@@ -5818,7 +5818,7 @@ test "CHECK preserves predicate marker classification" {
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
         const expected_stages = switch (case.stage) {
             .types => StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict }),
             .contract => StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict, .contract, .trace, .spec, .canonical }),
@@ -5836,8 +5836,8 @@ test "CHECK preserves predicate marker classification" {
 
 test "CHECK preserves type-only module admission and refusal diagnostics" {
     const FailureStage = enum { strip, parse, contract };
-    const proof_diagnostic: LegacyCompoundDiagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." };
-    const cases = [_]struct { source: []const u8, stage: FailureStage, diagnostic: LegacyCompoundDiagnostic }{
+    const proof_diagnostic: CompoundDiagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." };
+    const cases = [_]struct { source: []const u8, stage: FailureStage, diagnostic: CompoundDiagnostic }{
         .{ .source = "import type { A } from \"./a\";\nexport type { B }\nexport structural Shape = { value: string };\nexport nominal Id = string;\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 6, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
         .{ .source = "function helper(): number { import type { A } from \"./a\"; return 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import X from' default imports are not supported; use named imports: import { x } from \"module\"", .line = 1, .column = 29, .suggestion = null } },
         .{ .source = "function helper(): number { export type { A }; return 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'export' must be followed by 'function', 'const', or 'let'", .line = 1, .column = 29, .suggestion = null } },
@@ -5874,7 +5874,7 @@ test "CHECK preserves type-only module admission and refusal diagnostics" {
         defer result.deinit(std.testing.allocator);
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
         const expected_stages = switch (case.stage) {
             .strip => StageSet.initMany(&.{.strip}),
             .parse => StageSet.initMany(&.{ .strip, .parse }),
@@ -5892,7 +5892,7 @@ test "CHECK preserves type-only module admission and refusal diagnostics" {
 }
 
 test "CHECK preserves lexical diagnostics inside type-only modules" {
-    const cases = [_]struct { source: []const u8, contract: bool, diagnostics: []const LegacyCompoundDiagnostic }{
+    const cases = [_]struct { source: []const u8, contract: bool, diagnostics: []const CompoundDiagnostic }{
         .{ .source = "import type \"open\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .contract = false, .diagnostics = &.{
             .{ .code = "ZTS008", .message = "unterminated string literal", .line = 1, .column = 18, .suggestion = "close the quote, or write the newline as \\n" },
         } },
@@ -5933,7 +5933,7 @@ test "CHECK preserves lexical diagnostics inside type-only modules" {
         try std.testing.expectEqual(@as(u32, @intCast(case.diagnostics.len)), result.totalErrors());
         try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
         for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
-            try expectLegacyCompoundDiagnostic(actual, expected);
+            try expectCompoundDiagnostic(actual, expected);
         }
         const expected_stages = if (case.contract)
             StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict, .verifier, .flow, .contract, .paths, .trace, .spec, .canonical })
@@ -5952,7 +5952,7 @@ test "CHECK preserves lexical diagnostics inside type-only modules" {
 
 test "CHECK preserves typed generic arrows and comment classification" {
     const FailureStage = enum { parse, types, strict };
-    const cases = [_]struct { source: []const u8, stage: FailureStage, diagnostics: []const LegacyCompoundDiagnostic }{
+    const cases = [_]struct { source: []const u8, stage: FailureStage, diagnostics: []const CompoundDiagnostic }{
         .{ .source = "const id=<T>(value: T): T => value;\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{
             .{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null },
         } },
@@ -5985,7 +5985,7 @@ test "CHECK preserves typed generic arrows and comment classification" {
         try std.testing.expectEqual(expected_count, result.totalErrors());
         try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
         for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
-            try expectLegacyCompoundDiagnostic(actual, expected);
+            try expectCompoundDiagnostic(actual, expected);
         }
         const expected_stages = if (case.stage == .parse)
             StageSet.initMany(&.{ .strip, .parse })
@@ -6020,7 +6020,7 @@ test "CHECK preserves repeated global declaration bindings" {
         source: []const u8,
         type_errors: u32,
         has_contract: bool,
-        diagnostics: []const LegacyCompoundDiagnostic,
+        diagnostics: []const CompoundDiagnostic,
     }{
         .{
             .case = .two_typed,
@@ -6100,7 +6100,7 @@ test "CHECK preserves repeated global declaration bindings" {
         try std.testing.expectEqual(@as(u32, @intCast(case.diagnostics.len)), result.totalErrors());
         try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
         for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
-            try expectLegacyCompoundDiagnostic(actual, expected);
+            try expectCompoundDiagnostic(actual, expected);
         }
         try std.testing.expectEqual(case.has_contract, result.contract != null);
         seen.insert(case.case);
@@ -6109,7 +6109,7 @@ test "CHECK preserves repeated global declaration bindings" {
 }
 
 test "CHECK preserves nominal generic diagnostic order before scalar refusal" {
-    const cases = [_]struct { source: []const u8, diagnostics: []const LegacyCompoundDiagnostic }{
+    const cases = [_]struct { source: []const u8, diagnostics: []const CompoundDiagnostic }{
         .{ .source = "nominal Id<T extends void> = T;", .diagnostics = &.{
             .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 22, .suggestion = "write `undefined`" },
             .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 30, .suggestion = "its base must be `string`, `number`, or `boolean`" },
@@ -6138,7 +6138,7 @@ test "CHECK preserves nominal generic diagnostic order before scalar refusal" {
         try std.testing.expectEqual(expected_count, result.totalErrors());
         try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
         for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
-            try expectLegacyCompoundDiagnostic(actual, expected);
+            try expectCompoundDiagnostic(actual, expected);
         }
         try std.testing.expectEqual(StageSet.initMany(&.{.strip}), result.stages_run);
         try std.testing.expectEqual(expected_count, result.parse_errors);
@@ -6181,7 +6181,7 @@ test "CHECK preserves measured lookup winners shadows and captures" {
         type_errors: u32,
         strict_errors: u32,
         has_contract: bool,
-        diagnostics: []const LegacyCompoundDiagnostic,
+        diagnostics: []const CompoundDiagnostic,
     }{
         .{
             .source =
@@ -6414,7 +6414,7 @@ test "CHECK preserves measured lookup winners shadows and captures" {
         );
         try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
         for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
-            try expectLegacyCompoundDiagnostic(actual, expected);
+            try expectCompoundDiagnostic(actual, expected);
         }
         try std.testing.expectEqual(case.has_contract, result.contract != null);
         observed += 1;
@@ -6428,28 +6428,28 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
     const any_message = "'any' type is not supported";
     const any_suggestion = "use specific types (string, number, object) or union types instead";
     const namespace_message = "'import * as X' namespace imports are not supported; use named imports: import { x } from \"module\"";
-    const type_diagnostic: LegacyCompoundDiagnostic = .{
+    const type_diagnostic: CompoundDiagnostic = .{
         .code = "ZTS050",
         .message = "`type` is not a declaration form in this profile",
         .line = 1,
         .column = 1,
         .suggestion = "write `structural Name = ...;`",
     };
-    const interface_diagnostic: LegacyCompoundDiagnostic = .{
+    const interface_diagnostic: CompoundDiagnostic = .{
         .code = "ZTS049",
         .message = "`interface` is not a declaration form in this profile",
         .line = 1,
         .column = 1,
         .suggestion = "write `structural Name = { ... };`",
     };
-    const default_diagnostic: LegacyCompoundDiagnostic = .{
+    const default_diagnostic: CompoundDiagnostic = .{
         .code = "ZTS054",
         .message = "default parameters are not part of this profile",
         .line = 1,
         .column = 14,
         .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body",
     };
-    const nominal_diagnostic: LegacyCompoundDiagnostic = .{
+    const nominal_diagnostic: CompoundDiagnostic = .{
         .code = "ZTS048",
         .message = "a nominal declaration carries scalar identity only",
         .line = 1,
@@ -6459,7 +6459,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
     const cases = [_]struct {
         source: []const u8,
         parser_stage: bool,
-        diagnostics: []const LegacyCompoundDiagnostic,
+        diagnostics: []const CompoundDiagnostic,
     }{
         .{
             .source = "while (true) { const x: any = 1; }\n",
@@ -7310,7 +7310,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
         try std.testing.expect(!result.verify_ran);
         try std.testing.expect(result.contract == null);
         for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
-            try expectLegacyCompoundDiagnostic(actual, expected);
+            try expectCompoundDiagnostic(actual, expected);
         }
     }
 }
@@ -7318,7 +7318,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
 test "CHECK preserves absent structural aliases at comment boundaries" {
     const cases = [_]struct {
         source: []const u8,
-        diagnostics: []const LegacyCompoundDiagnostic,
+        diagnostics: []const CompoundDiagnostic,
     }{
         .{ .source = "structural X/* c */\nfunction handler(req: Request): Proof<Response, \"pure\"> { return Response.text(\"ok\"); }\n", .diagnostics = &.{} },
         .{ .source = "structural X/* c */\nfunction handler(req: Request): Proof<Response, \"pure\"> { const x: X = 1; return Response.text(\"ok\"); }\n", .diagnostics = &.{
@@ -7339,14 +7339,14 @@ test "CHECK preserves absent structural aliases at comment boundaries" {
         try std.testing.expectEqual(result.type_errors, result.totalErrors());
         try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
         for (result.json_diagnostics.items, case.diagnostics) |actual, expected| {
-            try expectLegacyCompoundDiagnostic(actual, expected);
+            try expectCompoundDiagnostic(actual, expected);
         }
         try std.testing.expectEqual(case.diagnostics.len == 0, result.contract != null);
     }
 }
 
 test "CHECK preserves raw module recovery and the complete nested parser batch" {
-    const cases = [_]struct { source: []const u8, parser_stage: bool, diagnostics: []const LegacyCompoundDiagnostic }{
+    const cases = [_]struct { source: []const u8, parser_stage: bool, diagnostics: []const CompoundDiagnostic }{
         .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .parser_stage = true, .diagnostics = &.{
             .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 24, .suggestion = null },
         } },
@@ -7377,13 +7377,13 @@ test "CHECK preserves raw module recovery and the complete nested parser batch" 
         try std.testing.expectEqual(@as(u32, @intCast(case.diagnostics.len)), result.parse_errors);
         try std.testing.expectEqual(result.parse_errors, result.totalErrors());
         try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
-        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| try expectLegacyCompoundDiagnostic(actual, expected);
+        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| try expectCompoundDiagnostic(actual, expected);
         try std.testing.expect(result.contract == null);
     }
 }
 
 test "CHECK preserves spaced function call-list selection and strict refusal" {
-    const cases = [_]struct { source: []const u8, strict: bool, diagnostic: LegacyCompoundDiagnostic }{
+    const cases = [_]struct { source: []const u8, strict: bool, diagnostic: CompoundDiagnostic }{
         .{ .source = "function id <T>(x) { return x; }\nfunction handler(req: Request): Proof<Response, \"pure\"> { return Response.text(\"ok\"); }\n", .strict = true, .diagnostic = .{ .code = "ZTS601", .message = "strict ZigTS requires explicit function parameter and return types", .line = 1, .column = 16, .suggestion = "annotate each parameter and the return type, for example `function handler(req: Request): Response`" } },
         .{ .source = "function id <T> (x) { return x; }\nfunction handler(req: Request): Proof<Response, \"pure\"> { return Response.text(\"ok\"); }\n", .strict = false, .diagnostic = .{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 13, .suggestion = "'('" } },
     };
@@ -7397,14 +7397,14 @@ test "CHECK preserves spaced function call-list selection and strict refusal" {
         try std.testing.expectEqual(@as(u32, if (case.strict) 1 else 0), result.strict_errors);
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
         try std.testing.expect(result.contract == null);
     }
 }
 
 test "CHECK observes every admission kind after the measured recovery divergence" {
     const Kind = zts.parser.type_syntax.AdmissionKind;
-    const cases = [_]struct { source: []const u8, kind: ?Kind, diagnostics: []const LegacyCompoundDiagnostic }{
+    const cases = [_]struct { source: []const u8, kind: ?Kind, diagnostics: []const CompoundDiagnostic }{
         .{ .source = "import type { A } /* ; */ from \"./a\";\nconst value: any = 1;\n", .kind = .any_type, .diagnostics = &.{
             .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 14, .suggestion = "use specific types (string, number, object) or union types instead" },
         } },
@@ -7429,7 +7429,7 @@ test "CHECK observes every admission kind after the measured recovery divergence
         .{ .source = "import type { A } /* ; */ from \"./a\";\ndistinct type Box = string;\n", .kind = .distinct_type_declaration, .diagnostics = &.{
             .{ .code = "ZTS051", .message = "`distinct type` is not a declaration form in this profile", .line = 2, .column = 1, .suggestion = "write `nominal Name = string;`" },
         } },
-        .{ .source = "import type { A } /* ; */ from \"./a\";\nimport type { Value } from 'zttp:types';\n", .kind = .legacy_types_import, .diagnostics = &.{
+        .{ .source = "import type { A } /* ; */ from \"./a\";\nimport type { Value } from 'zttp:types';\n", .kind = .retired_types_import, .diagnostics = &.{
             .{ .code = "ZTS053", .message = "`zttp:types` is not a module in this profile", .line = 2, .column = 1, .suggestion = "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names" },
         } },
         .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction f(value = 1) { return value; }\n", .kind = .default_parameter, .diagnostics = &.{
@@ -7470,7 +7470,7 @@ test "CHECK observes every admission kind after the measured recovery divergence
         try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expectEqual(case.diagnostics.len, result.json_diagnostics.items.len);
-        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| try expectLegacyCompoundDiagnostic(actual, expected);
+        for (result.json_diagnostics.items, case.diagnostics) |actual, expected| try expectCompoundDiagnostic(actual, expected);
         try std.testing.expect(result.contract == null);
         if (case.kind) |kind| {
             try std.testing.expect(!seen.contains(kind));
@@ -7486,7 +7486,7 @@ test "CHECK observes every admission kind after the measured recovery divergence
 }
 
 test "CHECK preserves raw recovery header comments" {
-    const cases = [_]struct { source: []const u8, parser_stage: bool, diagnostic: LegacyCompoundDiagnostic }{
+    const cases = [_]struct { source: []const u8, parser_stage: bool, diagnostic: CompoundDiagnostic }{
         .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction f(/* x = 1 */) { return 1; }\n", .parser_stage = false, .diagnostic = .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 2, .column = 17, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" } },
         .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction f(/* ) */) { return 1; }\n", .parser_stage = true, .diagnostic = .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 24, .suggestion = null } },
         .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction f(/* unfinished\n", .parser_stage = true, .diagnostic = .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 24, .suggestion = null } },
@@ -7500,7 +7500,7 @@ test "CHECK preserves raw recovery header comments" {
         try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
         try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectLegacyCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
         try std.testing.expect(result.contract == null);
     }
 }

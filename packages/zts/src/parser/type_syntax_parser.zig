@@ -749,7 +749,7 @@ pub fn appendProjectedParametersWithBounds(
         var index = start;
         while (index < parameter_end) : (index += 1) {
             if (index - start >= compact_count) break;
-            const bound_span = store.projected_generic_parameters.items[index].legacy_bound_span orelse
+            const bound_span = store.projected_generic_parameters.items[index].bound_span orelse
                 continue;
             const fragment_index = try parseSemanticFragmentAndStore(store, bound_span);
             store.projected_generic_parameters.items[index].bound_fragment = fragment_index;
@@ -854,11 +854,11 @@ fn projectGenericParameter(source: []const u8, raw_span: Span) ProjectedGenericP
     };
     const name_span: Span = .{ .start = raw_span.start, .end = name_end };
     const rest_start = skipWhitespaceWithin(source, name_end, raw_span.end);
-    var legacy_bound_span: ?Span = null;
+    var bound_span: ?Span = null;
     if (wordAt(source, rest_start, raw_span.end, "extends")) {
         const after = rest_start + @as(u32, "extends".len);
         if (after < raw_span.end and isTypeWhitespace(source[after])) {
-            legacy_bound_span = trimSpan(source, .{
+            bound_span = trimSpan(source, .{
                 .start = after,
                 .end = raw_span.end,
             });
@@ -867,7 +867,7 @@ fn projectGenericParameter(source: []const u8, raw_span: Span) ProjectedGenericP
     return .{
         .raw_span = raw_span,
         .name_span = name_span,
-        .legacy_bound_span = legacy_bound_span,
+        .bound_span = bound_span,
         .bound_fragment = null,
     };
 }
@@ -1118,7 +1118,7 @@ fn reserveDeclarationGenericOwner(
         .list_span = list_span,
         .capture_spans = .{
             .actual_erased_span = list_span,
-            .legacy_recorded_span = list_span,
+            .recorded_span = list_span,
         },
         .policy = switch (kind) {
             .structural => .structural,
@@ -2218,7 +2218,7 @@ test "application base plan requires one owner for every semantic fragment" {
         .list_span = .{ .start = 0, .end = 8 },
         .capture_spans = .{
             .actual_erased_span = .{ .start = 0, .end = 8 },
-            .legacy_recorded_span = .{ .start = 1, .end = 7 },
+            .recorded_span = .{ .start = 1, .end = 7 },
         },
         .authored_arguments = .{ .start = 0, .count = 0 },
         .semantic_fragments = .{ .start = fragment_index, .count = 1 },
@@ -2229,7 +2229,7 @@ test "application base plan requires one owner for every semantic fragment" {
     try store.projected_generic_parameters.append(std.testing.allocator, .{
         .raw_span = .{ .start = 1, .end = 7 },
         .name_span = .{ .start = 1, .end = 1 },
-        .legacy_bound_span = .{ .start = 1, .end = 7 },
+        .bound_span = .{ .start = 1, .end = 7 },
         .bound_fragment = fragment_index,
     });
     try store.generic_owners.append(std.testing.allocator, .{
@@ -2237,7 +2237,7 @@ test "application base plan requires one owner for every semantic fragment" {
         .list_span = .{ .start = 0, .end = 8 },
         .capture_spans = .{
             .actual_erased_span = .{ .start = 0, .end = 8 },
-            .legacy_recorded_span = .{ .start = 1, .end = 7 },
+            .recorded_span = .{ .start = 1, .end = 7 },
         },
         .authored_parameters = .{ .start = 0, .count = 0 },
         .projected_parameters = .{ .start = 0, .count = 1 },

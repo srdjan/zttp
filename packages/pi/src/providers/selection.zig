@@ -29,14 +29,14 @@ pub const Resolution = struct {
 
 pub const ResolveError = models.SelectionError || error{
     InvalidStoredProvider,
-    LegacySessionIdentity,
+    SessionProviderMissing,
 };
 
 pub fn resolve(input: Input) ResolveError!Resolution {
     var stored_provider_invalid = false;
     const stored_provider = if (input.stored) |stored| blk: {
         const name = stored.provider orelse {
-            if (input.launch_provider == null) return error.LegacySessionIdentity;
+            if (input.launch_provider == null) return error.SessionProviderMissing;
             break :blk null;
         };
         break :blk Provider.parsePublic(name) orelse {
@@ -48,7 +48,7 @@ pub fn resolve(input: Input) ResolveError!Resolution {
 
     const stored_model = if (input.stored) |stored| stored.model else null;
     if (input.stored != null and stored_model == null and input.launch_provider == null) {
-        return error.LegacySessionIdentity;
+        return error.SessionProviderMissing;
     }
 
     const provider = input.launch_provider orelse stored_provider orelse models.default_provider;
@@ -115,8 +115,8 @@ test "model never changes or infers provider" {
     }));
 }
 
-test "legacy stored identity requires an explicit provider then migrates" {
-    try std.testing.expectError(error.LegacySessionIdentity, resolve(.{
+test "providerless stored identity requires an explicit provider then migrates" {
+    try std.testing.expectError(error.SessionProviderMissing, resolve(.{
         .stored = .{ .provider = null, .model = null },
     }));
     const migrated = try resolve(.{

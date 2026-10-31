@@ -828,10 +828,10 @@ fn parseAssignedString(content: []const u8, marker: []const u8) ?[]const u8 {
 }
 
 fn looksLikeBuiltinAdjacentPath(path: []const u8) bool {
-    const in_legacy_modules_dir = std.mem.indexOf(u8, path, "packages/zts/src/modules/") != null and std.mem.endsWith(u8, path, ".zig");
+    const in_zts_modules_dir = std.mem.indexOf(u8, path, "packages/zts/src/modules/") != null and std.mem.endsWith(u8, path, ".zig");
     const in_peer_modules_dir = std.mem.indexOf(u8, path, "packages/modules/src/") != null and std.mem.endsWith(u8, path, ".zig");
     const in_specs_dir = std.mem.indexOf(u8, path, "packages/modules/module-specs/") != null and std.mem.endsWith(u8, path, ".json");
-    return in_legacy_modules_dir or in_peer_modules_dir or in_specs_dir;
+    return in_zts_modules_dir or in_peer_modules_dir or in_specs_dir;
 }
 
 fn findBuiltinEntryByModulePath(path: []const u8) ?*const builtin_modules.BuiltinGovernanceEntry {

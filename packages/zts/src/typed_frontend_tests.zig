@@ -926,7 +926,7 @@ fn expectTypeOnlyModuleRefusal(
     parser.setAtomTable(&atoms);
 
     try std.testing.expectError(error.AdmissionRefused, parser.parse());
-    try std.testing.expectEqual(TypeSyntax.AdmissionKind.legacy_types_import, parser.getAdmissionDiagnostics()[0].kind);
+    try std.testing.expectEqual(TypeSyntax.AdmissionKind.retired_types_import, parser.getAdmissionDiagnostics()[0].kind);
     const refusal = parser.type_only_module_refusal orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(TypeSyntax.TypeOnlyModuleRefusalReason.zttp_types, refusal.reason);
     try std.testing.expectEqual(expected_offset, refusal.original_location.offset);
@@ -1464,7 +1464,7 @@ test "first erased object prefix preserves runtime and exact ownership" {
     );
     try std.testing.expectEqualStrings(
         "T",
-        prefix.capture_spans.legacy_recorded_span.text(source),
+        prefix.capture_spans.recorded_span.text(source),
     );
     try std.testing.expectEqualStrings("{ id: 1 }", prefix.operand_span.text(source));
     switch (prefix.compatibility) {
@@ -1514,14 +1514,14 @@ test "first erased object prefix preserves runtime and exact ownership" {
     );
     prefix.capture_spans.actual_erased_span = original_capture;
 
-    const original_legacy_capture = prefix.capture_spans.legacy_recorded_span;
-    prefix.capture_spans.legacy_recorded_span.end =
-        prefix.capture_spans.legacy_recorded_span.start;
+    const original_legacy_capture = prefix.capture_spans.recorded_span;
+    prefix.capture_spans.recorded_span.end =
+        prefix.capture_spans.recorded_span.start;
     try std.testing.expectError(
         error.InvalidErasedTypePrefix,
         parser.type_store.validateRuntimeOwners(std.testing.allocator, view),
     );
-    prefix.capture_spans.legacy_recorded_span = original_legacy_capture;
+    prefix.capture_spans.recorded_span = original_legacy_capture;
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
 
     const completed_prefix = prefix.*;
@@ -1531,8 +1531,8 @@ test "first erased object prefix preserves runtime and exact ownership" {
         .capture_spans = completed_prefix.capture_spans,
         .policy = .ignored_parameters,
     });
-    pending.capture_spans.legacy_recorded_span.end =
-        pending.capture_spans.legacy_recorded_span.start;
+    pending.capture_spans.recorded_span.end =
+        pending.capture_spans.recorded_span.start;
     try std.testing.expectError(
         error.InvalidErasedTypePrefix,
         parser.type_store.finishErasedTypePrefix(&pending, .{
@@ -1673,7 +1673,7 @@ test "erased prefix matrix preserves runtime ownership and projection order" {
         var projected_total: usize = 0;
         for (case.prefixes, parser.type_store.erased_type_prefixes.items) |expected, prefix| {
             try std.testing.expectEqualStrings(expected.actual, prefix.capture_spans.actual_erased_span.text(case.source));
-            try std.testing.expectEqualStrings(expected.legacy, prefix.capture_spans.legacy_recorded_span.text(case.source));
+            try std.testing.expectEqualStrings(expected.legacy, prefix.capture_spans.recorded_span.text(case.source));
             try std.testing.expectEqualStrings(expected.operand, prefix.operand_span.text(case.source));
             const owner = switch (prefix.owner) {
                 .expression => |runtime_node| blk: {
@@ -1773,7 +1773,7 @@ test "spaced erased prefixes preserve assignment and general captures" {
         try std.testing.expectEqual(@as(usize, 1), parser.type_store.erased_type_prefixes.items.len);
         const prefix = &parser.type_store.erased_type_prefixes.items[0];
         try std.testing.expectEqualStrings(case.actual, prefix.capture_spans.actual_erased_span.text(case.source));
-        try std.testing.expectEqualStrings(case.legacy, prefix.capture_spans.legacy_recorded_span.text(case.source));
+        try std.testing.expectEqualStrings(case.legacy, prefix.capture_spans.recorded_span.text(case.source));
         switch (prefix.compatibility) {
             .legacy_parameter_projection => try std.testing.expect(case.projected),
             .ignored_parameters => try std.testing.expect(!case.projected),
@@ -1886,7 +1886,7 @@ test "direct erased prefix projection retains bounds and valid empty ranges" {
             .list_span = scanned.span,
             .capture_spans = .{
                 .actual_erased_span = scanned.span,
-                .legacy_recorded_span = .{
+                .recorded_span = .{
                     .start = scanned.span.start + 1,
                     .end = scanned.span.end - 1,
                 },
@@ -1914,7 +1914,7 @@ test "direct erased prefix projection retains bounds and valid empty ranges" {
                 .list_span = scanned.span,
                 .capture_spans = .{
                     .actual_erased_span = scanned.span,
-                    .legacy_recorded_span = scanned.span,
+                    .recorded_span = scanned.span,
                 },
                 .authored_parameters = .{ .start = 0, .count = 0 },
                 .projected_parameters = .{ .start = 0, .count = 0 },
@@ -1947,7 +1947,7 @@ test "direct erased prefix projection retains bounds and valid empty ranges" {
                 .list_span = scanned.span,
                 .capture_spans = .{
                     .actual_erased_span = scanned.span,
-                    .legacy_recorded_span = scanned.span,
+                    .recorded_span = scanned.span,
                 },
                 .authored_arguments = .{
                     .start = @intCast(store.authored_call_arguments.items.len),
@@ -2229,7 +2229,7 @@ test "type-only module refusal retains its original location" {
     parser.setAtomTable(&atoms);
 
     try std.testing.expectError(error.AdmissionRefused, parser.parse());
-    try std.testing.expectEqual(TypeSyntax.AdmissionKind.legacy_types_import, parser.getAdmissionDiagnostics()[0].kind);
+    try std.testing.expectEqual(TypeSyntax.AdmissionKind.retired_types_import, parser.getAdmissionDiagnostics()[0].kind);
     const refusal = parser.type_only_module_refusal orelse return error.TestUnexpectedResult;
     try std.testing.expectEqual(TypeSyntax.TypeOnlyModuleRefusalReason.zttp_types, refusal.reason);
     try std.testing.expectEqual(@as(u32, 0), refusal.original_location.offset);
@@ -4276,7 +4276,7 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
                 try std.testing.expect(recognized.default_span != null);
                 try std.testing.expectEqualStrings(
                     "string = boolean",
-                    (projected[0].legacy_bound_span orelse return error.TestUnexpectedResult).text(source),
+                    (projected[0].bound_span orelse return error.TestUnexpectedResult).text(source),
                 );
             }
             const fields = pool.getRecordFields(value_type orelse return error.TestUnexpectedResult);
@@ -4527,7 +4527,7 @@ fn assertGenericFragmentProperty(case: GenericFragmentCase, source: []const u8) 
         .list_span = .{ .start = 0, .end = lparen },
         .capture_spans = .{
             .actual_erased_span = .{ .start = 0, .end = lparen },
-            .legacy_recorded_span = .{ .start = 1, .end = lparen - 1 },
+            .recorded_span = .{ .start = 1, .end = lparen - 1 },
         },
     });
     const fragment_index = pending.final_record.semantic_fragments.start;
@@ -5123,7 +5123,7 @@ fn expectNamedFunctionCommentCompatibility(case: NamedFunctionCommentCase) !void
         .before_block, .before_line => {
             try std.testing.expectEqualStrings(
                 "T",
-                owner.capture_spans.legacy_recorded_span.text(source),
+                owner.capture_spans.recorded_span.text(source),
             );
             const ranges = switch (owner.compatibility) {
                 .legacy_call_arguments => |ranges| ranges,
@@ -5141,7 +5141,7 @@ fn expectNamedFunctionCommentCompatibility(case: NamedFunctionCommentCase) !void
         .after_block, .after_line => {
             try std.testing.expectEqualStrings(
                 "T",
-                owner.capture_spans.legacy_recorded_span.text(source),
+                owner.capture_spans.recorded_span.text(source),
             );
             switch (owner.compatibility) {
                 .ignored_declaration_parameters => {},
@@ -5300,7 +5300,7 @@ test "ignored and legacy-call policies retain syntax without generic declaration
             .list_span = .{ .start = list_start, .end = list_end },
             .capture_spans = .{
                 .actual_erased_span = .{ .start = list_start, .end = list_end },
-                .legacy_recorded_span = .{ .start = list_start, .end = list_end },
+                .recorded_span = .{ .start = list_start, .end = list_end },
             },
             .policy = .ignored,
         });
@@ -5367,7 +5367,7 @@ test "ignored and legacy-call policies retain syntax without generic declaration
             .list_span = .{ .start = 0, .end = 8 },
             .capture_spans = .{
                 .actual_erased_span = .{ .start = 0, .end = 8 },
-                .legacy_recorded_span = .{ .start = 0, .end = 8 },
+                .recorded_span = .{ .start = 0, .end = 8 },
             },
             .policy = .legacy_call,
         });
@@ -5427,7 +5427,7 @@ fn expectNominalGenericOwner(
     }
     try std.testing.expectEqualStrings(expected.list, owner.list_span.text(store.source));
     try std.testing.expect(std.meta.eql(owner.list_span, owner.capture_spans.actual_erased_span));
-    try std.testing.expect(std.meta.eql(owner.list_span, owner.capture_spans.legacy_recorded_span));
+    try std.testing.expect(std.meta.eql(owner.list_span, owner.capture_spans.recorded_span));
     const authored = store.genericParameterSlice(owner.authored_parameters) orelse
         return error.TestUnexpectedResult;
     const projected = store.projectedGenericParameterSlice(owner.projected_parameters) orelse
@@ -5448,10 +5448,10 @@ fn expectNominalGenericOwner(
         try std.testing.expect(recognized.default_span == null);
     }
     if (expected.legacy_bound) |legacy_bound| {
-        const span = projected[0].legacy_bound_span orelse return error.TestUnexpectedResult;
+        const span = projected[0].bound_span orelse return error.TestUnexpectedResult;
         try std.testing.expectEqualStrings(legacy_bound, span.text(store.source));
     } else {
-        try std.testing.expect(projected[0].legacy_bound_span == null);
+        try std.testing.expect(projected[0].bound_span == null);
     }
     try std.testing.expect(projected[0].bound_fragment == null);
     const body = switch (declaration.body) {
@@ -5721,7 +5721,7 @@ test "first generic function slice accepts only its bounded source shape" {
     ));
     try std.testing.expectEqualStrings(
         "T",
-        whitespace_owner.capture_spans.legacy_recorded_span.text(whitespace_source),
+        whitespace_owner.capture_spans.recorded_span.text(whitespace_source),
     );
 
     const residual_closer = "const seed: number = 1; function identity<T>>(value) { return value; }";
@@ -5861,7 +5861,7 @@ fn expectTypedGenericArrowRecords(
     );
     try std.testing.expectEqualStrings(
         expected.legacy_capture,
-        owner.capture_spans.legacy_recorded_span.text(source),
+        owner.capture_spans.recorded_span.text(source),
     );
     try std.testing.expectEqual(@as(u32, 0), owner.authored_parameters.start);
     try std.testing.expectEqual(@as(u32, 1), owner.authored_parameters.count);
@@ -6130,7 +6130,7 @@ test "nested generic owners and call retain source reservation order" {
     try std.testing.expectEqual(@as(usize, 1), outer_projected.len);
     try std.testing.expectEqualStrings(
         "string = boolean",
-        (outer_projected[0].legacy_bound_span orelse return error.TestUnexpectedResult).text(source),
+        (outer_projected[0].bound_span orelse return error.TestUnexpectedResult).text(source),
     );
     try std.testing.expect(outer_projected[0].bound_fragment != null);
     const call = parser.type_store.explicit_call_arguments.items[0];
@@ -6272,7 +6272,7 @@ test "generic runtime syntax census observes every case" {
                 ));
                 try std.testing.expectEqualStrings(
                     "T",
-                    owner.capture_spans.legacy_recorded_span.text(fixture.source),
+                    owner.capture_spans.recorded_span.text(fixture.source),
                 );
             },
             .leading_empty_arrow_parameter => {
@@ -6291,7 +6291,7 @@ test "generic runtime syntax census observes every case" {
                 try std.testing.expectEqualStrings("T", projected[0].name_span.text(fixture.source));
                 try std.testing.expectEqualStrings(
                     "string = boolean",
-                    (projected[0].legacy_bound_span orelse return error.TestUnexpectedResult).text(fixture.source),
+                    (projected[0].bound_span orelse return error.TestUnexpectedResult).text(fixture.source),
                 );
                 try std.testing.expect(projected[0].bound_fragment != null);
             },
@@ -6320,7 +6320,7 @@ test "generic runtime syntax census observes every case" {
                 ));
                 try std.testing.expectEqualStrings(
                     "",
-                    owner.capture_spans.legacy_recorded_span.text(fixture.source),
+                    owner.capture_spans.recorded_span.text(fixture.source),
                 );
             },
             .empty_general_arrow => {
@@ -6346,7 +6346,7 @@ test "generic runtime syntax census observes every case" {
                 ));
                 try std.testing.expectEqualStrings(
                     "string",
-                    call.capture_spans.legacy_recorded_span.text(fixture.source),
+                    call.capture_spans.recorded_span.text(fixture.source),
                 );
             },
             .explicit_call_combined_opener => {
@@ -6876,7 +6876,7 @@ test "generic owner projection removes one pair from its recorded window" {
             ));
             try std.testing.expect(std.meta.eql(
                 owner.list_span,
-                owner.capture_spans.legacy_recorded_span,
+                owner.capture_spans.recorded_span,
             ));
         }
         const projected = parser.type_store.projectedGenericParameterSlice(owner.projected_parameters) orelse
@@ -7028,7 +7028,7 @@ test "function bounds stop at the compact legacy parameter count" {
     try std.testing.expectEqualStrings("U", projected[2].name_span.text(source));
     try std.testing.expectEqualStrings(
         "1",
-        (projected[2].legacy_bound_span orelse return error.TestUnexpectedResult).text(source),
+        (projected[2].bound_span orelse return error.TestUnexpectedResult).text(source),
     );
     try std.testing.expect(projected[2].bound_fragment == null);
     try std.testing.expectEqual(@as(usize, 0), parser.type_store.semantic_fragments.items.len);
@@ -7063,7 +7063,7 @@ test "function bounds stop at the compact legacy parameter count" {
     ) orelse return error.TestUnexpectedResult;
     try std.testing.expectEqualStrings(
         "?",
-        (unsupported_projected[2].legacy_bound_span orelse return error.TestUnexpectedResult).text(unsupported),
+        (unsupported_projected[2].bound_span orelse return error.TestUnexpectedResult).text(unsupported),
     );
     try std.testing.expect(unsupported_projected[2].bound_fragment == null);
     try std.testing.expectEqual(@as(usize, 0), unsupported_parser.type_store.semantic_fragments.items.len);
@@ -9006,7 +9006,7 @@ test "later semantic fragment rollback closes every allocation failure" {
                 .list_span = .{ .start = @intCast(list_start), .end = @intCast(source.len - 1) },
                 .capture_spans = .{
                     .actual_erased_span = .{ .start = @intCast(list_start), .end = lparen },
-                    .legacy_recorded_span = .{ .start = @intCast(list_start + 1), .end = lparen - 1 },
+                    .recorded_span = .{ .start = @intCast(list_start + 1), .end = lparen - 1 },
                 },
             });
             const fragment_index = pending.final_record.semantic_fragments.start;
@@ -11553,12 +11553,12 @@ test "direct callable bounds stop before excluded projected fragments" {
     try std.testing.expectEqualStrings("U", projected[2].name_span.text(source));
     try std.testing.expectEqualStrings(
         "{ id: string }",
-        (projected[2].legacy_bound_span orelse return error.TestUnexpectedResult).text(source),
+        (projected[2].bound_span orelse return error.TestUnexpectedResult).text(source),
     );
     try std.testing.expect(projected[2].bound_fragment == null);
     const fragment_index = try TypeSyntax.parseSemanticFragmentAndStore(
         &direct.type_store,
-        projected[2].legacy_bound_span.?,
+        projected[2].bound_span.?,
     );
     direct.type_store.projected_generic_parameters.items[
         owner.projected_parameters.start + 2

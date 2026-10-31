@@ -689,13 +689,7 @@ pub fn evaluationManifestIdentity() evidence_identity.ManifestIdentity {
     });
 }
 
-/// Compatibility accessor for the existing JSON field. It is now the frozen
-/// model-visible input identity, not an aggregate containing expectations.
-pub fn corpusVersion() [64]u8 {
-    return headlineInputIdentity().bytes;
-}
-
-test "evaluation identities are deterministic and the corpus accessor is input only" {
+test "evaluation identities are deterministic" {
     const headline = headlineInputIdentity();
     const intents = intentSuiteIdentity();
     const probes = securityProbeIdentity();
@@ -707,7 +701,6 @@ test "evaluation identities are deterministic and the corpus accessor is input o
     try testing.expect(probes.eql(securityProbeIdentity()));
     try testing.expect(expected.eql(thresholdIdentity()));
     try testing.expect(aggregate.eql(evaluationManifestIdentity()));
-    try testing.expectEqualSlices(u8, &headline.bytes, &corpusVersion());
 }
 
 test "intent cohort is explicit and non-vacuous" {

@@ -881,10 +881,10 @@ fn writeBooleanProperties(
     }
 }
 
-fn contractKey(comptime json_version: JsonVersion, comptime legacy_key: []const u8) []const u8 {
+fn contractKey(comptime json_version: JsonVersion, comptime v1_key: []const u8) []const u8 {
     comptime {
-        if (json_version == .v1) return legacy_key;
-        return camelToSnake(legacy_key);
+        if (json_version == .v1) return v1_key;
+        return camelToSnake(v1_key);
     }
 }
 

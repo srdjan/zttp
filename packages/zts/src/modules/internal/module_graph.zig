@@ -410,7 +410,7 @@ test "graph refuses every hard admission producer" {
         .{ .kind = .interface_declaration, .err = error.InterfaceDeclaration, .source = "import type { A } /* ; */ from \"./a\";\ninterface Box { value: string }\n" },
         .{ .kind = .type_alias_declaration, .err = error.TypeAliasDeclaration, .source = "import type { A } /* ; */ from \"./a\";\ntype Box = string;\n" },
         .{ .kind = .distinct_type_declaration, .err = error.DistinctTypeDeclaration, .source = "import type { A } /* ; */ from \"./a\";\ndistinct type Box = string;\n" },
-        .{ .kind = .legacy_types_import, .err = error.LegacyTypesImport, .source = "import type { A } /* ; */ from \"./a\";\nimport type { Value } from '" ++ @import("zts-base").module_specifier.retired_types_module ++ "';\n" },
+        .{ .kind = .retired_types_import, .err = error.LegacyTypesImport, .source = "import type { A } /* ; */ from \"./a\";\nimport type { Value } from '" ++ @import("zts-base").module_specifier.retired_types_module ++ "';\n" },
         .{ .kind = .default_parameter, .err = error.DefaultParameter, .source = "import type { A } /* ; */ from \"./a\";\nfunction f(value = 1) { return value; }\n" },
         .{ .kind = .optional_parameter, .err = error.OptionalParameter, .source = "import type { A } /* ; */ from \"./a\";\nfunction f(value?: string) { return value; }\n" },
         .{ .kind = .default_export, .err = error.DefaultExport, .source = "import type { A } /* ; */ from \"./a\";\nexport default 1;\n" },

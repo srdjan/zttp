@@ -173,7 +173,7 @@ pub fn stripCode(kind: StripKind) []const u8 {
         .interface_declaration => "ZTS049",
         .type_alias_declaration => "ZTS050",
         .distinct_type_declaration => "ZTS051",
-        .legacy_types_import => "ZTS053",
+        .retired_types_import => "ZTS053",
         .default_parameter => "ZTS054",
         .optional_parameter => "ZTS055",
         .default_export => "ZTS056",

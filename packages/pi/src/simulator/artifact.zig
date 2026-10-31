@@ -725,7 +725,7 @@ pub fn isAgentScratch(path: []const u8) bool {
     return std.mem.eql(u8, path, ".zttp") or std.mem.startsWith(u8, path, ".zttp/");
 }
 
-test "agent scratch covers the witness tree and nothing beside it" {
+test "agent scratch covers the .zttp tree and nothing beside it" {
     try std.testing.expect(isAgentScratch(".zttp"));
     try std.testing.expect(isAgentScratch(".zttp/witnesses/f0812d0e79287bb9/handler.path"));
     try std.testing.expect(!isAgentScratch("handler.ts"));

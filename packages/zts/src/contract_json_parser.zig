@@ -704,11 +704,11 @@ fn parseV2StructInto(
     _ = try source.next();
 }
 
-fn v2KeyMatches(comptime legacy_key: []const u8, key: []const u8) bool {
-    if (std.mem.eql(u8, legacy_key, key)) return true;
+fn v2KeyMatches(comptime v1_key: []const u8, key: []const u8) bool {
+    if (std.mem.eql(u8, v1_key, key)) return true;
 
     var key_index: usize = 0;
-    for (legacy_key) |byte| {
+    for (v1_key) |byte| {
         if (std.ascii.isUpper(byte)) {
             if (key_index >= key.len or key[key_index] != '_') return false;
             key_index += 1;

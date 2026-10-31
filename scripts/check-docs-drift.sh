@@ -283,13 +283,13 @@ if (( live_surface_count < 100 )); then
   fail "legacy types-import gate scanned only $live_surface_count tracked files"
 fi
 
-legacy_types_hits="$({
+retired_types_hits="$({
   git ls-files -z |
     xargs -0 bash -c "$rg_scan_body" rg_scan -n -F -- 'zttp:types'
 } | grep -v -E '^(CHANGELOG\.md:|docs/(archive|plans|solutions)/|docs/(convergence|restrictions-to-proofs)\.md:|packages/pi/src/simulator/testdata/empirical/|packages/zts/src/(source_diagnostics|restriction_registry)\.zig:|packages/tools/src/precompile(_check_tests)?\.zig:|packages/pi/src/expert_persona\.zig:|scripts/check-docs-drift\.sh:|tests/corpus/[a-z]+/bad/)' || true)"
 rg_scan_ok
-if [[ -n "${legacy_types_hits//[[:space:]]/}" ]]; then
-  printf '%s\n' "$legacy_types_hits" >&2
+if [[ -n "${retired_types_hits//[[:space:]]/}" ]]; then
+  printf '%s\n' "$retired_types_hits" >&2
   fail "live source still references removed zttp:types; use ambient Proof<T, P> and Effects<T, R>"
 fi
 
