@@ -423,15 +423,24 @@ test {
     _ = @import("ir_children_tests.zig");
 }
 
-test "legacy Parser API" {
+/// Parse through admission, then generate bytecode, as the compile path does.
+fn generateAdmitted(p: *Parser) ![]const u8 {
+    switch (try p.parseTypedIr()) {
+        .accepted => {},
+        else => return error.TestUnexpectedResult,
+    }
+    return p.generateParsed(p.allocator);
+}
+
+test "Parser API" {
     const allocator = std.testing.allocator;
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
 
-    var p = try Parser.init(allocator, "let x = 1;", &strings, null);
+    var p = try Parser.initTyped(allocator, allocator, "let x = 1;", &strings, null);
     defer p.deinit();
 
-    const bytecode_data = try p.parse();
+    const bytecode_data = try generateAdmitted(&p);
     try std.testing.expect(bytecode_data.len > 0);
     // Global variables don't need local slots - they use put_global
     // max_local_count is 0 for top-level code with only global vars
@@ -444,14 +453,15 @@ test "legacy Parser API" {
     try std.testing.expectEqual(@backingInt(bytecode.Opcode.ret_undefined), bytecode_data[4]);
 }
 
-test "legacy Parser API getImports returns imported names" {
+test "Parser API getImports returns imported names" {
     const allocator = std.testing.allocator;
     var strings = string.StringTable.init(allocator);
     defer strings.deinit();
     var atoms = atom_table_mod.AtomTable.init(allocator);
     defer atoms.deinit();
 
-    var p = try Parser.init(
+    var p = try Parser.initTyped(
+        allocator,
         allocator,
         \\import { sha256 as hash, base64Encode } from "zttp:crypto";
         \\const out = hash("abc");
@@ -461,7 +471,7 @@ test "legacy Parser API getImports returns imported names" {
     );
     defer p.deinit();
 
-    _ = try p.parse();
+    _ = try generateAdmitted(&p);
     const imports = try p.getImports();
     defer p.freeImports(imports);
 
@@ -473,7 +483,7 @@ test "legacy Parser API getImports returns imported names" {
 }
 
 test "core parser rejects raw JSX element syntax" {
-    var parser = try JsParser.init(std.testing.allocator, "const view = <div />;");
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, "const view = <div />;", .compile);
     defer parser.deinit();
 
     try std.testing.expectError(error.UnexpectedToken, parser.parse());
@@ -487,10 +497,10 @@ test "var keyword is rejected with helpful error" {
     defer strings.deinit();
 
     const source = "var x = 1;";
-    var p = try Parser.init(allocator, source, &strings, null);
+    var p = try Parser.initTyped(allocator, allocator, source, &strings, null);
     defer p.deinit();
 
-    _ = p.parse() catch {};
+    _ = p.parseTypedIr() catch {};
 
     // Should have an error
     try std.testing.expect(p.js_parser.errors.hasErrors());
@@ -509,10 +519,10 @@ test "postfix increment is rejected with helpful error" {
     defer strings.deinit();
 
     const source = "let x = 0; x++;";
-    var p = try Parser.init(allocator, source, &strings, null);
+    var p = try Parser.initTyped(allocator, allocator, source, &strings, null);
     defer p.deinit();
 
-    _ = p.parse() catch {};
+    _ = p.parseTypedIr() catch {};
 
     // Should have an error about postfix increment
     try std.testing.expect(p.js_parser.errors.hasErrors());
@@ -530,10 +540,10 @@ test "prefix increment is rejected with helpful error" {
     defer strings.deinit();
 
     const source = "let x = 0; ++x;";
-    var p = try Parser.init(allocator, source, &strings, null);
+    var p = try Parser.initTyped(allocator, allocator, source, &strings, null);
     defer p.deinit();
 
-    _ = p.parse() catch {};
+    _ = p.parseTypedIr() catch {};
 
     // Should have an error about prefix increment
     try std.testing.expect(p.js_parser.errors.hasErrors());
@@ -558,7 +568,7 @@ test "a match record key that cannot be interned fails codegen instead of droppi
     for ([_][]const u8{ "h", "zzq" }) |name| _ = try atoms.intern(name);
     atoms.next_id = 0xFFFE;
 
-    var p = try Parser.init(allocator,
+    var p = try Parser.initTyped(allocator, allocator,
         \\function h(zzq) {
         \\  return match (zzq) {
         \\    when { zzkind: "x" }: 200,
@@ -568,25 +578,25 @@ test "a match record key that cannot be interned fails codegen instead of droppi
     , &strings, &atoms);
     defer p.deinit();
 
-    try std.testing.expectError(error.OutOfMemory, p.parse());
+    try std.testing.expectError(error.OutOfMemory, generateAdmitted(&p));
 }
 
 test "typed parser delays generation and matches equivalent JavaScript bytecode and atoms" {
     const allocator = std.testing.allocator;
     const typed_source = "const reset_value: number = 4;\nfunction reset_identity(input: number): number { return input; }\n";
-    const raw_source = "const reset_value         = 4;\nfunction reset_identity(input        )         { return input; }\n";
-    var raw_strings = string.StringTable.init(allocator);
-    defer raw_strings.deinit();
+    const plain_source = "const reset_value         = 4;\nfunction reset_identity(input        )         { return input; }\n";
+    var plain_strings = string.StringTable.init(allocator);
+    defer plain_strings.deinit();
     var typed_strings = string.StringTable.init(allocator);
     defer typed_strings.deinit();
-    var raw_atoms = atom_table_mod.AtomTable.init(allocator);
-    defer raw_atoms.deinit();
+    var plain_atoms = atom_table_mod.AtomTable.init(allocator);
+    defer plain_atoms.deinit();
     var typed_atoms = atom_table_mod.AtomTable.init(allocator);
     defer typed_atoms.deinit();
-    _ = try raw_atoms.intern("reset_prefix");
+    _ = try plain_atoms.intern("reset_prefix");
     _ = try typed_atoms.intern("reset_prefix");
-    var raw = try Parser.init(allocator, raw_source, &raw_strings, &raw_atoms);
-    defer raw.deinit();
+    var plain = try Parser.initTyped(allocator, allocator, plain_source, &plain_strings, &plain_atoms);
+    defer plain.deinit();
     var typed = try Parser.initTyped(allocator, allocator, typed_source, &typed_strings, &typed_atoms);
     defer typed.deinit();
     const before = typed.js_parser.tokens_advanced;
@@ -595,8 +605,6 @@ test "typed parser delays generation and matches equivalent JavaScript bytecode 
     try std.testing.expectError(error.InvalidParserPhase, typed.parseWithCodegenAllocator(allocator));
     try std.testing.expectEqual(before, typed.js_parser.tokens_advanced);
     try std.testing.expectEqual(@as(usize, 1), typed_atoms.count());
-    try std.testing.expectError(error.InvalidParserPhase, raw.parseTypedIr());
-    try std.testing.expectError(error.InvalidParserPhase, raw.generateParsed(allocator));
     const root = switch (try typed.parseTypedIr()) {
         .accepted => |node| node,
         else => return error.TestUnexpectedResult,
@@ -611,32 +619,32 @@ test "typed parser delays generation and matches equivalent JavaScript bytecode 
     const parsed_progress = typed.js_parser.tokens_advanced;
     const typed_code = try typed.generateParsed(allocator);
     defer typed.code_gen.?.freeOwnedConstantPayloads();
-    const raw_code = try raw.parse();
-    defer raw.code_gen.?.freeOwnedConstantPayloads();
+    const plain_code = try generateAdmitted(&plain);
+    defer plain.code_gen.?.freeOwnedConstantPayloads();
     try std.testing.expect(typed_code.len > 0);
-    try std.testing.expectEqualSlices(u8, raw_code, typed_code);
-    try std.testing.expectEqual(raw.max_local_count, typed.max_local_count);
+    try std.testing.expectEqualSlices(u8, plain_code, typed_code);
+    try std.testing.expectEqual(plain.max_local_count, typed.max_local_count);
     const cache = @import("../bytecode_cache.zig");
-    var raw_buffer: [4096]u8 = undefined;
+    var plain_buffer: [4096]u8 = undefined;
     var typed_buffer: [4096]u8 = undefined;
-    var raw_writer: cache.SliceWriter = .{ .buffer = &raw_buffer };
+    var plain_writer: cache.SliceWriter = .{ .buffer = &plain_buffer };
     var typed_writer: cache.SliceWriter = .{ .buffer = &typed_buffer };
-    try cache.serializeConstants(raw.constants.items, &raw_writer, allocator);
+    try cache.serializeConstants(plain.constants.items, &plain_writer, allocator);
     try cache.serializeConstants(typed.constants.items, &typed_writer, allocator);
-    try std.testing.expect(raw_writer.pos > @sizeOf(u16));
-    try std.testing.expectEqualSlices(u8, raw_writer.getWritten(), typed_writer.getWritten());
+    try std.testing.expect(plain_writer.pos > @sizeOf(u16));
+    try std.testing.expectEqualSlices(u8, plain_writer.getWritten(), typed_writer.getWritten());
 
-    try std.testing.expectEqual(raw_atoms.count(), typed_atoms.count());
-    try std.testing.expectEqual(raw_atoms.next_id, typed_atoms.next_id);
-    for (object.Atom.FIRST_DYNAMIC..raw_atoms.next_id) |atom_id| {
+    try std.testing.expectEqual(plain_atoms.count(), typed_atoms.count());
+    try std.testing.expectEqual(plain_atoms.next_id, typed_atoms.next_id);
+    for (object.Atom.FIRST_DYNAMIC..plain_atoms.next_id) |atom_id| {
         const atom: object.Atom = @fromBackingInt(@intCast(atom_id));
-        try std.testing.expectEqualStrings(raw_atoms.getName(atom).?, typed_atoms.getName(atom).?);
+        try std.testing.expectEqualStrings(plain_atoms.getName(atom).?, typed_atoms.getName(atom).?);
     }
     try std.testing.expectEqual(parsed_progress, typed.js_parser.tokens_advanced);
     try std.testing.expectError(error.InvalidParserPhase, typed.generateParsed(allocator));
     try std.testing.expectError(error.InvalidParserPhase, typed.parseTypedIr());
     try std.testing.expectEqual(parsed_progress, typed.js_parser.tokens_advanced);
-    try std.testing.expectEqualSlices(u8, raw_code, typed_code);
+    try std.testing.expectEqualSlices(u8, plain_code, typed_code);
 }
 
 test "typed compatibility refusals consume the parse attempt" {
