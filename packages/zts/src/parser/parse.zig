@@ -6617,7 +6617,7 @@ test "nested lists retain parent elements across scratch growth" {
     try source.writer.writeAll("function outer(first, last) { return [first, collect([");
     for (0..256) |i| try source.writer.print("{d},", .{i});
     try source.writer.writeAll("], {value: [11, 12]}, (x, y) => [x, y]), last]; }");
-    var parser = try Parser.init(allocator, source.written());
+    var parser = try Parser.initAdmission(allocator, allocator, source.written(), .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -6662,13 +6662,13 @@ test "list scratch unwinds on allocation failure and parser refusal" {
     const source = "function f(a, b) { return [a, {x: [1, 2, 3]}, g([4, 5], x => [x, b])]; }";
     try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
         fn run(allocator: std.mem.Allocator, text: []const u8) !void {
-            var parser = try Parser.init(allocator, text);
+            var parser = try Parser.initAdmission(allocator, allocator, text, .compile);
             defer parser.deinit();
             defer std.debug.assert(parser.scratch_nodes.items.len == 0);
             _ = try parser.parse();
         }
     }.run, .{source});
-    var refused = try Parser.init(std.testing.allocator, "function f(a) { return [a, {x: [1, , 2]}]; }");
+    var refused = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "function f(a) { return [a, {x: [1, , 2]}]; }", .compile);
     defer refused.deinit();
     try std.testing.expectError(error.ParseError, refused.parse());
     try std.testing.expectEqual(@as(usize, 0), refused.scratch_nodes.items.len);
@@ -7622,11 +7622,15 @@ test "a newline after return no longer swallows the value" {
     // unreachable - silently. Spec 5.5 has no
     // insertion, so the newline means nothing and `return` binds the expression
     // that follows it.
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\function handler(req) {
         \\  return
         \\  Response.json({ leaked: true });
         \\}
+    ,
+        .compile,
     );
     defer parser.deinit();
     _ = parser.parse() catch 0;
@@ -7648,10 +7652,14 @@ test "a bare return with no semicolon is refused, with the insertion repair" {
     // The other half: `return` genuinely returning nothing still needs its
     // terminator written, and the refusal names the rule rather than reporting
     // that some token was expected.
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\function handler(req) {
         \\  return
         \\}
+    ,
+        .compile,
     );
     defer parser.deinit();
     _ = parser.parse() catch 0;
@@ -7672,7 +7680,7 @@ test "break and continue in a function nested in a loop are refused" {
         "function f(xs) { for (const x of xs) { const g = (y) => { if (y) { continue; } return y; }; } }",
     };
     for (refused) |source| {
-        var parser = try Parser.init(std.testing.allocator, source);
+        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         _ = parser.parse() catch 0;
         const errors = parser.getErrors();
@@ -7688,7 +7696,7 @@ test "break and continue in a function nested in a loop are refused" {
         "function f(xs) { for (const x of xs) { const g = () => { for (const y of xs) { break; } return 1; }; continue; } }",
     };
     for (accepted) |source| {
-        var parser = try Parser.init(std.testing.allocator, source);
+        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
         _ = try parser.parse();
         try std.testing.expect(!parser.hasErrors());
@@ -7699,7 +7707,7 @@ test "the compatibility mode still parses what insertion accepted" {
     // M2 compares the tree of the unrepaired original against the repaired
     // file, so the original has to keep parsing somewhere. That somewhere is
     // this flag, and this is the test that it still does what it did.
-    var parser = try Parser.init(std.testing.allocator, "const a = 1\nconst b = 2\n");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const a = 1\nconst b = 2\n", .compile);
     defer parser.deinit();
     parser.allow_asi = true;
     _ = try parser.parse();
@@ -7707,7 +7715,7 @@ test "the compatibility mode still parses what insertion accepted" {
 }
 
 test "parse simple expression" {
-    var parser = try Parser.init(std.testing.allocator, "1 + 2;");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "1 + 2;", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -7720,7 +7728,7 @@ test "parse simple expression" {
 }
 
 test "parse variable declaration" {
-    var parser = try Parser.init(std.testing.allocator, "let x = 42;");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "let x = 42;", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -7733,7 +7741,7 @@ test "parse variable declaration" {
 }
 
 test "parse escaped string literal transfers an exact-sized owned value" {
-    var parser = try Parser.init(std.testing.allocator, "const s = \"{\\\"type\\\":\\\"object\\\"}\";");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const s = \"{\\\"type\\\":\\\"object\\\"}\";", .compile);
     defer parser.deinit();
 
     const result = try parser.parse();
@@ -7753,9 +7761,11 @@ test "parse escaped string literal transfers an exact-sized owned value" {
 test "escaped strings decode and deduplicate through allocation failures" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, struct {
         fn run(allocator: std.mem.Allocator) !void {
-            var parser = try Parser.init(
+            var parser = try Parser.initAdmission(
+                allocator,
                 allocator,
                 "const values = [\"line\\nvalue\", `line\\nvalue`, \"\\u{1F600}\", \"\\x41\"];",
+                .compile,
             );
             defer parser.deinit();
             _ = try parser.parse();
@@ -7770,10 +7780,14 @@ test "escaped strings decode and deduplicate through allocation failures" {
 }
 
 test "parse function declaration" {
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\function add(a, b) {
         \\  return a + b;
         \\}
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -7787,7 +7801,7 @@ test "parse function declaration" {
 }
 
 test "parse arrow function" {
-    var parser = try Parser.init(std.testing.allocator, "const f = (x) => x * 2;");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const f = (x) => x * 2;", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -7879,7 +7893,7 @@ test "named function comment call grammar refusal restores seeded speculation" {
 }
 
 test "parse no-substitution template as string literal" {
-    var parser = try Parser.init(std.testing.allocator, "const s = `hello!`;");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const s = `hello!`;", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -7892,7 +7906,7 @@ test "parse no-substitution template as string literal" {
 }
 
 test "parse object literal" {
-    var parser = try Parser.init(std.testing.allocator, "const obj = { x: 1, y: 2 };");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const obj = { x: 1, y: 2 };", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -7905,8 +7919,12 @@ test "parse object literal" {
 }
 
 test "parse class rejected" {
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\class Foo {}
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -7921,8 +7939,12 @@ test "parse class rejected" {
 }
 
 test "parse regex literal rejected" {
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\const r = /ab+/;
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -7935,9 +7957,13 @@ test "parse regex literal rejected" {
 }
 
 test "parse local Promise identifier" {
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\const Promise = 1;
         \\Promise;
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -7951,10 +7977,14 @@ test "parse local Promise identifier" {
 }
 
 test "parse closure creates upvalue" {
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\function outer(x) {
         \\  return () => x;
         \\}
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -7985,7 +8015,7 @@ test "refuse object declaration destructuring" {
         \\const { x: localX, y = 10 } = point;
     ;
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     try std.testing.expectError(error.ParseError, parser.parse());
@@ -8000,7 +8030,7 @@ test "refuse array declaration destructuring" {
         \\let [x, , y] = [1, 2, 3];
     ;
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     try std.testing.expectError(error.ParseError, parser.parse());
@@ -8023,7 +8053,7 @@ test "resource limit: deeply nested parentheses yield a diagnostic, not a crash"
     try buf.append(allocator, '1');
     try buf.appendNTimes(allocator, ')', depth);
 
-    var parser = try Parser.init(allocator, buf.items);
+    var parser = try Parser.initAdmission(allocator, allocator, buf.items, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8057,7 +8087,7 @@ test "resource limit: left-deep expression chains yield nesting diagnostic" {
         }
         try source.append(allocator, ';');
 
-        var parser = try Parser.init(allocator, source.items);
+        var parser = try Parser.initAdmission(allocator, allocator, source.items, .compile);
         defer parser.deinit();
         try std.testing.expectError(error.ParseError, parser.parse());
         try std.testing.expect(parser.hasErrors());
@@ -8079,7 +8109,7 @@ test "resource limit: left-deep chain at limit parses" {
     }
     try source.append(allocator, ';');
 
-    var parser = try Parser.init(allocator, source.items);
+    var parser = try Parser.initAdmission(allocator, allocator, source.items, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try std.testing.expect(!parser.hasErrors());
@@ -8095,7 +8125,7 @@ test "resource limit: grouped chains share one depth budget" {
     for (0..300) |_| try source.appendSlice(allocator, " + 1");
     try source.append(allocator, ';');
 
-    var parser = try Parser.init(allocator, source.items);
+    var parser = try Parser.initAdmission(allocator, allocator, source.items, .compile);
     defer parser.deinit();
     try std.testing.expectError(error.ParseError, parser.parse());
     try std.testing.expectEqual(error_mod.ErrorKind.nesting_too_deep, parser.getErrors()[0].kind);
@@ -8113,7 +8143,7 @@ test "resource limit: too many call arguments yields a diagnostic, not a crash" 
     }
     try source.appendSlice(allocator, ");");
 
-    var parser = try Parser.init(allocator, source.items);
+    var parser = try Parser.initAdmission(allocator, allocator, source.items, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8141,7 +8171,7 @@ test "resource limit: too many import specifiers yields a diagnostic, not a cras
     }
     try source.appendSlice(allocator, "} from \"zttp:env\";");
 
-    var parser = try Parser.init(allocator, source.items);
+    var parser = try Parser.initAdmission(allocator, allocator, source.items, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8162,7 +8192,7 @@ test "resource limit: too many import specifiers yields a diagnostic, not a cras
 test "unsupported: async function rejected at parse time" {
     const allocator = std.testing.allocator;
     const source = "const h = async function() { return 1; };";
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     _ = parser.parse() catch {
         try std.testing.expect(parser.hasErrors());
@@ -8178,7 +8208,7 @@ test "unsupported: async function rejected at parse time" {
 test "unsupported: await rejected at parse time" {
     const allocator = std.testing.allocator;
     const source = "function handler(req) { const x = await foo(); return Response.json({ x: x }); }";
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     _ = parser.parse() catch {
         try std.testing.expect(parser.hasErrors());
@@ -8194,7 +8224,7 @@ test "unsupported: class statement" {
     const allocator = std.testing.allocator;
     const source = "class Foo { }";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8216,7 +8246,7 @@ test "unsupported: class expression" {
     const allocator = std.testing.allocator;
     const source = "const X = class Foo { };";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8237,7 +8267,7 @@ test "unsupported: while loop" {
     const allocator = std.testing.allocator;
     const source = "while (true) { }";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8258,7 +8288,7 @@ test "unsupported: do-while loop" {
     const allocator = std.testing.allocator;
     const source = "do { } while (true);";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8278,7 +8308,7 @@ test "unsupported: switch statement" {
     const allocator = std.testing.allocator;
     const source = "switch (x) { case 1: break; }";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8297,7 +8327,7 @@ test "unsupported: switch statement" {
 
 test "assert statement parses" {
     const allocator = std.testing.allocator;
-    var parser = try Parser.init(allocator, "assert isString(val);");
+    var parser = try Parser.initAdmission(allocator, allocator, "assert isString(val);", .compile);
     defer parser.deinit();
     _ = parser.parse() catch {
         try std.testing.expect(false);
@@ -8308,7 +8338,7 @@ test "assert statement parses" {
 
 test "assert statement with error expression parses" {
     const allocator = std.testing.allocator;
-    var parser = try Parser.init(allocator, "assert isString(val), Response.json({ error: 'bad' });");
+    var parser = try Parser.initAdmission(allocator, allocator, "assert isString(val), Response.json({ error: 'bad' });", .compile);
     defer parser.deinit();
     _ = parser.parse() catch {
         try std.testing.expect(false);
@@ -8318,7 +8348,7 @@ test "assert statement with error expression parses" {
 }
 
 test "break in for-of" {
-    var parser = try Parser.init(std.testing.allocator, "for (const x of arr) { break; }");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "for (const x of arr) { break; }", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -8331,7 +8361,7 @@ test "break in for-of" {
 }
 
 test "continue in for-of" {
-    var parser = try Parser.init(std.testing.allocator, "for (const x of arr) { continue; }");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "for (const x of arr) { continue; }", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -8344,7 +8374,7 @@ test "continue in for-of" {
 }
 
 test "break outside loop" {
-    var parser = try Parser.init(std.testing.allocator, "break;");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "break;", .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8356,7 +8386,7 @@ test "break outside loop" {
 }
 
 test "continue outside loop" {
-    var parser = try Parser.init(std.testing.allocator, "continue;");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "continue;", .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8368,7 +8398,7 @@ test "continue outside loop" {
 }
 
 test "labeled break rejected" {
-    var parser = try Parser.init(std.testing.allocator, "for (const x of arr) { break label; }");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "for (const x of arr) { break label; }", .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8384,7 +8414,7 @@ test "labeled break rejected" {
 }
 
 test "break with conditional" {
-    var parser = try Parser.init(std.testing.allocator, "for (const x of arr) { if (x === 3) break; }");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "for (const x of arr) { if (x === 3) break; }", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -8400,7 +8430,7 @@ test "unsupported: throw statement" {
     const allocator = std.testing.allocator;
     const source = "throw new Error('test');";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8421,7 +8451,7 @@ test "unsupported: try-catch" {
     const allocator = std.testing.allocator;
     const source = "try { foo(); } catch (e) { }";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8442,7 +8472,7 @@ test "unsupported: var declaration" {
     const allocator = std.testing.allocator;
     const source = "var x = 42;";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8463,7 +8493,7 @@ test "unsupported: loose equality ==" {
     const allocator = std.testing.allocator;
     const source = "if (x == y) { }";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8504,7 +8534,7 @@ test "both profiles refuse the pipe operator with the same diagnostic" {
     try std.testing.expectError(error.ParseError, expression_parser.parseExpressionOnly());
     try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, expression_parser.getErrors()[0].kind);
 
-    var program_parser = try Parser.init(allocator, "const result = \"value\" |> hash;");
+    var program_parser = try Parser.initAdmission(allocator, allocator, "const result = \"value\" |> hash;", .compile);
     defer program_parser.deinit();
     _ = program_parser.parse() catch {};
     try std.testing.expect(program_parser.hasErrors());
@@ -8523,7 +8553,7 @@ test "kernel expression numeric separators remain isolated from programs" {
     // In a program, the separator is a diagnostic, not a silent truncation:
     // the literal must not lex as `1` followed by the identifier statement
     // `_000`, or a handler would serve 1 where the author wrote 1000.
-    var program_parser = try Parser.init(allocator, "const value = 1_000;");
+    var program_parser = try Parser.initAdmission(allocator, allocator, "const value = 1_000;", .compile);
     defer program_parser.deinit();
     try std.testing.expectError(error.InvalidNumber, program_parser.parse());
     const errors = program_parser.getErrors();
@@ -8537,7 +8567,7 @@ test "a non-ASCII identifier reports once, not once per cascade" {
     // which named the actual fault. The bytes of one character are one fault
     // and get one diagnostic.
     const allocator = std.testing.allocator;
-    var parser = try Parser.init(allocator, "const caf\xc3\xa9 = 1;");
+    var parser = try Parser.initAdmission(allocator, allocator, "const caf\xc3\xa9 = 1;", .compile);
     defer parser.deinit();
     _ = parser.parse() catch 0;
     const errors = parser.getErrors();
@@ -8549,7 +8579,7 @@ test "an ASCII identifier with digits and underscores still parses" {
     // The floor: refusing bytes above ASCII must not refuse the identifier
     // characters the profile admits.
     const allocator = std.testing.allocator;
-    var parser = try Parser.init(allocator, "const _priv$1 = 1; const camelCase2 = _priv$1;");
+    var parser = try Parser.initAdmission(allocator, allocator, "const _priv$1 = 1; const camelCase2 = _priv$1;", .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try std.testing.expect(!parser.hasErrors());
@@ -8560,7 +8590,7 @@ test "a radix prefix with no digits is refused" {
     // and became 0.0. The handler ran with a number the author never wrote.
     const allocator = std.testing.allocator;
     for ([_][]const u8{ "const n = 0x;", "const n = 0b;", "const n = 0o;" }) |source| {
-        var parser = try Parser.init(allocator, source);
+        var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
         defer parser.deinit();
         try std.testing.expectError(error.InvalidNumber, parser.parse());
         const errors = parser.getErrors();
@@ -8572,7 +8602,7 @@ test "a radix prefix with no digits is refused" {
 test "an exponent with no digits is refused" {
     const allocator = std.testing.allocator;
     for ([_][]const u8{ "const n = 1e;", "const n = 1e+;", "const n = 1E-;" }) |source| {
-        var parser = try Parser.init(allocator, source);
+        var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
         defer parser.deinit();
         try std.testing.expectError(error.InvalidNumber, parser.parse());
         const errors = parser.getErrors();
@@ -8585,7 +8615,7 @@ test "a legacy octal literal is refused, and the message names it" {
     // `0755` is 493 to one reader and 755 to another. The code is reused; the
     // message is what tells the two apart, so the message is what is asserted.
     const allocator = std.testing.allocator;
-    var parser = try Parser.init(allocator, "const mode = 0755;");
+    var parser = try Parser.initAdmission(allocator, allocator, "const mode = 0755;", .compile);
     defer parser.deinit();
     try std.testing.expectError(error.InvalidNumber, parser.parse());
     const errors = parser.getErrors();
@@ -8599,7 +8629,7 @@ test "the legal numeric forms still parse" {
     const allocator = std.testing.allocator;
     const legal = "const a = 0; const b = 0x1F; const c = 0b1010; const d = 0o17; " ++
         "const e = 1e3; const f = 1.5e-3; const g = 0.5; const h = 42;";
-    var parser = try Parser.init(allocator, legal);
+    var parser = try Parser.initAdmission(allocator, allocator, legal, .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try std.testing.expect(!parser.hasErrors());
@@ -8609,7 +8639,7 @@ test "a radix literal above i32 keeps its value" {
     // `parseFloat` reads only base 10 and 16, so `0b` and `0o` literals above
     // i32 must not become 0.0 with no diagnostic. The pool dedups the hex value.
     const allocator = std.testing.allocator;
-    var parser = try Parser.init(allocator, "const a = 0b100000000000000000000000000000000; const b = 0o100000000000; const c = 0x100000000;");
+    var parser = try Parser.initAdmission(allocator, allocator, "const a = 0b100000000000000000000000000000000; const b = 0o100000000000; const c = 0x100000000;", .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try std.testing.expect(!parser.hasErrors());
@@ -8619,13 +8649,13 @@ test "a radix literal above i32 keeps its value" {
 test "get and set before a key without a parenthesis are refused" {
     const allocator = std.testing.allocator;
     for ([_][]const u8{ "const o = { get x: 1 };", "const o = { set x: 1 };" }) |source| {
-        var parser = try Parser.init(allocator, source);
+        var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
         defer parser.deinit();
         try std.testing.expectError(error.ParseError, parser.parse());
         try std.testing.expect(parser.hasErrors());
     }
     // `get` and `set` stay ordinary keys.
-    var keys = try Parser.init(allocator, "const o = { get: 1, set: 2 };");
+    var keys = try Parser.initAdmission(allocator, allocator, "const o = { get: 1, set: 2 };", .compile);
     defer keys.deinit();
     _ = try keys.parse();
     try std.testing.expect(!keys.hasErrors());
@@ -8636,7 +8666,7 @@ test "an unknown escape is refused rather than copied" {
     // in an escape would produce a string the author did not write, with no
     // diagnostic.
     const allocator = std.testing.allocator;
-    var parser = try Parser.init(allocator, "const s = \"a\\qb\";");
+    var parser = try Parser.initAdmission(allocator, allocator, "const s = \"a\\qb\";", .compile);
     defer parser.deinit();
     try std.testing.expectError(error.InvalidEscapeSequence, parser.parse());
     const errors = parser.getErrors();
@@ -8650,7 +8680,7 @@ test "a backslash before a real newline is refused" {
     // The other half of the closed escape set. A line continuation used to
     // yield a literal newline, so a string silently spanned lines.
     const allocator = std.testing.allocator;
-    var parser = try Parser.init(allocator, "const s = \"a\\\nb\";");
+    var parser = try Parser.initAdmission(allocator, allocator, "const s = \"a\\\nb\";", .compile);
     defer parser.deinit();
     try std.testing.expectError(error.StringLineContinuation, parser.parse());
     const errors = parser.getErrors();
@@ -8662,9 +8692,11 @@ test "the legal escapes still parse" {
     // The floor under both refusals: closing the set must not close it on the
     // escapes the profile admits.
     const allocator = std.testing.allocator;
-    var parser = try Parser.init(
+    var parser = try Parser.initAdmission(
+        allocator,
         allocator,
         "const s = \"n\\nr\\rt\\tb\\bf\\fv\\v0\\0q\\\"d\\\\x\\x41u\\u0041c\\u{1F600}\";",
+        .compile,
     );
     defer parser.deinit();
     _ = try parser.parse();
@@ -8692,7 +8724,7 @@ test "kernel expression unary before exponent preserves its grammar" {
     try std.testing.expectEqual(BinaryOp.pow, binary.op);
     try std.testing.expectEqual(NodeTag.unary_op, view.getTag(binary.left).?);
 
-    var program_parser = try Parser.init(allocator, "const value = -3 ** 2;");
+    var program_parser = try Parser.initAdmission(allocator, allocator, "const value = -3 ** 2;", .compile);
     defer program_parser.deinit();
     try std.testing.expectError(error.ParseError, program_parser.parse());
     try std.testing.expectEqual(error_mod.ErrorKind.unsupported_feature, program_parser.getErrors()[0].kind);
@@ -8702,7 +8734,7 @@ test "unsupported: prefix increment ++" {
     const allocator = std.testing.allocator;
     const source = "++x;";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8720,7 +8752,7 @@ test "unsupported: prefix increment ++" {
 }
 
 test "compound assignment +=" {
-    var parser = try Parser.init(std.testing.allocator, "let x = 1; x += 5;");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "let x = 1; x += 5;", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -8732,7 +8764,7 @@ test "compound assignment +=" {
 }
 
 test "compound assignments: all arithmetic operators" {
-    var parser = try Parser.init(std.testing.allocator, "let x = 10; x += 1; x -= 2; x *= 3; x /= 4; x %= 5; x **= 2;");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "let x = 10; x += 1; x -= 2; x *= 3; x /= 4; x %= 5; x **= 2;", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -8744,7 +8776,7 @@ test "compound assignments: all arithmetic operators" {
 }
 
 test "compound assignments: bitwise operators" {
-    var parser = try Parser.init(std.testing.allocator, "let x = 255; x &= 15; x |= 240; x ^= 255; x <<= 2; x >>= 1; x >>>= 1;");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "let x = 255; x &= 15; x |= 240; x ^= 255; x <<= 2; x >>= 1; x >>>= 1;", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -8756,7 +8788,7 @@ test "compound assignments: bitwise operators" {
 }
 
 test "unsupported: logical compound assignment &&=" {
-    var parser = try Parser.init(std.testing.allocator, "x &&= 5;");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "x &&= 5;", .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8767,7 +8799,7 @@ test "unsupported: logical compound assignment &&=" {
 }
 
 test "array spread parses" {
-    var parser = try Parser.init(std.testing.allocator, "const xs = [0, ...rest, 3];");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const xs = [0, ...rest, 3];", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -8779,7 +8811,7 @@ test "array spread parses" {
 }
 
 test "array literal elisions are rejected" {
-    var parser = try Parser.init(std.testing.allocator, "const xs = [1,,2];");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const xs = [1,,2];", .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8793,7 +8825,7 @@ test "array literal elisions are rejected" {
 }
 
 test "call spread parses before canonical-profile rejection" {
-    var parser = try Parser.init(std.testing.allocator, "const r = f(...args);");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const r = f(...args);", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -8805,7 +8837,7 @@ test "call spread parses before canonical-profile rejection" {
 }
 
 test "unsupported: pipe operator names the direct call" {
-    var parser = try Parser.init(std.testing.allocator, "const r = 5 |> double;");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const r = 5 |> double;", .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8829,7 +8861,7 @@ test "unsupported: pipe operator names the direct call" {
 test "unsupported: a pipe chain is refused at its first operator" {
     // Refusing at the first operator is what keeps the reported column on a
     // span the author can act on rather than on the end of the chain.
-    var parser = try Parser.init(std.testing.allocator, "const r = x |> f |> g |> h;");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const r = x |> f |> g |> h;", .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8847,7 +8879,7 @@ test "unsupported: guard and pipe are ordinary names once compose is gone" {
     // `guard(f) |> h` was one desugared construct. The refusal must come from
     // the operator, not from the callee: with no module to import them from,
     // `guard` and `pipe` are undeclared identifiers like any other.
-    var parser = try Parser.init(std.testing.allocator, "const h = guard(a) |> route;");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const h = guard(a) |> route;", .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8864,7 +8896,7 @@ test "unsupported: instanceof operator" {
     const allocator = std.testing.allocator;
     const source = "if (x instanceof Foo) { }";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8885,7 +8917,7 @@ test "unsupported: new operator" {
     const allocator = std.testing.allocator;
     const source = "const obj = new Foo();";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8906,7 +8938,7 @@ test "unsupported: delete operator" {
     const allocator = std.testing.allocator;
     const source = "delete obj.prop;";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -8927,7 +8959,7 @@ test "unsupported: unary void names the explicit undefined repair" {
     const allocator = std.testing.allocator;
     const source = "const ignored = void sideEffect();";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     try std.testing.expectError(error.ParseError, parser.parse());
@@ -8936,7 +8968,7 @@ test "unsupported: unary void names the explicit undefined repair" {
 }
 
 test "unsupported: debugger statement names removal" {
-    var parser = try Parser.init(std.testing.allocator, "debugger;");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "debugger;", .compile);
     defer parser.deinit();
 
     try std.testing.expectError(error.ParseError, parser.parse());
@@ -8945,7 +8977,7 @@ test "unsupported: debugger statement names removal" {
 }
 
 test "unsupported: empty statement names removal" {
-    var parser = try Parser.init(std.testing.allocator, ";");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, ";", .compile);
     defer parser.deinit();
 
     try std.testing.expectError(error.ParseError, parser.parse());
@@ -8973,7 +9005,7 @@ test "a statement error after a semicolon inside a block terminates" {
     };
 
     for (cases) |source| {
-        var parser = try Parser.init(allocator, source);
+        var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
         defer parser.deinit();
         _ = parser.parse() catch {
             try std.testing.expect(parser.hasErrors());
@@ -8985,9 +9017,13 @@ test "a statement error after a semicolon inside a block terminates" {
 }
 
 test "parse import declaration" {
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\import { env } from "zttp:env";
         \\const name = env("USER");
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -9001,9 +9037,13 @@ test "parse import declaration" {
 }
 
 test "parse import multiple specifiers" {
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\import { sha256, hmacSha256, base64Encode } from "zttp:crypto";
         \\const h = sha256("test");
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -9017,9 +9057,13 @@ test "parse import multiple specifiers" {
 }
 
 test "parse import with as alias" {
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\import { env as getEnv } from "zttp:env";
         \\const name = getEnv("USER");
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -9033,10 +9077,14 @@ test "parse import with as alias" {
 }
 
 test "parse export function" {
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\export function handler(req) {
         \\  return req;
         \\}
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -9050,8 +9098,12 @@ test "parse export function" {
 }
 
 test "parse export const" {
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\export const version = "1.0";
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -9070,7 +9122,7 @@ test "unsupported: import default" {
         \\import env from "zttp:env";
     ;
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -9092,7 +9144,7 @@ test "unsupported: import namespace star" {
         \\import * as mod from "zttp:env";
     ;
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -9142,7 +9194,7 @@ test "unsupported: export re-export braces" {
         \\export { foo } from "bar";
     ;
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -9164,7 +9216,7 @@ test "unsupported: export star" {
         \\export * from "bar";
     ;
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -9186,7 +9238,7 @@ test "unsupported: enum statement" {
     const allocator = std.testing.allocator;
     const source = "enum Color { Red, Blue }";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -9207,7 +9259,7 @@ test "unsupported: const enum" {
     const allocator = std.testing.allocator;
     const source = "const enum Color { Red }";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -9227,7 +9279,7 @@ test "unsupported: export enum" {
     const allocator = std.testing.allocator;
     const source = "export enum Color { Red }";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -9247,7 +9299,7 @@ test "unsupported: namespace statement" {
     const allocator = std.testing.allocator;
     const source = "namespace N { }";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -9268,7 +9320,7 @@ test "unsupported: export namespace" {
     const allocator = std.testing.allocator;
     const source = "export namespace N { }";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -9288,7 +9340,7 @@ test "unsupported: implements keyword" {
     const allocator = std.testing.allocator;
     const source = "implements Foo { }";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -9308,7 +9360,7 @@ test "unsupported: rest parameter" {
     const allocator = std.testing.allocator;
     const source = "const f = (...xs) => xs;";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     _ = parser.parse() catch {};
 
@@ -9342,7 +9394,7 @@ test "unsupported: public modifier" {
     const allocator = std.testing.allocator;
     const source = "public foo() { }";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -9362,7 +9414,7 @@ test "unsupported: private modifier" {
     const allocator = std.testing.allocator;
     const source = "private x = 1;";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -9382,7 +9434,7 @@ test "unsupported: protected modifier" {
     const allocator = std.testing.allocator;
     const source = "protected foo() { }";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -9402,7 +9454,7 @@ test "unsupported: decorator before class" {
     const allocator = std.testing.allocator;
     const source = "@sealed class X {}";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -9422,7 +9474,7 @@ test "unsupported: decorator before function" {
     const allocator = std.testing.allocator;
     const source = "@log function f() {}";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     _ = parser.parse() catch {
@@ -9442,7 +9494,7 @@ test "keyword as property name: obj.enum" {
     const allocator = std.testing.allocator;
     const source = "const x = obj.enum;";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     const result = parser.parse();
@@ -9452,12 +9504,16 @@ test "keyword as property name: obj.enum" {
 }
 
 test "parse match expression with literals" {
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\const x = match (y) {
         \\  when "a": 1,
         \\  when "b": 2,
         \\  default: 0
         \\};
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -9471,11 +9527,15 @@ test "parse match expression with literals" {
 }
 
 test "parse match expression with object pattern" {
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\const r = match (req) {
         \\  when { method: "GET", path: "/health" }: 200,
         \\  default: 404
         \\};
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -9489,11 +9549,15 @@ test "parse match expression with object pattern" {
 }
 
 test "parse match expression refuses top-level wildcard" {
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\const x = match (v) {
         \\  when 1: "one",
         \\  when _: "other"
         \\};
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -9506,12 +9570,16 @@ test "parse match expression refuses a default arm that is not last" {
     // Spec 5.5 grammar is `MatchArm+ [DefaultArm]`. Codegen tests every `when`
     // in order and takes `default` last, so `when 2` below would be accepted
     // and then answered by `default`.
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\const x = match (v) {
         \\  when 1: "one",
         \\  default: "other",
         \\  when 2: "two"
         \\};
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -9526,12 +9594,16 @@ test "parse match expression refuses a default arm that is not last" {
 }
 
 test "parse match expression refuses a second default arm" {
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\const x = match (v) {
         \\  when 1: "one",
         \\  default: "other",
         \\  default: "again"
         \\};
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -9545,17 +9617,21 @@ test "parse match expression refuses a second default arm" {
 }
 
 test "parse match expression accepts default as the only or the last arm" {
-    var only = try Parser.init(std.testing.allocator, "const x = match (v) { default: 0 };");
+    var only = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const x = match (v) { default: 0 };", .compile);
     defer only.deinit();
     _ = try only.parse();
     try std.testing.expect(!only.hasErrors());
 
-    var last = try Parser.init(std.testing.allocator,
+    var last = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\const x = match (v) {
         \\  when 1: "one",
         \\  when 2: "two",
         \\  default: "other"
         \\};
+    ,
+        .compile,
     );
     defer last.deinit();
     _ = try last.parse();
@@ -9571,7 +9647,7 @@ test "parse match expression refuses a renamed binding named like a type test" {
         var source_buf: [128]u8 = undefined;
         const source = try std.fmt.bufPrint(&source_buf, "const x = match (v) {{ when {{ k: {s} }}: 1, default: 0 }};", .{name});
 
-        var parser = try Parser.init(std.testing.allocator, source);
+        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
 
         try std.testing.expectError(error.ParseError, parser.parse());
@@ -9589,7 +9665,7 @@ test "parse match expression refuses a renamed binding named like a type test" {
 
 test "parse match expression refuses a type-test name as an array element" {
     // The element must not parse as a type test of the whole scrutinee.
-    var parser = try Parser.init(std.testing.allocator, "const x = match (v) { when [string]: 1, default: 0 };");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const x = match (v) { when [string]: 1, default: 0 };", .compile);
     defer parser.deinit();
 
     try std.testing.expectError(error.ParseError, parser.parse());
@@ -9602,33 +9678,37 @@ test "parse match expression refuses a type-test name as an array element" {
 test "parse match expression keeps shorthand bindings and top-level type tests" {
     // `{ string }` binds a field literally named `string`; only the renamed
     // and array-element spellings are the trap.
-    var shorthand = try Parser.init(std.testing.allocator, "const x = match (v) { when { string }: string, default: 0 };");
+    var shorthand = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const x = match (v) { when { string }: string, default: 0 };", .compile);
     defer shorthand.deinit();
     _ = try shorthand.parse();
     try std.testing.expect(!shorthand.hasErrors());
 
-    var mixed = try Parser.init(std.testing.allocator, "const x = match (v) { when { kind: \"a\", Dict }: Dict, default: 0 };");
+    var mixed = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const x = match (v) { when { kind: \"a\", Dict }: Dict, default: 0 };", .compile);
     defer mixed.deinit();
     _ = try mixed.parse();
     try std.testing.expect(!mixed.hasErrors());
 
-    var top_level = try Parser.init(std.testing.allocator, "const x = match (v) { when string: 1, when Dict: 2, default: 0 };");
+    var top_level = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const x = match (v) { when string: 1, when Dict: 2, default: 0 };", .compile);
     defer top_level.deinit();
     _ = try top_level.parse();
     try std.testing.expect(!top_level.hasErrors());
 
-    var renamed = try Parser.init(std.testing.allocator, "const x = match (v) { when { k: other }: other, default: 0 };");
+    var renamed = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const x = match (v) { when { k: other }: other, default: 0 };", .compile);
     defer renamed.deinit();
     _ = try renamed.parse();
     try std.testing.expect(!renamed.hasErrors());
 }
 
 test "parse match expression with nested object and array patterns" {
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\const x = match (value) {
         \\  when { user: { role: "admin" }, tags: ["a", _, "c"] }: 1,
         \\  default: 0
         \\};
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -9645,7 +9725,7 @@ test "null literal parses as explicit data" {
     const allocator = std.testing.allocator;
     const source = "const x = null;";
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -9666,7 +9746,7 @@ test "null is a match pattern" {
         \\};
     ;
 
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -9681,7 +9761,9 @@ test "null is a match pattern" {
 test "the six admitted type-test patterns parse" {
     // Six is the whole of spec 5.5's list. A seventh identifier is not a type
     // test - it is a binding - so this count is the closed set, not a sample.
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\const x = match (v) {
         \\  when boolean: 1,
         \\  when number: 2,
@@ -9690,6 +9772,8 @@ test "the six admitted type-test patterns parse" {
         \\  when Dict: 5,
         \\  when Bytes: 6
         \\};
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -9716,7 +9800,7 @@ test "the Bytes type test lowers to an isBytes call" {
     // real global rather than a checker-only name.
     const source = "const x = match (v) { when Bytes: 1, default: 2 };";
 
-    var parser = try Parser.init(std.testing.allocator, source);
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -9741,11 +9825,15 @@ test "the Bytes type test lowers to an isBytes call" {
 }
 
 test "the Dict type test parses now that Dict exists" {
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\const x = match (v) {
         \\  when Dict: 1,
         \\  default: 2
         \\};
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -9761,11 +9849,15 @@ test "a type test over a scrutinee that is not a name is refused" {
     // The test reads the scrutinee a second time, so a call in that position
     // would be evaluated twice. Spec 5.5 already requires a name or a member
     // path there; this is the diagnostic that says so.
-    var parser = try Parser.init(std.testing.allocator,
+    var parser = try Parser.initAdmission(
+        std.testing.allocator,
+        std.testing.allocator,
         \\const x = match (compute()) {
         \\  when string: 1,
         \\  default: 2
         \\};
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -9782,11 +9874,15 @@ test "a match binding is scoped to its arm" {
     // per-arm scope the second arm would resolve `text` to the first arm's
     // slot, which is a value it never bound.
     const allocator = std.testing.allocator;
-    var parser = try Parser.init(allocator,
+    var parser = try Parser.initAdmission(
+        allocator,
+        allocator,
         \\const x = match (command) {
         \\  when { kind: "echo", text }: text,
         \\  when { kind: "ping" }: text
         \\};
+    ,
+        .compile,
     );
     defer parser.deinit();
 
@@ -9834,7 +9930,7 @@ test "a match binding is scoped to its arm" {
 }
 
 test "match as property name" {
-    var parser = try Parser.init(std.testing.allocator, "const obj = { match: 42 };");
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "const obj = { match: 42 };", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -9851,7 +9947,7 @@ test "parser construction reports allocation failure instead of panicking" {
     // parser must propagate. Before this was fallible, the same condition
     // reached `catch unreachable` and was undefined behavior.
     var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = 0 });
-    try std.testing.expectError(error.OutOfMemory, Parser.init(failing.allocator(), "const x = 1;"));
+    try std.testing.expectError(error.OutOfMemory, Parser.initAdmission(failing.allocator(), failing.allocator(), "const x = 1;", .compile));
 }
 
 // Regression: four binding sites returned `error.TooManyLocals` from a failed
@@ -9898,7 +9994,7 @@ test "a statement that needs more local slots than a scope has fails the parse" 
 }
 
 fn expectParseFailsWithTooMany(allocator: std.mem.Allocator, source: []const u8) !void {
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     if (parser.parse()) |_| return error.ProgramWithTooManyLocalsWasAccepted else |_| {}
     try std.testing.expect(parser.hasErrors());
@@ -9916,7 +10012,7 @@ fn expectParseFailsWithTooMany(allocator: std.mem.Allocator, source: []const u8)
 test "an out-of-memory error inside a statement fails the parse" {
     const Sweep = struct {
         fn parseWholeProgram(allocator: std.mem.Allocator, source: []const u8) !void {
-            var parser = try Parser.init(allocator, source);
+            var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
             defer parser.deinit();
             _ = try parser.parse();
         }
@@ -9944,7 +10040,7 @@ test "a program with more distinct constants than a u16 indexes fails the parse 
     for (0..70_000) |index| try source.print(allocator, "{d}.5, ", .{index});
     try source.appendSlice(allocator, "0.5];");
 
-    var parser = try Parser.init(allocator, source.items);
+    var parser = try Parser.initAdmission(allocator, allocator, source.items, .compile);
     defer parser.deinit();
     try std.testing.expectError(error.TooManyConstants, parser.parse());
     var found = false;
@@ -9967,7 +10063,7 @@ test "a constant overflow inside a function body fails the parse once with too_m
     for (0..70_000) |index| try source.print(allocator, "{d}.5, ", .{index});
     try source.appendSlice(allocator, "0.5]; return xs; }");
 
-    var parser = try Parser.init(allocator, source.items);
+    var parser = try Parser.initAdmission(allocator, allocator, source.items, .compile);
     defer parser.deinit();
     try std.testing.expectError(error.TooManyConstants, parser.parse());
     var found: usize = 0;
@@ -9980,7 +10076,7 @@ test "a constant overflow inside a function body fails the parse once with too_m
 test "an out-of-memory error inside a function body fails the parse" {
     const Sweep = struct {
         fn parseWholeProgram(allocator: std.mem.Allocator, source: []const u8) !void {
-            var parser = try Parser.init(allocator, source);
+            var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
             defer parser.deinit();
             _ = try parser.parse();
         }
@@ -9995,7 +10091,7 @@ test "an out-of-memory error inside a function body fails the parse" {
 }
 
 fn firstNonAsciiError(allocator: std.mem.Allocator, source: []const u8, out: *Parser) !error_mod.ParseError {
-    out.* = try Parser.init(allocator, source);
+    out.* = try Parser.initAdmission(allocator, allocator, source, .compile);
     _ = out.parse() catch 0;
     const errors = out.getErrors();
     try std.testing.expect(errors.len >= 1);
@@ -10107,7 +10203,7 @@ test "ZTS046 reports a byte order mark at the start of the file" {
 }
 
 fn parseErrorCount(allocator: std.mem.Allocator, source: []const u8) !usize {
-    var parser = try Parser.init(allocator, source);
+    var parser = try Parser.initAdmission(allocator, allocator, source, .compile);
     defer parser.deinit();
     _ = parser.parse() catch 0;
     return parser.getErrors().len;
@@ -11508,7 +11604,7 @@ test "a parse refusal carries a fixed help string" {
         .{ .source = "function f() { return await g(); }", .help = "Remove await. Handlers run synchronously, so call the function directly." },
     };
     for (cases) |case| {
-        var parser = try Parser.init(std.testing.allocator, case.source);
+        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
         defer parser.deinit();
         _ = parser.parse() catch {};
         const errors = parser.getErrors();
