@@ -179,3 +179,83 @@ The `-e` table: `any-type`, `comment-trailing`, `comment-leading`, `string-open`
 Review fixes by Opus: `formatAdmissionRefusal` moved to `source_frontend.zig` with a typed parameter, and the graph prints it; two bare blocks dedented; `admitToolSource` returns `void`; a test keeps the typed-to-raw bytecode comparison that the worker dropped with `compileWithOptions`.
 Gates, exit 0 unless stated: protection check, `digest.sh`, `surface.sh`, `test-zts`, `test-precompile`, `test-agent-protocol`, `test-module-graph-record`, `test-cli`, `test-zruntime`, `test-server`, `test-expert-app`, `test-diagnostic-corpus`, `test-spine`, `test-proof-swallow`, `test-module-boundary`, `check-semantics-spec.sh`, `zig build test`, `check-spine`. `probe.sh` exits 1 by design, because the moved rows are the accepted rows.
 Residual: a parser refusal that is not an admission refusal, such as `const x = ;`, still prints a raw `error: UnexpectedToken`. In a Debug build it also prints a leak trace. The behavior is older than this unit and is the same for a `.ts` entry.
+
+## Phase 10
+
+Legacy removal L0 to L9 ran before this phase, as Decision 13 of that plan selects. It took over units 9e and 9f. Unit 9d stays deferred, and unit 9g did not run.
+
+### 10a. Architecture
+
+`docs/internals/architecture.md` gains the table "Owner of each fact" and the section "Serve Request". It now states the D-016 entries, the 42 `NodeTag` members, the `responses` field, and the `applyContractFacts` writes. Two statements about a custom type checker were false after unit 6b, and the `module_scan` hook replaces them. No row of the target design is deferred.
+
+I checked the facts that the worker could not confirm. `parse.zig` has three `JsParser` constructors, so two untyped entries remain. `applyContractFacts` writes 12 fields, and each driver calls it twice. `buildWatchSet` runs only in the `--watch` branch of the CLI.
+
+The worker changed "the source profiles" to "the core source profile" in `CONCEPTS.md`. `artifact_graph.zig` holds one profile, so I made the same change in `docs/threat-model.md` and `docs/verification.md`.
+
+### 10c. Spec name
+
+The spec is now `docs/spec/zts-model-1.md`, and the eight files outside the plans use the new path. The old name remains only in six dated plans and one file in `advisor-plans/`. The site does not name it.
+
+The title and the relationship line lost "northstar". "Grounded against" stays, because `zts meta --json` reports compiler 0.19.0 and policy 2026.04.2, and no source gives a later grounding date. Section 17 and the archive paths keep the word as history. I replaced the word in the `docs/README.md` description and in the comment in `semantics.zig`.
+
+### 10d. Public forms, variables, and strategy
+
+All eight variables and all eight forms exist. `docs/internals/testing.md` holds a new table of the eight variables, and `docs/cli.md` holds the eight forms. `main` in `tooling/verify.zig` is the stated owner of the `-j1` rule.
+
+The hand-off text was in `docs/plans/2026-10-29-v0.26.0-w-handoff.md`. `CLAUDE.md` did not say how to read the `.value` of `requestJson`, so it gains one sentence. The worker ran `zts check` on both forms: a member read reports ZTS201, and `isDict(v)` with `dictGet` passes.
+
+`STRATEGY.md` has `last_updated: 2026-10-31`. One sentence left: "The current registry and corpus counts need measurement after the Phase 3 removal." Its direction, goals, and priorities did not change. Two of its claims stay untested: the grade of validator repair intents, and "milliseconds".
+
+Two review fixes by Opus:
+
+| Worker text | Measured | Fix |
+|---|---|---|
+| Replaced `zttp proofs` with `zttp proofs list` | `parseCommand` maps no argument to `.list`, and both forms exit 0 | Both forms are documented |
+| "a reader can compare it with `artifactSha256`" | A binary from `zttp compile` prints an all-zero `artifactSha256`, with and without `--no-attest` | The text states the zero value. `docs/roadmap.md` lists the gap as open |
+
+### 10e. Site check
+
+`../ZTTP-WEBSITE` at `100f496` holds nine repository links, and each one resolves. The anchor `docs/roadmap.md#agent-compiler-agenda` stays. The site does not name the old spec path, a removed form, or a moved count, so it gets no commit. It claims released behavior only, and the next release decides its update.
+
+### Gates
+
+The first run failed in `scripts/audit-docs.sh`, which `test-doc-links` and `zig build test` both run. The spec moved down one directory, so its two relative links to `roadmap.md` broke. I corrected both links.
+
+The second run exited 0 for `test-doc-links`, `test-grammar-drift`, `test-idiom-table`, `zig build test` with 214 of 214 steps, and `check-spine`. The first run also exited 0 for `test-docs-drift`, `test-spine`, `test-script-reachability`, and `zig build`. These runs used a warm cache. Phase 11 runs the empty-cache gate.
+
+Open for the owner: `STRATEGY.md` and `docs/provable-reach.md` still cite `pre-rebase:` paths, which resolve only after the push that Decision 6 selects.
+
+### 10b. Root instructions
+
+`AGENTS.md` moved from 27,490 bytes to 22,523 bytes. The generated blocks did not change. The row-count claim for `scripts/unseeded-rules.allow` stays in `AGENTS.md`, so `check-docs-drift.sh` still reads a claim.
+
+Five bullets became seven bullets. Each bullet states rules and links to the file that holds the reason. A clause check over the 136 clauses of the old bullets found 123 unchanged. I read the other 13. Twelve keep their facts, with a changed subject or a split sentence. One lost "decide whether a program is proven", and I restored it in `scripts/AGENTS.md`.
+
+Text that moved:
+
+| Old bullet | Moved text | New file |
+|---|---|---|
+| Proof swallow | The thirty-four files and their groups | `scripts/AGENTS.md` |
+| Proof swallow | A swallow surfaces as a pass, not as a failure | `scripts/AGENTS.md` |
+| Proof swallow | A walk with `else => {}` reports a verdict for children it never read | `scripts/AGENTS.md` |
+| Proof swallow | The five fail-opens, with three solution links | `packages/zts/AGENTS.md` |
+| Proof swallow | The weaker assertion let the class survive in `cacheGet`, `queue.receive`, `sqlOne`, `sqlMany`, and `durable.waitSignal` | `packages/zts/AGENTS.md` |
+| Proof swallow | The class also shipped in `packages/pi`, with one solution link | `packages/zts/AGENTS.md` |
+| Rule seeds | The list once carried nineteen rows | `packages/pi/AGENTS.md` |
+| Rule seeds | How those rows were closed | `packages/pi/AGENTS.md` |
+| Rule seeds | A row for a code that nothing constructs is a false advertisement | `packages/pi/AGENTS.md` |
+| Rule seeds | `scripts/check-diagnostic-producers.sh` catches that shape, with two solution links | `packages/pi/AGENTS.md` |
+| Persistent reads | Why no dataflow rule reaches a persistent read | `packages/modules/AGENTS.md` |
+| Persistent reads | Why `argDerivedLabels` cannot close the finding | `packages/modules/AGENTS.md` |
+| Persistent reads | `derives_from_args` is for a pass-through, and `returns_from_param` is retired | `packages/modules/AGENTS.md` |
+| Persistent reads | `.unknown` moves a verdict to unproven, and `rateCheck` and `uuid` are not this shape | `packages/modules/AGENTS.md` |
+| Declassifiers | `mask` uses `mask_visible_max`, which is 4 | `packages/zts/AGENTS.md` |
+| Declassifiers | The definition of an unmodified source value | `packages/zts/AGENTS.md` |
+| Declassifiers | Why an operation drops the mark | `packages/zts/AGENTS.md` |
+| Declassifiers | A runtime `visible` puts the magnitude in the code that computes it | `packages/zts/AGENTS.md` |
+| Gate floors | The shapes of an empty gate, and the two scripts that assert a floor, with one solution link | `scripts/AGENTS.md` |
+| Gate floors | A full input can still get a weak assertion | `scripts/AGENTS.md` |
+| Gate floors | A probe that does not compile runs no check, with one solution link | `scripts/AGENTS.md` |
+| Gate floors | What a porous gate is, and the one-edit method | `scripts/AGENTS.md` |
+| Gate floors | An open vocabulary gate names its threat, with one solution link. The root keeps the rule | `scripts/AGENTS.md` |
+| Gate floors | The aggregate refuses `-Dtest-filter`, and a suite with an empty filter fails | `scripts/AGENTS.md` |
