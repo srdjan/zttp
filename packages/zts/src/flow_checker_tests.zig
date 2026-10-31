@@ -1577,13 +1577,11 @@ test "a real secret leak offers no repair intent" {
     // The end-to-end half of the invariant below: a ZTS400 produced by the
     // actual checker on actual source, not a struct built in a test.
     //
-    // This test previously asserted the opposite. The reasoning it carried -
-    // "the agent inserts a redact/mask/strip call ahead of the offending sink"
-    // - describes an edit `insert_guard_before_line` does not make: the
-    // primitive inserts a conditional, and no conditional removes a taint
-    // label. The claim went unchallenged while nothing consumed the intent.
-    // Once diagnostics began carrying it to the model, a recorded case burned
-    // its whole attempt budget trying to build the guard this promised.
+    // The reasoning "the agent inserts a redact/mask/strip call ahead of the
+    // offending sink" describes an edit `insert_guard_before_line` does not
+    // make: the primitive inserts a conditional, and no conditional removes a
+    // taint label. An intent that promised this guard would send a model
+    // through its whole attempt budget trying to build it.
     const allocator = std.testing.allocator;
     const source =
         \\import { env } from "zttp:env";

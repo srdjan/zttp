@@ -1803,8 +1803,8 @@ test "a guarded call is reachable wherever an expression is" {
     var resolver_state = EveryCallResolver{ .row = 3 };
     const resolver = resolver_state.resolver();
 
-    // Inside a return, which the fold treats as a leaf. Before this lowering
-    // learned to descend, a guarded call here was invisible.
+    // Inside a return, which the fold treats as a leaf. A guarded call here
+    // must stay visible.
     var in_return = try parseAndLowerWith(allocator,
         \\function handler(req) {
         \\  return env("API_KEY");

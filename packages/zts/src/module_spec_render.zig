@@ -420,8 +420,8 @@ test "cache renders byte-identical to its committed spec" {
     // is what proved the renderer's formatting, indentation, key order,
     // non-empty requiredCapabilities, contractExtractions with an omitted
     // argPosition, failureSeverity, and bare-string law rendering. That
-    // evidence is recorded in the B3 plan, section 6, finding 6. Now that the
-    // files are generated this is a plain byte comparison, the same thing
+    // evidence is recorded in the B3 plan, section 6, finding 6. The
+    // files are generated, so this is a plain byte comparison, the same thing
     // `module-spec-render --check` enforces outside the test suite.
     try expectMatchesCommitted(testing.allocator, "zttp:cache");
 }

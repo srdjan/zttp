@@ -780,8 +780,8 @@ pub const TypeChecker = struct {
     }
 
     /// Kill rule 1. Any assignment to a binding drops its narrowing: the guard
-    /// that installed it described the old value. Nothing killed these before,
-    /// so a guard installed by an early return survived a later reassignment.
+    /// that installed it described the old value. Without this kill, a guard
+    /// installed by an early return would survive a later reassignment.
     fn killNarrowing(self: *TypeChecker, key: u64) void {
         self.recordNarrowChange(key, true);
         _ = self.narrowed.remove(key);
@@ -1218,7 +1218,7 @@ pub const TypeChecker = struct {
                 const func = self.ir_view.getFunction(decl.init) orelse return;
                 // The signature is the one whose parameter list opens where this
                 // function's does. A name does not identify it: nested functions
-                // repeat names, and the later one used to win for both.
+                // repeat names, and the later one would win for both.
                 const sig = self.sourceFunctionSignature(decl.init);
                 self.bindCallableMetadata(decl.binding, sourceFunctionMetadata(func, sig));
                 // Named declarations resolve signatures by binding identity.
@@ -1874,9 +1874,9 @@ pub const TypeChecker = struct {
     // -------------------------------------------------------------------
 
     const NarrowingGuard = struct {
-        /// Absent means the condition installed no guard. This used to be a `0`
-        /// sentinel, which made the binding at scope 0 slot 0 the one binding
-        /// in the program that could never narrow.
+        /// Absent means the condition installed no guard. A `0` sentinel would
+        /// make the binding at scope 0 slot 0 the one binding in the program
+        /// that could never narrow.
         key: ?u64 = null,
         narrowed_type: TypeIndex = null_type_idx,
         negated: bool = false,
@@ -4829,15 +4829,15 @@ pub const TypeChecker = struct {
 
     /// Refuse a nominal type name used in call position.
     ///
-    /// `UserId("u-1")` used to check clean and then fault at runtime with
-    /// `NotCallable`. Inference answered the call's type from the alias table
-    /// and nothing lowered it, so codegen emitted an ordinary call to a name no
-    /// function defines. Erasing it in codegen is not available:
+    /// `UserId("u-1")` would check clean and then fault at runtime with
+    /// `NotCallable`. Inference answers the call's type from the alias table
+    /// and nothing lowers it, so codegen would emit an ordinary call to a name
+    /// no function defines. Erasing it in codegen is not available:
     /// `parser/codegen.zig` receives its node types from
     /// `packages/tools/src/precompile.zig` and from nowhere else, so an erasure
     /// keyed on them would work under `zttp build` and fault under `zttp dev`.
     ///
-    /// Refusing costs nothing. The form was unusable, and the annotated
+    /// Refusing costs nothing. The form is unusable, and the annotated
     /// declaration is the construction path that replaces it.
     fn reportNominalConstructorCall(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
         const callee_tag = self.ir_view.getTag(call.callee) orelse return;
@@ -5892,9 +5892,9 @@ test "the join asks for structural identity, not the same pool index" {
     defer checker.deinit();
 
     // Step 2. Two branches that each build `{ id: string }` hold different
-    // indices, so the old rule fell through to step 3 and reached the same
-    // answer by mutual assignability. It is step 2 that answers now, which is
-    // what keeps the answer right when one side's field is optional.
+    // indices, so step 2 answers. Step 3 would reach the same answer by mutual
+    // assignability, but step 2 keeps the answer right when one side's field
+    // is optional.
     const left = recordWithStringField(&pool, allocator, "id");
     const right = recordWithStringField(&pool, allocator, "id");
     try std.testing.expect(left != right);
@@ -6487,7 +6487,7 @@ test "TypeChecker: a function and an arrow on one line keep separate signatures"
 }
 
 test "TypeChecker: nested functions that share a name keep their own signatures" {
-    // The later declaration used to win the name for both, in either order.
+    // The later declaration must not win the name for both, in either order.
     try checkTypedSource(
         \\function first(): number {
         \\  function inner(x: number): number { return x; }
@@ -7023,9 +7023,9 @@ test "TypeChecker: the branded binding keeps its brand" {
 }
 
 test "TypeChecker: a nominal constructor call is refused" {
-    // `UserId("usr_123")` used to type-check and then fault at runtime with
-    // NotCallable: the checker answered the call's type from the alias table
-    // and nothing lowered it, so codegen emitted a call to a name no function
+    // `UserId("usr_123")` must not type-check and then fault at runtime with
+    // NotCallable: the checker answers the call's type from the alias table
+    // and nothing lowers it, so codegen would emit a call to a name no function
     // defines. Erasing it in codegen is not available - node types reach the
     // generator on the precompile path only - so the refusal is what converts
     // a 500 into a compile error.

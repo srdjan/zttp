@@ -506,8 +506,7 @@ pub const HandlerProperties = struct {
     /// rather than an omission: spec 4.2.1's idiom rows report a preference
     /// about a program that is already correct, and a row whose precondition
     /// fails emits no rewrite, so there is nothing an author could do to clear
-    /// it. `no ZTS6xx diagnostics` was the old wording and it stopped being
-    /// true when the first idiom row started reporting.
+    /// it.
     canonical: bool = false,
     /// The handler's total cost bound is expressible (constant or linear):
     /// no unbounded loop over an unidentifiable source, and path enumeration

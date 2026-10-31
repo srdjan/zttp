@@ -221,7 +221,7 @@ pub const Parser = struct {
     /// Spec 5.5 mandates no ASI, so the default is false and every normal
     /// parse refuses.
     ///
-    /// Two callers need the old acceptance and say so: the repair producer,
+    /// Two callers need ASI acceptance (`allow_asi`) and say so: the repair producer,
     /// which has to find the insertion points in a source that no longer
     /// parses, and M2, which compares the tree of the unrepaired original
     /// against the tree of the repaired file - the unique-parse argument
@@ -710,7 +710,7 @@ pub const Parser = struct {
                 // An error the list could not record is an out-of-memory, not a
                 // syntax error. Report it as one: `hasErrors` counts it, so the
                 // loop stops, but `err` would name the wrong cause. Without this
-                // the whole loop used to spin forever, because a truncated error
+                // the whole loop would spin forever, because a truncated error
                 // left `hasErrors` false and `synchronize` returns without
                 // advancing when the current token starts a statement.
                 if (self.errors.outOfMemory()) return error.OutOfMemory;
@@ -3702,7 +3702,7 @@ pub const Parser = struct {
         var value: ?NodeIndex = null;
         // With no ASI, a newline after `return` means nothing: `return` binds
         // the next expression wherever it sits, and `return;` is how a value is
-        // omitted. Under the compatibility mode the old line rule still runs,
+        // omitted. Under `allow_asi` the line rule still runs,
         // so M2 can compare what the ASI parse built against the repaired file.
         const stops_here = self.check(.semicolon) or self.check(.rbrace) or self.check(.eof);
         const asi_ends_it = self.allow_asi and self.current.line > self.previous.line;
@@ -5960,7 +5960,7 @@ pub const Parser = struct {
             if (!self.allow_asi) return self.refuseMissingSemicolon();
             return;
         }
-        // Missing `;` before a newline: refused unless the compatibility mode
+        // Missing `;` before a newline: refused unless `allow_asi`
         // is on. Spec 5.5 mandates no automatic semicolon insertion.
         if (!self.allow_asi) return self.refuseMissingSemicolon();
     }
@@ -7803,10 +7803,9 @@ test "admission header recovery propagates allocation failures after refusal" {
 }
 
 test "a newline after return no longer swallows the value" {
-    // This test asserted the opposite until ASI was removed, and the fixture it
-    // used says why the old answer was worth removing: under JS ASI the
-    // newline terminated the statement, so the handler returned nothing and the
-    // `Response.json` below it became unreachable - silently. Spec 5.5 has no
+    // Under JS ASI the newline terminates the statement, so the handler would
+    // return nothing and the `Response.json` below it would become
+    // unreachable - silently. Spec 5.5 has no
     // insertion, so the newline means nothing and `return` binds the expression
     // that follows it.
     var parser = try Parser.init(std.testing.allocator,
@@ -8708,8 +8707,8 @@ test "kernel expression numeric separators remain isolated from programs" {
     try std.testing.expectEqual(@as(f64, 1000), view.getFloat(view.getFloatIdx(root).?).?);
 
     // In a program, the separator is a diagnostic, not a silent truncation:
-    // the literal used to lex as `1` followed by the identifier statement
-    // `_000`, so a handler served 1 where the author wrote 1000.
+    // the literal must not lex as `1` followed by the identifier statement
+    // `_000`, or a handler would serve 1 where the author wrote 1000.
     var program_parser = try Parser.init(allocator, "const value = 1_000;");
     defer program_parser.deinit();
     try std.testing.expectError(error.InvalidNumber, program_parser.parse());
@@ -8794,7 +8793,7 @@ test "the legal numeric forms still parse" {
 
 test "a radix literal above i32 keeps its value" {
     // `parseFloat` reads only base 10 and 16, so `0b` and `0o` literals above
-    // i32 used to become 0.0 with no diagnostic. The pool dedups the hex value.
+    // i32 must not become 0.0 with no diagnostic. The pool dedups the hex value.
     const allocator = std.testing.allocator;
     var parser = try Parser.init(allocator, "const a = 0b100000000000000000000000000000000; const b = 0o100000000000; const c = 0x100000000;");
     defer parser.deinit();
@@ -8819,9 +8818,9 @@ test "get and set before a key without a parenthesis are refused" {
 }
 
 test "an unknown escape is refused rather than copied" {
-    // D3 section 1: the escape set is closed. `\q` used to emit `q`, so a typo
-    // in an escape produced a string the author did not write and no
-    // diagnostic ever said so.
+    // D3 section 1: the escape set is closed. `\q` must not emit `q`: a typo
+    // in an escape would produce a string the author did not write, with no
+    // diagnostic.
     const allocator = std.testing.allocator;
     var parser = try Parser.init(allocator, "const s = \"a\\qb\";");
     defer parser.deinit();
@@ -9014,7 +9013,6 @@ test "unsupported: pipe operator names the direct call" {
 }
 
 test "unsupported: a pipe chain is refused at its first operator" {
-    // The fold used to consume the whole chain before building anything.
     // Refusing at the first operator is what keeps the reported column on a
     // span the author can act on rather than on the end of the chain.
     var parser = try Parser.init(std.testing.allocator, "const r = x |> f |> g |> h;");
@@ -9692,7 +9690,7 @@ test "parse match expression refuses top-level wildcard" {
 
 test "parse match expression refuses a default arm that is not last" {
     // Spec 5.5 grammar is `MatchArm+ [DefaultArm]`. Codegen tests every `when`
-    // in order and takes `default` last, so `when 2` below used to be accepted
+    // in order and takes `default` last, so `when 2` below would be accepted
     // and then answered by `default`.
     var parser = try Parser.init(std.testing.allocator,
         \\const x = match (v) {
@@ -9776,7 +9774,7 @@ test "parse match expression refuses a renamed binding named like a type test" {
 }
 
 test "parse match expression refuses a type-test name as an array element" {
-    // The element used to parse as a type test of the whole scrutinee.
+    // The element must not parse as a type test of the whole scrutinee.
     var parser = try Parser.init(std.testing.allocator, "const x = match (v) { when [string]: 1, default: 0 };");
     defer parser.deinit();
 
@@ -10302,10 +10300,10 @@ fn parseErrorCount(allocator: std.mem.Allocator, source: []const u8) !usize {
 }
 
 test "an unsupported while loop reports once, not once per resumed fragment" {
-    // Recovery used to stop at the first `;` inside the loop body, parse the
-    // rest of the body as new statements, and report a `return` "outside of
-    // function" and an expression "expected" at a `}`. Both followed from the
-    // `while` and named nothing the author could fix separately.
+    // Recovery must not stop at the first `;` inside the loop body and parse
+    // the rest of the body as new statements. That would report a `return`
+    // "outside of function" and an expression "expected" at a `}`. Both follow
+    // from the `while` and name nothing the author could fix separately.
     const source =
         \\function handler(req) {
         \\  let n = 0;

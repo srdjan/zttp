@@ -429,7 +429,7 @@ fn writeContractJsonVersion(
         // proven_specs: canonical, ordered list of property names the
         // compiler currently proves true. This is the field cross-build
         // ratchet checks diff against; the unsorted properties object above
-        // stays for backwards-compat consumers.
+        // stays for consumers that read the object form.
         var spec_buf: [contract_types.HandlerProperties.max_proven_specs]?[]const u8 = undefined;
         const proven_count = p.provenSpecNames(&spec_buf);
         try writer.writeAll("  \"" ++ comptime contractKey(json_version, "provenSpecs") ++ "\": [");

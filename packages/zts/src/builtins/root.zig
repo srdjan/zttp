@@ -401,8 +401,8 @@ test "Math.PI is stored under its own name and no other name reads it" {
     const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
     const math_val = ctx.getGlobal(.Math) orelse return error.TestUnexpectedResult;
     const math_obj = math_val.toPtr(object.JSObject);
-    // Intern an unrelated name first: the old code stored PI under the id the
-    // next interned name receives, so that name read 3.14159 on Math.
+    // Intern an unrelated name first: PI must not sit under the id the next
+    // interned name receives, or that name would read 3.14159 on Math.
     const has_own = object.lookupPredefinedAtom("hasOwn") orelse try ctx.atoms.intern("hasOwn");
     try std.testing.expect(math_obj.getProperty(pool, has_own) == null);
 

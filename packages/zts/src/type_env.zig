@@ -3540,10 +3540,10 @@ test "resolveType Pick<User, Keys> resolves an aliased key union (not the full s
 
     const user = parseTypeText(&pool, allocator, "{ id: number; name: string; age: number }");
     env.type_aliases.put(allocator, env.internName("User"), user) catch unreachable;
-    // Keys is a named alias of a string-literal union. Previously the keys
-    // argument was not alias-resolved, so collectStringKeys saw a t_ref, found
-    // zero keys, and Pick silently returned the full User - an unsound
-    // over-accept. It must now resolve to exactly {id, name}.
+    // Keys is a named alias of a string-literal union. The keys argument must
+    // be alias-resolved, or collectStringKeys sees a t_ref, finds zero keys,
+    // and Pick silently returns the full User - an unsound over-accept. It
+    // must resolve to exactly {id, name}.
     const keys = parseTypeText(&pool, allocator, "\"id\" | \"name\"");
     env.type_aliases.put(allocator, env.internName("Keys"), keys) catch unreachable;
 
@@ -3562,9 +3562,9 @@ test "resolveType Required<A> follows a forward alias chain to the record" {
     var env = TypeEnv.init(allocator, &pool);
     defer env.deinit();
 
-    // `structural A = B` (forward) stores A as a t_ref(B); B is the record. Previously
-    // resolveRefToRecord returned the t_ref unchanged, so Required<A> no-op'd and
-    // accepted any record. It must now chase the chain and clear `host?`.
+    // `structural A = B` (forward) stores A as a t_ref(B); B is the record.
+    // resolveRefToRecord must chase the chain: returning the t_ref unchanged
+    // would make Required<A> a no-op that accepts any record. It must clear `host?`.
     const b = parseTypeText(&pool, allocator, "{ host?: string }");
     env.type_aliases.put(allocator, env.internName("B"), b) catch unreachable;
     const a = parseTypeText(&pool, allocator, "B");

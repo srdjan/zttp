@@ -20,7 +20,7 @@ const ModuleFn = capabilities.ModuleFn;
 const wrapModuleFn = capabilities.wrapModuleFn;
 const wrapModuleFnWithCapabilities = capabilities.wrapModuleFnWithCapabilities;
 
-/// Re-export EffectClass from resolver for backward compatibility
+/// Re-export EffectClass from resolver
 pub const EffectClass = resolver.EffectClass;
 
 // -------------------------------------------------------------------------

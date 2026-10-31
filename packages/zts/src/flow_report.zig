@@ -1,4 +1,4 @@
-//! Output schema shared by the evaluator, compatibility facade and consumers.
+//! Output schema shared by the evaluator, facade and consumers.
 //! This module decides no verdict and constructs no evidence.
 
 const NodeIndex = @import("zts-engine").parser.ir.NodeIndex;
@@ -52,7 +52,7 @@ pub const Diagnostic = struct {
     /// Always null here, and a test over the kind set holds it that way. Every
     /// flow diagnostic reports a labelled value reaching a sink; the label is
     /// what fails the proof, and no conditional removes a label. The checker
-    /// used to offer `insert_guard_before_line` on all of them, which sent an
+    /// must not offer `insert_guard_before_line` for them: it would send an
     /// agent looking for a guard that could not exist.
     repair_intent: ?RepairIntent = null,
 };

@@ -443,8 +443,8 @@ test "every check_time row names either a registry rule or the band that answers
     // The floor. A table where every row said parse_time would satisfy the loop
     // above while publishing the over-approximation the section preamble warns
     // about as if it were exact.
-    // Nine rows remain after the model-minimal cut removed TypeDecl. Keeping
-    // this exact floor catches a registry that silently relabels a wider
+    // The set holds nine rows. This exact floor catches a registry that
+    // silently relabels a wider
     // production as parser-exact.
     try testing.expect(check_rows >= 9);
 }

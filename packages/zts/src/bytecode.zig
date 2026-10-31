@@ -25,8 +25,7 @@ pub const BytecodeHeader = packed struct(u88) {
 };
 
 /// Bytecode flags
-/// `jit_hints` is residue of the tiered JIT, which was removed after
-/// measurement, and nothing reads it. It stays for the same reason
+/// `jit_hints` has no reader. It stays for the same reason
 /// `HandlerFlags.pure_dispatch` does: this is a serialized bit at a fixed
 /// offset, and removing it changes what already-written bytecode decodes to.
 pub const BytecodeFlags = packed struct(u8) {
@@ -171,8 +170,6 @@ pub const Opcode = enum(u8) {
 
     // Type checks
     typeof = 0x90,
-
-    // Async operations (kept for future implementation)
 
     // Module operations
     import_module = 0x9A, // +u16 module_name_idx (load module, push namespace)

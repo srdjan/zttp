@@ -1017,11 +1017,9 @@ test "dischargeSpecs proof-less pure handler collapses to one ZTS500 naming real
     // EXP-3/EXP-4 regression. A trivial pure/read-only proof-less handler holds
     // pure/read_only/deterministic and every flow default, but the derived
     // properties (idempotent, fault_covered, result_safe, optional_safe,
-    // canonical) default false. Previously the implicit default profile emitted
-    // one byte-identical ZTS500 per undischarged property (the fan-out the agent
-    // re-fed to the model) and every one carried the misleading
-    // "...cache/sql cannot hold" suggestion. Now: exactly one collapsed ZTS500,
-    // whose suggestion names the actual undischarged set, not cache/sql.
+    // canonical) default false. The result is exactly one collapsed ZTS500,
+    // not one per undischarged property, and its suggestion names the actual
+    // undischarged set, not cache/sql.
     const allocator = std.testing.allocator;
     const props = HandlerProperties{
         .pure = true,
@@ -1120,8 +1118,8 @@ test "dischargeEffects a lower-bound row cannot discharge a ceiling" {
     inferred.insert(.env);
     const declared: [1][]const u8 = .{"env"};
 
-    // The ceiling matches the inferred set exactly, which used to read as
-    // discharged. It is not: the capabilities behind the unresolvable call
+    // The ceiling matches the inferred set exactly, which does not mean
+    // discharged: the capabilities behind the unresolvable call
     // are absent from the set being compared.
     var diags = try dischargeEffects(allocator, &declared, inferred, false, true);
     defer freeDiags(allocator, &diags);
@@ -1217,10 +1215,7 @@ test "suggestionFor covers all cause-only specs" {
 
 test "dischargeSpecs recognises pure/stateless/result_safe/optional_safe" {
     // Regression guard for the v1_specs/HandlerProperties drift fix.
-    // Before this change, dischargeSpecs would emit ZTS502 unknown_name
-    // for every name below — yet ratchet treated them as real
-    // obligations, and the README told authors to write `Proof<T, "pure">`.
-    // Now each name resolves to its HandlerProperties field and follows
+    // Each name below resolves to its HandlerProperties field and follows
     // the standard ZTS500 not_discharged path when the property is false.
     const allocator = std.testing.allocator;
 
@@ -1430,8 +1425,8 @@ test "dischargeCapsule unknown name emits ZTS502 with suggestion" {
 }
 
 test "dischargeCapsule recursive function fails total and nothing else" {
-    // The guard used to refuse every property at a recursive fixed point, for
-    // a reason (spec 5.6) that is about totality and cost. `pure`,
+    // The guard must not refuse every property at a recursive fixed point: the
+    // reason (spec 5.6) is about totality and cost. `pure`,
     // `read_only` and `deterministic` are read off the effect row, which
     // `effect_inference.propagate` joins to a fixed point over the cycle, so
     // they are answerable for a recursive function and were being withheld.

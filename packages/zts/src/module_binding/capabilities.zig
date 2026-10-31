@@ -456,9 +456,8 @@ pub fn allowsSqlWriteForActiveModule(
     };
     const allowed = ctx.capability_policy.allowsSqlWrite(canonical);
     if (!allowed) {
-        // Phase 1 dual-emit: legacy per-module event for existing JSONL
-        // consumers, generic policy_denied for spec section 12 shape.
-        // Phase 4 deprecates the legacy kinds once consumers migrate.
+        // Dual emit: a per-module event for JSONL consumers, and the generic
+        // policy_denied for the spec section 12 shape.
         emitPolicyDenial(ctx, .policy_denied_sql);
         const policy = @import("../policy.zig");
         policy.emitDenied(.{

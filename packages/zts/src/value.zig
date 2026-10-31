@@ -243,12 +243,12 @@ pub const JSValue = packed struct(u64) {
         return self.isInt() or self.isRawDouble() or self.isBoxedFloat64();
     }
 
-    /// Get float64 value (works for raw double and legacy boxed float)
+    /// Get float64 value (works for raw double and boxed float)
     pub inline fn getFloat64(self: JSValue) f64 {
         if (self.isRawDouble()) {
             return @bitCast(self.raw);
         }
-        // Legacy boxed float support (constant pool entries)
+        // Boxed float support (constant pool entries)
         if (self.isBoxedFloat64()) {
             const addr = self.raw & PAYLOAD_MASK;
             const box: *Float64Box = @ptrFromInt(addr);
@@ -452,7 +452,7 @@ pub const JSValue = packed struct(u64) {
     /// Get the JS typeof result
     pub fn typeOf(self: JSValue) []const u8 {
         if (self.isUndefined()) return "undefined";
-        if (self.isNull()) return "object"; // Historical quirk
+        if (self.isNull()) return "object"; // typeof null is "object"
         if (self.isBool()) return "boolean";
         if (self.isNumber()) return "number";
         if (self.isAnyString()) return "string";

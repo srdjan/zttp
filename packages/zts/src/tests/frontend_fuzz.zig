@@ -327,7 +327,7 @@ fn expectSpanInside(src: []const u8, start: u32, end: u32) !void {
 fn expectAdmissionInside(src: []const u8, diagnostic: TypeSyntax.AdmissionDiagnostic) !void {
     try expectSpanInside(src, diagnostic.span.start, diagnostic.span.end);
     const position = diagnostic.positionIn(src);
-    // Admission presentation retains compatibility cursor rewinds.
+    // Admission presentation can rewind the cursor.
     // Its coordinates need not equal the physical span's line and column.
     if (diagnostic.presentation != null) {
         try std.testing.expect(position.line >= 1);

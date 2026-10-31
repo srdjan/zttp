@@ -1175,7 +1175,7 @@ pub const ContractBuilder = struct {
         contract.capability_budget = capabilityMatrixFromSet(budget);
 
         // An all-invalid budget leaves an empty ceiling, and the check runs
-        // against it. Returning early here used to suppress ZTS506 / ZTS607
+        // against it. Returning early here would suppress ZTS506 / ZTS607
         // for every capability the handler reaches, which reads as "budget
         // satisfied" to anything that only counts diagnostics by kind.
 
@@ -3626,7 +3626,7 @@ test "a computed rateCheck key still detects rate limiting, with no namespace" {
 }
 
 test "an incremented counter alone is not rate limiting" {
-    // The signal the old detector half-rested on. A page-view tally is a
+    // A page-view tally is a
     // counter, and calling it a rate limit would put a namespace the
     // deployment must provision into the manifest of a handler that has none.
     const source =

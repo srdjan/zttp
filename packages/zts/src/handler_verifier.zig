@@ -881,9 +881,9 @@ pub const HandlerVerifier = struct {
     /// Map local binding slots to tracked virtual module functions
     /// (result-producing or optional-producing).
     ///
-    /// The legacy scan pre-screened each module for having ANY tracked export
-    /// before looking at its specifiers. That screen is dropped here because it
-    /// is a pure short-circuit: `lookupTrackedFunction` goes through
+    /// There is no pre-screen of each module for having ANY tracked export
+    /// before looking at its specifiers, because that screen would be a pure
+    /// short-circuit: `lookupTrackedFunction` goes through
     /// `findExport`, so a module with no tracked export returns null for every
     /// name anyway, and a module outside `builtin_modules.all` returns null too.
     /// The differential test below is what establishes that rather than
@@ -2564,13 +2564,12 @@ test "HandlerVerifier fails closed when a diagnostic cannot allocate" {
 
 /// Drive the verifier over typed source and assert its error count.
 ///
-/// This used to assert a match-exhaustiveness warning count as well. That
-/// warning's producer is gone: the type checker and the strict checker both
+/// This helper asserts the error count only. It does not assert a
+/// match-exhaustiveness warning: the type checker and the strict checker both
 /// refuse a non-exhaustive match, and the check pipeline returns on their
-/// errors before the verifier stage runs, so the diagnostic could never reach
-/// anyone. Calling the verifier directly, as this helper does, was the only
-/// place it was ever observed - which is how a rule stayed advertised and
-/// tested while being unreachable in the product.
+/// errors before the verifier stage runs, so the diagnostic cannot reach
+/// anyone. A test that calls the verifier directly, as this helper does, would
+/// keep a rule advertised and tested while it is unreachable in the product.
 fn verifyTypedHandlerSource(source: []const u8, expect_errors: u32) !void {
     const allocator = std.testing.allocator;
     var atoms = context.AtomTable.init(allocator);
@@ -4184,7 +4183,7 @@ test "ZTS303 accepts a guarded requestText read" {
 }
 
 test "an assert statement is not a total function body" {
-    // The discriminating probe for the fail-open this switch used to carry.
+    // The discriminating probe for a fail-open in this switch.
     // `functionAlwaysReturns` enumerated the tags that return false and ended
     // in `else => true`, so `.assert_stmt` - a statement that returns on no
     // path - was credited with "every path returns". The answer is written
@@ -4211,7 +4210,7 @@ test "a for-of statement is not a total function body" {
 }
 
 test "an expression-bodied arrow is a total function body" {
-    // The reason the old catch-all existed, kept as an explicit arm: the
+    // An explicit arm: the
     // expression IS the return value. The control for the two probes above -
     // without it a rewrite that answered `false` everywhere would pass them
     // while breaking every helper capsule's `total` fact.

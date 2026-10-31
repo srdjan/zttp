@@ -290,10 +290,8 @@ pub const Discharge = union(enum) {
 /// including "the tree carries a construct parse identity does not model",
 /// which is an answer about the input rather than a fault in the check.
 ///
-/// The allocator came back with M2. `3c1d5f6b` removed it because the only
-/// allocating method discharged no row, and this is the change that gives one
-/// a consumer: the semicolon insertion ASI removal needs, whose equivalence is
-/// exactly the unique-parse argument spec 5.5 makes.
+/// The allocator serves M2: the semicolon insertion that ASI removal needs,
+/// whose equivalence is exactly the unique-parse argument spec 5.5 makes.
 pub fn validateApplication(
     allocator: std.mem.Allocator,
     intent: RepairIntent,

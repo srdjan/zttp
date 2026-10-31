@@ -27,11 +27,7 @@ pub inline fn modValues(a: value.JSValue, b: value.JSValue) !value.JSValue {
 // non-numeric operand. The interpreter keeps its own trace-emitting slow paths
 // (arith.zig) because those distinguish which operand failed.
 //
-// They existed to let the tiered JIT helpers stay thin delegates. The JIT was
-// removed after measurement and the comment here went on describing it, along
-// with three helpers nothing called any more: `addNumeric`, and `incValue` /
-// `decValue` for a `++` / `--` the profile refuses at parse time. Every core
-// left below has a caller.
+// Every core below has a caller.
 
 pub inline fn subValues(a: value.JSValue, b: value.JSValue) !value.JSValue {
     if (a.isInt() and b.isInt()) {

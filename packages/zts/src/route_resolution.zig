@@ -728,8 +728,8 @@ pub const Resolver = struct {
     /// at the binding, because `[table][0]` is the table itself. Any other
     /// non-identifier root is `untracked`: reporting it as `other` would let a
     /// mutation through an unfollowed path leave the table looking stable,
-    /// which is the unsound direction. An identifier with no binding keeps the
-    /// old answer, `other`.
+    /// which is the unsound direction. An identifier with no binding answers
+    /// `other`.
     fn assignmentRootMatch(
         self: *const Resolver,
         target: NodeIndex,

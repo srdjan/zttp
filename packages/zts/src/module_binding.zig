@@ -769,8 +769,8 @@ test "allowsSqlQueryForActiveModule denies queries outside the allowlist" {
 
     try std.testing.expect(try allowsSqlQueryForActiveModule(ctx, "listTodos"));
     try std.testing.expect(!try allowsSqlQueryForActiveModule(ctx, "dropEverything"));
-    // Legacy policy JSON allow_queries entries have no operation metadata, so
-    // they remain explicit read/write overrides. Generated contract query
+    // Policy JSON allow_queries entries have no operation metadata, so
+    // they are explicit read/write overrides. Generated contract query
     // entries are split in handler_policy.zig.
     try std.testing.expect(try allowsSqlWriteForActiveModule(ctx, "listTodos"));
     try std.testing.expect(!try allowsSqlWriteForActiveModule(ctx, "dropEverything"));

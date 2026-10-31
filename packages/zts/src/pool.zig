@@ -240,7 +240,7 @@ pub const LockFreePool = struct {
 
         /// Audit-reset the request arena, update cumulative stats, and mark
         /// the runtime so the next `reset` skips the arena work. Returns null
-        /// on the legacy GC path.
+        /// when the runtime does not use hybrid allocation.
         pub fn auditAndResetArena(self: *Runtime) arena_mod.Arena.AuditError!?arena_mod.Arena.AuditSnapshot {
             if (!self.use_hybrid) return null;
             const arena = self.request_arena orelse return null;
@@ -380,7 +380,7 @@ pub const LockFreePool = struct {
     }
 
     /// Try to acquire from a specific slot (returns null if slot empty or CAS fails)
-    /// OPTIMIZATION: Removed atomic available_count from hot path
+    /// No atomic available_count sits on the hot path.
     fn tryAcquireSlot(self: *LockFreePool, idx: usize) ?*Runtime {
         const slot = &self.slots[idx];
         const current = slot.load(.acquire);
@@ -433,7 +433,7 @@ pub const LockFreePool = struct {
             if (self.slots[idx].cmpxchgStrong(null, runtime, .release, .monotonic) == null) {
                 // Update hint to point to this slot (next acquire will find it)
                 self.free_hint.store(idx, .monotonic);
-                // OPTIMIZATION: Removed atomic increment - available_count computed lazily
+                // available_count is computed lazily, with no atomic increment
                 return; // Successfully pooled
             }
         }
@@ -449,7 +449,7 @@ pub const LockFreePool = struct {
     }
 
     /// Get number of available (idle) runtimes - O(n) scan, but called rarely.
-    /// OPTIMIZATION: Removed atomic counter from hot path (tryAcquireSlot/release).
+    /// No atomic counter sits on the hot path (tryAcquireSlot/release).
     /// This function is only called for pool pressure checks which happen infrequently.
     pub fn getAvailable(self: *LockFreePool) usize {
         var count: usize = 0;

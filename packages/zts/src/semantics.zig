@@ -500,8 +500,7 @@ pub fn opcodeDisposition(op: Opcode) Disposition {
 /// Algebraic laws the language's value semantics must satisfy: equivalences
 /// between *structurally different* denotations. Mechanism 3 (structural RPN
 /// equality) cannot admit these - both sides have different `Term` sequences -
-/// but a solver check (removed; see `pre-rebase:packages/zts/src/semantics_smt.zig`)
-/// certified them over the value model. They are spec content (claims about the language), so they are
+/// so they are declared as data. They are spec content (claims about the language), so they are
 /// hashed into `semanticsHash` and rendered into the spec artifact.
 ///
 /// SOUNDNESS BOUNDARY - read before adding a law. The SMT encoder abstracts the
@@ -549,9 +548,8 @@ pub const algebraic_laws = [_]Law{};
 
 /// Excluded laws: equivalences that are tempting but FALSE under the engine's
 /// faithful value model, declared here so the exclusion is machine-checked rather
-/// than only asserted in the SOUNDNESS BOUNDARY comment above. The removed audit
-/// (`pre-rebase:packages/zts/src/semantics_audit.zig`) encoded each over a faithful
-/// tagged-value model and required a solver counterexample. They are data now:
+/// than only asserted in the SOUNDNESS BOUNDARY comment above. Each has a
+/// counterexample over a faithful tagged-value model. They are data:
 /// hashed into `semanticsHash` and rendered into the spec. They reuse the `Law`
 /// shape; they are read as non-laws.
 pub const excluded_laws = [_]Law{
@@ -584,8 +582,8 @@ pub const excluded_laws = [_]Law{
         .rhs = &.{.{ .child = 0 }},
     },
     // involution of unary -  - `-` coerces to number, so `-(-"5") === "5"` is
-    // false (number 5 !== string "5"). Was previously asserted over the ℤ tier;
-    // now machine-refuted here, removing the receipt over-claim.
+    // false (number 5 !== string "5"). It is machine-refuted here, not asserted
+    // over the ℤ tier.
     .{
         .name = "neg_involution",
         .lhs = &.{ .{ .child = 0 }, .{ .unop = .neg }, .{ .unop = .neg } },

@@ -482,8 +482,7 @@ test "an unresolved reference is identified by its name" {
     try testing.expectEqualStrings("Z7:Missing", try typeKey(&pool, allocator, ref));
 
     // Two refs to one name are one type, which is what `assignableStep`
-    // already says: it compares the names and nothing else. This used to be a
-    // hard error, and the fallback then reported them as different types.
+    // already says: it compares the names and nothing else.
     const other = pool.addRef(allocator, "Missing");
     try testing.expect(structurallyEqual(&pool, allocator, ref, other));
 

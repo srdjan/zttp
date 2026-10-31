@@ -523,7 +523,7 @@ pub const Tokenizer = struct {
 
     /// Advance over a run of digits accepted by `accept`, treating `_` as a
     /// separator between them and reporting whether one was seen. The `_` test
-    /// is the same comparison the old `accept(c) or c == '_'` condition made, so
+    /// is the same comparison as `accept(c) or c == '_'`, so
     /// recording it is free.
     fn scanDigitRun(self: *Tokenizer, comptime accept: fn (u8) bool) bool {
         var saw_separator = false;

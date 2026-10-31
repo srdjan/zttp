@@ -17,9 +17,7 @@
 //!                         the gap mechanism 3 cannot see: that the declared
 //!                         lowering matches what codegen actually emits.
 //!
-//! This slice emits no signed receipt. The two write-only signed receipts were
-//! removed; a fragment of their doc comment survived here, describing signing
-//! this file no longer does.
+//! This slice emits no signed receipt.
 
 const std = @import("std");
 const semantics = @import("semantics.zig");

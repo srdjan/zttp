@@ -1,13 +1,13 @@
 //! Heap-aware flow evaluator: finite values and origins, field-sensitive heaps,
 //! closures, recursion, native operations, request contents, persistent module
 //! roots and conditional witness evidence. `flow_checker.zig` supplies the
-//! compatibility facade; this evaluator establishes its verdicts.
+//! facade; this evaluator establishes its verdicts.
 //!
 //! Semantic authority: `docs/plans/2026-10-18-flow-checker-sound-redesign-plan.md`
 //! (round 3), the phase specifications P2–P6, and
 //! `docs/plans/2026-10-20-flow-interp-p7-spec.md`.
 //!
-//! The old checker keeps one label set per binding and loses what a value
+//! A checker with one label set per binding loses what a value
 //! points at, so a write through an alias reaches nothing the reader can see.
 //! This evaluator keeps three facts per value instead: the labels it carries,
 //! the allocation sites it may point at (`origins`), and the function bodies it

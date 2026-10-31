@@ -539,7 +539,7 @@ pub const StrictChecker = struct {
             .assignment => false,
             .call, .method_call => self.isPureModuleCall(node),
             // A callback's purity is its body's. Answering `true` for every
-            // function node - which the `else` arm below used to do - made
+            // function node - which an `else` arm would do - would make
             // `dictMapValues(d, () => cacheGet(...))` look like a pure
             // argument, so the export's own `.none` effect would have carried
             // a call that reaches storage into a `?:` arm.
@@ -761,10 +761,10 @@ pub const StrictChecker = struct {
     /// True when the registry says this call selects a value rather than
     /// performing an effect.
     ///
-    /// Every call used to answer false, which made spec 4.2.1's `two-way pure
-    /// selection` row - whose precondition is "none" - refuse
+    /// A call must not answer false in every case: spec 4.2.1's `two-way pure
+    /// selection` row, whose precondition is "none", would then refuse
     /// `c ? ok(a) : err(b)`. Both arms are calls to a zero-capability module
-    /// that declares no effect, so the rule was refusing the spelling it
+    /// that declares no effect, so the rule would refuse the spelling it
     /// exists to prefer.
     ///
     /// Three conditions, each closing a hole the others do not:
@@ -2532,9 +2532,9 @@ test "canonical_redundant_bool_compare fires on `!== false` for a boolean" {
 
 test "canonical_redundant_bool_compare fires on a captured unannotated boolean const" {
     // The strict checker asks the type checker for the operand's type after
-    // `check` has returned. A captured binding used to resolve through a name
-    // stack that is empty by then, so the operand had no type and the rule did
-    // not fire. The control with the same comparison in the declaring function
+    // `check` has returned. A captured binding must not resolve through a name
+    // stack that is empty by then: the operand would have no type and the rule
+    // would not fire. The control with the same comparison in the declaring function
     // fires either way.
     var function_form = try checkSourceTyped(
         "function handler(req) { const ready = req.method === \"GET\"; function g() { if (ready === false) { return \"no\"; } return \"yes\"; } return Response.text(g()); }",
@@ -2801,9 +2801,9 @@ test "a multi-line signature missing the return type still fails" {
 }
 
 test "a function and an arrow on one line are annotation-checked separately" {
-    // Both annotations used to land in the one bucket the line named. The
-    // arrow's annotations then stood in for a function that had none, so
-    // `plain` was reported fully annotated.
+    // Both annotations must not land in the one bucket the line names: the
+    // arrow's annotations would stand in for a function that has none, and
+    // `plain` would be reported fully annotated.
     var h = try checkDirect(
         "function handler(req: Request): Response { return Response.json({}); }\n" ++
             "function plain(x) { return [1].map((y: number): number => y); }\n",
@@ -3070,8 +3070,7 @@ test "ternary with a call nested inside a composite arm fires impure diagnostic"
 test "a ternary over zero-capability module calls is admitted" {
     // Spec 4.2.1's `two-way pure selection` row has precondition "none", and
     // this is the shape it exists to prefer. Both arms call a module that
-    // declares no effect and reaches no capability; the rule used to refuse it
-    // because every call answered impure.
+    // declares no effect and reaches no capability.
     var h = try checkDirect(
         "import { ok, err } from \"zttp:result\";\n" ++
             "function handler(req: Request): Response {\n  const n = 2;\n  const r = n > 0 ? ok(n) : err(\"negative\");\n  return Response.json({ ok: r.ok });\n}\n",
@@ -3096,7 +3095,7 @@ test "a ternary over a capability-reaching call still fires" {
 test "a pure callback keeps its call pure, an effectful one does not" {
     // `dictMapValues` declares `.none` and runs whatever it is handed, so the
     // export's own effect says nothing about the call. Answering `true` for
-    // every function node - which the walk used to do - would admit both.
+    // every function node would admit both.
     var pure_cb = try checkDirect(
         "import { dictEmpty, dictSet, dictMapValues, dictGet } from \"zttp:collections\";\n" ++
             "function handler(req: Request): Response {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const n = 1;\n  const out = n > 0 ? dictMapValues(d, (v) => v * 2) : d;\n  return Response.json({ v: dictGet(out, \"a\") });\n}\n",
@@ -3682,7 +3681,7 @@ test "a call from a closure is not counted for a helper name a loop binding shad
 
 test "a let that only a closure reassigns is not flagged avoidable" {
     // The closure writes through an upvalue reference, not the declaring
-    // binding. The write used to go unrecorded, and ZTS604 refused a binding
+    // binding. The write must be recorded, or ZTS604 refuses a binding
     // that is reassigned.
     var checker = try checkSource(
         "function handler(req) { let v = 1; const g = () => { v = 2; return 1; }; const n = g(); return Response.json({ v: v, n: n }); }",

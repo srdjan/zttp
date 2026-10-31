@@ -810,7 +810,7 @@ pub fn primitiveIndex(pool: *const TypePool, primitive: TypeSyntax.Primitive) Ty
     };
 }
 
-/// What the old standalone parser produced for a parity input, recorded before it was removed:
+/// What the lowering must produce for a parity input:
 /// the canonical type key, or that the root is null or has no key, plus the pool name bytes
 /// (which fix the order the constructors interned their names in).
 const ExpectedType = union(enum) {
@@ -896,7 +896,7 @@ fn expectParsedLowering(
 }
 
 test "parsed lowering preserves constructor name order" {
-    // Keys and names are what the removed standalone parser produced for each input.
+    // Keys and names are the expected output for each input.
     const cases = [_]struct { source: []const u8, expected: ExpectedType, names: []const u8 }{
         .{
             .source = "(value: T) => Effects<T, \"crypto\">",
@@ -931,7 +931,7 @@ test "parsed lowering preserves constructor name order" {
 }
 
 test "admitted malformed groups retain lowering while binding signatures reject their suffix" {
-    // Direct admission retains its historical prefix; binding signatures require full consumption.
+    // Direct admission retains its prefix; binding signatures require full consumption.
     const cases = [_]struct { source: []const u8, prefix: []const u8, names: []const u8 }{
         .{ .source = "(first: Left, Right)", .prefix = "first", .names = "Leftfirstfirst" },
         .{ .source = "(first: Left, second: Right, Final)", .prefix = "first", .names = "LeftfirstRightsecondfirst" },

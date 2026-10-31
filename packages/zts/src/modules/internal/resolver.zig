@@ -216,12 +216,11 @@ test "validateImports reports first missing export" {
 // ---------------------------------------------------------------------------
 // wrappedExportFn - capability propagation on the module_func path.
 //
-// Wave 1B/2D P0 #3 (2026-05-23 review) flagged that this branch previously
-// short-circuited through `getNativeFn()`, which wraps with empty
-// `required_capabilities`. Any sandbox module declaring caps would then run
+// This branch must not short-circuit through `getNativeFn()`, which wraps with
+// empty `required_capabilities`. Any sandbox module declaring caps would then run
 // with an empty active module scope, so every `sdk.requireCapability` call,
 // including the ones inside `sdk.hmacSha256`, `sdk.fillRandom`, and the
-// JWT verifier, would refuse the operation. The test below pins the fixed
+// JWT verifier, would refuse the operation. The test below pins the
 // shape: a `module_func` binding with `.crypto` declared in its parent
 // `ModuleBinding` must observe `.crypto` in the active scope.
 // ---------------------------------------------------------------------------

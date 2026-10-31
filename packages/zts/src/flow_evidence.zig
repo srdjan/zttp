@@ -102,9 +102,9 @@ fn collect(
             return left and right;
         }
         if (statusComparison(ctx, binary)) |status| {
-            // Preserve the exact numeric test. The old fork classifier only
-            // compares non-2xx statuses and 200, so it is a candidate preference
-            // rather than an equivalence for statuses 201..299.
+            // Preserve the exact numeric test. A comparison of non-2xx statuses
+            // and 200 is a candidate preference rather than an equivalence for
+            // statuses 201..299.
             if (status.preference) |preferred| try out.append(allocator, if (negated) counterexample.negate(preferred).? else preferred);
             try out.append(allocator, if (negated) counterexample.negate(status.exact).? else status.exact);
             return true;
@@ -202,7 +202,7 @@ fn statusComparison(ctx: Context, binary: ir.Node.BinaryExpr) ?StatusPredicate {
     return null;
 }
 
-/// The legacy solver deliberately chooses a candidate rather than solving
+/// The solver deliberately chooses a candidate rather than solving
 /// arbitrary conjunctions. Recheck that concrete candidate before attaching
 /// constructive evidence: last-write-wins request/stub choices can violate an
 /// earlier predicate, even when every individual predicate is supported.

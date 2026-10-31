@@ -927,8 +927,8 @@ test "string length/charAt/slice index by UTF-16 code units ENG-utf16" {
     try std.testing.expectEqualStrings(&@as([20:0]u8, @splat('a')), getStringData(stringSlice(ctx, long, &.{value.JSValue.fromInt(1)})) orelse return error.TestUnexpectedResult);
 
     // indexOf/lastIndexOf return UTF-16 code-unit indices that agree with slice
-    // (the bug: they used to return byte offsets, so slice(indexOf(...)) cut at
-    // the wrong place for non-ASCII). "café-x": c,a,f,é,-,x -> 'x' is unit 5.
+    // (a byte offset would make slice(indexOf(...)) cut at the wrong place for
+    // non-ASCII). "café-x": c,a,f,é,-,x -> 'x' is unit 5.
     const cafe = try ctx.createString("café-x");
     const x_needle = try ctx.createString("x");
     try std.testing.expectEqual(@as(i32, 5), stringIndexOf(ctx, cafe, &.{x_needle}).getInt());
@@ -962,7 +962,7 @@ test "string length/charAt/slice index by UTF-16 code units ENG-utf16" {
 
 test "stringConstructor converts scalars to strings ENG-String" {
     // The global String(x) must convert numbers and booleans to their text
-    // forms (previously String() was unregistered and threw NotCallable -> 500).
+    // forms.
     // A self-managed DebugAllocator that is intentionally not deinit'd: the
     // ctx-created JSStrings are GC-managed and not freed individually in tests.
     var dbg: std.heap.SafeAllocator = .init(std.heap.page_allocator, .{});

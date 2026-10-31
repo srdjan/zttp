@@ -138,8 +138,8 @@ const Parser = struct {
             '"' => self.parseString(),
             't' => self.parseKeyword("true", JSValue.true_val),
             'f' => self.parseKeyword("false", JSValue.false_val),
-            // Spec 6.4: `null` round-trips as data. Phase 3 admitted the value,
-            // so the boundary that would have had to erase it no longer does.
+            // Spec 6.4: `null` round-trips as data. The boundary admits the
+            // value and does not erase it.
             'n' => self.parseKeyword("null", JSValue.null_val),
             '-', '0'...'9' => self.parseNumber(),
             else => self.fail(.invalid_syntax, self.pos),

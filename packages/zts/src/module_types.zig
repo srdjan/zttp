@@ -419,11 +419,9 @@ test "a declared signature builds the precise type, and fetch is its first custo
 }
 
 test "fetch takes its init object optionally, the way a GET is written" {
-    // The `is_fetch` branch that used to build this signature truncated the
-    // parameter list to one, so `fetch(url)` type-checked by accident. Spelling
-    // both parameters in the binding raised the arity to two and left a plain
-    // GET failing with "expected 2, got 1" - a program the runtime accepts and
-    // the checker refused.
+    // The binding spells both parameters. `fetch(url)` must still type-check,
+    // or a plain GET fails with "expected 2, got 1" - a program the runtime
+    // accepts and the checker refuses.
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);

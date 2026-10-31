@@ -398,8 +398,8 @@ pub const TypePool = struct {
         if (self.names.items.len > std.math.maxInt(u16)) {
             return self.failName(error.TypePoolCapacityExceeded);
         }
-        // A longer name used to be cut to 255 bytes, so two names that differ only
-        // after byte 255 stored identically and compared equal. Fail closed instead.
+        // A longer name must not be cut to 255 bytes: two names that differ only
+        // after byte 255 would store identically and compare equal. Fail closed.
         if (name.len > std.math.maxInt(u8)) return self.failName(error.TypePoolCapacityExceeded);
         const start: u16 = @intCast(self.names.items.len);
         const len: u8 = @intCast(name.len);
@@ -480,11 +480,11 @@ pub const TypePool = struct {
     /// the tag is the only record of what was branded. That is exact while a
     /// nominal base is a scalar, which ZTS048 enforces at the declaration.
     ///
-    /// This used to delegate to `widenLiteral` and answered wrongly for every
-    /// nominal that exists: a brand over `string` carries `.t_string`, not
-    /// `.t_literal_string`, so it fell through the literal arms and the
-    /// function returned its own argument. Nothing caught it because the one
-    /// caller keys on the tag, which is the same either way.
+    /// This must not delegate to `widenLiteral`, which answers wrongly for
+    /// every nominal that exists: a brand over `string` carries `.t_string`,
+    /// not `.t_literal_string`, so it falls through the literal arms and the
+    /// function returns its own argument. The one caller keys on the tag,
+    /// which is the same either way, so a wrong answer there goes unnoticed.
     pub fn unwrapNominal(self: *const TypePool, idx: TypeIndex) TypeIndex {
         if (!self.isNominal(idx)) return idx;
         return switch (self.getTag(idx) orelse return idx) {
@@ -1737,8 +1737,8 @@ pub const TypePool = struct {
         }
 
         // D1 amendment A1 is applied: an unresolved name reaching here is not
-        // assignable, and the two lines that used to answer true for a `t_ref`
-        // or a `t_generic_param` on either side are gone. `firstUnresolvedName`
+        // assignable, whether a `t_ref` or a `t_generic_param` stands on either
+        // side. `firstUnresolvedName`
         // below is the reporting half, so a caller can tell an unresolved name
         // (ZTS206) apart from a real mismatch (ZTS200).
         //
@@ -2350,10 +2350,8 @@ test "addUnion overflow fallback keeps every flattened member" {
 }
 
 test "addUnion dedups a wide input by canonical key" {
-    // This test used to assert the opposite: that a union too wide for the
-    // sixteen-slot dedup buffer kept every flattened member, duplicates and
-    // all, because dropping one would have dropped an obligation. Normalizing
-    // on the heap removes the buffer, so the duplicates are gone by
+    // A union too wide for a fixed dedup buffer must not keep duplicates.
+    // Normalizing on the heap has no such buffer, so the duplicates are gone by
     // construction and nothing is dropped that was not already there.
     const allocator = std.testing.allocator;
     var pool = TypePool.init(allocator);

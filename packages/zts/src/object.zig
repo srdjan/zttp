@@ -1386,7 +1386,7 @@ pub const JSObject = extern struct {
         is_callable: bool = false,
         has_small_array: bool = false, // Dense array optimization
         is_generator: bool = false, // Generator function (function*)
-        is_async: bool = false, // No longer set; the bit keeps the flag layout stable
+        is_async: bool = false, // Never set; the bit keeps the flag layout stable
         is_arena: bool = false, // Allocated from request arena (ephemeral)
         // `new` is rejected at parse time, so there is no is_constructor bit.
         _reserved: u1 = 0,

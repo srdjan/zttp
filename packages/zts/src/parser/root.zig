@@ -22,7 +22,7 @@
 
 const std = @import("std");
 
-// Import from parent for compatibility types
+// Import from parent
 const bytecode = @import("../bytecode.zig");
 const value = @import("../value.zig");
 const string = @import("../string.zig");
@@ -159,13 +159,13 @@ pub const Parser = struct {
     js_parser: JsParser,
     code_gen: ?CodeGen,
 
-    // Output fields for zruntime.zig compatibility
+    // Output fields for zruntime.zig
     max_local_count: u8,
     constants: ConstantsList,
     root_node: NodeIndex = @import("ir.zig").null_node,
     typed_phase: ?TypedPhase = null,
 
-    // Strings/atoms kept for API compatibility (not used by new parser)
+    // Strings and atoms that CodeGen receives
     strings: *string.StringTable,
     atoms: ?*atom_table_mod.AtomTable,
 

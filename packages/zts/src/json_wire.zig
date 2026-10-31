@@ -1,8 +1,8 @@
-//! Typed JSON wire helpers for compatibility-sensitive decoders.
+//! Typed JSON wire helpers for decoders that need the exact source bytes.
 //!
 //! `std.json` remains the only JSON parser. These wrappers retain the exact
 //! source bytes for strings and embedded JSON values so projection code can
-//! preserve legacy domain and serialization behavior.
+//! preserve domain and serialization behavior.
 
 const std = @import("std");
 
@@ -211,7 +211,7 @@ fn appendRepeatedSlice(
     return joined;
 }
 
-/// An unsigned JSON integer that preserves the legacy decoder's overflow
+/// An unsigned JSON integer with defined overflow
 /// behavior: decimal digits are consumed, but an out-of-range value projects
 /// as null so the owning field can apply its documented default.
 pub fn Unsigned(comptime T: type) type {
@@ -287,7 +287,7 @@ pub fn AppendedNonNull(comptime T: type) type {
 }
 
 /// An optional object that preserves fields accumulated across repeated
-/// occurrences. Explicit null is a no-op, matching legacy section parsers.
+/// occurrences. Explicit null is a no-op.
 pub fn MergedOptional(comptime T: type) type {
     return struct {
         const Self = @This();
@@ -326,7 +326,7 @@ pub fn MergedOptional(comptime T: type) type {
 }
 
 /// An optional array that appends values across repeated occurrences.
-/// Explicit null is a no-op, matching legacy collection parsers.
+/// Explicit null is a no-op.
 pub fn AppendedOptional(comptime T: type) type {
     return struct {
         const Self = @This();

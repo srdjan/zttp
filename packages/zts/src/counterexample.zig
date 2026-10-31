@@ -319,8 +319,8 @@ fn solveStubs(
     var call_overrides: std.AutoHashMapUnmanaged(u32, []const u8) = .empty;
     defer call_overrides.deinit(allocator);
 
-    // Legacy fallback for hand-authored tests or callers that have not yet
-    // attached call indexes to stub constraints.
+    // Fallback keyed by function name, for a stub constraint that carries no
+    // call index (hand-authored tests, or a call the checker does not know).
     var func_overrides: std.StringHashMapUnmanaged([]const u8) = .empty;
     defer func_overrides.deinit(allocator);
 

@@ -1677,7 +1677,7 @@ test "ReplayState consumeHead and hasEntryAhead" {
     try std.testing.expectEqual(@as(u32, 1), state.cursor);
     try std.testing.expectEqual(@as(u32, 0), state.divergences);
 
-    // Now validate is at the head and no longer "ahead".
+    // Validate is at the head and not "ahead".
     try std.testing.expect(state.peekMatches("validate", "validateJson"));
 }
 

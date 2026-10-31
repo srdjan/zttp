@@ -579,7 +579,7 @@ pub const CodeGen = struct {
             // Copy the exported global into the local import binding. Virtual
             // modules use namespaced globals to avoid collisions such as
             // exports with the same name; relative file imports
-            // keep the legacy unqualified export name.
+            // keep the unqualified export name.
             try self.emit(.get_global);
             try self.emitU16(try self.importGlobalAtom(import_decl.module_idx, spec.imported_atom));
             self.pushStack(1);

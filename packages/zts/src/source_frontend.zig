@@ -106,7 +106,7 @@ pub fn sourceDiagnosticFromAdmission(
     };
 }
 
-/// Preserve diagnostic logging at callers that previously enabled source-preparation reports.
+/// Log an admission failure at callers that enable source-preparation reports.
 pub fn logAdmissionFailure(source: []const u8, failure: parser.AdmissionFailure) void {
     if (@import("builtin").is_test) return;
     switch (failure) {

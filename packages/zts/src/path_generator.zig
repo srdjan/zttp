@@ -1385,10 +1385,9 @@ pub const PathGenerator = struct {
 
     /// Map local binding slots to builtin module function metadata.
     ///
-    /// `.builtin` only, which is the exact translation of the legacy
-    /// `fromSpecifier(module) orelse continue`: that lookup searches
-    /// `builtin_modules.all` and never a manifest registry, so a
-    /// partner-registered module was skipped before and stays skipped.
+    /// `.builtin` only, matching `fromSpecifier(module) orelse continue`: that
+    /// lookup searches `builtin_modules.all` and never a manifest registry, so
+    /// a partner-registered module stays skipped.
     fn scanImports(self: *PathGenerator) error{OutOfMemory}!void {
         const facts = try self.resolveFacts();
         try fillFnBindings(self.allocator, facts.imports.items, &self.module_fn_bindings);
@@ -1404,7 +1403,7 @@ pub const PathGenerator = struct {
             const entry = builtin_modules.findExport(rec.module_specifier, rec.imported_name) orelse continue;
             try bindings.put(allocator, rec.slot, .{
                 // The binding's short name, not its specifier: that is what the
-                // legacy scan stored and what downstream comparisons expect.
+                // downstream comparisons expect.
                 .module = entry.binding.name,
                 .func = entry.func.name,
                 .returns = entry.func.returns,
@@ -6064,7 +6063,7 @@ test "a !== url guard sends a url other than the compared one" {
 test "a path no status can satisfy is not emitted and is not a truncation" {
     const allocator = std.testing.allocator;
     // Past `!res.ok`, the response is ok, so no 404 can reach the then-branch of
-    // the status test. The generator used to emit it with the plain success stub.
+    // the status test. The generator must not emit it with the plain success stub.
     const source = status_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/a");

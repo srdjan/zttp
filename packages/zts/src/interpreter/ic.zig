@@ -3,8 +3,7 @@
 //! govern megamorphic recovery behavior.
 //!
 //! PIC layout (PolymorphicInlineCache, PICEntry, PIC_ENTRIES) is consumed
-//! directly by the JIT (jit/baseline.zig), so changes here must keep the
-//! struct layout stable.
+//! only by the interpreter.
 
 const std = @import("std");
 const object = @import("../object.zig");
@@ -41,9 +40,7 @@ pub const PIC_ENTRIES = 8;
 /// Cap on distinct shapes the PIC caches before treating a site as megamorphic.
 /// The `entries` array stays at PIC_ENTRIES to preserve memory layout.
 ///
-/// This was `type_feedback.MAX_POLYMORPHIC_SHAPES` (4) until the JIT was
-/// removed; the value is inlined here because the PIC is an interpreter
-/// feature and no longer has an upstream feedback layer to agree with.
+/// The PIC is an interpreter feature, so the cap is a plain constant here.
 pub const effective_pic_cap: u8 = 4;
 
 /// Polymorphic Inline Cache for property access optimization

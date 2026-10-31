@@ -702,8 +702,7 @@ pub const Analyzer = struct {
     /// should treat false as "no evidence of recursion", never as "proven
     /// non-recursive". Allocation failure is returned as an error rather than
     /// as false: the walk that would have found the cycle never ran, and
-    /// reporting its silence as a clean result is the fail-open this doc
-    /// comment used to claim it avoided.
+    /// reporting its silence as a clean result would be a fail-open.
     pub fn reachesRecursion(self: *const Analyzer, body_node: NodeIndex) !bool {
         for (self.functions.items, 0..) |function, index| {
             if (function.body_node != body_node) continue;
@@ -2787,7 +2786,7 @@ const ContractProjectionBuilder = struct {
                 const binding = self.ir_view.getBinding(node) orelse break :blk null;
                 break :blk self.findFunctionNodeByBinding(binding.slot);
             },
-            // exhaustive: legacy function targets are declarations, function
+            // exhaustive: function targets are declarations, function
             // expressions, arrows, or identifiers. Other forms resolve no target.
             else => null,
         };
@@ -3536,7 +3535,7 @@ test "transitive non-determinism flows through callers" {
 
 test "a call chain too deep to converge marks every row a lower bound" {
     // `propagate` is a monotone join run to a fixed point, bounded by
-    // `max_iterations`. It used to fall out of that loop silently, leaving
+    // `max_iterations`. It must not fall out of that loop silently, leaving
     // rows mid-propagation: an effect that had not yet climbed to a caller is
     // simply absent from the caller's row, and absent reads as "does not have
     // it". Every capsule property is read off these fields, so the silence
@@ -4081,8 +4080,8 @@ test "a discarded write-effect clock read does not demote determinism" {
     defer atoms.deinit();
     // `logInfo` reads the clock for its timestamp, which reaches stderr and
     // stops. The response is identical across runs, so the handler stays
-    // deterministic. Demoting it was a false negative on the Spec surface: an
-    // author could no longer declare `deterministic` on a handler that merely
+    // deterministic. Demoting it would be a false negative on the Spec surface:
+    // an author could not declare `deterministic` on a handler that merely
     // logs.
     const source =
         \\import { logInfo } from "zttp:log";

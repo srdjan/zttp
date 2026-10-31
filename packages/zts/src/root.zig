@@ -86,7 +86,6 @@ pub const interpreter = engine.interpreter;
 pub const builtins = engine.builtins;
 // New two-pass parser with proper function compilation
 pub const parser = engine.parser;
-// Note: Legacy single-pass parser removed; use parser/root.zig
 pub const pool = engine.pool;
 pub const http = engine.http;
 pub const bytes = engine.bytes;

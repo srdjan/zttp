@@ -40,8 +40,7 @@ pub const AllowList = struct {
         try self.values.append(allocator, try allocator.dupe(u8, item));
     }
 
-    /// Exact, for every category. Egress used to compare case-insensitively
-    /// because it held host names; it holds normalized endpoints now, and the
+    /// Exact, for every category. Egress holds normalized endpoints, and the
     /// folding happens in `zts.endpoint` before a value reaches this list.
     fn contains(self: *const AllowList, candidate: []const u8) bool {
         for (self.values.items) |item| {
@@ -263,12 +262,12 @@ fn firstSqlToken(statement: []const u8) ?[]const u8 {
 /// `configured`, the capability policy file, and from nowhere else. With no
 /// configured section it is enabled and empty, which denies everything.
 ///
-/// It used to be left disabled, and a disabled list admits every value. The
-/// only thing standing between that and an allow-all deployment was that
-/// strict checking rejects a computed capability argument (ZTS602) before a
-/// dynamic contract can be built. That is a compiler decision guarding a
-/// runtime default, and the guarded-call work removes it, so the default moves
-/// first: no section this function returns is ever disabled.
+/// A disabled list admits every value, so no section this function returns is
+/// ever disabled. Otherwise the only thing standing between a disabled list
+/// and an allow-all deployment would be that strict checking rejects a
+/// computed capability argument (ZTS602) before a dynamic contract can be
+/// built. That is a compiler decision, and the runtime default does not rely
+/// on it.
 ///
 /// The returned policy borrows string data from the contract and from
 /// `configured`. Both must outlive the policy. For precompilation this is fine
@@ -589,8 +588,8 @@ pub fn policyErrorHelp(err: anyerror) []const u8 {
 
 pub const scopes_field = "allow_address_scopes";
 pub const endpoints_field = "allow_endpoints";
-/// The key this file used to read. Named here so the parser can say what
-/// replaced it rather than reporting an unknown key.
+/// A retired key. Named here so the parser can say what replaced it
+/// rather than reporting an unknown key.
 pub const retired_hosts_field = "allow_hosts";
 
 /// The policy `source` parses to, or null when it does not parse. The caller
@@ -715,8 +714,7 @@ pub fn validateContract(
     if (policy.egress) |section| {
         // Both sides hold normalized endpoints - the contract from the
         // compiler, the section from the policy reader - so this compares
-        // exactly, like every other category. The case-insensitive match this
-        // used to do belonged to host names.
+        // exactly, like every other category.
         for (contract.egress.endpoints.items) |item| {
             if (!section.contains(item)) {
                 try report.violations.append(allocator, .{

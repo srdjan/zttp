@@ -852,7 +852,7 @@ test "every import is recorded, whatever its module resolves to" {
     try testing.expectEqualStrings("thing", second.imported_name);
     try testing.expectEqual(ImportRecord.Resolution.unresolved, second.resolution);
 
-    // The unresolved module must NOT leak into the four legacy collections:
+    // The unresolved module must NOT leak into the four collections:
     // that is what keeps ContractBuilder's output and the contract goldens
     // unchanged.
     try testing.expectEqual(@as(usize, 1), facts.modules.items.len);

@@ -1,4 +1,4 @@
-//! Compatibility facade for the heap-aware flow interpreter.
+//! Facade for the heap-aware flow interpreter.
 const std = @import("std");
 const engine = @import("zts-engine");
 const SourceView = @import("zts-base").source_diagnostics.SourceView;

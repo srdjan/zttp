@@ -58,8 +58,8 @@ pub const Interpreter = struct {
     /// Set to 4 for .push_const_call (opcode + u16 + argc).
     call_opcode_offset: usize = 2,
 
-    // Perf counters, read by `zig build bench`. These profiled the JIT before it
-    // was removed; `backedge_count` now also amortizes the deadline check.
+    // Perf counters, read by `zig build bench`. `backedge_count` also amortizes
+    // the deadline check.
     backedge_count: u32 = 0, // Back-edge counter
     pic_hits: u32 = 0, // PIC cache hits
     pic_misses: u32 = 0, // PIC cache misses
@@ -4275,8 +4275,8 @@ test "End-to-end: a match binding is stored at every depth of the pattern" {
 
 test "End-to-end: a nested empty array or record pattern is still a test" {
     // Spec 5.5: a nested `[]` matches an array of length 0 and a nested `{}`
-    // matches a record. Codegen used to drop both without a test, so the arm
-    // matched whatever the field held, present or not.
+    // matches a record. Codegen must not drop either test, or the arm would
+    // match whatever the field held, present or not.
     const source =
         \\let full = { v: [1, 2] };
         \\let empty = { v: [] };

@@ -734,7 +734,7 @@ test "a local function sharing a slot with an import atom still reports its egre
     defer extraction.deinit(allocator);
 
     const props = extraction.contract.properties orelse return error.MissingProperties;
-    // The old slot-only lookup took `leaky` for the `env` import and hid the fetchSync.
+    // A slot-only lookup would take `leaky` for the `env` import and hide the fetchSync.
     try testing.expect(props.has_egress);
 }
 
@@ -2016,7 +2016,7 @@ test "one refused operator gives one type diagnostic" {
 
 test "a refused value used again gives no second diagnostic" {
     // The refused sum flows into a binding, a call argument, and a ternary.
-    // Each used to raise a mismatch of its own on top of ZTS105.
+    // Each must not raise a mismatch of its own on top of ZTS105.
     const source =
         \\function twice(x: number): number {
         \\  return x + x;

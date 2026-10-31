@@ -11,8 +11,8 @@ pub const SecurityEventKind = enum {
     policy_denied_cache,
     policy_denied_sql,
     /// Generic policy denial carrying spec-section-12 fields (service,
-    /// action, resource.kind, resource.id, reason). Phase 1 emits this
-    /// alongside the legacy per-module kinds for new gate sites only.
+    /// action, resource.kind, resource.id, reason). The runtime emits this
+    /// alongside the per-module kinds for new gate sites only.
     policy_denied,
     arena_audit_failure,
     persistent_string_escape,
@@ -28,7 +28,7 @@ pub const SecurityEvent = struct {
     kind: SecurityEventKind,
     timestamp_ns: u64 = 0,
     /// Pinned runtime policy generation for capability denials. Zero names a
-    /// direct or legacy context with no installed pool generation.
+    /// direct context with no installed pool generation.
     policy_generation: u64 = 0,
     module_buf: [max_module_len]u8 = undefined,
     module_len: u8 = 0,
@@ -222,8 +222,7 @@ pub fn emitGlobal(event: SecurityEvent) void {
 
 /// Write an event as a single JSONL line (including trailing newline).
 /// `.policy_denied` follows the spec section 12 shape; other kinds keep the
-/// legacy {kind, ts, module, detail} shape so existing JSONL consumers do
-/// not break.
+/// {kind, ts, module, detail} shape that existing JSONL consumers read.
 pub fn writeJsonLine(event: *const SecurityEvent, writer: anytype) !void {
     if (event.kind == .policy_denied) {
         try writer.print(
