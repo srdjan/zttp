@@ -1452,6 +1452,24 @@ test "runCheckOnlyFromSource refuses raw JSX in TypeScript with ZTS002" {
     try std.testing.expect(result.contract == null);
 }
 
+test "CHECK refuses an erased type prefix with ZTS002 at the angle bracket" {
+    const allocator = std.testing.allocator;
+    const cases = [_]struct { source: []const u8, diagnostic: CompoundDiagnostic }{
+        .{ .source = "const x = <T>(1);\n", .diagnostic = .{ .code = "ZTS002", .message = "raw JSX is not supported; use ordinary TypeScript expressions", .line = 1, .column = 11 } },
+        .{ .source = "const x = <T> { id: 1 };\n", .diagnostic = .{ .code = "ZTS002", .message = "raw JSX is not supported; use ordinary TypeScript expressions", .line = 1, .column = 11 } },
+        .{ .source = "<T> { const a = 1; }\n", .diagnostic = .{ .code = "ZTS002", .message = "raw JSX is not supported; use ordinary TypeScript expressions", .line = 1, .column = 1 } },
+        .{ .source = "const x = (<T>(1));\n", .diagnostic = .{ .code = "ZTS002", .message = "raw JSX is not supported; use ordinary TypeScript expressions", .line = 1, .column = 12 } },
+        .{ .source = "const f = <T>(value /* ( */): number => value;\n", .diagnostic = .{ .code = "ZTS002", .message = "raw JSX is not supported; use ordinary TypeScript expressions", .line = 1, .column = 11 } },
+    };
+    for (cases) |case| {
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+        try expectCompoundDiagnostic(result.json_diagnostics.items[0], case.diagnostic);
+    }
+}
+
 test "CHECK keeps the current tolerated annotation text suffix" {
     const source =
         \\function handler(req: Request): Response {
@@ -5614,49 +5632,6 @@ test "CHECK preserves orphan generic prefix refusal positions" {
     try std.testing.expectEqual(cases.len, observed);
 }
 
-test "CHECK preserves admitted generic prefixes without function owners" {
-    const cases = [_][]const u8{
-        "const value = <T>{ id: 1 };\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n",
-        "const value = (<T>{ id: 1 });\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n",
-        "const value = <T>(1);\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n",
-        "<T>{ const value = 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n",
-        "const value = <>{ id: 1 };\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n",
-        "const value = <>(1);\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n",
-        "const value = (<> (1));\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n",
-        "const value = <T>(<U>(1));\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n",
-        "const value = <T>{ id: <U>(1) };\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n",
-        "const value = <T>((x) => x);\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n",
-    };
-    const stages = StageSet.initMany(&.{
-        .strip, .parse,    .imports, .boolean, .types, .strict,    .verifier,
-        .flow,  .contract, .paths,   .trace,   .spec,  .canonical,
-    });
-    const diagnostic: CompoundDiagnostic = .{
-        .code = "ZTS500",
-        .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
-        .line = 2,
-        .column = 17,
-        .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`.",
-    };
-    var observed: usize = 0;
-    for (cases) |source| {
-        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
-            .json_mode = true,
-        });
-        defer result.deinit(std.testing.allocator);
-        try std.testing.expectEqual(stages, result.stages_run);
-        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
-        try std.testing.expectEqual(@as(u32, 0), result.type_errors);
-        try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
-        try std.testing.expect(result.contract != null);
-        try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-        try expectCompoundDiagnostic(result.json_diagnostics.items[0], diagnostic);
-        observed += 1;
-    }
-    try std.testing.expectEqual(@as(usize, 10), cases.len);
-    try std.testing.expectEqual(cases.len, observed);
-}
-
 test "CHECK preserves adjacent generic prefix refusals" {
     const cases = [_]struct { prefix: []const u8, column: u32 }{
         .{ .prefix = "const value = <T><U>{ id: 1 };", .column = 15 },
@@ -7303,26 +7278,11 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
         .{ .source = "export\r const seed = 1; const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
             .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 38, .suggestion = "use specific types (string, number, object) or union types instead" },
         } },
-        .{ .source = "const value = <T>\r(1); const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
-            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 36, .suggestion = "use specific types (string, number, object) or union types instead" },
-        } },
-        .{ .source = "const value = <T>\r{ ok: 1 }; const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
-            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 42, .suggestion = "use specific types (string, number, object) or union types instead" },
-        } },
-        .{ .source = "<T>\r{ const later: any = 1; }\n", .parser_stage = false, .diagnostics = &.{
-            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 19, .suggestion = "use specific types (string, number, object) or union types instead" },
-        } },
-        .{ .source = "const value = <T>\r(1 + ); const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
-            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 39, .suggestion = "use specific types (string, number, object) or union types instead" },
-        } },
-        .{ .source = "const value = <T>\r/* gap */(1); const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
-            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 46, .suggestion = "use specific types (string, number, object) or union types instead" },
-        } },
         .{ .source = "const value = <T>\r extends Missing; const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
             .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 49, .suggestion = "use specific types (string, number, object) or union types instead" },
         } },
     };
-    try std.testing.expectEqual(@as(usize, 129), cases.len);
+    try std.testing.expectEqual(@as(usize, 124), cases.len);
     for (cases) |case| {
         errdefer std.debug.print("CHECK recovery context failed: {s}\n", .{case.source});
         var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "handler.ts", .{

@@ -39,6 +39,8 @@ const Binding = scope_mod.Binding;
 
 const ErrorList = error_mod.ErrorList;
 
+const raw_jsx_message = "raw JSX is not supported; use ordinary TypeScript expressions";
+
 pub const AdmissionFailure = union(enum) {
     diagnostic: type_syntax.AdmissionDiagnostic,
     unterminated_comment: type_syntax.AdmissionCommentFailure,
@@ -1758,7 +1760,6 @@ pub const Parser = struct {
             self.errors.addErrorAt(.nesting_too_deep, self.current, "statements nest too deeply; simplify or split (nesting limit is 512)");
             return error.ParseError;
         }
-        if (try self.tryParseErasedBlockPrefix()) |block_node| return block_node;
         return switch (self.current.type) {
             .kw_var, .kw_let, .kw_const => self.parseVarDeclaration(),
             .kw_function => self.parseFunctionDeclaration(),
@@ -2584,143 +2585,6 @@ pub const Parser = struct {
         try self.recordPrintableRegion(.{ .recorded_generic = options.capture_spans.recorded_span });
         accepted = true;
         return .{ .selected = .{ .options = options, .cursor = cursor, .previous = previous } };
-    }
-
-    const ErasedPrefixSelection = struct {
-        options: type_syntax.ErasedTypePrefixOptions,
-        cursor: type_syntax.Cursor,
-        previous: Token,
-    };
-
-    fn selectErasedTypePrefix(self: *Parser, context: enum { expression, block }) !?ErasedPrefixSelection {
-        if (self.admissionCoveredByRecovery(self.current.start)) return null;
-        if (self.admission == null or
-            !type_syntax.tokenStartsGenericList(self.source, self.current) or
-            type_syntax.rawLooksLikeComparison(self.source, self.current.start))
-        {
-            return null;
-        }
-
-        const scanned = switch (try self.scanObservedGenericList(
-            self.current.start,
-        )) {
-            .scanned => |value| value,
-            .not_matched, .lexical_nonmatch => return null,
-            .nesting_too_deep => |offset| return try self.refuseAdmissionNesting(offset),
-        };
-        try self.classifyAdmissionGenericList(scanned.span);
-
-        const runtime_previous = self.previous;
-        const cursor = self.cursorAfterAdmittedGeneric(scanned.span.end, runtime_previous);
-        const previous = runtime_previous;
-        if (cursor.current.type != .lbrace and (context == .block or cursor.current.type != .lparen)) {
-            return null;
-        }
-        const gap = self.source[@as(usize, scanned.span.end)..@as(usize, cursor.current.start)];
-        if (std.mem.trim(u8, gap, " \t\r\n").len != 0) return null;
-
-        const dedicated = cursor.current.type == .lparen and
-            type_syntax.hasDedicatedAssignmentArrowWindow(
-                self.source,
-                self.previous,
-                scanned.span.start,
-            );
-        const capture_spans: type_syntax.GenericCaptureSpans = if (dedicated)
-            .{
-                .actual_erased_span = scanned.span,
-                .recorded_span = .{
-                    .start = scanned.span.start + 1,
-                    .end = scanned.span.end - 1,
-                },
-            }
-        else
-            .{
-                .actual_erased_span = .{
-                    .start = scanned.span.start,
-                    .end = cursor.current.start,
-                },
-                .recorded_span = .{
-                    .start = scanned.span.start + 1,
-                    .end = cursor.current.start - 1,
-                },
-            };
-        const policy: type_syntax.ErasedTypePrefixPolicy = if (cursor.current.type == .lparen)
-            .legacy_parameter_projection
-        else
-            .ignored_parameters;
-
-        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
-        const options: type_syntax.ErasedTypePrefixOptions = .{
-            .list_span = scanned.span,
-            .capture_spans = capture_spans,
-            .policy = policy,
-        };
-        try self.recordRecoveryErasure(options.capture_spans.actual_erased_span);
-        try self.recordPrintableRegion(.{ .recorded_generic = options.capture_spans.recorded_span });
-        return .{ .options = options, .cursor = cursor, .previous = previous };
-    }
-
-    fn tryParseErasedExpressionPrefix(self: *Parser) !?NodeIndex {
-        const selected = try self.selectErasedTypePrefix(.expression) orelse return null;
-        return try self.parseErasedExpressionPrefix(selected);
-    }
-
-    fn parseErasedExpressionPrefix(self: *Parser, selected: ErasedPrefixSelection) !NodeIndex {
-        const cursor = selected.cursor;
-        const previous = selected.previous;
-        var pending = try self.type_store.reserveErasedTypePrefix(selected.options);
-        errdefer self.type_store.cancelErasedTypePrefix(&pending);
-
-        self.adoptAdmissionCursor(cursor, previous);
-
-        const publication_checkpoint = self.typePublicationCheckpoint();
-        const operand_start = self.current.start;
-        const expression_node = switch (self.current.type) {
-            .lbrace => try self.parseObjectLiteral(),
-            .lparen => try self.parseGroupedOrArrowParams(),
-            else => unreachable,
-        };
-        if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
-            self.type_store.cancelErasedTypePrefix(&pending);
-            return expression_node;
-        }
-        const expected_closer: TokenType = if (self.source[operand_start] == '{') .rbrace else .rparen;
-        if (self.previous.type != expected_closer) return error.InvalidErasedTypePrefix;
-        const operand_end = std.math.add(u32, self.previous.start, self.previous.len) catch
-            return error.InvalidErasedTypePrefix;
-        try self.type_store.finishErasedTypePrefix(&pending, .{
-            .owner = .{ .expression = expression_node },
-            .operand_span = .{ .start = operand_start, .end = operand_end },
-            .view = ir.IrView.fromIRStore(&self.nodes, &self.constants),
-        });
-        return expression_node;
-    }
-
-    fn tryParseErasedBlockPrefix(self: *Parser) !?NodeIndex {
-        const selected = try self.selectErasedTypePrefix(.block) orelse return null;
-        const cursor = selected.cursor;
-        const previous = selected.previous;
-        var pending = try self.type_store.reserveErasedTypePrefix(selected.options);
-        errdefer self.type_store.cancelErasedTypePrefix(&pending);
-
-        self.adoptAdmissionCursor(cursor, previous);
-
-        const publication_checkpoint = self.typePublicationCheckpoint();
-        const operand_start = self.current.start;
-        const block_node = try self.parseBlock();
-        if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
-            self.type_store.cancelErasedTypePrefix(&pending);
-            return block_node;
-        }
-        if (self.previous.type != .rbrace) return error.InvalidErasedTypePrefix;
-        const operand_end = std.math.add(u32, self.previous.start, self.previous.len) catch
-            return error.InvalidErasedTypePrefix;
-        try self.type_store.finishErasedTypePrefix(&pending, .{
-            .owner = .{ .block = block_node },
-            .operand_span = .{ .start = operand_start, .end = operand_end },
-            .view = ir.IrView.fromIRStore(&self.nodes, &self.constants),
-        });
-        return block_node;
     }
 
     const ExplicitCallSelection = struct {
@@ -4505,23 +4369,21 @@ pub const Parser = struct {
                 0;
         }
 
+        const generic_opener = self.current;
         switch (try self.tryReserveArrowGenericOwner()) {
             .not_generic => {},
             .reserved => |pending_value| {
                 var pending = pending_value;
-                return self.parseArrowFunction(&pending);
+                return self.parseArrowFunction(&pending, generic_opener);
             },
         }
 
         // Check for arrow function
         if (self.isArrowFunction()) {
-            return self.parseArrowFunction(null);
+            return self.parseArrowFunction(null, generic_opener);
         }
 
-        var left = if (try self.tryParseErasedExpressionPrefix()) |prefix_node|
-            prefix_node
-        else
-            try self.parsePrefixExpr();
+        var left = try self.parsePrefixExpr();
 
         // Pratt parsing builds left-deep trees without increasing
         // recursion_depth. Bound those trees before later AST walkers recurse
@@ -4662,7 +4524,7 @@ pub const Parser = struct {
 
             // A leading `<` is never a core expression.
             .lt => {
-                self.errorAtCurrent("raw JSX is not supported; use ordinary TypeScript expressions");
+                self.errorAtCurrent(raw_jsx_message);
                 return error.UnexpectedToken;
             },
 
@@ -5449,6 +5311,7 @@ pub const Parser = struct {
     fn parseArrowFunction(
         self: *Parser,
         pending_owner: ?*type_syntax.PendingGenericOwner,
+        generic_opener: Token,
     ) anyerror!NodeIndex {
         const publication_checkpoint = self.typePublicationCheckpoint();
         errdefer if (pending_owner) |pending| self.type_store.cancelGenericOwner(pending);
@@ -5469,18 +5332,11 @@ pub const Parser = struct {
                 true);
             typed_header = try self.observeSourceHeader(if (dedicated) .return_colon else .arrow);
             if (!typed_header and !self.isRuntimeArrowFunction()) {
-                if (pending_owner) |pending| {
-                    const selected: ErasedPrefixSelection = .{
-                        .options = .{
-                            .list_span = pending.list_span,
-                            .capture_spans = pending.capture_spans,
-                            .policy = .legacy_parameter_projection,
-                        },
-                        .cursor = .{ .tokenizer = self.tokenizer, .current = self.current, .consumed = 0 },
-                        .previous = self.previous,
-                    };
-                    self.type_store.cancelGenericOwner(pending);
-                    return self.parseErasedExpressionPrefix(selected);
+                if (pending_owner != null) {
+                    // A comment in the parameters can hide the typed header from
+                    // the source probe. The errdefer above cancels the owner.
+                    self.errors.addErrorAt(.unexpected_token, generic_opener, raw_jsx_message);
+                    return error.UnexpectedToken;
                 }
                 return self.parseGroupedOrArrowParams();
             }
@@ -6372,10 +6228,6 @@ pub const Parser = struct {
             },
             .not_generic => if (self.current.start != start) return true,
         };
-        if (try self.selectErasedTypePrefix(.expression)) |selected| {
-            self.adoptAdmissionCursor(selected.cursor, selected.previous);
-            return true;
-        }
         if (try self.selectExplicitCall()) |selected| {
             self.adoptAdmissionCursor(selected.cursor, selected.previous);
             return true;
@@ -11295,21 +11147,6 @@ test "admission preserves measured module export and operand prefixes" {
         .{ .source = "export\r const seed = 1; const later: any = 1;\n", .fatal = false, .diagnostics = &.{
             .{ .kind = .any_type, .span = .{ .start = 37, .end = 40 }, .presentation = .{ .line = 1, .column = 38 } },
         } },
-        .{ .source = "const value = <T>\r(1); const later: any = 1;\n", .fatal = false, .diagnostics = &.{
-            .{ .kind = .any_type, .span = .{ .start = 36, .end = 39 }, .presentation = .{ .line = 1, .column = 36 } },
-        } },
-        .{ .source = "const value = <T>\r{ ok: 1 }; const later: any = 1;\n", .fatal = false, .diagnostics = &.{
-            .{ .kind = .any_type, .span = .{ .start = 42, .end = 45 }, .presentation = .{ .line = 1, .column = 42 } },
-        } },
-        .{ .source = "<T>\r{ const later: any = 1; }\n", .fatal = false, .diagnostics = &.{
-            .{ .kind = .any_type, .span = .{ .start = 19, .end = 22 }, .presentation = .{ .line = 1, .column = 19 } },
-        } },
-        .{ .source = "const value = <T>\r(1 + ); const later: any = 1;\n", .fatal = false, .diagnostics = &.{
-            .{ .kind = .any_type, .span = .{ .start = 39, .end = 42 }, .presentation = .{ .line = 1, .column = 39 } },
-        } },
-        .{ .source = "const value = <T>\r/* gap */(1); const later: any = 1;\n", .fatal = false, .diagnostics = &.{
-            .{ .kind = .any_type, .span = .{ .start = 45, .end = 48 }, .presentation = .{ .line = 1, .column = 46 } },
-        } },
         .{ .source = "const value = <T>\r extends Missing; const later: any = 1;\n", .fatal = false, .diagnostics = &.{
             .{ .kind = .any_type, .span = .{ .start = 49, .end = 52 }, .presentation = .{ .line = 1, .column = 49 } },
         } },
@@ -11328,7 +11165,7 @@ test "admission preserves measured module export and operand prefixes" {
             .{ .kind = .any_type, .span = .{ .start = 19, .end = 22 }, .presentation = .{ .line = 1, .column = 19 } },
         } },
     };
-    try std.testing.expectEqual(@as(usize, 17), cases.len);
+    try std.testing.expectEqual(@as(usize, 12), cases.len);
     for (cases) |case| {
         errdefer std.debug.print("module presentation failed: {s}\n", .{case.source});
         for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {

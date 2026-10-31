@@ -372,8 +372,7 @@ test "direct source retains every syntax owner family" {
         "nominal UserId = string;\n" ++
         "function keep<T>(value: T): Box<T> { return { value: value }; }\n" ++
         "function isText(value: unknown): value is string { return typeof value === \"string\"; }\n" ++
-        "const boxed: Box<string> = keep<Box<string>>({ value: \"x\" });\n" ++
-        "const prefixed = <P>(1);\n";
+        "const boxed: Box<string> = keep<Box<string>>({ value: \"x\" });\n";
     var owner: DirectCheckSource = undefined;
     try owner.initCompileInPlace(std.testing.allocator, std.testing.allocator, source, "types.ts");
     defer owner.deinit();
@@ -388,7 +387,6 @@ test "direct source retains every syntax owner family" {
         generic,
         explicit_call,
         type_only_module,
-        erased_prefix,
     };
     var seen = std.EnumSet(Family).empty;
     if (store.annotations.items.len > 0) seen.insert(.variable);
@@ -398,7 +396,6 @@ test "direct source retains every syntax owner family" {
     if (store.generic_owners.items.len > 0) seen.insert(.generic);
     if (store.explicit_call_arguments.items.len > 0) seen.insert(.explicit_call);
     if (store.type_only_modules.items.len > 0) seen.insert(.type_only_module);
-    if (store.erased_type_prefixes.items.len > 0) seen.insert(.erased_prefix);
     inline for (std.meta.tags(Family)) |family| try std.testing.expect(seen.contains(family));
 
     try std.testing.expectEqual(@as(usize, 2), store.declarations.items.len);
@@ -419,7 +416,6 @@ test "direct source retains every syntax owner family" {
     try std.testing.expectEqualStrings("<T>", store.generic_owners.items[0].list_span.text(source));
     try std.testing.expectEqualStrings("<Box<string>>", store.explicit_call_arguments.items[0].list_span.text(source));
     try std.testing.expectEqualStrings("import type { Shape } from \"./types\";", store.type_only_modules.items[0].raw_span.text(source));
-    try std.testing.expectEqualStrings("<P>", store.erased_type_prefixes.items[0].list_span.text(source));
     var saw_predicate = false;
     for (store.function_signatures.items) |signature| {
         const returned = signature.return_syntax orelse continue;

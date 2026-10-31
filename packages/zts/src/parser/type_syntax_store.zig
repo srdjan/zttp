@@ -3,7 +3,6 @@
 const std = @import("std");
 const ir = @import("ir.zig");
 const token_mod = @import("token.zig");
-const TokenType = token_mod.TokenType;
 const BindingRef = ir.BindingRef;
 const Token = token_mod.Token;
 const scan_mod = @import("type_syntax_scan.zig");
@@ -22,7 +21,6 @@ const isIdentifierStart = parser_mod.isIdentifierStart;
 const isIdentifierContinue = parser_mod.isIdentifierContinue;
 const containsOnlyTypeWhitespace = scan_mod.containsOnlyTypeWhitespace;
 const Cursor = scan_mod.Cursor;
-const max_type_depth = parser_mod.max_type_depth;
 const support_mod = @import("type_syntax_support.zig");
 const TestRuntime = support_mod.TestRuntime;
 const validateAfterAllocationFailure = support_mod.validateAfterAllocationFailure;
@@ -628,53 +626,6 @@ pub const GenericCaptureSpans = struct {
     recorded_span: Span,
 };
 
-pub const ErasedTypePrefixOwner = union(enum) {
-    expression: ir.NodeIndex,
-    block: ir.NodeIndex,
-};
-
-pub const ErasedTypePrefixCompatibility = union(enum) {
-    ignored_parameters,
-    legacy_parameter_projection: struct {
-        projected_parameters: Range,
-        semantic_fragments: Range,
-    },
-};
-
-pub const ErasedTypePrefix = struct {
-    list_span: Span,
-    capture_spans: GenericCaptureSpans,
-    operand_span: Span,
-    owner: ErasedTypePrefixOwner,
-    compatibility: ErasedTypePrefixCompatibility,
-};
-
-pub const ErasedTypePrefixPolicy = enum {
-    ignored_parameters,
-    legacy_parameter_projection,
-};
-
-pub const ErasedTypePrefixOptions = struct {
-    list_span: Span,
-    capture_spans: GenericCaptureSpans,
-    policy: ErasedTypePrefixPolicy,
-};
-
-pub const ErasedTypePrefixFinal = struct {
-    owner: ErasedTypePrefixOwner,
-    operand_span: Span,
-    view: ir.IrView,
-};
-
-pub const PendingErasedTypePrefix = struct {
-    checkpoint: Store.Checkpoint,
-    record_index: u32,
-    list_span: Span,
-    capture_spans: GenericCaptureSpans,
-    compatibility: ErasedTypePrefixCompatibility,
-    active: bool = true,
-};
-
 pub const DeclarationKind = enum {
     structural,
     nominal,
@@ -832,7 +783,6 @@ pub const Store = struct {
     parameter_annotations: std.ArrayListUnmanaged(ParameterAnnotation) = .empty,
     function_signatures: std.ArrayListUnmanaged(FunctionSignature) = .empty,
     type_only_modules: std.ArrayListUnmanaged(TypeOnlyModule) = .empty,
-    erased_type_prefixes: std.ArrayListUnmanaged(ErasedTypePrefix) = .empty,
 
     pub fn init(allocator: std.mem.Allocator, source: []const u8) Store {
         return .{
@@ -858,7 +808,6 @@ pub const Store = struct {
         self.parameter_annotations.deinit(self.allocator);
         self.function_signatures.deinit(self.allocator);
         self.type_only_modules.deinit(self.allocator);
-        self.erased_type_prefixes.deinit(self.allocator);
     }
 
     pub const Checkpoint = struct {
@@ -878,7 +827,6 @@ pub const Store = struct {
         parameter_annotations: usize,
         function_signatures: usize,
         type_only_modules: usize,
-        erased_type_prefixes: usize,
     };
 
     pub fn checkpoint(self: *const Store) Checkpoint {
@@ -899,7 +847,6 @@ pub const Store = struct {
             .parameter_annotations = self.parameter_annotations.items.len,
             .function_signatures = self.function_signatures.items.len,
             .type_only_modules = self.type_only_modules.items.len,
-            .erased_type_prefixes = self.erased_type_prefixes.items.len,
         };
     }
 
@@ -920,7 +867,6 @@ pub const Store = struct {
         self.parameter_annotations.items.len = value.parameter_annotations;
         self.function_signatures.items.len = value.function_signatures;
         self.type_only_modules.items.len = value.type_only_modules;
-        self.erased_type_prefixes.items.len = value.erased_type_prefixes;
     }
 
     pub fn appendNode(self: *Store, value: Node) !NodeIndex {
@@ -1263,74 +1209,6 @@ pub const Store = struct {
         pending.active = false;
     }
 
-    pub fn reserveErasedTypePrefix(
-        self: *Store,
-        options: ErasedTypePrefixOptions,
-    ) !PendingErasedTypePrefix {
-        const prior = self.checkpoint();
-        errdefer self.rollback(prior);
-        try self.validateErasedTypePrefixCaptureSpans(
-            options.list_span,
-            options.capture_spans,
-        );
-        const compatibility: ErasedTypePrefixCompatibility = switch (options.policy) {
-            .ignored_parameters => .ignored_parameters,
-            .legacy_parameter_projection => blk: {
-                const projection = try appendProjectedParametersWithBounds(
-                    self,
-                    projectedListBody(self.source, options.capture_spans.recorded_span),
-                    true,
-                );
-                break :blk .{ .legacy_parameter_projection = .{
-                    .projected_parameters = projection.parameters,
-                    .semantic_fragments = projection.fragments,
-                } };
-            },
-        };
-        const record_index = std.math.cast(u32, self.erased_type_prefixes.items.len) orelse
-            return error.TooManyTypeItems;
-        try self.erased_type_prefixes.ensureUnusedCapacity(self.allocator, 1);
-        self.erased_type_prefixes.appendAssumeCapacity(undefined);
-        return .{
-            .checkpoint = prior,
-            .record_index = record_index,
-            .list_span = options.list_span,
-            .capture_spans = options.capture_spans,
-            .compatibility = compatibility,
-        };
-    }
-
-    pub fn finishErasedTypePrefix(
-        self: *Store,
-        pending: *PendingErasedTypePrefix,
-        final: ErasedTypePrefixFinal,
-    ) !void {
-        if (!pending.active or
-            @as(usize, pending.record_index) >= self.erased_type_prefixes.items.len)
-        {
-            return error.InvalidErasedTypePrefix;
-        }
-        const record: ErasedTypePrefix = .{
-            .list_span = pending.list_span,
-            .capture_spans = pending.capture_spans,
-            .operand_span = final.operand_span,
-            .owner = final.owner,
-            .compatibility = pending.compatibility,
-        };
-        try self.validateErasedTypePrefixRecord(record, final.view);
-        self.erased_type_prefixes.items[pending.record_index] = record;
-        pending.active = false;
-    }
-
-    pub fn cancelErasedTypePrefix(
-        self: *Store,
-        pending: *PendingErasedTypePrefix,
-    ) void {
-        if (!pending.active) return;
-        self.rollback(pending.checkpoint);
-        pending.active = false;
-    }
-
     pub fn appendTypeOnlyModule(self: *Store, module: TypeOnlyModule) !void {
         try self.validateTypeOnlyModule(module);
         if (self.type_only_modules.items.len > 0) {
@@ -1441,10 +1319,6 @@ pub const Store = struct {
         for (parameter_owners) |claimed| {
             if (claimed != 1) return error.InvalidFunctionParameterOwner;
         }
-        for (self.erased_type_prefixes.items) |prefix| {
-            try self.validateErasedTypePrefixRecord(prefix, view);
-        }
-        try self.validateErasedPrefixRuntimeRelationships();
     }
 
     pub fn validateParsed(self: *const Store, root: Child, raw_span: Span) !void {
@@ -1594,15 +1468,6 @@ pub const Store = struct {
                 }
             }
         }
-        for (self.erased_type_prefixes.items, 0..) |prefix, index| {
-            try self.validateErasedTypePrefix(prefix);
-            if (index > 0 and
-                self.erased_type_prefixes.items[index - 1].list_span.start >= prefix.list_span.start)
-            {
-                return error.InvalidTypeSourceOrder;
-            }
-        }
-        try self.validateErasedPrefixOperandRelationships();
         try self.validateRecordOwnership();
         try self.validateOwnerRangesDoNotOverlap();
     }
@@ -1643,8 +1508,7 @@ pub const Store = struct {
     fn hasRuntimeOwnedRecords(self: *const Store) bool {
         if (self.explicit_call_arguments.items.len != 0 or
             self.function_signatures.items.len != 0 or
-            self.parameter_annotations.items.len != 0 or
-            self.erased_type_prefixes.items.len != 0)
+            self.parameter_annotations.items.len != 0)
         {
             return true;
         }
@@ -1764,9 +1628,6 @@ pub const Store = struct {
         const fragment_owners = try allocator.alloc(u8, self.semantic_fragments.items.len);
         defer allocator.free(fragment_owners);
         @memset(fragment_owners, 0);
-        const prefix_fragment_references = try allocator.alloc(u8, self.semantic_fragments.items.len);
-        defer allocator.free(prefix_fragment_references);
-        @memset(prefix_fragment_references, 0);
 
         for (self.generic_owners.items) |owner| {
             const projected = self.projectedGenericParameterSlice(owner.projected_parameters) orelse
@@ -1781,36 +1642,6 @@ pub const Store = struct {
             try claimRange(argument_owners, arguments.authored_arguments, error.SharedAuthoredCallArgument);
             try claimRange(fragment_owners, arguments.semantic_fragments, error.SharedSemanticFragment);
         }
-        for (self.erased_type_prefixes.items) |prefix| switch (prefix.compatibility) {
-            .ignored_parameters => {},
-            .legacy_parameter_projection => |projection| {
-                try claimRange(
-                    fragment_owners,
-                    projection.semantic_fragments,
-                    error.SharedSemanticFragment,
-                );
-                const parameters = self.projectedGenericParameterSlice(projection.projected_parameters) orelse
-                    return error.InvalidTypeRange;
-                for (parameters) |parameter| if (parameter.bound_fragment) |fragment_index| {
-                    if (@as(usize, fragment_index) >= prefix_fragment_references.len or
-                        prefix_fragment_references[fragment_index] != 0)
-                    {
-                        return error.SharedSemanticFragment;
-                    }
-                    prefix_fragment_references[fragment_index] = 1;
-                };
-                const fragment_start: usize = projection.semantic_fragments.start;
-                const fragment_end = std.math.add(
-                    usize,
-                    fragment_start,
-                    projection.semantic_fragments.count,
-                ) catch return error.InvalidTypeRange;
-                if (fragment_end > prefix_fragment_references.len) return error.InvalidTypeRange;
-                for (prefix_fragment_references[fragment_start..fragment_end]) |reference_count| {
-                    if (reference_count != 1) return error.UnownedSemanticFragment;
-                }
-            },
-        };
         for (argument_owners) |owner_count| {
             if (owner_count == 0) return error.UnownedAuthoredCallArgument;
         }
@@ -2146,257 +1977,6 @@ pub const Store = struct {
         }
     }
 
-    fn validateErasedTypePrefix(self: *const Store, prefix: ErasedTypePrefix) !void {
-        try self.validateErasedTypePrefixCaptureSpans(
-            prefix.list_span,
-            prefix.capture_spans,
-        );
-        try self.validateSpan(prefix.operand_span);
-        if (@as(usize, prefix.operand_span.start) >= self.source.len) {
-            return error.InvalidErasedTypePrefix;
-        }
-        const opener = self.source[prefix.operand_span.start];
-        const closer: u8 = switch (opener) {
-            '{' => '}',
-            '(' => ')',
-            else => return error.InvalidErasedTypePrefix,
-        };
-        const operand_end = scanErasedPrefixOperandEnd(
-            self.source,
-            prefix.operand_span.start,
-            opener,
-        ) orelse return error.InvalidErasedTypePrefix;
-        const assignment_capture = std.meta.eql(
-            prefix.capture_spans.actual_erased_span,
-            prefix.list_span,
-        );
-        const general_capture = prefix.capture_spans.actual_erased_span.end ==
-            prefix.operand_span.start;
-        if (prefix.list_span.end > prefix.operand_span.start or
-            !containsOnlyTypeWhitespace(
-                self.source,
-                prefix.list_span.end,
-                prefix.operand_span.start,
-            ) or
-            prefix.operand_span.end - prefix.operand_span.start < 2 or
-            self.source[prefix.operand_span.end - 1] != closer or
-            operand_end != prefix.operand_span.end)
-        {
-            return error.InvalidErasedTypePrefix;
-        }
-        switch (prefix.compatibility) {
-            .ignored_parameters => {
-                if (opener != '{' or !general_capture) return error.InvalidErasedTypePrefix;
-            },
-            .legacy_parameter_projection => |projection| {
-                if (opener != '(' or (!assignment_capture and !general_capture)) {
-                    return error.InvalidErasedTypePrefix;
-                }
-                const parameters = self.projectedGenericParameterSlice(projection.projected_parameters) orelse
-                    return error.InvalidTypeRange;
-                const fragments = self.semanticFragmentSlice(projection.semantic_fragments) orelse
-                    return error.InvalidTypeRange;
-                if (parameters.len > 8 or fragments.len > 8) return error.InvalidTypeRange;
-                for (parameters) |parameter| {
-                    if (!spanContains(prefix.capture_spans.recorded_span, parameter.raw_span)) {
-                        return error.InvalidErasedTypePrefix;
-                    }
-                    if (parameter.bound_fragment) |fragment_index| {
-                        const fragment_end = std.math.add(
-                            u32,
-                            projection.semantic_fragments.start,
-                            projection.semantic_fragments.count,
-                        ) catch return error.InvalidTypeRange;
-                        if (fragment_index < projection.semantic_fragments.start or
-                            fragment_index >= fragment_end)
-                        {
-                            return error.InvalidErasedTypePrefix;
-                        }
-                        const fragment = self.semantic_fragments.items[fragment_index];
-                        const bound_span = parameter.bound_span orelse
-                            return error.InvalidErasedTypePrefix;
-                        if (!std.meta.eql(fragment.raw_span, bound_span)) {
-                            return error.InvalidErasedTypePrefix;
-                        }
-                    }
-                }
-            },
-        }
-    }
-
-    fn validateErasedTypePrefixCaptureSpans(
-        self: *const Store,
-        list_span: Span,
-        capture_spans: GenericCaptureSpans,
-    ) !void {
-        try self.validateGenericListSpan(list_span);
-        try self.validateOwnerCaptureSpans(list_span, capture_spans);
-        const legacy_start = std.math.add(u32, list_span.start, 1) catch
-            return error.InvalidErasedTypePrefix;
-        const legacy_end = list_span.end - 1;
-        const assignment_capture = std.meta.eql(capture_spans.actual_erased_span, list_span) and
-            capture_spans.recorded_span.start == legacy_start and
-            capture_spans.recorded_span.end == legacy_end;
-        const legacy_projected_end = std.math.add(
-            u32,
-            capture_spans.recorded_span.end,
-            1,
-        ) catch return error.InvalidErasedTypePrefix;
-        const general_capture = capture_spans.actual_erased_span.start == list_span.start and
-            capture_spans.actual_erased_span.end >= list_span.end and
-            capture_spans.recorded_span.start == legacy_start and
-            legacy_projected_end == capture_spans.actual_erased_span.end and
-            containsOnlyTypeWhitespace(
-                self.source,
-                list_span.end,
-                capture_spans.actual_erased_span.end,
-            );
-        if (!assignment_capture and !general_capture) return error.InvalidErasedTypePrefix;
-    }
-
-    fn validateErasedTypePrefixRecord(
-        self: *const Store,
-        prefix: ErasedTypePrefix,
-        view: ir.IrView,
-    ) !void {
-        try self.validateErasedTypePrefix(prefix);
-        const owner, const is_block = switch (prefix.owner) {
-            .expression => |runtime_node| .{ runtime_node, false },
-            .block => |runtime_node| .{ runtime_node, true },
-        };
-        const tag = view.getTag(owner) orelse return error.InvalidErasedTypePrefix;
-        if (is_block) {
-            if (tag != .block or self.source[prefix.operand_span.start] != '{') {
-                return error.InvalidErasedTypePrefix;
-            }
-        } else if (!isErasedPrefixExpressionTag(tag)) {
-            return error.InvalidErasedTypePrefix;
-        }
-        const location = view.getLoc(owner) orelse return error.InvalidErasedTypePrefix;
-        if (is_block) {
-            if (location.offset != prefix.operand_span.start) return error.InvalidErasedTypePrefix;
-        } else if (self.source[prefix.operand_span.start] == '{') {
-            if (tag != .object_literal or location.offset != prefix.operand_span.start) {
-                return error.InvalidErasedTypePrefix;
-            }
-        } else if (location.offset <= prefix.operand_span.start or
-            location.offset >= prefix.operand_span.end - 1)
-        {
-            return error.InvalidErasedTypePrefix;
-        }
-    }
-
-    fn validateErasedPrefixOperandRelationships(self: *const Store) !void {
-        for (self.erased_type_prefixes.items, 0..) |left, left_index| {
-            for (self.erased_type_prefixes.items[left_index + 1 ..]) |right| {
-                if (!spansOverlap(left.operand_span, right.operand_span)) continue;
-                if (!spanStrictlyContains(left.operand_span, right.operand_span) and
-                    !spanStrictlyContains(right.operand_span, left.operand_span))
-                {
-                    return error.InvalidErasedTypePrefix;
-                }
-            }
-        }
-    }
-
-    fn validateErasedPrefixRuntimeRelationships(self: *const Store) !void {
-        for (self.erased_type_prefixes.items, 0..) |left, left_index| {
-            const left_owner = switch (left.owner) {
-                .expression => |runtime_node| runtime_node,
-                .block => continue,
-            };
-            for (self.erased_type_prefixes.items[left_index + 1 ..]) |right| {
-                const right_owner = switch (right.owner) {
-                    .expression => |runtime_node| runtime_node,
-                    .block => continue,
-                };
-                if (left_owner != right_owner) continue;
-                const outer, const inner = if (spanStrictlyContains(left.operand_span, right.operand_span))
-                    .{ left, right }
-                else if (spanStrictlyContains(right.operand_span, left.operand_span))
-                    .{ right, left }
-                else
-                    return error.InvalidErasedTypePrefix;
-                if (self.source[outer.operand_span.start] != '(' or
-                    !spanContains(outer.operand_span, inner.capture_spans.actual_erased_span))
-                {
-                    return error.InvalidErasedTypePrefix;
-                }
-            }
-        }
-    }
-
-    fn scanErasedPrefixOperandEnd(
-        source: []const u8,
-        operand_start: u32,
-        opener: u8,
-    ) ?u32 {
-        if (@as(usize, operand_start) >= source.len) return null;
-        const local_source = source[operand_start..];
-        var cursor = Cursor.init(local_source);
-        const opener_type: TokenType = switch (opener) {
-            '{' => .lbrace,
-            '(' => .lparen,
-            else => return null,
-        };
-        const closer_type: TokenType = switch (opener) {
-            '{' => .rbrace,
-            '(' => .rparen,
-            else => return null,
-        };
-        if (cursor.current.type != opener_type or cursor.current.start != 0) return null;
-        var depth: u16 = 0;
-        while (cursor.current.type != .eof) {
-            if (cursor.current.type == opener_type) {
-                if (depth == max_type_depth) return null;
-                depth += 1;
-            } else if (cursor.current.type == closer_type) {
-                if (depth == 0) return null;
-                depth -= 1;
-                if (depth == 0) {
-                    const local_end = std.math.add(
-                        u32,
-                        cursor.current.start,
-                        cursor.current.len,
-                    ) catch return null;
-                    return std.math.add(u32, operand_start, local_end) catch null;
-                }
-            }
-            cursor.advance();
-        }
-        return null;
-    }
-
-    fn isErasedPrefixExpressionTag(tag: ir.NodeTag) bool {
-        return switch (tag) {
-            .lit_int,
-            .lit_float,
-            .lit_string,
-            .lit_bool,
-            .lit_null,
-            .lit_undefined,
-            .identifier,
-            .binary_op,
-            .unary_op,
-            .ternary,
-            .call,
-            .method_call,
-            .member_access,
-            .computed_access,
-            .optional_chain,
-            .assignment,
-            .array_literal,
-            .object_literal,
-            .function_expr,
-            .arrow_function,
-            .sequence_expr,
-            .comma_expr,
-            .match_expr,
-            => true,
-            else => false,
-        };
-    }
-
     pub fn validateDeclaration(self: *const Store, declaration: Declaration) !void {
         if (declaration.export_span) |span| try self.validateSpan(span);
         try self.validateSpan(declaration.keyword_span);
@@ -2674,28 +2254,12 @@ pub const Store = struct {
     }
 
     fn validateRecordOwnership(self: *const Store) !void {
-        var list_owner_index: usize = 0;
-        var list_prefix_index: usize = 0;
         var prior_list_start: ?u32 = null;
-        while (list_owner_index < self.generic_owners.items.len or
-            list_prefix_index < self.erased_type_prefixes.items.len)
-        {
-            const owner_start = if (list_owner_index < self.generic_owners.items.len)
-                self.generic_owners.items[list_owner_index].list_span.start
-            else
-                null;
-            const prefix_start = if (list_prefix_index < self.erased_type_prefixes.items.len)
-                self.erased_type_prefixes.items[list_prefix_index].list_span.start
-            else
-                null;
-            const use_owner = prefix_start == null or
-                (owner_start != null and owner_start.? < prefix_start.?);
-            const list_start = if (use_owner) owner_start.? else prefix_start.?;
+        for (self.generic_owners.items) |owner| {
             if (prior_list_start) |prior_start| {
-                if (prior_start >= list_start) return error.InvalidTypeSourceOrder;
+                if (prior_start >= owner.list_span.start) return error.InvalidTypeSourceOrder;
             }
-            prior_list_start = list_start;
-            if (use_owner) list_owner_index += 1 else list_prefix_index += 1;
+            prior_list_start = owner.list_span.start;
         }
 
         var authored_parameter_end: u32 = 0;
@@ -2713,47 +2277,14 @@ pub const Store = struct {
             return error.InvalidGenericOwner;
         }
 
-        var generic_index: usize = 0;
-        var prefix_index: usize = 0;
         var projected_parameter_end: u32 = 0;
-        var previous_list_start: ?u32 = null;
-        while (true) {
-            while (prefix_index < self.erased_type_prefixes.items.len and
-                std.meta.activeTag(self.erased_type_prefixes.items[prefix_index].compatibility) !=
-                    .legacy_parameter_projection)
-            {
-                prefix_index += 1;
-            }
-            const generic_owner = if (generic_index < self.generic_owners.items.len)
-                self.generic_owners.items[generic_index]
-            else
-                null;
-            const prefix = if (prefix_index < self.erased_type_prefixes.items.len)
-                self.erased_type_prefixes.items[prefix_index]
-            else
-                null;
-            if (generic_owner == null and prefix == null) break;
-
-            const use_generic = prefix == null or
-                (generic_owner != null and generic_owner.?.list_span.start < prefix.?.list_span.start);
-            const list_start, const projected_range = if (use_generic)
-                .{ generic_owner.?.list_span.start, generic_owner.?.projected_parameters }
-            else
-                .{ prefix.?.list_span.start, switch (prefix.?.compatibility) {
-                    .legacy_parameter_projection => |projection| projection.projected_parameters,
-                    .ignored_parameters => unreachable,
-                } };
-            if (previous_list_start) |prior_start| {
-                if (prior_start >= list_start) return error.InvalidTypeSourceOrder;
-            }
-            if (projected_range.start != projected_parameter_end) return error.InvalidGenericOwner;
+        for (self.generic_owners.items) |owner| {
+            if (owner.projected_parameters.start != projected_parameter_end) return error.InvalidGenericOwner;
             projected_parameter_end = std.math.add(
                 u32,
                 projected_parameter_end,
-                projected_range.count,
+                owner.projected_parameters.count,
             ) catch return error.InvalidTypeRange;
-            previous_list_start = list_start;
-            if (use_generic) generic_index += 1 else prefix_index += 1;
         }
         if (@as(usize, projected_parameter_end) != self.projected_generic_parameters.items.len) {
             return error.InvalidGenericOwner;
@@ -2896,14 +2427,6 @@ pub fn rangesOverlap(left: Range, right: Range) bool {
     const left_end = std.math.add(u32, left.start, left.count) catch return true;
     const right_end = std.math.add(u32, right.start, right.count) catch return true;
     return left.start < right_end and right.start < left_end;
-}
-
-fn spansOverlap(left: Span, right: Span) bool {
-    return left.start < right.end and right.start < left.end;
-}
-
-fn spanStrictlyContains(outer: Span, inner: Span) bool {
-    return outer.start < inner.start and inner.end < outer.end;
 }
 
 fn claimSemanticFragment(owners: []u8, fragment_index: u32) !void {
@@ -4017,64 +3540,6 @@ test "admission collector closes every allocation failure" {
     try std.testing.expectEqual(@as(u64, 1), fatal.generation());
     try std.testing.expect(!fatal.hasFatal());
     try std.testing.expectEqual(@as(usize, 0), fatal.items().len);
-}
-
-test "erased prefix operand scanner is local and preserves lexical delimiters" {
-    const Case = struct {
-        prefix: []const u8,
-        operand: []const u8,
-    };
-    const cases = [_]Case{
-        .{
-            .prefix = "before ",
-            .operand = "{ text: \"brace } and {\" }",
-        },
-        .{
-            .prefix = "before ",
-            .operand = "{ nested: { id: 1 } }",
-        },
-        .{
-            .prefix = "before ",
-            .operand = "{ text: `brace } and {` }",
-        },
-        .{
-            .prefix = "before ",
-            .operand = "{ text: `head ${ { id: 1 }.id } tail }` }",
-        },
-        .{
-            .prefix = "before ",
-            .operand = "{ pattern: /[{}]/ }",
-        },
-        .{
-            .prefix = "\"unterminated { invalid ",
-            .operand = "{ id: 1 }",
-        },
-        .{
-            .prefix = "`unterminated ${ { invalid: ",
-            .operand = "{ id: 1 }",
-        },
-    };
-    for (cases) |case| {
-        const source = try std.mem.concat(
-            std.testing.allocator,
-            u8,
-            &.{ case.prefix, case.operand, " trailing" },
-        );
-        defer std.testing.allocator.free(source);
-        const operand_start = std.math.cast(u32, case.prefix.len) orelse
-            return error.TestUnexpectedResult;
-        const expected_end = std.math.cast(u32, case.prefix.len + case.operand.len) orelse
-            return error.TestUnexpectedResult;
-        try std.testing.expectEqual(
-            expected_end,
-            Store.scanErasedPrefixOperandEnd(source, operand_start, case.operand[0]).?,
-        );
-    }
-
-    const source = "{ id: 1 }";
-    try std.testing.expect(Store.scanErasedPrefixOperandEnd(source, @intCast(source.len), '{') == null);
-    try std.testing.expect(Store.scanErasedPrefixOperandEnd(source, 1, '{') == null);
-    try std.testing.expect(Store.scanErasedPrefixOperandEnd("((1)) trailing", 0, '(').? == 5);
 }
 
 test "admission presentation composes tracked prefixes and parameter rewinds" {

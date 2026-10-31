@@ -64,13 +64,6 @@ pub const TypeOnlyModuleDiagnostic = type_syntax_store_mod.TypeOnlyModuleDiagnos
 pub const TypeOnlyModuleScanOptions = type_syntax_store_mod.TypeOnlyModuleScanOptions;
 pub const TypeOnlyModuleScan = type_syntax_store_mod.TypeOnlyModuleScan;
 pub const GenericCaptureSpans = type_syntax_store_mod.GenericCaptureSpans;
-pub const ErasedTypePrefixOwner = type_syntax_store_mod.ErasedTypePrefixOwner;
-pub const ErasedTypePrefixCompatibility = type_syntax_store_mod.ErasedTypePrefixCompatibility;
-pub const ErasedTypePrefix = type_syntax_store_mod.ErasedTypePrefix;
-pub const ErasedTypePrefixPolicy = type_syntax_store_mod.ErasedTypePrefixPolicy;
-pub const ErasedTypePrefixOptions = type_syntax_store_mod.ErasedTypePrefixOptions;
-pub const ErasedTypePrefixFinal = type_syntax_store_mod.ErasedTypePrefixFinal;
-pub const PendingErasedTypePrefix = type_syntax_store_mod.PendingErasedTypePrefix;
 pub const DeclarationKind = type_syntax_store_mod.DeclarationKind;
 pub const DeclarationBody = type_syntax_store_mod.DeclarationBody;
 pub const RecognizedGenericParameter = type_syntax_store_mod.RecognizedGenericParameter;
@@ -1127,7 +1120,6 @@ test "generic application admission rejects a missing closing angle before synta
         .parameter_annotations = 0,
         .function_signatures = 0,
         .type_only_modules = 0,
-        .erased_type_prefixes = 0,
     }));
 }
 

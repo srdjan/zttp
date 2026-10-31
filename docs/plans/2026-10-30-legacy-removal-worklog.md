@@ -196,3 +196,31 @@ Appendix A tests that took new names: `direct phase three preserves actual call 
 Ruling on `compatibility_order` in `type_env.zig`: it stays. `replayDirectSignatureEvent` uses it to check that one source offset has one signature owner, and Phase 5 of `populateDirectSourceTypes` reads it. It has no link to `.legacy_call`. Row A1 removes it only when no reader remains.
 
 Defects that this unit did not cause: the ZTS208 message names `T>` for `<T> (value: T)`, because `recorded_span` ends one byte before the opener. The form with no comment reports the same text on the base binary.
+
+## L4b
+
+Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`, `test-zts`, `test-zruntime`, `test-server`, `test-precompile`, `test-diagnostic-corpus`, `test-standin`, `test-flow-census`, `test-proof-swallow`, `zig build test`, `check-spine`. `zts meta --json` is identical. The comparison script moved 11 of 648 rows: the 10 rows that the plan allows, and `lc.ts` from L4a. From this unit on, each allow list holds the rows of the earlier units, because the script compares with the base.
+
+The new test `CHECK refuses an erased type prefix with ZTS002 at the angle bracket` failed on the old path: `expected 1, found 0` at `parse_errors`, so the base accepted the form.
+
+Each erased form now reports ZTS002 at the `<`: `<T>(1)`, `<T> (1)`, `<T> { id: 1 }`, the statement `<T> { const a = 1; }`, and those forms inside a group, a call, an array, an object, a binary expression, and an arrow body. Thirty-nine side probes ran through `zts check`, `zts compile`, and `zts canonicalize`. Eight control probes did not move, including `const f = <T>(a) => a;` and `const f = <T>(a: T): T => a;`.
+
+`const x = true ? <T>(a: number) : 2;` was ZTS003 on the base binary and is ZTS002 now. It stays refused.
+
+Correction to my review of this unit: the worker reported that no public path reaches the new branch in `parseArrowFunction`, and 25 of my probes agreed. I replaced the branch with an internal error. `zig build test` then failed, because `const f = <T>(value /* ( */): any => value;` reaches the branch: a comment hides the typed header from the source probe. I restored the ZTS002 branch and added that form as a literal row in the new test.
+
+`populateDirectGenericPhase` now loops over generic owners only, and `GenericProjectionRetention` left, because only the prefix path used `.transient`.
+
+Tests outside Appendix A changed, because each one held a removed form or named a removed symbol:
+
+| Test | Change |
+|---|---|
+| `direct phase two consumer matrix preserves generics and headers` | Four prefix cases left. Five cases stay |
+| `admission header fallback preserves grouped and raw arrow type construction` | One prefix row left. Two rows stay |
+| `direct callable generic allocation failures close scopes by construction stage` | Its source now uses generic arrows. The observation floors hold |
+| `erased prefix operand scanner is local and preserves lexical delimiters` | Left with the scanner |
+| Shared helpers in `typed_frontend_tests.zig` and the checkpoint test in `type_syntax.zig` | Prefix counts left |
+
+`CHECK preserves admitted generic prefixes without function owners` left, because each of its 10 rows held a removed form. In `frontend_fuzz.zig`, the `erased_prefixes` counter and its floor left, and the seed `const value = <T>(1);` stays as a refused input.
+
+Observations that this unit did not cause, on the base binary and now: `function mk(): number { return (value: string): string => value; }` reports no ZTS204. `const isS = (x: unknown): x is string => true;` reports no ZTS211, and the same predicate as a function declaration does. I will measure both after the plan and report them.

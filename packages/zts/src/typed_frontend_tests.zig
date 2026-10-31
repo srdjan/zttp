@@ -507,7 +507,6 @@ fn expectDirectAccepted(source: []const u8) !void {
     try std.testing.expect(
         parser.type_store.annotations.items.len > 0 or
             parser.type_store.declarations.items.len > 0 or
-            parser.type_store.erased_type_prefixes.items.len > 0 or
             parser.type_store.generic_owners.items.len > 0 or
             parser.type_store.explicit_call_arguments.items.len > 0 or
             parser.type_store.type_only_modules.items.len > 0,
@@ -519,7 +518,6 @@ fn expectFirstFunctionSliceRecords(parser: *const JsParser, source: []const u8) 
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.parameter_annotations.items.len);
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.function_signatures.items.len);
     try std.testing.expectEqual(@as(usize, 0), parser.type_store.type_only_modules.items.len);
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.erased_type_prefixes.items.len);
 
     const view = engine.parser.IrView.fromIRStore(&parser.nodes, &parser.constants);
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
@@ -679,114 +677,6 @@ fn expectParsedStoreValid(
 fn expectParsedStoreValidWithAllocations(source: []const u8, direct: *const JsParser, direct_root: NodeIndex, direct_alloc: CountingAllocator) !void {
     try expectParsedStoreValid(source, direct, direct_root);
     try std.testing.expect(direct_alloc.alloc_calls > 0);
-}
-
-const ObjectPrefixAllocationObservations = struct {
-    failures: usize = 0,
-    post_seed_rollbacks: usize = 0,
-};
-
-fn runProjectedPrefixTypeAllocationSweep(
-    type_allocator: std.mem.Allocator,
-    observed: *ObjectPrefixAllocationObservations,
-) !void {
-    const source =
-        "const seed: number = 1;\n" ++
-        "const value = <T>(<U>(1));";
-    const prefix_offset = std.math.cast(
-        u32,
-        std.mem.indexOf(u8, source, "<T>") orelse return error.TestUnexpectedResult,
-    ) orelse return error.TestUnexpectedResult;
-    var runtime_count = CountingAllocator.init(std.testing.allocator);
-    const runtime_allocator = runtime_count.allocator();
-    var atoms = AtomTable.init(runtime_allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.initAdmission(runtime_allocator, type_allocator, source, .compile);
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = parser.parse() catch |err| switch (err) {
-        error.OutOfMemory => {
-            observed.failures += 1;
-            try std.testing.expectEqual(@as(u16, 0), parser.scopes.current_scope);
-            if (parser.current.start >= prefix_offset) {
-                observed.post_seed_rollbacks += 1;
-                try expectStoreCheckpoint(&parser.type_store, seedCheckpoint());
-                try parser.type_store.validate();
-            } else {
-                try expectStoreCheckpoint(
-                    &parser.type_store,
-                    std.mem.zeroes(TypeSyntax.Store.Checkpoint),
-                );
-            }
-            return err;
-        },
-        else => return err,
-    };
-
-    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
-    try parser.type_store.validateRuntimeOwners(
-        std.testing.allocator,
-        parserIrView(&parser),
-    );
-    var expected = seedCheckpoint();
-    expected.projected_generic_parameters = 2;
-    expected.erased_type_prefixes = 2;
-    try expectStoreCheckpoint(&parser.type_store, expected);
-    try std.testing.expect(parser.type_store.nodes.items.len > 0);
-    try std.testing.expect(parser.type_store.annotations.items.len > 0);
-    try std.testing.expect(parser.type_store.projected_generic_parameters.items.len > 0);
-    try std.testing.expect(parser.type_store.erased_type_prefixes.items.len > 0);
-}
-
-fn runObjectPrefixTypeAllocationSweep(
-    type_allocator: std.mem.Allocator,
-    observed: *ObjectPrefixAllocationObservations,
-) !void {
-    const source =
-        "const seed: number = 1;\n" ++
-        "const value = <T>{ id: 1 };";
-    const prefix_offset = std.math.cast(
-        u32,
-        std.mem.indexOf(u8, source, "<T>") orelse return error.TestUnexpectedResult,
-    ) orelse return error.TestUnexpectedResult;
-    var runtime_count = CountingAllocator.init(std.testing.allocator);
-    const runtime_allocator = runtime_count.allocator();
-    var atoms = AtomTable.init(runtime_allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.initAdmission(runtime_allocator, type_allocator, source, .compile);
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = parser.parse() catch |err| switch (err) {
-        error.OutOfMemory => {
-            observed.failures += 1;
-            try std.testing.expectEqual(@as(u16, 0), parser.scopes.current_scope);
-            const after_seed = parser.current.start >= prefix_offset;
-            if (after_seed) {
-                observed.post_seed_rollbacks += 1;
-                try expectStoreCheckpoint(&parser.type_store, seedCheckpoint());
-                try parser.type_store.validate();
-            } else {
-                try expectStoreCheckpoint(
-                    &parser.type_store,
-                    std.mem.zeroes(TypeSyntax.Store.Checkpoint),
-                );
-            }
-            return err;
-        },
-        else => return err,
-    };
-
-    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
-    try parser.type_store.validateRuntimeOwners(
-        std.testing.allocator,
-        parserIrView(&parser),
-    );
-    var expected = seedCheckpoint();
-    expected.erased_type_prefixes = 1;
-    try expectStoreCheckpoint(&parser.type_store, expected);
-    try std.testing.expect(parser.type_store.nodes.items.len > 0);
-    try std.testing.expect(parser.type_store.annotations.items.len > 0);
-    try std.testing.expect(parser.type_store.erased_type_prefixes.items.len > 0);
 }
 
 fn expectFirstTypeOnlyModuleEquivalent(source: []const u8) !void {
@@ -1135,7 +1025,6 @@ fn seedCheckpoint() TypeSyntax.Store.Checkpoint {
         .parameter_annotations = 0,
         .function_signatures = 0,
         .type_only_modules = 0,
-        .erased_type_prefixes = 0,
     };
 }
 
@@ -1157,7 +1046,6 @@ fn nominalGenericSeedCheckpoint() TypeSyntax.Store.Checkpoint {
         .parameter_annotations = 0,
         .function_signatures = 0,
         .type_only_modules = 0,
-        .erased_type_prefixes = 0,
     };
 }
 
@@ -1407,371 +1295,6 @@ test "first type-only module slice preserves runtime and direct syntax" {
     try expectFirstTypeOnlyModuleEquivalent(source);
 }
 
-test "first erased object prefix preserves runtime and exact ownership" {
-    const source = "const value = <T>{ id: 1 };";
-    var runtime_count = CountingAllocator.init(std.testing.allocator);
-    const runtime_allocator = runtime_count.allocator();
-    var atoms = AtomTable.init(runtime_allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, source, .compile);
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-
-    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
-
-    const view = parserIrView(&parser);
-    try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.erased_type_prefixes.items.len);
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.nodes.items.len);
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.generic_parameters.items.len);
-    try std.testing.expectEqual(
-        @as(usize, 0),
-        parser.type_store.projected_generic_parameters.items.len,
-    );
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.semantic_fragments.items.len);
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.generic_owners.items.len);
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.authored_call_arguments.items.len);
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.explicit_call_arguments.items.len);
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.parameter_annotations.items.len);
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.function_signatures.items.len);
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.type_only_modules.items.len);
-
-    const prefix = &parser.type_store.erased_type_prefixes.items[0];
-    try std.testing.expectEqualStrings("<T>", prefix.list_span.text(source));
-    try std.testing.expectEqualStrings(
-        "<T>",
-        prefix.capture_spans.actual_erased_span.text(source),
-    );
-    try std.testing.expectEqualStrings(
-        "T",
-        prefix.capture_spans.recorded_span.text(source),
-    );
-    try std.testing.expectEqualStrings("{ id: 1 }", prefix.operand_span.text(source));
-    switch (prefix.compatibility) {
-        .ignored_parameters => {},
-        .legacy_parameter_projection => return error.TestUnexpectedResult,
-    }
-    const object = switch (prefix.owner) {
-        .expression => |node| node,
-        .block => return error.TestUnexpectedResult,
-    };
-    try std.testing.expectEqual(engine.parser.NodeTag.object_literal, view.getTag(object).?);
-    try std.testing.expectEqual(prefix.operand_span.start, view.getLoc(object).?.offset);
-
-    var declaration: ?NodeIndex = null;
-    for (parser.nodes.tags.items, 0..) |tag, index| {
-        if (tag == .var_decl) declaration = @intCast(index);
-    }
-    const variable = declaration orelse return error.TestUnexpectedResult;
-    const var_decl = view.getVarDecl(variable) orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(object, var_decl.init);
-
-    const original_owner = prefix.owner;
-    prefix.owner = .{ .expression = variable };
-    try std.testing.expectError(
-        error.InvalidErasedTypePrefix,
-        parser.type_store.validateRuntimeOwners(std.testing.allocator, view),
-    );
-    prefix.owner = .{ .expression = engine.parser.null_node };
-    try std.testing.expectError(
-        error.InvalidErasedTypePrefix,
-        parser.type_store.validateRuntimeOwners(std.testing.allocator, view),
-    );
-    prefix.owner = original_owner;
-
-    const original_operand = prefix.operand_span;
-    prefix.operand_span.end -= 1;
-    try std.testing.expectError(
-        error.InvalidErasedTypePrefix,
-        parser.type_store.validateRuntimeOwners(std.testing.allocator, view),
-    );
-    prefix.operand_span = original_operand;
-    const original_capture = prefix.capture_spans.actual_erased_span;
-    prefix.capture_spans.actual_erased_span.start += 1;
-    try std.testing.expectError(
-        error.InvalidGenericOwner,
-        parser.type_store.validateRuntimeOwners(std.testing.allocator, view),
-    );
-    prefix.capture_spans.actual_erased_span = original_capture;
-
-    const original_legacy_capture = prefix.capture_spans.recorded_span;
-    prefix.capture_spans.recorded_span.end =
-        prefix.capture_spans.recorded_span.start;
-    try std.testing.expectError(
-        error.InvalidErasedTypePrefix,
-        parser.type_store.validateRuntimeOwners(std.testing.allocator, view),
-    );
-    prefix.capture_spans.recorded_span = original_legacy_capture;
-    try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-
-    const completed_prefix = prefix.*;
-    const checkpoint = parser.type_store.checkpoint();
-    var pending = try parser.type_store.reserveErasedTypePrefix(.{
-        .list_span = completed_prefix.list_span,
-        .capture_spans = completed_prefix.capture_spans,
-        .policy = .ignored_parameters,
-    });
-    pending.capture_spans.recorded_span.end =
-        pending.capture_spans.recorded_span.start;
-    try std.testing.expectError(
-        error.InvalidErasedTypePrefix,
-        parser.type_store.finishErasedTypePrefix(&pending, .{
-            .owner = .{ .expression = object },
-            .operand_span = completed_prefix.operand_span,
-            .view = view,
-        }),
-    );
-    parser.type_store.cancelErasedTypePrefix(&pending);
-    try expectStoreCheckpoint(&parser.type_store, checkpoint);
-    try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-}
-
-test "failed erased object prefix restores the earlier syntax checkpoint" {
-    const source = "const seed: number = 1; const value = <T>{ id: };";
-    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-    defer parser.deinit();
-    try std.testing.expectError(error.UnexpectedToken, parser.parse());
-    const errors = parser.errors.getErrors();
-    try std.testing.expectEqual(@as(usize, 1), errors.len);
-    try std.testing.expectEqual(engine.parser.ErrorKind.unexpected_token, errors[0].kind);
-    const rbrace = std.mem.indexOfScalar(u8, source, '}') orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u32, @intCast(rbrace)), errors[0].location.offset);
-    try std.testing.expectEqual(@as(u32, @intCast(rbrace + 1)), errors[0].location.end_offset);
-    try std.testing.expectEqual(@as(u16, 0), parser.scopes.current_scope);
-    try expectStoreCheckpoint(&parser.type_store, seedCheckpoint());
-    try parser.type_store.validate();
-}
-
-test "erased object prefix type allocation failures restore the typed seed" {
-    var observed: ObjectPrefixAllocationObservations = .{};
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        runObjectPrefixTypeAllocationSweep,
-        .{&observed},
-    );
-    try std.testing.expect(observed.failures > 0);
-    try std.testing.expect(observed.post_seed_rollbacks > 0);
-}
-
-test "projected erased prefix allocation failures restore the typed seed" {
-    var observed: ObjectPrefixAllocationObservations = .{};
-    try std.testing.checkAllAllocationFailures(
-        std.testing.allocator,
-        runProjectedPrefixTypeAllocationSweep,
-        .{&observed},
-    );
-    try std.testing.expect(observed.failures > 0);
-    try std.testing.expect(observed.post_seed_rollbacks > 0);
-}
-
-test "erased prefix matrix preserves runtime ownership and projection order" {
-    const ExpectedPrefix = struct {
-        actual: []const u8,
-        legacy: []const u8,
-        operand: []const u8,
-        owner_tag: engine.parser.NodeTag,
-        block_owner: bool = false,
-        projected_count: u32,
-        projected_name: ?[]const u8 = null,
-    };
-    const Case = struct {
-        source: []const u8,
-        prefixes: []const ExpectedPrefix,
-    };
-    const cases = [_]Case{
-        .{
-            .source = "const value = <T>{ id: 1 };",
-            .prefixes = &.{.{ .actual = "<T>", .legacy = "T", .operand = "{ id: 1 }", .owner_tag = .object_literal, .projected_count = 0 }},
-        },
-        .{
-            .source = "const value = (<T>{ id: 1 });",
-            .prefixes = &.{.{ .actual = "<T>", .legacy = "T", .operand = "{ id: 1 }", .owner_tag = .object_literal, .projected_count = 0 }},
-        },
-        .{
-            .source = "const value = <T>(1);",
-            .prefixes = &.{.{ .actual = "<T>", .legacy = "T", .operand = "(1)", .owner_tag = .lit_int, .projected_count = 1, .projected_name = "T" }},
-        },
-        .{
-            .source = "<T>{ const inner = 1; } const live: number = 1;",
-            .prefixes = &.{.{ .actual = "<T>", .legacy = "T", .operand = "{ const inner = 1; }", .owner_tag = .block, .block_owner = true, .projected_count = 0 }},
-        },
-        .{
-            .source = "const value = <>{ id: 1 };",
-            .prefixes = &.{.{ .actual = "<>", .legacy = "", .operand = "{ id: 1 }", .owner_tag = .object_literal, .projected_count = 0 }},
-        },
-        .{
-            .source = "const value = <>(1);",
-            .prefixes = &.{.{ .actual = "<>", .legacy = "", .operand = "(1)", .owner_tag = .lit_int, .projected_count = 0 }},
-        },
-        .{
-            .source = "const value = (<> (1));",
-            .prefixes = &.{.{ .actual = "<> ", .legacy = ">", .operand = "(1)", .owner_tag = .lit_int, .projected_count = 1, .projected_name = ">" }},
-        },
-        .{
-            .source = "const value = <T>(<U>(1));",
-            .prefixes = &.{
-                .{ .actual = "<T>", .legacy = "T", .operand = "(<U>(1))", .owner_tag = .lit_int, .projected_count = 1, .projected_name = "T" },
-                .{ .actual = "<U>", .legacy = "U", .operand = "(1)", .owner_tag = .lit_int, .projected_count = 1, .projected_name = "U" },
-            },
-        },
-        .{
-            .source = "const value = <T>{ id: <U>(1) };",
-            .prefixes = &.{
-                .{ .actual = "<T>", .legacy = "T", .operand = "{ id: <U>(1) }", .owner_tag = .object_literal, .projected_count = 0 },
-                .{ .actual = "<U>", .legacy = "U", .operand = "(1)", .owner_tag = .lit_int, .projected_count = 1, .projected_name = "U" },
-            },
-        },
-        .{
-            .source = "const value = <T>((x) => x);",
-            .prefixes = &.{.{ .actual = "<T>", .legacy = "T", .operand = "((x) => x)", .owner_tag = .arrow_function, .projected_count = 1, .projected_name = "T" }},
-        },
-    };
-
-    for (cases) |case| {
-        var runtime_count = CountingAllocator.init(std.testing.allocator);
-        const runtime_allocator = runtime_count.allocator();
-        var atoms = AtomTable.init(runtime_allocator);
-        defer atoms.deinit();
-        var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, case.source, .compile);
-        defer parser.deinit();
-        parser.setAtomTable(&atoms);
-        const root = try parser.parse();
-
-        try expectParsedStoreValidWithAllocations(case.source, &parser, root, runtime_count);
-        try expectDirectAccepted(case.source);
-
-        const view = parserIrView(&parser);
-        try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-        try std.testing.expectEqual(case.prefixes.len, parser.type_store.erased_type_prefixes.items.len);
-        try std.testing.expectEqual(@as(usize, 0), parser.type_store.generic_parameters.items.len);
-        try std.testing.expectEqual(@as(usize, 0), parser.type_store.generic_owners.items.len);
-        try std.testing.expectEqual(@as(usize, 0), parser.type_store.authored_call_arguments.items.len);
-        try std.testing.expectEqual(@as(usize, 0), parser.type_store.explicit_call_arguments.items.len);
-        try std.testing.expectEqual(@as(usize, 0), parser.type_store.semantic_fragments.items.len);
-        try std.testing.expectEqual(@as(usize, 0), parser.type_store.parameter_annotations.items.len);
-        try std.testing.expectEqual(@as(usize, 0), parser.type_store.function_signatures.items.len);
-        var projected_total: usize = 0;
-        for (case.prefixes, parser.type_store.erased_type_prefixes.items) |expected, prefix| {
-            try std.testing.expectEqualStrings(expected.actual, prefix.capture_spans.actual_erased_span.text(case.source));
-            try std.testing.expectEqualStrings(expected.legacy, prefix.capture_spans.recorded_span.text(case.source));
-            try std.testing.expectEqualStrings(expected.operand, prefix.operand_span.text(case.source));
-            const owner = switch (prefix.owner) {
-                .expression => |runtime_node| blk: {
-                    try std.testing.expect(!expected.block_owner);
-                    break :blk runtime_node;
-                },
-                .block => |runtime_node| blk: {
-                    try std.testing.expect(expected.block_owner);
-                    break :blk runtime_node;
-                },
-            };
-            try std.testing.expectEqual(expected.owner_tag, view.getTag(owner).?);
-            switch (prefix.compatibility) {
-                .ignored_parameters => try std.testing.expectEqual(@as(u32, 0), expected.projected_count),
-                .legacy_parameter_projection => |projection| {
-                    try std.testing.expectEqual(expected.projected_count, projection.projected_parameters.count);
-                    try std.testing.expectEqual(@as(u32, 0), projection.semantic_fragments.count);
-                    if (expected.projected_name) |name| {
-                        const parameters = parser.type_store.projectedGenericParameterSlice(
-                            projection.projected_parameters,
-                        ) orelse return error.TestUnexpectedResult;
-                        try std.testing.expectEqual(@as(usize, 1), parameters.len);
-                        try std.testing.expectEqualStrings(name, parameters[0].name_span.text(case.source));
-                    }
-                    projected_total += @intCast(projection.projected_parameters.count);
-                },
-            }
-        }
-        try std.testing.expectEqual(projected_total, parser.type_store.projected_generic_parameters.items.len);
-
-        var pool = TypePool.init(std.testing.allocator);
-        defer pool.deinit(std.testing.allocator);
-        var env = TypeEnv.init(std.testing.allocator, &pool);
-        defer env.deinit();
-        try env.populateSourceTypes(.{ .direct = .{
-            .store = &parser.type_store,
-            .ir_view = view,
-            .atoms = &atoms,
-        } });
-        try pool.ensureHealthy();
-        try env.ensureHealthy();
-        try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
-    }
-}
-
-test "erased prefixes retain direct void admission diagnostics" {
-    const cases = [_][]const u8{
-        "const value = <void>(1);",
-        "const value = <T>(<void>(1));",
-        "<void>{ const value = 1; }",
-    };
-    const modes = [_]TypeSyntax.AdmissionMode{ .collect, .compile };
-    const outcomes = [_]std.meta.Tag(engine.parser.AdmissionParseOutcome){ .recovered_admission_refused, .terminal_admission_refused };
-    for (cases) |source| for (modes, outcomes) |mode, outcome| {
-        const expected = try directDiagnosticAt(source, .void_type, "void");
-        try expectDirectAdmission(std.testing.allocator, source, mode, outcome, &.{expected}, null);
-    };
-    try std.testing.expectEqual(@as(usize, 3), cases.len);
-    try std.testing.expectEqual(@as(usize, 2), modes.len);
-
-    const accepted_names = [_][]const u8{
-        "const value = <any>(1);",
-        "const value = <T>(<any>(1));",
-        "<any>{ const value = 1; }",
-    };
-    for (accepted_names) |source| for (modes) |mode| {
-        try expectDirectAdmission(std.testing.allocator, source, mode, .accepted, &.{}, null);
-        try expectDirectAccepted(source);
-    };
-    try std.testing.expectEqual(@as(usize, 3), accepted_names.len);
-}
-
-test "spaced erased prefixes preserve assignment and general captures" {
-    const cases = [_]struct {
-        source: []const u8,
-        actual: []const u8,
-        legacy: []const u8,
-        projected: bool,
-    }{
-        .{ .source = "const value = <T> (1);", .actual = "<T>", .legacy = "T", .projected = true },
-        .{ .source = "const value = <> (1);", .actual = "<>", .legacy = "", .projected = true },
-        .{ .source = "const value = (<T> { id: 1 });", .actual = "<T> ", .legacy = "T>", .projected = false },
-    };
-    for (cases) |case| {
-        var runtime_count = CountingAllocator.init(std.testing.allocator);
-        const runtime_allocator = runtime_count.allocator();
-        var atoms = AtomTable.init(runtime_allocator);
-        defer atoms.deinit();
-        var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, case.source, .compile);
-        defer parser.deinit();
-        parser.setAtomTable(&atoms);
-        const root = try parser.parse();
-        try expectParsedStoreValidWithAllocations(case.source, &parser, root, runtime_count);
-
-        const view = parserIrView(&parser);
-        try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-        try std.testing.expectEqual(@as(usize, 1), parser.type_store.erased_type_prefixes.items.len);
-        const prefix = &parser.type_store.erased_type_prefixes.items[0];
-        try std.testing.expectEqualStrings(case.actual, prefix.capture_spans.actual_erased_span.text(case.source));
-        try std.testing.expectEqualStrings(case.legacy, prefix.capture_spans.recorded_span.text(case.source));
-        switch (prefix.compatibility) {
-            .legacy_parameter_projection => try std.testing.expect(case.projected),
-            .ignored_parameters => try std.testing.expect(!case.projected),
-        }
-        if (std.mem.eql(u8, case.source, "const value = <> (1);")) {
-            const compatibility = prefix.compatibility;
-            prefix.compatibility = .ignored_parameters;
-            try std.testing.expectError(
-                error.InvalidErasedTypePrefix,
-                parser.type_store.validateRuntimeOwners(std.testing.allocator, view),
-            );
-            prefix.compatibility = compatibility;
-            try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-        }
-    }
-}
-
 test "adjacent erased prefix lists remain outside direct admission" {
     // `second_error` is the offset of the follow-on error that recovery records, when there is one.
     const cases = [_]struct { source: []const u8, second_error: ?u32 = null }{
@@ -1811,393 +1334,6 @@ test "adjacent erased prefix lists remain outside direct admission" {
             &direct.type_store,
             std.mem.zeroes(TypeSyntax.Store.Checkpoint),
         );
-    }
-}
-
-test "direct erased prefix projection retains bounds and valid empty ranges" {
-    const cases = [_]struct {
-        source: []const u8,
-        projected: u32,
-        expected_bounds: []const []const u8,
-    }{
-        .{ .source = "const value = <T extends string>(1);", .projected = 1, .expected_bounds = &.{"string"} },
-        .{ .source = "const value = <T extends { id: string }>(1);", .projected = 1, .expected_bounds = &.{"{ id: string }"} },
-        .{ .source = "const value = <T extends string, U extends number>(1);", .projected = 2, .expected_bounds = &.{ "string", "number" } },
-        .{ .source = "const value = <>(1);", .projected = 0, .expected_bounds = &.{} },
-    };
-    for (cases) |case| {
-        var atoms = AtomTable.init(std.testing.allocator);
-        defer atoms.deinit();
-        var runtime = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
-        defer runtime.deinit();
-        runtime.setAtomTable(&atoms);
-        _ = try runtime.parse();
-
-        const view = parserIrView(&runtime);
-        var expression_owner: ?NodeIndex = null;
-        for (runtime.nodes.tags.items, 0..) |tag, index| {
-            if (tag != .var_decl) continue;
-            const declaration = view.getVarDecl(@intCast(index)) orelse continue;
-            expression_owner = declaration.init;
-        }
-        const owner = expression_owner orelse return error.TestUnexpectedResult;
-        const list_start: u32 = @intCast(std.mem.indexOfScalar(u8, case.source, '<') orelse
-            return error.TestUnexpectedResult);
-        const scanned = (try TypeSyntax.scanBalancedGenericList(
-            std.testing.allocator,
-            case.source,
-            list_start,
-        )) orelse return error.TestUnexpectedResult;
-        const operand_start: u32 = @intCast(std.mem.indexOfScalarPos(
-            u8,
-            case.source,
-            @intCast(scanned.span.end),
-            '(',
-        ) orelse return error.TestUnexpectedResult);
-        const operand_end: u32 = @intCast((std.mem.indexOfScalarPos(
-            u8,
-            case.source,
-            @intCast(operand_start),
-            ')',
-        ) orelse return error.TestUnexpectedResult) + 1);
-
-        var store = TypeSyntax.Store.init(std.testing.allocator, case.source);
-        defer store.deinit();
-        var pending = try store.reserveErasedTypePrefix(.{
-            .list_span = scanned.span,
-            .capture_spans = .{
-                .actual_erased_span = scanned.span,
-                .recorded_span = .{
-                    .start = scanned.span.start + 1,
-                    .end = scanned.span.end - 1,
-                },
-            },
-            .policy = .legacy_parameter_projection,
-        });
-        try store.finishErasedTypePrefix(&pending, .{
-            .owner = .{ .expression = owner },
-            .operand_span = .{ .start = operand_start, .end = operand_end },
-            .view = view,
-        });
-        try store.validateRuntimeOwners(std.testing.allocator, view);
-        const projection = switch (store.erased_type_prefixes.items[0].compatibility) {
-            .legacy_parameter_projection => |value| value,
-            .ignored_parameters => return error.TestUnexpectedResult,
-        };
-        try std.testing.expectEqual(case.projected, projection.projected_parameters.count);
-        try std.testing.expectEqual(
-            @as(u32, @intCast(case.expected_bounds.len)),
-            projection.semantic_fragments.count,
-        );
-        if (case.projected == 0) {
-            try store.generic_owners.append(std.testing.allocator, .{
-                .identity = .{ .function = owner },
-                .list_span = scanned.span,
-                .capture_spans = .{
-                    .actual_erased_span = scanned.span,
-                    .recorded_span = scanned.span,
-                },
-                .authored_parameters = .{ .start = 0, .count = 0 },
-                .projected_parameters = .{ .start = 0, .count = 0 },
-                .compatibility = .ignored_declaration_parameters,
-            });
-            try std.testing.expectError(error.InvalidTypeSourceOrder, store.validate());
-            store.generic_owners.items.len -= 1;
-            try store.validateRuntimeOwners(std.testing.allocator, view);
-        }
-        if (case.expected_bounds.len != 0) {
-            const fragment_start: usize = @intCast(projection.semantic_fragments.start);
-            const fragment_end = fragment_start + @as(usize, @intCast(projection.semantic_fragments.count));
-            if (fragment_end > store.semantic_fragments.items.len) return error.TestUnexpectedResult;
-            const fragments = store.semantic_fragments.items[fragment_start..fragment_end];
-            for (case.expected_bounds, fragments) |expected, fragment| {
-                try std.testing.expectEqualStrings(expected, fragment.raw_span.text(case.source));
-            }
-
-            const parameter_index: usize = @intCast(projection.projected_parameters.start);
-            const original_reference = store.projected_generic_parameters.items[parameter_index].bound_fragment;
-            store.projected_generic_parameters.items[parameter_index].bound_fragment = null;
-            try std.testing.expectError(
-                error.UnownedSemanticFragment,
-                store.validateRuntimeOwners(std.testing.allocator, view),
-            );
-            store.projected_generic_parameters.items[parameter_index].bound_fragment = original_reference;
-
-            try store.explicit_call_arguments.append(std.testing.allocator, .{
-                .owner = owner,
-                .list_span = scanned.span,
-                .capture_spans = .{
-                    .actual_erased_span = scanned.span,
-                    .recorded_span = scanned.span,
-                },
-                .authored_arguments = .{
-                    .start = @intCast(store.authored_call_arguments.items.len),
-                    .count = 0,
-                },
-                .semantic_fragments = projection.semantic_fragments,
-            });
-            try std.testing.expectError(
-                error.SharedSemanticFragment,
-                store.validateRuntimeOwners(std.testing.allocator, view),
-            );
-            store.explicit_call_arguments.items.len -= 1;
-            try store.validateRuntimeOwners(std.testing.allocator, view);
-
-            if (case.expected_bounds.len == 2) {
-                const second_index = parameter_index + 1;
-                const second_reference = store.projected_generic_parameters.items[second_index].bound_fragment;
-                store.projected_generic_parameters.items[second_index].bound_fragment = original_reference;
-                try std.testing.expectError(
-                    error.InvalidErasedTypePrefix,
-                    store.validateRuntimeOwners(std.testing.allocator, view),
-                );
-                store.projected_generic_parameters.items[second_index].bound_fragment = second_reference;
-                try store.validateRuntimeOwners(std.testing.allocator, view);
-            }
-        }
-
-        var pool = TypePool.init(std.testing.allocator);
-        defer pool.deinit(std.testing.allocator);
-        var env = TypeEnv.init(std.testing.allocator, &pool);
-        defer env.deinit();
-        try lowerSyntaxStore(std.testing.allocator, &store, &pool, &env, view);
-        try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
-    }
-}
-
-test "prefix projections merge with callable generic parameters in source order" {
-    const source =
-        "const before = <P>(1); " ++
-        "function identity<T>(value) { return value; } " ++
-        "const empty = <>(1); " ++
-        "const after = <Q>(2);";
-    var runtime_count = CountingAllocator.init(std.testing.allocator);
-    const runtime_allocator = runtime_count.allocator();
-    var atoms = AtomTable.init(runtime_allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, source, .compile);
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    const root = try parser.parse();
-    try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
-
-    const view = parserIrView(&parser);
-    try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-    try std.testing.expectEqual(@as(usize, 3), parser.type_store.erased_type_prefixes.items.len);
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
-    const before = switch (parser.type_store.erased_type_prefixes.items[0].compatibility) {
-        .legacy_parameter_projection => |projection| projection.projected_parameters,
-        .ignored_parameters => return error.TestUnexpectedResult,
-    };
-    const empty = switch (parser.type_store.erased_type_prefixes.items[1].compatibility) {
-        .legacy_parameter_projection => |projection| projection.projected_parameters,
-        .ignored_parameters => return error.TestUnexpectedResult,
-    };
-    const after = switch (parser.type_store.erased_type_prefixes.items[2].compatibility) {
-        .legacy_parameter_projection => |projection| projection.projected_parameters,
-        .ignored_parameters => return error.TestUnexpectedResult,
-    };
-    const callable = parser.type_store.generic_owners.items[0].projected_parameters;
-    try std.testing.expectEqual(TypeSyntax.Range{ .start = 0, .count = 1 }, before);
-    try std.testing.expectEqual(TypeSyntax.Range{ .start = 1, .count = 1 }, callable);
-    try std.testing.expectEqual(TypeSyntax.Range{ .start = 2, .count = 0 }, empty);
-    try std.testing.expectEqual(TypeSyntax.Range{ .start = 2, .count = 1 }, after);
-
-    var pool = TypePool.init(std.testing.allocator);
-    defer pool.deinit(std.testing.allocator);
-    var env = TypeEnv.init(std.testing.allocator, &pool);
-    defer env.deinit();
-    try env.populateSourceTypes(.{ .direct = .{
-        .store = &parser.type_store,
-        .ir_view = view,
-        .atoms = &atoms,
-    } });
-    try pool.ensureHealthy();
-    try env.ensureHealthy();
-    try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
-
-    const original = parser.type_store.erased_type_prefixes.items[2].compatibility;
-    var overlap = switch (original) {
-        .legacy_parameter_projection => |projection| projection,
-        .ignored_parameters => return error.TestUnexpectedResult,
-    };
-    overlap.projected_parameters.start = 1;
-    parser.type_store.erased_type_prefixes.items[2].compatibility =
-        .{ .legacy_parameter_projection = overlap };
-    try std.testing.expectError(
-        error.InvalidErasedTypePrefix,
-        parser.type_store.validateRuntimeOwners(std.testing.allocator, view),
-    );
-    var gap = overlap;
-    gap.projected_parameters.start = 3;
-    parser.type_store.erased_type_prefixes.items[2].compatibility =
-        .{ .legacy_parameter_projection = gap };
-    try std.testing.expectError(
-        error.InvalidTypeRange,
-        parser.type_store.validateRuntimeOwners(std.testing.allocator, view),
-    );
-    parser.type_store.erased_type_prefixes.items[2].compatibility = original;
-    try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-
-    const original_empty = parser.type_store.erased_type_prefixes.items[1].compatibility;
-    var misplaced_empty = switch (original_empty) {
-        .legacy_parameter_projection => |projection| projection,
-        .ignored_parameters => return error.TestUnexpectedResult,
-    };
-    misplaced_empty.projected_parameters.start = 1;
-    parser.type_store.erased_type_prefixes.items[1].compatibility =
-        .{ .legacy_parameter_projection = misplaced_empty };
-    try std.testing.expectError(
-        error.InvalidGenericOwner,
-        parser.type_store.validateRuntimeOwners(std.testing.allocator, view),
-    );
-    parser.type_store.erased_type_prefixes.items[1].compatibility = original_empty;
-    try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-}
-
-test "recovered erased block removes nested syntax and retains progress" {
-    const source =
-        "const seed: number = 1; " ++
-        "<T>{ const nested: number = 1; const broken = ; const inner_after: number = 2; } " ++
-        "const after: number = 3;";
-    const broken = std.mem.indexOf(u8, source, "const broken = ; ") orelse
-        return error.TestUnexpectedResult;
-    const control_source = try std.mem.concat(
-        std.testing.allocator,
-        u8,
-        &.{ source[0..broken], source[broken + "const broken = ; ".len ..] },
-    );
-    defer std.testing.allocator.free(control_source);
-
-    var runtime_count = CountingAllocator.init(std.testing.allocator);
-    const runtime_allocator = runtime_count.allocator();
-    var control_atoms = AtomTable.init(runtime_allocator);
-    defer control_atoms.deinit();
-    var control = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, control_source, .compile);
-    defer control.deinit();
-    control.setAtomTable(&control_atoms);
-    const control_root = try control.parse();
-    try expectParsedStoreValidWithAllocations(control_source, &control, control_root, runtime_count);
-    try std.testing.expectEqual(@as(usize, 1), control.type_store.erased_type_prefixes.items.len);
-    try control.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&control));
-
-    var atoms = AtomTable.init(std.testing.allocator);
-    defer atoms.deinit();
-    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-    defer parser.deinit();
-    parser.setAtomTable(&atoms);
-    try std.testing.expectError(error.ParseError, parser.parse());
-    try std.testing.expectEqual(TokenType.eof, parser.current.type);
-    try std.testing.expectEqual(@as(u16, 0), parser.scopes.current_scope);
-    try expectStoreCheckpoint(&parser.type_store, twoAnnotationCheckpoint());
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.erased_type_prefixes.items.len);
-    try parser.type_store.validate();
-
-    const view = parserIrView(&parser);
-    const block_offset: u32 = @intCast(std.mem.indexOfScalar(u8, source, '{') orelse
-        return error.TestUnexpectedResult);
-    const inner_after_offset: u32 = @intCast(std.mem.indexOf(u8, source, "const inner_after") orelse
-        return error.TestUnexpectedResult);
-    const after_offset: u32 = @intCast(std.mem.indexOf(u8, source, "const after") orelse
-        return error.TestUnexpectedResult);
-    var block_node: ?NodeIndex = null;
-    var inner_after_node: ?NodeIndex = null;
-    var after_node: ?NodeIndex = null;
-    for (parser.nodes.tags.items, parser.nodes.locs.items, 0..) |tag, loc, index| {
-        if (tag == .block and loc.offset == block_offset) block_node = @intCast(index);
-        if (tag == .var_decl and loc.offset == inner_after_offset) inner_after_node = @intCast(index);
-        if (tag == .var_decl and loc.offset == after_offset) after_node = @intCast(index);
-    }
-    const block = view.getBlock(block_node orelse return error.TestUnexpectedResult) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(u16, 2), block.stmts_count);
-    const last_statement = view.getListIndex(block.stmts_start, block.stmts_count - 1);
-    try std.testing.expectEqual(inner_after_node orelse return error.TestUnexpectedResult, last_statement);
-    const inner_after = view.getVarDecl(last_statement) orelse return error.TestUnexpectedResult;
-    const after = view.getVarDecl(after_node orelse return error.TestUnexpectedResult) orelse
-        return error.TestUnexpectedResult;
-    try std.testing.expectEqualStrings(
-        "inner_after",
-        atoms.getName(@fromBackingInt(@intCast(inner_after.binding.name_atom))) orelse return error.TestUnexpectedResult,
-    );
-    try std.testing.expectEqualStrings(
-        "after",
-        atoms.getName(@fromBackingInt(@intCast(after.binding.name_atom))) orelse return error.TestUnexpectedResult,
-    );
-    try std.testing.expect(std.meta.eql(after.binding, parser.type_store.annotations.items[1].binding));
-    try std.testing.expectEqualStrings(
-        "number",
-        parser.type_store.annotations.items[1].raw_span.text(source),
-    );
-}
-
-test "erased prefix relationships reject invalid intervals and owner swaps" {
-    {
-        const source = "const value = <T>(<U>(1));";
-        var runtime_count = CountingAllocator.init(std.testing.allocator);
-        const runtime_allocator = runtime_count.allocator();
-        var atoms = AtomTable.init(runtime_allocator);
-        defer atoms.deinit();
-        var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, source, .compile);
-        defer parser.deinit();
-        parser.setAtomTable(&atoms);
-        const root = try parser.parse();
-        try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
-        const view = parserIrView(&parser);
-        try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-        const prefixes = parser.type_store.erased_type_prefixes.items;
-        try std.testing.expectEqual(@as(usize, 2), prefixes.len);
-        const outer_owner = switch (prefixes[0].owner) {
-            .expression => |runtime_node| runtime_node,
-            .block => return error.TestUnexpectedResult,
-        };
-        const inner_owner = switch (prefixes[1].owner) {
-            .expression => |runtime_node| runtime_node,
-            .block => return error.TestUnexpectedResult,
-        };
-        try std.testing.expectEqual(outer_owner, inner_owner);
-
-        const original_inner = prefixes[1].operand_span;
-        prefixes[1].operand_span = prefixes[0].operand_span;
-        try std.testing.expectError(
-            error.InvalidErasedTypePrefix,
-            parser.type_store.validateRuntimeOwners(std.testing.allocator, view),
-        );
-        prefixes[1].operand_span = original_inner;
-        const original_outer = prefixes[0].operand_span;
-        prefixes[0].operand_span.end = original_inner.end;
-        try std.testing.expectError(
-            error.InvalidErasedTypePrefix,
-            parser.type_store.validateRuntimeOwners(std.testing.allocator, view),
-        );
-        prefixes[0].operand_span = original_outer;
-        try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-    }
-    {
-        const source = "const left = <T>(1); const right = <U>(2);";
-        var runtime_count = CountingAllocator.init(std.testing.allocator);
-        const runtime_allocator = runtime_count.allocator();
-        var atoms = AtomTable.init(runtime_allocator);
-        defer atoms.deinit();
-        var parser = try JsParser.initAdmission(runtime_allocator, std.testing.allocator, source, .compile);
-        defer parser.deinit();
-        parser.setAtomTable(&atoms);
-        const root = try parser.parse();
-        try expectParsedStoreValidWithAllocations(source, &parser, root, runtime_count);
-        const view = parserIrView(&parser);
-        try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
-        const prefixes = parser.type_store.erased_type_prefixes.items;
-        const left_owner = prefixes[0].owner;
-        const right_owner = prefixes[1].owner;
-        prefixes[0].owner = right_owner;
-        prefixes[1].owner = left_owner;
-        try std.testing.expectError(
-            error.InvalidErasedTypePrefix,
-            parser.type_store.validateRuntimeOwners(std.testing.allocator, view),
-        );
-        prefixes[0].owner = left_owner;
-        prefixes[1].owner = right_owner;
-        try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
     }
 }
 
@@ -5741,7 +4877,6 @@ fn expectTypedGenericArrowRecords(
     try std.testing.expectEqual(@as(usize, 1), store.parameter_annotations.items.len);
     try std.testing.expectEqual(@as(usize, 1), store.function_signatures.items.len);
     try std.testing.expectEqual(@as(usize, 0), store.type_only_modules.items.len);
-    try std.testing.expectEqual(@as(usize, 0), store.erased_type_prefixes.items.len);
 
     const owner = store.generic_owners.items[0];
     try std.testing.expectEqualStrings(expected.list, owner.list_span.text(source));
@@ -6631,7 +5766,6 @@ test "generic arrow lists after a line comment read like lists with no comment" 
         try std.testing.expectEqual(@as(usize, 0), parser.type_store.semantic_fragments.items.len);
         try std.testing.expectEqual(@as(usize, 1), parser.type_store.parameter_annotations.items.len);
         try std.testing.expectEqual(@as(usize, 1), parser.type_store.function_signatures.items.len);
-        try std.testing.expectEqual(@as(usize, 0), parser.type_store.erased_type_prefixes.items.len);
         try parser.type_store.validate();
     }
     try std.testing.expectEqual(@as(usize, 3), sources.len);
@@ -7060,7 +6194,6 @@ const FinalNodeRollbackCase = struct {
     control_owners: usize,
     control_calls: usize,
     control_signatures: usize = 0,
-    control_prefixes: usize = 0,
     retained_nodes: usize = 2,
     retained_owners: usize = 1,
     retained_generic_parameters: usize = 1,
@@ -7070,7 +6203,6 @@ const FinalNodeRollbackCase = struct {
     retained_fragments: usize = 1,
     retained_parameter_annotations: usize = 0,
     retained_signatures: usize = 0,
-    retained_prefixes: usize = 0,
     retained_checkpoint: ?TypeSyntax.Store.Checkpoint = null,
     runtime_validation: bool = false,
     expected_current: union(enum) {
@@ -7098,10 +6230,9 @@ fn expectFinalNodeAllocationRollback(case: FinalNodeRollbackCase) !void {
     try std.testing.expectEqual(case.control_owners, control.type_store.generic_owners.items.len);
     try std.testing.expectEqual(case.control_calls, control.type_store.explicit_call_arguments.items.len);
     try std.testing.expectEqual(case.control_signatures, control.type_store.function_signatures.items.len);
-    try std.testing.expectEqual(case.control_prefixes, control.type_store.erased_type_prefixes.items.len);
     try std.testing.expect(case.control_annotations > 1 or case.control_owners > 1 or
         case.control_calls > 1 or
-        case.control_signatures > 0 or case.control_prefixes > 0);
+        case.control_signatures > 0);
 
     var target_index: ?usize = null;
     var target_count: usize = 0;
@@ -7192,7 +6323,6 @@ fn expectFinalNodeAllocationRollback(case: FinalNodeRollbackCase) !void {
         parser.type_store.parameter_annotations.items.len,
     );
     try std.testing.expectEqual(case.retained_signatures, parser.type_store.function_signatures.items.len);
-    try std.testing.expectEqual(case.retained_prefixes, parser.type_store.erased_type_prefixes.items.len);
     if (case.retained_checkpoint) |checkpoint| {
         try expectStoreCheckpoint(&parser.type_store, checkpoint);
     }
@@ -7395,60 +6525,6 @@ test "typed generic arrow final node failures restore owner and signature arrays
     var variable = common;
     variable.target_tag = .var_decl;
     variable.target_offset = @intCast(std.mem.indexOf(u8, variable_source, "const id").?);
-    variable.expected_current = .eof;
-    try expectFinalNodeAllocationRollback(variable);
-
-    var export_wrapper = common;
-    export_wrapper.source = export_source;
-    export_wrapper.target_tag = .export_decl;
-    export_wrapper.target_offset = @intCast(std.mem.indexOf(u8, export_source, "export").?);
-    export_wrapper.expected_current = .eof;
-    try expectFinalNodeAllocationRollback(export_wrapper);
-}
-
-test "erased object prefix node failures restore every store array" {
-    const variable_source =
-        "const seed: number = 1;\n" ++
-        "const value = <T>{ id: 1 };";
-    const export_source =
-        "const seed: number = 1;\n" ++
-        "export const value = <T>{ id: 1 };";
-    const final_semicolon = std.mem.lastIndexOfScalar(u8, variable_source, ';').?;
-    const last_newline = std.mem.lastIndexOfScalar(u8, variable_source, '\n').?;
-    const common = FinalNodeRollbackCase{
-        .source = variable_source,
-        .target_tag = .object_literal,
-        .target_offset = @intCast(std.mem.indexOfScalar(u8, variable_source, '{').?),
-        .control_owners = 0,
-        .control_calls = 0,
-        .control_prefixes = 1,
-        .retained_nodes = 1,
-        .retained_owners = 0,
-        .retained_generic_parameters = 0,
-        .retained_projected_parameters = 0,
-        .retained_calls = 0,
-        .retained_call_arguments = 0,
-        .retained_fragments = 0,
-        .retained_parameter_annotations = 0,
-        .retained_signatures = 0,
-        .retained_prefixes = 0,
-        .retained_checkpoint = seedCheckpoint(),
-        .runtime_validation = true,
-        .expected_current = .{ .token = .{
-            .kind = .semicolon,
-            .location = .{
-                .offset = @intCast(final_semicolon),
-                .end_offset = @intCast(final_semicolon + 1),
-                .line = 2,
-                .column = @intCast(final_semicolon - last_newline),
-            },
-        } },
-    };
-    try expectFinalNodeAllocationRollback(common);
-
-    var variable = common;
-    variable.target_tag = .var_decl;
-    variable.target_offset = @intCast(std.mem.indexOf(u8, variable_source, "const value").?);
     variable.expected_current = .eof;
     try expectFinalNodeAllocationRollback(variable);
 
@@ -9829,7 +8905,6 @@ test "annotation owner census covers current syntax kinds" {
     try std.testing.expectEqual(@as(usize, 2), store.generic_owners.items.len);
     try std.testing.expectEqual(@as(usize, 1), store.explicit_call_arguments.items.len);
     try std.testing.expectEqual(@as(usize, 0), store.type_only_modules.items.len);
-    try std.testing.expectEqual(@as(usize, 0), store.erased_type_prefixes.items.len);
     try std.testing.expectEqual(@as(u32, 0), switch (store.generic_owners.items[0].identity) {
         .structural_declaration => |index| index,
         else => return error.TestUnexpectedResult,
@@ -9970,15 +9045,11 @@ test "shadowed bindings and closure parameters retain their actual owners" {
 }
 
 const DirectGenericConsumerCase = enum {
-    interleaved,
-    compound_prefix,
     duplicate_parameters,
     generic_arrow,
     empty_callable,
     generic_only,
     ignored_callable,
-    ignored_prefix,
-    empty_prefix,
 };
 
 fn expectDirectGenericConsumer(
@@ -10017,44 +9088,6 @@ fn expectDirectGenericConsumer(
     try std.testing.expectEqual(@as(usize, 0), direct_env.generic_scopes.items.len);
 
     switch (case) {
-        .interleaved => {
-            try std.testing.expectEqual(prior_nodes + 3, direct_pool.nodes.items.len);
-            for ([_][]const u8{ "P", "T", "Q" }, 0..) |name, index| {
-                const type_index: TypeIndex = @intCast(prior_nodes + index);
-                try std.testing.expectEqual(TypeTag.t_generic_param, direct_pool.getTag(type_index).?);
-                try std.testing.expectEqualStrings(name, direct_pool.getRefName(type_index));
-            }
-            try std.testing.expectEqual(@as(usize, 3), direct.type_store.erased_type_prefixes.items.len);
-            try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_owners.items.len);
-            const owner = switch (direct.type_store.generic_owners.items[0].identity) {
-                .function => |node| node,
-                else => return error.TestUnexpectedResult,
-            };
-            const reference = direct_env.functionTypeRef(direct_view, owner) orelse
-                return error.TestUnexpectedResult;
-            const signature = direct_env.getFunctionSignature(reference) orelse
-                return error.TestUnexpectedResult;
-            try std.testing.expectEqual(@as(u8, 1), signature.type_param_count);
-            try std.testing.expectEqualStrings("T", signature.type_params[0].name);
-            try std.testing.expectEqual(@as(TypeIndex, @intCast(prior_nodes + 1)), signature.type_params[0].idx);
-            try std.testing.expectEqual(direct_pool.idx_string, signature.type_params[0].constraint);
-            try std.testing.expectEqual(@as(u8, 1), signature.param_count);
-            try std.testing.expectEqual(signature.type_params[0].idx, signature.param_types[0]);
-            try std.testing.expectEqual(signature.type_params[0].idx, signature.return_type);
-            try std.testing.expectEqual(@as(usize, 2), direct_env.direct_accumulator_events);
-        },
-        .compound_prefix => {
-            try std.testing.expectEqual(prior_nodes + 2, direct_pool.nodes.items.len);
-            const parameter: TypeIndex = @intCast(prior_nodes);
-            const bound: TypeIndex = @intCast(prior_nodes + 1);
-            try std.testing.expectEqual(TypeTag.t_generic_param, direct_pool.getTag(parameter).?);
-            try std.testing.expectEqualStrings("P", direct_pool.getRefName(parameter));
-            try std.testing.expectEqual(TypeTag.t_record, direct_pool.getTag(bound).?);
-            const fields = direct_pool.getRecordFields(bound);
-            try std.testing.expectEqual(@as(usize, 1), fields.len);
-            try std.testing.expectEqual(direct_pool.idx_string, fields[0].type_idx);
-            try std.testing.expectEqual(@as(usize, 0), direct_env.direct_fn_signatures.count());
-        },
         .duplicate_parameters => {
             try std.testing.expectEqual(prior_nodes + 2, direct_pool.nodes.items.len);
             const owner = switch (direct.type_store.generic_owners.items[0].identity) {
@@ -10134,7 +9167,6 @@ fn expectDirectGenericConsumer(
             try std.testing.expectEqual(@as(usize, 0), direct_env.direct_accumulator_events);
         },
         .ignored_callable => {
-            try std.testing.expectEqual(@as(usize, 0), direct.type_store.erased_type_prefixes.items.len);
             try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_owners.items.len);
             try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_parameters.items.len);
             try std.testing.expectEqual(
@@ -10171,68 +9203,6 @@ fn expectDirectGenericConsumer(
                 direct_view.getTag(function_owner).?,
             );
             try std.testing.expectEqual(@as(usize, 0), direct.type_store.function_signatures.items.len);
-            try std.testing.expectEqual(prior_nodes, direct_pool.nodes.items.len);
-            try std.testing.expectEqual(prior_names, direct_env.name_storage.items.len);
-            try std.testing.expectEqual(@as(usize, 0), direct_env.direct_fn_signatures.count());
-            try std.testing.expectEqual(@as(usize, 0), direct_env.fn_sigs_by_name.count());
-            try std.testing.expectEqual(@as(usize, 0), direct_env.direct_accumulator_events);
-        },
-        .ignored_prefix => {
-            try std.testing.expectEqual(@as(usize, 1), direct.type_store.erased_type_prefixes.items.len);
-            try std.testing.expectEqual(@as(usize, 0), direct.type_store.generic_parameters.items.len);
-            try std.testing.expectEqual(
-                @as(usize, 0),
-                direct.type_store.projected_generic_parameters.items.len,
-            );
-            try std.testing.expectEqual(@as(usize, 0), direct.type_store.semantic_fragments.items.len);
-            try std.testing.expectEqual(@as(usize, 0), direct.type_store.generic_owners.items.len);
-            const prefix = direct.type_store.erased_type_prefixes.items[0];
-            try std.testing.expectEqualStrings("<T>", prefix.list_span.text(source));
-            switch (prefix.compatibility) {
-                .ignored_parameters => {},
-                .legacy_parameter_projection => return error.TestUnexpectedResult,
-            }
-            const expression_owner = switch (prefix.owner) {
-                .expression => |node| node,
-                .block => return error.TestUnexpectedResult,
-            };
-            try std.testing.expectEqual(
-                engine.parser.NodeTag.object_literal,
-                direct_view.getTag(expression_owner).?,
-            );
-            try std.testing.expectEqual(prior_nodes, direct_pool.nodes.items.len);
-            try std.testing.expectEqual(prior_names, direct_env.name_storage.items.len);
-            try std.testing.expectEqual(@as(usize, 0), direct_env.direct_fn_signatures.count());
-            try std.testing.expectEqual(@as(usize, 0), direct_env.fn_sigs_by_name.count());
-            try std.testing.expectEqual(@as(usize, 0), direct_env.direct_accumulator_events);
-        },
-        .empty_prefix => {
-            try std.testing.expectEqual(@as(usize, 1), direct.type_store.erased_type_prefixes.items.len);
-            try std.testing.expectEqual(@as(usize, 0), direct.type_store.generic_parameters.items.len);
-            try std.testing.expectEqual(
-                @as(usize, 0),
-                direct.type_store.projected_generic_parameters.items.len,
-            );
-            try std.testing.expectEqual(@as(usize, 0), direct.type_store.semantic_fragments.items.len);
-            try std.testing.expectEqual(@as(usize, 0), direct.type_store.generic_owners.items.len);
-            const prefix = direct.type_store.erased_type_prefixes.items[0];
-            try std.testing.expectEqualStrings("<>", prefix.list_span.text(source));
-            const projection = switch (prefix.compatibility) {
-                .legacy_parameter_projection => |value| value,
-                .ignored_parameters => return error.TestUnexpectedResult,
-            };
-            try std.testing.expectEqual(@as(u32, 0), projection.projected_parameters.start);
-            try std.testing.expectEqual(@as(u32, 0), projection.projected_parameters.count);
-            try std.testing.expectEqual(@as(u32, 0), projection.semantic_fragments.start);
-            try std.testing.expectEqual(@as(u32, 0), projection.semantic_fragments.count);
-            const expression_owner = switch (prefix.owner) {
-                .expression => |node| node,
-                .block => return error.TestUnexpectedResult,
-            };
-            try std.testing.expectEqual(
-                engine.parser.NodeTag.lit_int,
-                direct_view.getTag(expression_owner).?,
-            );
             try std.testing.expectEqual(prior_nodes, direct_pool.nodes.items.len);
             try std.testing.expectEqual(prior_names, direct_env.name_storage.items.len);
             try std.testing.expectEqual(@as(usize, 0), direct_env.direct_fn_signatures.count());
@@ -10278,17 +9248,6 @@ test "direct phase two consumer matrix preserves generics and headers" {
         case: DirectGenericConsumerCase,
     }{
         .{
-            .source = "const before = <P extends string>(1);\n" ++
-                "function identity<T extends string>(value: T): T { return value; }\n" ++
-                "const empty = <>(1);\n" ++
-                "const after = <Q extends number>(2);",
-            .case = .interleaved,
-        },
-        .{
-            .source = "const value = <P extends { id: string }>(1);",
-            .case = .compound_prefix,
-        },
-        .{
             .source = "function duplicate<T extends string, T extends number>(value: T): T { return value; }",
             .case = .duplicate_parameters,
         },
@@ -10307,14 +9266,6 @@ test "direct phase two consumer matrix preserves generics and headers" {
         .{
             .source = "function identity<T>/* gap */(value) { return value; }",
             .case = .ignored_callable,
-        },
-        .{
-            .source = "const value = (<T>{ id: 1 });",
-            .case = .ignored_prefix,
-        },
-        .{
-            .source = "const value = <>(1);",
-            .case = .empty_prefix,
         },
     };
     try std.testing.expectEqual(@typeInfo(DirectGenericConsumerCase).@"enum".field_names.len, cases.len);
@@ -11293,37 +10244,6 @@ test "direct predicate allocation failures restore scopes and poison consumers" 
     try std.testing.expect(observations.successes > 0);
 }
 
-test "bounded erased prefixes preserve direct consumer admission" {
-    const Case = enum { scalar_bound, compound_bound, any_bound, default_parameter, operator_parameter };
-    const cases = [_]struct { case: Case, source: []const u8 }{
-        .{ .case = .scalar_bound, .source = "const value = <T extends string>(1);" },
-        .{ .case = .compound_bound, .source = "const value = <T extends { id: string }>(1);" },
-        .{ .case = .any_bound, .source = "const value = <T extends any>(1);" },
-        .{ .case = .default_parameter, .source = "const value = <T = string>(1);" },
-        .{ .case = .operator_parameter, .source = "const value = <T | U>(1);" },
-    };
-    const modes = [_]TypeSyntax.AdmissionMode{ .collect, .compile };
-    var seen = std.EnumSet(Case).empty;
-    for (cases) |case| {
-        for (modes) |mode| try expectDirectAdmission(std.testing.allocator, case.source, mode, .accepted, &.{}, null);
-        try expectDirectDeclarationConsumer(case.source, &.{}, "", false);
-        seen.insert(case.case);
-    }
-    try std.testing.expectEqual(@typeInfo(Case).@"enum".field_names.len, seen.count());
-    try std.testing.expectEqual(@as(usize, 2), modes.len);
-
-    const refused = "const value = <T extends void>(1);";
-    const diagnostic = try directDiagnosticAt(refused, .void_type, "void");
-    for (modes) |mode| try expectDirectAdmission(
-        std.testing.allocator,
-        refused,
-        mode,
-        if (mode == .collect) .recovered_admission_refused else .terminal_admission_refused,
-        &.{diagnostic},
-        null,
-    );
-}
-
 test "direct callable bounds stop before excluded projected fragments" {
     const source =
         "function compact<T, = string, U extends { id: string }>(value: T): T { " ++
@@ -11431,9 +10351,9 @@ fn runDirectGenericAllocationSweep(
 ) !void {
     const source =
         "structural Seed = string;\n" ++
-        "const before = <P extends { id: string }>(1);\n" ++
+        "const before = <P extends { id: string }>(value) => value;\n" ++
         "function identity<T extends string>(value: T): T { return value; }\n" ++
-        "const after = <Q extends number>(2);";
+        "const after = <Q extends number>(value) => value;";
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     var atoms = AtomTable.init(runtime_count.allocator());
     defer atoms.deinit();
@@ -13842,14 +12762,12 @@ test "admission header fallback preserves grouped and raw arrow type constructio
     const cases = [_]struct {
         source: []const u8,
         initializer: engine.parser.NodeTag,
-        erased_prefixes: usize,
         generic_owners: usize,
     }{
-        .{ .source = "const result = flag ? <T>(value) /* gap */ : (x) => x;", .initializer = .ternary, .erased_prefixes = 1, .generic_owners = 0 },
-        .{ .source = "const result = <T>(value /* ( */) => value;", .initializer = .arrow_function, .erased_prefixes = 0, .generic_owners = 1 },
-        .{ .source = "const result = (value /* ( */) => value;", .initializer = .arrow_function, .erased_prefixes = 0, .generic_owners = 0 },
+        .{ .source = "const result = <T>(value /* ( */) => value;", .initializer = .arrow_function, .generic_owners = 1 },
+        .{ .source = "const result = (value /* ( */) => value;", .initializer = .arrow_function, .generic_owners = 0 },
     };
-    try std.testing.expectEqual(@as(usize, 3), cases.len);
+    try std.testing.expectEqual(@as(usize, 2), cases.len);
     for (cases) |case| {
         const source = case.source;
         var direct_atoms = AtomTable.init(std.testing.allocator);
@@ -13881,24 +12799,6 @@ test "admission header fallback preserves grouped and raw arrow type constructio
             .atoms = &direct_atoms,
         } });
         try direct.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&direct));
-        try std.testing.expectEqual(case.erased_prefixes, direct.type_store.erased_type_prefixes.items.len);
-        if (case.erased_prefixes == 1) {
-            const prefix = direct.type_store.erased_type_prefixes.items[0];
-            try std.testing.expectEqualStrings("<T>", prefix.list_span.text(source));
-            const projection = switch (prefix.compatibility) {
-                .legacy_parameter_projection => |value| value,
-                .ignored_parameters => return error.TestUnexpectedResult,
-            };
-            const parameters = direct.type_store.projectedGenericParameterSlice(projection.projected_parameters) orelse
-                return error.TestUnexpectedResult;
-            try std.testing.expectEqual(@as(usize, 1), parameters.len);
-            try std.testing.expectEqualStrings("T", parameters[0].name_span.text(source));
-            try std.testing.expectEqual(prefix.list_span.start + 1, parameters[0].name_span.start);
-            try std.testing.expect(parameters[0].bound_fragment == null);
-            try std.testing.expectEqual(@as(usize, 0), projection.semantic_fragments.count);
-            try std.testing.expectEqual(TypeTag.t_generic_param, direct_pool.getTag(@intCast(prior_type_nodes)).?);
-            try std.testing.expectEqualStrings("T", direct_pool.getRefName(@intCast(prior_type_nodes)));
-        }
         if (case.generic_owners == 1) {
             const owner = direct.type_store.generic_owners.items[0];
             try std.testing.expectEqualStrings("<T>", owner.list_span.text(source));
@@ -13913,7 +12813,7 @@ test "admission header fallback preserves grouped and raw arrow type constructio
             try std.testing.expectEqualStrings("T", direct_pool.getRefName(@intCast(prior_type_nodes)));
             try std.testing.expectEqual(prior_type_nodes + 1, direct_pool.nodes.items.len);
         } else {
-            try std.testing.expectEqual(prior_type_nodes + case.erased_prefixes, direct_pool.nodes.items.len);
+            try std.testing.expectEqual(prior_type_nodes, direct_pool.nodes.items.len);
         }
         try std.testing.expectEqual(@as(usize, 0), direct_env.generic_scopes.items.len);
         try direct_pool.ensureHealthy();

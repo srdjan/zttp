@@ -117,11 +117,6 @@ const DirectReplayObserver = struct {
 
 const DirectGenericSets = std.AutoHashMapUnmanaged(NodeIndex, ParsedGenericSet);
 
-const GenericProjectionRetention = enum {
-    transient,
-    callable,
-};
-
 /// The field name used to mark a record as the proof payload of an instantiated
 /// `Proof<T, P>` capsule. The verifier looks for records bearing this field
 /// when extracting declared proof sets from a function return type.
@@ -666,7 +661,7 @@ pub const TypeEnv = struct {
         try self.pool.ensureHealthy();
         try self.ensureHealthy();
 
-        // Phase 2: create callable and transient generic parameters in source order.
+        // Phase 2: create callable generic parameters in source order.
         var callable_sets: DirectGenericSets = .empty;
         defer callable_sets.deinit(self.allocator);
         try self.populateDirectGenericPhase(
@@ -789,70 +784,28 @@ pub const TypeEnv = struct {
         lowered: []TypeIndex,
         callable_sets: *DirectGenericSets,
     ) !void {
-        var owner_index: usize = 0;
-        var prefix_index: usize = 0;
-        while (true) {
-            while (owner_index < input.store.generic_owners.items.len) {
-                const owner = input.store.generic_owners.items[owner_index];
-                const is_callable = switch (owner.identity) {
-                    .function, .arrow => true,
-                    .structural_declaration, .nominal_declaration => false,
-                };
-                if (is_callable and
-                    std.meta.activeTag(owner.compatibility) == .declaration_parameters)
-                {
-                    break;
-                }
-                owner_index += 1;
-            }
-            while (prefix_index < input.store.erased_type_prefixes.items.len and
-                std.meta.activeTag(input.store.erased_type_prefixes.items[prefix_index].compatibility) !=
-                    .legacy_parameter_projection)
+        for (input.store.generic_owners.items) |owner| {
+            const is_callable = switch (owner.identity) {
+                .function, .arrow => true,
+                .structural_declaration, .nominal_declaration => false,
+            };
+            if (!is_callable or
+                std.meta.activeTag(owner.compatibility) != .declaration_parameters)
             {
-                prefix_index += 1;
+                continue;
             }
-
-            const owner = if (owner_index < input.store.generic_owners.items.len)
-                &input.store.generic_owners.items[owner_index]
-            else
-                null;
-            const prefix = if (prefix_index < input.store.erased_type_prefixes.items.len)
-                &input.store.erased_type_prefixes.items[prefix_index]
-            else
-                null;
-            if (owner == null and prefix == null) break;
-
-            if (prefix == null or
-                (owner != null and owner.?.list_span.start < prefix.?.list_span.start))
-            {
-                const owner_node = switch (owner.?.identity) {
-                    .function => |node| node,
-                    .arrow => |node| node,
-                    .structural_declaration, .nominal_declaration => return error.InvalidGenericOwner,
-                };
-                if (try self.populateDirectGenericProjection(
-                    input.store,
-                    application_bases,
-                    lowered,
-                    owner.?.projected_parameters,
-                    .callable,
-                )) |set| {
-                    try callable_sets.put(self.allocator, owner_node, set);
-                }
-                owner_index += 1;
-            } else {
-                const projection = switch (prefix.?.compatibility) {
-                    .legacy_parameter_projection => |value| value,
-                    .ignored_parameters => return error.InvalidGenericOwner,
-                };
-                _ = try self.populateDirectGenericProjection(
-                    input.store,
-                    application_bases,
-                    lowered,
-                    projection.projected_parameters,
-                    .transient,
-                );
-                prefix_index += 1;
+            const owner_node = switch (owner.identity) {
+                .function => |node| node,
+                .arrow => |node| node,
+                .structural_declaration, .nominal_declaration => return error.InvalidGenericOwner,
+            };
+            if (try self.populateDirectGenericProjection(
+                input.store,
+                application_bases,
+                lowered,
+                owner.projected_parameters,
+            )) |set| {
+                try callable_sets.put(self.allocator, owner_node, set);
             }
         }
     }
@@ -916,7 +869,6 @@ pub const TypeEnv = struct {
         application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
         lowered: []TypeIndex,
         projected_range: TypeSyntax.Range,
-        retention: GenericProjectionRetention,
     ) !?ParsedGenericSet {
         const projected = store.projectedGenericParameterSlice(projected_range) orelse
             return error.InvalidTypeRange;
@@ -953,20 +905,17 @@ pub const TypeEnv = struct {
             return @as(anyerror!?ParsedGenericSet, self.closeParsedScopeAfterError(&scope, err));
         }
 
-        const retained: ?ParsedGenericSet = switch (retention) {
-            .transient => null,
-            .callable => if (scope.count == 0)
-                null
-            else blk: {
-                const capture_result = self.captureParsedGenericSet(&scope);
-                break :blk if (capture_result) |set|
-                    set
-                else |err|
-                    return @as(
-                        anyerror!?ParsedGenericSet,
-                        self.closeParsedScopeAfterError(&scope, err),
-                    );
-            },
+        const retained: ?ParsedGenericSet = if (scope.count == 0)
+            null
+        else blk: {
+            const capture_result = self.captureParsedGenericSet(&scope);
+            break :blk if (capture_result) |set|
+                set
+            else |err|
+                return @as(
+                    anyerror!?ParsedGenericSet,
+                    self.closeParsedScopeAfterError(&scope, err),
+                );
         };
         try self.endParsedGenerics(&scope);
         return retained;

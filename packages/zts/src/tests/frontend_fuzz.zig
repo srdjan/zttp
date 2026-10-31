@@ -195,7 +195,6 @@ const Stats = struct {
     signatures: usize = 0,
     generics: usize = 0,
     type_modules: usize = 0,
-    erased_prefixes: usize = 0,
 };
 
 fn countNewlines(text: []const u8) u32 {
@@ -362,7 +361,6 @@ fn checkTyped(
             stats.signatures += store.function_signatures.items.len;
             stats.generics += store.generic_owners.items.len;
             stats.type_modules += store.type_only_modules.items.len;
-            stats.erased_prefixes += store.erased_type_prefixes.items.len;
         },
         .recovered_admission_refused => {
             try std.testing.expectEqual(TypeSyntax.AdmissionMode.collect, mode);
@@ -424,7 +422,6 @@ fn expectTypedStats(stats: Stats, mode: TypeSyntax.AdmissionMode, syntax_floor: 
         try std.testing.expect(stats.signatures > 0);
         try std.testing.expect(stats.generics > 0);
         try std.testing.expect(stats.type_modules > 0);
-        try std.testing.expect(stats.erased_prefixes > 0);
     }
 }
 
