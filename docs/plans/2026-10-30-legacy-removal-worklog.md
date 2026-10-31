@@ -315,3 +315,13 @@ Observation for later pruning: a parser refusal text such as "default exports ar
 Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`, `test-module-boundary`, `test-zts`, `test-zruntime`, `test-server`, `zig build test`, and `check-spine`. `zts meta --json` is identical. The comparison script moved 12 rows, all listed, and 0 unexpected rows.
 
 `zts.pathsMatch`, `HandlerInstance.loadHandler`, and the `allocator` parameter of `destroy` in `packages/zts/src/pool.zig` left. `pathsMatch` in `packages/zts/src/route_match.zig` stays, because `routePatternsMatch` names it. `test "stable pathsMatch compatibility alias remains callable"` left with the alias. `reloadHandler` and `loadHandlerCached` are different functions and stay. L9 adds a `CHANGELOG.md` line for an embedder of `zts.pathsMatch`.
+
+## L5 performance
+
+`zig build bench-check -Doptimize=ReleaseFast` exited 1 at load 4.8 with `intArithmetic` 12.75% below the stored baseline. The base commit `0635cd09` exited 1 on the same host with the same benchmark 11.22% below it. So this run says nothing about L1 to L5. L6 and L9 run it again.
+
+I compared the two binaries with 101 interleaved rounds. A base-against-base control gave a median noise of about 0.2%. `intArithmetic` moved 1.15%, but `propertyAccess` moved -4.4% to -4.9%, and `functionCalls`, `objectCreate`, and `stringOps` moved about -2%.
+
+The slowdown starts at L3e, `442c5c5a`. Each earlier commit stays within about 2% of base, and L3e shows `propertyAccess` -5.26%. Reverting the two lines of L3e in `doCall` at HEAD does not recover it. Restoring only the unused field `cached_handler_arg_count: u8` in `HandlerInstance` at HEAD recovers it: `propertyAccess` is 4.05% above HEAD and 1.15% below base. So the cause is the memory layout of `HandlerInstance`, with no new work per operation. I did not find which field moved. The check is a test of offsets in `HandlerInstance` against the cache line that the interpreter reads.
+
+Decision: the field stays removed. The move is inside the 8% gate, and a padding field would keep an accidental layout. The next field change in this struct can move the number again.
