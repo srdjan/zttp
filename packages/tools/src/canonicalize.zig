@@ -14,12 +14,8 @@ pub const RepairIntent = zts.RepairIntent;
 
 /// One rewrite, span-keyed (D3 §5).
 ///
-/// This is the single repair vocabulary. Two used to exist: a line-keyed
-/// `Refactor` that refused any replacement containing a newline and any two
-/// rewrites touching one line, and a span-keyed `Repair` for the
-/// multi-line rules. Two representations meant two apply paths, two sets of
-/// guards, and a scheduling rule ("line-keyed takes absolute priority") that
-/// existed only to keep them apart.
+/// This is the single repair vocabulary. One span-keyed representation means
+/// one apply path and one set of guards for every rule.
 ///
 /// A whole-line rewrite is a span rewrite over the line's bytes, so the
 /// line-keyed producers lost nothing by moving: `appendRepairUnique` computes
@@ -845,11 +841,7 @@ pub fn lineSpan(source: []const u8, line_num: u32) ?Span {
 // Applying repairs
 // ---------------------------------------------------------------------------
 //
-// One path. There used to be two: a line-keyed one that walked lines and
-// refused a replacement containing a newline, and this span-keyed one. A
-// whole-line rewrite is a span rewrite over the line's bytes, so the first was
-// a special case of the second wearing its own guards, its own errors, and a
-// scheduling rule that existed to keep the two apart.
+// One path. A whole-line rewrite is a span rewrite over the line's bytes.
 
 /// Convert a 1-based (line, column) byte position into a byte offset into
 /// `source`. Returns null when the position is out of range. Column is a byte
@@ -879,10 +871,8 @@ fn lineColToOffset(source: []const u8, line: u32, column: u32) ?usize {
 /// The set must be NON-OVERLAPPING: any two spans that overlap are a caller bug
 /// (the normalize loop only ever passes the innermost non-overlapping subset
 /// per pass), and are rejected with `error.OverlappingRepairs`. Two whole-line
-/// repairs on one line have identical spans and are refused by that same rule,
-/// which is what the retired line-keyed applier's same-line check was for; two
-/// repairs on one line whose spans do not overlap now both apply, which it
-/// could not express.
+/// repairs on one line have identical spans and are refused by that same rule;
+/// two repairs on one line whose spans do not overlap both apply.
 ///
 /// Each repair's `original` snapshot must still match `source[start..end)`,
 /// else `error.StaleRepair`. A span outside the source is
@@ -2687,10 +2677,8 @@ test "capability alias preview stays in enclosing scope" {
 }
 
 test "applyRepairs applies a replacement that spans lines" {
-    // The retired line-keyed applier refused any replacement containing a
-    // newline, so a rewrite that changed the shape of a statement had to go
-    // through a second, separate path. One path now, and this is the case that
-    // proves the restriction is gone rather than relocated.
+    // A replacement containing a newline applies on the same path as any other
+    // repair, so a rewrite may change the shape of a statement.
     const source =
         \\function handler(req: Request): Response {
         \\  const n = 1;

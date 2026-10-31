@@ -699,9 +699,8 @@ pub const BuildRequest = struct {
     attest_requested: bool,
 };
 
-/// What the build did. `runBuild` used to return void, so the only account of
-/// a build was the lines it logged: a caller, and a test, had to read stderr to
-/// learn whether a receipt was signed or a ledger row written.
+/// What the build did. A caller, and a test, learns from it whether a receipt
+/// was signed or a ledger row written, without reading stderr.
 pub const BuildReceipt = struct {
     output_path: []const u8,
     bytecode_len: usize,
@@ -2362,11 +2361,8 @@ test "localDeployCommand rejects stray positional args" {
 
 test "compileCommand rejects unknown -prefixed flags symmetrically with buildCommand" {
     const testing = std.testing;
-    // The argv loop used to silently drop `-`-prefixed unknowns via the
-    // non-matching path between `--help` and the `!startsWith("-")`
-    // positional branch. A typo like `--ouptut` would be ignored and the
-    // build would proceed with the default state. The new else arm
-    // returns UnknownOption — same behaviour as buildCommand.
+    // A `-`-prefixed unknown such as the typo `--ouptut` returns UnknownOption,
+    // the same as buildCommand.
     try testing.expectEqualStrings("--ouptut", parseCompileCommandArgs(&.{ "--ouptut", "out.bin", "handler.ts" }).err.unknown_arg);
     try testing.expectEqualStrings("--json", parseCompileCommandArgs(&.{ "--json", "handler.ts", "-o", "out.bin" }).err.unknown_arg);
 }

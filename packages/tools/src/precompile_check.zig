@@ -286,9 +286,7 @@ pub fn appendCanonicalPublicHelperDiagnostics(
     const contract = if (result.contract) |*c| c else return;
 
     // Spec 5.7 conditions this on export and a nonempty inferred row, and on
-    // nothing else. A `handler_reachable` qualifier used to stand here, which
-    // let an exported helper the handler never calls declare nothing and report
-    // nothing - the export is the promise, and who happens to call it today
+    // nothing else. The export is the promise, and who happens to call it today
     // does not change what the module's public surface owes its callers.
     for (contract.function_effect_capsules.items) |cap| {
         if (!cap.exported or cap.declared.items.len > 0 or cap.inferred.items.len == 0) continue;
@@ -598,11 +596,9 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
 
 /// The spec names a diagnostic is about, when it has any to report.
 ///
-/// `SpecDiagnostic` has carried `spec_name` all along and every message above
-/// discarded it, so a handler declaring twelve properties was told that one of
-/// them was not discharged and never which. A recorded model spent eighteen
-/// roundtrips on that question - "So the capsule discharge fails. Which trait?"
-/// - and never landed an edit. The name is free; it is already computed.
+/// `SpecDiagnostic` carries `spec_name`. A message that discards it tells a
+/// handler declaring twelve properties that one of them was not discharged and
+/// never which. The name is free; it is already computed.
 ///
 /// Null for the implicit-default cases, which have no declared name, and for the
 /// `Effects<...>` kinds, whose `spec_name` is the literal "Effects" rather than
@@ -1096,10 +1092,8 @@ test "frozen signature corpus: digests are stable and match the committed pin" {
 }
 
 test "a spec diagnostic names the spec it is about" {
-    // The recorded loop this closes: a handler declared twelve properties, was
-    // told one of them was not discharged, and could not tell which. The model
-    // asked "So the capsule discharge fails. Which trait?" and spent eighteen
-    // roundtrips guessing from a properties snapshot instead of reading it.
+    // A handler declaring twelve properties, told that one of them was not
+    // discharged, must also be told which.
     const allocator = std.testing.allocator;
 
     const named = try specDiagnosticMessageAlloc(allocator, .{

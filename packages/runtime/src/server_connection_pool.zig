@@ -399,8 +399,8 @@ pub const ConnectionPool = struct {
         if (self.server.config.static_dir) |static_dir| {
             if (std.mem.startsWith(u8, request.path, "/static/")) {
                 // Strip the full "/static/" prefix (8 chars) off request.path,
-                // not request.url[7..]: the old slice kept a leading slash (so the
-                // file resolved as absolute -> 403) and carried the query string.
+                // not request.url[7..], which keeps a leading slash (so the
+                // file resolves as absolute -> 403) and carries the query string.
                 access_status = self.serveStaticFileSync(fd, static_dir, request.path["/static/".len..], keep_alive, request.headers.items, is_head) catch |err| {
                     if (err == error.StaticFileTruncated) {
                         // Headers + a partial body already went out; the file

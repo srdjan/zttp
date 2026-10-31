@@ -8,8 +8,7 @@
 //! guessed replacement.
 //!
 //! What exists in this compiler to publish: the refusals returned by edit
-//! simulation and canonicalization. Each already carried a stable wire string chosen
-//! at its own emission site, which is the shape this registry replaces - the
+//! simulation and canonicalization. Each has a stable wire string. The
 //! `Id` enum below is the wire vocabulary, so a refusal that names a kind the
 //! registry does not carry no longer compiles.
 //!

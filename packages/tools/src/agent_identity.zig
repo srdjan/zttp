@@ -9,8 +9,8 @@
 //! Path canonicalization lives in tools. The language-profile authority lives
 //! with the grammar registry and is only re-exported here for protocol callers.
 //!
-//! The path functions take an `std.Io` because Zig 0.16 removed `std.fs.cwd()`:
-//! every filesystem call goes through an `Io` instance now. Callers that have
+//! The path functions take an `std.Io`:
+//! every filesystem call goes through an `Io` instance. Callers that have
 //! no backend yet build one the way the rest of the tools do
 //! (`std.Io.Threaded.init(allocator, .{ .environ = .empty })`).
 

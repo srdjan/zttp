@@ -183,7 +183,7 @@ fn findStartDir(
     const normalized = try normalizeAbsolutePath(allocator, io, input);
     // Freed on every path except the one that hands `normalized` back to the
     // caller, which clears `owned` to transfer ownership. Covers the error
-    // paths too, so it replaces the old `errdefer`.
+    // paths too.
     var owned = true;
     defer if (owned) allocator.free(normalized);
 

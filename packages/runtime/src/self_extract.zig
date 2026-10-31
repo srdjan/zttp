@@ -723,8 +723,8 @@ fn deserializePolicy(
     errdefer if (sql.queries.len > 0) allocator.free(sql.queries);
 
     // The scope byte, and nothing after it. A section this reader ran out of
-    // bytes for used to come back disabled, and a disabled section admits every
-    // value, so a truncated policy read as a permissive one.
+    // bytes for must not come back disabled: a disabled section admits every
+    // value, so a truncated policy would read as a permissive one.
     if (pos >= data.len) return error.InvalidPayload;
     const scopes = zts.endpoint.ScopeSet.fromWire(data[pos]) orelse return error.InvalidPayload;
     pos += 1;

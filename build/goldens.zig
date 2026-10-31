@@ -151,7 +151,7 @@ pub fn add(ctx: Context, bins: artifacts.Binaries) Result {
     init_preflight.expectExitCode(1);
     // Names the default provider's credential, so moving the default without
     // moving this line fails here rather than shipping a message for a provider
-    // the preflight no longer checks.
+    // the preflight does not check.
     init_preflight.expectStdErrMatch("--provider deepseek requires DEEPSEEK_API_KEY");
     const init_preflight_absence = b.addSystemCommand(&.{ "/bin/test", "!", "-e", "demo" });
     init_preflight_absence.setCwd(init_preflight_root.getDirectory());

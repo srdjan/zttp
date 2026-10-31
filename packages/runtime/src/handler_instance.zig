@@ -652,8 +652,6 @@ pub const HandlerInstance = struct {
         try self.ctx.setGlobal(fn_atom, fn_obj.toValue());
     }
 
-    // Note: installResponseHelpers and installJsxRuntime removed - these are now handled by initBuiltins()
-
     /// Validate module imports from parsed IR.
     /// Called after parse() to verify that all import specifiers reference valid modules.
     /// Native functions are registered eagerly by installVirtualModules(), so this only validates.

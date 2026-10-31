@@ -632,8 +632,8 @@ fn analyzeImportedFunction(
     }
 
     // The helpers of this helper come first, so a call into one of them applies
-    // that file's sinks and effects to this file. A failed type check retains
-    // the old early stop. Effects still inspect the loaded IR with every
+    // that file's sinks and effects to this file. A failed type check stops
+    // the collection early. Effects still inspect the loaded IR with every
     // nested file import blocked, without reading another file.
     var nested: ImportedFunctionAnalyses = if (type_check_clean)
         try collectImportedAnalyses(allocator, module_facts, path, stack, reader, graph, retained_file.id)

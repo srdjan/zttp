@@ -69,9 +69,7 @@ pub fn runCanonicalize(
     for (result.repairs.items) |repair| {
         try json.beginObject();
         // D3 §5's `repair` carries the typed intent, not a per-producer string.
-        // `Refactor` used to carry one and that is what made the third parallel
-        // vocabulary: five of its names differed from the tag by more than
-        // spelling. The legacy names survive only on the frozen v1 surface.
+        // The legacy names survive only on the frozen v1 surface.
         try json.objectField("intent");
         try json.write(@tagName(repair.intent));
         try json.objectField("diagnostic_code");

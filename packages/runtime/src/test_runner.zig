@@ -686,8 +686,8 @@ test "runOneTest: request url with query string yields path without query (CLI-1
         .enforce_arena_escape = false,
     };
 
-    // The scaffold fixture sends GET /?probe=1; before the fix req.path became
-    // "/?probe=1" and the handler returned 404.
+    // The scaffold fixture sends GET /?probe=1; req.path must be "/"
+    // and not "/?probe=1", or the handler returns 404.
     const test_case = TestCase{
         .name = "scaffold probe",
         .request = .{
@@ -749,7 +749,7 @@ test "runOneTest: req.query is populated from the url query string" {
 
 test "checkAssertions: a failure that cannot be recorded is an error, not a pass" {
     // The verdict is `failures.items.len == 0`, so a mismatch whose message
-    // could not be allocated used to read as a passing scenario.
+    // could not be allocated must not read as a passing scenario.
     const assertions = TestAssertions{ .status = 404 };
     var response = HttpResponse.init(std.testing.allocator);
     response.status = 200;

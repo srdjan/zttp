@@ -67,8 +67,7 @@ pub const HeaderStrings = struct {
 };
 
 /// `props` must be a struct with `bool` fields matching `chip_field_names`.
-/// Missing fields are treated as `false`, so older `Properties` shapes stay
-/// compatible.
+/// Missing fields are treated as `false`.
 pub fn build(
     allocator: std.mem.Allocator,
     props: anytype,

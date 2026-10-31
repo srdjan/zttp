@@ -324,8 +324,7 @@ pub fn summarizeGeneratedPaths(
     var analysis = PathAnalysis{
         .paths_enumerated = @intCast(tests.len),
         // Ask the generator rather than recomputing the MAX_PATHS comparison:
-        // it also knows whether anything was summarized instead of enumerated,
-        // which this copy of the predicate used to miss (spec gap 11).
+        // it also knows whether anything was summarized instead of enumerated.
         .paths_exhaustive = generator.pathsExhaustive(),
         .behaviors_exhaustive = generator.pathsExhaustive() and generator.getHandlerTests().len == tests.len,
         .paths_coverage_note = generator.coverage().note(),

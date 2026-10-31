@@ -572,8 +572,8 @@ test "formatProofCard: spec-less handler renders ZTS500 lines matching the foote
     const allocator = std.testing.allocator;
     // A handler with no Proof<T, P> activates the default proof profile, whose
     // unsatisfiable properties trip error-severity ZTS500 spec diagnostics.
-    // Those used to be counted in the footer but never printed; assert they
-    // now render and that the printed error lines equal the footer count.
+    // Assert that they render and that the printed error lines equal the
+    // footer count.
     const source =
         \\function handler(req: Request): Response {
         \\  return Response.json({ now: Date.now() });
@@ -1089,9 +1089,8 @@ test "ZTS623: dropping the internal ceiling satisfies the placement rule" {
 
 test "appendExportCapsuleDiagnostics: the docs mode asks only for a Proof capsule" {
     const allocator = std.testing.allocator;
-    // The effects half of this mode retired with ZTS507: once ZTS610 stopped
-    // testing `handler_reachable`, it refused exactly the helpers the warning
-    // asked about, so the flag now covers the proof half alone.
+    // This mode covers the proof half alone: ZTS610 already refuses exactly the
+    // helpers an effects warning would ask about.
     const source =
         \\import { env } from "zttp:env";
         \\
@@ -1221,7 +1220,7 @@ test "a pure-typed callback parameter contributes the empty row" {
     const allocator = std.testing.allocator;
     // D2 section 4's I3: a function type with no capsule declares the empty
     // row - spec 6.5's "its callback MUST be pure" made representable. The
-    // call through `f` used to defeat the row entirely and report ZTS512.
+    // call through `f` does not report ZTS512.
     const source =
         \\nominal Count = number;
         \\
@@ -1302,7 +1301,7 @@ test "zts check --types path rejects exported handler local mismatch" {
 
 test "check reports a boolean error and a type error on different nodes" {
     // The type stage and the boolean stage each find a different mistake. The
-    // check used to stop at the first stage with errors and show one of them.
+    // check shows both and does not stop at the first stage with errors.
     const source =
         \\function handler(req: Request): Proof<Response, "deterministic"> {
         \\  const n: number = 1;
@@ -3590,7 +3589,7 @@ test "retained flow modules keep per-read dependency revisions and stable owners
     try std.testing.expectEqual(@as(zts.pipeline.FlowModuleId, 3), graph.views.items[0].imports[1].target.module);
     try std.testing.expectEqual(@as(zts.pipeline.FlowModuleId, 2), graph.views.items[1].imports[0].target.module);
     try std.testing.expectEqual(@as(zts.pipeline.FlowModuleId, 4), graph.views.items[3].imports[0].target.module);
-    // The legacy summary temporaries have been freed. Both independent ASTs,
+    // The summary temporaries have been freed. Both independent ASTs,
     // atom tables and capture tables must still be usable through the graph.
     for (graph.views.items) |view| {
         try std.testing.expectEqual(ir.NodeTag.program, view.ir_view.getTag(view.root).?);

@@ -70,8 +70,8 @@ pub fn parsePrecompileArgSlice(argv: []const []const u8) !PrecompileOptions {
             continue;
         }
         // A flag this parser does not know is refused by name. Taking it as the
-        // handler or output path hid a removed or misspelled flag, such as the
-        // deleted `--data-labels`, behind an unrelated error or none.
+        // handler or output path would hide a misspelled flag behind an
+        // unrelated error or none.
         if (std.mem.startsWith(u8, arg, "--")) {
             errPrint("Unknown flag: {s}\n", .{arg});
             return error.UnknownFlag;

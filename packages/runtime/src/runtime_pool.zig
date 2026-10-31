@@ -222,7 +222,7 @@ pub const HandlerPool = struct {
         installed_config.shared_rate_store = rate_store;
         // The generation owns the policy backing from here on. Keeping the
         // caller's borrowed view in the long-lived config would leave a stale
-        // pointer even though capability installation no longer reads it.
+        // pointer even though capability installation does not read it.
         installed_config.dev_capability_policy = null;
 
         var self = Self{
@@ -576,8 +576,8 @@ pub const HandlerPool = struct {
         // The configured acquire_timeout_ms is the sole wait bound: a nonzero
         // timeout fails only once elapsed time reaches it, a zero timeout fails
         // fast below. There is deliberately no separate retry-count circuit
-        // breaker - it previously cut waits short of the configured timeout
-        // under contention.
+        // breaker: it would cut waits short of the configured timeout under
+        // contention.
         const spin_iterations: u32 = 10;
         const initial_backoff_ns: u64 = 10 * std.time.ns_per_us;
         const max_backoff_ns: u64 = 1 * std.time.ns_per_ms;
@@ -618,8 +618,7 @@ pub const HandlerPool = struct {
                     wait_timer = compat.Timer.start() catch null;
                     // Without a monotonic clock we cannot enforce
                     // acquire_timeout_ms. Fail closed rather than spin forever:
-                    // the elapsed-time check below is now the only loop bound
-                    // (the retry-count circuit breaker was removed), so a null
+                    // the elapsed-time check below is the only loop bound, so a null
                     // timer would otherwise never terminate the wait.
                     if (wait_timer == null) {
                         _ = self.exhausted_count.fetchAdd(1, .monotonic);
@@ -982,7 +981,7 @@ pub const HandlerPool = struct {
         const key = zq.sourceCacheKey(self.handler_code, self.handler_filename);
 
         // Acquire lock for parsing (double-checked locking pattern).
-        // The old lockless fast path was unsafe: getRaw() releases its internal
+        // A lockless fast path is unsafe: getRaw() releases its internal
         // lock before returning the slice, so a concurrent cache.clear() could
         // free the backing memory while we were reading from it (UAF).
         self.cache_mutex.lock();
@@ -1153,10 +1152,8 @@ test "acquireForRequest waits out contention up to the timeout, not a retry cap"
     const rt1 = try pool.acquireForRequest();
     try testing.expectEqual(@as(usize, 1), pool.getInUse());
 
-    // Release rt1 after ~250ms - well past the old ~100-retry circuit-breaker
-    // window (~80ms of 1ms backoffs) yet far below the 10s timeout. The
-    // planned-at code returned error.PoolExhausted at the retry cap before this
-    // release; the fix keeps waiting until the slot frees.
+    // Release rt1 after ~250ms, far below the 10s timeout. The acquire keeps
+    // waiting until the slot frees and has no retry cap.
     const Releaser = struct {
         pool: *HandlerPool,
         rt: *zq.LockFreePool.Runtime,
@@ -1363,8 +1360,7 @@ test "loadHandlerCached embedded path fails cleanly on corrupted bytecode instea
 }
 
 // ---------------------------------------------------------------------------
-// HandlerPool behavior tests. Moved here from the old zruntime.zig god-file, which held them
-// only for historical reasons and had to back-import this file to compile them.
+// HandlerPool behavior tests.
 // ---------------------------------------------------------------------------
 
 test "HandlerPool basic operations" {
@@ -1999,8 +1995,8 @@ test "HandlerPool init under FailingAllocator never leaks" {
         // unskipping this test for v0.2.0.
         1489,
         1535,
-        // Parser scope initialization previously panicked instead of
-        // returning OutOfMemory on this part of prewarm.
+        // Parser scope initialization returns OutOfMemory, and does not panic,
+        // on this part of prewarm.
         2048,
     };
     for (regression_fail_points) |fail_at| {

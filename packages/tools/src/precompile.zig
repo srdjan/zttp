@@ -1401,8 +1401,8 @@ test "compileHandler rejects invalid virtual-module imports" {
 
 test "compileHandler rejects an import of a module that does not exist" {
     // The export check only ever ran for modules the table knows, so an import
-    // of a module that is not there at all reported clean. `zttp:websocket`
-    // was removed in this beta and every handler still importing it passed.
+    // of a module that is not there at all, such as the removed
+    // `zttp:websocket`, must be refused and not reported clean.
     const allocator = std.testing.allocator;
     const source =
         \\import { send } from "zttp:websocket";

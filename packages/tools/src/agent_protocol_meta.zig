@@ -1264,7 +1264,7 @@ test "modules returns the resolved graph and binds one hash in two places" {
 // that takes a registered name - because discovery published only a name and
 // an effect per export. The named fact is back, through compiler authority.
 //
-// Asserted on the value, not on a difference from the old payload: a test that
+// Asserted on the value, not on a difference from a wrong payload: a test that
 // only checked "params is present" would pass on `["string","object"]`, which
 // is the shape that could not teach anything.
 test "module discovery names each parameter and the module use protocol" {

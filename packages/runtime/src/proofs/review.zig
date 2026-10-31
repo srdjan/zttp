@@ -26,9 +26,7 @@ const zts_cli = @import("zts_cli");
 const ProvenFacts = zts_cli.deploy_manifest.ProvenFacts;
 
 /// The deploy decision, shared with `zttp dev --watch --prove` and with
-/// `zttp rollout` rather than mirrored. Both mirrors this file used to carry
-/// justified themselves as keeping review.zig independent of zts types, which
-/// was never true: the package already imports `zts` and `zts_cli`.
+/// `zttp rollout` rather than mirrored.
 ///
 /// `classify` derives only `.safe`, `.safe_with_additions`, and `.breaking`
 /// from a `ReviewDelta`. `.needs_review` comes from property regressions that only

@@ -19,7 +19,6 @@ const Mutant = struct {
 // probing a deleted list and reported rows that no longer existed.
 var mutants: []const Mutant = &.{};
 
-// The unfiltered suite runs 195 tests after Phase 2 removes three subjects.
 const minimum_test_count: usize = 231;
 const test_timeout_seconds: u64 = 10;
 const process_output_limit: std.Io.Limit = .limited(8 * 1024 * 1024);

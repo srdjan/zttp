@@ -366,7 +366,7 @@ pub const Server = struct {
         const source = candidate.source orelse return error.MissingHandlerSource;
         try activation.requireSourceSwap(self.generationIsGuarded(), null, candidate.configured_policy_checked);
         const invalidated = try pool.reloadSourceGeneration(source.code, source.filename, candidate.policy, self.sourceServingSettings());
-        // Pool preparation is the final fallible operation. It no longer reads
+        // Pool preparation is the final fallible operation. It does not read
         // the retired source under runtime-init before any backing is freed.
         if (self.superseded_source) |*retired| retired.deinit();
         self.superseded_source = self.source_generation;
@@ -425,7 +425,7 @@ pub const Server = struct {
                 // Embedded bytecode from build-time compilation
                 embedded_bytecode = bytecode;
                 // Handler code is not needed when using embedded bytecode,
-                // but we provide a placeholder for API compatibility
+                // but the tuple needs a value, so it holds an empty placeholder
                 break :blk .{ "", "<embedded>" };
             },
             .appended_payload => |payload| blk: {
@@ -1188,8 +1188,7 @@ test "threaded completeRequestLength rejects a chunked body whose encoding excee
 
     // Each one-byte decoded chunk carries a large extension. The decoded
     // payload stays within max_body_size while its encoded representation
-    // exceeds the separate wire-size cap. Ported from the edge listener test
-    // (pre-rebase:packages/runtime/src/edge_server.zig) when edge was removed.
+    // exceeds the separate wire-size cap.
     var request: std.ArrayList(u8) = .empty;
     try request.appendSlice(
         allocator,
@@ -1487,7 +1486,7 @@ test "threaded waitForNextRequest closes idle keep-alive connection early" {
     defer std.Io.Threaded.closeFd(fds[1]);
 
     // No bytes pending: the idle wait expires at keep_alive_timeout_ms, far
-    // below the 30s request timeout that previously pinned the worker.
+    // below the 30s request timeout, which would pin the worker.
     var timer = try engine.Timer.start();
     try std.testing.expect(!pool.waitForNextRequest(fds[0]));
     const elapsed_ms = timer.read() / std.time.ns_per_ms;

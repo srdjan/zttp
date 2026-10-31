@@ -3514,11 +3514,9 @@ test "object property access works" {
 }
 
 test "ENG-2: zero-arg user-named method on object literal is callable" {
-    // Regression: a zero-arg method call on an object literal with a
-    // user-defined property name (`({greet:()=>7}).greet()`) used to fall
-    // through to NotCallable -> HTTP 500 because the get_field+call_method ->
-    // get_field_call peephole fusion mis-resolved the dynamically-interned
-    // atom. The fusion is now deleted (bytecode_opt.zig). Covers the literal
+    // A zero-arg method call on an object literal with a user-defined
+    // property name (`({greet:()=>7}).greet()`) must not fall through to
+    // NotCallable -> HTTP 500. Covers the literal
     // receiver, a multi-property literal, and a variable receiver.
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

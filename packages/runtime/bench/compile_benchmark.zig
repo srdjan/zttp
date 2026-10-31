@@ -350,7 +350,7 @@ const CountingAlloc = struct {
 
 // -- Compile once ------------------------------------------------------------
 //
-// Keep the historical parse -> codegen measurement separate from semantic
+// Keep the parse -> codegen measurement separate from semantic
 // checking. Both profiles use the production typed parser and own teardown.
 
 const Profile = enum { compile, check };

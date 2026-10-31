@@ -2,9 +2,8 @@
 //!
 //! The compile-time contract extraction (handler_contract.zig) proves handler
 //! properties, env vars, routes, and egress hosts. That contract is embedded in
-//! self-extracting binaries but was previously unused at runtime ("v1 emission
-//! only"). This module makes the runtime contract-aware: startup env validation,
-//! route pre-filtering, and property-driven behavior.
+//! self-extracting binaries. This module makes the runtime contract-aware:
+//! startup env validation, route pre-filtering, and property-driven behavior.
 
 const std = @import("std");
 const zq = @import("zts");

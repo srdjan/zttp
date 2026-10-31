@@ -128,7 +128,7 @@ pub fn main(init: std.process.Init.Minimal) !void {
         return;
     }
 
-    // Backward-compatible default: treat bare `zttp <handler>` usage as `serve`.
+    // Bare `zttp-runtime <handler>` serves the handler.
     try serveRefusingSource(allocator, user_args, init.environ);
 }
 

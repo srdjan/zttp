@@ -329,8 +329,8 @@ fn runCheckCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     defer result.deinit(allocator);
 
     // Opt-in docs mode: ask exported helpers to carry an explicit Proof<...>
-    // capsule (ZTS508). Warning-only; never changes the exit code. The effects
-    // half retired when ZTS610 widened to cover the same helpers.
+    // capsule (ZTS508). Warning-only; never changes the exit code. It covers the
+    // proof half alone.
     if (require_export_capsules) {
         precompile.appendExportCapsuleDiagnostics(allocator, &result, target);
     }

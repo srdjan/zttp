@@ -154,10 +154,6 @@ pub fn add(ctx: Context) Result {
     release_provenance_test_step.dependOn(&run_release_provenance_tests.step);
 
     // The coverage union across every published run of one corpus identity.
-    // Zig rather than the python3 heredoc it replaces: AGENTS.md says existing
-    // python is legacy to be removed as each area is touched, and this area was
-    // touched because its first-run guard made publishing a new corpus identity
-    // impossible.
     const coverage_union_mod = b.createModule(.{
         .root_source_file = b.path("tooling/coverage_union.zig"),
         .target = b.graph.host,
