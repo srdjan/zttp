@@ -242,7 +242,7 @@ test "appendEntry on assistant_tool_use writes one atomic tool_use_batch frame" 
     try testing.expectEqualStrings("workspace_read_file", d2.get("name").?.string);
 }
 
-test "appendEntry on tool_result under cap writes body unchanged" {
+test "appendEntry on tool_result under cap writes llm_text unchanged" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -265,7 +265,7 @@ test "appendEntry on tool_result under cap writes body unchanged" {
     defer parsed.deinit();
 
     const d = parsed.value.object.get("d").?.object;
-    try testing.expectEqualStrings("{\"ok\":true}", d.get("body").?.string);
+    try testing.expectEqualStrings("{\"ok\":true}", d.get("llm_text").?.string);
     try testing.expectEqual(true, d.get("ok").?.bool);
 }
 
@@ -294,7 +294,7 @@ test "appendEntry preserves a large projected tool result exactly" {
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
     defer parsed.deinit();
 
-    const body = parsed.value.object.get("d").?.object.get("body").?.string;
+    const body = parsed.value.object.get("d").?.object.get("llm_text").?.string;
     try testing.expectEqualSlices(u8, &big, body);
 
     // Input entry must not have been mutated.
@@ -324,7 +324,7 @@ test "appendEntry with no_persist_tool_output writes a structural placeholder" {
     defer allocator.free(raw);
     var parsed = try std.json.parseFromSlice(std.json.Value, allocator, raw, .{});
     defer parsed.deinit();
-    const body = parsed.value.object.get("d").?.object.get("body").?.string;
+    const body = parsed.value.object.get("d").?.object.get("llm_text").?.string;
     try testing.expectEqualStrings(redacted_tool_output, body);
     try testing.expect(std.mem.indexOf(u8, raw, "secret output") == null);
 }

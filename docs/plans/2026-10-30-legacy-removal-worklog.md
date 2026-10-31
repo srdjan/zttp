@@ -371,3 +371,11 @@ Omission that I corrected here: the feature map requires `smoke-v1`, `smoke-gett
 `docs/convergence.json` and `docs/coverage.json` hold the old `semanticsHash` until the next release republish, as the plan expects.
 
 `zig build bench-check -Doptimize=ReleaseFast` exited 0 at load 2.7: 9 benchmarks, 1.17% geomean regression. So the L5 failure came from host load.
+
+## L7a
+
+Status: complete. A tool result in the session journal no longer writes the duplicate `body` field. `writePayload` and `writeDisplayPayload` in `packages/pi/src/session/events.zig` write `llm_text` only.
+
+A journal from an earlier binary still loads. `a journal line that holds the old body field still loads` reads one literal line through `decodeEnvelope`. At review I added `a journal that holds the old body field still reconstructs` in `packages/pi/src/session/reconstructor.zig`, because the plan names the real loader. That test runs `recoverIncompleteTail` and `reconstructTranscript`. A line that holds only `body` is still refused, as L3a left it.
+
+One gate ran on the tree that holds L7a, L7b, and L7d, because the three units touch separate files. No separate result exists for each of the three commits.

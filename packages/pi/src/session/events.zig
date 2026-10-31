@@ -945,8 +945,6 @@ fn writePayload(writer: *std.Io.Writer, record: EventRecord) !void {
             try writer.writeAll(if (tr.ok) "true" else "false");
             try writer.writeAll(",\"llm_text\":");
             try json_writer.writeString(writer, tr.llm_text);
-            try writer.writeAll(",\"body\":");
-            try json_writer.writeString(writer, tr.llm_text);
             if (tr.ui_payload) |payload| {
                 try writer.writeAll(",\"ui_payload\":");
                 try ui_payload.writeJson(writer, payload);
@@ -1057,8 +1055,6 @@ fn writeDisplayPayload(
 ) !void {
     try writer.writeByte('{');
     try writer.writeAll("\"llm_text\":");
-    try json_writer.writeString(writer, message.llm_text);
-    try writer.writeAll(",\"body\":");
     try json_writer.writeString(writer, message.llm_text);
     if (message.ui_payload) |payload| {
         try writer.writeAll(",\"ui_payload\":");
@@ -1432,7 +1428,7 @@ test "model_text JSON projection uses the documented v4 envelope" {
     try testing.expectEqualStrings("hello", obj.get("d").?.string);
 }
 
-test "appendEvent serializes tool_result with llm_text body alias and ui_payload" {
+test "appendEvent serializes tool_result with llm_text and ui_payload and no body" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
@@ -1450,9 +1446,21 @@ test "appendEvent serializes tool_result with llm_text body alias and ui_payload
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"llm_text\":\"{\\\"ok\\\":false}\"") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"body\":\"{\\\"ok\\\":false}\"") != null);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"ui_payload\":{\"kind\":\"plain_text\"") != null);
+    const line =
+        "{\"v\":4,\"entry_id\":1,\"k\":\"tool_result\",\"d\":{\"tool_use_id\":\"toolu_1\",\"tool_name\":\"zts_expert_verify_paths\",\"ok\":false,\"llm_text\":\"{\\\"ok\\\":false}\",\"ui_payload\":{\"kind\":\"plain_text\",\"text\":\"fallback\"}}}";
+    try testing.expect(std.mem.indexOf(u8, raw, line) != null);
+    try testing.expect(std.mem.indexOf(u8, raw, "\"body\"") == null);
+}
+
+test "a journal line that holds the old body field still loads" {
+    const allocator = testing.allocator;
+    const line =
+        "{\"v\":4,\"entry_id\":1,\"k\":\"tool_result\",\"d\":{\"tool_use_id\":\"toolu_1\",\"tool_name\":\"zts_expert_verify_paths\",\"ok\":false,\"llm_text\":\"{\\\"ok\\\":false}\",\"body\":\"{\\\"ok\\\":false}\",\"ui_payload\":{\"kind\":\"plain_text\",\"text\":\"fallback\"}}}";
+    var decoded = try decodeEnvelope(allocator, line, .reconstruction);
+    defer decoded.deinit();
+    try testing.expectEqualStrings("{\"ok\":false}", decoded.record.tool_result.llm_text);
+    try testing.expectEqualStrings("toolu_1", decoded.record.tool_result.tool_use_id);
+    try testing.expectEqual(false, decoded.record.tool_result.ok);
 }
 
 test "appendEvent serializes proof_card as a display object" {

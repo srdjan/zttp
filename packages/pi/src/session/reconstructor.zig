@@ -504,6 +504,32 @@ test "journal refuses part_index, body-only results, and string display payloads
     }
 }
 
+test "a journal that holds the old body field still reconstructs" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "old-body-field.events");
+    defer allocator.free(path);
+    try writeRawSchema4Frame(
+        allocator,
+        path,
+        "{\"v\":4,\"entry_id\":1,\"k\":\"tool_result\",\"d\":{\"tool_use_id\":\"toolu_1\",\"tool_name\":\"zts_expert_verify_paths\",\"ok\":false,\"llm_text\":\"{\\\"ok\\\":false}\",\"body\":\"{\\\"ok\\\":false}\",\"ui_payload\":{\"kind\":\"plain_text\",\"text\":\"fallback\"}}}",
+    );
+
+    try recoverIncompleteTail(allocator, path);
+    var tr = try reconstructTranscript(allocator, path, null);
+    defer tr.deinit(allocator);
+    try testing.expectEqual(@as(usize, 1), tr.len());
+    try testing.expectEqualStrings("toolu_1", tr.at(0).tool_result.tool_use_id);
+    try testing.expectEqualStrings("zts_expert_verify_paths", tr.at(0).tool_result.tool_name);
+    try testing.expect(!tr.at(0).tool_result.ok);
+    try testing.expectEqualStrings("{\"ok\":false}", tr.at(0).tool_result.llm_text);
+    switch (tr.at(0).tool_result.ui_payload.?) {
+        .plain_text => |text| try testing.expectEqualStrings("fallback", text),
+        else => return error.TestExpectedPlainTextPayload,
+    }
+}
+
 test "reader recovery and reconstruction preserve additive journal fields" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
