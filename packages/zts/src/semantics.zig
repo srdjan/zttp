@@ -271,7 +271,6 @@ pub fn nodeDisposition(tag: NodeTag) Disposition {
     if (hasNodeRule(tag)) return already_specified;
     return switch (tag) {
         .lit_float, .lit_string, .lit_undefined => .{ .kind = .trusted, .reason = literal_tcb_reason },
-        .method_call,
         .member_access,
         .computed_access,
         .optional_chain,
@@ -279,46 +278,25 @@ pub fn nodeDisposition(tag: NodeTag) Disposition {
         .array_literal,
         .object_literal,
         .object_property,
-        .object_method,
-        .object_getter,
-        .object_setter,
         .object_spread,
         .function_expr,
         .arrow_function,
         .spread,
-        .await_expr,
-        .yield_expr,
-        .sequence_expr,
-        .comma_expr,
         => .{ .kind = .trusted, .reason = expression_tcb_reason },
-        .match_expr, .match_arm, .match_pattern, .array_pattern, .pattern_element, .pattern_rest, .pattern_default => .{ .kind = .trusted, .reason = pattern_tcb_reason },
+        .match_expr, .match_arm, .match_pattern, .array_pattern, .pattern_element => .{ .kind = .trusted, .reason = pattern_tcb_reason },
         .expr_stmt,
         .var_decl,
-        .for_stmt,
         .for_of_stmt,
-        .for_in_stmt,
-        .while_stmt,
-        .do_while_stmt,
-        .switch_stmt,
-        .case_clause,
         .assert_stmt,
-        .throw_stmt,
         .break_stmt,
         .continue_stmt,
-        .try_stmt,
-        .labeled_stmt,
         => .{ .kind = .trusted, .reason = control_tcb_reason },
         .function_decl,
         .import_decl,
         .import_specifier,
-        .import_default,
-        .import_namespace,
         .export_decl,
-        .export_specifier,
-        .export_default,
-        .export_all,
         => .{ .kind = .trusted, .reason = binding_tcb_reason },
-        .program, .param_list, .arg_list, .stmt_list => .{ .kind = .trusted, .reason = parser_structure_reason },
+        .program => .{ .kind = .trusted, .reason = parser_structure_reason },
         // Handled before this switch by `hasNodeRule`; spelling the members here
         // keeps the switch exhaustive, so adding a new NodeTag is a compile error.
         .lit_int, .lit_bool, .lit_null, .identifier, .binary_op, .unary_op, .ternary, .call, .match_type_test, .if_stmt, .return_stmt, .block => already_specified,
@@ -584,7 +562,7 @@ pub const SpecCode = diagnostic_catalog.SemanticsKind;
 // alphabet", not "every byte value". Rename/reorder at equal size is caught by
 // the receipt's irTableHash/opcodeTableHash at check time. A per-member
 // rule-or-pending list plus SMT-checked coverage is the northstar's version.
-pub const expected_nodes = 69;
+pub const expected_nodes = 42;
 pub const expected_opcodes = 127;
 
 comptime {

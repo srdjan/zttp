@@ -353,14 +353,9 @@ pub const CodeGen = struct {
             .if_stmt,
             .match_expr,
             .match_arm,
-            .for_stmt,
             .for_of_stmt,
-            .for_in_stmt,
-            .while_stmt,
-            .do_while_stmt,
             .return_stmt,
             .call,
-            .method_call,
             => true,
             else => false,
         };
@@ -420,11 +415,9 @@ pub const CodeGen = struct {
             },
             .var_decl, .function_decl => try self.emitVarDecl(self.ir.getVarDecl(index).?),
             .if_stmt => try self.emitIfStmt(self.ir.getIfStmt(index).?),
-            .for_stmt => try self.emitForLoop(self.ir.getLoop(index).?),
             .for_of_stmt => try self.emitForIterLoop(self.ir.getForIter(index).?),
             .return_stmt => try self.emitReturn(self.ir.getOptValue(index)),
             .assert_stmt => try self.emitAssert(self.ir.getAssertStmt(index).?),
-            .switch_stmt => unreachable, // switch is rejected at parse time
             .block, .program => try self.emitBlock(self.ir.getBlock(index).?),
             // Module declarations
             // Emit alias binding copies for named imports.
@@ -1760,54 +1753,6 @@ pub const CodeGen = struct {
             try self.emitNode(if_stmt.then_branch);
             try self.placeLabel(else_label);
         }
-    }
-
-    fn emitForLoop(self: *CodeGen, loop: Node.LoopStmt) !void {
-        // Init
-        if (loop.init != null_node) {
-            try self.emitNode(loop.init);
-            if (self.ir.getTag(loop.init)) |init_tag| {
-                if (init_tag != .var_decl) {
-                    try self.emit(.drop);
-                    self.popStack(1);
-                }
-            }
-        }
-
-        const loop_start = try self.createLabel();
-        const loop_end = try self.createLabel();
-        const continue_label = try self.createLabel();
-
-        try self.loop_stack.append(self.allocator, .{
-            .break_label = loop_end,
-            .continue_label = continue_label,
-        });
-
-        try self.placeLabel(loop_start);
-
-        // Condition
-        if (loop.condition != null_node) {
-            try self.emitNode(loop.condition);
-            try self.emitJump(.if_false, loop_end);
-            self.popStack(1);
-        }
-
-        // Body
-        try self.emitNode(loop.body);
-
-        try self.placeLabel(continue_label);
-
-        // Update
-        if (loop.update != null_node) {
-            try self.emitNode(loop.update);
-            try self.emit(.drop);
-            self.popStack(1);
-        }
-
-        try self.emitJump(.goto, loop_start);
-        try self.placeLabel(loop_end);
-
-        _ = self.loop_stack.pop();
     }
 
     fn emitForIterLoop(self: *CodeGen, for_iter: Node.ForIterStmt) !void {

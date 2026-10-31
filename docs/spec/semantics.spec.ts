@@ -1,12 +1,12 @@
 // zts semantics spec - GENERATED from packages/zts/src/semantics.zig.
 // Do not edit by hand; run `zts spec-render` to regenerate.
 //
-// semanticsHash:   83b822bd0dee8e5f9a9231501f0f95b34fa48a0f08c671ade7a8bee822b877b8
-// irTableHash:     78e7a99405de0a7f01baec7a599af5221c540b0b8045340e596fe48d226383f3
+// semanticsHash:   6f6f17bc48a511f2ca4376829f4b2b2c11560b63d75299d00e7811e31d2a09f6
+// irTableHash:     f4e38e19dc66e224b66e8277811f685eb1222e20dc3fca55e4a8c83c527730ba
 // opcodeTableHash: d3354fa6676c42bd2855e423c339001d2bf8f1d008e6270c5a0ab1170b96478c
 //
-// Coverage: 69/69 reachable IR nodes and 127/127 reachable bytecode opcodes classified.
-// IR assurance: 12 specified, 0 translation-validated, 57 trusted, 0 unreachable.
+// Coverage: 42/42 reachable IR nodes and 127/127 reachable bytecode opcodes classified.
+// IR assurance: 12 specified, 0 translation-validated, 30 trusted, 0 unreachable.
 // Opcode assurance: 7 specified, 1 translation-validated, 119 trusted, 0 unreachable.
 // `denote` is what the node computes; `lower` is the bytecode it compiles to.
 // A value node's lower, symbolically executed, equals its denote (spec-check
@@ -28,7 +28,6 @@ export const nodeAssurance = {
   unary_op: { disposition: "specified", reason: "executable denotation and lowering rule" },
   ternary: { disposition: "specified", reason: "executable denotation and lowering rule" },
   call: { disposition: "specified", reason: "executable denotation and lowering rule" },
-  method_call: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
   member_access: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
   computed_access: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
   optional_chain: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
@@ -36,17 +35,10 @@ export const nodeAssurance = {
   array_literal: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
   object_literal: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
   object_property: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
-  object_method: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
-  object_getter: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
-  object_setter: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
   object_spread: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
   function_expr: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
   arrow_function: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
   spread: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
-  await_expr: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
-  yield_expr: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
-  sequence_expr: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
-  comma_expr: { disposition: "trusted", reason: "typed expression lowering remains in the compiler and VM TCB; bytecode verification checks its stack contract" },
   match_expr: { disposition: "trusted", reason: "match-pattern elaboration remains in the checker TCB and lowers to ordinary core tests and bindings" },
   match_arm: { disposition: "trusted", reason: "match-pattern elaboration remains in the checker TCB and lowers to ordinary core tests and bindings" },
   match_pattern: { disposition: "trusted", reason: "match-pattern elaboration remains in the checker TCB and lowers to ordinary core tests and bindings" },
@@ -54,38 +46,19 @@ export const nodeAssurance = {
   expr_stmt: { disposition: "trusted", reason: "control-flow lowering remains in the compiler and VM TCB; bytecode verification checks targets and stack joins" },
   var_decl: { disposition: "trusted", reason: "control-flow lowering remains in the compiler and VM TCB; bytecode verification checks targets and stack joins" },
   if_stmt: { disposition: "specified", reason: "executable denotation and lowering rule" },
-  for_stmt: { disposition: "trusted", reason: "control-flow lowering remains in the compiler and VM TCB; bytecode verification checks targets and stack joins" },
   for_of_stmt: { disposition: "trusted", reason: "control-flow lowering remains in the compiler and VM TCB; bytecode verification checks targets and stack joins" },
-  for_in_stmt: { disposition: "trusted", reason: "control-flow lowering remains in the compiler and VM TCB; bytecode verification checks targets and stack joins" },
-  while_stmt: { disposition: "trusted", reason: "control-flow lowering remains in the compiler and VM TCB; bytecode verification checks targets and stack joins" },
-  do_while_stmt: { disposition: "trusted", reason: "control-flow lowering remains in the compiler and VM TCB; bytecode verification checks targets and stack joins" },
-  switch_stmt: { disposition: "trusted", reason: "control-flow lowering remains in the compiler and VM TCB; bytecode verification checks targets and stack joins" },
-  case_clause: { disposition: "trusted", reason: "control-flow lowering remains in the compiler and VM TCB; bytecode verification checks targets and stack joins" },
   return_stmt: { disposition: "specified", reason: "executable denotation and lowering rule" },
   assert_stmt: { disposition: "trusted", reason: "control-flow lowering remains in the compiler and VM TCB; bytecode verification checks targets and stack joins" },
-  throw_stmt: { disposition: "trusted", reason: "control-flow lowering remains in the compiler and VM TCB; bytecode verification checks targets and stack joins" },
   break_stmt: { disposition: "trusted", reason: "control-flow lowering remains in the compiler and VM TCB; bytecode verification checks targets and stack joins" },
   continue_stmt: { disposition: "trusted", reason: "control-flow lowering remains in the compiler and VM TCB; bytecode verification checks targets and stack joins" },
-  try_stmt: { disposition: "trusted", reason: "control-flow lowering remains in the compiler and VM TCB; bytecode verification checks targets and stack joins" },
   block: { disposition: "specified", reason: "executable denotation and lowering rule" },
-  labeled_stmt: { disposition: "trusted", reason: "control-flow lowering remains in the compiler and VM TCB; bytecode verification checks targets and stack joins" },
   function_decl: { disposition: "trusted", reason: "binding and module lowering remain in the compiler TCB; static resolution and bytecode verification guard the boundary" },
   array_pattern: { disposition: "trusted", reason: "match-pattern elaboration remains in the checker TCB and lowers to ordinary core tests and bindings" },
   pattern_element: { disposition: "trusted", reason: "match-pattern elaboration remains in the checker TCB and lowers to ordinary core tests and bindings" },
-  pattern_rest: { disposition: "trusted", reason: "match-pattern elaboration remains in the checker TCB and lowers to ordinary core tests and bindings" },
-  pattern_default: { disposition: "trusted", reason: "match-pattern elaboration remains in the checker TCB and lowers to ordinary core tests and bindings" },
   import_decl: { disposition: "trusted", reason: "binding and module lowering remain in the compiler TCB; static resolution and bytecode verification guard the boundary" },
   import_specifier: { disposition: "trusted", reason: "binding and module lowering remain in the compiler TCB; static resolution and bytecode verification guard the boundary" },
-  import_default: { disposition: "trusted", reason: "binding and module lowering remain in the compiler TCB; static resolution and bytecode verification guard the boundary" },
-  import_namespace: { disposition: "trusted", reason: "binding and module lowering remain in the compiler TCB; static resolution and bytecode verification guard the boundary" },
   export_decl: { disposition: "trusted", reason: "binding and module lowering remain in the compiler TCB; static resolution and bytecode verification guard the boundary" },
-  export_specifier: { disposition: "trusted", reason: "binding and module lowering remain in the compiler TCB; static resolution and bytecode verification guard the boundary" },
-  export_default: { disposition: "trusted", reason: "binding and module lowering remain in the compiler TCB; static resolution and bytecode verification guard the boundary" },
-  export_all: { disposition: "trusted", reason: "binding and module lowering remain in the compiler TCB; static resolution and bytecode verification guard the boundary" },
   program: { disposition: "trusted", reason: "parser-only structural container with no independent runtime denotation" },
-  param_list: { disposition: "trusted", reason: "parser-only structural container with no independent runtime denotation" },
-  arg_list: { disposition: "trusted", reason: "parser-only structural container with no independent runtime denotation" },
-  stmt_list: { disposition: "trusted", reason: "parser-only structural container with no independent runtime denotation" },
 } as const;
 
 export const opcodeAssurance = {

@@ -325,3 +325,49 @@ I compared the two binaries with 101 interleaved rounds. A base-against-base con
 The slowdown starts at L3e, `442c5c5a`. Each earlier commit stays within about 2% of base, and L3e shows `propertyAccess` -5.26%. Reverting the two lines of L3e in `doCall` at HEAD does not recover it. Restoring only the unused field `cached_handler_arg_count: u8` in `HandlerInstance` at HEAD recovers it: `propertyAccess` is 4.05% above HEAD and 1.15% below base. So the cause is the memory layout of `HandlerInstance`, with no new work per operation. I did not find which field moved. The check is a test of offsets in `HandlerInstance` against the cache line that the interpreter reads.
 
 Decision: the field stays removed. The move is inside the 8% gate, and a padding field would keep an accidental layout. The next field change in this struct can move the number again.
+
+## L6
+
+Status: complete. `NodeTag` now has 42 members. The 27 unproduced members and the seven builders `addCase`, `addLabeled`, `addLoop`, `addMethodProperty`, `addSequence`, `addSwitch`, and `addTry` are gone, with `LoopStmt`, `SwitchStmt`, `CaseClause`, `TryStmt`, `LabeledStmt`, `getLoop`, `getSwitchStmt`, `getCaseClause`, `getTryBlocks`, `getLabeledBody`, and `emitForLoop`. `Opcode` did not change, and `opcodeTableHash` did not move.
+
+Moved hashes, from `docs/spec/semantics.spec.ts`:
+
+| Hash | Old | New |
+|---|---|---|
+| `semanticsHash` | `83b822bd0dee8e5f9a9231501f0f95b34fa48a0f08c671ade7a8bee822b877b8` | `6f6f17bc48a511f2ca4376829f4b2b2c11560b63d75299d00e7811e31d2a09f6` |
+| `irTableHash` | `78e7a99405de0a7f01baec7a599af5221c540b0b8045340e596fe48d226383f3` | `f4e38e19dc66e224b66e8277811f685eb1222e20dc3fca55e4a8c83c527730ba` |
+
+`zts meta --json` is identical, because it does not print `semanticsHash`. The plan expected a meta change from L6 on, and that was wrong.
+
+The comparison script moved 339 rows. To test that only the hash moved, I ran the base and L6 binaries over the same 648 inputs with both hash values masked in every output file. That comparison moved only the 12 rows that earlier units moved. So each other moved row differs only by the hash value.
+
+The plan listed two hash pins. There are three, because its simulation ran `test-zts` only and not `test-cli`:
+
+| Test | File | Pin |
+|---|---|---|
+| `direct single-module full and sound extraction preserve contract bytes` | `typed_frontend_tests.zig` | 8 contract digests |
+| `explicit omitted selection preserves native ABI holes and hides authored signatures` | `pipeline_tests.zig` | 2 digests |
+| `direct source contracts preserve certificate bytes and proof IR` | `packages/runtime/src/build_command.zig` | 1 contract digest and 2 certificate digests. The certificate takes the contract digest as an input, and its length does not change |
+
+Each one hashes contract JSON that embeds `semanticsHash`, or a certificate built from that digest. Other tests that named the node count moved from 69 to 42: `expected_nodes` in `semantics.zig`, `spec-check renderers aggregate structural and corpus failures` in `semantics_cli.zig`, and the test below.
+
+`surface.sh` moved on `zts spec-check --help`, `zts spec-hash --help`, and `zts spec-render --help`. Those verbs ignore `--help` and run, so they print the hash and the node count. Their other output is the same. The surface baseline is now the L6 output.
+
+Changes that the unit did not name, each reviewed:
+
+| Change | Reason |
+|---|---|
+| `TagPlan.refused_by_parser` left `flow_rules.zig`, and the census test lost its counter | Each tag in the variant left. `Owner.refused_by_parser` stays |
+| `flow_interp.zig` has `unknown_tag = .program` in place of `.stmt_list` as the fallback for a node index with no tag | I read each switch on that value. None has a `.program` arm, and `tagPlan(.program)` is `.not_produced`, the same as `.stmt_list`. No accepted source reaches it |
+| `execForOf` records `.for_of_stmt` when `is_for_in` is set | The `for_in_stmt` tag left. The test `a for_of_stmt marked for-in is refused` follows. The parser never sets the flag |
+| `parse.zig` uses a local `PropertyKind` | `.object_getter` and `.object_setter` were local markers that chose an error message. The messages are the same |
+| The `unmodeled` arm of `ir_identity.zig` left, and `the constructs the unmodeled arm names cannot reach this file` is now `the parser refuses the removed statement forms before a tree exists` | Each tag in the arm left. `.unmodeled` keeps a producer for a re-export. The four refused sources are the same |
+| Two `tag == .for_of_stmt` guards in `type_checker.zig` left | The arm has one tag now |
+
+Tests that left with their tags, all hand-built in `parser/ir.zig`: `expressionChildren of a loop reads init condition update and body in source order`, `expressionChildren of a for-in are the iterable then the body`, `expressionChildren of a switch and its case clauses read the test and the body list`, `expressionChildren of try and labeled statements reads the blocks and the body`, and `expressionChildren of an export specifier is its declaration word only`. Each one held a visitor row for a tag that no source can produce. Five others lost only their rows for removed tags. `expressionChildren of an object method yields a non-string key before the value` is now `expressionChildren of an object property yields a non-string key before the value`.
+
+Omission that I corrected here: the feature map requires `smoke-v1`, `smoke-getting-started`, and `test-examples` at each L5 unit. I ran `test-examples` at L5b only. This gate ran all three on the L5 and L6 tree, and they passed. No result exists for the separate L5 commits.
+
+`docs/convergence.json` and `docs/coverage.json` hold the old `semanticsHash` until the next release republish, as the plan expects.
+
+`zig build bench-check -Doptimize=ReleaseFast` exited 0 at load 2.7: 9 benchmarks, 1.17% geomean regression. So the L5 failure came from host load.

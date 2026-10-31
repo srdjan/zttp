@@ -1173,14 +1173,14 @@ pub const TypeChecker = struct {
                 }
             },
 
-            .for_of_stmt, .for_in_stmt => {
+            .for_of_stmt => {
                 const fi = self.ir_view.getForIter(node) orelse return;
                 self.walkExpr(fi.iterable);
-                if (tag == .for_of_stmt) self.recordAbsentReceiver(node, fi.iterable);
+                self.recordAbsentReceiver(node, fi.iterable);
                 // The element variable of `for (const x of xs)` takes the element
                 // type of an array iterable. Without it the variable had no type
                 // and a boolean read of it was refused.
-                if (tag == .for_of_stmt) self.bindForOfElement(fi);
+                self.bindForOfElement(fi);
                 // Kill rule 4. A narrowing established before the loop is only
                 // valid inside it if the body never reassigns the binding, and
                 // a narrowing established inside the body does not survive the
@@ -1192,20 +1192,6 @@ pub const TypeChecker = struct {
                 const body_mark = self.beginNarrowScope();
                 self.walkStmt(fi.body);
                 self.applyKills(self.endNarrowScope(body_mark));
-            },
-
-            .switch_stmt => {
-                const sw = self.ir_view.getSwitchStmt(node) orelse return;
-                self.walkExpr(sw.discriminant);
-                for (0..sw.cases_count) |i| {
-                    const case_idx = self.ir_view.getListIndex(sw.cases_start, @intCast(i));
-                    const cc = self.ir_view.getCaseClause(case_idx) orelse continue;
-                    if (cc.test_expr != null_node) self.walkExpr(cc.test_expr);
-                    for (0..cc.body_count) |j| {
-                        const body_stmt = self.ir_view.getListIndex(cc.body_start, @intCast(j));
-                        self.walkStmt(body_stmt);
-                    }
-                }
             },
 
             .function_decl => {
@@ -1252,12 +1238,6 @@ pub const TypeChecker = struct {
                 self.current_return_type = saved_return;
             },
 
-            .export_default => {
-                if (self.ir_view.getOptValue(node)) |val| {
-                    self.walkStmt(val);
-                }
-            },
-
             .export_decl => {
                 const export_decl = self.ir_view.getExportDecl(node) orelse return;
                 self.walkStmt(export_decl.declaration);
@@ -1267,7 +1247,6 @@ pub const TypeChecker = struct {
             .unary_op,
             .ternary,
             .call,
-            .method_call,
             .assignment,
             .match_expr,
             => {
@@ -1371,21 +1350,6 @@ pub const TypeChecker = struct {
                 const else_kills = self.endNarrowScope(else_mark);
                 self.applyKills(then_kills);
                 self.applyKills(else_kills);
-            },
-
-            .method_call => {
-                const mc = self.ir_view.getCall(node) orelse return;
-                self.walkExpr(mc.callee);
-                self.bindCallbackElement(mc);
-                if (self.closure_writes_outer) {
-                    self.walkCallArgsThenKill(node, mc);
-                    return;
-                }
-                self.checkCallArgs(node, mc);
-                for (0..mc.args_count) |i| {
-                    const arg = self.ir_view.getListIndex(mc.args_start, @intCast(i));
-                    self.walkExpr(arg);
-                }
             },
 
             .assignment => {
@@ -3694,7 +3658,7 @@ pub const TypeChecker = struct {
                     self.markPatternBindingsOpaque(element, depth + 1);
                 }
             },
-            .pattern_element, .pattern_rest, .pattern_default => {
+            .pattern_element => {
                 const elem = self.ir_view.getPatternElem(pattern) orelse return;
                 self.markOpaqueBinding(elem.binding);
             },
@@ -4025,7 +3989,7 @@ pub const TypeChecker = struct {
                 if (branches == null_type_idx or covered or self.returnsOnEveryPath(node)) return branches;
                 return self.joinReturnType(branches, self.env.pool.idx_undefined);
             },
-            .for_of_stmt, .for_in_stmt => {
+            .for_of_stmt => {
                 const fi = self.ir_view.getForIter(node) orelse return null_type_idx;
                 const body_type = self.bodyReturnTypeIn(fi.body, depth + 1, true);
                 if (body_type == null_type_idx or covered) return body_type;

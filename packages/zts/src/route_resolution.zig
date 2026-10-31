@@ -538,7 +538,7 @@ pub const Resolver = struct {
                         if (assignment.target == child and assignment.value != child) continue;
                         return true;
                     },
-                    .call, .method_call => {
+                    .call => {
                         const call = self.ir_view.getCall(parent) orelse return true;
                         if (call.callee == child) return true;
                         if (!self.nodeIsBinding(child, key)) return true;
@@ -557,21 +557,16 @@ pub const Resolver = struct {
                         return true;
                     },
                     // The result of a comparison, arithmetic, or unary
-                    // operator is a primitive. A logical operator, a
-                    // conditional, and a sequence yield an operand, so the
-                    // question moves to their own parent, which is visited as
-                    // a parent of this node.
-                    .binary_op, .unary_op, .ternary, .sequence_expr, .comma_expr => continue,
+                    // operator is a primitive. A logical operator and a
+                    // conditional yield an operand, so the question moves to
+                    // their own parent, which is visited as a parent of this
+                    // node.
+                    .binary_op, .unary_op, .ternary => continue,
                     // The value is dropped.
                     .expr_stmt => continue,
                     .if_stmt => {
                         const stmt = self.ir_view.getIfStmt(parent) orelse return true;
                         if (stmt.condition == child) continue;
-                        return true;
-                    },
-                    .while_stmt, .for_stmt, .do_while_stmt => {
-                        const loop = self.ir_view.getLoop(parent) orelse return true;
-                        if (loop.condition == child) continue;
                         return true;
                     },
                     .assert_stmt => {
@@ -619,14 +614,6 @@ pub const Resolver = struct {
                 return self.valueMayBeBinding(ternary.then_branch, key, depth + 1) or
                     self.valueMayBeBinding(ternary.else_branch, key, depth + 1);
             },
-            .sequence_expr, .comma_expr => {
-                const array = self.ir_view.getArray(node) orelse return true;
-                for (0..array.elements_count) |index| {
-                    const element = self.ir_view.getListIndex(array.elements_start, @intCast(index));
-                    if (self.valueMayBeBinding(element, key, depth + 1)) return true;
-                }
-                return false;
-            },
             // exhaustive: a call result, a member read, and the other shapes
             // build or fetch a different value, never the table itself. A call
             // argument that is the table is checked at the call.
@@ -656,7 +643,7 @@ pub const Resolver = struct {
         for (0..self.ir_view.nodeCount()) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
             const tag = self.ir_view.getTag(idx) orelse continue;
-            if (tag != .call and tag != .method_call) continue;
+            if (tag != .call) continue;
             const nested_call = self.ir_view.getCall(idx) orelse return false;
             // A method call on the parameter may mutate it. An untracked
             // receiver root cannot be this parameter, so it does not count here.

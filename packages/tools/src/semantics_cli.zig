@@ -263,7 +263,7 @@ test "spec-check renderers aggregate structural and corpus failures" {
     defer json.deinit(allocator);
     try writeSpecCheckJson(allocator, &json, report);
     try std.testing.expect(std.mem.indexOf(u8, json.items, "\"ok\":false") != null);
-    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"classified\":69,\"reachable\":69") != null);
+    try std.testing.expect(std.mem.indexOf(u8, json.items, "\"classified\":42,\"reachable\":42") != null);
     try std.testing.expect(std.mem.indexOf(u8, json.items, "\"classified\":127,\"reachable\":127") != null);
     try std.testing.expect(std.mem.indexOf(u8, json.items, "\"where\":\"binary_op\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, json.items, "\"where\":\"unary_op\"") != null);
@@ -271,7 +271,7 @@ test "spec-check renderers aggregate structural and corpus failures" {
     var text: std.ArrayList(u8) = .empty;
     defer text.deinit(allocator);
     try writeSpecCheckText(allocator, &text, report);
-    try std.testing.expect(std.mem.indexOf(u8, text.items, "nodes classified:  69/69 reachable") != null);
+    try std.testing.expect(std.mem.indexOf(u8, text.items, "nodes classified:  42/42 reachable") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.items, "opcodes classified:127/127 reachable") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.items, "FAIL (2 divergence)") != null);
     try std.testing.expect(std.mem.indexOf(u8, text.items, "binary_op: lowering mismatch") != null);

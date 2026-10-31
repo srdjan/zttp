@@ -746,7 +746,7 @@ pub const PathGenerator = struct {
         for (0..ir_view.nodeCount()) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
             const tag = ir_view.getTag(idx) orelse continue;
-            if (tag != .call and tag != .method_call) continue;
+            if (tag != .call) continue;
             const call = ir_view.getCall(idx) orelse return error.InvalidIR;
             try callees.put(allocator, call.callee, {});
             const meta = calleeMeta(ir_view, bindings, call.callee) orelse continue;
@@ -935,7 +935,7 @@ pub const PathGenerator = struct {
         for (0..self.ir_view.nodeCount()) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
             const tag = self.ir_view.getTag(idx) orelse continue;
-            if (tag != .call and tag != .method_call) continue;
+            if (tag != .call) continue;
             const call = self.ir_view.getCall(idx) orelse return error.InvalidIR;
             var targets = try resolver.resolveDispatch(self.allocator, call.callee) orelse continue;
             defer targets.deinit(self.allocator);
@@ -1567,30 +1567,8 @@ pub const PathGenerator = struct {
                 try self.walkPaths(fi.body);
             },
 
-            .switch_stmt => {
-                const sw = self.ir_view.getSwitchStmt(node) orelse return;
-                // The discriminant runs once, before any case.
-                try self.trackModuleCall(sw.discriminant, null);
-                for (0..sw.cases_count) |i| {
-                    const case_idx = self.ir_view.getListIndex(sw.cases_start, @intCast(i));
-                    const cc = self.ir_view.getCaseClause(case_idx) orelse continue;
-                    const saved = self.constraints.items.len;
-                    const saved_io = self.io_seq.items.len;
-                    const case_block = Node.BlockData{ .stmts_start = cc.body_start, .stmts_count = cc.body_count, .scope_id = 0 };
-                    try self.walkBlock(case_block);
-                    self.constraints.shrinkRetainingCapacity(saved);
-                    self.io_seq.shrinkRetainingCapacity(saved_io);
-                }
-            },
-
             .function_decl, .function_expr, .arrow_function => {
                 // Don't recurse into nested function definitions
-            },
-
-            .export_default => {
-                if (self.ir_view.getOptValue(node)) |val| {
-                    try self.walkPaths(val);
-                }
             },
 
             // An `assert` that is not a statement of a block reaches here: the
@@ -1890,7 +1868,7 @@ pub const PathGenerator = struct {
             const arm_idx = self.ir_view.getListIndex(match_data.arms_start, i);
             const arm = self.ir_view.getMatchArm(arm_idx) orelse continue;
             if (self.ir_view.getTag(arm.body)) |tag| {
-                if (tag == .call or tag == .method_call) {
+                if (tag == .call) {
                     if (self.ir_view.getCall(arm.body)) |call| {
                         if (self.responseHelperName(call.callee) != null) return true;
                     }
@@ -2591,7 +2569,7 @@ pub const PathGenerator = struct {
             else => {},
         }
 
-        const is_call = tag == .call or tag == .method_call;
+        const is_call = tag == .call;
         const callee: NodeIndex = if (is_call)
             (if (self.ir_view.getCall(node)) |call| call.callee else null_node)
         else
@@ -2716,7 +2694,7 @@ pub const PathGenerator = struct {
                     const found = body orelse continue;
                     try self.named_fns.put(self.allocator, vd.binding.name_atom, .{ .function = found });
                 },
-                .for_of_stmt, .for_in_stmt => {
+                .for_of_stmt => {
                     const fi = self.ir_view.getForIter(node) orelse continue;
                     try bumpBinder(self.allocator, &binders, fi.binding.name_atom);
                 },
@@ -2836,7 +2814,7 @@ pub const PathGenerator = struct {
     /// Returns an owned slice. Caller frees.
     fn computeArgSignature(self: *const PathGenerator, allocator: std.mem.Allocator, call_node: NodeIndex) !?[]const u8 {
         const tag = self.ir_view.getTag(call_node) orelse return null;
-        if (tag != .call and tag != .method_call) return null;
+        if (tag != .call) return null;
         const call = self.ir_view.getCall(call_node) orelse return null;
 
         var buf: std.ArrayList(u8) = .empty;
@@ -2926,7 +2904,7 @@ pub const PathGenerator = struct {
             const arm_body = self.bound_arms.get(packBindingKey(binding.scope_id, binding.slot)) orelse return .unknown;
             return self.extractExprStatus(arm_body);
         }
-        if (ret_tag != .call and ret_tag != .method_call) return .unknown;
+        if (ret_tag != .call) return .unknown;
         const call = self.ir_view.getCall(ret_val) orelse return .unknown;
         const helper = self.responseHelperName(call.callee) orelse return .unknown;
 
@@ -3456,7 +3434,7 @@ pub const PathGenerator = struct {
         const tag = self.ir_view.getTag(iterable) orelse return null;
         switch (tag) {
             .array_literal => return self.arrayLiteralCount(iterable),
-            .call, .method_call => {
+            .call => {
                 if (self.rangeCallCount(iterable)) |count| return count;
                 if (self.sliceCallCeiling(iterable)) |count| return count;
                 if (self.objectKeysLiteralCount(iterable)) |count| return count;
@@ -3645,7 +3623,7 @@ pub const PathGenerator = struct {
             const prop_idx = self.ir_view.getListIndex(obj.properties_start, i);
             const prop_tag = self.ir_view.getTag(prop_idx) orelse return null;
             switch (prop_tag) {
-                .object_property, .object_method, .object_getter, .object_setter => count += 1,
+                .object_property => count += 1,
                 // exhaustive: a property kind other than a plain member makes the key count unknown, so the loop bound stays symbolic.
                 else => return null,
             }

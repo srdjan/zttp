@@ -233,7 +233,6 @@ pub fn functionAlwaysReturns(ir_view: IrView, body: NodeIndex) bool {
         .unary_op,
         .ternary,
         .call,
-        .method_call,
         .member_access,
         .computed_access,
         .optional_chain,
@@ -242,23 +241,16 @@ pub fn functionAlwaysReturns(ir_view: IrView, body: NodeIndex) bool {
         .object_literal,
         .function_expr,
         .arrow_function,
-        .await_expr,
-        .yield_expr,
-        .sequence_expr,
-        .comma_expr,
         .match_expr,
         => true,
 
         // Every remaining tag: a statement other than the three handled above,
         // a declaration, a pattern, a module form, or a sub-node that is never
         // a function body on its own (an object member, a spread, a match arm
-        // or pattern, a list marker). None of them return on every path, and
+        // or pattern). None of them return on every path, and
         // for the sub-nodes `false` is the fail-closed answer to a shape that
         // should not have reached here at all.
         .object_property,
-        .object_method,
-        .object_getter,
-        .object_setter,
         .object_spread,
         .spread,
         .match_arm,
@@ -266,35 +258,16 @@ pub fn functionAlwaysReturns(ir_view: IrView, body: NodeIndex) bool {
         .match_type_test,
         .expr_stmt,
         .var_decl,
-        .for_stmt,
         .for_of_stmt,
-        .for_in_stmt,
-        .while_stmt,
-        .do_while_stmt,
-        .switch_stmt,
-        .case_clause,
         .assert_stmt,
-        .throw_stmt,
         .break_stmt,
         .continue_stmt,
-        .try_stmt,
-        .labeled_stmt,
         .function_decl,
         .array_pattern,
         .pattern_element,
-        .pattern_rest,
-        .pattern_default,
         .import_decl,
         .import_specifier,
-        .import_default,
-        .import_namespace,
         .export_decl,
-        .export_specifier,
-        .export_default,
-        .export_all,
-        .param_list,
-        .arg_list,
-        .stmt_list,
         => false,
     };
 }
@@ -712,7 +685,7 @@ pub const HandlerVerifier = struct {
         for (0..self.ir_view.nodeCount()) |idx_usize| {
             const idx: NodeIndex = @intCast(idx_usize);
             const tag = self.ir_view.getTag(idx) orelse continue;
-            if (tag != .call and tag != .method_call) continue;
+            if (tag != .call) continue;
             const call = self.ir_view.getCall(idx) orelse continue;
             var targets = (try resolver.resolveDispatch(self.allocator, call.callee)) orelse continue;
             defer targets.deinit(self.allocator);
@@ -1117,26 +1090,16 @@ pub const HandlerVerifier = struct {
             .expr_stmt,
             .var_decl,
             .if_stmt,
-            .for_stmt,
             .for_of_stmt,
-            .for_in_stmt,
-            .while_stmt,
-            .do_while_stmt,
-            .switch_stmt,
-            .case_clause,
             .return_stmt,
             .assert_stmt,
-            .throw_stmt,
             .break_stmt,
             .continue_stmt,
-            .try_stmt,
             .block,
-            .labeled_stmt,
             .function_decl,
             .import_decl,
             .export_decl,
             .program,
-            .stmt_list,
             => true,
             // exhaustive: every other tag is an expression, a pattern, or a leaf. Those
             // belong to the expression walk, which descends through the same child map.
@@ -1215,7 +1178,7 @@ pub const HandlerVerifier = struct {
                 const unary = self.ir_view.getUnary(node) orelse return;
                 self.walkExprForRefs(unary.operand);
             },
-            .call, .method_call => {
+            .call => {
                 const call = self.ir_view.getCall(node) orelse return;
                 self.walkExprForRefs(call.callee);
                 var i: u8 = 0;
@@ -1439,7 +1402,7 @@ pub const HandlerVerifier = struct {
     /// expression.
     fn resultCallee(self: *HandlerVerifier, node: NodeIndex) ?ResultCallee {
         const tag = self.ir_view.getTag(node) orelse return null;
-        if (tag != .call and tag != .method_call) return null;
+        if (tag != .call) return null;
         const call = self.ir_view.getCall(node) orelse return null;
         if (self.resultGlobalName(call.callee)) |name| {
             return .{ .func = null, .module_name = null, .func_name = name };
@@ -1646,16 +1609,9 @@ pub const HandlerVerifier = struct {
                 self.walkResultExpr(operand, if (self.result_flat) .other else .discard, 0);
             },
             .if_stmt => self.walkResultIf(node),
-            .for_of_stmt, .for_in_stmt => {
+            .for_of_stmt => {
                 const loop = self.ir_view.getForIter(node) orelse return;
                 self.walkResultExpr(loop.iterable, .other, 0);
-                self.walkResultScoped(loop.body);
-            },
-            .for_stmt, .while_stmt, .do_while_stmt => {
-                const loop = self.ir_view.getLoop(node) orelse return;
-                self.walkResultChild(loop.init, 0);
-                self.walkResultChild(loop.condition, 0);
-                self.walkResultChild(loop.update, 0);
                 self.walkResultScoped(loop.body);
             },
             .return_stmt => {
@@ -1777,7 +1733,7 @@ pub const HandlerVerifier = struct {
                 self.walkResultExpr(binary.left, left, depth + 1);
                 self.walkResultExpr(binary.right, .other, depth + 1);
             },
-            .call, .method_call => self.walkResultCall(node, position, depth),
+            .call => self.walkResultCall(node, position, depth),
             // exhaustive: every other expression passes no Result safely, so
             // each child is a use in an unmodelled position.
             else => {
@@ -2136,7 +2092,7 @@ pub const HandlerVerifier = struct {
     /// Check if a call expression calls an optional-producing function.
     fn isOptionalProducingCall(self: *HandlerVerifier, node: NodeIndex) ?OptionalKind {
         const call_tag = self.ir_view.getTag(node) orelse return null;
-        if (call_tag != .call and call_tag != .method_call) return null;
+        if (call_tag != .call) return null;
 
         const call = self.ir_view.getCall(node) orelse return null;
         const callee_tag = self.ir_view.getTag(call.callee) orelse return null;

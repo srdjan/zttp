@@ -238,9 +238,9 @@ const Comparer = struct {
             // above is the whole comparison.
             .lit_null, .lit_undefined => return .identical,
             // The parser's only construction site for either sets the label to
-            // null, and `labeled_stmt` is unmodeled below, so there is no label
-            // to compare. Measured, not assumed: parse.zig builds `break_stmt`
-            // and `continue_stmt` with `.opt_label = null` and nothing else.
+            // null, so there is no label to compare. Measured, not assumed:
+            // parse.zig builds `break_stmt` and `continue_stmt` with
+            // `.opt_label = null` and nothing else.
             .break_stmt, .continue_stmt => return .identical,
 
             .identifier => return self.bindings(a, b),
@@ -270,7 +270,7 @@ const Comparer = struct {
                     .{ av.else_branch, bv.else_branch },
                 }, depth);
             },
-            .call, .method_call => {
+            .call => {
                 const av = self.left.getCall(a) orelse return payloadMissing();
                 const bv = self.right.getCall(b) orelse return payloadMissing();
                 if (av.args_count != bv.args_count) {
@@ -459,7 +459,7 @@ const Comparer = struct {
                 }
                 return self.lists(av.stmts_start, bv.stmts_start, av.stmts_count, depth);
             },
-            .pattern_element, .pattern_rest => {
+            .pattern_element => {
                 const av = self.left.getPatternElem(a) orelse return payloadMissing();
                 const bv = self.right.getPatternElem(b) orelse return payloadMissing();
                 if (av.kind != bv.kind) {
@@ -522,39 +522,6 @@ const Comparer = struct {
                 if (decl != .identical) return decl;
                 return self.lists(av.specifiers_start, bv.specifiers_start, av.specifiers_count, depth);
             },
-
-            // ---- Not modeled ----
-            //
-            // The first group names constructs the language refuses at parse
-            // time, so a source that parsed carries none of them. The rest are
-            // forms whose payload nothing here has been checked against; each
-            // answers `.unmodeled`, which no caller may read as an equivalence.
-            .await_expr,
-            .yield_expr,
-            .sequence_expr,
-            .comma_expr,
-            .switch_stmt,
-            .case_clause,
-            .for_stmt,
-            .for_in_stmt,
-            .while_stmt,
-            .do_while_stmt,
-            .throw_stmt,
-            .try_stmt,
-            .labeled_stmt,
-            .object_method,
-            .object_getter,
-            .object_setter,
-            .pattern_default,
-            .import_default,
-            .import_namespace,
-            .export_specifier,
-            .export_default,
-            .export_all,
-            .param_list,
-            .arg_list,
-            .stmt_list,
-            => return .{ .unmodeled = a_tag },
         }
     }
 
@@ -714,20 +681,10 @@ test "a source that does not parse names its own side" {
     try testing.expectEqual(Side.repaired, right.unparsable);
 }
 
-test "the constructs the unmodeled arm names cannot reach this file" {
-    // What the unmodeled arm rests on, checked rather than asserted in prose:
-    // the parser refuses these before a tree exists, so `compare` answers
-    // `unparsable` and never has to decide them. That is the property worth
-    // pinning. It replaces a version of this test that walked
-    // `std.enums.values(NodeTag)` against a hand-copied duplicate of the arm's
-    // 32 tags and asserted the copy's own length - which held whatever the
-    // implementation did, including after a tag moved out of the arm.
-    //
-    // A behavioural check of the arm itself is not available: every tag in it
-    // is either refused here or, like JSX, needs a strip mode `compare` does
-    // not use, so no source reaches it. The arm is the answer for a tag that
-    // becomes reachable later, and `nodes` stays exhaustive with no `else` so
-    // that a new tag has to be classified rather than defaulting.
+test "the parser refuses the removed statement forms before a tree exists" {
+    // The parser refuses these before a tree exists, so `compare` answers
+    // `unparsable` and never has to decide them. `nodes` stays exhaustive with
+    // no `else`, so a new tag has to be classified rather than defaulting.
     const refused = [_][]const u8{
         "function f(x: number): number { while (x > 0) { x = x - 1; } return x; }",
         "function f(x: number): number { try { return x; } catch (e) { return 0; } }",
@@ -743,7 +700,7 @@ test "the constructs the unmodeled arm names cannot reach this file" {
     }
 
     // The alphabet pin, read off the enum rather than off a list beside it.
-    try testing.expectEqual(@as(usize, 69), std.enums.values(NodeTag).len);
+    try testing.expectEqual(@as(usize, 42), std.enums.values(NodeTag).len);
 }
 
 /// One source exercising every form a handler is written in, used twice below:

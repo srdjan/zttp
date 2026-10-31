@@ -45,6 +45,10 @@ const packBindingKey = @import("binding_key.zig").packBindingKey;
 
 const tag_count = @typeInfo(NodeTag).@"enum".field_names.len;
 
+/// The tag used for a node index that holds no tag. It matches no rule arm
+/// and the plan for it is `not_produced`.
+const unknown_tag: NodeTag = .program;
+
 /// The default for `FlowInterp.max_steps`.
 const default_max_steps: u32 = 100_000;
 
@@ -635,7 +639,7 @@ pub const FlowInterp = struct {
         var i: u16 = 0;
         while (i < block.stmts_count and st.reachable) : (i += 1) {
             const node = self.ir_view.getListIndex(block.stmts_start, i);
-            switch (self.ir_view.getTag(node) orelse .stmt_list) {
+            switch (self.ir_view.getTag(node) orelse unknown_tag) {
                 .export_decl => {
                     const declaration = self.ir_view.getExportDecl(node) orelse {
                         _ = try self.missing(node);
@@ -643,9 +647,6 @@ pub const FlowInterp = struct {
                     };
                     if (declaration.declaration != null_node) try self.exec(declaration.declaration, st);
                     if (declaration.from_module_idx != 0) try self.record(node, .export_decl, .module_graph_gap);
-                },
-                .export_default => if (self.ir_view.getOptValue(node)) |value| {
-                    _ = try self.eval(value, st);
                 },
                 .import_decl => {
                     const declaration = self.ir_view.getImportDecl(node) orelse continue;
@@ -829,7 +830,7 @@ pub const FlowInterp = struct {
 
         // The accessors read payload words, so the tag is checked first: a
         // node of any other tag would be decoded as a function.
-        const func_tag = self.ir_view.getTag(func) orelse .stmt_list;
+        const func_tag = self.ir_view.getTag(func) orelse unknown_tag;
         const function = (if (func_tag == .function_expr or func_tag == .arrow_function)
             self.ir_view.getFunction(func)
         else if (func_tag == .function_decl)
@@ -862,7 +863,7 @@ pub const FlowInterp = struct {
         var i: usize = 0;
         while (i < function.params_count) : (i += 1) {
             const param_idx = self.ir_view.getListIndex(function.params_start, @intCast(i));
-            const param_tag = self.ir_view.getTag(param_idx) orelse .stmt_list;
+            const param_tag = self.ir_view.getTag(param_idx) orelse unknown_tag;
             const binding = self.ir_view.paramBinding(param_idx) orelse {
                 try self.record(param_idx, param_tag, .refused_by_parser);
                 continue;
@@ -1187,9 +1188,9 @@ pub const FlowInterp = struct {
     }
 
     /// A node the rule needs and the accessor cannot read. The parser does not
-    /// produce this, so it is recorded as an unproduced list tag.
+    /// produce this, so it is recorded under `unknown_tag` as not produced.
     fn missing(self: *FlowInterp, node: NodeIndex) Error!Value {
-        try self.record(node, .stmt_list, .not_produced);
+        try self.record(node, unknown_tag, .not_produced);
         return Value.top;
     }
 
@@ -1352,7 +1353,7 @@ pub const FlowInterp = struct {
                 },
                 // An import or a pattern binding that binds a module name
                 // counts as a declaration and is never a function.
-                .import_specifier, .import_default, .import_namespace => {
+                .import_specifier => {
                     const spec = view.getImportSpec(idx) orelse continue;
                     if (spec.local_binding.kind == .global) {
                         try self.countDeclaration(&declared, spec.local_binding.name_atom, null_node);
@@ -2507,7 +2508,7 @@ pub const FlowInterp = struct {
         };
         const saved = self.enterModule(ref.module);
         defer self.leaveModule(saved);
-        const tag = self.ir_view.getTag(ref.node) orelse .stmt_list;
+        const tag = self.ir_view.getTag(ref.node) orelse unknown_tag;
         const function = (if (tag == .function_expr or tag == .arrow_function)
             self.ir_view.getFunction(ref.node)
         else
@@ -3327,7 +3328,7 @@ pub const FlowInterp = struct {
     fn scheduleArrayItem(self: *FlowInterp, pending: *PendingArray, frames: *std.ArrayList(EvalFrame), current: *NodeIndex) Error!bool {
         if (pending.index >= pending.count) return false;
         const element = self.ir_view.getListIndex(pending.start, pending.index);
-        pending.spread = (self.ir_view.getTag(element) orelse .stmt_list) == .spread;
+        pending.spread = (self.ir_view.getTag(element) orelse unknown_tag) == .spread;
         current.* = if (pending.spread) blk: {
             self.noteVisited(.spread);
             break :blk self.ir_view.getOptValue(element) orelse {
@@ -3342,7 +3343,7 @@ pub const FlowInterp = struct {
     fn scheduleObjectItem(self: *FlowInterp, pending: *PendingObject, frames: *std.ArrayList(EvalFrame), current: *NodeIndex) Error!bool {
         while (pending.index < pending.count) {
             const property = self.ir_view.getListIndex(pending.start, pending.index);
-            const tag = self.ir_view.getTag(property) orelse .stmt_list;
+            const tag = self.ir_view.getTag(property) orelse unknown_tag;
             switch (tag) {
                 .object_property => {
                     self.noteVisited(.object_property);
@@ -3381,7 +3382,7 @@ pub const FlowInterp = struct {
             result.* = try self.missing(node);
             return;
         };
-        const callee_tag = self.ir_view.getTag(call.callee) orelse .stmt_list;
+        const callee_tag = self.ir_view.getTag(call.callee) orelse unknown_tag;
         const pending = try self.mem().create(PendingCall);
         pending.* = .{ .node = node, .call = call, .mode = .ordinary, .state = state, .previous_call_node = self.current_call_node, .previous_callsite = self.root_callsite };
         self.current_call_node = self.functionHandle(node);
@@ -3417,7 +3418,7 @@ pub const FlowInterp = struct {
     fn scheduleCallArg(self: *FlowInterp, pending: *PendingCall, frames: *std.ArrayList(EvalFrame), current: *NodeIndex, result: *?Value) Error!void {
         while (pending.index < pending.call.args_count) {
             const argument = self.ir_view.getListIndex(pending.call.args_start, pending.index);
-            if ((self.ir_view.getTag(argument) orelse .stmt_list) == .spread) {
+            if ((self.ir_view.getTag(argument) orelse unknown_tag) == .spread) {
                 self.noteVisited(.spread);
                 try self.record(argument, .spread, .refused_by_strict);
                 pending.has_spread = true;
@@ -3810,7 +3811,6 @@ pub const FlowInterp = struct {
             .unary_op,
             .ternary,
             .call,
-            .method_call,
             .member_access,
             .computed_access,
             .optional_chain,
@@ -3818,17 +3818,10 @@ pub const FlowInterp = struct {
             .array_literal,
             .object_literal,
             .object_property,
-            .object_method,
-            .object_getter,
-            .object_setter,
             .object_spread,
             .function_expr,
             .arrow_function,
             .spread,
-            .await_expr,
-            .yield_expr,
-            .sequence_expr,
-            .comma_expr,
             .match_expr,
             .match_arm,
             .match_pattern,
@@ -3840,31 +3833,12 @@ pub const FlowInterp = struct {
 
             // The forms the parser refuses, and the structural tags that a
             // parent reads through its accessor.
-            .for_stmt,
-            .for_in_stmt,
-            .while_stmt,
-            .do_while_stmt,
-            .switch_stmt,
-            .case_clause,
-            .throw_stmt,
-            .try_stmt,
-            .labeled_stmt,
             .array_pattern,
             .pattern_element,
-            .pattern_rest,
-            .pattern_default,
             .import_decl,
             .import_specifier,
-            .import_default,
-            .import_namespace,
             .export_decl,
-            .export_specifier,
-            .export_default,
-            .export_all,
             .program,
-            .param_list,
-            .arg_list,
-            .stmt_list,
             => try self.record(node, tag, ownerOf(tag)),
         }
     }
@@ -3915,7 +3889,7 @@ pub const FlowInterp = struct {
         // The parser builds every `for_of_stmt` with `is_for_in` false and
         // refuses `for-in`, whose iteration yields keys and not elements.
         if (loop.is_for_in) {
-            try self.record(node, .for_in_stmt, .refused_by_parser);
+            try self.record(node, .for_of_stmt, .refused_by_parser);
             return;
         }
         const iterable = try self.eval(loop.iterable, st);
@@ -4882,7 +4856,7 @@ test "a for_of_stmt marked for-in is refused" {
     var st: State = .{};
     try interp.exec(node, &st);
     const result = try interp.finish(st);
-    try expectUnresolved(result, .for_in_stmt, .refused_by_parser);
+    try expectUnresolved(result, .for_of_stmt, .refused_by_parser);
 }
 
 test "parameter values are canonicalized and copied" {
@@ -7750,7 +7724,6 @@ test "tagPlan agrees with eval and exec for every tag" {
     }
 
     var handled: usize = 0;
-    var refused: usize = 0;
     var refused_strict: usize = 0;
     var not_produced: usize = 0;
     inline for (@typeInfo(NodeTag).@"enum".field_names) |field| {
@@ -7766,10 +7739,6 @@ test "tagPlan agrees with eval and exec for every tag" {
                     return error.HandledTagNotReached;
                 }
             },
-            .refused_by_parser => {
-                refused += 1;
-                try testing.expect(census.unresolved[index] > 0);
-            },
             .refused_by_strict => {
                 refused_strict += 1;
                 try testing.expect(census.unresolved[index] > 0);
@@ -7780,16 +7749,16 @@ test "tagPlan agrees with eval and exec for every tag" {
             },
         }
     }
-    try testing.expectEqual(tag_count, handled + refused + refused_strict + not_produced);
-    try testing.expect(handled > 0 and refused > 0 and refused_strict > 0 and not_produced > 0);
+    try testing.expectEqual(tag_count, handled + refused_strict + not_produced);
+    try testing.expect(handled > 0 and refused_strict > 0 and not_produced > 0);
     try testing.expect(tagPlan(.array_pattern) == .handled);
     try testing.expect(tagPlan(.spread) == .refused_by_strict);
     inline for (.{ NodeTag.for_of_stmt, NodeTag.break_stmt, NodeTag.continue_stmt, NodeTag.call }) |tag| {
         try testing.expect(tagPlan(tag) == .handled);
     }
     std.debug.print(
-        "flow_interp tagPlan: {d} tags, handled={d} refused_by_parser={d} refused_by_strict={d} not_produced={d}\n",
-        .{ tag_count, handled, refused, refused_strict, not_produced },
+        "flow_interp tagPlan: {d} tags, handled={d} refused_by_strict={d} not_produced={d}\n",
+        .{ tag_count, handled, refused_strict, not_produced },
     );
 }
 

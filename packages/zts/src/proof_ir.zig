@@ -226,7 +226,7 @@ const Lowerer = struct {
         const resolver = self.resolver orelse return null;
         const tag = self.view.getTag(index) orelse return null;
         return switch (tag) {
-            .call, .method_call => resolver.call(index),
+            .call => resolver.call(index),
             // exhaustive: only call nodes can be guarded; any other node is not a guarded call.
             else => null,
         };
@@ -268,16 +268,9 @@ const Lowerer = struct {
                 visit(ctx, self, stmt.then_branch);
                 visit(ctx, self, stmt.else_branch);
             },
-            .for_of_stmt, .for_in_stmt => {
+            .for_of_stmt => {
                 const loop = self.view.getForIter(index) orelse return;
                 visit(ctx, self, loop.iterable);
-                visit(ctx, self, loop.body);
-            },
-            .for_stmt, .while_stmt, .do_while_stmt => {
-                const loop = self.view.getLoop(index) orelse return;
-                visit(ctx, self, loop.init);
-                visit(ctx, self, loop.condition);
-                visit(ctx, self, loop.update);
                 visit(ctx, self, loop.body);
             },
             .return_stmt, .expr_stmt => {
@@ -302,7 +295,7 @@ const Lowerer = struct {
                 visit(ctx, self, ternary.then_branch);
                 visit(ctx, self, ternary.else_branch);
             },
-            .call, .method_call => {
+            .call => {
                 const call = self.view.getCall(index) orelse return;
                 visit(ctx, self, call.callee);
                 for (0..call.args_count) |i| {
@@ -422,7 +415,7 @@ const Lowerer = struct {
 
     fn isResultCall(self: *Lowerer, node: NodeIndex) bool {
         const tag = self.view.getTag(node) orelse return false;
-        if (tag != .call and tag != .method_call) return false;
+        if (tag != .call) return false;
         const call = self.view.getCall(node) orelse return false;
         if (self.isResultGlobal(call.callee)) return true;
         const func = self.builtinExport(call.callee) orelse return false;
@@ -494,7 +487,7 @@ const Lowerer = struct {
         for (0..self.view.nodeCount()) |position| {
             const node: NodeIndex = @intCast(position);
             const tag = self.view.getTag(node) orelse continue;
-            if (tag != .call and tag != .method_call) continue;
+            if (tag != .call) continue;
             const call = self.view.getCall(node) orelse continue;
             const exported = self.builtinExport(call.callee) orelse continue;
             for (0..call.args_count) |index| {
@@ -644,7 +637,7 @@ const Lowerer = struct {
                 try self.emitExpr(out, binary.left, left, depth + 1);
                 try self.emitExpr(out, binary.right, .other, depth + 1);
             },
-            .call, .method_call => try self.emitCall(out, node, position, depth),
+            .call => try self.emitCall(out, node, position, depth),
             else => {
                 var children = self.view.expressionChildren(node);
                 while (children.next()) |child| try self.emitExpr(out, child, .other, depth + 1);
@@ -847,21 +840,11 @@ const Lowerer = struct {
                 try node.children.append(self.allocator, branch);
                 break :blk node;
             },
-            .for_of_stmt, .for_in_stmt => blk: {
+            .for_of_stmt => blk: {
                 const loop = self.view.getForIter(index) orelse break :blk try self.leaf(.loop_node, index, @backingInt(tag));
                 var node = Tree{ .tag = .loop_node, .source = index, .leaf_kind = 0 };
                 errdefer node.deinit(self.allocator);
                 try self.appendGuarded(&node, loop.iterable);
-                try node.children.append(self.allocator, try self.build(loop.body));
-                break :blk node;
-            },
-            .for_stmt, .while_stmt, .do_while_stmt => blk: {
-                const loop = self.view.getLoop(index) orelse break :blk try self.leaf(.loop_node, index, @backingInt(tag));
-                var node = Tree{ .tag = .loop_node, .source = index, .leaf_kind = 0 };
-                errdefer node.deinit(self.allocator);
-                try self.appendGuarded(&node, loop.init);
-                try self.appendGuarded(&node, loop.condition);
-                try self.appendGuarded(&node, loop.update);
                 try node.children.append(self.allocator, try self.build(loop.body));
                 break :blk node;
             },

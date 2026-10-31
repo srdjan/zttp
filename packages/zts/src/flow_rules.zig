@@ -30,9 +30,6 @@ const PathEvidence = flow_value.PathEvidence;
 pub const TagPlan = union(enum) {
     /// A rule exists and resolves the tag in every context the census uses.
     handled,
-    /// The restricted profile refuses the construct, so no accepted program
-    /// holds it.
-    refused_by_parser,
     /// The parser accepts the construct and the strict checker refuses it, so
     /// no checked module holds it. The runtime does not evaluate it as the
     /// source reads, so the evaluator does not follow it either.
@@ -148,7 +145,6 @@ pub const HandlerReport = struct {
 /// putting a tag where it never does, so it reports `not_produced`.
 pub fn ownerOf(tag: NodeTag) Owner {
     return switch (tagPlan(tag)) {
-        .refused_by_parser => .refused_by_parser,
         .refused_by_strict => .refused_by_strict,
         .handled, .not_produced => .not_produced,
     };
@@ -201,39 +197,10 @@ pub fn tagPlan(tag: NodeTag) TagPlan {
         // rule. A call-site spread is the case this plan names.
         .spread => .refused_by_strict,
 
-        .await_expr,
-        .yield_expr,
-        .for_stmt,
-        .for_in_stmt,
-        .while_stmt,
-        .do_while_stmt,
-        .switch_stmt,
-        .case_clause,
-        .throw_stmt,
-        .try_stmt,
-        .labeled_stmt,
-        => .refused_by_parser,
-
-        .method_call,
-        .object_method,
-        .object_getter,
-        .object_setter,
-        .sequence_expr,
-        .comma_expr,
-        .pattern_rest,
-        .pattern_default,
         .import_decl,
         .import_specifier,
-        .import_default,
-        .import_namespace,
         .export_decl,
-        .export_specifier,
-        .export_default,
-        .export_all,
         .program,
-        .param_list,
-        .arg_list,
-        .stmt_list,
         => .not_produced,
     };
 }

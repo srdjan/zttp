@@ -1986,7 +1986,7 @@ pub const ContractBuilder = struct {
                     try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(block.stmts_start, i), request_binding_slot, route);
                 }
             },
-            .expr_stmt, .throw_stmt => {
+            .expr_stmt => {
                 if (self.ir_view.getOptValue(node_idx)) |value_node| {
                     try self.scanFunctionNodeForApiFacts(value_node, request_binding_slot, route);
                 }
@@ -2007,23 +2007,7 @@ pub const ContractBuilder = struct {
                 try self.scanFunctionNodeForApiFacts(if_stmt.then_branch, request_binding_slot, route);
                 try self.scanFunctionNodeForApiFacts(if_stmt.else_branch, request_binding_slot, route);
             },
-            .switch_stmt => {
-                const switch_stmt = self.ir_view.getSwitchStmt(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(switch_stmt.discriminant, request_binding_slot, route);
-                var i: u8 = 0;
-                while (i < switch_stmt.cases_count) : (i += 1) {
-                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(switch_stmt.cases_start, i), request_binding_slot, route);
-                }
-            },
-            .case_clause => {
-                const case_clause = self.ir_view.getCaseClause(node_idx) orelse return;
-                try self.scanFunctionNodeForApiFacts(case_clause.test_expr, request_binding_slot, route);
-                var i: u16 = 0;
-                while (i < case_clause.body_count) : (i += 1) {
-                    try self.scanFunctionNodeForApiFacts(self.ir_view.getListIndex(case_clause.body_start, i), request_binding_slot, route);
-                }
-            },
-            .for_of_stmt, .for_in_stmt => {
+            .for_of_stmt => {
                 const for_iter = self.ir_view.getForIter(node_idx) orelse return;
                 try self.scanFunctionNodeForApiFacts(for_iter.iterable, request_binding_slot, route);
                 try self.scanFunctionNodeForApiFacts(for_iter.body, request_binding_slot, route);
@@ -2072,7 +2056,7 @@ pub const ContractBuilder = struct {
                 try self.scanFunctionNodeForApiFacts(member.object, request_binding_slot, route);
                 try self.scanFunctionNodeForApiFacts(member.computed, request_binding_slot, route);
             },
-            .call, .method_call => {
+            .call => {
                 const call = self.ir_view.getCall(node_idx) orelse return;
                 try self.captureApiHeaderGetter(call, request_binding_slot, route);
                 const callee_tag = self.ir_view.getTag(call.callee) orelse return;

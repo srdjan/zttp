@@ -537,7 +537,7 @@ pub const StrictChecker = struct {
         const tag = self.ir_view.getTag(node) orelse return true;
         return switch (tag) {
             .assignment => false,
-            .call, .method_call => self.isPureModuleCall(node),
+            .call => self.isPureModuleCall(node),
             // A callback's purity is its body's. Answering `true` for every
             // function node - which an `else` arm would do - would make
             // `dictMapValues(d, () => cacheGet(...))` look like a pure
@@ -737,18 +737,10 @@ pub const StrictChecker = struct {
             // anyway; listing them means adding one to the alphabet lands here
             // as a refusal instead of silently as a pass.
             .if_stmt,
-            .for_stmt,
             .for_of_stmt,
-            .for_in_stmt,
-            .while_stmt,
-            .do_while_stmt,
-            .switch_stmt,
             .assert_stmt,
-            .throw_stmt,
             .break_stmt,
             .continue_stmt,
-            .try_stmt,
-            .labeled_stmt,
             .function_decl,
             .import_decl,
             => false,
@@ -861,7 +853,7 @@ pub const StrictChecker = struct {
                 self.walkExpr(ternary.then_branch);
                 self.walkExpr(ternary.else_branch);
             },
-            .call, .method_call => {
+            .call => {
                 self.checkCall(node);
                 self.checkDictIdioms(node);
                 const call = self.ir_view.getCall(node) orelse return;
@@ -1376,7 +1368,7 @@ pub const StrictChecker = struct {
 
     fn isDictEntriesCall(self: *const StrictChecker, node: NodeIndex) bool {
         const tag = self.ir_view.getTag(node) orelse return false;
-        if (tag != .call and tag != .method_call) return false;
+        if (tag != .call) return false;
         const call = self.ir_view.getCall(node) orelse return false;
         return self.importedCollectionsFn(call.callee, "dictEntries");
     }
@@ -1395,7 +1387,7 @@ pub const StrictChecker = struct {
                 const binding = self.ir_view.getBinding(node) orelse return null;
                 return self.entries_derived_bindings.get(bindingKey(binding));
             },
-            .call, .method_call => {
+            .call => {
                 const call = self.ir_view.getCall(node) orelse return null;
                 const callee_tag = self.ir_view.getTag(call.callee) orelse return null;
                 if (callee_tag == .identifier) {
@@ -1553,7 +1545,7 @@ pub const StrictChecker = struct {
     fn isLiveMutationOf(self: *const StrictChecker, node: NodeIndex, target: ir.BindingRef) bool {
         const tag = self.ir_view.getTag(node) orelse return false;
         switch (tag) {
-            .call, .method_call => {
+            .call => {
                 const call = self.ir_view.getCall(node) orelse return false;
                 if (self.ir_view.getTag(call.callee) != .member_access) return false;
                 const member = self.ir_view.getMember(call.callee) orelse return false;
@@ -1857,7 +1849,7 @@ pub const StrictChecker = struct {
         if (node == null_node) return;
         const tag = self.ir_view.getTag(node) orelse return;
         switch (tag) {
-            .call, .method_call => {
+            .call => {
                 const call = self.ir_view.getCall(node) orelse return;
                 self.recordCall(call.callee);
             },

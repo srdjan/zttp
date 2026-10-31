@@ -1181,7 +1181,7 @@ pub const Analyzer = struct {
                 try self.walkBaseExpr(ternary.then_branch, owner, row, seen_users);
                 try self.walkBaseExpr(ternary.else_branch, owner, row, seen_users);
             },
-            .call, .method_call => {
+            .call => {
                 try self.handleCall(node, owner, row, seen_users);
                 const call = self.ir_view.getCall(node) orelse return;
                 // A bare identifier callee was resolved and charged by
@@ -1852,7 +1852,7 @@ pub const Analyzer = struct {
         for (0..node_count) |index| {
             const node: NodeIndex = @intCast(index);
             const tag = self.ir_view.getTag(node) orelse continue;
-            if (tag != .call and tag != .method_call) continue;
+            if (tag != .call) continue;
             const call = self.ir_view.getCall(node) orelse continue;
             const callee_tag = self.ir_view.getTag(call.callee) orelse continue;
             if (callee_tag == .identifier) {
@@ -1892,7 +1892,6 @@ pub const Analyzer = struct {
                     if (func.name_atom == 0) break :blk "an anonymous function";
                     break :blk self.resolveAtomName(func.name_atom) orelse "an anonymous function";
                 },
-                .object_method, .object_getter, .object_setter => "an object method",
                 .identifier => blk: {
                     _ = self.functionValueRef(node, &declared) orelse continue;
                     const binding = self.ir_view.getBinding(node) orelse continue;
@@ -2073,7 +2072,7 @@ pub const Analyzer = struct {
                         .table = decl.init,
                     });
                 },
-                .call, .method_call => {
+                .call => {
                     const call = self.ir_view.getCall(node) orelse continue;
                     if (call.args_count == 0 or !self.isRouterMatchImport(call.callee)) continue;
                     try table_args.put(self.allocator, self.ir_view.getListIndex(call.args_start, 0), {});
@@ -2122,7 +2121,7 @@ pub const Analyzer = struct {
         for (0..self.ir_view.nodeCount()) |index| {
             const node: NodeIndex = @intCast(index);
             const tag = self.ir_view.getTag(node) orelse continue;
-            if (tag != .call and tag != .method_call) continue;
+            if (tag != .call) continue;
             const call = self.ir_view.getCall(node) orelse continue;
             var targets = (try resolver.resolveDispatch(self.allocator, call.callee)) orelse continue;
             defer targets.deinit(self.allocator);
@@ -2628,7 +2627,7 @@ const ContractProjectionBuilder = struct {
                 try stack.append(self.allocator, ternary.then_branch);
                 try stack.append(self.allocator, ternary.else_branch);
             },
-            .call, .method_call => {
+            .call => {
                 try self.includeReachableCallEffects(node, summary, seen_functions, stack);
                 const call = self.ir_view.getCall(node) orelse return;
                 try stack.append(self.allocator, call.callee);

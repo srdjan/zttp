@@ -362,24 +362,10 @@ pub const BoolChecker = struct {
                 }
             },
 
-            .for_of_stmt, .for_in_stmt => {
+            .for_of_stmt => {
                 const fi = self.ir_view.getForIter(node) orelse return;
                 self.walkExpr(fi.iterable);
                 self.walkStmt(fi.body);
-            },
-
-            .switch_stmt => {
-                const sw = self.ir_view.getSwitchStmt(node) orelse return;
-                self.walkExpr(sw.discriminant);
-                for (0..sw.cases_count) |i| {
-                    const case_idx = self.ir_view.getListIndex(sw.cases_start, @intCast(i));
-                    const cc = self.ir_view.getCaseClause(case_idx) orelse continue;
-                    if (cc.test_expr != null_node) self.walkExpr(cc.test_expr);
-                    for (0..cc.body_count) |j| {
-                        const body_stmt = self.ir_view.getListIndex(cc.body_start, @intCast(j));
-                        self.walkStmt(body_stmt);
-                    }
-                }
             },
 
             .function_decl => {
@@ -413,18 +399,11 @@ pub const BoolChecker = struct {
                 self.walkStmt(func.body);
             },
 
-            .export_default => {
-                if (self.ir_view.getOptValue(node)) |val| {
-                    self.walkStmt(val);
-                }
-            },
-
             // Expression-position tags that can appear as statements
             .binary_op,
             .unary_op,
             .ternary,
             .call,
-            .method_call,
             .assignment,
             .match_expr,
             => {
@@ -547,16 +526,6 @@ pub const BoolChecker = struct {
                 self.walkExpr(c.callee);
                 for (0..c.args_count) |i| {
                     const arg = self.ir_view.getListIndex(c.args_start, @intCast(i));
-                    self.walkExpr(arg);
-                }
-            },
-
-            .method_call => {
-                // method_call uses CallExpr layout: callee is the object.method member_access node
-                const mc = self.ir_view.getCall(node) orelse return;
-                self.walkExpr(mc.callee);
-                for (0..mc.args_count) |i| {
-                    const arg = self.ir_view.getListIndex(mc.args_start, @intCast(i));
                     self.walkExpr(arg);
                 }
             },
@@ -711,8 +680,7 @@ pub const BoolChecker = struct {
 
             .member_access => self.inferMemberAccessType(node),
 
-            // Method calls, computed access - cannot determine statically
-            .method_call,
+            // Computed access - cannot determine statically
             .computed_access,
             .optional_chain,
             .spread,

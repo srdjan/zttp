@@ -492,7 +492,7 @@ pub fn flowImportBindingKey(view: IrView, slot: u16) ?u32 {
     for (0..view.nodeCount()) |index| {
         const node: ir_mod.NodeIndex = @intCast(index);
         switch (view.getTag(node) orelse continue) {
-            .import_specifier, .import_default, .import_namespace => {},
+            .import_specifier => {},
             // exhaustive: a node that is not an import specifier cannot bind the slot; no match returns null and the caller raises ImportNotFound.
             else => continue,
         }

@@ -5161,13 +5161,14 @@ pub const Parser = struct {
                     try properties.append(spread_node);
                 } else {
                     // Check for getter/setter
-                    var prop_kind: NodeTag = .object_property;
+                    const PropertyKind = enum { property, getter, setter };
+                    var prop_kind: PropertyKind = .property;
                     if (self.check(.kw_get) and self.peekIsPropertyName()) {
                         self.advance();
-                        prop_kind = .object_getter;
+                        prop_kind = .getter;
                     } else if (self.check(.kw_set) and self.peekIsPropertyName()) {
                         self.advance();
-                        prop_kind = .object_setter;
+                        prop_kind = .setter;
                     }
 
                     // Property key
@@ -5181,7 +5182,7 @@ pub const Parser = struct {
                         self.advance();
 
                         // Check for shorthand { x } or method { x() {} }
-                        if (prop_kind == .object_property and
+                        if (prop_kind == .property and
                             !self.check(.colon) and !self.check(.lparen))
                         {
                             self.errors.addErrorAt(.unsupported_feature, key, "object literal shorthand is not supported; write the field and value explicitly, for example `{ value: value }`");
@@ -5224,11 +5225,11 @@ pub const Parser = struct {
                     // rejected: codegen emits only `.object_property` and
                     // `.object_spread`, so a parsed method was silently
                     // dropped from the object it appeared in.
-                    if (self.check(.lparen) or prop_kind != .object_property) {
+                    if (self.check(.lparen) or prop_kind != .property) {
                         const message = switch (prop_kind) {
-                            .object_getter => "object getters are not supported; use an explicit function call instead",
-                            .object_setter => "object setters are not supported; use an explicit function call instead",
-                            else => "object methods are not supported; use a property holding an arrow function instead",
+                            .getter => "object getters are not supported; use an explicit function call instead",
+                            .setter => "object setters are not supported; use an explicit function call instead",
+                            .property => "object methods are not supported; use a property holding an arrow function instead",
                         };
                         self.errors.addErrorAt(.unsupported_feature, self.current, message);
                         return error.ParseError;
