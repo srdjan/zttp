@@ -409,9 +409,7 @@ test "canonicalize candidates carry a grade and the original span text" {
     try testing.expectEqual(@as(i64, 6), first.get("line").?.integer);
 
     // D3 §5: the v2 candidate carries the typed intent, not a producer-local
-    // string. `canonicalize_let_const` is the v1 name for this row and must not
-    // appear here - shipping it would freeze the third vocabulary into the
-    // protocol, which is the thing item 8 exists to prevent.
+    // string.
     try testing.expectEqualStrings("replace_let_with_const", first.get("intent").?.string);
     try testing.expect(first.get("kind") == null);
 

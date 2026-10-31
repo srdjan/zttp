@@ -26,8 +26,7 @@ pub const RepairIntent = zts.RepairIntent;
 pub const Repair = struct {
     /// The typed intent this rewrite realizes. The span-keyed side has carried
     /// one since it existed; the line-keyed side carried a free string, which is
-    /// what made three vocabularies out of one. They are one enum now, and
-    /// `legacyKind` is the only place the old spelling survives.
+    /// what made three vocabularies out of one. They are one enum now.
     intent: RepairIntent,
     /// Exact diagnostic that authorized this instance. Empty only in tests
     /// that exercise generic span mechanics; a gradable application requires
@@ -63,28 +62,6 @@ pub const Repair = struct {
         freeRepairOwned(allocator, self);
     }
 };
-
-/// The v1 `canonicalize --json` name for an intent.
-///
-/// Five of these differ from the tag by more than spelling -
-/// `canonicalize_arrow_helper` against `replace_arrow_with_function` - which is
-/// why the string field read as a separate vocabulary rather than a rendering
-/// of this one. D3 §6 freezes v1 command shapes, so the names stay on that
-/// surface and nowhere else: the v2 wire publishes the tag, and every internal
-/// comparison is now on the enum.
-///
-/// An intent with no legacy name never reached the line-keyed path, so it has
-/// no v1 spelling to preserve; it renders as its tag.
-pub fn legacyKind(intent: RepairIntent) []const u8 {
-    return switch (intent) {
-        .replace_arrow_with_function => "canonicalize_arrow_helper",
-        .replace_export_arrow_with_function => "canonicalize_export_function",
-        .replace_let_with_const => "canonicalize_let_const",
-        .replace_compound_assign_with_explicit => "canonicalize_compound_assign",
-        .drop_redundant_bool_compare => "canonicalize_redundant_bool_compare",
-        else => @tagName(intent),
-    };
-}
 
 /// The repairs one analysis pass produced for one file. Both builders fill
 /// this: the line-derived rules and the span-derived ones share a list because
@@ -2129,10 +2106,8 @@ pub fn writeJsonWithSimulation(
     try writer.writeAll(",\"refactors\":[");
     for (result.repairs.items, 0..) |r, i| {
         if (i > 0) try writer.writeByte(',');
-        // v1 keeps its spelling. D3 §6 freezes v1 command shapes, so this is
-        // the one surface where the legacy names still appear.
         try writer.writeAll("{\"kind\":");
-        try writeJsonString(writer, legacyKind(r.intent));
+        try writeJsonString(writer, @tagName(r.intent));
         try writer.print(",\"line\":{d},\"column\":{d},\"message\":", .{ r.line, r.column });
         try writeJsonString(writer, r.message);
         try writer.writeAll(",\"replacement\":");
@@ -2366,29 +2341,39 @@ test "writeJson envelope is stable with no refactors" {
     defer parsed.deinit();
 }
 
-test "every rewrite row has a v1 name, and only the renamed five differ" {
-    // The mapping is the whole compatibility surface. Five rows are renamed
-    // and the other two are their own tag; asserting both directions is what
-    // stops a future row from quietly acquiring a sixth legacy name, or a
-    // renamed one from losing its v1 spelling.
-    try std.testing.expectEqualStrings("canonicalize_arrow_helper", legacyKind(.replace_arrow_with_function));
-    try std.testing.expectEqualStrings("canonicalize_export_function", legacyKind(.replace_export_arrow_with_function));
-    try std.testing.expectEqualStrings("canonicalize_let_const", legacyKind(.replace_let_with_const));
-    try std.testing.expectEqualStrings("canonicalize_compound_assign", legacyKind(.replace_compound_assign_with_explicit));
-    try std.testing.expectEqualStrings("canonicalize_redundant_bool_compare", legacyKind(.drop_redundant_bool_compare));
+test "canonicalize json prints the tag name of each repair intent" {
+    const cases = [_]struct { intent: RepairIntent, kind: []const u8 }{
+        .{ .intent = .replace_arrow_with_function, .kind = "replace_arrow_with_function" },
+        .{ .intent = .replace_export_arrow_with_function, .kind = "replace_export_arrow_with_function" },
+        .{ .intent = .replace_let_with_const, .kind = "replace_let_with_const" },
+        .{ .intent = .replace_compound_assign_with_explicit, .kind = "replace_compound_assign_with_explicit" },
+        .{ .intent = .drop_redundant_bool_compare, .kind = "drop_redundant_bool_compare" },
+        .{ .intent = .canonicalize_for_of_const, .kind = "canonicalize_for_of_const" },
+        .{ .intent = .canonicalize_capability_key_alias, .kind = "canonicalize_capability_key_alias" },
+        .{ .intent = .replace_chained_ternary_with_match, .kind = "replace_chained_ternary_with_match" },
+    };
+    for (cases) |case| {
+        var result = Result{ .file = "handler.ts" };
+        defer result.repairs.deinit(std.testing.allocator);
+        try result.repairs.append(std.testing.allocator, .{
+            .intent = case.intent,
+            .line = 1,
+            .column = 1,
+            .replacement = "r",
+            .original = "o",
+        });
 
-    try std.testing.expectEqualStrings("canonicalize_for_of_const", legacyKind(.canonicalize_for_of_const));
-    try std.testing.expectEqualStrings("canonicalize_capability_key_alias", legacyKind(.canonicalize_capability_key_alias));
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(std.testing.allocator);
+        var aw: std.Io.Writer.Allocating = .fromArrayList(std.testing.allocator, &buf);
+        try writeJson(&aw.writer, &result);
+        buf = aw.toArrayList();
 
-    // An intent that never reached the line-keyed path renders as its tag:
-    // there is no v1 output to stay compatible with.
-    try std.testing.expectEqualStrings("replace_chained_ternary_with_match", legacyKind(.replace_chained_ternary_with_match));
-
-    var renamed: usize = 0;
-    for (rewrite_row_intents) |intent| {
-        if (!std.mem.eql(u8, legacyKind(intent), @tagName(intent))) renamed += 1;
+        var parsed = try expectCanonicalizeEnvelope(buf.items, "handler.ts", 1);
+        defer parsed.deinit();
+        const refactor = parsed.value.object.get("refactors").?.array.items[0].object;
+        try std.testing.expectEqualStrings(case.kind, refactor.get("kind").?.string);
     }
-    try std.testing.expectEqual(@as(usize, 5), renamed);
 }
 
 test "every graded rewrite this rewriter emits discharges against its law" {
@@ -2531,7 +2516,7 @@ test "writeJson envelope covers all deterministic refactor kinds" {
             \\  return Response.json({ a: a, b: b });
             \\}
             ,
-            .kind = "canonicalize_arrow_helper",
+            .kind = "replace_arrow_with_function",
             .replacement = "function parse(x: number): number { return x; }",
         },
         .{
@@ -2542,7 +2527,7 @@ test "writeJson envelope covers all deterministic refactor kinds" {
             \\  return load("x");
             \\}
             ,
-            .kind = "canonicalize_export_function",
+            .kind = "replace_export_arrow_with_function",
             .replacement = "export function load(id: string): Response { return Response.text(id); }",
         },
         .{
@@ -2553,7 +2538,7 @@ test "writeJson envelope covers all deterministic refactor kinds" {
             \\  return Response.json({ count: count });
             \\}
             ,
-            .kind = "canonicalize_let_const",
+            .kind = "replace_let_with_const",
             .replacement = "  const count = 1;",
         },
         .{
@@ -2648,7 +2633,7 @@ test "dynamic literal-prefix capability alias is not treated as static" {
     var parsed = try expectCanonicalizeEnvelope(out.json, out.file, 1);
     defer parsed.deinit();
     const refactor = parsed.value.object.get("refactors").?.array.items[0].object;
-    try std.testing.expectEqualStrings("canonicalize_let_const", refactor.get("kind").?.string);
+    try std.testing.expectEqualStrings("replace_let_with_const", refactor.get("kind").?.string);
 }
 
 test "capability alias preview stays in enclosing scope" {
@@ -3733,8 +3718,8 @@ fn normalizeOnlyIntent(
 /// fixture when closing it needs a rule change rather than a normalizer fix -
 /// and its one entry has been closed.
 ///
-/// That entry was `canonicalize_let_const` against
-/// `canonicalize_redundant_bool_compare`: rewriting the binding to `const`
+/// That entry was `replace_let_with_const` against
+/// `drop_redundant_bool_compare`: rewriting the binding to `const`
 /// first disabled the comparison row, so one program had two canonical forms.
 /// The cause was a type guard comparing against `idx_boolean` by identity while
 /// a `const` binding keeps its literal type; `checkRedundantBoolCompare` now

@@ -379,3 +379,11 @@ Status: complete. A tool result in the session journal no longer writes the dupl
 A journal from an earlier binary still loads. `a journal line that holds the old body field still loads` reads one literal line through `decodeEnvelope`. At review I added `a journal that holds the old body field still reconstructs` in `packages/pi/src/session/reconstructor.zig`, because the plan names the real loader. That test runs `recoverIncompleteTail` and `reconstructTranscript`. A line that holds only `body` is still refused, as L3a left it.
 
 One gate ran on the tree that holds L7a, L7b, and L7d, because the three units touch separate files. No separate result exists for each of the three commits.
+
+## L7b
+
+Status: complete. `canonicalize --json` prints the tag name of each repair intent, and `legacyKind` is gone. `canonicalize json prints the tag name of each repair intent` replaces the old census with eight literal rows.
+
+The two goldens each moved one line, with three names changed. The comparison script moved 13 more rows, all inputs that trigger a rewrite. I ran the base and new binaries over the 648 inputs with the two hash values and the ten names masked. Only the 12 rows that earlier units moved still differ. So those 13 rows differ only by the hash and the five names.
+
+At review I rewrote the comments in `packages/tools/src/agent_protocol_canon.zig` and `packages/tools/src/agent_protocol_simulate.zig`, because each one called the old name a current form. The test that sends `canonicalize_let_const` to `simulate_edit` stays, and that input is still refused as `unknown_intent`.

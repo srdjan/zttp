@@ -510,8 +510,8 @@ test "simulate_edit refuses a repair outside the vocabulary" {
     const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", a);
     defer a.free(root);
 
-    // The v1 spelling is not the vocabulary. Accepting it here would recreate
-    // the second vocabulary inside the protocol that just retired it.
+    // An intent name outside `RepairIntent` is refused, and this name once
+    // appeared in `canonicalize --json` output.
     const req = try a.print(
         \\{{"schema_version":2,"operation":"simulate_edit","project_root":"{s}","input":{{"file":"h.ts","repairs":[{{"intent":"canonicalize_let_const","line":6,"original":"x","replacement":"y"}}]}}}}
     , .{root});
