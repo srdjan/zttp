@@ -157,3 +157,42 @@ The new tests `replay refuses a checkpoint with no request budget` and `replay r
 An absent field uses the failure of a mismatch: `request_budget_mismatch` and `normalized_input_mismatch`. The decoder still accepts an absent field, so a hand-made recording fails at replay with a named failure. No file under `packages/pi/src/simulator/testdata` changed, and every committed trace holds both fields.
 
 The fixture in `every Chat Completions provider rebuilds its wire digest on replay` now calls `prepareSnapshot` to fill the budget. The digest from the independent body still replaces the prepared digest, so the digest check stays bound to that body. The comments on the two fields in `artifact_contract.zig` now state the replay refusal.
+
+## L4a
+
+Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`, `test-zruntime`, `test-server`, `test-precompile`, `test-diagnostic-corpus`, `test-standin`, `test-flow-census`, `test-proof-swallow`, `zig build test`, `check-spine`. `zts meta --json` is identical. The comparison script moved 1 of 648 rows: `_probe/ex/lc.ts`, the allowed row. It now reports one ZTS200.
+
+Correction to row A1: the row named only a generic arrow after a line comment. `rawLooksLikeComparison` reads the raw byte before `<`, so the keyword `return` reached `.legacy_call` too, with no comment. Row A1 also names the selectors, so this unit removed them and all arrow lists use one scanner.
+
+Two forms moved outside the row text, and both forms were ZTS002 on the base binary:
+
+| Form | Base | After | Assignment form on base |
+|---|---|---|---|
+| `return <T extends string = string>(value: T): T => value;` | ZTS002 | Accepted by parse and types | Accepted |
+| `return <T>` newline `(value: T): T => value;` | ZTS002 | Accepted by parse and types | Accepted |
+
+No tracked program uses either form. The new test `CHECK parses a generic arrow after return` holds both.
+
+A generic arrow after a line comment now takes every list that the same arrow takes with no comment. For example, `// note` newline `<T = string>(value: T): T => value` moved from ZTS002 to the ZTS200 of the form with no comment, and `// note` newline `<T> (value: T): T => value` moved from ZTS002 to ZTS208 and ZTS200.
+
+Side probes: 63 programs in the scratch directory ran through `zts check`, `zts compile`, and `zts canonicalize` on both binaries. Only the two forms above moved. The new test `CHECK reads a generic arrow after a line comment like one with no comment` failed on the old path, because the base reports ZTS203 and ZTS200.
+
+`selectFunctionGeneric` keeps the call scanner for a spaced list and for a comment before the name. Those shapes now take policy `.ignored` with a runtime-only header. The generic scanner changed the output of `function id <T = string>(x)`, so the worker reverted that choice.
+
+`observeRecoveryGeneric` now skips the arrow selection after a value byte. The source observer has no expression position, so it reads `id<T>(1)` as a call and any arrow header as a following group.
+
+Tests outside Appendix A changed, because each one named the removed policy and could not compile:
+
+| Test | Change |
+|---|---|
+| `generic and call finalizers reject incompatible runtime owners` | The `.legacy_call` stanza left |
+| `legacy compatibility and explicit calls own distinct shared ranges` | Now `explicit calls own their argument and fragment ranges`. The explicit-call checks stay |
+| `ignored and legacy-call policies retain syntax without generic declaration lowering` | Now `ignored policy retains syntax without generic declaration lowering`. The `.legacy_call` block left |
+| `line comment arrows keep direct source and owner boundaries` | The refused `<T> (` row is now accepted with one owner |
+| `comparison-shaped generic arrow candidates require explicit call grammar` | Now `generic arrow lists after a line comment read like lists with no comment` |
+
+Appendix A tests that took new names: `direct phase three preserves actual call construction`, `nested line-comment arrow retains captures and semantic projection`, and `admission spaced function lists take the ignored policy and runtime headers`.
+
+Ruling on `compatibility_order` in `type_env.zig`: it stays. `replayDirectSignatureEvent` uses it to check that one source offset has one signature owner, and Phase 5 of `populateDirectSourceTypes` reads it. It has no link to `.legacy_call`. Row A1 removes it only when no reader remains.
+
+Defects that this unit did not cause: the ZTS208 message names `T>` for `<T> (value: T)`, because `recorded_span` ends one byte before the opener. The form with no comment reports the same text on the base binary.

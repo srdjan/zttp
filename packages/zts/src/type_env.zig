@@ -632,35 +632,12 @@ pub const TypeEnv = struct {
     }
 
     fn validateDirectCallOrder(store: *const TypeSyntax.Store) !void {
-        var explicit_index: usize = 0;
-        var compatibility_index: usize = 0;
-        var previous_merged_start: ?u32 = null;
-        while (true) {
-            while (compatibility_index < store.generic_owners.items.len and
-                std.meta.activeTag(store.generic_owners.items[compatibility_index].compatibility) !=
-                    .legacy_call_arguments)
-            {
-                compatibility_index += 1;
+        var previous_start: ?u32 = null;
+        for (store.explicit_call_arguments.items) |explicit| {
+            if (previous_start) |previous| {
+                if (previous >= explicit.list_span.start) return error.InvalidTypeSourceOrder;
             }
-
-            const explicit_start = if (explicit_index < store.explicit_call_arguments.items.len)
-                store.explicit_call_arguments.items[explicit_index].list_span.start
-            else
-                null;
-            const compatibility_start = if (compatibility_index < store.generic_owners.items.len)
-                store.generic_owners.items[compatibility_index].list_span.start
-            else
-                null;
-            if (explicit_start == null and compatibility_start == null) break;
-
-            const use_explicit = compatibility_start == null or
-                (explicit_start != null and explicit_start.? < compatibility_start.?);
-            const start = if (use_explicit) explicit_start.? else compatibility_start.?;
-            if (previous_merged_start) |previous| {
-                if (previous >= start) return error.InvalidTypeSourceOrder;
-            }
-            previous_merged_start = start;
-            if (use_explicit) explicit_index += 1 else compatibility_index += 1;
+            previous_start = explicit.list_span.start;
         }
     }
 
@@ -699,7 +676,7 @@ pub const TypeEnv = struct {
             &callable_sets,
         );
 
-        // Phase 3: resolve actual and compatibility call arguments in source order.
+        // Phase 3: resolve call arguments in source order.
         try self.populateDirectCallPhase(input, application_bases, lowered);
 
         var compatibility_order: DirectCompatibilityOrder = .empty;
@@ -886,60 +863,14 @@ pub const TypeEnv = struct {
         application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
         lowered: []TypeIndex,
     ) !void {
-        var explicit_index: usize = 0;
-        var compatibility_index: usize = 0;
-        while (true) {
-            while (compatibility_index < input.store.generic_owners.items.len and
-                std.meta.activeTag(input.store.generic_owners.items[compatibility_index].compatibility) !=
-                    .legacy_call_arguments)
-            {
-                compatibility_index += 1;
-            }
-
-            const explicit = if (explicit_index < input.store.explicit_call_arguments.items.len)
-                &input.store.explicit_call_arguments.items[explicit_index]
-            else
-                null;
-            const compatibility_owner = if (compatibility_index < input.store.generic_owners.items.len)
-                &input.store.generic_owners.items[compatibility_index]
-            else
-                null;
-            if (explicit == null and compatibility_owner == null) break;
-
-            if (compatibility_owner == null or
-                (explicit != null and explicit.?.list_span.start < compatibility_owner.?.list_span.start))
-            {
-                try self.populateDirectCallArguments(
-                    input,
-                    application_bases,
-                    lowered,
-                    explicit.?.owner,
-                    .call,
-                    explicit.?.semantic_fragments,
-                );
-                explicit_index += 1;
-                continue;
-            }
-
-            const owner = compatibility_owner.?;
-            const semantic_fragments = switch (owner.compatibility) {
-                .legacy_call_arguments => |arguments| arguments.semantic_fragments,
-                .declaration_parameters, .ignored_declaration_parameters => return error.InvalidGenericOwner,
-            };
-            const runtime_owner, const expected_tag = switch (owner.identity) {
-                .function => |node| .{ node, engine.parser.NodeTag.function_expr },
-                .arrow => |node| .{ node, engine.parser.NodeTag.arrow_function },
-                .structural_declaration, .nominal_declaration => return error.InvalidGenericOwner,
-            };
+        for (input.store.explicit_call_arguments.items) |explicit| {
             try self.populateDirectCallArguments(
                 input,
                 application_bases,
                 lowered,
-                runtime_owner,
-                expected_tag,
-                semantic_fragments,
+                explicit.owner,
+                explicit.semantic_fragments,
             );
-            compatibility_index += 1;
         }
     }
 
@@ -949,13 +880,12 @@ pub const TypeEnv = struct {
         application_bases: *const TypeSyntax.Store.ApplicationBasePlan,
         lowered: []TypeIndex,
         owner: NodeIndex,
-        expected_tag: engine.parser.NodeTag,
         fragment_range: TypeSyntax.Range,
     ) !void {
         try self.pool.ensureHealthy();
         try self.ensureHealthy();
         const tag = input.ir_view.getTag(owner) orelse return error.InvalidGenericOwner;
-        if (tag != expected_tag) return error.InvalidGenericOwner;
+        if (tag != .call) return error.InvalidGenericOwner;
         const fragments = input.store.semanticFragmentSlice(fragment_range) orelse
             return error.InvalidTypeRange;
         if (fragments.len > MAX_TYPE_PARAMS) return error.InvalidTypeRange;

@@ -2388,7 +2388,7 @@ pub const Parser = struct {
             header_admission: FunctionHeaderAdmission,
         };
         const reservation: OwnerReservation = if (spaced_call_list) .{
-            .policy = .legacy_call,
+            .policy = .ignored,
             .capture_spans = .{
                 .actual_erased_span = scanned.span,
                 .recorded_span = .{ .start = scanned.span.start + 1, .end = scanned.span.end - 1 },
@@ -2423,7 +2423,7 @@ pub const Parser = struct {
             .block_comment, .line_comment => switch (opener_gap) {
                 .whitespace => if (scanned.span.end == cursor.current.start)
                     .{
-                        .policy = .legacy_call,
+                        .policy = .ignored,
                         .capture_spans = .{
                             .actual_erased_span = scanned.span,
                             .recorded_span = .{
@@ -2443,7 +2443,7 @@ pub const Parser = struct {
 
         if (spaced_call_list and scanned.span.end != cursor.current.start) return .{ .header_admission = .runtime_only };
 
-        if (reservation.policy == .legacy_call) {
+        if (!named_header) {
             try self.classifyAdmissionGenericList(scanned.span);
         }
         const options: type_syntax.GenericOwnerOptions = .{
@@ -2464,7 +2464,6 @@ pub const Parser = struct {
 
     const ArrowGenericOwnerProbe = union(enum) {
         not_generic,
-        rejected_call_grammar,
         reserved: type_syntax.PendingGenericOwner,
     };
 
@@ -2476,14 +2475,12 @@ pub const Parser = struct {
 
     const ArrowGenericSelection = union(enum) {
         not_generic,
-        rejected_call_grammar,
         selected: GenericSourceSelection,
     };
 
     fn tryReserveArrowGenericOwner(self: *Parser) !ArrowGenericOwnerProbe {
         return switch (try self.selectArrowGeneric()) {
             .not_generic => .not_generic,
-            .rejected_call_grammar => .rejected_call_grammar,
             .selected => |selected| blk: {
                 const pending = try self.type_store.reserveGenericOwner(selected.options);
                 self.adoptAdmissionCursor(selected.cursor, selected.previous);
@@ -2510,25 +2507,14 @@ pub const Parser = struct {
             runtime_previous,
             self.current.start,
         );
-        const looks_like_comparison = type_syntax.rawLooksLikeComparison(
-            self.source,
-            self.current.start,
-        );
-        const use_call_scanner = !has_dedicated_window and looks_like_comparison;
         const scanned = blk: {
             var caught: std.ArrayListUnmanaged(type_syntax.AdmissionDiagnostic) = .empty;
             defer caught.deinit(self.type_store.allocator);
-            const result = if (use_call_scanner)
-                try self.scanAdmissionCallTypeArgumentsStaged(self.current.start, &caught)
-            else
-                try self.scanAdmissionGenericListStaged(self.current.start, &caught);
+            const result = try self.scanAdmissionGenericListStaged(self.current.start, &caught);
             try self.commitAdmissionCaught(caught.items);
             break :blk switch (result) {
                 .scanned => |value| value,
-                .not_matched, .lexical_nonmatch => if (use_call_scanner)
-                    return .rejected_call_grammar
-                else
-                    return .not_generic,
+                .not_matched, .lexical_nonmatch => return .not_generic,
                 .nesting_too_deep => |offset| return try self.refuseAdmissionNesting(offset),
             };
         };
@@ -2536,7 +2522,7 @@ pub const Parser = struct {
 
         const cursor = self.cursorAfterAdmittedGeneric(scanned.span.end, runtime_previous);
         const previous = runtime_previous;
-        if (!use_call_scanner and cursor.current.type == .kw_extends and
+        if (cursor.current.type == .kw_extends and
             containsOnlyAdmissionWhitespace(self.source, scanned.span.end, cursor.current.start))
         {
             self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
@@ -2577,30 +2563,18 @@ pub const Parser = struct {
                     .end = scanned.span.end - 1,
                 },
             } }
-        else if (looks_like_comparison) blk: {
-            if (scanned.span.end != cursor.current.start) {
-                return .rejected_call_grammar;
-            }
-            break :blk .{ .policy = .legacy_call, .capture_spans = .{
-                .actual_erased_span = scanned.span,
+        else
+            .{ .policy = .callable, .capture_spans = .{
+                .actual_erased_span = .{
+                    .start = scanned.span.start,
+                    .end = cursor.current.start,
+                },
                 .recorded_span = .{
                     .start = scanned.span.start + 1,
-                    .end = scanned.span.end - 1,
+                    .end = cursor.current.start - 1,
                 },
             } };
-        } else .{ .policy = .callable, .capture_spans = .{
-            .actual_erased_span = .{
-                .start = scanned.span.start,
-                .end = cursor.current.start,
-            },
-            .recorded_span = .{
-                .start = scanned.span.start + 1,
-                .end = cursor.current.start - 1,
-            },
-        } };
-        if (reservation.policy != .legacy_call) {
-            self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
-        }
+        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
         const options: type_syntax.GenericOwnerOptions = .{
             .list_span = scanned.span,
             .capture_spans = reservation.capture_spans,
@@ -4533,7 +4507,6 @@ pub const Parser = struct {
 
         switch (try self.tryReserveArrowGenericOwner()) {
             .not_generic => {},
-            .rejected_call_grammar => return self.parsePrefixExpr(),
             .reserved => |pending_value| {
                 var pending = pending_value;
                 return self.parseArrowFunction(&pending);
@@ -6380,7 +6353,10 @@ pub const Parser = struct {
     fn observeRecoveryGeneric(self: *Parser) !bool {
         if (!type_syntax.tokenStartsGenericList(self.source, self.current)) return false;
         const start = self.current.start;
-        switch (try self.selectArrowGeneric()) {
+        // The observer has no expression position. A value byte before `<`
+        // reads as call type arguments, and any arrow header follows as a group.
+        const after_value = type_syntax.rawLooksLikeComparison(self.source, start);
+        if (!after_value) switch (try self.selectArrowGeneric()) {
             .selected => |selected| {
                 const dedicated = self.source_only and
                     type_syntax.hasDedicatedAssignmentArrowWindow(
@@ -6394,9 +6370,8 @@ pub const Parser = struct {
                 }
                 return true;
             },
-            .rejected_call_grammar => return false,
             .not_generic => if (self.current.start != start) return true,
-        }
+        };
         if (try self.selectErasedTypePrefix(.expression)) |selected| {
             self.adoptAdmissionCursor(selected.cursor, selected.previous);
             return true;
@@ -7995,7 +7970,7 @@ test "failed generic speculation restores the complete parser cursor" {
         const store_before = parser.type_store.checkpoint();
         switch (try parser.tryReserveArrowGenericOwner()) {
             .not_generic => {},
-            .rejected_call_grammar, .reserved => return error.TestUnexpectedResult,
+            .reserved => return error.TestUnexpectedResult,
         }
         try std.testing.expect(std.meta.eql(cursor_before, parser.cursorCheckpoint()));
         try std.testing.expect(std.meta.eql(store_before, parser.type_store.checkpoint()));
@@ -11411,7 +11386,7 @@ test "retired module refusal retains caught history under its selected prefix" {
     }
 }
 
-test "admission spaced function lists retain call arguments and runtime headers" {
+test "admission spaced function lists take the ignored policy and runtime headers" {
     const source = "function id <T>(x) { return x; }\n";
     for ([_]type_syntax.AdmissionMode{ .collect, .compile }) |mode| {
         var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, mode);
@@ -11438,13 +11413,6 @@ test "admission spaced function lists retain call arguments and runtime headers"
         try std.testing.expectEqualStrings("T", owner.capture_spans.recorded_span.text(source));
         try std.testing.expectEqual(@as(u32, 1), owner.authored_parameters.count);
         try std.testing.expectEqual(@as(u32, 1), owner.projected_parameters.count);
-        const arguments = switch (owner.compatibility) {
-            .legacy_call_arguments => |value| value,
-            else => return error.TestUnexpectedResult,
-        };
-        try std.testing.expectEqual(@as(u32, 1), arguments.authored_arguments.count);
-        try std.testing.expectEqual(@as(u32, 1), arguments.semantic_fragments.count);
-        try std.testing.expectEqualStrings("T", parser.type_store.authored_call_arguments.items[arguments.authored_arguments.start].full_span.text(source));
         try std.testing.expectEqual(@as(usize, 0), parser.type_store.function_signatures.items.len);
         try std.testing.expectEqual(@as(usize, 0), parser.getAdmissionDiagnostics().len);
         try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);

@@ -5432,21 +5432,14 @@ test "CHECK preserves arrow capture after line comment text" {
         diagnostics: []const CompoundDiagnostic,
     }{
         .{
-            .source = "const id = // note\n<T>(value: T): T => value;\n" ++
+            .source = "const id = // note\n<T> (value: T): T => value;\n" ++
                 "const probe: number = id(\"x\");\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .parse_refusal = false,
             .diagnostics = &.{
-                .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected T, got \"x\"", .line = 3, .column = 26, .suggestion = null },
+                .{ .code = "ZTS208", .message = "no argument determines type parameter 'T>'", .line = 3, .column = 25, .suggestion = "Name the type argument at the call site." },
                 .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null },
             },
-        },
-        .{
-            .source = "const id = // note\n<T> (value: T): T => value;\n" ++
-                "const probe: number = id(\"x\");\n" ++
-                "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-            .parse_refusal = true,
-            .diagnostics = &.{.{ .code = "ZTS002", .message = "raw JSX is not supported; use ordinary TypeScript expressions", .line = 2, .column = 1, .suggestion = null }},
         },
         .{
             .source = "const id = // note=\n<T> (value: T): T => value;\n" ++
@@ -5482,8 +5475,47 @@ test "CHECK preserves arrow capture after line comment text" {
         }
         observed += 1;
     }
-    try std.testing.expectEqual(@as(usize, 3), cases.len);
+    try std.testing.expectEqual(@as(usize, 2), cases.len);
     try std.testing.expectEqual(cases.len, observed);
+}
+
+test "CHECK reads a generic arrow after a line comment like one with no comment" {
+    const source =
+        "const id = // note\n<T>(value: T): T => value;\n" ++
+        "const probe: number = id(\"x\");\n" ++
+        "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
+    var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+    try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
+        .code = "ZTS200",
+        .message = "type 'string' is not assignable to type 'number'",
+        .line = 3,
+        .column = 1,
+        .suggestion = null,
+    });
+}
+
+test "CHECK parses a generic arrow after return" {
+    const cases = [_][]const u8{
+        "function make() { return <T>(value: T): T => value; }\n",
+        "function make() { return <T extends string = string>(value: T): T => value; }\n",
+        "function make() { return <T>\n(value: T): T => value; }\n",
+    };
+    inline for (cases) |head| {
+        const source = head ++
+            "function handler(req: Request): Response { return Response.text(\"ok\"); }\n";
+        var result = try runCheckOnlyFromSourceWithOptions(std.testing.allocator, source, "handler.ts", .{
+            .json_mode = true,
+        });
+        defer result.deinit(std.testing.allocator);
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+    }
 }
 
 test "CHECK classifies predicate targets and quoted return types" {
@@ -5960,8 +5992,8 @@ test "CHECK preserves typed generic arrows and comment classification" {
             .{ .code = "ZTS208", .message = "no argument determines type parameter 'T>'", .line = 2, .column = 25, .suggestion = "Name the type argument at the call site." },
             .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null },
         } },
-        .{ .source = "const id = // note\n<T = string>(value: T): T => value;\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{
-            .{ .code = "ZTS002", .message = "raw JSX is not supported; use ordinary TypeScript expressions", .line = 2, .column = 1, .suggestion = null },
+        .{ .source = "const id = // note\n<T = string>(value: T): T => value;\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{
+            .{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null },
         } },
         .{ .source = "const id = // note=\n<T = string> (value: T): T => value;\nconst probe: number = id(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{
             .{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null },

@@ -1259,7 +1259,7 @@ fn runHeaderTypeAllocation(
 
 const GenericArrowAllocationCase = enum {
     dedicated,
-    legacy_call,
+    line_comment,
 };
 
 const GenericArrowAllocationObservations = struct {
@@ -1275,7 +1275,7 @@ fn runGenericArrowTypeAllocation(
 ) !void {
     const source = switch (case) {
         .dedicated => "const seed: number = 1; const id=<T>(value: T): T => value;",
-        .legacy_call => "const seed: number = 1; const id = // note\n<T>(value: T): T => value;",
+        .line_comment => "const seed: number = 1; const id = // note\n<T>(value: T): T => value;",
     };
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     const runtime_allocator = runtime_count.allocator();
@@ -1318,24 +1318,11 @@ fn runGenericArrowTypeAllocation(
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.parameter_annotations.items.len);
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.function_signatures.items.len);
-    switch (case) {
-        .dedicated => {
-            try std.testing.expectEqual(
-                @as(usize, 0),
-                parser.type_store.authored_call_arguments.items.len,
-            );
-            try std.testing.expectEqual(@as(usize, 0), parser.type_store.semantic_fragments.items.len);
-        },
-        .legacy_call => {
-            // One authored call argument, `T`, and one fragment for it.
-            try std.testing.expectEqual(@as(usize, 1), parser.type_store.authored_call_arguments.items.len);
-            try std.testing.expectEqualStrings(
-                "T",
-                parser.type_store.authored_call_arguments.items[0].full_span.text(source),
-            );
-            try std.testing.expectEqual(@as(usize, 1), parser.type_store.semantic_fragments.items.len);
-        },
-    }
+    try std.testing.expectEqual(
+        @as(usize, 0),
+        parser.type_store.authored_call_arguments.items.len,
+    );
+    try std.testing.expectEqual(@as(usize, 0), parser.type_store.semantic_fragments.items.len);
 }
 
 const NamedFunctionCommentAllocationCase = enum {
@@ -1392,15 +1379,9 @@ fn runNamedFunctionCommentTypeAllocation(
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&parser));
     try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
     try std.testing.expectEqual(@as(usize, 0), parser.type_store.function_signatures.items.len);
-    switch (case) {
-        .before_name => switch (parser.type_store.generic_owners.items[0].compatibility) {
-            .legacy_call_arguments => {},
-            else => return error.TestUnexpectedResult,
-        },
-        .after_list => switch (parser.type_store.generic_owners.items[0].compatibility) {
-            .ignored_declaration_parameters => {},
-            else => return error.TestUnexpectedResult,
-        },
+    switch (parser.type_store.generic_owners.items[0].compatibility) {
+        .ignored_declaration_parameters => {},
+        else => return error.TestUnexpectedResult,
     }
 }
 
@@ -3519,7 +3500,7 @@ test "predicate header type allocation failures restore the seed checkpoint" {
 }
 
 test "typed generic arrow allocation failures restore every store array" {
-    const cases = [_]GenericArrowAllocationCase{ .dedicated, .legacy_call };
+    const cases = [_]GenericArrowAllocationCase{ .dedicated, .line_comment };
     for (cases) |case| {
         var observations: GenericArrowAllocationObservations = .{};
         try std.testing.checkAllAllocationFailures(
@@ -5119,38 +5100,16 @@ fn expectNamedFunctionCommentCompatibility(case: NamedFunctionCommentCase) !void
     );
     try store.validateFunctionDeclarationWrapper(function_owner, declaration, view);
 
-    switch (case) {
-        .before_block, .before_line => {
-            try std.testing.expectEqualStrings(
-                "T",
-                owner.capture_spans.recorded_span.text(source),
-            );
-            const ranges = switch (owner.compatibility) {
-                .legacy_call_arguments => |ranges| ranges,
-                else => return error.TestUnexpectedResult,
-            };
-            const authored = store.authoredCallArgumentSlice(ranges.authored_arguments) orelse
-                return error.TestUnexpectedResult;
-            const fragments = store.semanticFragmentSlice(ranges.semantic_fragments) orelse
-                return error.TestUnexpectedResult;
-            try std.testing.expectEqual(@as(usize, 1), authored.len);
-            try std.testing.expectEqual(@as(usize, 1), fragments.len);
-            try std.testing.expectEqualStrings("T", authored[0].full_span.text(source));
-            try std.testing.expectEqualStrings("T", fragments[0].raw_span.text(source));
-        },
-        .after_block, .after_line => {
-            try std.testing.expectEqualStrings(
-                "T",
-                owner.capture_spans.recorded_span.text(source),
-            );
-            switch (owner.compatibility) {
-                .ignored_declaration_parameters => {},
-                else => return error.TestUnexpectedResult,
-            }
-            try std.testing.expectEqual(@as(usize, 0), store.authored_call_arguments.items.len);
-            try std.testing.expectEqual(@as(usize, 0), store.semantic_fragments.items.len);
-        },
+    try std.testing.expectEqualStrings(
+        "T",
+        owner.capture_spans.recorded_span.text(source),
+    );
+    switch (owner.compatibility) {
+        .ignored_declaration_parameters => {},
+        else => return error.TestUnexpectedResult,
     }
+    try std.testing.expectEqual(@as(usize, 0), store.authored_call_arguments.items.len);
+    try std.testing.expectEqual(@as(usize, 0), store.semantic_fragments.items.len);
 }
 
 test "untyped named function comment gaps retain final compatibility owners" {
@@ -5278,7 +5237,7 @@ test "generic owner validation rejects exchanged function nodes" {
     try parser.type_store.validateRuntimeOwners(std.testing.allocator, view);
 }
 
-test "ignored and legacy-call policies retain syntax without generic declaration lowering" {
+test "ignored policy retains syntax without generic declaration lowering" {
     {
         const source = "nominal UserId<T> = string;";
         const name_start: u32 = @intCast(std.mem.indexOf(u8, source, "UserId") orelse
@@ -5345,52 +5304,6 @@ test "ignored and legacy-call policies retain syntax without generic declaration
 
         // This synthetic Store fixture checks the ignored generic-owner record.
         // Source-backed alias lowering is covered by the direct declaration tests.
-    }
-    {
-        const source = "<string>(";
-        var store = TypeSyntax.Store.init(std.testing.allocator, source);
-        defer store.deinit();
-        var nodes = engine.parser.IRStore.init(std.testing.allocator);
-        defer nodes.deinit();
-        var constants = engine.parser.ConstantPool.init(std.testing.allocator);
-        defer constants.deinit();
-        const function = try nodes.addFunction(.function_expr, .{ .line = 1, .column = 9, .offset = 8, .end_offset = 9 }, .{
-            .scope_id = 0,
-            .name_atom = 0,
-            .params_start = engine.parser.null_node,
-            .params_count = 0,
-            .body = engine.parser.null_node,
-            .flags = .{},
-        });
-        const view = engine.parser.IrView.fromIRStore(&nodes, &constants);
-        var pending = try store.reserveGenericOwner(.{
-            .list_span = .{ .start = 0, .end = 8 },
-            .capture_spans = .{
-                .actual_erased_span = .{ .start = 0, .end = 8 },
-                .recorded_span = .{ .start = 0, .end = 8 },
-            },
-            .policy = .legacy_call,
-        });
-        try store.finishGenericOwner(&pending, .{ .runtime = .{
-            .owner = function,
-            .view = view,
-        } });
-        try store.validateRuntimeOwners(std.testing.allocator, view);
-        const owner = store.generic_owners.items[0];
-        const projected = store.projectedGenericParameterSlice(owner.projected_parameters) orelse
-            return error.TestUnexpectedResult;
-        try std.testing.expectEqual(@as(usize, 1), projected.len);
-        try std.testing.expect(projected[0].bound_fragment == null);
-
-        var pool = TypePool.init(std.testing.allocator);
-        defer pool.deinit(std.testing.allocator);
-        var env = TypeEnv.init(std.testing.allocator, &pool);
-        defer env.deinit();
-        try lowerSyntaxStore(std.testing.allocator, &store, &pool, &env, view);
-        const arguments = env.direct_call_type_args.get(function) orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqual(@as(u8, 1), arguments.count);
-        try std.testing.expectEqual(pool.idx_string, arguments.args[0]);
-        try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
     }
 }
 
@@ -5771,18 +5684,11 @@ test "first generic function slice parses unsafe generic list scans for the stri
     _ = try parser.parse();
 }
 
-const GenericArrowCompatibilityExpectation = enum {
-    declaration_parameters,
-    legacy_call_arguments,
-};
-
 const GenericArrowExpectation = struct {
     list: []const u8,
     actual_capture: []const u8,
     legacy_capture: []const u8,
     projected_name: []const u8,
-    compatibility: GenericArrowCompatibilityExpectation,
-    authored_argument: []const u8 = "T",
 };
 
 fn expectGenericArrowOrderedProjection(
@@ -5801,8 +5707,7 @@ fn expectGenericArrowOrderedProjection(
         &env,
         parserIrView(parser),
     );
-    const expected_nodes: usize = if (expected.compatibility == .declaration_parameters and
-        std.mem.eql(u8, expected.projected_name, "T")) 1 else 3;
+    const expected_nodes: usize = if (std.mem.eql(u8, expected.projected_name, "T")) 1 else 3;
     try std.testing.expectEqual(prior_nodes + expected_nodes, pool.nodes.items.len);
     try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
 
@@ -5811,30 +5716,15 @@ fn expectGenericArrowOrderedProjection(
         .arrow => |node| node,
         else => return error.TestUnexpectedResult,
     };
-    switch (expected.compatibility) {
-        .declaration_parameters => {
-            try std.testing.expectEqual(
-                TypeTag.t_generic_param,
-                pool.getTag(@intCast(prior_nodes)).?,
-            );
-            try std.testing.expectEqualStrings(
-                expected.projected_name,
-                pool.getRefName(@intCast(prior_nodes)),
-            );
-            try std.testing.expect(env.direct_call_type_args.get(owner_node) == null);
-        },
-        .legacy_call_arguments => {
-            try std.testing.expectEqual(
-                TypeTag.t_ref,
-                pool.getTag(@intCast(prior_nodes)).?,
-            );
-            try std.testing.expectEqualStrings("T", pool.getRefName(@intCast(prior_nodes)));
-            const arguments = env.direct_call_type_args.get(owner_node) orelse
-                return error.TestUnexpectedResult;
-            try std.testing.expectEqual(@as(u8, 1), arguments.count);
-            try std.testing.expectEqual(@as(TypeIndex, @intCast(prior_nodes)), arguments.args[0]);
-        },
-    }
+    try std.testing.expectEqual(
+        TypeTag.t_generic_param,
+        pool.getTag(@intCast(prior_nodes)).?,
+    );
+    try std.testing.expectEqualStrings(
+        expected.projected_name,
+        pool.getRefName(@intCast(prior_nodes)),
+    );
+    try std.testing.expect(env.direct_call_type_args.get(owner_node) == null);
 }
 
 fn expectTypedGenericArrowRecords(
@@ -5916,35 +5806,12 @@ fn expectTypedGenericArrowRecords(
     try std.testing.expectEqual(@as(u32, @intCast(opener)), signature.source_span.start);
     try std.testing.expectEqual(@as(u32, @intCast(body)), signature.source_span.end);
 
-    switch (expected.compatibility) {
-        .declaration_parameters => {
-            switch (owner.compatibility) {
-                .declaration_parameters => {},
-                else => return error.TestUnexpectedResult,
-            }
-            try std.testing.expectEqual(@as(usize, 0), store.authored_call_arguments.items.len);
-            try std.testing.expectEqual(@as(usize, 0), store.semantic_fragments.items.len);
-        },
-        .legacy_call_arguments => {
-            const ranges = switch (owner.compatibility) {
-                .legacy_call_arguments => |ranges| ranges,
-                else => return error.TestUnexpectedResult,
-            };
-            try std.testing.expectEqual(@as(u32, 0), ranges.authored_arguments.start);
-            try std.testing.expectEqual(@as(u32, 1), ranges.authored_arguments.count);
-            try std.testing.expectEqual(@as(u32, 0), ranges.semantic_fragments.start);
-            try std.testing.expectEqual(@as(u32, 1), ranges.semantic_fragments.count);
-            const authored = store.authoredCallArgumentSlice(ranges.authored_arguments) orelse
-                return error.TestUnexpectedResult;
-            const fragments = store.semanticFragmentSlice(ranges.semantic_fragments) orelse
-                return error.TestUnexpectedResult;
-            try std.testing.expectEqualStrings(
-                expected.authored_argument,
-                std.mem.trim(u8, authored[0].full_span.text(source), " \t\r\n"),
-            );
-            try std.testing.expectEqualStrings("T", fragments[0].raw_span.text(source));
-        },
+    switch (owner.compatibility) {
+        .declaration_parameters => {},
+        else => return error.TestUnexpectedResult,
     }
+    try std.testing.expectEqual(@as(usize, 0), store.authored_call_arguments.items.len);
+    try std.testing.expectEqual(@as(usize, 0), store.semantic_fragments.items.len);
     try expectGenericArrowOrderedProjection(parser, expected);
 }
 
@@ -5961,7 +5828,6 @@ test "typed generic arrows retain final owners and legacy projection windows" {
                 .actual_capture = "<T>",
                 .legacy_capture = "T",
                 .projected_name = "T",
-                .compatibility = .declaration_parameters,
             },
         },
         .{
@@ -5971,7 +5837,6 @@ test "typed generic arrows retain final owners and legacy projection windows" {
                 .actual_capture = "<T> ",
                 .legacy_capture = "T>",
                 .projected_name = "T>",
-                .compatibility = .declaration_parameters,
             },
         },
         .{
@@ -5981,7 +5846,6 @@ test "typed generic arrows retain final owners and legacy projection windows" {
                 .actual_capture = "<T> ",
                 .legacy_capture = "T>",
                 .projected_name = "T>",
-                .compatibility = .declaration_parameters,
             },
         },
         .{
@@ -5991,7 +5855,6 @@ test "typed generic arrows retain final owners and legacy projection windows" {
                 .actual_capture = "<T>",
                 .legacy_capture = "T",
                 .projected_name = "T",
-                .compatibility = .legacy_call_arguments,
             },
         },
         .{
@@ -6001,7 +5864,6 @@ test "typed generic arrows retain final owners and legacy projection windows" {
                 .actual_capture = "<T = string> ",
                 .legacy_capture = "T = string>",
                 .projected_name = "T",
-                .compatibility = .declaration_parameters,
             },
         },
     };
@@ -6718,21 +6580,23 @@ test "line comment arrows keep direct source and owner boundaries" {
         "const seed: number = 1; const id = // note\n<T>(value: T): T => value;",
         "const seed: number = 1; const id = // note\n<T> (value: T): T => value;",
     };
-    var parser = try JsParser.initAdmission(
-        std.testing.allocator,
-        std.testing.allocator,
-        sources[1],
-        .compile,
-    );
-    defer parser.deinit();
-    try std.testing.expectError(error.UnexpectedToken, parser.parse());
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.generic_owners.items.len);
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.parameter_annotations.items.len);
-    try std.testing.expectEqual(@as(usize, 0), parser.type_store.function_signatures.items.len);
-    try parser.type_store.validate();
+    for (sources) |source| {
+        var parser = try JsParser.initAdmission(
+            std.testing.allocator,
+            std.testing.allocator,
+            source,
+            .compile,
+        );
+        defer parser.deinit();
+        _ = try parser.parse();
+        try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
+        try std.testing.expectEqual(@as(usize, 1), parser.type_store.parameter_annotations.items.len);
+        try std.testing.expectEqual(@as(usize, 1), parser.type_store.function_signatures.items.len);
+        try parser.type_store.validate();
+    }
 }
 
-test "nested legacy-call line-comment arrow retains captures and semantic projection" {
+test "nested line-comment arrow retains captures and semantic projection" {
     const source = "const id = // note\n<<T>>(value: T): T => value;";
     var runtime_count = CountingAllocator.init(std.testing.allocator);
     var type_count = CountingAllocator.init(std.testing.allocator);
@@ -6750,12 +6614,10 @@ test "nested legacy-call line-comment arrow retains captures and semantic projec
         .actual_capture = "<<T>>",
         .legacy_capture = "<T>",
         .projected_name = "T",
-        .compatibility = .legacy_call_arguments,
-        .authored_argument = "<T>",
     });
 }
 
-test "comparison-shaped generic arrow candidates require explicit call grammar" {
+test "generic arrow lists after a line comment read like lists with no comment" {
     const sources = [_][]const u8{
         "const id = // word\n<T = string>(value: T): T => value;",
         "const id = // word\n<T || U>(value: T): T => value;",
@@ -6764,16 +6626,11 @@ test "comparison-shaped generic arrow candidates require explicit call grammar" 
     for (sources) |source| {
         var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
         defer parser.deinit();
-        try std.testing.expectError(error.UnexpectedToken, parser.parse());
-        try std.testing.expectEqual(@as(usize, 0), parser.type_store.generic_parameters.items.len);
-        try std.testing.expectEqual(
-            @as(usize, 0),
-            parser.type_store.projected_generic_parameters.items.len,
-        );
+        _ = try parser.parse();
+        try std.testing.expectEqual(@as(usize, 1), parser.type_store.generic_owners.items.len);
         try std.testing.expectEqual(@as(usize, 0), parser.type_store.semantic_fragments.items.len);
-        try std.testing.expectEqual(@as(usize, 0), parser.type_store.generic_owners.items.len);
-        try std.testing.expectEqual(@as(usize, 0), parser.type_store.parameter_annotations.items.len);
-        try std.testing.expectEqual(@as(usize, 0), parser.type_store.function_signatures.items.len);
+        try std.testing.expectEqual(@as(usize, 1), parser.type_store.parameter_annotations.items.len);
+        try std.testing.expectEqual(@as(usize, 1), parser.type_store.function_signatures.items.len);
         try std.testing.expectEqual(@as(usize, 0), parser.type_store.erased_type_prefixes.items.len);
         try parser.type_store.validate();
     }
@@ -10470,20 +10327,11 @@ test "direct phase two consumer matrix preserves generics and headers" {
     try std.testing.expectEqual(@typeInfo(DirectGenericConsumerCase).@"enum".field_names.len, seen.count());
 }
 
-fn compatibilityCallOwner(owner: TypeSyntax.GenericOwner) ?NodeIndex {
-    if (std.meta.activeTag(owner.compatibility) != .legacy_call_arguments) return null;
-    return switch (owner.identity) {
-        .function => |node| node,
-        .arrow => |node| node,
-        .structural_declaration, .nominal_declaration => null,
-    };
-}
-
 const DirectCallConsumerCase = enum {
     interleaved,
     generic_scope_contrast,
     generic_application_argument,
-    arrow_compatibility,
+    line_comment_arrow,
 };
 
 fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !void {
@@ -10523,7 +10371,7 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
         .interleaved => {
             try std.testing.expectEqual(@as(usize, 3), direct.type_store.explicit_call_arguments.items.len);
             try std.testing.expectEqual(@as(usize, 2), direct.type_store.generic_owners.items.len);
-            try std.testing.expectEqual(@as(usize, 3), direct_env.direct_call_type_args.count());
+            try std.testing.expectEqual(@as(usize, 2), direct_env.direct_call_type_args.count());
             const before = direct.type_store.explicit_call_arguments.items[0];
             const empty = direct.type_store.explicit_call_arguments.items[1];
             const after = direct.type_store.explicit_call_arguments.items[2];
@@ -10538,35 +10386,12 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
             try std.testing.expectEqual(@as(u8, 2), after_arguments.count);
             try std.testing.expectEqual(null_type_idx, after_arguments.args[0]);
             try std.testing.expectEqual(direct_pool.idx_number, after_arguments.args[1]);
-            const compatibility = direct.type_store.generic_owners.items[0];
-            const compatibility_owner = compatibilityCallOwner(compatibility) orelse
-                return error.TestUnexpectedResult;
-            const compatibility_arguments = direct_env.direct_call_type_args.get(
-                compatibility_owner,
-            ) orelse return error.TestUnexpectedResult;
-            try std.testing.expectEqual(@as(u8, 1), compatibility_arguments.count);
-            try std.testing.expectEqual(
-                TypeTag.t_ref,
-                direct_pool.getTag(compatibility_arguments.args[0]).?,
-            );
-            try std.testing.expectEqualStrings(
-                "T",
-                direct_pool.getRefName(compatibility_arguments.args[0]),
-            );
-            const empty_compatibility = direct.type_store.generic_owners.items[1];
-            const empty_compatibility_owner = compatibilityCallOwner(empty_compatibility) orelse
-                return error.TestUnexpectedResult;
-            const empty_compatibility_range = switch (empty_compatibility.compatibility) {
-                .legacy_call_arguments => |arguments| arguments.semantic_fragments,
-                .declaration_parameters, .ignored_declaration_parameters => return error.TestUnexpectedResult,
-            };
-            try std.testing.expectEqual(@as(u32, 0), empty_compatibility_range.count);
-            try std.testing.expect(
-                direct_env.direct_call_type_args.get(empty_compatibility_owner) == null,
-            );
-            try std.testing.expect(
-                direct_env.getCallTypeArgsForCall(direct_view, empty_compatibility_owner) == null,
-            );
+            for (direct.type_store.generic_owners.items) |owner| {
+                try std.testing.expectEqual(
+                    std.meta.Tag(TypeSyntax.GenericOwnerCompatibility).ignored_declaration_parameters,
+                    std.meta.activeTag(owner.compatibility),
+                );
+            }
         },
         .generic_scope_contrast => {
             try std.testing.expectEqual(@as(usize, 1), direct.type_store.explicit_call_arguments.items.len);
@@ -10627,7 +10452,7 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
             try std.testing.expectEqualStrings("Box", direct_pool.getRefName(application.base));
             try std.testing.expectEqualSlices(TypeIndex, &.{direct_pool.idx_string}, application.args);
         },
-        .arrow_compatibility => {
+        .line_comment_arrow => {
             try std.testing.expectEqual(@as(usize, 0), direct.type_store.explicit_call_arguments.items.len);
             try std.testing.expectEqual(@as(usize, 1), direct.type_store.generic_owners.items.len);
             const record = direct.type_store.generic_owners.items[0];
@@ -10637,16 +10462,13 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
             };
             try std.testing.expectEqual(engine.parser.NodeTag.arrow_function, direct_view.getTag(owner).?);
             try std.testing.expectEqual(
-                std.meta.Tag(TypeSyntax.GenericOwnerCompatibility).legacy_call_arguments,
+                std.meta.Tag(TypeSyntax.GenericOwnerCompatibility).declaration_parameters,
                 std.meta.activeTag(record.compatibility),
             );
             try std.testing.expectEqualStrings("<T>", record.list_span.text(source));
-            const arguments = direct_env.direct_call_type_args.get(owner) orelse return error.TestUnexpectedResult;
-            try std.testing.expectEqual(@as(u8, 1), arguments.count);
-            try std.testing.expectEqual(TypeTag.t_ref, direct_pool.getTag(arguments.args[0]).?);
-            try std.testing.expectEqualStrings("T", direct_pool.getRefName(arguments.args[0]));
+            try std.testing.expect(direct_env.direct_call_type_args.get(owner) == null);
             try std.testing.expect(direct_env.getCallTypeArgsForCall(direct_view, owner) == null);
-            try std.testing.expectEqual(@as(usize, 1), direct_env.direct_call_type_args.count());
+            try std.testing.expectEqual(@as(usize, 0), direct_env.direct_call_type_args.count());
         },
     }
 
@@ -10683,7 +10505,7 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
             .missing_public_annotation,
             .implicit_unknown,
         },
-        .arrow_compatibility => &.{},
+        .line_comment_arrow => &.{},
     };
     try std.testing.expectEqual(@as(u32, @intCast(expected_strict.len)), strict_ok);
     try std.testing.expectEqual(expected_strict.len, direct_strict.getDiagnostics().len);
@@ -10692,7 +10514,7 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
     }
 }
 
-test "direct phase three preserves actual and compatibility call construction" {
+test "direct phase three preserves actual call construction" {
     const cases = [_]struct {
         source: []const u8,
         case: DirectCallConsumerCase,
@@ -10720,7 +10542,7 @@ test "direct phase three preserves actual and compatibility call construction" {
         },
         .{
             .source = "const id = // note\n<T>(value: T): T => value;",
-            .case = .arrow_compatibility,
+            .case = .line_comment_arrow,
         },
     };
     var seen = std.EnumSet(DirectCallConsumerCase).empty;
@@ -10734,7 +10556,6 @@ test "direct phase three preserves actual and compatibility call construction" {
 const DirectCallOrderMutation = enum {
     reversed_actual,
     equal_cross_stream,
-    reversed_compatibility,
 };
 
 fn expectDirectCallOrderRefusal(
@@ -10778,21 +10599,6 @@ fn expectDirectCallOrderRefusal(
                 parser.type_store.explicit_call_arguments.items[0].list_span.start;
             break :blk error.InvalidGenericOwner;
         },
-        .reversed_compatibility => blk: {
-            try std.testing.expectEqual(@as(usize, 2), parser.type_store.generic_owners.items.len);
-            try std.testing.expect(compatibilityCallOwner(
-                parser.type_store.generic_owners.items[0],
-            ) != null);
-            try std.testing.expect(compatibilityCallOwner(
-                parser.type_store.generic_owners.items[1],
-            ) != null);
-            std.mem.swap(
-                TypeSyntax.GenericOwner,
-                &parser.type_store.generic_owners.items[0],
-                &parser.type_store.generic_owners.items[1],
-            );
-            break :blk error.InvalidTypeSourceOrder;
-        },
     };
 
     switch (mutation) {
@@ -10800,7 +10606,7 @@ fn expectDirectCallOrderRefusal(
             std.testing.allocator,
             parserIrView(&parser),
         ),
-        .equal_cross_stream, .reversed_compatibility => try std.testing.expectError(
+        .equal_cross_stream => try std.testing.expectError(
             expected_error,
             parser.type_store.validateRuntimeOwners(std.testing.allocator, parserIrView(&parser)),
         ),
@@ -10850,11 +10656,6 @@ test "direct phase three refuses malformed call order before selection" {
             .source = "const first = identity<string>(\"a\");\n" ++
                 "function /* gap */ identity<T>(value) { return value; }",
             .mutation = .equal_cross_stream,
-        },
-        .{
-            .source = "function /* gap */ first<T>(value) { return value; }\n" ++
-                "function /* gap */ second<U>(value) { return value; }",
-            .mutation = .reversed_compatibility,
         },
     };
     var seen = std.EnumSet(DirectCallOrderMutation).empty;
@@ -10950,7 +10751,7 @@ fn runDirectCallAllocationSweep(
     try env.ensureHealthy();
     try std.testing.expectEqual(@as(usize, 0), env.generic_scopes.items.len);
     try std.testing.expect(env.getTypeAlias("Seed") != null);
-    try std.testing.expectEqual(@as(usize, 3), env.direct_call_type_args.count());
+    try std.testing.expectEqual(@as(usize, 2), env.direct_call_type_args.count());
     const view = parserIrView(&parser);
     const first = env.getCallTypeArgsForCall(
         view,

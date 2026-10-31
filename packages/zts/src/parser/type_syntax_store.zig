@@ -729,10 +729,6 @@ pub const GenericOwnerIdentity = union(enum) {
 pub const GenericOwnerCompatibility = union(enum) {
     declaration_parameters,
     ignored_declaration_parameters,
-    legacy_call_arguments: struct {
-        authored_arguments: Range,
-        semantic_fragments: Range,
-    },
 };
 
 pub const GenericOwner = struct {
@@ -748,7 +744,6 @@ pub const GenericOwnerPolicy = enum {
     structural,
     callable,
     ignored,
-    legacy_call,
 };
 
 pub const GenericOwnerOptions = struct {
@@ -1032,24 +1027,6 @@ pub const Store = struct {
         const compatibility: GenericOwnerCompatibility = switch (options.policy) {
             .structural, .callable => .declaration_parameters,
             .ignored => .ignored_declaration_parameters,
-            .legacy_call => blk: {
-                const argument_start = std.math.cast(u32, self.authored_call_arguments.items.len) orelse
-                    return error.TooManyTypeItems;
-                const fragment_start = std.math.cast(u32, self.semantic_fragments.items.len) orelse
-                    return error.TooManyTypeItems;
-                try appendAuthoredCallArguments(self, options.list_span);
-                try appendProjectedCallFragments(self, options.capture_spans.recorded_span);
-                break :blk .{ .legacy_call_arguments = .{
-                    .authored_arguments = .{
-                        .start = argument_start,
-                        .count = @intCast(self.authored_call_arguments.items.len - argument_start),
-                    },
-                    .semantic_fragments = .{
-                        .start = fragment_start,
-                        .count = @intCast(self.semantic_fragments.items.len - fragment_start),
-                    },
-                } };
-            },
         };
 
         const owner_index = std.math.cast(u32, self.generic_owners.items.len) orelse
@@ -1089,7 +1066,7 @@ pub const Store = struct {
                     .{ .nominal_declaration = declaration.index }
                 else
                     return error.InvalidGenericOwner,
-                .callable, .legacy_call => return error.InvalidGenericOwner,
+                .callable => return error.InvalidGenericOwner,
             },
             .runtime => |runtime| blk: {
                 const tag = runtime.view.getTag(runtime.owner) orelse return error.InvalidGenericOwner;
@@ -1104,11 +1081,6 @@ pub const Store = struct {
                         .{ .function = runtime.owner }
                     else
                         return error.InvalidGenericOwner,
-                    .legacy_call => switch (tag) {
-                        .function_expr => .{ .function = runtime.owner },
-                        .arrow_function => .{ .arrow = runtime.owner },
-                        else => return error.InvalidGenericOwner,
-                    },
                 };
             },
         };
@@ -1803,13 +1775,6 @@ pub const Store = struct {
                 if (parameter.bound_fragment) |fragment_index| {
                     try claimSemanticFragment(fragment_owners, fragment_index);
                 }
-            }
-            switch (owner.compatibility) {
-                .declaration_parameters, .ignored_declaration_parameters => {},
-                .legacy_call_arguments => |arguments| {
-                    try claimRange(argument_owners, arguments.authored_arguments, error.SharedAuthoredCallArgument);
-                    try claimRange(fragment_owners, arguments.semantic_fragments, error.SharedSemanticFragment);
-                },
             }
         }
         for (self.explicit_call_arguments.items) |arguments| {
@@ -2581,22 +2546,6 @@ pub const Store = struct {
                     if (parameter.bound_fragment != null) return error.InvalidGenericOwner;
                 }
             },
-            .legacy_call_arguments => |arguments| {
-                for (projected) |parameter| {
-                    if (parameter.bound_fragment != null) return error.InvalidGenericOwner;
-                }
-                const authored_arguments = self.authoredCallArgumentSlice(arguments.authored_arguments) orelse
-                    return error.InvalidTypeRange;
-                const fragments = self.semanticFragmentSlice(arguments.semantic_fragments) orelse
-                    return error.InvalidTypeRange;
-                if (fragments.len > 8) return error.InvalidTypeRange;
-                for (authored_arguments) |argument| {
-                    if (!spanContains(owner.list_span, argument.full_span)) return error.InvalidTypeSpan;
-                }
-                for (fragments) |fragment| {
-                    if (!spanContains(owner.list_span, fragment.raw_span)) return error.InvalidTypeSpan;
-                }
-            },
         }
         switch (owner.identity) {
             .structural_declaration => |declaration_index| {
@@ -3215,20 +3164,6 @@ test "generic and call finalizers reject incompatible runtime owners" {
     );
     store.cancelGenericOwner(&ignored);
 
-    var legacy_call = try store.reserveGenericOwner(.{
-        .list_span = .{ .start = 0, .end = 3 },
-        .capture_spans = capture_spans,
-        .policy = .legacy_call,
-    });
-    try std.testing.expectError(
-        error.InvalidGenericOwner,
-        store.finishGenericOwner(
-            &legacy_call,
-            .{ .declaration = .{ .kind = .structural, .index = 0 } },
-        ),
-    );
-    store.cancelGenericOwner(&legacy_call);
-
     var explicit = try store.reserveExplicitCall(.{
         .list_span = .{ .start = 0, .end = 3 },
         .capture_spans = capture_spans,
@@ -3335,7 +3270,6 @@ test "only ignored named functions accept one bounded after-list comment gap" {
     try Context.check(accepted, .ignored, .function_expr, true);
     try Context.check(accepted, .callable, .function_expr, false);
     try Context.check(accepted, .ignored, .arrow_function, false);
-    try Context.check(accepted, .legacy_call, .function_expr, false);
 
     const forbidden = [_][]const u8{
         "<T>// crlf\r\n(",
@@ -3523,28 +3457,18 @@ test "runtime owners reject captures extending through their opener" {
     try std.testing.expect(std.meta.eql(before, store.checkpoint()));
 }
 
-test "legacy compatibility and explicit calls own distinct shared ranges" {
+test "explicit calls own their argument and fragment ranges" {
     const source = "<string>(";
     var store = Store.init(std.testing.allocator, source);
     defer store.deinit();
     var runtime = TestRuntime.init(std.testing.allocator);
     defer runtime.deinit();
-    const function = try runtime.addFunction(.function_expr, 8);
     const call = try runtime.addCall(8);
     const capture_spans: GenericCaptureSpans = .{
         .actual_erased_span = .{ .start = 0, .end = 8 },
         .recorded_span = .{ .start = 0, .end = 8 },
     };
 
-    var compatibility = try store.reserveGenericOwner(.{
-        .list_span = .{ .start = 0, .end = 8 },
-        .capture_spans = capture_spans,
-        .policy = .legacy_call,
-    });
-    try store.finishGenericOwner(&compatibility, .{ .runtime = .{
-        .owner = function,
-        .view = runtime.view(),
-    } });
     var explicit = try store.reserveExplicitCall(.{
         .list_span = .{ .start = 0, .end = 8 },
         .capture_spans = capture_spans,
@@ -3552,26 +3476,7 @@ test "legacy compatibility and explicit calls own distinct shared ranges" {
     try store.finishExplicitCall(&explicit, call, runtime.view());
     try store.validateRuntimeOwners(std.testing.allocator, runtime.view());
 
-    const compatibility_ranges = switch (store.generic_owners.items[0].compatibility) {
-        .legacy_call_arguments => |ranges| ranges,
-        else => return error.TestUnexpectedResult,
-    };
     const original_arguments = store.explicit_call_arguments.items[0].authored_arguments;
-    const original_fragments = store.explicit_call_arguments.items[0].semantic_fragments;
-
-    store.explicit_call_arguments.items[0].authored_arguments = compatibility_ranges.authored_arguments;
-    try std.testing.expectError(
-        error.SharedAuthoredCallArgument,
-        store.validateRuntimeOwners(std.testing.allocator, runtime.view()),
-    );
-    store.explicit_call_arguments.items[0].authored_arguments = original_arguments;
-
-    store.explicit_call_arguments.items[0].semantic_fragments = compatibility_ranges.semantic_fragments;
-    try std.testing.expectError(
-        error.SharedSemanticFragment,
-        store.validateRuntimeOwners(std.testing.allocator, runtime.view()),
-    );
-    store.explicit_call_arguments.items[0].semantic_fragments = original_fragments;
 
     store.explicit_call_arguments.items[0].authored_arguments.count = 0;
     try std.testing.expectError(
