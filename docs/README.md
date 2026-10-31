@@ -70,8 +70,8 @@ and superseded execution records live in the `pre-rebase` git tag, under
 - [Agent Protocol v2](internals/agent-protocol-v2.md) - the
   `zts agent --stdin-json` request and response envelope, its closed operation
   set, and version negotiation.
-- [zts-model-1 Formal Spec](zts-formal-spec-northstar-advanced.md) - the
-  language-design and assurance northstar for `zts-model-1`. Compiler-owned
+- [zts-model-1 Formal Spec](spec/zts-model-1.md) - the
+  language-design and assurance specification for `zts-model-1`. Compiler-owned
   registries define the implemented surface, and some target-level design text
   remains beyond the live compiler. Artifact-level certificate acceptance now
   ships with disclosed tested and trusted edges; the spec's stronger target is

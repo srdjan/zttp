@@ -126,7 +126,7 @@ follow where the answer comes back wrong.
 
 - Phase 3 plan and its measured record:
   `pre-rebase:docs/archive/plans/2026-08-09-022-zts-advanced-rev4-phase3-plan.md`
-- The spec rule the fixes restore: `docs/zts-formal-spec-northstar-advanced.md`
+- The spec rule the fixes restore: `docs/spec/zts-model-1.md`
   section 5.3.
 - A second finding from the same phase, distinct in shape and not covered here:
   the canonical profile asked only whether a `match` had a `default` arm, so the

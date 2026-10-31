@@ -1,4 +1,4 @@
-# ZTS advanced formal-spec northstar
+# zts-model-1 formal specification
 
 **Status:** implemented language profile; staged artifact assurance implemented
 
@@ -22,7 +22,7 @@ identity. Revision 6 records the shipped artifact certificate and independent
 consumer, including the current `trusted` weakest edge and the properties
 disclosed at `tested`.
 
-**Relationship to the earlier northstar:** this document replaces its design
+**Relationship to the earlier document:** this document replaces its design
 claims, not its historical record. The earlier artifact remains useful context,
 but it does not define the advanced profile.
 
@@ -2352,7 +2352,7 @@ Current status: the independent consumer and exact artifact binding are
 shipped. Inconclusive required evidence fails acceptance, the native-module
 surface is bound, and production solver edges are disabled. Authenticated
 signer trust, consumer-modeled opcode semantics, and isolated solver execution
-remain target capabilities. [Roadmap](roadmap.md) is the authority for delivery
+remain target capabilities. [Roadmap](../roadmap.md) is the authority for delivery
 status and priorities.
 
 - A real independent consumer exists before certificate production is called
@@ -2416,7 +2416,7 @@ status and priorities.
 The target design still includes authenticated extension and signer trust,
 consumer-modeled opcode semantics, isolated solver execution, and broader
 consumer-checked properties. The current implementation and ordered work live
-in [Roadmap](roadmap.md); this specification defines the intended assurance
+in [Roadmap](../roadmap.md); this specification defines the intended assurance
 shape rather than a second delivery backlog.
 
 ### Settled tightening decisions

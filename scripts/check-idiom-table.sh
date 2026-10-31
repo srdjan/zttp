@@ -33,7 +33,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-spec_doc="docs/zts-formal-spec-northstar-advanced.md"
+spec_doc="docs/spec/zts-model-1.md"
 registry_file="packages/zts/src/idiom_registry.zig"
 
 # The row count measured on 2026-08-16. Removed forms are restrictions, not

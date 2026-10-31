@@ -10,7 +10,7 @@
 //! so the conformance denominator is the whole named alphabet rather than only
 //! the symbolic slice. `semantics_check.zig` fails any unclassified member.
 //!
-//! The northstar (docs/zts-formal-spec-northstar-advanced.md) replaces the hand-rolled
+//! The specification (docs/spec/zts-model-1.md) replaces the hand-rolled
 //! symbolic executor with an SMT refinement check; this data model migrates there
 //! unchanged.
 

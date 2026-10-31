@@ -26,7 +26,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-spec_doc="docs/zts-formal-spec-northstar-advanced.md"
+spec_doc="docs/spec/zts-model-1.md"
 registry_file="packages/zts/src/grammar_registry.zig"
 
 # The production count measured on 2026-08-16.

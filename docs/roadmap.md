@@ -108,6 +108,10 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
   predicate on an arrow function reports no ZTS211, while the same predicate on
   a function declaration does. A predicate that names a different parameter,
   such as `(y: unknown): x is string`, reports no error.
+- A binary from `zttp compile` holds an all-zero `artifactSha256`, so
+  `verifyArtifactHash` skips that binary. Only `zts compile` stamps the hash.
+  The effect on tamper detection needs measurement, because
+  `proof_activation.zig` rebuilds the artifact graph at boot.
 
 ## Runtime And Product Work
 
@@ -174,7 +178,7 @@ Recorded so they are not proposed again:
 
 Status: complete for phases 0 through 7. The implemented source identity is
 `zts-model-1` for TypeScript.
-The [formal spec](zts-formal-spec-northstar-advanced.md), revision 6, states the
+The [formal spec](spec/zts-model-1.md), revision 6, states the
 language and assurance target. Its stronger target does not mean the shipped
 certificate has no tested or trusted edges.
 

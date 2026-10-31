@@ -33,7 +33,7 @@ The advanced ZTS profile resolves this tension by optimizing for few semantic
 concepts, not merely few source tokens. Its target is a useful application
 surface that elaborates locally into a much smaller execution kernel. The
 complete proposal is
-[ZTS advanced formal-spec northstar](../../zts-formal-spec-northstar-advanced.md).
+[ZTS advanced formal-spec northstar](../../spec/zts-model-1.md).
 
 ## Guidance
 
@@ -120,6 +120,6 @@ refuses both claims. See
 
 ## Related
 
-- [ZTS advanced formal-spec northstar](../../zts-formal-spec-northstar-advanced.md)
+- [ZTS advanced formal-spec northstar](../../spec/zts-model-1.md)
 - [Recursion through a function value proved total and cost_bounded](../security-issues/recursion-through-a-function-value-proved-total-and-cost-bounded.md): the termination rule enforced for calls through values
 - Earlier formal-spec northstar (`pre-rebase:docs/archive/spec-explainers/zts-formal-spec-northstar.html`)

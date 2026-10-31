@@ -11,7 +11,7 @@ objects are legacy or human-facing interfaces, and an agent must not read them a
 advanced-profile responses. See [zts-expert-contract.md](zts-expert-contract.md)
 for those shapes.
 
-Normative source: `docs/zts-formal-spec-northstar-advanced.md` section 4.8.
+Normative source: `docs/spec/zts-model-1.md` section 4.8.
 Payload design: `docs/plans/2026-07-30-016-d3-canonical-form-wire-design.md`
 sections 3 and 6.
 
