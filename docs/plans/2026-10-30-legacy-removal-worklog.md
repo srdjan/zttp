@@ -445,3 +445,17 @@ The stored-data set matched base on all rows. `surface.sh` moved only the help l
 The worker made three removals that the packet did not name, and I accepted each one. `readU32Field` had no caller left. `a raw kind=equivalence row decodes fired laws and counts` asserted only payload fields and the kind, and `an old kind=equivalence row still loads` still asserts that kind. The comment above the `proofs gate` line in `scripts/proof-gate.sh` described signing that no longer exists.
 
 Plan row B7 left too: `appendEvent without perf payload omits the field for back-compat` pinned only the absent payload field. `ReviewFacts.parseJson` keeps its defaults, as Decision 6 (a) requires.
+
+## L8b
+
+Status: complete. `zttp auth claude` and `zttp auth openai` now reach the `Unknown auth subcommand` path, which prints the help text and exits 1. `zttp auth revoke claude` and `zttp auth revoke openai` still delete a stored key. `retired_providers` and `retiredByLabel` stay, and `zttp auth revoke` is their only reader.
+
+I ran both binaries with a temporary home that held an `anthropic` key:
+
+| Command | Base | Now |
+|---|---|---|
+| `zttp auth claude` | Exit 1, the removal message on stderr | Exit 1, `Unknown auth subcommand: claude` on stderr, help on stdout |
+| `zttp auth revoke claude` | Exit 0, `Removed stored claude key.`, the file then holds `{}` | The same |
+| `zttp auth revoke openai` with no stored key | Exit 0, `No stored openai key. Nothing to revoke.` | The same |
+
+I added no unit test through `authCommand`, because `printAuthHelp` writes to stdout and that would corrupt the protocol of the test runner. Probable: that is the effect, and I did not run it. The table above is the evidence for this move. `docs/cli.md` and `docs/user-guide.md` say that `zttp auth claude` is refused, and that stays true.

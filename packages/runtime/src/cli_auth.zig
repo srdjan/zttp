@@ -39,7 +39,8 @@ fn providerByLabel(label: []const u8) ?Provider {
 
 /// Providers that were removed. A key stored for one of them stays in
 /// `~/.zttp/providers.json` until revoked, so `zttp auth revoke` still accepts
-/// these labels and removes the stored entry. Nothing else reads them.
+/// these labels and removes the stored entry. `zttp auth revoke` is the only
+/// reader.
 const retired_providers = [_]struct { label: []const u8, name: []const u8 }{
     .{ .label = "claude", .name = "anthropic" },
     .{ .label = "openai", .name = "openai" },
@@ -63,14 +64,6 @@ pub fn authCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     }
 
     const sub = argv[0];
-    if (retiredByLabel(sub)) |retired| {
-        std.debug.print(
-            "The {s} provider was removed. Use `zttp auth deepseek`, or `--provider local`.\n" ++
-                "To delete a key stored earlier, run `zttp auth revoke {s}`.\n",
-            .{ retired.label, retired.label },
-        );
-        return error.InvalidArgument;
-    }
     if (std.mem.eql(u8, sub, "deepseek")) {
         try authProviderSet(allocator, providerByLabel("deepseek").?, argv[1..]);
         return;
@@ -545,7 +538,7 @@ test "looksLikeApiKey: only checks length" {
     try std.testing.expect(looksLikeApiKey(deepseek, "anything-longer-than-twenty-chars"));
 }
 
-test "retired providers are refused by label and still revocable" {
+test "retired provider labels stay revocable" {
     try std.testing.expect(providerByLabel("claude") == null);
     try std.testing.expect(providerByLabel("openai") == null);
     try std.testing.expectEqualStrings("anthropic", retiredByLabel("claude").?.name);
