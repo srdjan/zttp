@@ -179,10 +179,7 @@ pub const DecodeConsumer = enum { journal, reconstruction };
 
 pub const WireIdentity = union(enum) {
     session,
-    entry: struct {
-        value: i64,
-        part_index: ?i64,
-    },
+    entry: i64,
 };
 
 pub const ToolUseBatchView = struct {
@@ -201,11 +198,6 @@ pub const ToolResultView = struct {
     ui_payload_value: ?std.json.Value,
 };
 
-pub const DisplayView = union(enum) {
-    string: []const u8,
-    object: std.json.ObjectMap,
-};
-
 /// Borrowed typed views into `DecodedEnvelope.document`. None of these values
 /// may outlive that owner.
 pub const DecodedRecord = union(EventKind) {
@@ -214,9 +206,9 @@ pub const DecodedRecord = union(EventKind) {
     tool_use: ToolUse,
     tool_use_batch: ToolUseBatchView,
     tool_result: ToolResultView,
-    proof_card: DisplayView,
-    diagnostic_box: DisplayView,
-    verified_change_set: DisplayView,
+    proof_card: std.json.ObjectMap,
+    diagnostic_box: std.json.ObjectMap,
+    verified_change_set: std.json.ObjectMap,
     system_note: []const u8,
     autoloop_outcome: std.json.Value,
     turn_end: std.json.Value,
@@ -240,7 +232,6 @@ pub const DecodedEnvelope = struct {
 const Envelope = struct {
     record: EventRecord,
     entry_id: ?EntryId = null,
-    part_index: ?u32 = null,
 };
 
 pub const Meta = struct {
@@ -277,14 +268,12 @@ pub fn appendEntryEvent(
     allocator: std.mem.Allocator,
     events_path: []const u8,
     entry_id: EntryId,
-    part_index: ?u32,
     record: EventRecord,
 ) !void {
     if (!isTranscriptRecord(record) or entry_id == 0) return error.InvalidEventIdentity;
     return appendEnvelope(allocator, events_path, .{
         .record = record,
         .entry_id = entry_id,
-        .part_index = part_index,
     });
 }
 
@@ -410,14 +399,12 @@ pub const JournalWriter = struct {
         self: *JournalWriter,
         allocator: std.mem.Allocator,
         entry_id: EntryId,
-        part_index: ?u32,
         record: EventRecord,
     ) !void {
         if (!isTranscriptRecord(record) or entry_id == 0) return error.InvalidEventIdentity;
         return self.appendEnvelope(allocator, .{
             .record = record,
             .entry_id = entry_id,
-            .part_index = part_index,
         });
     }
 
@@ -500,10 +487,6 @@ fn writeEnvelopeJson(writer: *std.Io.Writer, envelope: Envelope) !void {
     if (envelope.entry_id) |entry_id| {
         try writer.writeAll(",\"entry_id\":");
         try writer.print("{d}", .{entry_id});
-    }
-    if (envelope.part_index) |part_index| {
-        try writer.writeAll(",\"part_index\":");
-        try writer.print("{d}", .{part_index});
     }
     try writer.writeAll(",\"k\":");
     try json_writer.writeString(writer, kindTag(envelope.record));
@@ -655,8 +638,6 @@ fn recoverTail(
 
 const JournalSequence = struct {
     next_entry_id: EntryId = 1,
-    legacy_tool_entry_id: ?EntryId = null,
-    next_legacy_part: u32 = 0,
 };
 
 fn deriveJournalSequence(
@@ -706,19 +687,14 @@ pub fn decodeEnvelope(
         return error.CorruptEventsLog;
     const data = object.get("d") orelse return error.CorruptEventsLog;
     const entry_value = object.get("entry_id");
-    const part_value = object.get("part_index");
+    // A per-part identity belongs to a form that no release wrote.
+    if (object.get("part_index") != null) return error.CorruptEventsLog;
     const identity: WireIdentity = if (isTranscriptKind(kind)) blk: {
         const entry = entry_value orelse return error.CorruptEventsLog;
         if (entry != .integer or entry.integer <= 0) return error.CorruptEventsLog;
-        const part = if (part_value) |part| part_blk: {
-            if (kind != .tool_use or part != .integer or part.integer < 0) {
-                return error.CorruptEventsLog;
-            }
-            break :part_blk part.integer;
-        } else null;
-        break :blk .{ .entry = .{ .value = entry.integer, .part_index = part } };
+        break :blk .{ .entry = entry.integer };
     } else blk: {
-        if (entry_value != null or part_value != null) return error.CorruptEventsLog;
+        if (entry_value != null) return error.CorruptEventsLog;
         break :blk .session;
     };
 
@@ -784,8 +760,7 @@ fn decodeToolResultValue(value: std.json.Value) !ToolResultView {
     const id = value.object.get("tool_use_id") orelse return error.CorruptEventsLog;
     const name = value.object.get("tool_name") orelse return error.CorruptEventsLog;
     const ok = value.object.get("ok") orelse return error.CorruptEventsLog;
-    const text = value.object.get("llm_text") orelse value.object.get("body") orelse
-        return error.CorruptEventsLog;
+    const text = value.object.get("llm_text") orelse return error.CorruptEventsLog;
     if (id != .string or name != .string or ok != .bool or text != .string) {
         return error.CorruptEventsLog;
     }
@@ -798,46 +773,16 @@ fn decodeToolResultValue(value: std.json.Value) !ToolResultView {
     };
 }
 
-fn decodeDisplayValue(value: std.json.Value) !DisplayView {
-    return switch (value) {
-        .string => |text| .{ .string = text },
-        .object => |object| .{ .object = object },
-        else => error.CorruptEventsLog,
-    };
+fn decodeDisplayValue(value: std.json.Value) !std.json.ObjectMap {
+    if (value != .object) return error.CorruptEventsLog;
+    return value.object;
 }
 
 fn applySequenceTransition(sequence: *JournalSequence, decoded: *const DecodedEnvelope) !void {
     switch (decoded.record) {
-        .tool_use => {
-            const wire = switch (decoded.identity) {
-                .entry => |entry| entry,
-                .session => return error.CorruptEventsLog,
-            };
-            const entry_id = std.math.cast(EntryId, wire.value) orelse
-                return error.CorruptEventsLog;
-            if (wire.part_index) |raw_part| {
-                const part = std.math.cast(u32, raw_part) orelse return error.CorruptEventsLog;
-                if (part == 0) {
-                    if (entry_id != sequence.next_entry_id) return error.CorruptEventsLog;
-                    sequence.next_entry_id = std.math.add(EntryId, sequence.next_entry_id, 1) catch
-                        return error.EventIdentityOverflow;
-                    sequence.legacy_tool_entry_id = entry_id;
-                    sequence.next_legacy_part = 1;
-                } else {
-                    const current_tool_id = sequence.legacy_tool_entry_id orelse
-                        return error.CorruptEventsLog;
-                    if (entry_id != current_tool_id or part != sequence.next_legacy_part) {
-                        return error.CorruptEventsLog;
-                    }
-                    sequence.next_legacy_part = std.math.add(u32, part, 1) catch
-                        return error.EventIdentityOverflow;
-                }
-            } else {
-                try applyOrdinaryEntry(sequence, entry_id);
-            }
-        },
         .user_text,
         .model_text,
+        .tool_use,
         .tool_use_batch,
         .tool_result,
         .proof_card,
@@ -849,7 +794,7 @@ fn applySequenceTransition(sequence: *JournalSequence, decoded: *const DecodedEn
                 .entry => |entry| entry,
                 .session => return error.CorruptEventsLog,
             };
-            const entry_id = std.math.cast(EntryId, wire.value) orelse
+            const entry_id = std.math.cast(EntryId, wire) orelse
                 return error.CorruptEventsLog;
             try applyOrdinaryEntry(sequence, entry_id);
         },
@@ -875,8 +820,6 @@ fn applyOrdinaryEntry(sequence: *JournalSequence, entry_id: EntryId) !void {
     if (entry_id != sequence.next_entry_id) return error.CorruptEventsLog;
     sequence.next_entry_id = std.math.add(EntryId, sequence.next_entry_id, 1) catch
         return error.EventIdentityOverflow;
-    sequence.legacy_tool_entry_id = null;
-    sequence.next_legacy_part = 0;
 }
 
 fn isTranscriptKind(kind: EventKind) bool {
@@ -1384,17 +1327,11 @@ fn expectEventContractKind(
 
     if (eventContractIsTranscript(tag)) {
         try testing.expectError(error.InvalidEventIdentity, appendEvent(allocator, path, record));
-        try appendEntryEvent(
-            allocator,
-            path,
-            1,
-            if (tag == .tool_use) 0 else null,
-            record,
-        );
+        try appendEntryEvent(allocator, path, 1, record);
     } else {
         try testing.expectError(
             error.InvalidEventIdentity,
-            appendEntryEvent(allocator, path, 1, null, record),
+            appendEntryEvent(allocator, path, 1, record),
         );
         try appendEvent(allocator, path, record);
     }
@@ -1415,47 +1352,7 @@ fn expectEventContractKind(
     } else {
         try testing.expect(object.get("entry_id") == null);
     }
-    if (tag == .tool_use) {
-        try testing.expectEqual(@as(i64, 0), object.get("part_index").?.integer);
-    } else {
-        try testing.expect(object.get("part_index") == null);
-    }
-}
-
-fn expectPartIdentityRejected(
-    allocator: std.mem.Allocator,
-    tmp: *const IsolatedTmp,
-    tag: EventTag,
-) !void {
-    const filename = try allocator.print("part-{s}.events", .{@tagName(tag)});
-    defer allocator.free(filename);
-    const path = try tmp.childPath(allocator, filename);
-    defer allocator.free(path);
-    try testing.expectError(
-        error.CorruptEventsLog,
-        appendEntryEvent(allocator, path, 1, 0, eventContractFixture(tag)),
-    );
-}
-
-const InvalidSequenceFixture = enum {
-    skipped_entry,
-    first_part_above_zero,
-    part_gap,
-    different_entry_continuation,
-    continuation_after_ordinary_entry,
-};
-
-fn appendLegacyToolPart(
-    writer: *JournalWriter,
-    allocator: std.mem.Allocator,
-    entry_id: EntryId,
-    part_index: u32,
-) !void {
-    try writer.appendEntryEvent(allocator, entry_id, part_index, .{ .tool_use = .{
-        .id = if (part_index == 0) "toolu_first" else "toolu_next",
-        .name = "workspace_read_file",
-        .args_json = "{\"path\":\"handler.ts\"}",
-    } });
+    try testing.expect(object.get("part_index") == null);
 }
 
 fn countEventFrames(allocator: std.mem.Allocator, path: []const u8) !usize {
@@ -1469,75 +1366,6 @@ fn countEventFrames(allocator: std.mem.Allocator, path: []const u8) !usize {
     return count;
 }
 
-fn expectInvalidSequenceRejected(
-    allocator: std.mem.Allocator,
-    tmp: *const IsolatedTmp,
-    fixture: InvalidSequenceFixture,
-) !void {
-    const filename = try allocator.print("sequence-{s}.events", .{@tagName(fixture)});
-    defer allocator.free(filename);
-    const path = try tmp.childPath(allocator, filename);
-    defer allocator.free(path);
-    const expected_frames: usize = switch (fixture) {
-        .skipped_entry, .first_part_above_zero => 1,
-        .part_gap, .different_entry_continuation => 2,
-        .continuation_after_ordinary_entry => 3,
-    };
-
-    {
-        var writer = try JournalWriter.open(allocator, path);
-        defer writer.deinit();
-        switch (fixture) {
-            .skipped_entry => {
-                try testing.expectError(
-                    error.CorruptEventsLog,
-                    writer.appendEntryEvent(allocator, 2, null, .{ .user_text = "skipped" }),
-                );
-                try testing.expect(!writer.poisoned);
-                try writer.appendEntryEvent(allocator, 1, null, .{ .user_text = "recovered" });
-            },
-            .first_part_above_zero => {
-                try testing.expectError(
-                    error.CorruptEventsLog,
-                    appendLegacyToolPart(&writer, allocator, 1, 1),
-                );
-                try testing.expect(!writer.poisoned);
-                try appendLegacyToolPart(&writer, allocator, 1, 0);
-            },
-            .part_gap => {
-                try appendLegacyToolPart(&writer, allocator, 1, 0);
-                try testing.expectError(
-                    error.CorruptEventsLog,
-                    appendLegacyToolPart(&writer, allocator, 1, 2),
-                );
-                try testing.expect(!writer.poisoned);
-                try appendLegacyToolPart(&writer, allocator, 1, 1);
-            },
-            .different_entry_continuation => {
-                try appendLegacyToolPart(&writer, allocator, 1, 0);
-                try testing.expectError(
-                    error.CorruptEventsLog,
-                    appendLegacyToolPart(&writer, allocator, 2, 1),
-                );
-                try testing.expect(!writer.poisoned);
-                try appendLegacyToolPart(&writer, allocator, 1, 1);
-            },
-            .continuation_after_ordinary_entry => {
-                try appendLegacyToolPart(&writer, allocator, 1, 0);
-                try writer.appendEntryEvent(allocator, 2, null, .{ .user_text = "closes parts" });
-                try testing.expectError(
-                    error.CorruptEventsLog,
-                    appendLegacyToolPart(&writer, allocator, 1, 1),
-                );
-                try testing.expect(!writer.poisoned);
-                try writer.appendEntryEvent(allocator, 3, null, .{ .model_text = "still usable" });
-            },
-        }
-        try testing.expect(!writer.poisoned);
-    }
-    try testing.expectEqual(expected_frames, try countEventFrames(allocator, path));
-}
-
 test "every event kind has one encoded tag and identity class" {
     const allocator = testing.allocator;
     const tags = std.enums.values(EventTag);
@@ -1549,25 +1377,25 @@ test "every event kind has one encoded tag and identity class" {
     for (tags) |tag| try expectEventContractKind(allocator, &tmp, tag);
 }
 
-test "part identity is exclusive to legacy tool use records" {
+test "a skipped entry identity is refused without poisoning the writer" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
+    const path = try tmp.childPath(allocator, "skipped-entry.events");
+    defer allocator.free(path);
 
-    for (std.enums.values(EventTag)) |tag| {
-        if (!eventContractIsTranscript(tag) or tag == .tool_use) continue;
-        try expectPartIdentityRejected(allocator, &tmp, tag);
+    {
+        var writer = try JournalWriter.open(allocator, path);
+        defer writer.deinit();
+        try testing.expectError(
+            error.CorruptEventsLog,
+            writer.appendEntryEvent(allocator, 2, .{ .user_text = "skipped" }),
+        );
+        try testing.expect(!writer.poisoned);
+        try writer.appendEntryEvent(allocator, 1, .{ .user_text = "recovered" });
+        try testing.expect(!writer.poisoned);
     }
-}
-
-test "invalid journal sequence transitions do not poison the writer" {
-    const allocator = testing.allocator;
-    var tmp = try initTmp(allocator);
-    defer tmp.cleanup(allocator);
-
-    for (std.enums.values(InvalidSequenceFixture)) |fixture| {
-        try expectInvalidSequenceRejected(allocator, &tmp, fixture);
-    }
+    try testing.expectEqual(@as(usize, 1), try countEventFrames(allocator, path));
 }
 
 test "appendEntryEvent frames a v4 user_text event with stable identity" {
@@ -1578,7 +1406,7 @@ test "appendEntryEvent frames a v4 user_text event with stable identity" {
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try appendEntryEvent(allocator, path, 1, null, .{ .user_text = "hello world" });
+    try appendEntryEvent(allocator, path, 1, .{ .user_text = "hello world" });
 
     const raw = try readWhole(allocator, path);
     defer allocator.free(raw);
@@ -1612,7 +1440,7 @@ test "appendEvent serializes tool_result with llm_text body alias and ui_payload
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try appendEntryEvent(allocator, path, 1, null, .{ .tool_result = .{
+    try appendEntryEvent(allocator, path, 1, .{ .tool_result = .{
         .tool_use_id = "toolu_1",
         .tool_name = "zts_expert_verify_paths",
         .ok = false,
@@ -1635,7 +1463,7 @@ test "appendEvent serializes proof_card as a display object" {
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try appendEntryEvent(allocator, path, 1, null, .{ .proof_card = .{
+    try appendEntryEvent(allocator, path, 1, .{ .proof_card = .{
         .llm_text = "{\"summary\":{\"total\":0}}",
         .ui_payload = null,
     } });
@@ -1965,13 +1793,13 @@ test "JournalWriter rejects duplicate entry identities without poisoning the jou
 
     var writer = try JournalWriter.open(allocator, path);
     defer writer.deinit();
-    try writer.appendEntryEvent(allocator, 1, null, .{ .user_text = "first" });
+    try writer.appendEntryEvent(allocator, 1, .{ .user_text = "first" });
     try testing.expectError(
         error.CorruptEventsLog,
-        writer.appendEntryEvent(allocator, 1, null, .{ .model_text = "duplicate" }),
+        writer.appendEntryEvent(allocator, 1, .{ .model_text = "duplicate" }),
     );
     try testing.expect(!writer.poisoned);
-    try writer.appendEntryEvent(allocator, 2, null, .{ .model_text = "second" });
+    try writer.appendEntryEvent(allocator, 2, .{ .model_text = "second" });
 }
 
 test "appendEvent rejects corruption in a complete non-final frame" {

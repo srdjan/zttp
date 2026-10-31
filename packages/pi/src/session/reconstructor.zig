@@ -97,22 +97,8 @@ fn applyDecodedEnvelope(
             _ = try requireNextEntry(tr, decoded.identity);
             try appendText(allocator, tr, text, .model_text);
         },
-        .tool_use => |tool_use| {
-            const identity = try decodeEntryIdentity(decoded.identity);
-            if (identity.entry_id == tr.nextEntryId() - 1) {
-                try appendToolUsePart(
-                    allocator,
-                    tr,
-                    tool_use,
-                    identity.part_index orelse return error.CorruptEventsLog,
-                );
-                return;
-            }
-            if (identity.entry_id != tr.nextEntryId() or identity.part_index != 0) {
-                return error.CorruptEventsLog;
-            }
-            try appendToolUse(allocator, tr, tool_use);
-        },
+        // No reader accepts a single tool_use record. The writer's batch record carries tool calls.
+        .tool_use => return error.CorruptEventsLog,
         .tool_use_batch => |batch| {
             _ = try requireNextEntry(tr, decoded.identity);
             try appendToolUseBatch(allocator, tr, batch);
@@ -142,32 +128,14 @@ fn applyDecodedEnvelope(
     }
 }
 
-const EntryIdentity = struct {
-    entry_id: events.EntryId,
-    part_index: ?u32,
-};
-
-fn decodeEntryIdentity(identity: events.WireIdentity) !EntryIdentity {
-    const entry = switch (identity) {
+fn requireNextEntry(tr: *const transcript.Transcript, identity: events.WireIdentity) !events.EntryId {
+    const wire = switch (identity) {
         .entry => |value| value,
         .session => return error.CorruptEventsLog,
     };
-    return .{
-        .entry_id = std.math.cast(events.EntryId, entry.value) orelse
-            return error.CorruptEventsLog,
-        .part_index = if (entry.part_index) |part|
-            std.math.cast(u32, part) orelse return error.CorruptEventsLog
-        else
-            null,
-    };
-}
-
-fn requireNextEntry(tr: *const transcript.Transcript, identity: events.WireIdentity) !events.EntryId {
-    const entry = try decodeEntryIdentity(identity);
-    if (entry.entry_id != tr.nextEntryId() or entry.part_index != null) {
-        return error.CorruptEventsLog;
-    }
-    return entry.entry_id;
+    const entry_id = std.math.cast(events.EntryId, wire) orelse return error.CorruptEventsLog;
+    if (entry_id != tr.nextEntryId()) return error.CorruptEventsLog;
+    return entry_id;
 }
 
 fn applyCheckpoint(
@@ -227,16 +195,10 @@ const DisplayKind = enum { proof_card, diagnostic_box, verified_change_set };
 fn appendDisplayMessage(
     allocator: std.mem.Allocator,
     tr: *transcript.Transcript,
-    view: events.DisplayView,
+    object: std.json.ObjectMap,
     kind: DisplayKind,
 ) !void {
-    var message = switch (view) {
-        .string => |text| transcript.OwnedDisplayMessage{
-            .llm_text = try allocator.dupe(u8, text),
-            .ui_payload = null,
-        },
-        .object => |object| try parseDisplayMessage(allocator, object),
-    };
+    var message = try parseDisplayMessage(allocator, object);
     errdefer {
         allocator.free(message.llm_text);
         if (message.ui_payload) |*p| p.deinit(allocator);
@@ -247,18 +209,6 @@ fn appendDisplayMessage(
         .diagnostic_box => .{ .diagnostic_box = message },
         .verified_change_set => .{ .verified_change_set = message },
     });
-}
-
-fn appendToolUse(
-    allocator: std.mem.Allocator,
-    tr: *transcript.Transcript,
-    tool_use: events.ToolUse,
-) !void {
-    const calls = try allocator.alloc(transcript.OwnedToolCall, 1);
-    errdefer allocator.free(calls);
-    calls[0] = try ownToolUse(allocator, tool_use);
-    errdefer calls[0].deinit(allocator);
-    try tr.entries.append(allocator, .{ .assistant_tool_use = calls });
 }
 
 fn appendToolUseBatch(
@@ -277,24 +227,6 @@ fn appendToolUseBatch(
         initialized += 1;
     }
     try tr.entries.append(allocator, .{ .assistant_tool_use = calls });
-}
-
-fn appendToolUsePart(
-    allocator: std.mem.Allocator,
-    tr: *transcript.Transcript,
-    tool_use: events.ToolUse,
-    part_index: u32,
-) !void {
-    if (tr.entries.items.len == 0) return error.CorruptEventsLog;
-    const last = &tr.entries.items[tr.entries.items.len - 1];
-    if (last.* != .assistant_tool_use) return error.CorruptEventsLog;
-    if (part_index != last.assistant_tool_use.len) return error.CorruptEventsLog;
-    var call = try ownToolUse(allocator, tool_use);
-    errdefer call.deinit(allocator);
-    const old_len = last.assistant_tool_use.len;
-    const calls = try allocator.realloc(last.assistant_tool_use, old_len + 1);
-    last.assistant_tool_use = calls;
-    calls[old_len] = call;
 }
 
 fn ownToolUse(allocator: std.mem.Allocator, tool_use: events.ToolUse) !transcript.OwnedToolCall {
@@ -347,8 +279,7 @@ fn parseDisplayMessage(
     allocator: std.mem.Allocator,
     object: std.json.ObjectMap,
 ) !transcript.OwnedDisplayMessage {
-    const llm_text_val = object.get("llm_text") orelse object.get("body") orelse
-        return error.CorruptEventsLog;
+    const llm_text_val = object.get("llm_text") orelse return error.CorruptEventsLog;
     if (llm_text_val != .string) return error.CorruptEventsLog;
     const llm_text = try allocator.dupe(u8, llm_text_val.string);
     errdefer allocator.free(llm_text);
@@ -381,41 +312,30 @@ fn initTmp(allocator: std.mem.Allocator) !IsolatedTmp {
 const JournalEventTag = std.meta.Tag(events.EventRecord);
 
 fn populateAllKindsJournal(allocator: std.mem.Allocator, path: []const u8) !void {
-    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "user" });
-    try events.appendEntryEvent(allocator, path, 2, null, .{ .model_text = "model" });
-    try events.appendEntryEvent(allocator, path, 3, 0, .{ .tool_use = .{
-        .id = "toolu_legacy_1",
-        .name = "workspace_read_file",
-        .args_json = "{\"path\":\"one.ts\"}",
-        .reasoning_content = "first reasoning",
-    } });
-    try events.appendEntryEvent(allocator, path, 3, 1, .{ .tool_use = .{
-        .id = "toolu_legacy_2",
-        .name = "workspace_read_file",
-        .args_json = "{\"path\":\"two.ts\"}",
-    } });
+    try events.appendEntryEvent(allocator, path, 1, .{ .user_text = "user" });
+    try events.appendEntryEvent(allocator, path, 2, .{ .model_text = "model" });
     const batch = [_]events.ToolUse{
-        .{ .id = "toolu_batch", .name = "zts_expert_meta", .args_json = "{}" },
+        .{ .id = "toolu_batch", .name = "zts_expert_meta", .args_json = "{}", .reasoning_content = "first reasoning" },
     };
-    try events.appendEntryEvent(allocator, path, 4, null, .{ .tool_use_batch = &batch });
-    try events.appendEntryEvent(allocator, path, 5, null, .{ .tool_result = .{
+    try events.appendEntryEvent(allocator, path, 3, .{ .tool_use_batch = &batch });
+    try events.appendEntryEvent(allocator, path, 4, .{ .tool_result = .{
         .tool_use_id = "toolu_batch",
         .tool_name = "zts_expert_meta",
         .ok = true,
         .llm_text = "result",
         .ui_payload = .{ .plain_text = @constCast("result display") },
     } });
-    try events.appendEntryEvent(allocator, path, 6, null, .{ .proof_card = .{
+    try events.appendEntryEvent(allocator, path, 5, .{ .proof_card = .{
         .llm_text = "proof",
         .ui_payload = .{ .plain_text = @constCast("proof display") },
     } });
-    try events.appendEntryEvent(allocator, path, 7, null, .{ .diagnostic_box = .{
+    try events.appendEntryEvent(allocator, path, 6, .{ .diagnostic_box = .{
         .llm_text = "diagnostic",
     } });
-    try events.appendEntryEvent(allocator, path, 8, null, .{ .verified_change_set = .{
+    try events.appendEntryEvent(allocator, path, 7, .{ .verified_change_set = .{
         .llm_text = "verified",
     } });
-    try events.appendEntryEvent(allocator, path, 9, null, .{ .system_note = "system" });
+    try events.appendEntryEvent(allocator, path, 8, .{ .system_note = "system" });
     try events.appendEvent(allocator, path, .{ .autoloop_outcome = .{
         .verdict = .achieved,
         .goals_met = &.{"retry_safe"},
@@ -429,7 +349,7 @@ fn populateAllKindsJournal(allocator: std.mem.Allocator, path: []const u8) !void
     } });
     try events.appendEvent(allocator, path, .{ .compaction_checkpoint = .{
         .summary = "summary",
-        .first_kept_entry_id = 9,
+        .first_kept_entry_id = 8,
         .reason = .manual,
         .read_files = &.{"read.ts"},
         .modified_files = &.{"modified.ts"},
@@ -504,15 +424,17 @@ test "reconstructTranscript applies all event kinds with stable identities" {
         seen.insert(tag);
         frame_count += 1;
     }
-    try testing.expectEqual(@as(usize, 14), frame_count);
-    for (std.enums.values(JournalEventTag)) |tag| try testing.expect(seen.contains(tag));
+    try testing.expectEqual(@as(usize, 12), frame_count);
+    // No journal reader accepts a single tool_use record, so this journal omits it.
+    var expected_seen = std.EnumSet(JournalEventTag).full;
+    expected_seen.remove(.tool_use);
+    try testing.expect(seen.eql(expected_seen));
 
     var tr = try reconstructTranscript(allocator, path, null);
     defer tr.deinit(allocator);
     const expected_tags = [_]transcript.Tag{
         .user_text,
         .model_text,
-        .assistant_tool_use,
         .assistant_tool_use,
         .tool_result,
         .proof_card,
@@ -527,83 +449,58 @@ test "reconstructTranscript applies all event kinds with stable identities" {
     }
     try testing.expectEqualStrings("user", tr.at(0).user_text);
     try testing.expectEqualStrings("model", tr.at(1).model_text);
-    try testing.expectEqual(@as(usize, 2), tr.at(2).assistant_tool_use.len);
-    try testing.expectEqualStrings("toolu_legacy_1", tr.at(2).assistant_tool_use[0].id);
-    try testing.expectEqualStrings("workspace_read_file", tr.at(2).assistant_tool_use[0].name);
-    try testing.expectEqualStrings("{\"path\":\"one.ts\"}", tr.at(2).assistant_tool_use[0].args_json);
+    try testing.expectEqual(@as(usize, 1), tr.at(2).assistant_tool_use.len);
+    try testing.expectEqualStrings("toolu_batch", tr.at(2).assistant_tool_use[0].id);
+    try testing.expectEqualStrings("zts_expert_meta", tr.at(2).assistant_tool_use[0].name);
+    try testing.expectEqualStrings("{}", tr.at(2).assistant_tool_use[0].args_json);
     try testing.expectEqualStrings("first reasoning", tr.at(2).assistant_tool_use[0].reasoning_content.?);
-    try testing.expectEqualStrings("toolu_legacy_2", tr.at(2).assistant_tool_use[1].id);
-    try testing.expectEqual(@as(usize, 1), tr.at(3).assistant_tool_use.len);
-    try testing.expectEqualStrings("toolu_batch", tr.at(3).assistant_tool_use[0].id);
-    try testing.expectEqualStrings("zts_expert_meta", tr.at(3).assistant_tool_use[0].name);
-    try testing.expectEqualStrings("{}", tr.at(3).assistant_tool_use[0].args_json);
-    try testing.expectEqualStrings("toolu_batch", tr.at(4).tool_result.tool_use_id);
-    try testing.expectEqualStrings("zts_expert_meta", tr.at(4).tool_result.tool_name);
-    try testing.expect(tr.at(4).tool_result.ok);
-    try testing.expectEqualStrings("result", tr.at(4).tool_result.llm_text);
-    switch (tr.at(4).tool_result.ui_payload.?) {
+    try testing.expectEqualStrings("toolu_batch", tr.at(3).tool_result.tool_use_id);
+    try testing.expectEqualStrings("zts_expert_meta", tr.at(3).tool_result.tool_name);
+    try testing.expect(tr.at(3).tool_result.ok);
+    try testing.expectEqualStrings("result", tr.at(3).tool_result.llm_text);
+    switch (tr.at(3).tool_result.ui_payload.?) {
         .plain_text => |text| try testing.expectEqualStrings("result display", text),
         else => return error.TestExpectedPlainTextPayload,
     }
-    switch (tr.at(5).proof_card.ui_payload.?) {
+    switch (tr.at(4).proof_card.ui_payload.?) {
         .plain_text => |text| try testing.expectEqualStrings("proof display", text),
         else => return error.TestExpectedPlainTextPayload,
     }
-    try testing.expectEqualStrings("proof", tr.at(5).proof_card.llm_text);
-    try testing.expectEqualStrings("diagnostic", tr.at(6).diagnostic_box.llm_text);
-    try testing.expectEqualStrings("verified", tr.at(7).verified_change_set.llm_text);
-    try testing.expectEqualStrings("system", tr.at(8).system_note);
+    try testing.expectEqualStrings("proof", tr.at(4).proof_card.llm_text);
+    try testing.expectEqualStrings("diagnostic", tr.at(5).diagnostic_box.llm_text);
+    try testing.expectEqualStrings("verified", tr.at(6).verified_change_set.llm_text);
+    try testing.expectEqualStrings("system", tr.at(7).system_note);
     try testing.expectEqualStrings("summary", tr.projection.?.summary);
-    try testing.expectEqual(@as(events.EntryId, 9), tr.projection.?.first_kept_entry_id);
+    try testing.expectEqual(@as(events.EntryId, 8), tr.projection.?.first_kept_entry_id);
     try testing.expectEqualStrings("read.ts", tr.projection.?.read_files[0]);
     try testing.expectEqualStrings("modified.ts", tr.projection.?.modified_files[0]);
 }
 
-test "reconstructTranscript preserves legacy display and body payloads" {
+test "journal refuses part_index, body-only results, and string display payloads" {
     const allocator = testing.allocator;
     var tmp = try initTmp(allocator);
     defer tmp.cleanup(allocator);
 
-    const display_path = try tmp.childPath(allocator, "display-string.events");
-    defer allocator.free(display_path);
-    try writeRawSchema4Frame(
-        allocator,
-        display_path,
-        "{\"v\":4,\"entry_id\":1,\"k\":\"proof_card\",\"d\":\"legacy proof\"}",
-    );
-    var display = try reconstructTranscript(allocator, display_path, null);
-    defer display.deinit(allocator);
-    try testing.expectEqualStrings("legacy proof", display.at(0).proof_card.llm_text);
-    try testing.expect(display.at(0).proof_card.ui_payload == null);
-
-    const result_path = try tmp.childPath(allocator, "result-body.events");
-    defer allocator.free(result_path);
-    try writeRawSchema4Frame(
-        allocator,
-        result_path,
-        "{\"v\":4,\"entry_id\":1,\"k\":\"tool_result\",\"d\":{\"tool_use_id\":\"toolu_1\",\"tool_name\":\"tool\",\"ok\":true,\"body\":\"legacy result\",\"ui_payload\":{\"kind\":\"plain_text\",\"text\":\"display\"}}}",
-    );
-    var result = try reconstructTranscript(allocator, result_path, null);
-    defer result.deinit(allocator);
-    try testing.expectEqualStrings("legacy result", result.at(0).tool_result.llm_text);
-    switch (result.at(0).tool_result.ui_payload.?) {
-        .plain_text => |text| try testing.expectEqualStrings("display", text),
-        else => return error.TestExpectedPlainTextPayload,
-    }
-
-    const object_path = try tmp.childPath(allocator, "display-body.events");
-    defer allocator.free(object_path);
-    try writeRawSchema4Frame(
-        allocator,
-        object_path,
-        "{\"v\":4,\"entry_id\":1,\"k\":\"verified_change_set\",\"d\":{\"body\":\"legacy verified\",\"ui_payload\":{\"kind\":\"plain_text\",\"text\":\"verified display\"}}}",
-    );
-    var object = try reconstructTranscript(allocator, object_path, null);
-    defer object.deinit(allocator);
-    try testing.expectEqualStrings("legacy verified", object.at(0).verified_change_set.llm_text);
-    switch (object.at(0).verified_change_set.ui_payload.?) {
-        .plain_text => |text| try testing.expectEqualStrings("verified display", text),
-        else => return error.TestExpectedPlainTextPayload,
+    const cases = [_]struct { name: []const u8, payload: []const u8 }{
+        .{
+            .name = "part-index-tool-use.events",
+            .payload = "{\"v\":4,\"entry_id\":1,\"part_index\":0,\"k\":\"tool_use\",\"d\":{\"id\":\"toolu_1\",\"name\":\"workspace_read_file\",\"args_json\":\"{}\"}}",
+        },
+        .{
+            .name = "body-only-tool-result.events",
+            .payload = "{\"v\":4,\"entry_id\":1,\"k\":\"tool_result\",\"d\":{\"tool_use_id\":\"toolu_1\",\"tool_name\":\"tool\",\"ok\":true,\"body\":\"result\"}}",
+        },
+        .{
+            .name = "string-proof-card.events",
+            .payload = "{\"v\":4,\"entry_id\":1,\"k\":\"proof_card\",\"d\":\"proof\"}",
+        },
+    };
+    for (cases) |case| {
+        const path = try tmp.childPath(allocator, case.name);
+        defer allocator.free(path);
+        try writeRawSchema4Frame(allocator, path, case.payload);
+        try testing.expectError(error.CorruptEventsLog, reconstructTranscript(allocator, path, null));
+        try testing.expectError(error.CorruptEventsLog, recoverIncompleteTail(allocator, path));
     }
 }
 
@@ -614,7 +511,7 @@ test "reader recovery and reconstruction preserve additive journal fields" {
     const path = try tmp.childPath(allocator, "additive-fields.events");
     defer allocator.free(path);
     const entry_payload =
-        "{\"v\":4,\"entry_id\":1,\"future_envelope\":{\"revision\":5},\"k\":\"tool_result\",\"d\":{\"tool_use_id\":\"toolu_1\",\"tool_name\":\"tool\",\"ok\":true,\"body\":\"result\",\"future_payload\":[1,2],\"ui_payload\":{\"kind\":\"plain_text\",\"text\":\"display\",\"future_ui\":true}}}";
+        "{\"v\":4,\"entry_id\":1,\"future_envelope\":{\"revision\":5},\"k\":\"tool_result\",\"d\":{\"tool_use_id\":\"toolu_1\",\"tool_name\":\"tool\",\"ok\":true,\"llm_text\":\"result\",\"future_payload\":[1,2],\"ui_payload\":{\"kind\":\"plain_text\",\"text\":\"display\",\"future_ui\":true}}}";
     const checkpoint_payload =
         "{\"v\":4,\"future_envelope\":\"kept\",\"k\":\"compaction_checkpoint\",\"d\":{\"summary\":\"summary\",\"first_kept_entry_id\":1,\"reason\":\"manual\",\"read_files\":[\"read.ts\"],\"modified_files\":[\"modified.ts\"],\"future_payload\":{\"tokens\":3}}}";
     try writeRawSchema4Frame(allocator, path, entry_payload);
@@ -778,7 +675,7 @@ test "writer accepts tool use without part index but reconstruction rejects it" 
     defer tmp.cleanup(allocator);
     const path = try tmp.childPath(allocator, "tool-use-without-part.events");
     defer allocator.free(path);
-    try events.appendEntryEvent(allocator, path, 1, null, .{ .tool_use = .{
+    try events.appendEntryEvent(allocator, path, 1, .{ .tool_use = .{
         .id = "toolu_1",
         .name = "workspace_read_file",
         .args_json = "{\"path\":\"handler.ts\"}",
@@ -792,7 +689,7 @@ test "reconstructTranscript preserves parse allocation error compatibility" {
     defer tmp.cleanup(allocator);
     const path = try tmp.childPath(allocator, "parse-oom.events");
     defer allocator.free(path);
-    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "user" });
+    try events.appendEntryEvent(allocator, path, 1, .{ .user_text = "user" });
 
     // Reader.open allocates the path first and Reader.next allocates the frame
     // payload second. The next allocation enters std.json parsing, whose
@@ -818,8 +715,8 @@ test "reconstructTranscript cleans every allocation failure" {
         if (reconstructTranscript(failing.allocator(), path, null)) |value| {
             var tr = value;
             defer tr.deinit(failing.allocator());
-            try testing.expectEqual(@as(usize, 9), tr.len());
-            try testing.expectEqualStrings("result", tr.at(4).tool_result.llm_text);
+            try testing.expectEqual(@as(usize, 8), tr.len());
+            try testing.expectEqualStrings("result", tr.at(3).tool_result.llm_text);
             try testing.expectEqualStrings("summary", tr.projection.?.summary);
             break;
         } else |err| {
@@ -872,8 +769,8 @@ test "reconstructTranscript round-trips user_text, model_text, tool_use, tool_re
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "hi" });
-    try events.appendEntryEvent(allocator, path, 2, null, .{ .model_text = "hello back" });
+    try events.appendEntryEvent(allocator, path, 1, .{ .user_text = "hi" });
+    try events.appendEntryEvent(allocator, path, 2, .{ .model_text = "hello back" });
     const tool_batch = [_]events.ToolUse{
         .{
             .id = "toolu_1",
@@ -883,14 +780,14 @@ test "reconstructTranscript round-trips user_text, model_text, tool_use, tool_re
         },
         .{ .id = "toolu_2", .name = "workspace_read_file", .args_json = "{\"path\":\"handler.ts\"}" },
     };
-    try events.appendEntryEvent(allocator, path, 3, null, .{ .tool_use_batch = &tool_batch });
-    try events.appendEntryEvent(allocator, path, 4, null, .{ .tool_result = .{
+    try events.appendEntryEvent(allocator, path, 3, .{ .tool_use_batch = &tool_batch });
+    try events.appendEntryEvent(allocator, path, 4, .{ .tool_result = .{
         .tool_use_id = "toolu_1",
         .tool_name = "zts_expert_meta",
         .ok = true,
         .llm_text = "{\"ok\":true}",
     } });
-    try events.appendEntryEvent(allocator, path, 5, null, .{ .proof_card = .{ .llm_text = "contract ok" } });
+    try events.appendEntryEvent(allocator, path, 5, .{ .proof_card = .{ .llm_text = "contract ok" } });
 
     var tr = try reconstructTranscript(allocator, path, null);
     defer tr.deinit(allocator);
@@ -952,9 +849,9 @@ test "reconstructTranscript skips turn_end records" {
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "before" });
+    try events.appendEntryEvent(allocator, path, 1, .{ .user_text = "before" });
     try events.appendEvent(allocator, path, .{ .turn_end = .{ .reason = .budget_roundtrips } });
-    try events.appendEntryEvent(allocator, path, 2, null, .{ .model_text = "after" });
+    try events.appendEntryEvent(allocator, path, 2, .{ .model_text = "after" });
 
     var tr = try reconstructTranscript(allocator, path, null);
     defer tr.deinit(allocator);
@@ -978,9 +875,9 @@ test "reconstructTranscript restores the latest projection checkpoint" {
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "old" });
-    try events.appendEntryEvent(allocator, path, 2, null, .{ .model_text = "old answer" });
-    try events.appendEntryEvent(allocator, path, 3, null, .{ .user_text = "new" });
+    try events.appendEntryEvent(allocator, path, 1, .{ .user_text = "old" });
+    try events.appendEntryEvent(allocator, path, 2, .{ .model_text = "old answer" });
+    try events.appendEntryEvent(allocator, path, 3, .{ .user_text = "new" });
     try events.appendEvent(allocator, path, .{ .compaction_checkpoint = .{
         .summary = "summary",
         .first_kept_entry_id = 3,
@@ -1002,14 +899,14 @@ test "reconstructTranscript accepts a checkpoint at the next entry boundary" {
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "old" });
-    try events.appendEntryEvent(allocator, path, 2, null, .{ .model_text = "old answer" });
+    try events.appendEntryEvent(allocator, path, 1, .{ .user_text = "old" });
+    try events.appendEntryEvent(allocator, path, 2, .{ .model_text = "old answer" });
     try events.appendEvent(allocator, path, .{ .compaction_checkpoint = .{
         .summary = "summary through the completed tail",
         .first_kept_entry_id = 3,
         .reason = .threshold,
     } });
-    try events.appendEntryEvent(allocator, path, 3, null, .{ .model_text = "continued" });
+    try events.appendEntryEvent(allocator, path, 3, .{ .model_text = "continued" });
 
     var tr = try reconstructTranscript(allocator, path, null);
     defer tr.deinit(allocator);
@@ -1026,7 +923,7 @@ test "journal writer rejects a checkpoint with a missing cut identity" {
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "only" });
+    try events.appendEntryEvent(allocator, path, 1, .{ .user_text = "only" });
     try testing.expectError(
         error.CorruptEventsLog,
         events.appendEvent(allocator, path, .{ .compaction_checkpoint = .{
@@ -1047,8 +944,8 @@ test "reconstructTranscript streams a journal larger than the former 64 MiB ceil
     const body = try allocator.alloc(u8, 33 * 1024 * 1024);
     defer allocator.free(body);
     @memset(body, 'a');
-    try events.appendEntryEvent(allocator, path, 1, null, .{ .system_note = body });
-    try events.appendEntryEvent(allocator, path, 2, null, .{ .system_note = body });
+    try events.appendEntryEvent(allocator, path, 1, .{ .system_note = body });
+    try events.appendEntryEvent(allocator, path, 2, .{ .system_note = body });
 
     var tr = try reconstructTranscript(allocator, path, null);
     defer tr.deinit(allocator);
@@ -1065,7 +962,7 @@ test "reconstructTranscript is read-only and recovery requires the journal lock"
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "complete" });
+    try events.appendEntryEvent(allocator, path, 1, .{ .user_text = "complete" });
     const fd = try zts.file_io.openAppend(allocator, path);
     defer std.Io.Threaded.closeFd(fd);
     _ = std.c.write(fd, "ZTE3partial".ptr, "ZTE3partial".len);
@@ -1085,8 +982,8 @@ test "reconstructTranscript reports the line number of the first corrupt record"
     const path = try tmp.childPath(allocator, "events.jsonl");
     defer allocator.free(path);
 
-    try events.appendEntryEvent(allocator, path, 1, null, .{ .user_text = "one" });
-    try events.appendEntryEvent(allocator, path, 2, null, .{ .user_text = "two" });
+    try events.appendEntryEvent(allocator, path, 1, .{ .user_text = "one" });
+    try events.appendEntryEvent(allocator, path, 2, .{ .user_text = "two" });
     const raw = try zts.file_io.readFile(allocator, path, 1024 * 1024);
     defer allocator.free(raw);
     const corrupt_at = std.mem.indexOf(u8, raw, "two") orelse return error.TestExpectedPayload;

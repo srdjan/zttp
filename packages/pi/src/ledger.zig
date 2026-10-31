@@ -941,6 +941,6 @@ test "readLastSessionSummary returns null when a session wrote no summary" {
     defer tmp.cleanup(testing.allocator);
     const events_path = try tmp.childPath(testing.allocator, "events.jsonl");
     defer testing.allocator.free(events_path);
-    try session_events.appendEntryEvent(testing.allocator, events_path, 1, null, .{ .user_text = "hello" });
+    try session_events.appendEntryEvent(testing.allocator, events_path, 1, .{ .user_text = "hello" });
     try testing.expect((try readLastSessionSummary(testing.allocator, events_path)) == null);
 }

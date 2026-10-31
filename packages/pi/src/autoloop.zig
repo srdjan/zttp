@@ -74,9 +74,9 @@ fn appendEntryEvent(
     entry_id: session_events.EntryId,
     record: session_events.EventRecord,
 ) !void {
-    if (options.journal_writer) |writer| return writer.appendEntryEvent(allocator, entry_id, null, record);
+    if (options.journal_writer) |writer| return writer.appendEntryEvent(allocator, entry_id, record);
     const path = options.events_path orelse return;
-    return session_events.appendEntryEvent(allocator, path, entry_id, null, record);
+    return session_events.appendEntryEvent(allocator, path, entry_id, record);
 }
 
 pub const Outcome = struct {

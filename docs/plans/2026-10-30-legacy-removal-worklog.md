@@ -93,3 +93,21 @@ Names that the worker chose: `in_zts_modules_dir`, `StepCapturingClient` (becaus
 `eprobe.sh` table rows hold a pool timing and leak addresses, so the unit gate normalizes both before it compares. The `parse-error` row of that table shows a `SafeAllocator` leak report on the debug binary at the base commit. This plan did not cause it, and no unit here changes it.
 
 Names that wait for L4 to L8: `legacy_return_kind`, `LegacyReturnKind`, `hasLegacyGuardFacet`, `legacy_ordinary_prefix`, `legacy_call`, `legacy_call_arguments`, `legacy_parameter_projection`, `legacy_start`, `legacy_end`, `legacy_projected_end`, `legacy_capture`, `original_legacy_capture`, `legacy_bound`, `unsupported_legacy_spelling_refusal`.
+
+## L3a
+
+Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`, `test-zruntime`, `test-expert-app`, `test-expert`, `test-cassette`, `test-simulator`, `zig build test`, `check-spine`. The comparison script moved 0 of 648 rows.
+
+The new test `journal refuses part_index, body-only results, and string display payloads` failed on the old readers: the `part_index` record loaded. The table stops at its first failure, so that run proved only the first row. The deleted pin test proves that the other two forms loaded before this unit.
+
+Tests that left, each with the behavior that it held:
+
+| Test | Behavior | Now |
+|---|---|---|
+| `reconstructTranscript preserves legacy display and body payloads` | A string `proof_card` and a body-only `tool_result` loaded | Left on purpose. The new test asserts each refusal |
+| `part identity is exclusive to legacy tool use records` | The writer refused `part_index` on other kinds | Left on purpose, because the writer parameter is gone. The new test asserts the read refusal |
+| `invalid journal sequence transitions do not poison the writer` | Four part cases and one skipped-entry case | The four part cases left on purpose. `a skipped entry identity is refused without poisoning the writer` keeps the skipped-entry case |
+
+The fixture in `reader recovery and reconstruction preserve additive journal fields` used a body-only record, so it now uses `llm_text`. That test is about unknown keys, and its assertions did not change.
+
+Ruling on the `tool_use` event kind: it stays. `zttp expert --mode json` prints it through `emitEntry` in `print_mode.zig`, so it is a current output. My follow-up to remove it was wrong, and the worker stopped before it edited a file. The journal writer emits `tool_use_batch`, and `reconstructor.zig` refuses a single `tool_use` record, as it did before this unit.

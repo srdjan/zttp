@@ -99,7 +99,7 @@ pub fn appendEntryToWriter(
 ) !void {
     switch (entry.*) {
         .tool_result => |tr| {
-            try writer.appendEntryEvent(allocator, entry_id, null, .{ .tool_result = .{
+            try writer.appendEntryEvent(allocator, entry_id, .{ .tool_result = .{
                 .tool_use_id = tr.tool_use_id,
                 .tool_name = tr.tool_name,
                 .ok = tr.ok,
@@ -119,9 +119,9 @@ pub fn appendEntryToWriter(
                     .reasoning_content = call.reasoning_content,
                 };
             }
-            try writer.appendEntryEvent(allocator, entry_id, null, .{ .tool_use_batch = batch });
+            try writer.appendEntryEvent(allocator, entry_id, .{ .tool_use_batch = batch });
         },
-        else => try writer.appendEntryEvent(allocator, entry_id, null, entryToEvent(entry)),
+        else => try writer.appendEntryEvent(allocator, entry_id, entryToEvent(entry)),
     }
 }
 
