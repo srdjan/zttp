@@ -502,9 +502,6 @@ Flags:
 - `--head <ref>` after side. Default: the working tree.
 - `--format md|json` default `md`.
 - `--out <path>` write the report to a file instead of stdout.
-- `--no-sign` accepted and ignored. The gate used to append signed
-  `kind=equivalence` ledger rows; it writes none now. CI scripts that pass the
-  flag keep working.
 
 Files that are not handlers (a changed `.ts` with no routes and no
 behavior paths, i.e. a config or library module) and files under `tests/`,

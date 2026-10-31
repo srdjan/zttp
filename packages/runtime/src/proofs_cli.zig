@@ -117,10 +117,6 @@ fn gateCommand(
             opts.head = try shared.takeArg(&i, argv, error.MissingArgValue);
         } else if (std.mem.eql(u8, arg, "--out")) {
             opts.out = try shared.takeArg(&i, argv, error.MissingArgValue);
-        } else if (std.mem.eql(u8, arg, "--no-sign")) {
-            // Accepted and ignored. The gate used to append signed kind=equivalence
-            // ledger rows and this flag skipped them; it writes none now, but the
-            // Action and `scripts/proof-gate.sh` still pass the flag.
         } else if (std.mem.eql(u8, arg, "--format")) {
             const value = try shared.takeArg(&i, argv, error.MissingArgValue);
             if (std.mem.eql(u8, value, "md")) {
@@ -313,8 +309,7 @@ fn writeHelp(w: *std.Io.Writer) !void {
         \\                   git range, aggregate a repo-level behavioral verdict,
         \\                   and emit a PR-ready report. Exit 1 on `breaking`.
         \\                   Flags: [--base REF] [--head REF] [--format md|json]
-        \\                          [--out PATH] [--no-sign].
-        \\                   --no-sign is accepted and ignored.
+        \\                          [--out PATH].
         \\                   Defaults: --base origin/main (then main), head is the
         \\                   working tree, --format md.
         \\
@@ -1111,6 +1106,20 @@ test "show without ref returns MissingRefArgument" {
         runWith(testing.allocator, &.{"show"}, &out.writer, &err.writer),
     );
     try testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "requires a ref") != null);
+}
+
+test "gate refuses the removed --no-sign flag" {
+    var out = std.Io.Writer.Allocating.init(testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(testing.allocator);
+    defer err.deinit();
+
+    try testing.expectError(
+        error.UnknownArgument,
+        runWith(testing.allocator, &.{ "gate", "--no-sign" }, &out.writer, &err.writer),
+    );
+    try testing.expectEqualStrings("zttp proofs gate: unknown argument `--no-sign`\n", err.writer.buffered());
+    try testing.expectEqualStrings("", out.writer.buffered());
 }
 
 test "help subcommand prints usage" {

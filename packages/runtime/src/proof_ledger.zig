@@ -17,16 +17,13 @@ const json_util = @import("proofs/json_util.zig");
 pub const EventKind = enum {
     deploy,
     swap,
-    /// Legacy: a signed perf-as-proof receipt attached to an applied edit.
-    /// Nothing writes this kind any more (the probe was removed in plan 005
-    /// G10), but existing ledgers hold such rows and `parseLine` rejects an
-    /// unknown kind, so it stays readable. Carries a `perf` JSON object
-    /// alongside `facts`.
+    /// An old row kind. Nothing writes it now, but ledgers on disk hold such
+    /// rows and `parseLine` refuses an unknown kind, so the kind stays
+    /// readable. The reader does not read the `perf` object in the row.
     perf,
-    /// Legacy: a signed behavioral-equivalence verdict, the classification
-    /// `contract_diff` computed between two handler versions, in a signed
-    /// `equivalence` JSON object alongside `facts`. Nothing writes this kind
-    /// any more (plan 005 G10); it stays readable for existing ledgers.
+    /// An old row kind. Nothing writes it now, but ledgers on disk hold such
+    /// rows and `parseLine` refuses an unknown kind, so the kind stays
+    /// readable. The reader does not read the `equivalence` object in the row.
     equivalence,
 
     pub fn toString(self: EventKind) []const u8 {
@@ -47,61 +44,6 @@ pub const EventKind = enum {
     }
 };
 
-/// Payload of a legacy `kind=perf` row. The `sig` field is the compact JWS
-/// that the removed `zts.perf_receipt.sign` produced over the same numeric
-/// fields (see `pre-rebase:packages/zts/src/perf_receipt.zig`). This code
-/// never verifies it.
-///
-/// `sample_count == 0` means the probe was skipped (handler capabilities
-/// disqualified it: see proof_enrichment.zig). The row still records the
-/// fact that an apply happened so that a future audit can prove no
-/// receipt was suppressed.
-pub const PerfPayload = struct {
-    handler_hash: []const u8,
-    p50_us: u64,
-    p99_us: u64,
-    alloc_bytes: u64,
-    sample_count: u64,
-    sig: []const u8,
-
-    pub fn deinit(self: *PerfPayload, allocator: std.mem.Allocator) void {
-        allocator.free(self.handler_hash);
-        allocator.free(self.sig);
-    }
-};
-
-/// Payload of a legacy `kind=equivalence` row. The `sig` field is the
-/// compact JWS that the removed `zts.equivalence_receipt.sign` produced over
-/// the verdict-defining fields (see
-/// `pre-rebase:packages/zts/src/equivalence_receipt.zig`). This code never
-/// verifies it. `classification` is one of
-/// equivalent / equivalent_modulo_laws / additive / breaking, and
-/// `claim_scope` (pure / deterministic / structural) records how strong the
-/// claim is, so an effectful handler never reads as a clean behavioral
-/// equivalence.
-pub const EquivalencePayload = struct {
-    before_contract_hash: []const u8,
-    after_contract_hash: []const u8,
-    classification: []const u8,
-    laws_fired: []const []const u8 = &.{},
-    preserved: u32 = 0,
-    response_changed: u32 = 0,
-    added: u32 = 0,
-    removed: u32 = 0,
-    claim_scope: []const u8,
-    sig: []const u8,
-
-    pub fn deinit(self: *EquivalencePayload, allocator: std.mem.Allocator) void {
-        allocator.free(self.before_contract_hash);
-        allocator.free(self.after_contract_hash);
-        allocator.free(self.classification);
-        for (self.laws_fired) |law| allocator.free(law);
-        allocator.free(self.laws_fired);
-        allocator.free(self.claim_scope);
-        allocator.free(self.sig);
-    }
-};
-
 /// Strings are owned so a parsed event survives independently of the buffer
 /// it came from.
 pub const Event = struct {
@@ -110,19 +52,11 @@ pub const Event = struct {
     handler_path: []const u8,
     service_name: ?[]const u8,
     facts: review.ReviewFacts,
-    /// Present only when `kind == .perf`. Older readers that predate
-    /// Slice H ignore this field, which keeps the schema additive.
-    perf: ?PerfPayload = null,
-    /// Present only when `kind == .equivalence`. Older readers ignore this
-    /// field, which keeps the schema additive.
-    equivalence: ?EquivalencePayload = null,
 
     pub fn deinit(self: *Event, allocator: std.mem.Allocator) void {
         allocator.free(self.handler_path);
         if (self.service_name) |s| allocator.free(s);
         self.facts.deinit(allocator);
-        if (self.perf) |*p| p.deinit(allocator);
-        if (self.equivalence) |*e| e.deinit(allocator);
     }
 };
 
@@ -341,118 +275,12 @@ fn parseLine(allocator: std.mem.Allocator, line: []const u8) !Event {
     var facts = try review.ReviewFacts.parseJson(allocator, facts_value.object);
     errdefer facts.deinit(allocator);
 
-    var perf_payload: ?PerfPayload = null;
-    errdefer if (perf_payload) |*p| p.deinit(allocator);
-    if (obj.get("perf")) |perf_value| {
-        if (perf_value != .object) return error.InvalidLedgerLine;
-        perf_payload = try parsePerfPayload(allocator, perf_value.object);
-    }
-
-    var equivalence_payload: ?EquivalencePayload = null;
-    errdefer if (equivalence_payload) |*e| e.deinit(allocator);
-    if (obj.get("equivalence")) |eq_value| {
-        if (eq_value != .object) return error.InvalidLedgerLine;
-        equivalence_payload = try parseEquivalencePayload(allocator, eq_value.object);
-    }
-
     return .{
         .ts_unix_ms = ts,
         .kind = kind,
         .handler_path = handler_path,
         .service_name = service_name,
         .facts = facts,
-        .perf = perf_payload,
-        .equivalence = equivalence_payload,
-    };
-}
-
-fn parseEquivalencePayload(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !EquivalencePayload {
-    const before_str = json_util.getString(obj, "beforeContractHash") orelse return error.InvalidLedgerLine;
-    const after_str = json_util.getString(obj, "afterContractHash") orelse return error.InvalidLedgerLine;
-    const classification_str = json_util.getString(obj, "classification") orelse return error.InvalidLedgerLine;
-    const claim_scope_str = json_util.getString(obj, "claimScope") orelse return error.InvalidLedgerLine;
-    const sig_str = json_util.getString(obj, "sig") orelse return error.InvalidLedgerLine;
-
-    var preserved: u32 = 0;
-    var response_changed: u32 = 0;
-    var added: u32 = 0;
-    var removed: u32 = 0;
-    if (obj.get("behaviorDiff")) |bd_value| {
-        if (bd_value != .object) return error.InvalidLedgerLine;
-        const bd = bd_value.object;
-        preserved = readU32Field(bd, "preserved") orelse 0;
-        response_changed = readU32Field(bd, "responseChanged") orelse 0;
-        added = readU32Field(bd, "added") orelse 0;
-        removed = readU32Field(bd, "removed") orelse 0;
-    }
-
-    var laws: std.ArrayList([]const u8) = .empty;
-    errdefer {
-        for (laws.items) |law| allocator.free(law);
-        laws.deinit(allocator);
-    }
-    if (obj.get("lawsFired")) |laws_value| {
-        if (laws_value != .array) return error.InvalidLedgerLine;
-        for (laws_value.array.items) |item| {
-            if (item != .string) return error.InvalidLedgerLine;
-            const dup = try allocator.dupe(u8, item.string);
-            errdefer allocator.free(dup);
-            try laws.append(allocator, dup);
-        }
-    }
-
-    const before = try allocator.dupe(u8, before_str);
-    errdefer allocator.free(before);
-    const after = try allocator.dupe(u8, after_str);
-    errdefer allocator.free(after);
-    const classification = try allocator.dupe(u8, classification_str);
-    errdefer allocator.free(classification);
-    const claim_scope = try allocator.dupe(u8, claim_scope_str);
-    errdefer allocator.free(claim_scope);
-    const sig = try allocator.dupe(u8, sig_str);
-    errdefer allocator.free(sig);
-
-    return .{
-        .before_contract_hash = before,
-        .after_contract_hash = after,
-        .classification = classification,
-        .laws_fired = try laws.toOwnedSlice(allocator),
-        .preserved = preserved,
-        .response_changed = response_changed,
-        .added = added,
-        .removed = removed,
-        .claim_scope = claim_scope,
-        .sig = sig,
-    };
-}
-
-fn readU32Field(obj: std.json.ObjectMap, key: []const u8) ?u32 {
-    const v = json_util.getI64(obj, key) orelse return null;
-    if (v < 0 or v > std.math.maxInt(u32)) return null;
-    return @intCast(v);
-}
-
-fn parsePerfPayload(allocator: std.mem.Allocator, obj: std.json.ObjectMap) !PerfPayload {
-    const handler_hash_str = json_util.getString(obj, "handlerHash") orelse return error.InvalidLedgerLine;
-    const sig_str = json_util.getString(obj, "sig") orelse return error.InvalidLedgerLine;
-    const p50 = json_util.getI64(obj, "p50Us") orelse return error.InvalidLedgerLine;
-    const p99 = json_util.getI64(obj, "p99Us") orelse return error.InvalidLedgerLine;
-    const alloc_bytes = json_util.getI64(obj, "allocBytes") orelse return error.InvalidLedgerLine;
-    const samples = json_util.getI64(obj, "sampleCount") orelse return error.InvalidLedgerLine;
-    if (p50 < 0 or p99 < 0 or alloc_bytes < 0 or samples < 0) return error.InvalidLedgerLine;
-
-    const handler_hash = try allocator.dupe(u8, handler_hash_str);
-    errdefer allocator.free(handler_hash);
-    const sig = try allocator.dupe(u8, sig_str);
-    errdefer allocator.free(sig);
-
-    return .{
-        .handler_hash = handler_hash,
-        .p50_us = @intCast(p50),
-        .p99_us = @intCast(p99),
-        .alloc_bytes = @intCast(alloc_bytes),
-        .sample_count = @intCast(samples),
-        .sig = sig,
     };
 }
 
@@ -733,54 +561,25 @@ test "readEvents rejects malformed lines" {
     }
 }
 
-test "appendEvent without perf payload omits the field for back-compat" {
-    var tmp = testing.tmpDir(.{});
-    defer tmp.cleanup();
-    const old_cwd = try chdirTmpForTest(&tmp);
-    defer testing.allocator.free(old_cwd);
-    defer std.Io.Threaded.chdir(old_cwd) catch {};
-
-    var facts = try buildFactsForTest(testing.allocator, "sha-nope", false);
-    defer facts.deinit(testing.allocator);
-
-    try appendEvent(testing.allocator, .{
-        .kind = .deploy,
-        .facts = &facts,
-        .handler_path = "src/handler.ts",
-        .now_unix_ms = 1,
-    });
-
-    // Confirm the JSON has no "perf" key so old consumers see exactly
-    // what they saw pre-Slice H.
-    const raw = try zts.file_io.readFile(testing.allocator, ledgerPath(), 8192);
-    defer testing.allocator.free(raw);
-    try testing.expect(std.mem.indexOf(u8, raw, "\"perf\"") == null);
-
-    const events = try readEvents(testing.allocator);
-    defer freeEvents(testing.allocator, events);
-    try testing.expectEqual(@as(usize, 1), events.len);
-    try testing.expectEqual(@as(?PerfPayload, null), events[0].perf);
-}
-
 test "equivalence event kind round-trips through string" {
     try testing.expectEqual(EventKind.equivalence, EventKind.fromString("equivalence").?);
     try testing.expectEqualStrings("equivalence", EventKind.equivalence.toString());
 }
 
-// The perf and equivalence probes were removed and nothing writes these kinds
-// any more. Ledgers on disk still hold such rows, and `parseLine` rejects an
-// unknown kind, so both kinds must stay readable. The two rows below are the
-// bytes the removed writers produced (captured from their own tests, with a
-// fixed signing key), not rows built by `appendEvent`.
-const legacy_perf_row =
+// Nothing writes the perf and equivalence kinds now. Ledgers on disk still
+// hold such rows, and `parseLine` refuses an unknown kind, so both kinds stay
+// readable. The reader does not read the payload object in these rows. The two
+// rows below are the bytes the old writers produced, not rows built by
+// `appendEvent`.
+const old_perf_row =
     \\{"ts":1700000002000,"kind":"perf","handlerPath":"handler.ts","facts":{"contractSha":"91b697dc8adcc528386f9f6e70843eeb6522b304491e685b8a5e780cb0a5ba68","proofLevel":"none","envKeys":[],"egressEndpoints":[],"cacheNamespaces":[],"capabilities":[],"routes":[],"properties":{"retrySafe":false,"readOnly":false,"deterministic":true,"injectionSafe":true,"idempotent":false,"stateIsolated":true,"noSecretLeakage":true,"noCredentialLeakage":true,"inputValidated":true,"piiContained":true,"resultsSafe":false,"faultCovered":false},"declaredSpecs":[],"intentAssertionCount":0,"intentDynamic":false,"behaviorPathCount":0,"failurePathCount":0},"perf":{"handlerHash":"91b697dc8adcc528386f9f6e70843eeb6522b304491e685b8a5e780cb0a5ba68","p50Us":2,"p99Us":3,"allocBytes":0,"sampleCount":4096,"sig":"eyJhbGciOiJFZERTQSIsInR5cCI6Inp0dHAtcGVyZitqd3MiLCJraWQiOiIzMDk3ZTJkZWUyY2I0YTM0YjUzODQwY2RiNzA1YWVkNzEwNjdjMzZmNjhkYjBlMGY1NTljM2YzZmEwNDMzMTVmIiwiandrIjp7Imt0eSI6Ik9LUCIsImNydiI6IkVkMjU1MTkiLCJ4IjoiSVZMNDBadDVIU1JGTWtMaFh5NnJiTGZQLW50cVh0TUFsNVlPQnBpQjJ4SSJ9fQ.eyJ2IjoienR0cC1wZXJmLXYxIiwiaGFuZGxlckhhc2giOiI5MWI2OTdkYzhhZGNjNTI4Mzg2ZjlmNmU3MDg0M2VlYjY1MjJiMzA0NDkxZTY4NWI4YTVlNzgwY2IwYTViYTY4IiwicDUwVXMiOjIsInA5OVVzIjozLCJhbGxvY0J5dGVzIjowLCJzYW1wbGVDb3VudCI6NDA5Niwic2lnbmVkQXQiOjE3MDAwMDAwMDJ9.3pdG3LPmo6Uh7fFU5GC26J_l0v6HSSIRRx8TbJJPOpKk7Tdurd1CBGRa2BZo-eC4JBGOqoBcWD3k0C8p4APnBQ"}}
 ;
 
-const legacy_equivalence_row =
+const old_equivalence_row =
     \\{"ts":1700000003000,"kind":"equivalence","handlerPath":"handler.ts","facts":{"contractSha":"d110210a2a5bf2eecc5ea09a01258cddae408c663986d87f2ba7ffc990982b24","proofLevel":"none","envKeys":[],"egressEndpoints":[],"cacheNamespaces":[],"capabilities":[],"routes":[],"properties":{"retrySafe":false,"readOnly":false,"deterministic":true,"injectionSafe":true,"idempotent":false,"stateIsolated":true,"noSecretLeakage":true,"noCredentialLeakage":true,"inputValidated":true,"piiContained":true,"resultsSafe":false,"faultCovered":false},"declaredSpecs":[],"intentAssertionCount":0,"intentDynamic":false,"behaviorPathCount":0,"failurePathCount":0},"equivalence":{"beforeContractHash":"d110210a2a5bf2eecc5ea09a01258cddae408c663986d87f2ba7ffc990982b24","afterContractHash":"d110210a2a5bf2eecc5ea09a01258cddae408c663986d87f2ba7ffc990982b24","classification":"equivalent","lawsFired":[],"behaviorDiff":{"preserved":1,"responseChanged":0,"added":0,"removed":0},"claimScope":"pure","sig":"eyJhbGciOiJFZERTQSIsInR5cCI6Inp0dHAtZXF1aXZhbGVuY2UrandzIn0.enR0cC1lcXVpdmFsZW5jZS12MQpkMTEwMjEwYTJhNWJmMmVlY2M1ZWEwOWEwMTI1OGNkZGFlNDA4YzY2Mzk4NmQ4N2YyYmE3ZmZjOTkwOTgyYjI0CmQxMTAyMTBhMmE1YmYyZWVjYzVlYTA5YTAxMjU4Y2RkYWU0MDhjNjYzOTg2ZDg3ZjJiYTdmZmM5OTA5ODJiMjQKZXF1aXZhbGVudApwdXJlCjEKMAowCjA.uyIK6MazyH96t8-7z-N6HanREgdUfcAwZY8JtBQyaEAupdOWkUG5KVfulL0iXnG6_2CZVzYCApv7TC24ERU2Bg"}}
 ;
 
-test "a legacy kind=perf row written by the removed probe still loads" {
+test "an old kind=perf row still loads" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const old_cwd = try chdirTmpForTest(&tmp);
@@ -788,7 +587,7 @@ test "a legacy kind=perf row written by the removed probe still loads" {
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
     try ensureLedgerDir();
-    try zts.file_io.writeFile(testing.allocator, ledgerPath(), legacy_perf_row ++ "\n");
+    try zts.file_io.writeFile(testing.allocator, ledgerPath(), old_perf_row ++ "\n");
 
     const events = try readEvents(testing.allocator);
     defer freeEvents(testing.allocator, events);
@@ -801,17 +600,9 @@ test "a legacy kind=perf row written by the removed probe still loads" {
         "91b697dc8adcc528386f9f6e70843eeb6522b304491e685b8a5e780cb0a5ba68",
         events[0].facts.contract_sha,
     );
-    try testing.expect(events[0].equivalence == null);
-    const perf = events[0].perf orelse return error.MissingPerfPayload;
-    try testing.expectEqualStrings(events[0].facts.contract_sha, perf.handler_hash);
-    try testing.expectEqual(@as(u64, 2), perf.p50_us);
-    try testing.expectEqual(@as(u64, 3), perf.p99_us);
-    try testing.expectEqual(@as(u64, 0), perf.alloc_bytes);
-    try testing.expectEqual(@as(u64, 4096), perf.sample_count);
-    try testing.expect(std.mem.startsWith(u8, perf.sig, "eyJhbGciOiJFZERTQSIs"));
 }
 
-test "a legacy kind=equivalence row written by the removed probe still loads" {
+test "an old kind=equivalence row still loads" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const old_cwd = try chdirTmpForTest(&tmp);
@@ -819,7 +610,7 @@ test "a legacy kind=equivalence row written by the removed probe still loads" {
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
     try ensureLedgerDir();
-    try zts.file_io.writeFile(testing.allocator, ledgerPath(), legacy_equivalence_row ++ "\n");
+    try zts.file_io.writeFile(testing.allocator, ledgerPath(), old_equivalence_row ++ "\n");
 
     const events = try readEvents(testing.allocator);
     defer freeEvents(testing.allocator, events);
@@ -828,30 +619,9 @@ test "a legacy kind=equivalence row written by the removed probe still loads" {
     try testing.expectEqual(EventKind.equivalence, events[0].kind);
     try testing.expectEqual(@as(i64, 1_700_000_003_000), events[0].ts_unix_ms);
     try testing.expectEqualStrings("handler.ts", events[0].handler_path);
-    try testing.expect(events[0].perf == null);
-    const eq = events[0].equivalence orelse return error.MissingEquivalencePayload;
-    try testing.expectEqualStrings(
-        "d110210a2a5bf2eecc5ea09a01258cddae408c663986d87f2ba7ffc990982b24",
-        eq.before_contract_hash,
-    );
-    try testing.expectEqualStrings(eq.before_contract_hash, eq.after_contract_hash);
-    try testing.expectEqualStrings("equivalent", eq.classification);
-    try testing.expectEqualStrings("pure", eq.claim_scope);
-    try testing.expectEqual(@as(usize, 0), eq.laws_fired.len);
-    try testing.expectEqual(@as(u32, 1), eq.preserved);
-    try testing.expectEqual(@as(u32, 0), eq.response_changed);
-    try testing.expectEqual(@as(u32, 0), eq.added);
-    try testing.expectEqual(@as(u32, 0), eq.removed);
-    try testing.expect(std.mem.startsWith(u8, eq.sig, "eyJhbGciOiJFZERTQSIs"));
 }
 
-// A raw `kind=equivalence` row whose payload is not empty: it carries fired
-// laws and non-zero counts, which the captured legacy row above does not.
-// The facts are the legacy row's own; only the payload differs.
-const raw_equivalence_row = legacy_equivalence_row[0..(std.mem.indexOf(u8, legacy_equivalence_row, "\"equivalence\":") orelse unreachable)] ++
-    "\"equivalence\":{\"beforeContractHash\":\"aa\",\"afterContractHash\":\"bb\",\"classification\":\"equivalent_modulo_laws\",\"lawsFired\":[\"spread_assoc\",\"guard_hoist\"],\"behaviorDiff\":{\"preserved\":5,\"responseChanged\":0,\"added\":1,\"removed\":0},\"claimScope\":\"deterministic\",\"sig\":\"header.payload.signature\"}}";
-
-test "a raw kind=equivalence row decodes fired laws and counts" {
+test "an old kind=perf row with a payload that is not an object still loads" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     const old_cwd = try chdirTmpForTest(&tmp);
@@ -859,23 +629,13 @@ test "a raw kind=equivalence row decodes fired laws and counts" {
     defer std.Io.Threaded.chdir(old_cwd) catch {};
 
     try ensureLedgerDir();
-    try zts.file_io.writeFile(testing.allocator, ledgerPath(), raw_equivalence_row ++ "\n");
+    const row_prefix = comptime old_perf_row[0..(std.mem.indexOf(u8, old_perf_row, ",\"perf\":") orelse unreachable)];
+    try zts.file_io.writeFile(testing.allocator, ledgerPath(), row_prefix ++ ",\"perf\":\"not-an-object\"}\n");
 
     const events = try readEvents(testing.allocator);
     defer freeEvents(testing.allocator, events);
 
     try testing.expectEqual(@as(usize, 1), events.len);
-    try testing.expectEqual(EventKind.equivalence, events[0].kind);
-    try testing.expect(events[0].equivalence != null);
-    const got = events[0].equivalence.?;
-    try testing.expectEqualStrings("aa", got.before_contract_hash);
-    try testing.expectEqualStrings("bb", got.after_contract_hash);
-    try testing.expectEqualStrings("equivalent_modulo_laws", got.classification);
-    try testing.expectEqual(@as(usize, 2), got.laws_fired.len);
-    try testing.expectEqualStrings("spread_assoc", got.laws_fired[0]);
-    try testing.expectEqualStrings("guard_hoist", got.laws_fired[1]);
-    try testing.expectEqual(@as(u32, 5), got.preserved);
-    try testing.expectEqual(@as(u32, 1), got.added);
-    try testing.expectEqualStrings("deterministic", got.claim_scope);
-    try testing.expectEqualStrings("header.payload.signature", got.sig);
+    try testing.expectEqual(EventKind.perf, events[0].kind);
+    try testing.expectEqualStrings("handler.ts", events[0].handler_path);
 }

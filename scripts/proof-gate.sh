@@ -21,8 +21,7 @@ ZTTP="${ZTTP:-$REPO_ROOT/zig-out/bin/zttp}"
 # Make the base ref available to `git show <base>:<path>` and the diff.
 git fetch --no-tags origin "${BASE#origin/}" >/dev/null 2>&1 || true
 
-# CI runners hold no persistent attest identity, so do not sign ledger rows.
-"$ZTTP" proofs gate --base "$BASE" --head "$HEAD" --format md --out proof-gate.md --no-sign
+"$ZTTP" proofs gate --base "$BASE" --head "$HEAD" --format md --out proof-gate.md
 GATE_EXIT=$?
 
 case "$GATE_EXIT" in

@@ -197,7 +197,7 @@ an array of `{"property", "severity"}` objects, empty when nothing was lost.
 It also adds `capsule`, which is `"implicit"` for a handler with no `Proof<...>`
 return type and `"declared"` otherwise. The gate compares an implicit handler on
 its behavior; a failing declared capsule still gives exit 2.
-The gate writes no ledger row. `--no-sign` is still accepted and does nothing.
+The gate writes no ledger row.
 See [Proofs and receipts](proofs-and-receipts.md#proof-gate).
 
 `zttp verify <url>`

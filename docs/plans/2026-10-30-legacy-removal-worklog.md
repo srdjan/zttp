@@ -424,3 +424,24 @@ The worker also deleted the `analyzeDirectReturn` block in `populateApiRouteFact
 The comparison script cannot show this move, because the hash move already put those rows on the allow list. So I compared `contract.json` from `zts compile --verify --contract` directly, with the five keys stripped from both sides. My first version of this probe read `zts check --contract`, which prints a proof summary, and its count of routed inputs was 0. That run checked nothing, and I discarded it. Over 648 inputs, 332 produce a contract on both binaries and all 332 match. Five of those base contracts hold the scalar keys, and no new contract does. The other nine inputs that wrote a contract on base are refused on the new binary, and each one is a row that an earlier unit moved.
 
 The stored-data set matched base on all nine rows. The `protect` line of the gate reported 1 because it compares with the plan commit: the L7b goldens and these two fixtures differ, and no other protected path does.
+
+## L8a
+
+Status: complete. `kind=perf` and `kind=equivalence` rows now load as opaque rows. `PerfPayload`, `EquivalencePayload`, their parsers, and the two `Event` fields are gone. `--no-sign` is gone from `proofs_cli.zig`, `scripts/proof-gate.sh`, `docs/cli.md`, and `docs/proofs-and-receipts.md`, and `git grep -n -e '--no-sign' -- . ':!docs/plans'` prints nothing.
+
+No production code read the payload, and no code rewrites `.zttp/proofs.jsonl`: `appendEvent` is the only writer, and it appends. So the payload bytes in old rows stay on disk.
+
+Two moves that a user can see:
+
+| Input | Base | Now |
+|---|---|---|
+| A `kind=perf` row whose `perf` value is not an object | `zttp proofs list` fails with `InvalidLedgerLine` | The row lists |
+| `zttp proofs gate --no-sign` | Accepted and ignored | Exit 1, stderr `` zttp proofs gate: unknown argument `--no-sign` `` |
+
+I ran the first row on both binaries with a ledger file, because the worker read it from the code only. `an old kind=perf row with a payload that is not an object still loads` pins the new value. `gate refuses the removed --no-sign flag` pins the second row.
+
+The stored-data set matched base on all rows. `surface.sh` moved only the help lines that name the flag, and I took the L8a output as the new baseline.
+
+The worker made three removals that the packet did not name, and I accepted each one. `readU32Field` had no caller left. `a raw kind=equivalence row decodes fired laws and counts` asserted only payload fields and the kind, and `an old kind=equivalence row still loads` still asserts that kind. The comment above the `proofs gate` line in `scripts/proof-gate.sh` described signing that no longer exists.
+
+Plan row B7 left too: `appendEvent without perf payload omits the field for back-compat` pinned only the absent payload field. `ReviewFacts.parseJson` keeps its defaults, as Decision 6 (a) requires.

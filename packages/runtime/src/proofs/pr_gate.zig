@@ -18,8 +18,7 @@
 //! The analysis is entirely reused: `diffContracts` + `behavioralVerdict` for
 //! the per-handler verdict, the lost-property table of `contract_diff` for the
 //! critical-loss rule (every lost monotonic proven boolean is listed; only a
-//! critical one makes the handler breaking). The gate writes no ledger row;
-//! `--no-sign` is still accepted so CI scripts that pass it keep working.
+//! critical one makes the handler breaking). The gate writes no ledger row.
 //! Only the git-range discovery, multi-handler aggregation, and the
 //! PR-oriented rendering are new here.
 
