@@ -69,7 +69,7 @@ start, and never falls back to running as a plain runtime.
 The ordered inventory of every byte and identity that can affect what a
 deployment runs: the entry module's bytecode, each dependency in load order,
 every function, every constant pool, the module and native-module identities,
-the contract, the runtime policy, the source profiles, the grammar, the
+the contract, the runtime policy, the core source profile, the grammar, the
 semantics registry, the capability matrix, the proof IR, and a digest over every
 authority-bearing certificate section. It folds to one root. Order is part of
 the commitment, and the producer and the consumer build their inventories

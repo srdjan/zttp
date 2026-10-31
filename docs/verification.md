@@ -512,7 +512,7 @@ The artifact commitment covers every byte and identity that can affect what runs
 the entry module's bytecode, each dependency module in load order, every
 function in every module, every constant pool, the module specifiers in declared
 order, the native-module binding identities, the contract, the runtime policy,
-the source profiles, the grammar, the semantics registry, the capability matrix,
+the core source profile, the grammar, the semantics registry, the capability matrix,
 the proof IR, and every authority-bearing certificate section. Order is part of
 the commitment. The certificate fold normalizes only its executable-root slot
 and its own graph-member digest, which makes the cycle finite without excluding

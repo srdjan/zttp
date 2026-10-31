@@ -25,6 +25,25 @@ share the same `zts` engine and contract logic.
 `build.zig` and the files under `build/` wire the packages, build options, tests, smoke checks, and release
 steps.
 
+### Owner of each fact
+
+Each fact below has one place to edit. Tests reach that place through the production path.
+No row is deferred. The roadmap lists the open items, such as the `zttp:fetch` summary and the runtime cost fuse.
+
+| Fact or stage | Owner |
+|---|---|
+| Source acceptance | `JsParser.initAdmission` in `packages/zts/src/parser/parse.zig`, for every source file and every `-e` source (D-016) |
+| Single-module analysis | `ModuleAnalysisSession` in `packages/zts/src/pipeline.zig` |
+| Contract completion | `applyContractFacts` in `packages/tools/src/precompile_check_run.zig`. `compileHandler` and the CHECK run both call it |
+| Test entry | The production parse mode (`initAdmission` with `.compile`) and the production profiles of `ModuleAnalysisSession` |
+| Artifact identity | `identityFromRuntimeContract` in `packages/runtime/src/artifact_graph.zig` |
+| Activation order | `activate` in `packages/runtime/src/server_activation.zig` |
+| Serve request | `parseServeArgs` in `packages/runtime/src/runtime_cli.zig`, which returns one `ServeRequest` |
+| Status | `docs/roadmap.md` |
+| Agent rules | `AGENTS.md` for the rule. Area contracts and solution notes hold the history |
+
+`identityFromContract` in the same file reads the identity from a `HandlerContract`, which is a different type.
+
 ### Split modules
 
 A few large modules are a facade plus files that each own one responsibility. The facade
@@ -77,8 +96,8 @@ and workspace state never derive authority from a summary.
 `session/events.zig` decodes event payloads into a typed record whose borrowed
 fields belong to one parsed envelope. Journal sequence validation and transcript
 reconstruction use exhaustive switches over those records. They retain separate
-acceptance rules for legacy parts, session payloads, checkpoints, and version
-errors. `Reader` checks framing only. Tail recovery validates complete frames
+acceptance rules for session payloads, checkpoints, and version errors. A journal
+line that holds `part_index` is corrupt. `Reader` checks framing only. Tail recovery validates complete frames
 before it repairs an incomplete tail, then derives the entry sequence.
 
 `RecoveredWorkspace` in `change_transaction.zig` acquires the workspace lock,
@@ -167,11 +186,22 @@ Failed speculation rolls back the syntax it attempted.
 
 Nodes enter `IRStore` through typed constructors (`addInt`, `addCall`, `addVarDecl`, and so on).
 Each constructor packs one payload kind into the compact columns. There is no struct adapter.
+`NodeTag` in `packages/zts/src/parser/ir.zig` has 42 members, and the parser produces each one.
+`expected_nodes` in `packages/zts/src/semantics.zig` pins that count.
 
 `DirectCheckSource` owns source admission and the parser result used by CHECK
 and compilation. It keeps parser diagnostics on original source coordinates.
 The file-path admission boundary accepts `.ts`; it refuses `.js`, `.jsx`,
-and `.tsx` with ZTS052. Virtual JavaScript input has a separate path.
+and `.tsx` with ZTS052. A virtual path such as `<eval>` names prepared
+evaluation. It is not a file route, and its source passes the same admission.
+
+Every source passes `JsParser.initAdmission`, with no untyped fallback (D-016).
+The module graph, the module graph record, `prepareInlineSource` for `-e` source,
+and the load path of `HandlerInstance` all call admission first. That load path
+also serves `HandlerSource.inline_code`. A source that admission
+refuses fails at start with the admission message. Only two entries keep the
+untyped parser. `JsParser.initExpression` parses one expression for
+`kernel_identity`. `JsParser.initSourceObserver` is the admission observer.
 Unsupported TypeScript constructs fail before bytecode generation; the
 published subset and diagnostic stages are in [TypeScript Support](../typescript.md)
 and [Feature Detection](../feature-detection.md).
@@ -253,9 +283,19 @@ An unavailable effect result makes path coverage report recursion conservatively
 The session builds separate contract effect facts during contract extraction.
 These facts retain the selected handler and its property summary.
 They also retain reachability from the first function named `handler`.
-The session builds these facts after late context and custom type checking are complete.
+The session builds these facts after late context and the type check are complete.
 The contract builder borrows completed module and effect facts.
 Contract analysis failures stop extraction and do not become unavailable path facts.
+
+After extraction, `applyContractFacts` in `precompile_check_run.zig` writes the 12 contract
+fields that come from the verifier and path analyses. Each driver fills `ContractFacts` from
+its own analysis. The compile driver and the CHECK driver call it twice, once for the
+verifier facts and once for the path facts.
+
+`ApiRouteInfo` in `packages/zts/src/contract_types.zig` records the responses of a route only in
+`responses`. The five scalar response fields are gone, from the type and from the contract JSON.
+A contract from an earlier binary that holds those keys still parses, because the parser ignores
+unknown keys. `diffContracts` in `contract_diff.zig` compares each response of a static route.
 
 The `full` profile runs resolution for CHECK and single-module compilation.
 The `contract_only` profile builds contracts without source annotations.
@@ -270,7 +310,7 @@ Completed contracts and transferred export tables own their data after session c
 Sound resolution always uses module facts without a manifest registry.
 Contract extraction can use separate facts with a manifest registry.
 Injected module facts remain borrowed and authoritative for contract extraction.
-A custom extraction callback gets a separate type environment and checker.
+The `module_scan` hook of `ExtractContractOptions` takes the IR view. It runs in `extractContract` before the type check of a sound-extraction session. It owns no type environment or checker.
 
 ### Root source ownership for machine requests
 
@@ -330,6 +370,16 @@ The same contract feeds:
 - `zttp proofs gate`;
 - upgrade checks;
 - runtime sandbox policy.
+
+## Serve Request
+
+`parseServeArgs` in `packages/runtime/src/runtime_cli.zig` parses the `serve` command line once.
+It returns one `ServeRequest`: the server config, the watch, prove, and force-swap flags, and the
+loaded project. A flag token in a value position does not set that flag. An ordinary `serve` start loads `zttp.json` once.
+
+`configuredPolicy` in `packages/runtime/src/serve_policy.zig` reuses that project only when it is
+the nearest manifest of the handler. Otherwise it loads the nearer manifest, because that manifest
+can declare a different policy. `buildWatchSet` in `cli_shared.zig` keeps its own discovery and runs only with `--watch`.
 
 ## Live Reload
 
@@ -412,6 +462,11 @@ Startup runs four stages before a handler pool exists, in this order:
    and requires exact residual coverage.
 4. **Pool init and prewarm.** Only now, so a refused artifact never has a warm
    runtime.
+
+`activate` in `packages/runtime/src/server_activation.zig` runs stages 1 to 3. `Server.start`
+calls it and then creates the pool. The attestation-header block stays in `Server.start`,
+because it runs after the pool exists. `swapRefusal` in the same file owns the refusal of a
+live-reload source swap.
 
 Only a `ProofCheckedContract` drives the proof response cache, unbounded runtime
 reuse, and the result and optional fault-explanation facts.

@@ -33,7 +33,7 @@ repository is in scope.
   boundary. The signed commitment covers the whole executable graph, not the
   entry module alone: dependency bytecode, every nested function, every constant pool,
   the module and native-module identities, the contract, the runtime policy,
-  the source profiles, and every authority-bearing certificate section all
+  the core source profile, and every authority-bearing certificate section all
   move the root. The cycle-safe certificate fold normalizes only the root slot
   and the certificate's own graph-member digest.
 - The compiler is a producer, and its verdicts are claims. A deployed artifact
