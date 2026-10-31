@@ -2336,7 +2336,8 @@ test "a live swap drops the promotion the replaced artifact earned" {
         ",\"properties\":{\"pure\":true,\"deterministic\":true,\"stateIsolated\":true}",
     );
     defer allocator.free(contract_json);
-    const raw = try contract_runtime.parseContractJson(allocator, contract_json);
+    var raw = try contract_runtime.parseContractJson(allocator, contract_json);
+    contract_runtime.stampLiveForTest(&raw.inner);
     server.contract = try contract_runtime.validate(raw, .{});
 
     // Stand in for what an accepted certificate earns.
@@ -2349,7 +2350,8 @@ test "a live swap drops the promotion the replaced artifact earned" {
 
     // The certificate described the artifact that is being replaced, so the
     // swap takes the promotion with it.
-    const swapped_raw = try contract_runtime.parseContractJson(allocator, contract_json);
+    var swapped_raw = try contract_runtime.parseContractJson(allocator, contract_json);
+    contract_runtime.stampLiveForTest(&swapped_raw.inner);
     {
         server.contract_lock.lock();
         defer server.contract_lock.unlock();
@@ -2372,7 +2374,8 @@ test "promotion refuses a policy rejection" {
     const allocator = std.testing.allocator;
     const contract_json = try stampedContractJsonForTest(allocator, "");
     defer allocator.free(contract_json);
-    const raw = try contract_runtime.parseContractJson(allocator, contract_json);
+    var raw = try contract_runtime.parseContractJson(allocator, contract_json);
+    contract_runtime.stampLiveForTest(&raw.inner);
     var validated = try contract_runtime.validate(raw, .{});
     defer validated.deinit();
 
@@ -2623,6 +2626,7 @@ fn sourceContractForTest(allocator: std.mem.Allocator, route: []const u8, key: [
         .requires_bearer = false,
         .requires_jwt = false,
     });
+    contract_runtime.stampLiveHandlerForTest(&contract);
     return contract;
 }
 

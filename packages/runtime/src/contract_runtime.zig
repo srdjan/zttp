@@ -222,7 +222,7 @@ pub const RuntimeContract = struct {
     /// the contract did not carry a sandbox block.
     artifact_sha256: [32]u8 = @as([32]u8, @splat(0)),
     /// SHA-256 of the zts rule registry used to extract this contract.
-    /// All-zero means the contract did not carry a sandbox block.
+    /// All-zero is a hand-made contract: `verifyPolicyHash` refuses it.
     policy_hash: [32]u8 = @as([32]u8, @splat(0)),
     modules: []const []const u8 = &.{},
     cost_envelope: ?CostEnvelope = null,
@@ -630,10 +630,10 @@ pub fn deriveLiveCapabilityMatrix(contract: *const RuntimeContract) CapabilityMa
 }
 
 /// Verify the embedded matrix still matches what the linked registry would
-/// produce. Returns error.CapabilityMatrixMismatch on drift. Skips silently
-/// when the contract did not carry a sandbox block.
+/// produce. Returns error.CapabilityMatrixMismatch on drift, and when the
+/// contract carries no sandbox block.
 pub fn verifyCapabilityMatrix(contract: *const RuntimeContract) !void {
-    const stored = contract.capabilities orelse return;
+    const stored = contract.capabilities orelse return error.CapabilityMatrixMismatch;
     const live = deriveLiveCapabilityMatrix(contract);
     if (!std.mem.eql(u8, &live.hash, &stored.hash)) {
         return error.CapabilityMatrixMismatch;
@@ -658,10 +658,9 @@ pub fn verifySourceIdentity(contract: *const RuntimeContract) !void {
 }
 
 /// Compare the embedded policy hash against the linked rule registry.
-/// Returns error.PolicyHashMismatch on drift. All-zero means "not emitted",
-/// which skips the check.
+/// Returns error.PolicyHashMismatch on drift. An all-zero hash means the
+/// contract carries no policy hash, which is also a mismatch.
 pub fn verifyPolicyHash(contract: *const RuntimeContract) !void {
-    if (std.mem.allEqual(u8, &contract.policy_hash, 0)) return;
     const hex = zq.policyHash();
     var live: [32]u8 = undefined;
     _ = std.fmt.hexToBytes(&live, &hex) catch return error.PolicyHashMismatch;
@@ -1159,6 +1158,23 @@ test "contract wire format round-trips between writer and runtime parser" {
     try std.testing.expect(!rc.properties.pure);
 }
 
+/// Test support: give a hand-built contract the matrix and the policy hash that
+/// the writer stamps, so that `validate` reaches the check that a test
+/// targets. It does not skip `validate`.
+pub fn stampLiveForTest(contract: *RuntimeContract) void {
+    contract.capabilities = deriveLiveCapabilityMatrix(contract);
+    const hex = zq.policyHash();
+    _ = std.fmt.hexToBytes(&contract.policy_hash, &hex) catch unreachable;
+}
+
+/// Test support: the same stamps for an engine contract, before it enters
+/// `fromHandlerContract` or a source swap.
+pub fn stampLiveHandlerForTest(hc: *HandlerContract) void {
+    hc.capabilities = zq.computeCapabilityMatrix(hc.modules.items);
+    const hex = zq.policyHash();
+    _ = std.fmt.hexToBytes(&hc.policy_hash, &hex) catch unreachable;
+}
+
 test "parseContractJson reads sandbox block" {
     const allocator = std.testing.allocator;
     const source =
@@ -1200,11 +1216,12 @@ test "validate promotes Raw to Validated when integrity checks pass" {
         \\}
     ;
     var raw = try parseContractJson(allocator, source);
+    stampLiveForTest(&raw.inner);
     raw.inner.source_identity = zq.sourceIdentityForPath("handler.ts");
     var validated = try validate(raw, .{});
     defer validated.deinit();
 
-    try std.testing.expect(validated.view().capabilities == null);
+    try std.testing.expectEqual(@as(u8, 0), validated.view().capabilities.?.len);
 }
 
 test "validate rejects artifact-hash drift" {
@@ -1220,6 +1237,7 @@ test "validate rejects artifact-hash drift" {
         \\}
     ;
     var raw = try parseContractJson(allocator, source);
+    stampLiveForTest(&raw.inner);
     raw.inner.source_identity = zq.sourceIdentityForPath("handler.ts");
     raw.inner.artifact_sha256 = @as([32]u8, @splat(0xAB));
     try std.testing.expectError(
@@ -1306,7 +1324,7 @@ test "verifyCapabilityMatrix detects drift" {
     );
 }
 
-test "verifyCapabilityMatrix skips when matrix is absent" {
+test "verifyCapabilityMatrix refuses a contract with no matrix" {
     var contract = RuntimeContract{
         .env_vars = &.{},
         .env_dynamic = false,
@@ -1315,7 +1333,10 @@ test "verifyCapabilityMatrix skips when matrix is absent" {
         .properties = .{},
         .allocator = std.testing.allocator,
     };
-    try verifyCapabilityMatrix(&contract);
+    try std.testing.expectError(
+        error.CapabilityMatrixMismatch,
+        verifyCapabilityMatrix(&contract),
+    );
 }
 
 test "derivePoolingPolicy: null contract falls back to bounded count" {
@@ -1398,7 +1419,7 @@ test "verifyPolicyHash rejects drift" {
     try std.testing.expectError(error.PolicyHashMismatch, verifyPolicyHash(&contract));
 }
 
-test "verifyPolicyHash skips when hash is absent" {
+test "verifyPolicyHash refuses an all-zero hash" {
     var contract = RuntimeContract{
         .env_vars = &.{},
         .env_dynamic = false,
@@ -1407,7 +1428,7 @@ test "verifyPolicyHash skips when hash is absent" {
         .properties = .{},
         .allocator = std.testing.allocator,
     };
-    try verifyPolicyHash(&contract);
+    try std.testing.expectError(error.PolicyHashMismatch, verifyPolicyHash(&contract));
 }
 
 test "verifyArtifactHash matches bytecode digest" {
@@ -1627,11 +1648,10 @@ test "parseContractJson: errdefer ladders close every failure path" {
 // pin the behavior it proved.
 // ---------------------------------------------------------------------------
 
-test "a stamped contract with no sandbox block still validates" {
-    // A null capability matrix means "this contract makes no capability
-    // statement", which makes verifyCapabilityMatrix skip. Collapsing that
-    // into an empty matrix made the check compare the live matrix against an
-    // all-zero hash, so every pre-sandbox binary refused to serve.
+test "a stamped contract with no sandbox block is refused" {
+    // A null capability matrix is a hand-made contract: the writer always
+    // emits the sandbox block. validate refuses it rather than skipping the
+    // matrix check.
     const allocator = std.testing.allocator;
     const source =
         \\{
@@ -1648,8 +1668,7 @@ test "a stamped contract with no sandbox block still validates" {
     try std.testing.expect(raw.rawView().capabilities == null);
     raw.inner.source_identity = zq.sourceIdentityForPath("handler.ts");
 
-    var validated = try validate(raw, .{});
-    defer validated.deinit();
+    try std.testing.expectError(error.CapabilityMatrixMismatch, validate(raw, .{}));
 }
 
 test "runtime validation refuses missing or stale source identity" {
@@ -1665,15 +1684,18 @@ test "runtime validation refuses missing or stale source identity" {
         \\}
     ;
 
-    const missing = try parseContractJson(allocator, source);
+    var missing = try parseContractJson(allocator, source);
+    stampLiveForTest(&missing.inner);
     try std.testing.expectError(error.SourceIdentityMissing, validate(missing, .{}));
 
     var stale_grammar = try parseContractJson(allocator, source);
+    stampLiveForTest(&stale_grammar.inner);
     stale_grammar.inner.source_identity = zq.sourceIdentityForPath("handler.ts");
     stale_grammar.inner.source_identity.core_grammar_hash[0] ^= 0xff;
     try std.testing.expectError(error.CoreGrammarHashMismatch, validate(stale_grammar, .{}));
 
     var stale_semantics = try parseContractJson(allocator, source);
+    stampLiveForTest(&stale_semantics.inner);
     stale_semantics.inner.source_identity = zq.sourceIdentityForPath("handler.ts");
     stale_semantics.inner.source_identity.semantics_hash[0] ^= 0xff;
     try std.testing.expectError(error.SemanticsHashMismatch, validate(stale_semantics, .{}));

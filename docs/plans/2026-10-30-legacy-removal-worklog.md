@@ -129,3 +129,13 @@ Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`
 The test `the old-checker miss table equals the observed misses` left on purpose. It compared the table with the observed misses, and the table is gone. `every expected property holds` fails on any miss.
 
 `docs/zts-formal-spec-northstar-advanced.md` is a tracked document, so the two "northstar" comments in `semantics.zig` name a current future plan. They stay.
+
+## L3d
+
+Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`, the stored-data set, `test-zruntime`, `test-cli`, `test-proof-checker`, `test-proof-checker-mutants`, `test-proof-ratchet`, `test-kernel-safety`, `test-module-boundary`, `zig build test`, `check-spine`. The comparison script moved 0 of 648 rows.
+
+The 3 pin tests failed on the old checks: `expected error.CapabilityMatrixMismatch, found void`, `expected error.PolicyHashMismatch, found void`, and a returned contract in `validate`. They now assert the refusal under new names.
+
+The 6 fixture tests take `stampLiveForTest` or `stampLiveHandlerForTest`, which set the values that the writer stamps. `validate` still runs in each test. In `validate promotes Raw to Validated when integrity checks pass`, the assertion `capabilities == null` became a zero-length matrix, because the fixture now carries a matrix.
+
+`verifyArtifactHash` is unchanged, as row E14 requires.
