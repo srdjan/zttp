@@ -175,12 +175,10 @@ pub const LockFreePool = struct {
             return rt;
         }
 
-        /// `allocator` is accepted for call-site compatibility but unused:
-        /// runtime-lifetime memory belongs to `lifetime_arena`, and freeing any
-        /// of it through another allocator would be a mismatched free.
-        pub fn destroy(self: *Runtime, allocator: std.mem.Allocator) void {
-            _ = allocator;
-
+        /// Runtime-lifetime memory belongs to `lifetime_arena`, so `destroy`
+        /// takes no allocator: freeing it through another one would be a
+        /// mismatched free.
+        pub fn destroy(self: *Runtime) void {
             // Higher-level wrappers may hold borrowed pointers into this
             // context. Let them clear their state before the engine-owned
             // context, heap, and string table are destroyed.
@@ -340,7 +338,7 @@ pub const LockFreePool = struct {
                 }
             }
 
-            runtime.destroy(self.allocator);
+            runtime.destroy();
         }
         self.allocator.free(self.slots);
     }
@@ -405,7 +403,7 @@ pub const LockFreePool = struct {
             }
         }
         runtime.in_use = false;
-        runtime.destroy(self.allocator);
+        runtime.destroy();
         _ = self.size.fetchSub(1, .monotonic);
     }
 
@@ -439,7 +437,7 @@ pub const LockFreePool = struct {
         }
 
         // Pool full, destroy runtime
-        runtime.destroy(self.allocator);
+        runtime.destroy();
         _ = self.size.fetchSub(1, .monotonic);
     }
 
@@ -521,7 +519,7 @@ test "Runtime destroy clears user data before context teardown" {
         .deinit_fn = Hooks.moduleDeinit,
     };
 
-    rt.destroy(allocator);
+    rt.destroy();
     try std.testing.expectEqual(@as(u8, 2), sequence);
 }
 
@@ -677,7 +675,7 @@ test "Runtime.create errdefer ladder closes every failure path" {
         if (result) |rt| {
             // We've exceeded the allocation count of a successful create();
             // destroy and stop walking.
-            rt.destroy(failing.allocator());
+            rt.destroy();
             const leak_check = leak_detector.deinit();
             if (leak_check != 0) std.debug.print("Runtime.create leaked on success after fail_at={d}\n", .{fail_at});
             try std.testing.expectEqual(@as(usize, 0), leak_check);

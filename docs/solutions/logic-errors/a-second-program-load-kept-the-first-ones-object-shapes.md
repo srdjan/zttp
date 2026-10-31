@@ -97,9 +97,9 @@ first program's name for it.
 Two handlers, one instance, no policy or module involvement:
 
 ```zig
-try rt.loadHandler("function handler(req) { return Response.json({ a: 1 }); }", "<a>");
+try rt.loadCode("function handler(req) { return Response.json({ a: 1 }); }", "<a>");
 // -> {"a":1}
-try rt.loadHandler("function handler(req) { return Response.json({ b: 2, c: 3 }); }", "<b>");
+try rt.loadCode("function handler(req) { return Response.json({ b: 2, c: 3 }); }", "<b>");
 // -> {"a":2}
 ```
 
@@ -163,7 +163,7 @@ object path rather than write by position into the wrong shape. That alone would
 have converted this into a visible wrong-arity object instead of a wrong-name
 one, and it is independent of which fix is chosen.
 
-Until then, treat `loadCode` and `loadHandler` as a once-per-instance operation.
+Until then, treat `loadCode` as a once-per-instance operation.
 A test that needs two working handlers needs two `HandlerInstance`s.
 
 ## Prevention

@@ -745,18 +745,10 @@ pub const solveCounterexample = counterexample.solve;
 /// significant.
 pub const routePatternsMatch = route_match.pathsMatch;
 
-/// Compatibility alias for callers of the original stable export. New code
-/// should use `routePatternsMatch`.
-pub const pathsMatch = routePatternsMatch;
-
 test "stable routePatternsMatch preserves route pattern semantics" {
     try std.testing.expect(routePatternsMatch("/orders/:id", "/orders/42"));
     try std.testing.expect(!routePatternsMatch("/assets/*", "/assets/app.js"));
     try std.testing.expect(!routePatternsMatch("/orders", "/orders/"));
-}
-
-test "stable pathsMatch compatibility alias remains callable" {
-    try std.testing.expect(pathsMatch("/orders/:id", "/orders/42"));
 }
 
 /// Classify a single SQL statement: which tables it touches and whether it

@@ -113,7 +113,7 @@ test "a type fault leaves its source line on the runtime for the pool to copy ou
 
     // A handler that calls a non-function faults with HandlerTypeFault, and the
     // runtime resolves the source line from the bytecode line table.
-    try rt.loadHandler(
+    try rt.loadCode(
         \\function handler(req) {
         \\  const missing = undefined;
         \\  return missing();

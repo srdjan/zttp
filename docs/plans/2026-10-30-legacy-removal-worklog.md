@@ -309,3 +309,9 @@ A normalized comparison shows that the `parse.zig` test move changed only call s
 Removed `error.InvalidParserPhase` rows, each because the method left: 2 raw rows, 2 `parse` rows in the typed tests, 1 `parseWithCodegenAllocator` row, and 1 more `parse` row in `typed generation failures clean published float and nested function payloads`.
 
 Observation for later pruning: a parser refusal text such as "default exports are not supported" still runs, but `parseAdmission` replaces it with the admission text. So those texts have no reader on a program parse. They are not legacy under this plan's definition, because the parser branch still refuses, and this plan leaves them.
+
+## L5d
+
+Status: complete. Gate exit 0: protection diff, build, `surface.sh`, `eprobe.sh`, `test-module-boundary`, `test-zts`, `test-zruntime`, `test-server`, `zig build test`, and `check-spine`. `zts meta --json` is identical. The comparison script moved 12 rows, all listed, and 0 unexpected rows.
+
+`zts.pathsMatch`, `HandlerInstance.loadHandler`, and the `allocator` parameter of `destroy` in `packages/zts/src/pool.zig` left. `pathsMatch` in `packages/zts/src/route_match.zig` stays, because `routePatternsMatch` names it. `test "stable pathsMatch compatibility alias remains callable"` left with the alias. `reloadHandler` and `loadHandlerCached` are different functions and stay. L9 adds a `CHANGELOG.md` line for an embedder of `zts.pathsMatch`.

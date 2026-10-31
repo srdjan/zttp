@@ -989,11 +989,6 @@ pub const HandlerInstance = struct {
         return serialized;
     }
 
-    /// Load handler code (alias for loadCode for API compatibility)
-    pub fn loadHandler(self: *Self, code: []const u8, filename: []const u8) !void {
-        return self.loadCode(code, filename);
-    }
-
     /// Call a global function by name with the provided arguments.
     /// Returns the function result or error.NotCallable if missing or not callable.
     pub fn callGlobalFunction(self: *Self, name: []const u8, args: []const zq.JSValue) !zq.JSValue {

@@ -696,7 +696,7 @@ test "virtual module import alias resolves to callable binding" {
         \\  return Response.text(typeof getEnv);
         \\}
     ;
-    try rt.loadHandler(handler_code, "<import-alias>");
+    try rt.loadCode(handler_code, "<import-alias>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -729,7 +729,7 @@ test "built-in module import runs under capability wrapper context" {
         \\  });
         \\}
     ;
-    try rt.loadHandler(handler_code, "<builtin-capability-wrapper>");
+    try rt.loadCode(handler_code, "<builtin-capability-wrapper>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -785,7 +785,7 @@ test "runtime type fault is preserved as HandlerTypeFault for proof-explained 50
     // class as error.HandlerTypeFault (not the opaque error.HandlerError) so the
     // 500 site can name the proof chip that guards it. See fault_explain.zig.
     const handler_code = "function handler(req) { const o = { a: 1 }; const f = o.missing; return f(); }";
-    try rt.loadHandler(handler_code, "<type-fault>");
+    try rt.loadCode(handler_code, "<type-fault>");
 
     var request = try makeTestRequest(allocator, "GET", "/", null);
     defer request.deinit(allocator);
@@ -802,7 +802,7 @@ fn runFailingCallbackHandler(handler_code: []const u8) !void {
 
     const rt = try HandlerInstance.init(allocator, .{});
     defer rt.deinit();
-    try rt.loadHandler(handler_code, "<callback-fault>");
+    try rt.loadCode(handler_code, "<callback-fault>");
 
     var request = try makeTestRequest(allocator, "GET", "/", null);
     defer request.deinit(allocator);
@@ -834,7 +834,7 @@ test "a request timeout inside a map callback remains RequestTimeout" {
     };
     const timeout_atom = try rt.ctx.atoms.intern("requestTimeout");
     try rt.ctx.registerGlobalFunction(timeout_atom, timeout.call, 0);
-    try rt.loadHandler(
+    try rt.loadCode(
         "function handler(req) { const r = [1].map((x) => requestTimeout()); return Response.json(r); }",
         "<callback-timeout>",
     );
@@ -877,7 +877,7 @@ test "non-Response return 500 is proof-explained against exhaustive_returns" {
     // Returns a primitive, not a Response -> extractResponseInternal's Path B
     // builds a 500. handler_proof defaults to unproven, so the body names the
     // exhaustive_returns chip as the predicted cause.
-    try rt.loadHandler("function handler(req) { return 42; }", "<non-response>");
+    try rt.loadCode("function handler(req) { return 42; }", "<non-response>");
 
     var request = try makeTestRequest(allocator, "GET", "/", null);
     defer request.deinit(allocator);
@@ -909,7 +909,7 @@ test "soundness incident on a proven path is written to the incident log" {
     });
     defer rt.deinit();
 
-    try rt.loadHandler("function handler(req) { const o = { a: 1 }; const f = o.missing; return f(); }", "<incident>");
+    try rt.loadCode("function handler(req) { const o = { a: 1 }; const f = o.missing; return f(); }", "<incident>");
     var request = try makeTestRequest(allocator, "GET", "/boom", null);
     defer request.deinit(allocator);
     try std.testing.expectError(error.HandlerTypeFault, rt.executeHandler(request.asView()));
@@ -944,7 +944,7 @@ test "exceeding a constant cost ceiling records a soundness incident" {
     });
     defer rt.deinit();
 
-    try rt.loadHandler(
+    try rt.loadCode(
         \\import { env } from "zttp:env";
         \\function handler(req) {
         \\  env("ONE");
@@ -990,7 +990,7 @@ test "requests within the ceiling record no incident" {
     });
     defer rt.deinit();
 
-    try rt.loadHandler(
+    try rt.loadCode(
         \\import { env } from "zttp:env";
         \\function handler(req) {
         \\  env("ONE");
@@ -1031,7 +1031,7 @@ test "cost meter resets between pooled requests" {
     });
     defer rt.deinit();
 
-    try rt.loadHandler(
+    try rt.loadCode(
         \\import { env } from "zttp:env";
         \\function handler(req) {
         \\  env("ONE");
@@ -1069,7 +1069,7 @@ test "httpRequest native binding reports disabled bridge by default" {
         \\  return Response.json(JSON.parse(out));
         \\}
     ;
-    try rt.loadHandler(handler_code, "<http-bridge-disabled>");
+    try rt.loadCode(handler_code, "<http-bridge-disabled>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -1110,7 +1110,7 @@ test "httpRequest native binding enforces allowlisted host before dialing" {
         \\  return Response.json(JSON.parse(out));
         \\}
     ;
-    try rt.loadHandler(handler_code, "<http-bridge-allowlist>");
+    try rt.loadCode(handler_code, "<http-bridge-allowlist>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -1155,7 +1155,7 @@ test "request helpers expose body parsing and case-insensitive headers" {
         \\  });
         \\}
     ;
-    try rt.loadHandler(handler_code, "<request-helpers>");
+    try rt.loadCode(handler_code, "<request-helpers>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "POST"),
@@ -1208,7 +1208,7 @@ test "request helpers define empty and invalid body semantics" {
         \\  });
         \\}
     ;
-    try rt.loadHandler(handler_code, "<request-body-semantics>");
+    try rt.loadCode(handler_code, "<request-body-semantics>");
 
     var empty_request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "POST"),
@@ -1293,7 +1293,7 @@ test "Headers Request and Response factories share the HTTP model" {
         \\  });
         \\}
     ;
-    try rt.loadHandler(handler_code, "<http-factories>");
+    try rt.loadCode(handler_code, "<http-factories>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -1333,7 +1333,7 @@ test "Response factories expose canonical status text" {
     const rt = try HandlerInstance.init(allocator, .{});
     defer rt.deinit();
 
-    try rt.loadHandler(
+    try rt.loadCode(
         \\function handler(req) {
         \\  const cached = Response("created", { status: 201 });
         \\  const badGateway = Response.json({ error: true }, { status: 502 });
@@ -1382,7 +1382,7 @@ test "body readers are single-use for inbound and constructed HTTP objects" {
     const rt = try HandlerInstance.init(allocator, .{});
     defer rt.deinit();
 
-    try rt.loadHandler(
+    try rt.loadCode(
         \\function handler(req) {
         \\  req.text();
         \\  return Response.text(req.text());
@@ -1401,7 +1401,7 @@ test "body readers are single-use for inbound and constructed HTTP objects" {
     try std.testing.expectError(error.NativeFunctionError, rt.callGlobalFunction("handler", &[_]zq.JSValue{request_val}));
     rt.resetForNextRequest();
 
-    try rt.loadHandler(
+    try rt.loadCode(
         \\function handler(req) {
         \\  const built = Response("pong");
         \\  built.text();
@@ -1420,7 +1420,7 @@ test "HTTP body consumption resets for request reuse and pool release" {
     const allocator = arena.allocator();
     const rt = try HandlerInstance.init(allocator, .{ .use_hybrid_allocation = false });
     defer rt.deinit();
-    try rt.loadHandler("function handler(req) { return req.text(); }", "<body-reset>");
+    try rt.loadCode("function handler(req) { return req.text(); }", "<body-reset>");
     const request = try rt.createRequestObject(.{ .method = "POST", .url = "/", .headers = .empty, .body = "ping" });
     // Keep the same object alive across resets so allocating a fresh object
     // cannot conceal stale body-consumption tracking.
@@ -1461,7 +1461,7 @@ test "fetchSync returns response helpers and direct response objects" {
         \\  });
         \\}
     ;
-    try rt.loadHandler(inspect_handler, "<fetchsync-inspect>");
+    try rt.loadCode(inspect_handler, "<fetchsync-inspect>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -1482,7 +1482,7 @@ test "fetchSync returns response helpers and direct response objects" {
     try std.testing.expectEqualStrings("application/json", obj.get("contentType").?.string);
     try std.testing.expectEqualStrings("OutboundHttpDisabled", obj.get("error").?.string);
 
-    try rt.loadHandler("function handler(req) { return fetchSync('http://example.com'); }", "<fetchsync-direct>");
+    try rt.loadCode("function handler(req) { return fetchSync('http://example.com'); }", "<fetchsync-direct>");
     var direct_response = try rt.executeHandler(request.asView());
     defer direct_response.deinit();
 
@@ -1522,7 +1522,7 @@ test "fetchSync returns structured errors for invalid init and allowlist failure
         \\  });
         \\}
     ;
-    try rt.loadHandler(handler_code, "<fetchsync-invalid>");
+    try rt.loadCode(handler_code, "<fetchsync-invalid>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -1576,7 +1576,7 @@ test "a Bytes body is accepted where a number is InvalidBody" {
         \\  });
         \\}
     ;
-    try rt.loadHandler(handler_code, "<fetchsync-bytes-body>");
+    try rt.loadCode(handler_code, "<fetchsync-bytes-body>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -1626,7 +1626,7 @@ test "fetchSync respects embedded capability policy host allowlist" {
         \\  });
         \\}
     ;
-    try rt.loadHandler(handler_code, "<fetchsync-policy>");
+    try rt.loadCode(handler_code, "<fetchsync-policy>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -1673,7 +1673,7 @@ test "a resolved scope outside policy denies before the socket" {
         \\  return Response.json({{ status: res.status, error: res.error }});
         \\}}
     , .{url});
-    try rt.loadHandler(handler_code, "<egress-scope-denied>");
+    try rt.loadCode(handler_code, "<egress-scope-denied>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -1734,7 +1734,7 @@ test "a denial names the guard, not the request's own bytes" {
         \\  return Response.json({{ error: fetchSync("{s}").error }});
         \\}}
     , .{url});
-    try rt.loadHandler(handler_code, "<denial-telemetry>");
+    try rt.loadCode(handler_code, "<denial-telemetry>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -1803,7 +1803,7 @@ test "a policy that names no scope permits no connection" {
         \\  return Response.json({{ error: res.error }});
         \\}}
     , .{url});
-    try rt.loadHandler(handler_code, "<egress-scope-unnamed>");
+    try rt.loadCode(handler_code, "<egress-scope-unnamed>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -1844,7 +1844,7 @@ test "dev_capability_policy config enforces egress on sync fetch" {
         \\  return Response.json({ blocked: fetchSync("http://example.com").json().error });
         \\}
     ;
-    try rt.loadHandler(handler_code, "<dev-egress-sync>");
+    try rt.loadCode(handler_code, "<dev-egress-sync>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -1917,7 +1917,7 @@ test "a denied env key never reaches the handler" {
         \\  return Response.json({ allowed: env("ZTTP_PROBE_ALLOWED") });
         \\}
     ;
-    try rt.loadHandler(handler_code, "<env-allowed>");
+    try rt.loadCode(handler_code, "<env-allowed>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -1943,7 +1943,7 @@ test "a denied env key never reaches the handler" {
         \\  return Response.json({ denied: env("ZTTP_PROBE_DENIED") });
         \\}
     ;
-    try rt.loadHandler(denied_code, "<env-denied>");
+    try rt.loadCode(denied_code, "<env-denied>");
     const request_val = try rt.createRequestObject(request.asView());
     try std.testing.expectError(
         error.NativeFunctionError,
@@ -1974,7 +1974,7 @@ test "a denied cache namespace never creates the store" {
     {
         const rt = try HandlerInstance.init(allocator, .{ .dev_capability_policy = policy });
         defer rt.deinit();
-        try rt.loadHandler(
+        try rt.loadCode(
             \\import { cacheSet } from "zttp:cache";
             \\function handler(req) {
             \\  cacheSet("allowed", "k", "v");
@@ -2005,7 +2005,7 @@ test "a denied cache namespace never creates the store" {
             \\  return Response.json({{ out: {s} }});
             \\}}
         , .{call});
-        try rt.loadHandler(code, "<cache-denied>");
+        try rt.loadCode(code, "<cache-denied>");
         const request_val = try rt.createRequestObject(request.asView());
         try std.testing.expectError(
             error.NativeFunctionError,
@@ -2033,7 +2033,7 @@ test "jwtSign, jwtVerify, and verifyWebhookSignature refuse an empty secret" {
         \\  return Response.json({ signed: typeof signed, verifyOk: forged.ok, hook: hook });
         \\}
     ;
-    try rt.loadHandler(handler_code, "<empty-secret>");
+    try rt.loadCode(handler_code, "<empty-secret>");
 
     var request = try makeTestRequest(allocator, "GET", "/", null);
     defer request.deinit(allocator);
@@ -2059,7 +2059,7 @@ test "jwtSign, jwtVerify, and verifyWebhookSignature accept a non-empty secret" 
         \\  return Response.json({ signed: signed, verifyOk: verified.ok, hook: hook });
         \\}
     ;
-    try rt.loadHandler(handler_code, "<non-empty-secret>");
+    try rt.loadCode(handler_code, "<non-empty-secret>");
 
     var request = try makeTestRequest(allocator, "GET", "/", null);
     defer request.deinit(allocator);
@@ -2086,7 +2086,7 @@ test "rateCheck answers bad arguments with an error Result, not undefined" {
         \\  return Response.json({ limitOk: limit.ok, limitTag: limit.error.tag, windowOk: window.ok, windowTag: window.error.tag });
         \\}
     ;
-    try rt.loadHandler(handler_code, "<ratecheck-invalid>");
+    try rt.loadCode(handler_code, "<ratecheck-invalid>");
 
     var request = try makeTestRequest(allocator, "GET", "/", null);
     defer request.deinit(allocator);
@@ -2135,7 +2135,7 @@ test "a denied sql write never reaches the database" {
             .dev_capability_policy = policy,
         });
         defer rt.deinit();
-        try rt.loadHandler(
+        try rt.loadCode(
             \\import { sql, sqlExec } from "zttp:sql";
             \\function handler(req) {
             \\  sql("makeTable", "CREATE TABLE t (n INTEGER)");
@@ -2156,7 +2156,7 @@ test "a denied sql write never reaches the database" {
             .dev_capability_policy = policy,
         });
         defer rt.deinit();
-        try rt.loadHandler(
+        try rt.loadCode(
             \\import { sql, sqlExec } from "zttp:sql";
             \\function handler(req) {
             \\  sql("insertDenied", "INSERT INTO t VALUES (2)");
@@ -2246,7 +2246,7 @@ test "fetchSync sends request data and exposes response helpers" {
         \\}}
     , .{url});
     defer allocator.free(handler_code);
-    try rt.loadHandler(handler_code, "<fetchsync-success>");
+    try rt.loadCode(handler_code, "<fetchsync-success>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -2343,7 +2343,7 @@ test "zttp fetch replay consumes traced inner and outer rows and preserves heade
         \\  });
         \\}
     ;
-    try rt.loadHandler(handler_code, "<fetch-replay-trace>");
+    try rt.loadCode(handler_code, "<fetch-replay-trace>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -2402,7 +2402,7 @@ test "replay cannot replace retired ledger absence with recorded success" {
 
     try std.testing.expectError(
         error.UnknownModule,
-        rt.loadHandler(retired_ledger_handler, "<retired-ledger>"),
+        rt.loadCode(retired_ledger_handler, "<retired-ledger>"),
     );
     try std.testing.expectEqual(@as(u32, 0), replay_state.cursor);
 }
@@ -2424,7 +2424,7 @@ test "replay cannot replace retired tool refusals with recorded success" {
 
     try std.testing.expectError(
         error.UnknownModule,
-        rt.loadHandler(retired_tool_handler, "<retired-tool>"),
+        rt.loadCode(retired_tool_handler, "<retired-tool>"),
     );
     try std.testing.expectEqual(@as(u32, 0), replay_state.cursor);
 }
@@ -2434,7 +2434,7 @@ test "a handler exercising every stateful module fills only owned slots" {
     const Slot = zq.module_slots.Slot;
     const rt = try HandlerInstance.init(allocator, .{});
     defer rt.deinit();
-    try rt.loadHandler(
+    try rt.loadCode(
         \\import { cacheSet } from "zttp:cache";
         \\import { rateCheck } from "zttp:ratelimit";
         \\import { schemaCompile } from "zttp:validate";
@@ -2505,7 +2505,7 @@ test "zttp fetch replay preserves missing content-type header" {
         \\  });
         \\}
     ;
-    try rt.loadHandler(handler_code, "<fetch-replay-missing-content-type>");
+    try rt.loadCode(handler_code, "<fetch-replay-missing-content-type>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -2589,7 +2589,7 @@ test "weather handler parses Open-Meteo forecast and surfaces request id" {
     rt.ctx.setModuleState(zq.trace.REPLAY_STATE_SLOT, @ptrCast(&replay_state), &zq.trace.ReplayState.deinitOpaque);
     defer rt.ctx.module_state[zq.trace.REPLAY_STATE_SLOT] = null;
 
-    try rt.loadHandler(weather_handler_src, "<weather-replay-ok>");
+    try rt.loadCode(weather_handler_src, "<weather-replay-ok>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -2640,7 +2640,7 @@ test "weather handler returns 502 when upstream is not ok" {
     rt.ctx.setModuleState(zq.trace.REPLAY_STATE_SLOT, @ptrCast(&replay_state), &zq.trace.ReplayState.deinitOpaque);
     defer rt.ctx.module_state[zq.trace.REPLAY_STATE_SLOT] = null;
 
-    try rt.loadHandler(weather_handler_src, "<weather-replay-502>");
+    try rt.loadCode(weather_handler_src, "<weather-replay-502>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -2676,7 +2676,7 @@ test "weather handler returns 404 for an unknown path without any egress" {
     rt.ctx.setModuleState(zq.trace.REPLAY_STATE_SLOT, @ptrCast(&replay_state), &zq.trace.ReplayState.deinitOpaque);
     defer rt.ctx.module_state[zq.trace.REPLAY_STATE_SLOT] = null;
 
-    try rt.loadHandler(weather_handler_src, "<weather-replay-404>");
+    try rt.loadCode(weather_handler_src, "<weather-replay-404>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -2808,7 +2808,7 @@ test "fetchSync enforces response byte limits" {
         \\}}
     , .{url});
     defer allocator.free(handler_code);
-    try rt.loadHandler(handler_code, "<fetchsync-too-large>");
+    try rt.loadCode(handler_code, "<fetchsync-too-large>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -2870,7 +2870,7 @@ test "fetchSync times out instead of hanging when upstream accepts and goes sile
         \\}}
     , .{url});
     defer allocator.free(handler_code);
-    try rt.loadHandler(handler_code, "<fetchsync-timeout>");
+    try rt.loadCode(handler_code, "<fetchsync-timeout>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -2933,7 +2933,7 @@ fn probeFetchWithRetry(allocator: std.mem.Allocator, init_js: []const u8) !Retry
         \\}}
     , .{ url, init_js });
     defer allocator.free(handler_code);
-    try rt.loadHandler(handler_code, "<fetchwithretry-credential>");
+    try rt.loadCode(handler_code, "<fetchwithretry-credential>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -3051,7 +3051,7 @@ const CeilingFetch = struct {
             \\}}
         , .{target_url});
         defer allocator.free(handler_code);
-        try rt.loadHandler(handler_code, "<fetch-ceiling>");
+        try rt.loadCode(handler_code, "<fetch-ceiling>");
 
         var clock_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
         defer clock_backend.deinit();
@@ -3351,7 +3351,7 @@ test "string prototype methods are callable" {
     const split_val = proto.getProperty(pool, zq.Atom.split) orelse return error.NoHandler;
     try std.testing.expect(split_val.isCallable());
 
-    try rt.loadHandler("function handler(req){ return Response.text(typeof ''.split); }", "<test>");
+    try rt.loadCode("function handler(req){ return Response.text(typeof ''.split); }", "<test>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -3377,7 +3377,7 @@ test "request body split works" {
 
     // First test: simple method call
     const simple_test = "function handler(req){ return Response.text('hello'); }";
-    try rt.loadHandler(simple_test, "<test1>");
+    try rt.loadCode(simple_test, "<test1>");
 
     var req1 = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -3396,7 +3396,7 @@ test "request body split works" {
     defer rt2.deinit();
 
     const prop_test = "function handler(req){ return Response.text(req.method); }";
-    try rt2.loadHandler(prop_test, "<test2>");
+    try rt2.loadCode(prop_test, "<test2>");
 
     var req2 = HttpRequestOwned{
         .method = try allocator.dupe(u8, "POST"),
@@ -3415,7 +3415,7 @@ test "request body split works" {
     defer rt3.deinit();
 
     const typeof_split = "function handler(req){ return Response.text(typeof 'a&b'.split('&')); }";
-    try rt3.loadHandler(typeof_split, "<test3>");
+    try rt3.loadCode(typeof_split, "<test3>");
 
     var req3 = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -3435,7 +3435,7 @@ test "request body split works" {
 
     const handler_code =
         "function handler(req){ let x = 'test'; return Response.text(x); }";
-    try rt4.loadHandler(handler_code, "<test>");
+    try rt4.loadCode(handler_code, "<test>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -3461,7 +3461,7 @@ test "for loop locals preserve numeric values" {
 
     const handler_code =
         "function handler(req){ for (let i of range(1)) { return Response.text(typeof i); } return Response.text('none'); }";
-    try rt.loadHandler(handler_code, "<test>");
+    try rt.loadCode(handler_code, "<test>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -3491,7 +3491,7 @@ test "Number converts numeric cache-shaped strings" {
         \\  return Response.json({ hits: hits });
         \\}
     ;
-    try rt.loadHandler(handler_code, "<number-constructor>");
+    try rt.loadCode(handler_code, "<number-constructor>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -3524,7 +3524,7 @@ test "object property access works" {
         \\  return Response.text([name, '-', String(age)].join(''));
         \\}
     ;
-    try rt.loadHandler(handler_code, "<test>");
+    try rt.loadCode(handler_code, "<test>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -3561,7 +3561,7 @@ test "ENG-2: zero-arg user-named method on object literal is callable" {
         \\  return Response.text([String(a), '-', String(b), '-', String(c)].join(''));
         \\}
     ;
-    try rt.loadHandler(handler_code, "<test>");
+    try rt.loadCode(handler_code, "<test>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -3594,7 +3594,7 @@ test "array indexing works" {
         \\  return Response.text([String(a), '-', String(b), '-', String(c)].join(''));
         \\}
     ;
-    try rt.loadHandler(handler_code, "<test>");
+    try rt.loadCode(handler_code, "<test>");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -3624,7 +3624,7 @@ test "HTML rendering works through ordinary TypeScript calls" {
         \\  return Response.html(renderToString(elem));
         \\}
     ;
-    try rt.loadHandler(handler_code, "test.ts");
+    try rt.loadCode(handler_code, "test.ts");
 
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, "GET"),
@@ -3648,9 +3648,9 @@ test "handler loading refuses retired source extensions" {
     defer rt.deinit();
     const source = "function handler(req) { return Response.text('ok'); }";
 
-    try std.testing.expectError(error.UnsupportedSourceExtension, rt.loadHandler(source, "handler.js"));
-    try std.testing.expectError(error.UnsupportedSourceExtension, rt.loadHandler(source, "handler.jsx"));
-    try std.testing.expectError(error.UnsupportedSourceExtension, rt.loadHandler(source, "handler.tsx"));
+    try std.testing.expectError(error.UnsupportedSourceExtension, rt.loadCode(source, "handler.js"));
+    try std.testing.expectError(error.UnsupportedSourceExtension, rt.loadCode(source, "handler.jsx"));
+    try std.testing.expectError(error.UnsupportedSourceExtension, rt.loadCode(source, "handler.tsx"));
 }
 
 test "constant folding matches runtime arithmetic and preserves short circuit effects" {
@@ -3721,7 +3721,7 @@ test "runtime strings survive the borrowed parser source" {
     );
     const rt = try HandlerInstance.init(allocator, .{});
     defer rt.deinit();
-    try rt.loadHandler(source, "strings.ts");
+    try rt.loadCode(source, "strings.ts");
     @memset(source, 'x');
     var response = try rt.executeHandler(.{ .method = "GET", .url = "/", .headers = .empty, .body = null });
     defer response.deinit();
@@ -3842,7 +3842,7 @@ test "outbound adapters preserve exchange results and failure stages" {
                     \\  return Response.json({{ status: result.status, error: failure.error, details: failure.details, body: result.body, reason: result.statusText, reply: result.headers.get("x-reply") ?? "" }});
                     \\}}
                 , .{url});
-            try rt.loadHandler(source, "<outbound-adapter-parity>");
+            try rt.loadCode(source, "<outbound-adapter-parity>");
             var request = try makeTestRequest(allocator, "GET", "/", null);
             defer request.deinit(allocator);
             if (case.fail_send) {
@@ -3898,7 +3898,7 @@ test "a POST with no body is sent with an empty body" {
         \\  return Response.json({{ sync: sync.contentLength, bridge: bridge.contentLength }});
         \\}}
     , .{ sync_url, bridge_url });
-    try rt.loadHandler(source, "<empty-post-control>");
+    try rt.loadCode(source, "<empty-post-control>");
 
     var request = try makeTestRequest(allocator, "GET", "/", null);
     defer request.deinit(allocator);
@@ -3920,7 +3920,7 @@ test "sseEvents returns events and a tagged framing failure through the JS API" 
 
     const rt = try HandlerInstance.init(allocator, .{});
     defer rt.deinit();
-    try rt.loadHandler(
+    try rt.loadCode(
         \\import { sseEvents } from "zttp:sse";
         \\function handler(req) {
         \\  const bounds = { maxBodyBytes: 128, maxBlockBytes: 128, maxEvents: 4 };
