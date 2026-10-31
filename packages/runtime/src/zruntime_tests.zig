@@ -2908,7 +2908,7 @@ const RetryProbe = struct {
 fn probeFetchWithRetry(allocator: std.mem.Allocator, init_js: []const u8) !RetryProbe {
     var server = try TestHttpServer.init(allocator, .sequenced_status);
     server.status_sequence = &.{ 503, 503, 503 };
-    defer server.join() catch {};
+    defer server.finish() catch {};
     try server.start();
 
     const url = try server.url(allocator, "/retry");
