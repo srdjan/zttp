@@ -50,6 +50,20 @@ Core commands auto-detect `zttp.json` from the current directory or a parent.
 | `expert` | Start the compiler-in-the-loop coding agent. |
 | `deploy` | Build, prove, attest, and emit a local binary. |
 
+`zttp init --extension <name>` scaffolds a partner virtual module instead of a
+project:
+
+```bash
+zttp init --extension my-partner
+```
+
+The command creates `zttp-module.json` (proof metadata), `src/root.zig` (a
+native Zig binding against `zttp-sdk`), `build.zig`, `build.zig.zon`,
+`handler.ts` (a sample handler that imports `zttp-ext:<name>`), `.gitignore`,
+and `README.md`.
+To analyze the sample handler against the manifest, see `--module-manifest`
+under [Analyzer Commands](#analyzer-commands).
+
 ## Run Commands
 
 `zttp serve` runs a handler without the proof-aware watch loop:
@@ -175,12 +189,20 @@ Proof ledger commands:
 
 ```bash
 zttp proofs
+zttp proofs list
+zttp proofs watch
 zttp proofs show HEAD
 zttp proofs diff HEAD~1 HEAD
 zttp proofs export --format md --ref HEAD
 zttp proofs badge
 zttp proofs gate --base origin/main --head HEAD
 ```
+
+`zttp proofs` and `zttp proofs list` print the last 10 ledger entries, newest
+last.
+`zttp proofs watch` prints the existing entries, then prints each new entry
+as it lands. It checks the ledger every 500 milliseconds and runs until you
+stop it with Ctrl+C.
 
 `zttp proofs gate` compares every changed handler between the base and the head.
 It also compares each handler that imports a changed helper, through any chain
@@ -199,6 +221,14 @@ return type and `"declared"` otherwise. The gate compares an implicit handler on
 its behavior; a failing declared capsule still gives exit 2.
 The gate writes no ledger row.
 See [Proofs and receipts](proofs-and-receipts.md#proof-gate).
+
+A self-contained binary answers `<binary> attest`. The command prints one
+JSON line with `policyHash`, `artifactSha256`, `artifactActual`, and
+`capabilityHash`. `artifactActual` is the SHA-256 of the embedded bytecode.
+A binary from `zttp compile` holds an all-zero `artifactSha256`, so
+`artifactActual` has no stamped value to match. A binary with no embedded
+payload prints a JSON `error` line and exits 1. `zttp-runtime attest` is this
+command on the template binary, and it fails the same way.
 
 `zttp verify <url>`
 verifies a live endpoint's attestation. `zttp proofs verify <bundle-dir>`
@@ -308,6 +338,28 @@ zttp verify-paths <file>... [--json]
 zttp verify-modules <file>... [--strict] [--json]
 zttp verify-modules --builtins --strict --json
 ```
+
+`zts compile` precompiles a handler to Zig source. It accepts `--verify`,
+`--contract`, `--sql-schema <path>`, `--policy <path>`, and
+`--module-manifest <path>`:
+
+```bash
+zts compile [--verify] [--contract] [--sql-schema path] [--policy policy.json] [--module-manifest path] <handler.ts> <output.zig>
+```
+
+`--module-manifest` registers a partner module manifest, such as the
+`zttp-module.json` that `zttp init --extension` writes. Repeat the flag for
+more than one manifest. The command reads, parses, and registers each manifest
+before it compiles. A manifest that cannot be read or parsed stops the command
+with an error that names the path. `zttp compile` and `zttp build` do not
+take this flag.
+
+`zts restrictions --markdown` prints the generated restrictions reference.
+`--json` and `--markdown` are alternatives.
+
+`zttp canonicalize <file> --json --simulate` applies each rewrite preview in
+memory and runs `edit-simulate` over the result. It never writes the source
+file.
 
 With a configured policy, computed env keys, egress endpoints, and cache
 namespaces compile as residual guards. The contract records them separately
@@ -504,7 +556,10 @@ line under the banner states before the first turn.
 
 The optional DeepSeek key is stored in `~/.zttp/providers.json` with mode `0600`.
 The environment variable `DEEPSEEK_API_KEY` overrides the stored value after
-DeepSeek is selected. The Claude and OpenAI providers were removed, so `zttp auth
+DeepSeek is selected. `zttp auth status` prints one line for the DeepSeek key:
+the source (`shell`, `file`, or `none`) and a masked form of the key. It
+prints a `zttp auth deepseek` hint when no key is set. A final `File:` line names
+the key file. The Claude and OpenAI providers were removed, so `zttp auth
 claude` and `zttp auth openai` are refused. `zttp auth revoke claude` and
 `zttp auth revoke openai` still delete a key stored for them earlier. A session
 stored under either provider fails to resume with the stored-provider error until

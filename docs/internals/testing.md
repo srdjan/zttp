@@ -420,9 +420,27 @@ fold it in by importing it; it needs its own step either way.
 
 ## Parallelism On macOS
 
-`scripts/verify.sh` runs `zig build test -j1` on macOS and plain
-`zig build test` elsewhere. The serialization is for the same
-teardown instability that keeps the zruntime root standalone.
+`scripts/verify.sh` runs `zig build verify`. `main` in `tooling/verify.zig`
+owns the `-j1` rule. That function appends `-j1` to the route whose last
+argument is `test`, and only when the host is macOS. Other hosts run plain
+`zig build test`. The serialization is for the same teardown instability that
+keeps the zruntime root standalone.
+
+## Environment Variables
+
+These `ZTTP_*` variables control a build, a test, or a recording. A shipped
+binary needs none of them.
+
+| Variable | Read by | Effect |
+|---|---|---|
+| `ZTTP_ZIG_EXE` | `tooling/verification_routes.zig` | Path of the Zig compiler. `build/tooling.zig` sets it to `b.graph.zig_exe` for the route tests. A test run outside the build has no value, and the test then fails with `MissingProbeCompiler`. |
+| `ZTTP_WRITE_BYTECODE_GOLDEN` | `packages/tools/src/bytecode_identity_golden.zig` | Any value rewrites `bytecode_identity_golden.txt`. See `test-bytecode-identity`. |
+| `ZTTP_EVIDENCE_PUBLISH` | `packages/pi/src/expert_codegen_record.zig` | The value `1` makes the expert replay publish evidence. `zig build test-expert-app -Devidence-publish` sets it, and marks that run step as having side effects so a warm cache cannot skip it. |
+| `ZTTP_CODEGEN_LOCAL_RUNTIME` | `packages/pi/src/expert_codegen_record.zig` | Declares the local server stack as `name@version` for a recording, for example `rapid-mlx@0.12.11`. A malformed value, or any value with the DeepSeek provider, is an error. |
+| `ZTTP_CODEGEN_MODEL_REVISION` | `packages/pi/src/expert_codegen_record.zig` | Declares the model revision of a recording. It takes precedence over the revision that the code reads from the Hugging Face cache. |
+| `ZTTP_DEBUG_PANIC_PATH` | `packages/runtime/src/runtime_pool.zig` | Request path that panics on purpose, to test panic recovery. Only debug and safe builds read it. `zttp serve --_debug-panic-path` sets the same hook, and `scripts/test-panic-isolation.sh` uses that flag. |
+| `ZTTP_PROBE_ALLOWED` | `packages/runtime/src/zruntime_tests.zig` | Set by one test, with the value `visible`, as an env key that a handler may read. Do not set it by hand. |
+| `ZTTP_PROBE_DENIED` | `packages/runtime/src/zruntime_tests.zig` | Set by the same test, with the value `secret`, as an env key that the policy denies. Do not set it by hand. |
 
 ## Source Coverage Is Unavailable
 

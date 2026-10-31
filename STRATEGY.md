@@ -1,6 +1,6 @@
 ---
 name: zttp
-last_updated: 2026-08-31
+last_updated: 2026-10-31
 ---
 
 # zttp Strategy
@@ -114,7 +114,6 @@ workspace.
 
 What is thin: some validator repair intents grade as mechanical repairs. Most
 rewrites remain proposed refactors that an outside client must judge.
-The current registry and corpus counts need measurement after the Phase 3 removal.
 Generated convergence and coverage pages remain the authority for published counts.
 
 Bounded provable-set reach is now measured. The first fresh DeepSeek run on 2026-09-21

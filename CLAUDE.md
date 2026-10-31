@@ -70,7 +70,7 @@ Statement termination is explicit: there is no automatic semicolon insertion (ZT
 
 Response helpers: `Response.json()`, `Response.text()`, `Response.html()`, `Response.redirect()`, `Response.rawJson()`. `Response.json` refuses a payload whose type JSON cannot carry (ZTS213); `Response.text` is the total constructor.
 
-Request body readers (globals): `requestBody(req)` returns `Bytes` and is total, `requestText(req)` and `requestJson(req)` return a `Result` whose error names `absent`, `invalid-encoding`, or spec 6.4's JSON taxonomy.
+Request body readers (globals): `requestBody(req)` returns `Bytes` and is total, `requestText(req)` and `requestJson(req)` return a `Result` whose error names `absent`, `invalid-encoding`, or spec 6.4's JSON taxonomy. The `.value` of `requestJson(req)` is raw JSON, and a member or index read on it is refused (ZTS201). Decode it with `decodeJson` and a schema, or check `isDict(v)` and read with `dictGet(v, key)` from `zttp:collections`.
 
 `.ts` enters the `zts-model-1` core. `.js`, `.jsx`, `.tsx`, and unknown extensions are refused with ZTS052. The parser has no JSX mode. `h()` and `renderToString()` provide manual HTML construction. See [docs/typescript.md](docs/typescript.md).
 
