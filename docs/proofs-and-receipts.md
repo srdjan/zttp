@@ -1,13 +1,11 @@
 # Proofs and Receipts
 
 This is the single reference for the proof surfaces: the card you read on
-every save, the counterexample block that explains a regression, the witness
-corpus that persists falsifying inputs, and the merge gate that carries the
-verdict into a pull request.
+every save, the counterexample block that explains a regression, and the
+merge gate that carries the verdict into a pull request.
 
 - [Reading the Proof Card](#reading-the-proof-card)
 - [Counterexamples in the Live HUD](#counterexamples-in-the-live-hud)
-- [Witness Corpus](#witness-corpus)
 - [Proof Gate](#proof-gate)
 
 ## Reading the Proof Card
@@ -294,7 +292,8 @@ witnesses. The witness solver in `zts.counterexample.solve` turns a
 flow violation's constraint chain into a concrete `Request` plus the
 virtual-module stub sequence needed to drive the handler down the
 witnessing path. The Counterexample frame does not show the witness. The
-[witness corpus](#witness-corpus) below is the system of record for these.
+expert tools `pi_goal_check` and `pi_repair_plan` return each witness in their
+JSON output. The analyzer does not write witnesses to disk.
 
 ### Where it lives in the code
 
@@ -312,119 +311,10 @@ witnessing path. The Counterexample frame does not show the witness. The
 
 ### Related reading
 
-[Witness Corpus](#witness-corpus) below covers the corpus, the CLI for
-pinning and pruning, and the persisted-on-disk layout.
 [`verification.md`](verification.md) describes the property classifier
 that produces the demotions in the first place.
 [Sound Mode](typescript.md#sound-mode) covers the type-directed analyses that
 sit upstream of the flow-driven property set.
-
-## Witness Corpus
-
-Every counterexample the compiler discovers when proving a handler is a
-concrete falsifying input: a `Request` plus the virtual-module stub
-responses needed to drive the handler down the witnessing path. The
-witness corpus persists those inputs to disk so they accumulate across
-builds, deploys, live reloads, and developer machines.
-
-The corpus is the project's accumulated evidence. It is not throwaway
-state.
-
-### Layout
-
-All paths are relative to the project root (the cwd of the analyzer
-invocation):
-
-```
-.zttp/witnesses/<short_hash>/handler.path        # text, original handler path
-.zttp/witnesses/<short_hash>/index.jsonl         # append-only event log
-.zttp/witnesses/<short_hash>/<key>.witness.jsonl # one file per witness
-.zttp/witnesses/<short_hash>/<key>.pinned        # marker file (presence = pinned)
-```
-
-`<short_hash>` is the first sixteen hex characters of
-`sha256(handler_path)`. The original path is recorded in `handler.path`
-so tools can present it without reversing the hash.
-
-`<key>` is `counterexample.CounterexampleWitness.stableKey()`: a sha256
-over `(property, origin_node_id, sink_node_id)`. AST node ids survive
-line shifts caused by edits above the witnessing site, so the same
-logical leak is not re-persisted as a new entry every time the file is
-reformatted.
-
-Witness files use `counterexample.writeJsonl` exactly. They use the
-same request and virtual-module stub shape consumed by the runtime
-witness-replay path.
-
-### How the corpus grows
-
-Witnesses are materialised by the agent-facing tools that already
-synthesise concrete inputs from a flow_checker diagnostic's constraint
-chain:
-
-- `pi_repair_plan` materialises a witness for every flow violation that
-  matches a requested goal, then persists each one before returning.
-- `pi_goal_check` materialises a witness for every flow violation that
-  matches an active goal and persists it during the same pass.
-
-A handler that has never been touched by either tool has no corpus.
-Once an agent runs them, the corpus begins populating immediately and
-stays in sync with the proof state.
-
-Build-time auto-population is wired into `precompile.runCheckOnly`, so
-every `zts check` and `zig build -Dhandler=...` populates the corpus
-from any flow-property witness the analyzer produces. The `proof.witnesses`
-block in the JSON envelope reflects the corpus state after that
-population pass.
-
-Cause-only specs (`deterministic`, `read_only`, `retry_safe`,
-`idempotent`, `state_isolated`, `fault_covered`) do not have flow-style
-falsifying inputs - their classification is structural. The analyzer
-persists no entries for them. The former `synthesize` command that seeded
-them is gone (`pre-rebase:packages/runtime/src/witnesses_cli.zig`).
-
-### Surfaces
-
-There is no CLI for the corpus. The former `witnesses` command (`list`, `pin`,
-`unpin`, `prune`, `synthesize`) is gone (`pre-rebase:packages/runtime/src/witnesses_cli.zig`).
-To pin an entry, create its `<key>.pinned` marker file by hand. Delete the
-marker to unpin it.
-
-#### JSON envelope
-
-`zts check --json` includes a `proof.witnesses` block:
-
-```json
-{
-  "proof": {
-    "...": "...",
-    "witnesses": {
-      "total": 3,
-      "by_property": {
-        "injection_safe": 1,
-        "no_secret_leakage": 2
-      }
-    }
-  }
-}
-```
-
-The block is read directly from `.zttp/witnesses/<short_hash>/` for
-the handler under check. A missing or empty corpus reports
-`{"total":0,"by_property":{}}`.
-
-### Versioning
-
-The corpus is per-project state. Commit `.zttp/witnesses/` to your
-repository so every contributor's build sees the same defending
-evidence and CI fails on the same regressions. Pinned entries should
-in particular be treated as part of the source of truth.
-
-### See also
-
-- [verification.md - Author-Declared Proof Discharge](verification.md#8-author-declared-proof-discharge)
-- `packages/zts/src/witness_corpus.zig` - persistence library
-- `packages/zts/src/counterexample.zig` - solver and JSONL wire format
 
 ## Proof Gate
 

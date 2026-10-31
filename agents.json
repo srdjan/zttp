@@ -256,7 +256,7 @@
       "intent": "verify",
       "effect": "local-write",
       "approval": "none",
-      "does": "runs retired instruction-counter tests",
+      "does": "runs retired-instruction counter tests",
       "requiredWhen": "after instruction counter changes"
     },
     {

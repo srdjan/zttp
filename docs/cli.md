@@ -279,8 +279,7 @@ inside the signed `Zttp-Attest` JWS, with the active set alongside it under
 
 `zttp check` is the gate: it compiles the contract and exits 1 on an
 undischarged proof (`ZTS500`) and on a non-monotonic declared name. The
-former `ratchet` and `witnesses` commands are gone. The witness corpus under
-`.zttp/witnesses/` stays; see [Witness Corpus](proofs-and-receipts.md#witness-corpus).
+former `ratchet` and `witnesses` commands are gone.
 
 ## Analyzer Commands
 

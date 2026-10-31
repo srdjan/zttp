@@ -360,8 +360,6 @@ zttp serve --trace traces.jsonl src/handler.ts
 zttp serve --replay traces.jsonl src/handler.ts
 ```
 
-Persisted counterexamples live in the witness corpus. See [Witness Corpus](proofs-and-receipts.md#witness-corpus).
-
 ## Deploy And Verify
 
 ```bash

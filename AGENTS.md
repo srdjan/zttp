@@ -26,7 +26,7 @@ Run `deno task verify` before committing website changes. Commit locally and do 
 | `CONCEPTS.md` | Shared domain vocabulary - entities, named processes, and status concepts with project-specific meaning; relevant when orienting to the codebase or discussing domain concepts |
 
 ## Coding Style & Naming Conventions
-- No Python. This is a Zig project. Do not add a `.py` file and do not add a `python3` heredoc or `-c` invocation to a shell script. New tooling is a Zig command or a Zig build step. Measured on 2026-10-21: `git ls-files '*.py'` lists no file, and no file under `scripts/`, `build/`, `tooling/`, or `packages/` invokes `python3`. Two comments name the old heredoc. Keep it that way.
+- No Python. This is a Zig project. Do not add a `.py` file and do not add a `python3` heredoc or `-c` invocation to a shell script. New tooling is a Zig command or a Zig build step. Measured on 2026-10-21: `git ls-files '*.py'` lists no file, and no file under `scripts/`, `build/`, `tooling/`, or `packages/` invokes `python3`. Keep it that way.
 - Keep APIs explicit: the engine/runtime use native Zig error unions (`!T`); `Result<T>` is a user-facing JS/verification construct in handlers, not a Zig engine pattern.
 - Shell scripts that enumerate files should use `git ls-files -z | xargs -0` for safe path handling (handles spaces and special characters).
 
@@ -120,7 +120,7 @@ The native port and its limits are described in `docs/internals/agent-spine.md`.
 | `zig build test-module-audit` | runs module-contract audit tests | after module-contract audit changes |
 | `zig build test-verify-paths-core` | runs behavior-path verification core tests | after verification path changes |
 | `zig build test-project-config` | runs project configuration discovery tests | after configuration discovery changes |
-| `zig build test-instruction-counter` | runs retired instruction-counter tests | after instruction counter changes |
+| `zig build test-instruction-counter` | runs retired-instruction counter tests | after instruction counter changes |
 | `zig build test-expert-app` | runs expert loop and provider integration tests | after expert loop or provider changes |
 | `zig build test-cassette` | runs the focused offline provider cassette harness | after cassette or provider wire changes; aggregate coverage is in test-expert-app |
 | `zig build test-recorder-smoke` | runs provider-free recorder capture and replay | after recorder changes |

@@ -44,8 +44,7 @@ and superseded execution records live in the `pre-rebase` git tag, under
 - [Canonicalize And Normalize](cli.md#canonicalize-and-normalize) - canonical
   ZigTS rules and `zttp normalize`.
 - [Proofs and Receipts](proofs-and-receipts.md) - the proof card, the
-  counterexample block, the persisted witness corpus, and the pull-request
-  proof gate.
+  counterexample block, and the pull-request proof gate.
 - [Performance](performance.md) - current benchmark claims and tuning notes.
 - [Reliability](reliability.md) - limits, failure behavior, and exit codes.
 - [Threat Model](threat-model.md) - current trust boundaries and non-goals.

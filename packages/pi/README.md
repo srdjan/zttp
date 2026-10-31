@@ -159,13 +159,19 @@ then `CLAUDE.md` if present. Concatenates outer-first with path
 headings. Caps: 64 KiB per file, 512 KiB total, 128 KiB final prompt.
 Suppress with `--no-context-files`.
 
-### Policy-hash drift detection (`agent.zig:injectDriftNote`)
+### Session protocol identity (`agent_bootstrap.zig`)
 
-`meta.json` stamps the `policy_hash` computed from `zts.policyHash()`
-at session create. On `--resume`, if the binary's current hash differs
-from the stamped one, `injectDriftNote` prepends a `[policy drift]`
-system_note to the transcript so the model knows prior rule citations
-may be stale against today's compiler.
+`meta.json` stamps a `protocol_hash` and the `policy_hash` from `zts.policyHash()`
+at session create. `protocol_hash` comes from `current` in
+`session/protocol_identity.zig`. It covers the persona, compiler version, agent
+schema, policy, grammar, semantics, diagnostics, idiom table, restriction
+matrix, builtin registry, example registry, and tool catalog.
+
+On `--resume` or `--fork`, the bootstrap compares the stored hashes with the
+current binary. If either hash differs, the bootstrap returns
+`SessionProtocolMismatch` and the session does not start. The CLI tells the
+user to start a new session with `zttp expert`. The bootstrap does not add a
+note to the transcript and does not replay stale rule citations.
 
 ### Session persistence (`session/`)
 
@@ -175,11 +181,11 @@ reconstructs the transcript; `--fork` branches with `parent_id`;
 `--continue` is an alias for `--resume`. `$ZTTP_SESSIONS_DIR`
 overrides the root (used by tests).
 
-The v3 journal is a checksummed append-only frame stream. Raw entries remain
+The journal (schema version 4) is a checksummed append-only frame stream. Raw entries remain
 the authority for ledgers, proof state, and patch-chain verification. Context
 compaction writes a typed checkpoint and changes only the provider-visible
 projection. Resume and fork reconstruct that projection without discarding its
-raw ancestry. Older v2 journals are rejected instead of guessed or migrated.
+raw ancestry. Journals of any other schema version are rejected instead of guessed or migrated.
 
 ### Request budgets and compaction
 

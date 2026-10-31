@@ -304,19 +304,10 @@ Graph extraction uses the loaded compilation parsers and makes no additional rea
 The entry contract receives these facts before merging. The merged contract retains null aggregate properties.
 Legacy capability and purity charging remains conservative for relative imports.
 
-Counterexample-rich specs additionally feed a persistent on-disk
-corpus. Each falsifying input the analyzer materialises is written
-under `.zttp/witnesses/<short_hash>/` so the same logical leak does
-not need to be rediscovered next session. See
-[Witness Corpus](proofs-and-receipts.md#witness-corpus)
-for layout.
-
 A witness drives each `fetch` that a
 branch tests to the response the branch needs: status 503 behind `!res.ok`
 or `res.status !== 200`, status 200 on the success side, and a status that
-takes the branch for any other status comparison. A witness written before
-this rule keeps its old stub, because the corpus does not rewrite a known
-witness. Delete its entry to record it again.
+takes the branch for any other status comparison.
 
 ### 10. Capability Capsules
 
