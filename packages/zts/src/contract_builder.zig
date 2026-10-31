@@ -39,7 +39,6 @@ const manifest_registry_mod = @import("manifest_registry.zig");
 const module_facts_mod = @import("module_facts.zig");
 const module_manifest = @import("zts-engine").module_manifest;
 const bytecode = @import("zts-engine").bytecode;
-const handler_analyzer = @import("zts-engine").handler_analyzer;
 const type_checker_mod = @import("type_checker.zig");
 const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
@@ -1937,20 +1936,10 @@ pub const ContractBuilder = struct {
     }
 
     fn populateApiRouteFacts(self: *ContractBuilder, route: *ApiRouteInfo, fn_node: NodeIndex) !void {
-        var analyzer = handler_analyzer.HandlerAnalyzer.init(self.allocator, self.ir_view, self.atoms);
-        defer analyzer.deinit();
-
-        if (try analyzer.analyzeDirectReturn(fn_node)) |response| {
-            defer if (response.body.len > 0) self.allocator.free(response.body);
-            route.response_status = response.status;
-            route.response_content_type = try self.allocator.dupe(u8, contentTypeFor(response.content_type_idx));
-        }
-
         const func = self.ir_view.getFunction(fn_node) orelse return;
         const request_binding_slot = self.findRequestBindingSlot(func);
         try self.scanFunctionNodeForApiFacts(func.body, request_binding_slot, route);
         try self.syncRouteRequestBodies(route);
-        try self.syncLegacyRouteResponse(route);
     }
 
     fn findRequestBindingSlot(self: *const ContractBuilder, func: Node.FunctionExpr) ?u16 {
@@ -2528,39 +2517,6 @@ pub const ContractBuilder = struct {
                 try writer.writeByte('}');
             },
             else => return error.UnsupportedJsonValue,
-        }
-    }
-
-    fn syncLegacyRouteResponse(self: *ContractBuilder, route: *ApiRouteInfo) !void {
-        route.response_status = null;
-        if (route.response_content_type) |content_type| self.allocator.free(content_type);
-        route.response_content_type = null;
-        if (route.response_schema_ref) |schema_ref| self.allocator.free(schema_ref);
-        route.response_schema_ref = null;
-        if (route.response_schema_json) |schema_json| self.allocator.free(schema_json);
-        route.response_schema_json = null;
-        route.response_schema_dynamic = route.responses_dynamic;
-
-        if (route.responses.items.len != 1) {
-            if (route.responses.items.len > 1) route.response_schema_dynamic = true;
-            return;
-        }
-
-        const response = route.responses.items[0];
-        if (response.schema.isDynamic()) {
-            route.response_schema_dynamic = true;
-            return;
-        }
-
-        route.response_status = response.status;
-        if (response.content_type) |content_type| {
-            route.response_content_type = try self.allocator.dupe(u8, content_type);
-        }
-        if (response.schema.schemaRef()) |schema_ref| {
-            route.response_schema_ref = try self.allocator.dupe(u8, schema_ref);
-        }
-        if (response.schema.schemaJson()) |schema_json| {
-            route.response_schema_json = try self.allocator.dupe(u8, schema_json);
         }
     }
 

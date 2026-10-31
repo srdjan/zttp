@@ -183,11 +183,6 @@ fn populateFullContract(allocator: std.mem.Allocator, contract: *HandlerContract
             .request_bodies_dynamic = true,
             .responses = responses,
             .responses_dynamic = true,
-            .response_status = 201,
-            .response_content_type = try dupe(allocator, "application/json"),
-            .response_schema_ref = try dupe(allocator, "Order"),
-            .response_schema_json = try dupe(allocator, "{\"type\":\"string\"}"),
-            .response_schema_dynamic = true,
         });
     }
 

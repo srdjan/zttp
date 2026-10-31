@@ -399,3 +399,28 @@ Decision 11 names the asset fallback and not the version prefixes. `check_existi
 Three temporary mutants of `install.sh` each failed the script: any version accepted, no exit after the "already installed" line, and a wrong `zts` prefix.
 
 `docs/solutions/integration-issues/resolve-release-assets-across-project-renames.md` now opens with a status line, and its history stays. `bash scripts/test-install-archive-safety.sh` exited 0, and `zig build test-release-workflow` exited 0. `zig build verify` routes that script, and L9 runs it there.
+
+## L7c
+
+Status: complete. `ApiRouteInfo` no longer holds the five scalar response fields, and the contract writer no longer writes them. `syncLegacyRouteResponse`, `schemaSpecView`, and the first branch of `compareResponses` are gone. A contract from an earlier binary still parses, because the parser ignores unknown keys. `parseFromJson ignores the scalar response keys of an older contract` holds all five keys as literal JSON.
+
+The table test `response shapes classify through diffContracts` holds 16 rows. On the unchanged code, six rows gave the wrong verdict, and ten matched:
+
+| Row | Change | Before | After |
+|---|---|---|---|
+| d | Two static, one status changes | `.unchanged` | `.breaking` |
+| e | Two static, one content type changes | `.unchanged` | `.breaking` |
+| f | Two static become three | `.unchanged` | `.breaking` |
+| k | Two static, one becomes dynamic | `.unchanged` | `.dynamic` |
+| o | One static becomes two | `.dynamic` | `.breaking` |
+| p | Two static become one | `.unchanged` | `.breaking` |
+
+The packet predicted rows d and e only, and that was too narrow. With two or more responses on the old side, `old_dyn` was always true, so `compareResponses` returned `.unchanged` for any new side. Rows f and k have that same cause. I added rows o and p because a route that gains or loses a response takes the same branch. `live_reload.zig` is the production caller of `diffContracts`. `zts prove-behavior` printed `breaking` on the base and new binaries for a handler with a changed 404, because it compares paths.
+
+The worker also deleted the `analyzeDirectReturn` block in `populateApiRouteFacts`, which the packet did not name. That block set only scalars, and `syncLegacyRouteResponse` reset them next. The only `error.` returns in `handler_analyzer.zig` are in test helpers, so the block could fail only on allocation. `precompile_contract.zig` still calls `analyzeDirectReturn`.
+
+`full_v1.json` and `full_v2.json` lost only the five keys. `contract_census.zig` embeds both, so `full_v2.json` is the census golden that the plan names. The repository has no regeneration command for them. The worker edited both and the writer tests confirm the bytes. `version 2 writes only snake_case keys` and `version 2's key set is exactly the snake_case image of version 1's` moved their floors from 141 to 136. None of the three digest pins moved, so those contract bytes did not change. Their sources probably hold no API route.
+
+The comparison script cannot show this move, because the hash move already put those rows on the allow list. So I compared `contract.json` from `zts compile --verify --contract` directly, with the five keys stripped from both sides. My first version of this probe read `zts check --contract`, which prints a proof summary, and its count of routed inputs was 0. That run checked nothing, and I discarded it. Over 648 inputs, 332 produce a contract on both binaries and all 332 match. Five of those base contracts hold the scalar keys, and no new contract does. The other nine inputs that wrote a contract on base are refused on the new binary, and each one is a row that an earlier unit moved.
+
+The stored-data set matched base on all nine rows. The `protect` line of the gate reported 1 because it compares with the plan commit: the L7b goldens and these two fixtures differ, and no other protected path does.

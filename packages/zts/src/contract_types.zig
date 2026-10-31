@@ -287,13 +287,6 @@ pub const ApiRouteInfo = struct {
     request_bodies_dynamic: bool = false,
     responses: std.ArrayList(ApiResponseInfo) = .empty,
     responses_dynamic: bool = false,
-    // Legacy scalar response fields, kept for backward compatibility with
-    // older contract.json consumers.
-    response_status: ?u16 = null,
-    response_content_type: ?[]const u8 = null, // owned when present
-    response_schema_ref: ?[]const u8 = null, // owned when present
-    response_schema_json: ?[]const u8 = null, // owned when present
-    response_schema_dynamic: bool = false,
 
     pub fn deinit(self: *ApiRouteInfo, allocator: std.mem.Allocator) void {
         allocator.free(self.method);
@@ -322,15 +315,6 @@ pub const ApiRouteInfo = struct {
             response.deinit(allocator);
         }
         self.responses.deinit(allocator);
-        if (self.response_content_type) |content_type| {
-            allocator.free(content_type);
-        }
-        if (self.response_schema_ref) |schema_ref| {
-            allocator.free(schema_ref);
-        }
-        if (self.response_schema_json) |schema_json| {
-            allocator.free(schema_json);
-        }
     }
 };
 

@@ -330,36 +330,7 @@ fn writeContractJsonVersion(
             try writer.writeAll("\n        ");
         }
         try writer.writeAll("],\n");
-        try writer.print("        \"" ++ comptime contractKey(json_version, "responsesDynamic") ++ "\": {s},\n", .{if (route.responses_dynamic) "true" else "false"});
-        try writer.writeAll("        \"" ++ comptime contractKey(json_version, "responseStatus") ++ "\": ");
-        if (route.response_status) |status| {
-            try writer.print("{d}", .{status});
-        } else {
-            try writer.writeAll("null");
-        }
-        try writer.writeAll(",\n");
-        try writer.writeAll("        \"" ++ comptime contractKey(json_version, "responseContentType") ++ "\": ");
-        if (route.response_content_type) |content_type| {
-            try writeJsonString(writer, content_type);
-        } else {
-            try writer.writeAll("null");
-        }
-        try writer.writeAll(",\n");
-        try writer.writeAll("        \"" ++ comptime contractKey(json_version, "responseSchemaRef") ++ "\": ");
-        if (route.response_schema_ref) |schema_ref| {
-            try writeJsonString(writer, schema_ref);
-        } else {
-            try writer.writeAll("null");
-        }
-        try writer.writeAll(",\n");
-        try writer.writeAll("        \"" ++ comptime contractKey(json_version, "responseSchema") ++ "\": ");
-        if (route.response_schema_json) |schema_json| {
-            try writer.writeAll(schema_json);
-        } else {
-            try writer.writeAll("null");
-        }
-        try writer.writeAll(",\n");
-        try writer.print("        \"" ++ comptime contractKey(json_version, "responseSchemaDynamic") ++ "\": {s}\n", .{if (route.response_schema_dynamic) "true" else "false"});
+        try writer.print("        \"" ++ comptime contractKey(json_version, "responsesDynamic") ++ "\": {s}\n", .{if (route.responses_dynamic) "true" else "false"});
         try writer.writeAll("      }");
     }
     if (contract.api.routes.items.len > 0) {
@@ -1081,9 +1052,6 @@ fn populateVersionTwoTestContract(
             .request_bodies_dynamic = false,
             .responses = responses,
             .responses_dynamic = false,
-            .response_status = 201,
-            .response_content_type = try allocator.dupe(u8, "application/json"),
-            .response_schema_ref = try allocator.dupe(u8, "Order"),
         });
 
         try contract.api.schemas.append(allocator, .{
@@ -1150,7 +1118,7 @@ test "version 2 writes only snake_case keys" {
     var visited: usize = 0;
     try expectSnakeCaseKeys(&parsed.value, &visited);
     // Measured from the populated retained fixture after the Phase 3 removal.
-    try std.testing.expect(visited >= 141);
+    try std.testing.expect(visited >= 136);
 }
 
 test "version 1 keeps its version and camelCase keys" {
@@ -1252,7 +1220,7 @@ test "version 2's key set is exactly the snake_case image of version 1's" {
 
     try std.testing.expectEqual(v1_keys.items.len, v2_keys.items.len);
     // Measured from the populated retained fixture after the Phase 3 removal.
-    try std.testing.expect(v1_keys.items.len >= 141);
+    try std.testing.expect(v1_keys.items.len >= 136);
 
     // Document order is the same traversal on both sides, so the images line
     // up index for index and a mismatch names the key that moved.

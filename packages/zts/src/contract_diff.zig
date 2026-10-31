@@ -1327,19 +1327,6 @@ fn compareResponses(
     old_schemas: []const handler_contract.ApiSchemaInfo,
     new_schemas: []const handler_contract.ApiSchemaInfo,
 ) !ApiResponseChange {
-    if (old.responses.items.len == 0 and new.responses.items.len == 0) {
-        if (old.response_status != new.response_status) return .breaking;
-        if (!eqlOptionalString(old.response_content_type, new.response_content_type)) return .breaking;
-
-        return try compareSchemaSpecs(
-            allocator,
-            schemaSpecView(old.response_schema_ref, old.response_schema_json, old.response_schema_dynamic),
-            schemaSpecView(new.response_schema_ref, new.response_schema_json, new.response_schema_dynamic),
-            old_schemas,
-            new_schemas,
-        );
-    }
-
     {
         const old_dyn = responsesDynamic(old);
         const new_dyn = responsesDynamic(new);
@@ -1387,17 +1374,6 @@ fn findResponse(
         if (item.status == status and eqlOptionalString(item.content_type, content_type)) return item;
     }
     return null;
-}
-
-/// Borrowed-slice view of legacy scalar schema fields shaped as a SchemaSpec
-/// for `compareSchemaSpecs`. The returned union must NOT be deinit'd: the
-/// payload slices alias the caller's storage. Read-only use only.
-fn schemaSpecView(
-    schema_ref: ?[]const u8,
-    schema_json: ?[]const u8,
-    is_dynamic: bool,
-) handler_contract.SchemaSpec {
-    return handler_contract.SchemaSpec.fromFields(schema_ref, schema_json, is_dynamic);
 }
 
 /// Compare two body schemas via exhaustive variant matching. Mixed-shape
@@ -2068,9 +2044,7 @@ test "diffContracts api response field addition is additive" {
         .request_schema_dynamic = false,
         .requires_bearer = false,
         .requires_jwt = false,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"),
+        .responses = try oneTestResponse(allocator, .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}") }),
     });
 
     var new = try makeTestContract(allocator);
@@ -2082,9 +2056,7 @@ test "diffContracts api response field addition is additive" {
         .request_schema_dynamic = false,
         .requires_bearer = false,
         .requires_jwt = false,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"id\"]}"),
+        .responses = try oneTestResponse(allocator, .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"id\"]}") }),
     });
 
     var diff = try diffContracts(allocator, &old, &new);
@@ -2107,9 +2079,7 @@ test "diffContracts api query param addition is additive" {
         .request_schema_dynamic = false,
         .requires_bearer = false,
         .requires_jwt = false,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+        .responses = try oneTestResponse(allocator, .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\"}") }),
     });
 
     var query_params: std.ArrayList(handler_contract.ApiParamInfo) = .empty;
@@ -2130,9 +2100,7 @@ test "diffContracts api query param addition is additive" {
         .requires_bearer = false,
         .requires_jwt = false,
         .query_params = query_params,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+        .responses = try oneTestResponse(allocator, .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\"}") }),
     });
 
     var diff = try diffContracts(allocator, &old, &new);
@@ -2154,9 +2122,7 @@ test "diffContracts api response removal is breaking" {
         .request_schema_dynamic = false,
         .requires_bearer = false,
         .requires_jwt = false,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"id\"]}"),
+        .responses = try oneTestResponse(allocator, .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"},\"name\":{\"type\":\"string\"}},\"required\":[\"id\"]}") }),
     });
 
     var new = try makeTestContract(allocator);
@@ -2168,9 +2134,7 @@ test "diffContracts api response removal is breaking" {
         .request_schema_dynamic = false,
         .requires_bearer = false,
         .requires_jwt = false,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"),
+        .responses = try oneTestResponse(allocator, .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}") }),
     });
 
     var diff = try diffContracts(allocator, &old, &new);
@@ -2194,9 +2158,7 @@ test "diffContracts removing a route bearer-auth guard is breaking" {
         .request_schema_dynamic = false,
         .requires_bearer = true,
         .requires_jwt = false,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+        .responses = try oneTestResponse(allocator, .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\"}") }),
     });
 
     var new = try makeTestContract(allocator);
@@ -2208,9 +2170,7 @@ test "diffContracts removing a route bearer-auth guard is breaking" {
         .request_schema_dynamic = false,
         .requires_bearer = false,
         .requires_jwt = false,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+        .responses = try oneTestResponse(allocator, .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\"}") }),
     });
 
     var diff = try diffContracts(allocator, &old, &new);
@@ -2242,9 +2202,7 @@ test "diffContracts tightening a path-param schema is not equivalent" {
         .request_schema_dynamic = false,
         .requires_bearer = false,
         .requires_jwt = false,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+        .responses = try oneTestResponse(allocator, .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\"}") }),
     });
 
     var new = try makeTestContract(allocator);
@@ -2264,9 +2222,7 @@ test "diffContracts tightening a path-param schema is not equivalent" {
         .request_schema_dynamic = false,
         .requires_bearer = false,
         .requires_jwt = false,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+        .responses = try oneTestResponse(allocator, .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\"}") }),
     });
 
     var diff = try diffContracts(allocator, &old, &new);
@@ -2316,9 +2272,7 @@ test "diffContracts changing a shared ref schema shape is breaking" {
         .request_schema_dynamic = false,
         .requires_bearer = false,
         .requires_jwt = false,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+        .responses = try oneTestResponse(allocator, .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\"}") }),
     });
 
     var new = try makeTestContract(allocator);
@@ -2336,9 +2290,7 @@ test "diffContracts changing a shared ref schema shape is breaking" {
         .request_schema_dynamic = false,
         .requires_bearer = false,
         .requires_jwt = false,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\"}"),
+        .responses = try oneTestResponse(allocator, .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\"}") }),
     });
 
     var diff = try diffContracts(allocator, &old, &new);
@@ -2349,7 +2301,7 @@ test "diffContracts changing a shared ref schema shape is breaking" {
 
 test "diffContracts api response going dynamic is breaking" {
     // Regression: a route whose response was a provable literal schema but
-    // becomes computed/unprovable (response_schema_dynamic) must not classify
+    // becomes computed/unprovable (a dynamic response schema) must not classify
     // as equivalent. compareResponses returns .dynamic; classifyStructural used
     // to drop it into the .unchanged no-op arm, so prove-behavior/pr_gate
     // auto-approved a change that turned a provable response into an arbitrary
@@ -2365,9 +2317,7 @@ test "diffContracts api response going dynamic is breaking" {
         .request_schema_dynamic = false,
         .requires_bearer = false,
         .requires_jwt = false,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}"),
+        .responses = try oneTestResponse(allocator, .{ .inline_json = try allocator.dupe(u8, "{\"type\":\"object\",\"properties\":{\"id\":{\"type\":\"string\"}},\"required\":[\"id\"]}") }),
     });
 
     var new = try makeTestContract(allocator);
@@ -2379,9 +2329,7 @@ test "diffContracts api response going dynamic is breaking" {
         .request_schema_dynamic = false,
         .requires_bearer = false,
         .requires_jwt = false,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_dynamic = true,
+        .responses = try oneTestResponse(allocator, .dynamic),
     });
 
     var diff = try diffContracts(allocator, &old, &new);
@@ -2409,9 +2357,7 @@ test "diffContracts unchanged already-dynamic response is NOT breaking" {
         .request_schema_dynamic = false,
         .requires_bearer = false,
         .requires_jwt = false,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_dynamic = true,
+        .responses = try oneTestResponse(allocator, .dynamic),
     });
 
     var new = try makeTestContract(allocator);
@@ -2423,9 +2369,7 @@ test "diffContracts unchanged already-dynamic response is NOT breaking" {
         .request_schema_dynamic = false,
         .requires_bearer = false,
         .requires_jwt = false,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_dynamic = true,
+        .responses = try oneTestResponse(allocator, .dynamic),
     });
 
     var diff = try diffContracts(allocator, &old, &new);
@@ -2434,6 +2378,19 @@ test "diffContracts unchanged already-dynamic response is NOT breaking" {
     try std.testing.expectEqual(ApiResponseChange.unchanged, diff.api_route_changes.items[0].response);
     try std.testing.expectEqual(Classification.equivalent, diff.classify());
     try std.testing.expectEqual(Classification.equivalent, diff.behavioralVerdict());
+}
+
+/// One `application/json` 200 response, the shape a single-response route has.
+fn oneTestResponse(
+    allocator: std.mem.Allocator,
+    schema: handler_contract.SchemaSpec,
+) !std.ArrayList(handler_contract.ApiResponseInfo) {
+    var responses: std.ArrayList(handler_contract.ApiResponseInfo) = .empty;
+    errdefer responses.deinit(allocator);
+    const content_type = try allocator.dupe(u8, "application/json");
+    errdefer allocator.free(content_type);
+    try responses.append(allocator, .{ .status = 200, .content_type = content_type, .schema = schema });
+    return responses;
 }
 
 const TestResponse = struct {
@@ -2451,9 +2408,7 @@ const gone_json: TestResponse = .{ .status = 410, .content_type = "application/j
 const error_json: TestResponse = .{ .status = 500, .content_type = "application/json", .schema_json = "{\"type\":\"string\"}", .dynamic = false };
 const computed: TestResponse = .{ .status = 200, .content_type = "application/json", .schema_json = null, .dynamic = true };
 
-/// Appends a route whose `responses` hold `specs`. The scalar fields get the
-/// values `syncLegacyRouteResponse` gives them, because the contract builder
-/// sets them before any diff.
+/// Appends a route whose `responses` hold `specs`.
 fn appendTestResponseRoute(
     allocator: std.mem.Allocator,
     contract: *HandlerContract,
@@ -2468,7 +2423,6 @@ fn appendTestResponseRoute(
         .requires_bearer = false,
         .requires_jwt = false,
         .responses_dynamic = responses_dynamic,
-        .response_schema_dynamic = responses_dynamic,
     };
     errdefer route.deinit(allocator);
     for (specs) |spec| {
@@ -2482,16 +2436,6 @@ fn appendTestResponseRoute(
             .none;
         errdefer schema.deinitOwned(allocator);
         try route.responses.append(allocator, .{ .status = spec.status, .content_type = content_type, .schema = schema });
-    }
-    if (specs.len > 1) route.response_schema_dynamic = true;
-    if (specs.len == 1) {
-        if (specs[0].dynamic) {
-            route.response_schema_dynamic = true;
-        } else {
-            route.response_status = specs[0].status;
-            if (specs[0].content_type) |value| route.response_content_type = try allocator.dupe(u8, value);
-            if (specs[0].schema_json) |value| route.response_schema_json = try allocator.dupe(u8, value);
-        }
     }
     try contract.api.routes.append(allocator, route);
 }

@@ -345,11 +345,6 @@ const ApiRouteWire = struct {
     requestBodiesDynamic: bool = false,
     responses: []const ApiResponseWire = &.{},
     responsesDynamic: bool = false,
-    responseStatus: ?WireU16 = null,
-    responseContentType: ?WireString = null,
-    responseSchemaRef: ?WireString = null,
-    responseSchema: ?RawJson = null,
-    responseSchemaDynamic: bool = false,
 };
 
 const ApiWire = struct {
@@ -1114,14 +1109,6 @@ fn projectApiRoutes(
         route.request_bodies_dynamic = wire.requestBodiesDynamic;
         route.responses = try projectApiResponses(allocator, wire.responses);
         route.responses_dynamic = wire.responsesDynamic;
-        route.response_status = if (wire.responseStatus) |status| status.value else null;
-        route.response_content_type = try dupeOptionalWireString(allocator, wire.responseContentType);
-        route.response_schema_ref = try dupeOptionalWireString(allocator, wire.responseSchemaRef);
-        route.response_schema_json = if (wire.responseSchema) |schema|
-            try allocator.dupe(u8, schema.bytes)
-        else
-            null;
-        route.response_schema_dynamic = wire.responseSchemaDynamic;
         routes.appendAssumeCapacity(route);
     }
 }
@@ -1677,9 +1664,9 @@ test "parseFromJson still reads a version 1 document" {
     const json =
         \\{
         \\  "version": 1,
-        \\  "handler": { "path": "legacy.ts", "line": 3, "column": 1 },
+        \\  "handler": { "path": "v1.ts", "line": 3, "column": 1 },
         \\  "routes": [
-        \\    { "pattern": "/legacy", "type": "exact", "field": "path", "status": 200, "contentType": "text/plain; charset=utf-8", "aot": false }
+        \\    { "pattern": "/v1", "type": "exact", "field": "path", "status": 200, "contentType": "text/plain; charset=utf-8", "aot": false }
         \\  ]
         \\}
     ;
@@ -1687,7 +1674,7 @@ test "parseFromJson still reads a version 1 document" {
     var contract = try parseFromJson(std.testing.allocator, json);
     defer contract.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(u32, 1), contract.version);
-    try std.testing.expectEqualStrings("legacy.ts", contract.handler.path);
+    try std.testing.expectEqualStrings("v1.ts", contract.handler.path);
     try std.testing.expectEqualStrings("text/plain; charset=utf-8", contract.routes.items[0].content_type);
 }
 
@@ -1775,10 +1762,7 @@ test "parseFromJson leaves API route collections empty when the arrays are absen
         \\{"api":{"routes":[{
         \\  "method":"POST",
         \\  "path":"/scalar",
-        \\  "requestSchemaRefs":["Body"],
-        \\  "responseStatus":204,
-        \\  "responseContentType":"text/plain",
-        \\  "responseSchemaRef":"Reply"
+        \\  "requestSchemaRefs":["Body"]
         \\}]}}
     ;
     var contract = try parseFromJson(std.testing.allocator, json);
@@ -1786,6 +1770,30 @@ test "parseFromJson leaves API route collections empty when the arrays are absen
     const route = contract.api.routes.items[0];
     try std.testing.expectEqual(@as(usize, 0), route.responses.items.len);
     try std.testing.expectEqual(@as(usize, 0), route.request_bodies.items.len);
+}
+
+test "parseFromJson ignores the scalar response keys of an older contract" {
+    const json =
+        \\{"api":{"routes":[{
+        \\  "method":"POST",
+        \\  "path":"/scalar",
+        \\  "responses":[{"status":204,"contentType":"text/plain","schemaRef":"Reply"}],
+        \\  "responsesDynamic":false,
+        \\  "responseStatus":204,
+        \\  "responseContentType":"text/plain",
+        \\  "responseSchemaRef":"Reply",
+        \\  "responseSchema":{"type":"string"},
+        \\  "responseSchemaDynamic":true
+        \\}]}}
+    ;
+    var contract = try parseFromJson(std.testing.allocator, json);
+    defer contract.deinit(std.testing.allocator);
+    const route = contract.api.routes.items[0];
+    try std.testing.expectEqual(@as(usize, 1), route.responses.items.len);
+    try std.testing.expectEqual(@as(?u16, 204), route.responses.items[0].status);
+    try std.testing.expectEqualStrings("text/plain", route.responses.items[0].content_type.?);
+    try std.testing.expectEqualStrings("Reply", route.responses.items[0].schema.schemaRef().?);
+    try std.testing.expect(!route.responses_dynamic);
 }
 
 test "parseFromJson preserves escaped extension map keys" {
@@ -1986,10 +1994,7 @@ test "parseFromJson cleans every allocation failure" {
         \\    "method": "POST",
         \\    "path": "/items",
         \\    "queryParams": [{"name": "page", "schema": {"type": "integer"}}],
-        \\    "requestSchemaRefs": ["ItemInput"],
-        \\    "responseStatus": 201,
-        \\    "responseContentType": "application/json",
-        \\    "responseSchemaRef": "Item"
+        \\    "requestSchemaRefs": ["ItemInput"]
         \\  }]},
         \\  "rateLimiting": {"namespace": "login-attempts", "dynamic": false}
         \\}

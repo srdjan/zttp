@@ -207,20 +207,6 @@ pub fn mergeModuleContract(
             .header_params_dynamic = route.header_params_dynamic,
             .request_bodies_dynamic = route.request_bodies_dynamic,
             .responses_dynamic = route.responses_dynamic,
-            .response_status = route.response_status,
-            .response_content_type = if (route.response_content_type) |content_type|
-                try allocator.dupe(u8, content_type)
-            else
-                null,
-            .response_schema_ref = if (route.response_schema_ref) |schema_ref|
-                try allocator.dupe(u8, schema_ref)
-            else
-                null,
-            .response_schema_json = if (route.response_schema_json) |schema_json|
-                try allocator.dupe(u8, schema_json)
-            else
-                null,
-            .response_schema_dynamic = route.response_schema_dynamic,
         };
         errdefer route_copy.deinit(allocator);
 
@@ -600,10 +586,6 @@ test "parseFromJson roundtrip preserves api route response schema" {
         .header_params = header_params,
         .request_bodies = request_bodies,
         .responses = responses,
-        .response_status = 200,
-        .response_content_type = try allocator.dupe(u8, "application/json"),
-        .response_schema_ref = try allocator.dupe(u8, "user"),
-        .response_schema_dynamic = false,
     });
 
     var contract = HandlerContract{
@@ -652,7 +634,7 @@ test "parseFromJson roundtrip preserves api route response schema" {
     try std.testing.expectEqualStrings("user.create", route.request_bodies.items[0].schema.schemaRef().?);
     try std.testing.expectEqual(@as(usize, 1), route.responses.items.len);
     try std.testing.expectEqual(@as(u16, 200), route.responses.items[0].status.?);
-    try std.testing.expectEqualStrings("user", route.response_schema_ref.?);
+    try std.testing.expectEqualStrings("user", route.responses.items[0].schema.schemaRef().?);
 }
 
 test "writeJsonString escapes correctly" {
