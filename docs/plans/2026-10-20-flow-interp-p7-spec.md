@@ -154,6 +154,8 @@ flow/fault traversals, explicit reader paths/order, revision selection and
 type-failure stopping. Merged multi-module contracts continue to omit flow
 claims; the unused compiled-graph adapter is removed.
 
+Notice, 2026-11-01: decision D-018 supersedes the sentence above for a build. The build of a handler with file imports runs FlowInterp over the modules of the graph, in load order, and the merged contract carries flow claims. See [decisions.md](../decisions.md) and the [module graph certificates plan](2026-11-01-module-graph-certificates-plan.md). The rest of this specification stands.
+
 A complete 13-case DeepSeek re-record reached green and passed declared
 runtime intent in every case, with 11 first-attempt passes. Original
 generations remain byte-identical. The owner approved truthful zero registry

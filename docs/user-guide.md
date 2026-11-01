@@ -335,6 +335,33 @@ The proof card shows the current verdict and the property chips. See
 [Verification](verification.md), and
 [Contracts and Auto-Sandboxing](contracts-and-sandboxing.md).
 
+## Handlers With File Imports
+
+A handler can import functions and values from other `.ts` files. `zttp compile`, `zttp build`, and `zttp deploy` build such a handler into one binary with one certificate. `examples/handler/handler-with-imports.ts` is a working example.
+
+```ts
+import { greet } from "./utils.ts";
+```
+
+The imported file needs an export that can cross a file. Export a non-generic function, or export a value with a declared type. Import a type with `import type`, because a value import of a type leaves the binding undefined at run time.
+
+The build checks each file as it checks the handler. A check that fails in any file stops the build with exit 1 and no binary. ZTS061 is the one exception: a dependency may export a raw built-in type.
+
+| Cause | Fix |
+|---|---|
+| Two files bind one top-level value name, a file binds a built-in name, or a dependency binds `handler` | Rename one binding. An import local name counts, unless it names the identical export. Type names do not count |
+| A named import has no matching export | Export the name from the file, or correct the import |
+| A file import has no type that can cross modules | Export a non-generic function, or a value with a declared type |
+| A dependency holds a top-level `assert` | Move the `assert` into a function |
+| Two files register one schema name with different JSON | Use one schema definition, or rename one schema |
+| `GraphResultLimit` or `ModuleNotClassified` | Reduce the Result bindings. The limit is 64 in total across all files |
+
+A capsule applies to every file. If a dependency breaks a property that the capsule demands, the build fails with ZTS500. A handler with no capsule answers for every file under the default profile. A capsule that does not demand the broken property still compiles.
+
+A dependency runs its top-level code at load, once for each pooled runtime. No request deadline applies to that code. `zttp serve` refuses an ambiguous top-level binding too.
+
+`zttp build` can refuse a handler that `zttp check` passes. Fix the refusal that `zttp build` names. See [Handlers with file imports](verification.md#handlers-with-file-imports) for the limits of the certificate.
+
 ## Tests And Replay
 
 Declarative tests are JSONL files. A scaffolded project writes a starter file

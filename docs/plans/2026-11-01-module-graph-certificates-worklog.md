@@ -273,3 +273,11 @@ Sonnet implemented items 1 to 4 and took about 55 calls against a turn budget of
 Results at the G5 tree, each from an unfiltered run: `zig build test` 214 of 214 steps, `test-zruntime` 274 of 275 tests with 1 skipped, and `test-cli`, `test-precompile`, `test-bytecode-identity`, `smoke-v1`, `smoke-getting-started`, `test-module-boundary`, `test-expert-app`, `test-proof-swallow`, `test-proof-checker`, `test-proof-ratchet`, `test-proof-ratchet-drift`, `zig fmt --check`, and `zig build` each exit 0.
 
 Against the G4 tables, `zts check` and `zts compile` each moved 0 of 215 rows. The command surface moved 0 of 38 rows against G0. `git diff` on `packages/proof-checker` is empty.
+
+## G6
+
+The documentation now states the target, the limits, and the refusals. `docs/decisions.md` holds D-018, which supersedes the P7 line on merged contracts. `docs/verification.md` holds the section "Handlers with file imports". `docs/cli.md`, `docs/user-guide.md`, `docs/roadmap.md`, `docs/plans/README.md`, the P7 specification notice, and `packages/runtime/AGENTS.md` follow it.
+
+The website states the change under "Awaiting the next release" in `static/index.html`, with the coverage limit. The site version stays 0.26.0, and nothing was deployed or pushed.
+
+Sonnet found two more false statements in `docs/roadmap.md`: `zttp serve` no longer lets the last module win, and the Result-limit exposure now applies to a single-module handler only. In review I corrected D-018, which said that no certificate property reads an exported signature. G2b reads those signatures for their types, so the correct statement is that no property depends on rule ZTS061.

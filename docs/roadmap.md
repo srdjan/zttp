@@ -16,7 +16,7 @@ Release v0.26.0 was published on 2026-10-30. The release fixes plan shipped as 0
 
 Standing rule D-012 in [decisions.md](decisions.md): a model-visible change waits for one batched re-record window. The v0.26.0 window ran on 2026-10-29. The owner runs any later window.
 
-Next work: the owner selects it. No reset is active. The first open item is the refusal of a handler with file imports, under "Current Limitations". The [module graph certificates plan](plans/2026-11-01-module-graph-certificates-plan.md) is approved and owns that work.
+Next work: the owner selects it. No reset is active. The [module graph certificates plan](plans/2026-11-01-module-graph-certificates-plan.md) owns the open work on handlers with file imports. Units G0 to G6 are done, and unit G7 (the final gate) is next. Unit G8 (`zttp check` parity) is deferred to a re-record window that the owner opens.
 
 M1, M2, and M3 are complete.
 M4 is complete: T1a to T7 were delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 2 later removed both runtime products. No release date is assigned.
@@ -107,19 +107,14 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
   predicate on an arrow function reports no ZTS211, while the same predicate on
   a function declaration does. A predicate that names a different parameter,
   such as `(y: unknown): x is string`, reports no error.
-- `zttp compile`, `zttp build`, and `zttp deploy` refuse a handler with file
-  imports, such as `examples/handler/handler-with-imports.ts`. The compiler
-  builds no proof certificate for that handler, and production acceptance
-  requires one. `zttp serve` runs the same handler. The
-  [record](plans/2026-10-30-legacy-removal-worklog.md#multi-module-build-refusal)
-  states the evidence.
-- `zttp serve` links the modules of a handler in one flat namespace. Two
-  modules that bind one private name share one function, and the last module
-  loaded wins. On 2026-11-01, a helper in one file read another file's secret
-  through this collision. `zttp check` reported ZTS400 for that handler.
+- `zttp build` is stricter than `zttp check` for a handler with file imports. The build runs every check on every module, and `zttp check` does not. Unit G8 of the [module graph certificates plan](plans/2026-11-01-module-graph-certificates-plan.md) closes that gap: it runs the per-module checks, typed imports, and the binding refusal in `zttp check` and in `discoverModulePaths`. G8 moves `zttp check` output, so it waits for a re-record window under D-012. Until then `zttp build` refuses some handlers that `zttp check` passes. [Handlers with file imports](verification.md#handlers-with-file-imports) lists the refusals.
+- The runtime links the modules of a handler in one flat namespace. Two modules that bind one top-level name would share one binding, and the last module loaded would win. `zttp serve`, `zttp compile`, `zttp build`, and `zttp deploy` now refuse that graph (D-018). `zttp check` and `discoverModulePaths` do not yet, and unit G8 adds the refusal.
 - Past 64 Result bindings, the proof IR emits no Result events, and the
   certificate states a `tested` edge from the producer. That edge meets the
-  production floor, so `results_checked` then gets no kernel check.
+  production floor, so `results_checked` then gets no kernel check. A
+  single-module handler keeps this exposure. The build refuses a handler with
+  file imports past the limit, and raising the limit needs a kernel change and
+  an owner decision.
 
 ## Runtime And Product Work
 
@@ -135,6 +130,7 @@ contract must identify which ones it needs.
 | Server rate limiting | Conditional | Standalone unproxied server selected as a product target | Decide whether application limits through `zttp:ratelimit` are insufficient | Approved server policy and accept-path tests, or a recorded decision to retain application limits |
 | Computed SQL guards | Deferred | Policy preserves read/write authority | Design that policy distinction before enabling the family | Consumer coverage and sink tests reject cross-authority use; guard drift gate passes |
 | Certificate assurance | Open, incremental | Select one property or opcode family | Add a producer case and an independent checker rule or witness | Checker rejects a mutation; `test-proof-ratchet` and `test-proof-ratchet-drift` pass with the revised disclosed boundary |
+| `zttp check` parity for file imports (unit G8) | Deferred to a re-record window | The owner opens a window under D-012, because the unit moves `zttp check` output | Run the per-module checks, typed imports, and the binding refusal in `zttp check` and `discoverModulePaths` | A handler that passes `zttp check` passes `zttp build` |
 | Runtime cost fuse | Open product question | The server, the CLI, and the build do not set `cost_ceilings` in `RuntimeConfig`; only tests set it | Decide whether to wire the fuse into the server or to delete it (unit 9g of the [reset plan](plans/2026-10-30-reset-implementation-plan.md)). The code stays until the owner decides | A shipped binary records the incident, or the field and `CostMeter` are deleted; [Verification](verification.md) matches |
 
 Socket health/readiness, in-flight shutdown-drain, and grace-expiry tests exist in

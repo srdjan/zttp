@@ -19,4 +19,4 @@ Runtime code reaches only approved `zts` internals. `zig build test-module-bound
 
 ## Decisions that bind here
 
-D-004, D-005
+D-004, D-005, D-018

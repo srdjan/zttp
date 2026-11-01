@@ -305,7 +305,7 @@ With incomplete effects, `has_egress` reports possible egress. The proof trace i
 CHECK computes these effects during its existing imported-flow reads.
 CHECK retains a separate fault traversal, with its existing read order and stopping rules.
 Graph extraction uses the loaded compilation parsers and makes no additional reads for effect summaries.
-The entry contract receives these facts before merging. The merged contract retains null aggregate properties.
+The entry contract receives these facts before merging. The build of a handler with file imports merges each dependency into the entry contract, and the merged contract keeps real aggregate properties. See [Handlers with file imports](#handlers-with-file-imports).
 Legacy capability and purity charging remains conservative for relative imports.
 
 A witness drives each `fetch` that a
@@ -711,6 +711,79 @@ only. The self-extract payload is format 7, the attestation envelope is
 `zttp-attest-v4`, and the proof bundle is `zttp-bundle-3`. Every identity is
 checked for equality rather than a lower bound. Schema 4 and format 6 are
 refused with a rebuild diagnostic. The runtime does not reinterpret them.
+
+## Handlers with file imports
+
+`zttp compile`, `zttp build`, and `zttp deploy` build a handler with file imports, such as `examples/handler/handler-with-imports.ts`. The build produces one certificate. The decision is D-018 in [decisions.md](decisions.md).
+
+The certificate covers one proof IR. The build folds the proof evidence of every module into that IR. The entry root stays node 0, and each dependency root becomes a `function` node. `packages/proof-checker` did not change for this fold.
+
+A build of such a handler passes the checks that a single-module build passes. The table states what each property covers and where it stops.
+
+| Property | Established by | Covers | Limit |
+|---|---|---|---|
+| `response_total` | Kernel | Every path of the handler reaches a return | Structural. A module load failure and a trap in a callee stay outside it |
+| Return type | Producer, type check | The returned value of the handler | A file import needs a type that can cross modules. The build refuses any other file import |
+| `results_checked` | Kernel | Every module in the folded IR | The build refuses a graph that it cannot classify, past the limit of 64 Result bindings in total, and a graph whose Result events the producer cannot prove |
+| Guard coverage | Kernel | Every capability call in the folded IR | The kernel node and work limits fail closed |
+| `no_secret_leakage` | Producer, flow pass | The module graph, in load order | Fails closed on an incomplete graph |
+| `state_isolated`, `result_safe` | Producer, verifier | Each top-level function of each module | The verifier does not model parameter aliasing across modules |
+| `capability_bounded` | Producer | A claim only when no module has a budget error | The claim derives from the budget of the merged contract |
+| Dependency bytes | Kernel | Each module, through `dep_bytecode` members | Digest only |
+
+### What the certificate does not establish
+
+The certificate does not establish that the IR covers every module. That coverage is the word of the producer. The kernel reads no bytecode and binds the artifact through digests. A single-module certificate has the same exposure.
+
+`response_total` is structural. A callee can still trap at run time, so a request can end in a 500. A trap in a callee is outside the property.
+
+A dependency runs its top-level code at load, once for each pooled runtime, and no request deadline applies. The entry module behaves the same way. The flow pass reads the modules in load order.
+
+The verifier does not model parameter aliasing across modules. Two nominal types with one name in two modules read as one type across a file import. No certificate property reads a nominal name.
+
+### Cost and purity
+
+`pure` reads false for an entry that calls a file import, because the call counts as a call. `cost_bounded`, `max_io_depth`, and `cost_envelope` stand only when every dependency is `pure`. The bound counts module calls on the entry paths. Any other dependency clears all three fields.
+
+The analysis walks a helper in the same file. It does not walk a call across files. A chain of pure helpers keeps `cost_bounded` true and `max_io_depth` at 0.
+
+The `behaviors` and `fault_coverage` records describe the entry paths only. The `fault_covered` field fails closed across import levels. Dependency helper capsules stay hidden, because dependency extraction reads the contract only.
+
+### What the build refuses
+
+Each refusal exits 1 and writes no binary.
+
+| Cause | Refusal |
+|---|---|
+| Two modules bind one top-level value name | The build names the identifier and the files. An import local binding counts, unless it names the identical export. Type names do not count |
+| A module binds a built-in name, or a dependency binds `handler` | The build names the identifier |
+| A named import has no matching export | The build refuses the import |
+| A check fails in any module | The build runs the boolean, type, strict, verifier, virtual import, and bytecode checks on each module. ZTS061 is exempt on a dependency |
+| A dependency holds a top-level `assert` | `DependencyTopLevelAssert`, because a failed `assert` leaves the later exports undefined |
+| A file import has no type that can cross modules | `FileImportUntyped`. Export a non-generic function or a value with a declared type |
+| Two modules register one `api.schemas` name with different JSON | The build refuses the graph |
+| A dependency breaks a capsule property | ZTS500 |
+| The proof evidence does not fold | `ModuleNotClassified`, `GraphResultLimit`, or `GraphResultsNotProved` |
+
+The ZTS061 exemption lets `examples/handler/utils.ts` and the corpus seeds compile. A handler with no capsule answers for every module under the default profile on the merged contract. A capsule that does not demand the broken property still compiles.
+
+An uncalled function in a dependency that calls a module fails the default profile. The same function in one file passes. The default profile is stricter here, because a dependency contract counts every function of the module.
+
+A corpus handler whose capsule demands `cost_bounded` and whose dependency calls `env` stays refused. The case `sibling-helper-holes` is an example.
+
+### Tampering and bundles
+
+A dependency edit on a built binary exits 1 at boot. So does a dependency section that someone grafts onto a single-module binary. On a signed binary, attestation stops the start with `ExecutableGraphMismatch`. Without a signature, proof acceptance stops it with `artifact_binding` and `graph_member_digest_mismatch` or `graph_member_extra`. These results come from Debug binaries on macOS.
+
+`zttp proofs verify <dir> --require-proof` exits 0 on a multi-module bundle and reports `policy_accepted`.
+
+A computed capability call in a dependency appears in the residual plan. The call obeys the policy at run time: a key outside the policy gives HTTP 500.
+
+### Difference from `zttp check`
+
+`zttp check` stays unchanged, with one rule. Every top-level function is now a root for the state checks. A same-file helper that mutates module state therefore clears `state_isolated`.
+
+Until unit G8 of the [plan](plans/2026-11-01-module-graph-certificates-plan.md), `zttp build` refuses some handlers that `zttp check` passes. D-012 freezes the output of `zttp check`. G8 runs in a re-record window that the owner opens.
 
 ## Running Tests
 

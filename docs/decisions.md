@@ -193,3 +193,24 @@ Two entries keep the untyped parser, each for a reason that is not a source file
 A file on a user machine outlives the binary that wrote it. The owner chose Decisions 5, 6, 8, and 10 of the legacy removal plan on 2026-10-30. Those decisions removed writers and payload types, and each one keeps the smallest reader that stops a failure or a stranded secret.
 
 `parseLine` refuses an unknown ledger kind, so `kind=perf` and `kind=equivalence` stay in `EventKind` as opaque rows. Without them, `zttp proofs list` fails for a project that holds one such row. `zttp auth revoke claude` and `zttp auth revoke openai` stay, because a stored key has no other way off the disk. A journal line that holds `body` still loads. A contract that holds the scalar response keys still parses, and the parser ignores them. A reader here leaves only with a superseding entry.
+
+## Module graph proofs
+
+### D-018 A handler with file imports gets one certificate over a folded proof IR
+
+- Status: standing
+- Decided: 2026-11-01
+- Binds: packages/zts/src/proof_ir.zig, packages/tools/src/precompile.zig, packages/tools/src/precompile_contract.zig, packages/runtime/src/proof_certificate.zig
+- Gate: zig build test-proof-ratchet
+
+Before this decision, `zttp compile`, `zttp build`, and `zttp deploy` refused a handler with file imports, because the compiler built no certificate for one. The multi-module path also skipped most checks of the single-module path. The owner chose option (a) for Decisions 1 to 6 of the module graph certificates plan on 2026-11-01.
+
+Decision 1 (a): the build refuses a graph in which a top-level binding is ambiguous. The refusal covers two modules that bind one value name, a built-in name, a dependency that binds `handler`, and a named import with no matching export. Codegen does not change. `zttp serve` refuses the same graph, which is a deliberate change.
+
+Decision 2 (a): the build folds every module into one proof IR. The entry root stays node 0, and each dependency root becomes a `function` node. `packages/proof-checker` does not change. The certificate does not establish that the IR covers every module. That coverage is the word of the producer, as it is for a single-module certificate.
+
+Decision 3 (a): the build runs every check on every module, except ZTS061. A dependency may export a raw built-in type, because no certificate property depends on that rule. The build also types each file import from the export of the target module.
+
+Decision 4 (a): this supersedes the line of the P7 specification that merged multi-module contracts omit flow claims. A build runs FlowInterp over the modules of the graph, each module once, in load order. FlowInterp does not change, so the flow facts keep one producer, as D-011 requires.
+
+Decision 5 (a): `zttp check` does not change, except that every top-level function is a root for the state checks. Until unit G8 of the plan, the build is the stricter gate, and `zttp build` refuses some handlers that `zttp check` passes. D-012 freezes the output of `zttp check`, and G8 waits for a re-record window.

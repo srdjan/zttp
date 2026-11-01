@@ -155,9 +155,23 @@ directory or a parent and defaults the output to `.zttp/build/<project-name>`.
 `compile` is the explicit-path form for scripts that name both sides. Both sign
 a proof receipt by default; `--no-attest` skips signing for that build.
 
-`build`, `compile`, and `deploy` refuse a handler with file imports, because
-the compiler builds no proof certificate for one. `zttp serve` runs that
-handler.
+`build`, `compile`, and `deploy` build a handler with file imports, such as
+`examples/handler/handler-with-imports.ts`. The binary carries one
+certificate over a folded proof IR. Each command exits 0 on that example, signed
+or with `--no-attest`, and the binary serves `{"message":"Hello, world!"}`.
+
+These commands exit 1 and write no binary when a module binds an ambiguous
+top-level name, when a check fails in any module, or when a file import has no
+type that can cross modules. They also exit 1 when a dependency breaks a
+capsule property or when the proof evidence of the graph does not fold.
+`zttp serve` refuses an ambiguous top-level binding too. For the list of
+refusals and the limits of the certificate, see
+[Handlers with file imports](verification.md#handlers-with-file-imports).
+
+`zttp check` is unchanged, except that every top-level function is a root for
+the state checks. Until the parity unit in the
+[roadmap](roadmap.md#current-limitations), `zttp build` refuses some handlers
+that `zttp check` passes.
 
 `zttp deploy` is the project-level verb built on the same path; see below.
 
