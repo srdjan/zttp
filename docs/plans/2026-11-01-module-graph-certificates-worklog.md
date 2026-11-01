@@ -158,3 +158,25 @@ No test can drive the bytecode verifier to fail from source, so no test kills a 
 Results at the G2a tree, each from an unfiltered run: `zig build test` 214 of 214 steps, `test-zruntime` 274 of 275 tests with 1 skipped, and `test-cli`, `test-bytecode-identity`, `smoke-v1`, `test-module-boundary`, `test-expert-app`, `test-proof-swallow`, and `zig fmt --check packages scripts` exit 0. The `git diff` on `packages/proof-checker` is empty.
 
 Against the G0 tables, `zts check` moved only the G1b row, and the command surface moved 0 of 38 rows. `zts compile` moved 1 of 215 rows: `examples/handler/handler-with-imports.ts`. Its `out.zig`, `contract.json`, and stdout are byte-identical. Its stderr gained a correct ZTS305 warning for the unused `body` variable in that example, because the entry now reaches the verifier.
+
+## G2b
+
+On the compile path, a file import now carries the type of its export. `TypeChecker.recordExportedSignatures` copies each exported signature and value type into an `ExportedSignatures` table, which owns its own pool. `TypeChecker.materializeFileImports` copies each one into the importer's pool. `Copier` in `packages/zts/src/import_signatures.zig` resolves a structural alias to its base type, so Decision 3 (a) holds. A nominal type reuses the importer's type of the same name, so `Response` stays one type. The file import table is null on every other path, so `zttp check`, `packages/pi`, and `ModuleGraph.build` do not move.
+
+The `greet` probe now fails with `type error[ZTS204]: return type does not match declared return type`, the diagnostic of a same-file function. A dependency helper that declares `Response` compiles and reaches the missing certificate refusal.
+
+**Change from the plan.** The plan and my first brief left an import unknown when its type could not cross, and refused only a request-root `return` of it. My review found that this leaves a gap. `pick(env("X"))` with a generic `pick` from a dependency compiled and read `.length`, and the same-file form reports ZTS309. `for (const r of wrap(["a"])) { return r; }` compiled a string return from a handler. An unknown value has too many positions for a walk to cover, so that walk is gone.
+
+The rule is now that no unknown file import reaches the checks. A data export gets its declared or inferred type. Any other file import with no type fails with `error.FileImportUntyped`, whether the module uses it or not: a generic export, a type predicate, a recursive alias, or a type that does not copy. This rule can widen later. No working build depends on it, because a handler with file imports stops at the missing certificate until G5.
+
+A Result cannot cross a file import in a form that I could build. A function with a declared `Result<object>` return that returns `jwtVerify` fails ZTS204 in a same-file build too, so no test exists for that case.
+
+**Correction to G1.** `import { Label }` for an exported type now fails `checkBindings`, and it served 200 at G0 with a ZTS306 warning. I kept the refusal, because a value import of a type leaves that binding undefined at run time. The message now names `import type`.
+
+Two nominal types with one name in two modules read as one type across a file import. No certificate property reads a nominal name.
+
+Sonnet implemented the unit in two rounds, and I reviewed each diff. The first red run failed 10 of 443 tests. The second red run failed 6 of 36 tests. It used a filter, and it ran with the new code switched off, because the tree already held that code. My gate run found one miss: `scripts/zts-tiers.allow` had no row for the new file. `packages/zts/src/import_signatures.zig` is now in the `scripts/check-proof-swallow.sh` file list.
+
+Results at the G2b tree, each from an unfiltered run: `zig build test` 214 of 214 steps, 8045 of 8051 tests with 6 skipped, `test-zruntime` 274 of 275 tests with 1 skipped, and `test-cli`, `test-bytecode-identity`, `smoke-v1`, `test-module-boundary`, `test-expert-app`, `test-proof-swallow`, and `zig fmt --check packages scripts` exit 0. `examples/handler/handler-with-imports.ts` and the expected handler of `sibling-helper-holes` compile with exit 0.
+
+Against the G2a tables, `zts check` and `zts compile` each moved 0 of 215 rows. The command surface moved 0 of 38 rows against G0.

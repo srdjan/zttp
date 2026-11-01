@@ -36,6 +36,7 @@ const abi_types = @import("abi_types.zig");
 const match_analysis_mod = @import("match_analysis.zig");
 const ir_json_literal = @import("ir_json_literal.zig");
 const module_facts_mod = @import("module_facts.zig");
+const import_signatures_mod = @import("import_signatures.zig");
 
 const Node = ir.Node;
 const NodeIndex = ir.NodeIndex;
@@ -181,6 +182,15 @@ pub const TypeChecker = struct {
     /// Direct checker users own one fallback index. Never retain a pointer
     /// into this field: the checker can move by value after checking.
     owned_import_facts: ?module_facts_mod.ModuleFacts = null,
+    /// Signatures of the file imports of this module. Null on every path but
+    /// the compile path of a multi-module build, where it is off by default.
+    /// With it set, a file import is typed from the signature of its export.
+    file_imports: ?*const import_signatures_mod.FileImportSignatures = null,
+    /// The callable behind each file import, keyed by slot and binding kind.
+    /// Filled once at the start of `check`.
+    file_import_callables: std.AutoHashMapUnmanaged(u32, CallableMetadata) = .empty,
+    /// The local name atom of each file import that has no type, in import order.
+    file_import_untyped: std.ArrayListUnmanaged(u16) = .empty,
 
     /// Inferred types for const/let bindings: packed(scope_id, slot) -> TypeIndex
     binding_types: std.AutoHashMapUnmanaged(u64, TypeIndex),
@@ -291,6 +301,8 @@ pub const TypeChecker = struct {
         self.compiled_schemas.deinit(self.allocator);
         self.binding_types.deinit(self.allocator);
         self.binding_callables.deinit(self.allocator);
+        self.file_import_callables.deinit(self.allocator);
+        self.file_import_untyped.deinit(self.allocator);
         self.param_types.deinit(self.allocator);
         self.narrowed.deinit(self.allocator);
         self.context_types.deinit(self.allocator);
@@ -312,6 +324,7 @@ pub const TypeChecker = struct {
                 null,
             );
         }
+        self.materializeFileImports();
         // Before the main walk, so a call to a predicate declared later in the
         // file still narrows. A predicate whose body is not an admitted test is
         // rejected here and installs nothing anywhere.
@@ -3317,11 +3330,179 @@ pub const TypeChecker = struct {
         return false;
     }
 
+    // -------------------------------------------------------------------
+    // File imports (compile path of a multi-module build)
+    // -------------------------------------------------------------------
+
+    fn fileImportKey(binding: ir.BindingRef) u32 {
+        return (@as(u32, @backingInt(binding.kind)) << 16) | @as(u32, binding.slot);
+    }
+
+    /// Give every file import its type in this checker's pool: the callable
+    /// metadata of a function export in `file_import_callables`, and the type
+    /// of a value export in `binding_types`, under the key of the import's
+    /// binding. An import that gets neither is listed in `file_import_untyped`.
+    /// The table is null off the compile path, and nothing happens then.
+    fn materializeFileImports(self: *TypeChecker) void {
+        const rows = self.file_imports orelse return;
+        const facts = self.import_facts orelse
+            if (self.owned_import_facts) |*owned| owned else {
+                self.binding_resolution_failed = true;
+                return;
+            };
+        var copier: import_signatures_mod.Copier = .{
+            .allocator = self.allocator,
+            .src = rows.source,
+            .src_env = null,
+            .dst = self.env.pool,
+            .dst_env = self.env,
+        };
+        defer copier.deinit();
+        for (0..self.ir_view.nodeCount()) |index| {
+            const node: NodeIndex = @intCast(index);
+            if (self.ir_view.getTag(node) != .import_decl) continue;
+            const decl = self.ir_view.getImportDecl(node) orelse {
+                self.binding_resolution_failed = true;
+                continue;
+            };
+            const specifier = self.ir_view.getString(decl.module_idx) orelse {
+                self.binding_resolution_failed = true;
+                continue;
+            };
+            if (importsVirtualModule(facts, specifier)) continue;
+            for (0..decl.specifiers_count) |position| {
+                const spec_index = self.ir_view.getListIndex(decl.specifiers_start, @intCast(position));
+                const spec = self.ir_view.getImportSpec(spec_index) orelse {
+                    self.binding_resolution_failed = true;
+                    continue;
+                };
+                self.materializeFileImport(&copier, rows, specifier, spec);
+            }
+        }
+    }
+
+    fn importsVirtualModule(facts: *const module_facts_mod.ModuleFacts, specifier: []const u8) bool {
+        for (facts.modules.items) |module| {
+            if (std.mem.eql(u8, module, specifier)) return true;
+        }
+        return false;
+    }
+
+    fn materializeFileImport(
+        self: *TypeChecker,
+        copier: *import_signatures_mod.Copier,
+        rows: *const import_signatures_mod.FileImportSignatures,
+        specifier: []const u8,
+        spec: ir.Node.ImportSpec,
+    ) void {
+        var metadata: CallableMetadata = .unavailable;
+        var typed = false;
+        switch (spec.kind) {
+            .named => if (self.resolveAtomName(spec.imported_atom)) |imported| {
+                if (rows.find(specifier, imported)) |row| {
+                    if (row.sig) |source_sig| {
+                        if (copier.copySignature(source_sig)) |copied| {
+                            metadata = .{ .signature = copied };
+                            typed = true;
+                        }
+                    }
+                    const value = copier.copy(row.value_type);
+                    if (value != null_type_idx) {
+                        if (self.env.pool.getTag(value) == .t_function) {
+                            // A value of function type is called through its
+                            // signature, which a call reads from the metadata.
+                            if (!typed) {
+                                metadata = self.callableMetadataFromType(value);
+                                typed = metadata != .unavailable;
+                            }
+                        } else {
+                            self.binding_types.put(self.allocator, bindingKey(spec.local_binding), value) catch self.markAllocationFailure();
+                            typed = true;
+                        }
+                    }
+                }
+            },
+            // exhaustive: a default or namespace import has no export row, so
+            // it has no type that crosses a module.
+            .default, .namespace => {},
+        }
+        const key = fileImportKey(spec.local_binding);
+        self.file_import_callables.put(self.allocator, key, metadata) catch self.markAllocationFailure();
+        if (!typed) self.file_import_untyped.append(self.allocator, spec.local_binding.name_atom) catch self.markAllocationFailure();
+    }
+
+    /// The local name of the first file import that holds neither a signature
+    /// nor a value type, or null when every file import is typed. Always null
+    /// when no file import table is set. The compile path of a multi-module
+    /// build asks it after the check, and refuses the build on a name.
+    pub fn firstUntypedFileImport(self: *const TypeChecker) ?[]const u8 {
+        if (self.file_import_untyped.items.len == 0) return null;
+        return self.resolveAtomName(self.file_import_untyped.items[0]) orelse "<unnamed>";
+    }
+
+    /// What a file import holds, or null for a binding that is not one.
+    fn fileImportCallable(self: *const TypeChecker, binding: ir.BindingRef) ?CallableMetadata {
+        if (self.file_imports == null) return null;
+        return self.file_import_callables.get(fileImportKey(binding));
+    }
+
+    /// Record the exports of this checked module in `table`, under the module's
+    /// index in the graph: the signature of a function, and the declared or
+    /// inferred type of a `const` or `let`. An export whose type does not copy
+    /// gets a row without it.
+    pub fn recordExportedSignatures(
+        self: *TypeChecker,
+        root: NodeIndex,
+        module: u16,
+        table: *import_signatures_mod.ExportedSignatures,
+    ) !void {
+        try self.ensureHealthy();
+        const block = self.ir_view.getBlock(root) orelse return;
+        var copier = table.copierFrom(self.env.pool, self.env);
+        defer copier.deinit();
+        for (0..block.stmts_count) |i| {
+            const stmt = self.ir_view.getListIndex(block.stmts_start, @intCast(i));
+            if (self.ir_view.getTag(stmt) != .export_decl) continue;
+            const export_decl = self.ir_view.getExportDecl(stmt) orelse continue;
+            if (export_decl.declaration == null_node) continue;
+            const declaration_tag = self.ir_view.getTag(export_decl.declaration) orelse continue;
+            switch (declaration_tag) {
+                .function_decl, .var_decl => {},
+                // exhaustive: only a function or a variable declaration exports a
+                // value. Any other export form gets no row, and an import of it
+                // finds no row, so that import is untyped and the build refuses it.
+                else => continue,
+            }
+            const decl = self.ir_view.getVarDecl(export_decl.declaration) orelse continue;
+            const name = self.resolveAtomName(decl.binding.name_atom) orelse continue;
+            var sig: ?type_env_mod.FunctionSig = null;
+            if (decl.init != null_node) {
+                if (self.sourceFunctionSignature(decl.init)) |source_sig| {
+                    sig = copier.copySignature(source_sig);
+                } else if (self.binding_callables.get(bindingKey(decl.binding))) |bound| {
+                    // `export const alias = helper;` keeps the signature of `helper`.
+                    switch (bound) {
+                        .signature => |bound_sig| sig = copier.copySignature(bound_sig),
+                        .arity, .unavailable => {},
+                    }
+                }
+            }
+            var value_type: TypeIndex = null_type_idx;
+            if (declaration_tag == .var_decl) {
+                const declared_type = self.typeOfDeclaration(decl.binding);
+                if (declared_type != null_type_idx) value_type = copier.copy(declared_type);
+            }
+            try table.add(module, name, sig, value_type);
+        }
+        try table.pool.ensureHealthy();
+    }
+
     fn boundCallableMetadata(self: *const TypeChecker, binding: ir.BindingRef) ?CallableMetadata {
         // A capture the record cannot resolve is unknown. `unavailable` says so
         // and keeps the by-name module signature from answering for it.
         const declaration = self.captureSource(binding) orelse return .unavailable;
-        return self.binding_callables.get(bindingKey(declaration));
+        if (self.binding_callables.get(bindingKey(declaration))) |metadata| return metadata;
+        return self.fileImportCallable(declaration);
     }
 
     fn callableSignatureForBinding(self: *const TypeChecker, binding: ir.BindingRef) ?type_env_mod.FunctionSig {

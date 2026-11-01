@@ -160,11 +160,11 @@ shared_compile_status=0
 shared_compile_out=$(cd "$TMP_DIR/shared-name-app" && "$ZTTP" compile h.ts -o shared-bin --no-attest 2>&1 </dev/null) || shared_compile_status=$?
 [ "$shared_compile_status" -eq 1 ] || fail "compile with a shared top-level name exited $shared_compile_status, expected 1: $shared_compile_out"
 [ ! -e "$TMP_DIR/shared-name-app/shared-bin" ] || fail "refused compile with a shared top-level name wrote a binary"
-printf '%s\n' "$shared_compile_out" | grep -qxF "$shared_want" || fail "compile did not name the shared top-level name: $shared_compile_out"
+grep -qxF -- "$shared_want" <<<"$shared_compile_out" || fail "compile did not name the shared top-level name: $shared_compile_out"
 shared_serve_status=0
 shared_serve_out=$(cd "$TMP_DIR/shared-name-app" && perl -e 'alarm 60; exec @ARGV' "$ZTTP" serve h.ts -p 0 2>&1 </dev/null) || shared_serve_status=$?
 [ "$shared_serve_status" -eq 1 ] || fail "serve with a shared top-level name exited $shared_serve_status, expected 1: $shared_serve_out"
-printf '%s\n' "$shared_serve_out" | grep -qxF "$shared_want" || fail "serve did not name the shared top-level name: $shared_serve_out"
+grep -qxF -- "$shared_want" <<<"$shared_serve_out" || fail "serve did not name the shared top-level name: $shared_serve_out"
 
 step "negative: a defect in a dependency is refused by compile for each check"
 mkdir -p "$TMP_DIR/dep-check-app"
@@ -181,7 +181,7 @@ dep_check_case() {
   dep_out=$(cd "$TMP_DIR/dep-check-app" && "$ZTTP" compile h.ts -o "dep-bin-$dep_name" --no-attest 2>&1 </dev/null) || dep_status=$?
   [ "$dep_status" -eq 1 ] || fail "compile with a $dep_name defect in a dependency exited $dep_status, expected 1: $dep_out"
   [ ! -e "$TMP_DIR/dep-check-app/dep-bin-$dep_name" ] || fail "refused compile with a $dep_name defect in a dependency wrote a binary"
-  printf '%s\n' "$dep_out" | grep -qF "$dep_want" || fail "compile with a $dep_name defect in a dependency did not print '$dep_want': $dep_out"
+  grep -qF -- "$dep_want" <<<"$dep_out" || fail "compile with a $dep_name defect in a dependency did not print '$dep_want': $dep_out"
 }
 cat > "$TMP_DIR/dep-check-app/dep.ts" <<'TS'
 export function value(): number {
@@ -229,6 +229,52 @@ export function value(): number {
 }
 TS
 dep_check_case top-level-assert "dep.ts: a dependency may not hold a top-level assert, because a failed one leaves the later exports undefined"
+
+step "negative: a string imported from a file is refused where a Response is declared"
+mkdir -p "$TMP_DIR/import-type-app"
+cat > "$TMP_DIR/import-type-app/h.ts" <<'TS'
+import { greet } from "./dep.ts";
+export function handler(req: Request): Proof<Response, "state_isolated"> {
+  return greet();
+}
+TS
+cat > "$TMP_DIR/import-type-app/dep.ts" <<'TS'
+export function greet(): string {
+  return "x";
+}
+TS
+import_type_status=0
+import_type_out=$(cd "$TMP_DIR/import-type-app" && "$ZTTP" compile h.ts -o import-type-bin --no-attest 2>&1 </dev/null) || import_type_status=$?
+[ "$import_type_status" -eq 1 ] || fail "compile of a string imported from a file exited $import_type_status, expected 1: $import_type_out"
+[ ! -e "$TMP_DIR/import-type-app/import-type-bin" ] || fail "refused compile of a string imported from a file wrote a binary"
+grep -qF -- "type error[ZTS204]: return type does not match declared return type" <<<"$import_type_out" || fail "compile of a string imported from a file did not print the ZTS204 diagnostic: $import_type_out"
+cat > "$TMP_DIR/import-type-app/dep.ts" <<'TS'
+export function greet(): Response {
+  return Response.text("x");
+}
+TS
+import_type_ok_status=0
+import_type_ok_out=$(cd "$TMP_DIR/import-type-app" && "$ZTTP" compile h.ts -o import-type-bin --no-attest 2>&1 </dev/null) || import_type_ok_status=$?
+[ "$import_type_ok_status" -eq 1 ] || fail "compile of a Response imported from a file exited $import_type_ok_status, expected 1: $import_type_ok_out"
+grep -qF -- "Build refused: the compiler builds no proof certificate for a handler with file imports" <<<"$import_type_ok_out" || fail "compile of a Response imported from a file did not reach the missing certificate refusal: $import_type_ok_out"
+if grep -qF -- "ZTS204" <<<"$import_type_ok_out"; then fail "compile of a Response imported from a file printed a type error: $import_type_ok_out"; fi
+cat > "$TMP_DIR/import-type-app/dep.ts" <<'TS'
+export function pick<T>(value: T): T {
+  return value;
+}
+TS
+cat > "$TMP_DIR/import-type-app/h.ts" <<'TS'
+import { pick } from "./dep.ts";
+export function handler(req: Request): Proof<Response, "state_isolated"> {
+  return Response.text(String(pick(1)));
+}
+TS
+import_untyped_want="h.ts: import 'pick' has no type that can cross modules. Export a non-generic function or a value with a declared type."
+import_untyped_status=0
+import_untyped_out=$(cd "$TMP_DIR/import-type-app" && "$ZTTP" compile h.ts -o import-untyped-bin --no-attest 2>&1 </dev/null) || import_untyped_status=$?
+[ "$import_untyped_status" -eq 1 ] || fail "compile of a generic function imported from a file exited $import_untyped_status, expected 1: $import_untyped_out"
+[ ! -e "$TMP_DIR/import-type-app/import-untyped-bin" ] || fail "refused compile of a generic function imported from a file wrote a binary"
+grep -qF -- "$import_untyped_want" <<<"$import_untyped_out" || fail "compile of a generic function imported from a file did not print '$import_untyped_want': $import_untyped_out"
 
 step "negative: a helper mutation stops only a capsule that demands state_isolated"
 mkdir -p "$TMP_DIR/helper-state-app"

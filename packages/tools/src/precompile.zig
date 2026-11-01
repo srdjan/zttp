@@ -876,10 +876,14 @@ fn compileMultiModule(
         for (compile_result.codegens) |*cg| cg.freeOwnedConstantPayloads();
     }
 
+    // Each checked dependency leaves the signatures of its exports here, for
+    // the modules that import it.
+    var exports = zts.ExportedSignatures.init(allocator);
+    defer exports.deinit();
     // Check every module, dependencies first and the entry last. Code
     // generation above already ran on the kept parsers, so no bytecode moves.
     for (0..compile_result.modules.len) |module_index| {
-        const checks = try checkGraphModule(allocator, &graph, &compile_result, module_index, atoms, opts);
+        const checks = try checkGraphModule(allocator, &graph, &compile_result, module_index, atoms, &exports, opts);
         if (checks.verify_failed) return .{ .verify_failed = true };
     }
 
@@ -1014,6 +1018,7 @@ fn checkGraphModule(
     compile_result: *const zts.modules.CompileResult,
     module_index: usize,
     atoms: *zts.AtomTable,
+    exports: *zts.ExportedSignatures,
     opts: CompileOptions,
 ) !GraphModuleChecks {
     const is_entry = module_index == compile_result.modules.len - 1;
@@ -1027,6 +1032,21 @@ fn checkGraphModule(
     diag_view.normalize_positions = true;
 
     try validateVirtualModuleImports(view, atoms, module.path, null);
+
+    // What this module knows of its file imports: the signature or value type
+    // that the checked target module exports under the imported name, or none.
+    var link_arena = std.heap.ArenaAllocator.init(allocator);
+    defer link_arena.deinit();
+    const links = try graph.fileImportLinks(link_arena.allocator(), module.path, view, atoms);
+    const import_rows = try link_arena.allocator().alloc(zts.FileImportSignatures.Row, links.len);
+    for (links, import_rows) |link, *row| {
+        row.* = .{ .specifier = link.specifier, .imported = link.imported, .sig = null, .value_type = zts.null_type_idx };
+        const target = link.target orelse continue;
+        const exported = exports.find(target, link.imported) orelse continue;
+        row.sig = exported.sig;
+        row.value_type = exported.value_type;
+    }
+    const file_imports: zts.FileImportSignatures = .{ .source = &exports.pool, .rows = import_rows };
 
     if (!is_entry and hasTopLevelAssert(view, root, 0)) {
         if (!builtin.is_test) debugPrint(
@@ -1047,10 +1067,23 @@ fn checkGraphModule(
         .select_verifier = opts.emit_verify,
         .select_flow = false,
         .allow_raw_exported_boundary = !is_entry,
+        .file_import_signatures = &file_imports,
     });
     defer analysis.deinit();
     try analysis.complete();
     const resolved = try analysis.resolvedForReport();
+
+    // A file import with no type that crosses a module would hand the later
+    // checks a value they cannot read, so the build stops here.
+    const untyped_checker = if (resolved.type_checker) |*checker| checker else return error.AnalysisPassIncomplete;
+    if (untyped_checker.firstUntypedFileImport()) |name| {
+        if (!builtin.is_test) debugPrint(
+            "{s}: import '{s}' has no type that can cross modules. Export a non-generic function or a value with a declared type.\n",
+            .{ module.path, name },
+        );
+        analysis.refuseResolution();
+        return error.FileImportUntyped;
+    }
 
     const bool_diags = resolved.boolDiagnostics();
     if (bool_diags.len > 0 and !builtin.is_test) {
@@ -1085,6 +1118,11 @@ fn checkGraphModule(
             if (!builtin.is_test) debugPrint("\nStrict check failed for {s}\n", .{module.path});
             return error.SoundModeViolation;
         }
+    }
+
+    if (!is_entry) {
+        const checker = if (resolved.type_checker) |*checker| checker else return error.AnalysisPassIncomplete;
+        try checker.recordExportedSignatures(root, graph.execution_order[module_index], exports);
     }
 
     var checks: GraphModuleChecks = .{};
@@ -1430,13 +1468,23 @@ test "compileHandler graph refuses a dependency that fails the strict check" {
 }
 
 test "compileHandler graph skips the strict rules of a dependency when strict is off" {
-    var fixture = try graphDependencyFixture(
-        \\export function value() {
-        \\  return 1;
+    var fixture = try CompileGraphFixture.init("entry.ts",
+        \\import { typed } from "./dep.ts";
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(String(typed()));
         \\}
         \\
     );
     defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export function value() {
+        \\  return 1;
+        \\}
+        \\export function typed(): number {
+        \\  return 1;
+        \\}
+        \\
+    );
     var compiled = try fixture.compile(.{ .emit_verify = true, .strict = false });
     defer compiled.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), compiled.dep_bytecodes.?.len);
@@ -1626,6 +1674,377 @@ test "compileHandler graph rejects an entry with an unsupported extension" {
     defer unsupported.deinit();
     try unsupported.add("dep.ts", "export function count(): number { return 1; }\n");
     try std.testing.expectError(error.UnsupportedSourceExtension, unsupported.compile(.{}));
+}
+
+const greet_entry =
+    \\import { greet } from "./dep.ts";
+    \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+    \\  return greet();
+    \\}
+    \\
+;
+
+const greet_dep =
+    \\export function greet(): string {
+    \\  return "x";
+    \\}
+    \\
+;
+
+fn importFixture(entry_source: []const u8, dep_source: []const u8) !CompileGraphFixture {
+    var fixture = try CompileGraphFixture.init("entry.ts", entry_source);
+    errdefer fixture.deinit();
+    try fixture.add("dep.ts", dep_source);
+    return fixture;
+}
+
+fn expectImportRefused(entry_source: []const u8, dep_source: []const u8) !void {
+    var fixture = try importFixture(entry_source, dep_source);
+    defer fixture.deinit();
+    try std.testing.expectError(error.SoundModeViolation, fixture.compile(.{ .emit_verify = true }));
+}
+
+fn expectImportUnproven(entry_source: []const u8, dep_source: []const u8) !void {
+    var fixture = try importFixture(entry_source, dep_source);
+    defer fixture.deinit();
+    var compiled = try fixture.compile(.{ .emit_verify = true });
+    defer compiled.deinit(std.testing.allocator);
+    try std.testing.expect(compiled.verify_failed);
+    try std.testing.expectEqual(@as(usize, 0), compiled.bytecode.len);
+}
+
+fn expectImportCompiles(entry_source: []const u8, dep_source: []const u8) !void {
+    var fixture = try importFixture(entry_source, dep_source);
+    defer fixture.deinit();
+    var compiled = try fixture.compile(.{ .emit_verify = true });
+    defer compiled.deinit(std.testing.allocator);
+    try std.testing.expect(!compiled.verify_failed);
+    try std.testing.expectEqual(@as(usize, 1), compiled.dep_bytecodes.?.len);
+}
+
+test "compileHandler graph refuses a string imported from a file where a Response is declared" {
+    try expectImportRefused(greet_entry, greet_dep);
+}
+
+test "compileHandler graph accepts a dependency helper that declares Response" {
+    try expectImportCompiles(greet_entry,
+        \\export function greet(): Response {
+        \\  return Response.text("x");
+        \\}
+        \\
+    );
+}
+
+test "compileHandler graph refuses a string imported from a file and returned through a binding" {
+    try expectImportRefused(
+        \\import { greet } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  const r = greet();
+        \\  return r;
+        \\}
+        \\
+    , greet_dep);
+}
+
+test "compileHandler graph refuses a string imported from a file under an alias" {
+    try expectImportRefused(
+        \\import { greet as hello } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  return hello();
+        \\}
+        \\
+    , greet_dep);
+}
+
+test "compileHandler graph refuses a local function that shares a name with an export of another module" {
+    var fixture = try CompileGraphFixture.init("entry.ts",
+        \\import { other } from "./dep.ts";
+        \\function greet(): Response {
+        \\  return Response.text(other());
+        \\}
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  return greet();
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export function greet(): string {
+        \\  return "x";
+        \\}
+        \\export function other(): string {
+        \\  return "y";
+        \\}
+        \\
+    );
+    try std.testing.expectError(error.AmbiguousBinding, fixture.compile(.{ .emit_verify = true }));
+}
+
+test "compileHandler graph refuses a wrong argument type to an imported function" {
+    try expectImportRefused(
+        \\import { twice } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  return Response.text(String(twice("a")));
+        \\}
+        \\
+    ,
+        \\export function twice(n: number): number {
+        \\  return n * 2;
+        \\}
+        \\
+    );
+}
+
+test "compileHandler graph accepts the right argument type to an imported function" {
+    try expectImportCompiles(
+        \\import { twice } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  return Response.text(String(twice(2)));
+        \\}
+        \\
+    ,
+        \\export function twice(n: number): number {
+        \\  return n * 2;
+        \\}
+        \\
+    );
+}
+
+test "compileHandler graph reads an exported structural alias of string as string" {
+    const alias_dep =
+        \\structural Label = string;
+        \\export function label(): Label {
+        \\  return "x";
+        \\}
+        \\
+    ;
+    try expectImportRefused(
+        \\import { label } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  return label();
+        \\}
+        \\
+    , alias_dep);
+    try expectImportCompiles(
+        \\import { label } from "./dep.ts";
+        \\function show(text: string): Response {
+        \\  return Response.text(text);
+        \\}
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  return show(label());
+        \\}
+        \\
+    , alias_dep);
+}
+
+test "compileHandler graph types a dependency that imports from another dependency" {
+    const entry_source =
+        \\import { mid } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  return mid();
+        \\}
+        \\
+    ;
+    var fixture = try importFixture(entry_source,
+        \\import { base } from "./base.ts";
+        \\export function mid(): string {
+        \\  return base();
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("base.ts",
+        \\export function base(): string {
+        \\  return "b";
+        \\}
+        \\
+    );
+    try std.testing.expectError(error.SoundModeViolation, fixture.compile(.{ .emit_verify = true }));
+}
+
+test "compileHandler graph refuses a read of an imported value that may be undefined" {
+    try expectImportUnproven(
+        \\import { maybe } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  return Response.text(String(maybe().length));
+        \\}
+        \\
+    ,
+        \\export function maybe(): string | undefined {
+        \\  return "x";
+        \\}
+        \\
+    );
+}
+
+const generic_dep =
+    \\export function pick<T>(value: T): T {
+    \\  return value;
+    \\}
+    \\
+;
+
+fn expectImportUntyped(entry_source: []const u8, dep_source: []const u8) !void {
+    var fixture = try importFixture(entry_source, dep_source);
+    defer fixture.deinit();
+    try std.testing.expectError(error.FileImportUntyped, fixture.compile(.{ .emit_verify = true }));
+}
+
+test "compileHandler graph refuses a generic import that launders an environment value" {
+    try expectImportUntyped(
+        \\import { env } from "zttp:env";
+        \\import { pick } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  const v = pick(env("X"));
+        \\  return Response.text(String(v.length));
+        \\}
+        \\
+    , generic_dep);
+}
+
+test "compileHandler graph refuses a generic import that yields a returned string" {
+    try expectImportUntyped(
+        \\import { wrap } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  for (const r of wrap(["a"])) {
+        \\    return r;
+        \\  }
+        \\  return Response.text("x");
+        \\}
+        \\
+    ,
+        \\export function wrap<T>(x: T[]): T[] {
+        \\  return x;
+        \\}
+        \\
+    );
+}
+
+test "compileHandler graph refuses a generic import that is called and not returned" {
+    try expectImportUntyped(
+        \\import { pick } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  return Response.text(String(pick(1)));
+        \\}
+        \\
+    , generic_dep);
+}
+
+test "compileHandler graph refuses an import of a type predicate" {
+    try expectImportUntyped(
+        \\import { isText } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  return Response.text(String(isText("a")));
+        \\}
+        \\
+    ,
+        \\export function isText(v: unknown): v is string {
+        \\  return typeof v === "string";
+        \\}
+        \\
+    );
+}
+
+const limit_dep =
+    \\export const limit = 5;
+    \\
+;
+
+test "compileHandler graph reads an imported number as a number" {
+    try expectImportCompiles(
+        \\import { limit } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  return Response.text(String(limit));
+        \\}
+        \\
+    , limit_dep);
+}
+
+test "compileHandler graph refuses an imported number where a string is declared" {
+    try expectImportRefused(
+        \\import { limit } from "./dep.ts";
+        \\function show(text: string): Response {
+        \\  return Response.text(text);
+        \\}
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  return show(limit);
+        \\}
+        \\
+    , limit_dep);
+}
+
+test "compileHandler graph types an exported alias of a function by the function" {
+    try expectImportRefused(
+        \\import { alias } from "./dep.ts";
+        \\function show(text: string): Response {
+        \\  return Response.text(text);
+        \\}
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  return show(alias());
+        \\}
+        \\
+    ,
+        \\function helper(): number {
+        \\  return 1;
+        \\}
+        \\export const alias = helper;
+        \\
+    );
+}
+
+test "compileHandler graph refuses a read of an imported value that is declared undefined" {
+    try expectImportUnproven(
+        \\import { label } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  return Response.text(String(label.length));
+        \\}
+        \\
+    ,
+        \\export const label: string | undefined = undefined;
+        \\
+    );
+}
+
+test "compileHandler graph accepts an import of a type" {
+    try expectImportCompiles(
+        \\import type { Label } from "./dep.ts";
+        \\import { greet } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  return greet();
+        \\}
+        \\
+    ,
+        \\export structural Label = string;
+        \\export function greet(): Response {
+        \\  return Response.text("x");
+        \\}
+        \\
+    );
+}
+
+test "compileHandler graph refuses an import cycle" {
+    var fixture = try importFixture(
+        \\import { a } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  return a();
+        \\}
+        \\
+    ,
+        \\import { b } from "./back.ts";
+        \\export function a(): Response {
+        \\  return b();
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("back.ts",
+        \\import { a } from "./dep.ts";
+        \\export function b(): Response {
+        \\  return a();
+        \\}
+        \\
+    );
+    try std.testing.expectError(error.CircularImport, fixture.compile(.{ .emit_verify = true }));
 }
 
 test "compileHandler preserves fanout order shared dependencies and imported routes" {

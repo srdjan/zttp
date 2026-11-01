@@ -353,6 +353,8 @@ pub const parseTypeText = compiler.type_syntax_lowering.parseTypeText;
 /// every virtual-module export by this digest.
 pub const typeDigest = type_key.typeDigest;
 pub const TypeEnv = type_env.TypeEnv;
+pub const ExportedSignatures = compiler.import_signatures.ExportedSignatures;
+pub const FileImportSignatures = compiler.import_signatures.FileImportSignatures;
 pub const TypeChecker = type_checker.TypeChecker;
 pub const StrictChecker = strict_checker.StrictChecker;
 pub const EffectAnalyzer = effect_inference.Analyzer;

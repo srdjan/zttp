@@ -129,6 +129,13 @@ packages/zts/src/type_checker.zig bindCallableMetadata catch-block
 packages/zts/src/type_checker.zig bindForOfElement catch-poison
 packages/zts/src/type_checker.zig bindPatternBindings catch-poison
 packages/zts/src/type_checker.zig bindVarDeclaration catch-poison
+# A file import whose table write fails stays unrecorded: an import with no callable
+# entry has no signature, one with no value type is listed untyped and the build
+# refuses it. The failure also sets allocation_failed, which ensureHealthy reports
+# before the build uses any type.
+packages/zts/src/type_checker.zig materializeFileImport catch-poison
+packages/zts/src/type_checker.zig materializeFileImport catch-poison@2
+packages/zts/src/type_checker.zig materializeFileImport catch-poison@3
 packages/zts/src/type_checker.zig endNarrowScope catch-poison
 packages/zts/src/type_checker.zig inferObjectLiteralType catch-block
 packages/zts/src/type_checker.zig putNarrowed catch-poison
@@ -467,3 +474,14 @@ packages/tools/src/precompile_check_run.zig runCheckOnlyWithOptions catch-block@
 packages/tools/src/precompile_check_run.zig runCheckOnlyFromSourceWithPathAllocator catch-switch
 packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-switch
 packages/tools/src/precompile_contract.zig enforcePolicyForContract catch-block
+
+# Each of these is a failed allocation inside the type copier, and each returns
+# null_type_idx, which is the unknown type. A copy that comes back unknown leaves
+# the import or the export without a type. materializeFileImport then lists the
+# import as untyped, and checkGraphModule refuses the build with
+# error.FileImportUntyped. A failed copy never yields a narrower or a wider type.
+packages/zts/src/import_signatures.zig copyAt catch-return
+packages/zts/src/import_signatures.zig copyAt catch-return@2
+packages/zts/src/import_signatures.zig copyList catch-return
+packages/zts/src/import_signatures.zig copyRecord catch-return
+packages/zts/src/import_signatures.zig copyFunction catch-return

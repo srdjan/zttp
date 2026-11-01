@@ -66,6 +66,7 @@ proof_files=(
   packages/zts/src/handler_contract.zig
   packages/zts/src/handler_function.zig
   packages/zts/src/handler_verifier.zig
+  packages/zts/src/import_signatures.zig
   packages/zts/src/intent_extractor.zig
   packages/zts/src/ir_identity.zig
   packages/zts/src/match_analysis.zig

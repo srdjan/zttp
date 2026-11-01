@@ -29,6 +29,7 @@ pub const handler_function = @import("handler_function.zig");
 pub const proof_ir = @import("proof_ir.zig");
 
 pub const type_pool = @import("type_pool.zig");
+pub const import_signatures = @import("import_signatures.zig");
 pub const type_key = @import("type_key.zig");
 pub const type_syntax_lowering = @import("type_syntax_lowering.zig");
 pub const type_env = @import("type_env.zig");

@@ -45,6 +45,7 @@ const module_facts_mod = @import("module_facts.zig");
 const context_mod = @import("zts-engine").context;
 const type_env_mod = @import("type_env.zig");
 const type_pool_mod = @import("type_pool.zig");
+const import_signatures_mod = @import("import_signatures.zig");
 const guard_catalog = @import("zts-base").guard_catalog;
 const modules_mod = @import("zts-engine").modules;
 const module_types_mod = @import("module_types.zig");
@@ -211,6 +212,10 @@ pub const ResolveOptions = struct {
     policy_sections: guard_catalog.SectionSet = .{},
     /// A dependency of a multi-module build is exempt from ZTS061 only.
     allow_raw_exported_boundary: bool = false,
+    /// The signatures of the file imports of a module in a multi-module build.
+    /// Null off the compile path of such a build, and the checker then types no
+    /// file import. The pointed-to table must outlive the resolved module.
+    file_import_signatures: ?*const import_signatures_mod.FileImportSignatures = null,
 };
 
 pub const ResolvedModule = struct {
@@ -329,6 +334,7 @@ pub fn resolve(
         errdefer tc.deinit();
         tc.import_facts = opts.type_import_facts;
         tc.scopes = parsed.scopes;
+        tc.file_imports = opts.file_import_signatures;
         // The strict checker reports a match that is not exhaustive as ZTS603,
         // so the type checker leaves its ZTS205 out when strict runs.
         tc.strict_checker_follows = opts.strict;
@@ -741,6 +747,8 @@ pub const ModuleAnalysisSession = struct {
         select_flow: bool = false,
         /// Exempt the module from ZTS061 (`raw_exported_boundary_type`) alone.
         allow_raw_exported_boundary: bool = false,
+        /// See `ResolveOptions.file_import_signatures`.
+        file_import_signatures: ?*const import_signatures_mod.FileImportSignatures = null,
     };
 
     pub const ContractOnlyOptions = struct {
@@ -761,6 +769,7 @@ pub const ModuleAnalysisSession = struct {
     /// One option set for every profile. `.full` fills only `strict` and `manifest_registry`.
     extraction_opts: ExtractContractOptions = .{},
     allow_raw_exported_boundary: bool = false,
+    file_import_signatures: ?*const import_signatures_mod.FileImportSignatures = null,
     policy_sections: guard_catalog.SectionSet = .{},
     /// `env.public` names for the standalone flow checker of a contract-only session.
     env_public: []const []const u8 = &.{},
@@ -804,6 +813,7 @@ pub const ModuleAnalysisSession = struct {
             .policy_sections = opts.policy_sections,
             .source_types = source_types,
             .allow_raw_exported_boundary = opts.allow_raw_exported_boundary,
+            .file_import_signatures = opts.file_import_signatures,
             .state = .ready,
             .resolution_state = .ready,
             .contract_type_state = .ready,
@@ -1153,6 +1163,7 @@ pub const ModuleAnalysisSession = struct {
             .type_import_facts = &self.contract_facts.?,
             .policy_sections = self.policy_sections,
             .allow_raw_exported_boundary = self.allow_raw_exported_boundary,
+            .file_import_signatures = self.file_import_signatures,
         });
         if (self.resolved.?.type_checker) |*checker| try checker.ensureHealthy();
         self.resolution_state = .completed;

@@ -336,7 +336,7 @@ pub const ModuleGraph = struct {
             ),
             .missing_export => std.fmt.bufPrint(
                 buffer,
-                "Module '{s}' imports '{s}' from '{s}', but that module does not export '{s}'.",
+                "Module '{s}' imports '{s}' from '{s}', but that module does not export '{s}' as a value. Use `import type` for a type.",
                 .{ refusal.first_path, refusal.name, refusal.second_path, refusal.name },
             ),
         } catch return "Module bindings are refused.";
@@ -431,6 +431,44 @@ pub const ModuleGraph = struct {
             return std.fmt.allocPrint(arena, "{s}\x00{s}", .{ owner_path, import.imported });
         }
         return std.fmt.allocPrint(arena, "{s}\x00{s}", .{ module_path, name });
+    }
+
+    /// A file import of one module, with the module that it names.
+    pub const FileImportLink = struct {
+        /// The specifier as written in the importing module.
+        specifier: []const u8,
+        /// The name of the export.
+        imported: []const u8,
+        /// The index in `module_list` of the target module, or null when the
+        /// specifier names no module of the graph.
+        target: ?ModuleIndex,
+    };
+
+    /// Every file import of the module whose parsed IR is `view`, resolved to
+    /// the module it targets by the rule that `checkBindings` uses. A virtual
+    /// import is left out. Strings are copied into `arena`.
+    pub fn fileImportLinks(
+        self: *const ModuleGraph,
+        arena: std.mem.Allocator,
+        importing_path: []const u8,
+        view: zts_parser.IrView,
+        atoms: *atom_table_mod.AtomTable,
+    ) CheckBindingsError![]const FileImportLink {
+        const imports = try collectImports(arena, view, atoms);
+        const importing_dir = file_resolver.dirName(importing_path);
+        var links = std.ArrayList(FileImportLink).empty;
+        for (imports) |import| {
+            switch (resolver.resolve(import.specifier)) {
+                .file => {},
+                .virtual, .unknown => continue,
+            }
+            try links.append(arena, .{
+                .specifier = import.specifier,
+                .imported = import.imported,
+                .target = try self.fileImportTarget(arena, import.specifier, importing_dir),
+            });
+        }
+        return links.items;
     }
 
     /// The module that a file import names, or null for a virtual or unknown specifier.
@@ -1092,6 +1130,11 @@ test "checkBindings refuses an import that the target does not export" {
     try std.testing.expectEqualStrings("missing", refusal.name);
     try std.testing.expectEqualStrings("/app/h.ts", refusal.first_path);
     try std.testing.expectEqualStrings("/app/utils.ts", refusal.second_path);
+    var buffer: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Module '/app/h.ts' imports 'missing' from '/app/utils.ts', but that module does not export 'missing' as a value. Use `import type` for a type.",
+        graph.bindingRefusalMessage(&buffer),
+    );
 }
 
 test "checkBindings refuses an import of a binding that the target does not export" {
