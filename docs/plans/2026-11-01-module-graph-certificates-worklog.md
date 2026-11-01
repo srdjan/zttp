@@ -281,3 +281,31 @@ The documentation now states the target, the limits, and the refusals. `docs/dec
 The website states the change under "Awaiting the next release" in `static/index.html`, with the coverage limit. The site version stays 0.26.0, and nothing was deployed or pushed.
 
 Sonnet found two more false statements in `docs/roadmap.md`: `zttp serve` no longer lets the last module win, and the Result-limit exposure now applies to a single-module handler only. In review I corrected D-018, which said that no certificate property reads an exported signature. G2b reads those signatures for their types, so the correct statement is that no property depends on rule ZTS061.
+
+## G7
+
+The final gate passed at `801d1492`, from empty local and global caches, with no provider key. Every step below is an unfiltered run with its exit status read directly.
+
+| Step | Exit | Result |
+|---|---|---|
+| `zig build test` | 0 | 214 of 214 steps, 8795 of 8801 tests, 6 skipped |
+| `scripts/verify.sh` | 0 | Ran in separate sequential processes |
+| `smoke-v1` | 0 | 2 of 2 steps |
+| `test-proof-checker` | 0 | 3 of 3 steps |
+| `test-proof-checker-mutants` | 0 | 3 of 3 steps |
+| `test-proof-ratchet` | 0 | 5 of 5 steps |
+| `test-proof-ratchet-drift` | 0 | 2 of 2 steps |
+| `test-bytecode-identity` | 0 | 5 of 5 steps |
+| `zig fmt --check packages scripts` | 0 | |
+| `zig build` | 0 | |
+| `bench-check -Doptimize=ReleaseFast` | 0 | 9 benchmarks, geomean 1.00402, regression 0.00%, load 2.81 before and 2.41 after |
+
+`git diff` from the base commit to the final commit on `packages/proof-checker` is empty.
+
+Against the G0 tables, `zts check` moved 1 of 215 rows and `zts compile` moved 1 of 215 rows. Each moved row traces to a unit. `tests/corpus/check/bad/module_scope_mutation.ts` is the G1b text change. `examples/handler/handler-with-imports.ts` is the G2a warning and the G3 contract.
+
+**Single-module artifacts.** The pinned test from G4 dated only from G3, so I measured back to the base. I built each single-module handler in `examples/` with the G0 binaries at `8d62cb07` and with the final binaries, with `--no-attest`. 25 handlers built on both. Sections 1, 3, 4, and 7 (bytecode, contract, policy, and certificate) have identical SHA-256 digests in all 25. No handler changed its exit status. The other handlers under `examples/` exit nonzero on both.
+
+That result replaces the pinned test, which I removed as G4 planned. The test pinned one digest that an unrelated change to the semantics or grammar hash would move.
+
+**Limits.** These runs used Debug binaries on macOS, except `bench-check`, which used ReleaseFast. No provider call, corpus re-record, push, or deploy ran. `test-expert-app` ran offline inside `zig build test`. Unit G8 stays open, and `zttp build` stays stricter than `zttp check` until a re-record window.

@@ -1476,50 +1476,6 @@ test "a real compile produces a certificate that binds its own IR and artifact" 
     }
 }
 
-test "a single-module certificate keeps its pinned bytes" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
-        \\  if (req.method === "GET") {
-        \\    return Response.text("get");
-        \\  } else {
-        \\    return Response.text("other");
-        \\  }
-        \\}
-    ;
-    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
-        .emit_verify = true,
-        .emit_contract = true,
-        .emit_proof_evidence = true,
-    });
-    defer compiled.deinit(allocator);
-    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
-    const contract = compiled.contract orelse return error.TestUnexpectedResult;
-    const contract_json = try serializeContractJson(allocator, &contract);
-    defer allocator.free(contract_json);
-    const policy = zts.handler_policy.contractToRuntimePolicy(&contract, null);
-    const policy_section = try self_extract.serializePolicy(allocator, &policy);
-    defer allocator.free(policy_section);
-    var built = try proof_certificate.build(allocator, .{
-        .evidence = &evidence,
-        .properties = dischargedProperties(&contract),
-        .artifact = .{
-            .bytecode = compiled.bytecode,
-            .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
-            .contract_section = contract_json,
-            .policy_section_digest = artifact_graph.digestOf(policy_section),
-            .identity = artifact_graph.identityFromContract(&contract),
-        },
-        .contract_digest = artifact_graph.digestOf(contract_json),
-    });
-    defer built.deinit();
-    var digest: [32]u8 = undefined;
-    std.crypto.hash.sha2.Sha256.hash(built.bytes, &digest, .{});
-    const hex = std.fmt.bytesToHex(digest, .lower);
-    try std.testing.expectEqual(@as(usize, 1729), built.bytes.len);
-    try std.testing.expectEqualStrings("e4fa9860cb2ed7c4782a2ffeaa6f3ef3762768b3f2faa5a0b0270bf6baf03d1d", &hex);
-}
-
 /// A certificate built from the folded evidence of a handler with file imports,
 /// with the sections that the activation reads.
 const GraphCertificate = struct {

@@ -16,7 +16,7 @@ Release v0.26.0 was published on 2026-10-30. The release fixes plan shipped as 0
 
 Standing rule D-012 in [decisions.md](decisions.md): a model-visible change waits for one batched re-record window. The v0.26.0 window ran on 2026-10-29. The owner runs any later window.
 
-Next work: the owner selects it. No reset is active. The [module graph certificates plan](plans/2026-11-01-module-graph-certificates-plan.md) owns the open work on handlers with file imports. Units G0 to G6 are done, and unit G7 (the final gate) is next. Unit G8 (`zttp check` parity) is deferred to a re-record window that the owner opens.
+Next work: the owner selects it. No reset is active. Units G0 to G7 of the [module graph certificates plan](plans/2026-11-01-module-graph-certificates-plan.md) are done, on local `main`, and await release. Unit G8 (`zttp check` parity) is deferred to a re-record window that the owner opens.
 
 M1, M2, and M3 are complete.
 M4 is complete: T1a to T7 were delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 2 later removed both runtime products. No release date is assigned.
