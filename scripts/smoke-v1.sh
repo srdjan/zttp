@@ -138,6 +138,34 @@ imports_out=$(cd "$TMP_DIR/imports-app" && "$ZTTP" compile handler-with-imports.
 imports_want='Build refused: the compiler builds no proof certificate for a handler with file imports; the artifact would refuse to serve.'
 printf '%s\n' "$imports_out" | grep -qxF "$imports_want" || fail "compile with file imports did not name the missing certificate: $imports_out"
 
+step "negative: two modules that bind one top-level name are refused by compile and serve"
+mkdir -p "$TMP_DIR/shared-name-app"
+cat > "$TMP_DIR/shared-name-app/a.ts" <<'TS'
+function label(): string { return "a"; }
+export function fromA(): string { return label(); }
+TS
+cat > "$TMP_DIR/shared-name-app/b.ts" <<'TS'
+function label(): string { return "b"; }
+export function fromB(): string { return label(); }
+TS
+cat > "$TMP_DIR/shared-name-app/h.ts" <<'TS'
+import { fromA } from "./a.ts";
+import { fromB } from "./b.ts";
+export function handler(req: Request): Response {
+  return Response.text([fromA(), fromB()].join(""));
+}
+TS
+shared_want="Top-level name 'label' is bound in both 'a.ts' and 'b.ts'. Modules share one namespace, so rename one binding."
+shared_compile_status=0
+shared_compile_out=$(cd "$TMP_DIR/shared-name-app" && "$ZTTP" compile h.ts -o shared-bin --no-attest 2>&1 </dev/null) || shared_compile_status=$?
+[ "$shared_compile_status" -eq 1 ] || fail "compile with a shared top-level name exited $shared_compile_status, expected 1: $shared_compile_out"
+[ ! -e "$TMP_DIR/shared-name-app/shared-bin" ] || fail "refused compile with a shared top-level name wrote a binary"
+printf '%s\n' "$shared_compile_out" | grep -qxF "$shared_want" || fail "compile did not name the shared top-level name: $shared_compile_out"
+shared_serve_status=0
+shared_serve_out=$(cd "$TMP_DIR/shared-name-app" && perl -e 'alarm 60; exec @ARGV' "$ZTTP" serve h.ts -p 0 2>&1 </dev/null) || shared_serve_status=$?
+[ "$shared_serve_status" -eq 1 ] || fail "serve with a shared top-level name exited $shared_serve_status, expected 1: $shared_serve_out"
+printf '%s\n' "$shared_serve_out" | grep -qxF "$shared_want" || fail "serve did not name the shared top-level name: $shared_serve_out"
+
 step "negative: test prints each error that its summary counts"
 cat > "$BROKEN_APP_DIR/src/handler.ts" <<'TS'
 import { env } from "zttp:env";

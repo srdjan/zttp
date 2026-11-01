@@ -12,6 +12,9 @@ const resolver = @import("resolver.zig");
 const zts_parser = @import("../../parser/root.zig");
 const context = @import("../../context.zig");
 const source_frontend = @import("../../source_frontend.zig");
+const atom_table_mod = @import("../../atom_table.zig");
+const object = @import("../../object.zig");
+const known_globals = @import("zts-base").known_globals;
 
 pub const ModuleIndex = u16;
 
@@ -92,11 +95,36 @@ fn admitModule(allocator: std.mem.Allocator, source: []const u8, path: []const u
     }
 }
 
+/// Why `checkBindings` refused a graph. `name` is owned by the graph. Both paths
+/// borrow from the graph and stay as the graph holds them. `second_path` is empty
+/// unless the refusal involves two modules.
+pub const BindingRefusal = struct {
+    kind: Kind,
+    name: []const u8,
+    first_path: []const u8,
+    second_path: []const u8,
+
+    pub const Kind = enum { ambiguous, reserved, dependency_handler, missing_export };
+};
+
+pub const CheckBindingsError = error{
+    AmbiguousBinding,
+    ReservedBinding,
+    DependencyBindsHandler,
+    MissingExport,
+    OutOfMemory,
+};
+
 pub const ModuleGraph = struct {
     allocator: std.mem.Allocator,
     modules: std.StringHashMap(ModuleIndex),
     module_list: std.ArrayList(Module),
     execution_order: []ModuleIndex,
+    /// Detail of the last refusal that `checkBindings` returned.
+    binding_refusal: ?BindingRefusal = null,
+
+    /// Whether a top-level binding would overwrite a global that the runtime installs.
+    pub const isReservedName = known_globals.isRuntimeGlobal;
 
     pub fn init(allocator: std.mem.Allocator) ModuleGraph {
         return .{
@@ -116,6 +144,7 @@ pub const ModuleGraph = struct {
         if (self.execution_order.len > 0) {
             self.allocator.free(self.execution_order);
         }
+        if (self.binding_refusal) |refusal| self.allocator.free(refusal.name);
     }
 
     /// Get the number of modules (excluding the entry file)
@@ -285,6 +314,164 @@ pub const ModuleGraph = struct {
         self.execution_order = try order.toOwnedSlice(self.allocator);
     }
 
+    /// Format the last `checkBindings` refusal into `buffer`. Paths appear as the
+    /// graph holds them. The text is empty when no refusal is recorded.
+    pub fn bindingRefusalMessage(self: *const ModuleGraph, buffer: []u8) []const u8 {
+        const refusal = self.binding_refusal orelse return "";
+        const written = switch (refusal.kind) {
+            .ambiguous => std.fmt.bufPrint(
+                buffer,
+                "Top-level name '{s}' is bound in both '{s}' and '{s}'. Modules share one namespace, so rename one binding.",
+                .{ refusal.name, refusal.first_path, refusal.second_path },
+            ),
+            .reserved => std.fmt.bufPrint(
+                buffer,
+                "Top-level name '{s}' in '{s}' is a built-in global. Modules share one namespace with built-ins, so rename the binding.",
+                .{ refusal.name, refusal.first_path },
+            ),
+            .dependency_handler => std.fmt.bufPrint(
+                buffer,
+                "Dependency '{s}' binds 'handler'. Only the entry file may bind 'handler', so rename the binding.",
+                .{refusal.first_path},
+            ),
+            .missing_export => std.fmt.bufPrint(
+                buffer,
+                "Module '{s}' imports '{s}' from '{s}', but that module does not export '{s}'.",
+                .{ refusal.first_path, refusal.name, refusal.second_path, refusal.name },
+            ),
+        } catch return "Module bindings are refused.";
+        return written;
+    }
+
+    /// Refuse a graph whose modules cannot share one global namespace. The
+    /// modules of a graph run as one program: every top-level value binding
+    /// is a global that the last module loaded wins, and built-ins live in
+    /// the same namespace. Call this after `build` and before compilation. A
+    /// graph without dependencies passes. `build` never calls it, because
+    /// `packages/pi` reaches `build` and a new error there would change
+    /// model-visible output. A module that fails to parse also passes here:
+    /// compilation reports that parse error.
+    ///
+    /// Refused: two modules that bind one top-level value name, a module that
+    /// binds a built-in global, a dependency that binds `handler`, and a named
+    /// import that its target module does not export. Type declarations are
+    /// not value bindings. Import bindings that name the identical export are
+    /// one binding.
+    pub fn checkBindings(self: *ModuleGraph) CheckBindingsError!void {
+        if (self.binding_refusal) |refusal| self.allocator.free(refusal.name);
+        self.binding_refusal = null;
+        if (self.dependencyCount() == 0) return;
+
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
+        const facts = try arena.alloc(ModuleFacts, self.module_list.items.len);
+        for (facts) |*fact| fact.* = .{};
+        var owners = std.StringHashMap(Owner).init(arena);
+        const entry_index = self.execution_order[self.execution_order.len - 1];
+
+        for (self.execution_order) |module_index| {
+            const module = &self.module_list.items[module_index];
+            var atoms = atom_table_mod.AtomTable.init(self.allocator);
+            defer atoms.deinit();
+            var parser = try module.initParser(self.allocator);
+            defer parser.deinit();
+            parser.setAtomTable(&atoms);
+            _ = module.parse(&parser) catch return;
+            const view = zts_parser.IrView.fromIRStore(&parser.nodes, &parser.constants);
+
+            const imports = try collectImports(arena, view, &atoms);
+            const exports = try collectExports(arena, view, &atoms);
+            facts[module_index].exports = exports;
+
+            const importing_dir = file_resolver.dirName(module.path);
+            for (imports) |import| {
+                const target = try self.fileImportTarget(arena, import.specifier, importing_dir) orelse continue;
+                if (!facts[target].exports.contains(import.imported)) {
+                    return self.refuse(.missing_export, import.imported, module.path, self.module_list.items[target].path);
+                }
+            }
+
+            const global_scope = parser.scopes.getScope(0);
+            for (global_scope.bindings.items) |binding| {
+                const name = try arena.dupe(u8, binding.name);
+                if (known_globals.isRuntimeGlobal(name)) return self.refuse(.reserved, name, module.path, "");
+                if (module_index != entry_index and std.mem.eql(u8, name, "handler")) {
+                    return self.refuse(.dependency_handler, name, module.path, "");
+                }
+                const identity = try self.bindingIdentity(arena, module.path, name, imports, importing_dir);
+                const gop = try owners.getOrPut(name);
+                if (!gop.found_existing) {
+                    gop.value_ptr.* = .{ .identity = identity, .path = module.path };
+                } else if (!std.mem.eql(u8, gop.value_ptr.identity, identity)) {
+                    return self.refuse(.ambiguous, name, gop.value_ptr.path, module.path);
+                }
+            }
+        }
+    }
+
+    /// The identity of a top-level binding. Two bindings with the same identity
+    /// are one binding: the module that defines an export, and each module
+    /// that imports that export under its own name.
+    fn bindingIdentity(
+        self: *const ModuleGraph,
+        arena: std.mem.Allocator,
+        module_path: []const u8,
+        name: []const u8,
+        imports: []const ImportEntry,
+        importing_dir: []const u8,
+    ) CheckBindingsError![]const u8 {
+        for (imports) |import| {
+            if (!std.mem.eql(u8, import.local, name)) continue;
+            const owner_path: []const u8 = if (try self.fileImportTarget(arena, import.specifier, importing_dir)) |target|
+                self.module_list.items[target].path
+            else
+                import.specifier;
+            return std.fmt.allocPrint(arena, "{s}\x00{s}", .{ owner_path, import.imported });
+        }
+        return std.fmt.allocPrint(arena, "{s}\x00{s}", .{ module_path, name });
+    }
+
+    /// The module that a file import names, or null for a virtual or unknown specifier.
+    fn fileImportTarget(
+        self: *const ModuleGraph,
+        arena: std.mem.Allocator,
+        specifier: []const u8,
+        importing_dir: []const u8,
+    ) CheckBindingsError!?ModuleIndex {
+        const file_specifier = switch (resolver.resolve(specifier)) {
+            .file => |file| file,
+            .virtual, .unknown => return null,
+        };
+        const resolved = file_resolver.resolve(arena, file_specifier, importing_dir, null) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return null,
+        };
+        return self.modules.get(resolved);
+    }
+
+    fn refuse(
+        self: *ModuleGraph,
+        kind: BindingRefusal.Kind,
+        name: []const u8,
+        first_path: []const u8,
+        second_path: []const u8,
+    ) CheckBindingsError {
+        self.binding_refusal = .{
+            .kind = kind,
+            .name = try self.allocator.dupe(u8, name),
+            .first_path = first_path,
+            .second_path = second_path,
+        };
+        return switch (kind) {
+            .ambiguous => error.AmbiguousBinding,
+            .reserved => error.ReservedBinding,
+            .dependency_handler => error.DependencyBindsHandler,
+            .missing_export => error.MissingExport,
+        };
+    }
+
     fn dfsVisit(self: *ModuleGraph, idx: ModuleIndex, order: *std.ArrayList(ModuleIndex)) !void {
         var module = &self.module_list.items[idx];
 
@@ -303,11 +490,91 @@ pub const ModuleGraph = struct {
 };
 
 // ============================================================================
+// Binding check support
+// ============================================================================
+
+const ImportEntry = struct {
+    local: []const u8,
+    imported: []const u8,
+    specifier: []const u8,
+};
+
+const ModuleFacts = struct {
+    exports: std.StringHashMapUnmanaged(void) = .empty,
+};
+
+const Owner = struct {
+    identity: []const u8,
+    path: []const u8,
+};
+
+fn atomName(atom_index: u16, atoms: *atom_table_mod.AtomTable) ?[]const u8 {
+    const atom: object.Atom = @fromBackingInt(@intCast(atom_index));
+    if (atom.isPredefined()) return atom.toPredefinedName();
+    return atoms.getName(atom);
+}
+
+/// Every named import of a module, with strings copied into `arena`.
+fn collectImports(
+    arena: std.mem.Allocator,
+    view: zts_parser.IrView,
+    atoms: *atom_table_mod.AtomTable,
+) std.mem.Allocator.Error![]const ImportEntry {
+    var entries = std.ArrayList(ImportEntry).empty;
+    for (0..view.nodeCount()) |index| {
+        const tag = view.getTag(@intCast(index)) orelse continue;
+        if (tag != .import_decl) continue;
+        const decl = view.getImportDecl(@intCast(index)) orelse continue;
+        const specifier = view.getString(decl.module_idx) orelse continue;
+        for (0..decl.specifiers_count) |position| {
+            const spec_index = view.getListIndex(decl.specifiers_start, @intCast(position));
+            const spec = view.getImportSpec(spec_index) orelse continue;
+            const imported = atomName(spec.imported_atom, atoms) orelse continue;
+            const local = atomName(spec.local_binding.name_atom, atoms) orelse continue;
+            try entries.append(arena, .{
+                .local = try arena.dupe(u8, local),
+                .imported = try arena.dupe(u8, imported),
+                .specifier = try arena.dupe(u8, specifier),
+            });
+        }
+    }
+    return entries.items;
+}
+
+/// The names that a module exports: `export function` and `export const`.
+fn collectExports(
+    arena: std.mem.Allocator,
+    view: zts_parser.IrView,
+    atoms: *atom_table_mod.AtomTable,
+) std.mem.Allocator.Error!std.StringHashMapUnmanaged(void) {
+    var names: std.StringHashMapUnmanaged(void) = .empty;
+    for (0..view.nodeCount()) |index| {
+        const tag = view.getTag(@intCast(index)) orelse continue;
+        if (tag != .export_decl) continue;
+        const decl = view.getExportDecl(@intCast(index)) orelse continue;
+        if (decl.declaration == zts_parser.null_node) continue;
+        const declaration_tag = view.getTag(decl.declaration) orelse continue;
+        switch (declaration_tag) {
+            .function_decl, .var_decl => {},
+            else => continue,
+        }
+        const var_decl = view.getVarDecl(decl.declaration) orelse continue;
+        const name = atomName(var_decl.binding.name_atom, atoms) orelse continue;
+        try names.put(arena, try arena.dupe(u8, name), {});
+    }
+    return names;
+}
+
+// ============================================================================
 // Errors
 // ============================================================================
 
 pub const Error = error{
     CircularImport,
+    AmbiguousBinding,
+    ReservedBinding,
+    DependencyBindsHandler,
+    MissingExport,
     ImportFileNotFound,
     ImportNestingTooDeep,
     OutOfMemory,
@@ -643,4 +910,203 @@ test "graph preparation propagates native admission allocation failures" {
     }
     try std.testing.expectEqual(parse_end - parse_start, failures);
     try std.testing.expect(failures > 0);
+}
+
+// ============================================================================
+// Binding checks
+// ============================================================================
+
+fn bindingsReadFile(allocator: std.mem.Allocator, path: []const u8) ReadFileError![]const u8 {
+    const source: []const u8 = if (std.mem.endsWith(u8, path, "/a.ts"))
+        "function label(): string { return \"a\"; }\nexport function fromA(): string { return label(); }\n"
+    else if (std.mem.endsWith(u8, path, "/b.ts"))
+        "function label(): string { return \"b\"; }\nexport function fromB(): string { return label(); }\n"
+    else if (std.mem.endsWith(u8, path, "/utils.ts"))
+        "export function greet(name: string): string { return name; }\nfunction hidden(): string { return \"h\"; }\n"
+    else if (std.mem.endsWith(u8, path, "/user.ts"))
+        "import { greet } from \"./utils.ts\";\nexport function hello(): string { return greet(\"a\"); }\n"
+    else if (std.mem.endsWith(u8, path, "/types_a.ts"))
+        "structural Box = { v: string };\nexport function fromTypesA(): string { return \"a\"; }\n"
+    else if (std.mem.endsWith(u8, path, "/types_b.ts"))
+        "structural Box = { v: string };\nexport function fromTypesB(): string { return \"b\"; }\n"
+    else if (std.mem.endsWith(u8, path, "/env_user.ts"))
+        "import { env } from \"zttp:env\";\nexport function readA(): string { return env(\"A\") ?? \"\"; }\n"
+    else if (std.mem.endsWith(u8, path, "/other_env.ts"))
+        "import { env } from \"zttp:other\";\nexport function readB(): string { return env(\"B\"); }\n"
+    else if (std.mem.endsWith(u8, path, "/res.ts"))
+        "function Response(): string { return \"x\"; }\nexport function fromRes(): string { return Response(); }\n"
+    else if (std.mem.endsWith(u8, path, "/dep_handler.ts"))
+        "export function handler(req: Request): Response { return Response.text(\"d\"); }\n"
+    else
+        return error.FileNotFound;
+
+    return allocator.dupe(u8, source) catch return error.OutOfMemory;
+}
+
+fn buildBindingsGraph(graph: *ModuleGraph, entry_source: []const u8) !void {
+    try graph.build("/app/h.ts", entry_source, bindingsReadFile);
+}
+
+test "checkBindings refuses two modules that bind one top-level name" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try buildBindingsGraph(&graph, "import { fromA } from \"./a.ts\";\nimport { fromB } from \"./b.ts\";\nexport function handler(req: Request): Response { return Response.text(fromA()); }\n");
+
+    try std.testing.expectError(error.AmbiguousBinding, graph.checkBindings());
+    const refusal = graph.binding_refusal.?;
+    try std.testing.expectEqual(BindingRefusal.Kind.ambiguous, refusal.kind);
+    try std.testing.expectEqualStrings("label", refusal.name);
+    try std.testing.expectEqualStrings("/app/a.ts", refusal.first_path);
+    try std.testing.expectEqualStrings("/app/b.ts", refusal.second_path);
+}
+
+test "checkBindings words the ambiguous binding refusal" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try buildBindingsGraph(&graph, "import { fromA } from \"./a.ts\";\nimport { fromB } from \"./b.ts\";\nexport function handler(req: Request): Response { return Response.text(fromA()); }\n");
+
+    try std.testing.expectError(error.AmbiguousBinding, graph.checkBindings());
+    var buffer: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Top-level name 'label' is bound in both '/app/a.ts' and '/app/b.ts'. Modules share one namespace, so rename one binding.",
+        graph.bindingRefusalMessage(&buffer),
+    );
+}
+
+test "checkBindings refuses an import alias that another module binds" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try buildBindingsGraph(&graph, "import { greet as label } from \"./utils.ts\";\nimport { fromA } from \"./a.ts\";\nexport function handler(req: Request): Response { return Response.text(label(\"x\")); }\n");
+
+    try std.testing.expectError(error.AmbiguousBinding, graph.checkBindings());
+    const refusal = graph.binding_refusal.?;
+    try std.testing.expectEqualStrings("label", refusal.name);
+    try std.testing.expectEqualStrings("/app/a.ts", refusal.first_path);
+    try std.testing.expectEqualStrings("/app/h.ts", refusal.second_path);
+}
+
+test "checkBindings accepts two modules that import the identical export" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try buildBindingsGraph(&graph, "import { greet } from \"./utils.ts\";\nimport { hello } from \"./user.ts\";\nexport function handler(req: Request): Response { return Response.text(greet(hello())); }\n");
+
+    try graph.checkBindings();
+    try std.testing.expect(graph.binding_refusal == null);
+}
+
+test "checkBindings accepts an import of the export that a module binds" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try buildBindingsGraph(&graph, "import { greet } from \"./utils.ts\";\nexport function handler(req: Request): Response { return Response.text(greet(\"x\")); }\n");
+
+    try graph.checkBindings();
+    try std.testing.expect(graph.binding_refusal == null);
+}
+
+test "checkBindings ignores type declarations of one name" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try buildBindingsGraph(&graph, "import { fromTypesA } from \"./types_a.ts\";\nimport { fromTypesB } from \"./types_b.ts\";\nexport function handler(req: Request): Response { return Response.text(fromTypesA()); }\n");
+
+    try graph.checkBindings();
+    try std.testing.expect(graph.binding_refusal == null);
+}
+
+test "checkBindings accepts one virtual export imported by two modules" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try buildBindingsGraph(&graph, "import { env } from \"zttp:env\";\nimport { readA } from \"./env_user.ts\";\nexport function handler(req: Request): Response { return Response.text(readA()); }\n");
+
+    try graph.checkBindings();
+    try std.testing.expect(graph.binding_refusal == null);
+}
+
+test "checkBindings refuses one local name for exports of two virtual modules" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try buildBindingsGraph(&graph, "import { env } from \"zttp:env\";\nimport { readB } from \"./other_env.ts\";\nexport function handler(req: Request): Response { return Response.text(readB()); }\n");
+
+    try std.testing.expectError(error.AmbiguousBinding, graph.checkBindings());
+    const refusal = graph.binding_refusal.?;
+    try std.testing.expectEqualStrings("env", refusal.name);
+    try std.testing.expectEqualStrings("/app/other_env.ts", refusal.first_path);
+    try std.testing.expectEqualStrings("/app/h.ts", refusal.second_path);
+}
+
+test "checkBindings refuses a dependency that binds a built-in global" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try buildBindingsGraph(&graph, "import { fromRes } from \"./res.ts\";\nexport function handler(req: Request): Response { return Response.text(fromRes()); }\n");
+
+    try std.testing.expectError(error.ReservedBinding, graph.checkBindings());
+    const refusal = graph.binding_refusal.?;
+    try std.testing.expectEqual(BindingRefusal.Kind.reserved, refusal.kind);
+    try std.testing.expectEqualStrings("Response", refusal.name);
+    try std.testing.expectEqualStrings("/app/res.ts", refusal.first_path);
+}
+
+test "checkBindings refuses an import alias that names a runtime global" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try buildBindingsGraph(&graph, "import { greet as console } from \"./utils.ts\";\nexport function handler(req: Request): Response { return Response.text(console(\"x\")); }\n");
+
+    try std.testing.expectError(error.ReservedBinding, graph.checkBindings());
+    const refusal = graph.binding_refusal.?;
+    try std.testing.expectEqualStrings("console", refusal.name);
+    try std.testing.expectEqualStrings("/app/h.ts", refusal.first_path);
+}
+
+test "checkBindings words the reserved binding refusal" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try buildBindingsGraph(&graph, "import { fromRes } from \"./res.ts\";\nexport function handler(req: Request): Response { return Response.text(fromRes()); }\n");
+
+    try std.testing.expectError(error.ReservedBinding, graph.checkBindings());
+    var buffer: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Top-level name 'Response' in '/app/res.ts' is a built-in global. Modules share one namespace with built-ins, so rename the binding.",
+        graph.bindingRefusalMessage(&buffer),
+    );
+}
+
+test "checkBindings refuses a dependency that binds handler" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try buildBindingsGraph(&graph, "import { handler as inner } from \"./dep_handler.ts\";\nexport function handler(req: Request): Response { return inner(req); }\n");
+
+    try std.testing.expectError(error.DependencyBindsHandler, graph.checkBindings());
+    const refusal = graph.binding_refusal.?;
+    try std.testing.expectEqual(BindingRefusal.Kind.dependency_handler, refusal.kind);
+    try std.testing.expectEqualStrings("handler", refusal.name);
+    try std.testing.expectEqualStrings("/app/dep_handler.ts", refusal.first_path);
+}
+
+test "checkBindings refuses an import that the target does not export" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try buildBindingsGraph(&graph, "import { missing } from \"./utils.ts\";\nexport function handler(req: Request): Response { return Response.text(missing()); }\n");
+
+    try std.testing.expectError(error.MissingExport, graph.checkBindings());
+    const refusal = graph.binding_refusal.?;
+    try std.testing.expectEqual(BindingRefusal.Kind.missing_export, refusal.kind);
+    try std.testing.expectEqualStrings("missing", refusal.name);
+    try std.testing.expectEqualStrings("/app/h.ts", refusal.first_path);
+    try std.testing.expectEqualStrings("/app/utils.ts", refusal.second_path);
+}
+
+test "checkBindings refuses an import of a binding that the target does not export" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try buildBindingsGraph(&graph, "import { hidden } from \"./utils.ts\";\nexport function handler(req: Request): Response { return Response.text(hidden()); }\n");
+
+    try std.testing.expectError(error.MissingExport, graph.checkBindings());
+    try std.testing.expectEqualStrings("hidden", graph.binding_refusal.?.name);
+}
+
+test "checkBindings accepts a graph without dependencies" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try buildBindingsGraph(&graph, "export function handler(req: Request): Response { return Response.text(\"x\"); }\n");
+
+    try graph.checkBindings();
 }

@@ -1483,6 +1483,11 @@ fn extractMultiModuleContractWithEntry(
     } else {
         try graph.build(entry_filename, entry_source, read_file);
     }
+    graph.checkBindings() catch |err| {
+        var message_buffer: [1024]u8 = undefined;
+        if (!@import("builtin").is_test) std.debug.print("{s}\n", .{graph.bindingRefusalMessage(&message_buffer)});
+        return err;
+    };
 
     var strings = string_mod.StringTable.init(allocator);
     defer strings.deinit();

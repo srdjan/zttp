@@ -509,6 +509,29 @@ test {
     _ = @import("incident_log.zig");
 }
 
+test "every runtime global is reserved from a module top-level binding" {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const rt = try HandlerInstance.init(allocator, .{});
+    defer rt.deinit();
+
+    const global_obj = rt.ctx.global_obj orelse return error.TestUnexpectedResult;
+    const pool = rt.ctx.hidden_class_pool orelse return error.TestUnexpectedResult;
+    const keys = try global_obj.getOwnEnumerableKeys(allocator, pool);
+    try std.testing.expect(keys.len >= 30);
+    for (keys) |key| {
+        const name = (if (key.isPredefined()) key.toPredefinedName() else rt.ctx.atoms.getName(key)) orelse
+            return error.TestUnexpectedResult;
+        // A name such as `zttp:env#env` is no identifier, so no module can bind it.
+        if (std.mem.indexOfAny(u8, name, "%:#") != null) continue;
+        if (!zq.modules.ModuleGraph.isReservedName(name)) {
+            std.debug.print("runtime global has no reserved row: {s}\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 test "HandlerInstance creation" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();

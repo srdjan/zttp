@@ -852,6 +852,12 @@ fn compileMultiModule(
         return err;
     };
 
+    graph.checkBindings() catch |err| {
+        var message_buffer: [1024]u8 = undefined;
+        if (!builtin.is_test) debugPrint("{s}\n", .{graph.bindingRefusalMessage(&message_buffer)});
+        return err;
+    };
+
     if (!builtin.is_test) debugPrint("Module graph: {d} modules ({d} dependencies)\n", .{
         graph.module_list.items.len,
         graph.dependencyCount(),

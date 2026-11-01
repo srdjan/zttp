@@ -275,6 +275,9 @@ packages/zts/src/path_generator.zig trailingLimitValue catch-value
 # The cleanup block frees the export effects that the failed list append did
 # not take, and then returns the error. The multi-module extraction fails.
 packages/zts/src/pipeline.zig extractMultiModuleContractWithEntry catch-block
+# The binding refusal prints its detail and returns the same error, so no
+# contract exists for that graph.
+packages/zts/src/pipeline.zig extractMultiModuleContractWithEntry catch-block@2
 
 # Failure to build effect facts is cached as `.unavailable`. The path generator
 # reads `.unavailable` as "reaches recursion", and that blocks fault_covered.

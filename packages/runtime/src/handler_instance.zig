@@ -705,6 +705,12 @@ pub const HandlerInstance = struct {
             return err;
         };
 
+        graph.checkBindings() catch |err| {
+            var message_buffer: [1024]u8 = undefined;
+            std.log.err("{s}", .{graph.bindingRefusalMessage(&message_buffer)});
+            return err;
+        };
+
         if (graph.dependencyCount() == 0) {
             // No actual file dependencies found; run entry normally
             // This shouldn't happen since resolveModuleImports said there were file imports,

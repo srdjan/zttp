@@ -71,4 +71,5 @@ test {
 // analyze on its own, so its test blocks go uncollected without this anchor.
 test {
     _ = @import("modules/internal/compiler.zig");
+    _ = @import("modules/internal/module_graph.zig");
 }

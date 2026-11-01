@@ -37,6 +37,37 @@ pub const names = [_][]const u8{
     "requestText",
 };
 
+/// Globals that the runtime installs and `names` omits. The strict checker needs
+/// only the names a handler may call. A module graph refuses every installed
+/// name, because a top-level binding writes to the same global object. A name
+/// missing here lets a dependency replace that global for every module. The
+/// census in `packages/runtime/src/zruntime_tests.zig` fails on a missing name.
+pub const runtime_only_names = [_][]const u8{
+    "Error",
+    "Fragment",
+    "RangeError",
+    "ReferenceError",
+    "Result",
+    "SyntaxError",
+    "TypeError",
+    "_processRequest",
+    "console",
+    "fetchSync",
+    "httpRequest",
+    "isFinite",
+    "isNaN",
+    "performance",
+};
+
+/// Whether the runtime installs a global under this name.
+pub fn isRuntimeGlobal(name: []const u8) bool {
+    if (isKnownGlobalFunction(name)) return true;
+    for (runtime_only_names) |candidate| {
+        if (std.mem.eql(u8, name, candidate)) return true;
+    }
+    return false;
+}
+
 /// Global member reads whose result differs between runs.
 ///
 /// Same reasoning as `names` above, and the same cost for a drifted copy. This

@@ -96,3 +96,21 @@ The entry-only certificate spike set `cg.witness` on the entry module in `compil
 Status: complete on 2026-11-01 at `b050ccab`.
 
 From an empty cache and with no provider key, `zig build test` exited 0: 214 of 214 steps, 8469 of 8475 tests, 6 skipped. `zig build` exited 0. The digest tables match `bf19a10a`: `zts check` and `zts compile` each moved 0 of 215 rows. Table hashes, first 16 hex digits: check `f3f96aea53920149`, compile `ef6ae4c00207df54`, surface `ce54095059001b3b`. The disk had 14 GiB free.
+
+## G1
+
+`ModuleGraph.checkBindings` refuses an ambiguous top-level binding, a reserved name, a dependency that binds `handler`, and a missing export. `compileMultiModule`, `extractMultiModuleContractWithEntry`, and the runtime source load path call it. `build`, `discoverModulePaths`, and `zttp check` do not.
+
+Sonnet implemented the unit, and I reviewed the diff. The red run failed 10 of 24 tests against a stub, for example "expected error.AmbiguousBinding, found void".
+
+My review added three items that the plan did not name. The list of runtime-only names moved to `packages/zts/src/known_globals.zig`, and a census in `packages/runtime/src/zruntime_tests.zig` iterates every installed global. Removing the `console` row failed the census, so the census kills that mutant. The census skips a name with `%`, `:`, or `#`, because no module can bind such a name. The `serve` smoke step has a 60-second alarm. A 20-second alarm on a direct probe fired once while `zig build test` loaded the host, so I did not use a shorter value.
+
+`packages/zts/src/engine_root.zig` gained one line, outside the plan's file list. The existing module graph tests were never collected, so no suite ran them. They run now.
+
+The gate found one miss of mine: the `pipeline.zig` catch needed a row in `scripts/proof-swallow.allow`. It returns the same error after it prints the message.
+
+Results at the G1 tree, each from an unfiltered run: `zig build test` 214 of 214 steps, `test-zruntime` 274 of 275 tests with 1 skipped, and `test-cli`, `test-bytecode-identity`, `smoke-v1`, `test-module-boundary`, `test-expert-app`, `test-proof-swallow`, and `zig fmt --check packages scripts` exit 0. Against the G0 tables, `zts check` moved 0 of 215 rows, `zts compile` moved 0 of 215 rows, and the command surface moved 0 of 38 rows.
+
+Probes through `zttp compile` and `zttp serve` exit 1 with the identifier and files for eight cases: `label`, `helper`, a `const` collision, a `let` collision, a dependency `const Response`, a dependency `handler`, a missing export, and an alias whose local name collides. `examples/handler/handler-with-imports.ts` serves 200. The corpus case `sibling-helper-holes` loads and serves its own 503 body `{"error":"unconfigured"}`.
+
+**Correction to the plan for G1b.** The plan calls Checks 6 and 7 "the two state checks". In `packages/zts/src/handler_verifier.zig`, Check 6 is optional checking and only Check 7 is state isolation. A probe at `8d62cb07` read an optional in a helper through `env`, and `zts check` reported ZTS309 from another path. Check 6 therefore has no helper gap to close, and G1b changes Check 7 only.
