@@ -462,7 +462,7 @@ I added no unit test through `authCommand`, because `printAuthHelp` writes to st
 
 ## L9
 
-Status: complete, with one open item: `bench-check` has not passed on a quiet host at this commit.
+Status: complete. `bench-check` missed at this commit under host load, and it passed at `5329a60b` in reset Phase 11.
 
 The first L9 gate stopped during its cold `zig build test`, at about 12:24 on 2026-10-31, with no `Build Summary` and no exit status. Probable: the session that started it ended. That partial run is not evidence.
 
@@ -519,3 +519,36 @@ I then compared L9 with L6, the last commit that passed on a quiet host: exit 0 
 | L6 against L9 | +0.16% | +0.82% | `intArithmetic` -1.02% |
 
 The difference is inside the noise that this load allows. Since L6, the changed engine source is the contract files and the CLI files, and no interpreter file changed. Reset Phase 11 runs `bench-check` again, if the host is quiet. The stored baseline stays unchanged.
+
+Reset Phase 11 ran the same command at `5329a60b` on 2026-10-31: exit 0 at load 2.2 to 3.2, with geomean 1.00279 and regression 0.00%. So host load is the confirmed cause of the L9 miss.
+
+## Decision 14 measurement
+
+Status: complete on 2026-10-31 at `5329a60b`, for a single-module handler. The owner selected this measurement in Decision 14, and the owner decides whether a change follows.
+
+Result: the all-zero `artifactSha256` lost no tamper detection in these cases. Each of the 18 edits stopped at boot with exit 1 and served no request. 17 stopped at another check. The one exception needed a hash that I stamped by hand.
+
+Method: I built `examples/handler/handler.ts` with `zttp compile`, once signed and once with `--no-attest`, in a scratch directory with its own `HOME`. A scratch script edited a copy of each binary in place. It recomputed the CRC-32 of the payload unless the row says otherwise, and I signed each copy ad hoc again. The two unedited copies served HTTP 200 with `{"message":"Hello, World",...}`.
+
+The bytecode edit changes the string `Hello, ` to `Hullo, `. The contract edit sets one `dynamic` flag to true. Each policy edit flips one bit of a byte that still parses.
+
+| Edit | Signed binary stops at | Unsigned binary stops at |
+|---|---|---|
+| Bytecode, with the old CRC-32 | Payload checksum | Payload checksum |
+| Bytecode | Attestation: the executable graph does not match the signed root | Proof acceptance: `artifact_binding`, `graph_member_digest_mismatch` |
+| Bytecode, attestation removed | Proof acceptance: `artifact_binding`, `graph_member_digest_mismatch` | Not applicable |
+| Bytecode, certificate removed | Attestation: the executable graph does not match the signed root | Proof acceptance: `decode`, `missing_required_section` |
+| Bytecode, attestation and certificate removed | Proof acceptance: `decode`, `missing_required_section` | Not applicable |
+| Certificate removed, no other edit | Not run | Proof acceptance: `decode`, `missing_required_section` |
+| Contract | Attestation: the executable graph does not match the signed root | Proof acceptance: `artifact_binding`, `graph_member_digest_mismatch` |
+| Policy, first allow-list byte | Attestation: the runtime policy does not match the signed claim | Proof acceptance: `artifact_binding`, `graph_member_digest_mismatch` |
+| Policy, egress scope byte | Attestation: the runtime policy does not match the signed claim | Proof acceptance: `artifact_binding`, `graph_member_digest_mismatch` |
+| Bytecode, hash of the original bytecode stamped in the contract | Not run | `verifyArtifactHash`: the bytecode does not match the contract artifact hash |
+| Bytecode, hash of the edited bytecode stamped in the contract | Not run | Proof acceptance: `artifact_binding`, `graph_member_digest_mismatch` |
+| Correct hash stamped, no other edit | Not run | Proof acceptance: `artifact_binding`, `graph_member_digest_mismatch` |
+
+The last three rows show what a stamped hash would add. A hash in the payload catches an edit only if the edit leaves the hash alone. When the edit also replaces the hash, `verifyArtifactHash` passes, and proof acceptance still refuses.
+
+Limits: these are Debug binaries from `zig build`, on macOS, with one handler. Each case is an in-place edit. A person who can run `zttp compile` can make a new valid binary, and no check inside that file can detect it. That last statement is an inference, not a measurement.
+
+Dependency bytecode is not measured. `zttp compile` refuses `examples/handler/handler-with-imports.ts` with "the serialized contract fails validation", at `5329a60b` and at the legacy-removal base `03318b5a`, so no multi-module binary exists to edit. `zts compile` writes that contract with `capabilityHash`, `policyHash`, `coreGrammarHash`, and `semanticsHash` all-zero, because `buildMultiModuleContract` does not set them. A scratch patch that stamped only the two identity hashes did not clear the refusal. `docs/roadmap.md` lists the defect.

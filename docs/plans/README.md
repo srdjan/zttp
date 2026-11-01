@@ -8,7 +8,7 @@ index when a plan starts, closes, or moves to the archive.
 |---|---|---|
 | [Reset implementation, 2026-10-30](2026-10-30-reset-implementation-plan.md) | Active authority for the 2026-10-30 reset; findings, target design, phases, and owner decisions | Owner chose the recommended option for Decisions 1 to 6 on 2026-10-30 |
 | [Reset worklog, 2026-10-30](2026-10-30-reset-worklog.md) | Execution record, commands, exit statuses, and deviations for the 2026-10-30 reset | Records the owner decisions of the 2026-10-30 reset plan |
-| [Legacy removal, 2026-10-30](2026-10-30-legacy-removal-plan.md) | Active authority for the removal of legacy code; verdict ledger, phases, and owner decisions. It takes over reset units 9e and 9f | Owner chose the recommended option for Decisions 1 to 13 on 2026-10-30 |
+| [Legacy removal, 2026-10-30](2026-10-30-legacy-removal-plan.md) | Complete through L9, 2026-10-31; no longer an authority; verdict ledger, phases, and owner decisions. It took over reset units 9e and 9f | Owner chose the recommended option for Decisions 1 to 13 on 2026-10-30 |
 | [Legacy removal worklog, 2026-10-30](2026-10-30-legacy-removal-worklog.md) | Execution record, commands, exit statuses, and deviations for the legacy removal | Records the owner decisions of the legacy removal plan |
 | [v0.26.0: proof trust](2026-10-27-v0.26.0-plan.md) | Complete; v0.26.0 published 2026-10-30; revision 2 after the audit re-check and one Fable round; execution record in the same file | Owner chose 1(a), 2(a), 3(a) and 4(a) to 8(a) with "as recommended" on 2026-10-27 |
 | [v0.26.0 C2 design](2026-10-28-v0.26.0-c2-design.md) | Design for C2a, C2b, R3, and C2c: the consumer re-derives `results_checked` | Owner chose 13(a) and 14(a) on 2026-10-28 |

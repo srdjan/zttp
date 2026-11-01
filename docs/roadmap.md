@@ -108,10 +108,19 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
   predicate on an arrow function reports no ZTS211, while the same predicate on
   a function declaration does. A predicate that names a different parameter,
   such as `(y: unknown): x is string`, reports no error.
+- `zttp compile` refuses a multi-module handler, such as
+  `examples/handler/handler-with-imports.ts`, with "the serialized contract
+  fails validation". `buildMultiModuleContract` leaves `capabilityHash`,
+  `policyHash`, `coreGrammarHash`, and `semanticsHash` all-zero. Measured on
+  2026-10-31, at `5329a60b` and at the legacy-removal base `03318b5a`. A scratch
+  patch that stamped only the two identity hashes did not clear the refusal.
 - A binary from `zttp compile` holds an all-zero `artifactSha256`, so
   `verifyArtifactHash` skips that binary. Only `zts compile` stamps the hash.
-  The effect on tamper detection needs measurement, because
-  `proof_activation.zig` rebuilds the artifact graph at boot.
+  On 2026-10-31, each of 18 in-place edits of a single-module binary stopped at
+  boot, and 17 stopped without that hash check. Dependency bytecode is not
+  measured, because of the refusal above. The
+  [measurement](plans/2026-10-30-legacy-removal-worklog.md#decision-14-measurement)
+  states its limits. The owner decides whether a change follows.
 
 ## Runtime And Product Work
 
