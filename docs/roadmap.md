@@ -9,15 +9,14 @@ work from reference designs. Product proposals (`pre-rebase:docs/zttp-next/READM
 
 ## Milestones
 
-The [2026-10-30 reset plan](plans/2026-10-30-reset-implementation-plan.md) is the active reset authority.
-The [2026-10-30 reset worklog](plans/2026-10-30-reset-worklog.md) records its execution, commands, and exit statuses.
+The 2026-10-30 reset closed on 2026-10-31. Its [plan](plans/2026-10-30-reset-implementation-plan.md) and [worklog](plans/2026-10-30-reset-worklog.md) are records, not an authority.
 The 2026-10-25 reset is complete through R13 (2026-10-25). Its [plan](plans/2026-10-25-reset-implementation-plan.md) and [worklog](plans/2026-10-25-reset-worklog.md) are records, not an authority.
 The [2026-10-14 reset plan](plans/2026-10-14-reset-implementation-plan.md) is also complete (U1 to U20) and is not an authority.
 Release v0.26.0 was published on 2026-10-30. The release fixes plan shipped as 0.25.0.
 
 Standing rule D-012 in [decisions.md](decisions.md): a model-visible change waits for one batched re-record window. The v0.26.0 window ran on 2026-10-29. The owner runs any later window.
 
-Next work: the 2026-10-30 reset.
+Next work: the owner selects it. No reset is active. The first open defect is the multi-module build refusal under "Current Limitations".
 
 M1, M2, and M3 are complete.
 M4 is complete: T1a to T7 were delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 2 later removed both runtime products. No release date is assigned.
@@ -117,7 +116,7 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
 - A binary from `zttp compile` holds an all-zero `artifactSha256`, so
   `verifyArtifactHash` skips that binary. Only `zts compile` stamps the hash.
   On 2026-10-31, each of 18 in-place edits of a single-module binary stopped at
-  boot, and 17 stopped without that hash check. Dependency bytecode is not
+  boot, and 17 stopped at another check. Dependency bytecode is not
   measured, because of the refusal above. The
   [measurement](plans/2026-10-30-legacy-removal-worklog.md#decision-14-measurement)
   states its limits. The owner decides whether a change follows.
@@ -215,9 +214,7 @@ or generic-instantiation case. This is an investigation, not a confirmed bypass.
 
 ## Reset And Simplification
 
-The [2026-10-30 reset plan](plans/2026-10-30-reset-implementation-plan.md) is the active reset authority.
-The [2026-10-30 reset worklog](plans/2026-10-30-reset-worklog.md) records its execution.
-Earlier reset work is complete. Each plan below is a record of its own work, not a second authority.
+No reset is active. Each plan below is a record of its own work, not an authority.
 
 - Plan 005 Phase 1 ([plan](plans/2026-10-11-feature-removal-phase-1.md)), 2026-10-12. It removed Studio, the demo and proof quest, the edge runtime, the AOT native-handler path, the WASM playground, the Claude and OpenAI providers, the SMT layer, RPC mode, the receipt writers for performance and equivalence, and the provable-reach tooling. Groups G1 to G15 changed no model-visible input. The policy, module registry, and spec hashes equal their baselines. Studio and edge are not part of "Supported Now".
 - Plan 005 Phase 2 ([plan](plans/2026-10-12-1109-refactor-feature-removal-phase-two-plan.md)), 2026-10-12. It removed runtime tool routes, agent turns, application invariants, and consumer declarations. New artifacts use payload format 7 and certificate schema 5, and the reader refuses the previous formats.
@@ -227,6 +224,7 @@ Earlier reset work is complete. Each plan below is a record of its own work, not
 - Reset of 2026-10-14 ([plan](plans/2026-10-14-reset-implementation-plan.md), [worklog](plans/2026-10-15-reset-worklog.md)). U1 to U20 are complete. The unresolved advisory benchmark result is in the worklog.
 - Reset of 2026-10-25 ([plan](plans/2026-10-25-reset-implementation-plan.md), [worklog](plans/2026-10-25-reset-worklog.md)). Complete through R13.
 - Legacy removal of 2026-10-30 ([plan](plans/2026-10-30-legacy-removal-plan.md), [worklog](plans/2026-10-30-legacy-removal-worklog.md)). Complete through L9. It took over reset units 9e and 9f. The next release republishes `docs/convergence.json` and `docs/coverage.json`, which hold the earlier `semanticsHash`.
+- Reset of 2026-10-30 ([plan](plans/2026-10-30-reset-implementation-plan.md), [worklog](plans/2026-10-30-reset-worklog.md)). Closed on 2026-10-31. Unit 9d stays deferred for a re-record window, and unit 9g did not run.
 
 The shared import and binding index shipped. The old parser-deletion estimate is obsolete.
 The orchestration move stays declined: no selected consumer needs another `LoweredModule` phase.

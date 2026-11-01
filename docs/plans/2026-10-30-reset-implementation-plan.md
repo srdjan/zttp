@@ -7,8 +7,8 @@ It owns the findings review, the target design, the phase order, the verificatio
 The worklog `docs/plans/2026-10-30-reset-worklog.md` records execution and evidence. Phase 0 creates that worklog.
 Execution evidence goes into the worklog, not into this document.
 
-Status: revision 3, not approved. No phase has started. The section "Validation record" states what each review covered.
-Owner approval of Decision 1 makes this document the active reset authority. Phase 1 then updates the roadmap and the plan index.
+Status: revision 3, approved by the owner on 2026-10-30, and closed on 2026-10-31. The worklog records each phase and the final gate. The section "Validation record" states what each review covered.
+This document is now the record of that reset, not an active authority.
 The [2026-10-25 reset plan](2026-10-25-reset-implementation-plan.md) stays the record of its completed phases R0 to R13.
 This plan does not repeat a finished item from that plan.
 

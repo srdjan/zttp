@@ -259,3 +259,38 @@ Text that moved:
 | Gate floors | What a porous gate is, and the one-edit method | `scripts/AGENTS.md` |
 | Gate floors | An open vocabulary gate names its threat, with one solution link. The root keeps the rule | `scripts/AGENTS.md` |
 | Gate floors | The aggregate refuses `-Dtest-filter`, and a suite with an empty filter fails | `scripts/AGENTS.md` |
+
+## Phase 11
+
+Status: complete at `5329a60b` on 2026-10-31. The reset is closed.
+
+The gates ran from empty local caches, in the scrubbed environment:
+
+| Check | Result |
+|---|---|
+| `zig build test` | Exit 0. 8469 of 8475 tests pass, with 6 skipped, on 214 of 214 steps. The skip count equals Phase 0 |
+| `bash scripts/verify.sh` | Exit 0 in 1,172 seconds |
+| `zig build bench-check -Doptimize=ReleaseFast` | Exit 0 at load 2.2 to 3.2, with geomean 1.00279 and regression 0.00%. This run used a warm cache |
+| `zts check` digests | 0 of 215 rows moved |
+| `zts compile` digests | 97 of 215 rows moved, and no exit status moved |
+| Surface digests | 6 of 38 rows moved, and no exit status moved. The table is identical to the L9 table |
+
+The Phase 0 count was 8492 of 8498, so the net change is 23 fewer tests. I did not reconcile that count test by test.
+
+The plan asks for each difference to trace to a class B unit. The binary at the legacy-removal base `03318b5a` gives the Phase 0 check and compile tables exactly. So no reset unit moved these rows, and each move comes from a class B unit of the legacy removal:
+
+| Rows | Moved at | Change |
+|---|---|---|
+| 94 compile rows | L6 | `semanticsHash` in `contract.json` |
+| 3 compile rows | L6 and L7c | `semanticsHash`, and the removal of the scalar response fields |
+| `zts spec-check --help`, `zts spec-hash --help`, `zts spec-render --help` | L6 | The semantics hash and the node census |
+| `zttp proofs --help` | L8a | `--no-sign` is gone |
+| `zttp-runtime --help`, `zttp expert --help` | Reset 9a | The text corrections of that unit |
+
+I compared the output of the base binary and the final binary for each of the 97 compile rows. That diff has 829 changed lines. They are the `semanticsHash` lines, the scalar response lines, and path lines that name my two scratch directories.
+
+One exit-0 compile row did not move: `examples/handler/handler-with-imports.ts`. Its contract holds an all-zero `semanticsHash` at both commits, so L6 could not move it. That row exposed an older defect: `zttp compile` refuses a multi-module handler. `docs/roadmap.md` lists the defect, and the legacy removal worklog gives the evidence.
+
+`surface.sh` exited 0 against `after-L6`, because L8a replaced that baseline. `digest.sh` exited 1 at its `cmp`, as expected with moved rows, and each assertion before the `cmp` passed.
+
+Evidence republish is not part of this phase. The next release runs `release-provenance`. Unit 9d stays deferred for a re-record window. The owner pushes the four archive tags, as Decision 6 selects.

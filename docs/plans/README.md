@@ -6,7 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [Reset implementation, 2026-10-30](2026-10-30-reset-implementation-plan.md) | Active authority for the 2026-10-30 reset; findings, target design, phases, and owner decisions | Owner chose the recommended option for Decisions 1 to 6 on 2026-10-30 |
+| [Reset implementation, 2026-10-30](2026-10-30-reset-implementation-plan.md) | Closed 2026-10-31; no longer the reset authority; findings, target design, phases, and owner decisions | Owner chose the recommended option for Decisions 1 to 6 on 2026-10-30 |
 | [Reset worklog, 2026-10-30](2026-10-30-reset-worklog.md) | Execution record, commands, exit statuses, and deviations for the 2026-10-30 reset | Records the owner decisions of the 2026-10-30 reset plan |
 | [Legacy removal, 2026-10-30](2026-10-30-legacy-removal-plan.md) | Complete through L9, 2026-10-31; no longer an authority; verdict ledger, phases, and owner decisions. It took over reset units 9e and 9f | Owner chose the recommended option for Decisions 1 to 13 on 2026-10-30 |
 | [Legacy removal worklog, 2026-10-30](2026-10-30-legacy-removal-worklog.md) | Execution record, commands, exit statuses, and deviations for the legacy removal | Records the owner decisions of the legacy removal plan |
@@ -92,7 +92,7 @@ Pruning round 2 (decision 5A) deleted 15 completed or superseded plans and workl
 Each stays readable at the local `pre-round-2-archive` tag, for example
 `pre-round-2-archive:docs/plans/2026-10-11-feature-removal-worklog.md`. The tag marks the commit before the deletion.
 The round 2 worklog (`pre-reset-archive-2026-10-25:docs/plans/2026-10-21-pruning-round-2-worklog.md`, section "U8 archive") lists every deleted file.
-The 2026-10-14 reset plan and worklog stay as the record of U1 to U20 and of the open benchmark result. The 2026-10-30 reset plan is the active authority.
+The 2026-10-14 reset plan and worklog stay as the record of U1 to U20 and of the open benchmark result. The 2026-10-30 reset plan and worklog stay as the record of that closed reset. No reset is active.
 
 Pruning round 3 (decision D7) deleted six completed plans that no tracked file outside `docs/plans/` cites, and advisor plan 006.
 Each stays readable at the local `pre-round-3-archive` tag, for example
