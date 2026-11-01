@@ -16,6 +16,8 @@ ZTS="${ZTS:-$REPO_ROOT/zig-out/bin/zts}"
 BASE_PORT=$((RANDOM % 1000 + 5000))
 BUILD_PORT=$((BASE_PORT + 1))
 DEPLOY_PORT=$((BASE_PORT + 2))
+IMPORTS_PORT=$((BASE_PORT + 3))
+GUARD_PORT=$((BASE_PORT + 4))
 
 TMP_DIR=$(mktemp -d -t zttp-smoke-XXXXXX)
 APP_NAME="smoke-app"
@@ -128,15 +130,75 @@ fi
 [ ! -e "$BROKEN_APP_DIR/.zttp/build/broken-app" ] || fail "broken handler emitted a build artifact"
 printf '%s' "$broken_out" | grep -Eq "Compilation failed|Parse|error" || fail "broken-handler diagnostic was not actionable: $broken_out"
 
-step "negative: a handler with file imports names the missing certificate"
+step "a handler with file imports compiles and serves its response"
 mkdir -p "$TMP_DIR/imports-app"
 cp "$REPO_ROOT/examples/handler/handler-with-imports.ts" "$REPO_ROOT/examples/handler/utils.ts" "$TMP_DIR/imports-app/"
 imports_status=0
 imports_out=$(cd "$TMP_DIR/imports-app" && "$ZTTP" compile handler-with-imports.ts -o imports-bin --no-attest 2>&1 </dev/null) || imports_status=$?
-[ "$imports_status" -eq 1 ] || fail "compile with file imports exited $imports_status, expected 1: $imports_out"
-[ ! -e "$TMP_DIR/imports-app/imports-bin" ] || fail "refused compile with file imports wrote a binary"
-imports_want='Build refused: the compiler builds no proof certificate for a handler with file imports; the artifact would refuse to serve.'
-printf '%s\n' "$imports_out" | grep -qxF "$imports_want" || fail "compile with file imports did not name the missing certificate: $imports_out"
+[ "$imports_status" -eq 0 ] || fail "compile with file imports exited $imports_status, expected 0: $imports_out"
+[ -x "$TMP_DIR/imports-app/imports-bin" ] || fail "compile with file imports wrote no binary: $imports_out"
+"$TMP_DIR/imports-app/imports-bin" -p "$IMPORTS_PORT" >/dev/null 2>&1 </dev/null &
+imports_pid=$!
+imports_body=$(wait_for_http "http://127.0.0.1:$IMPORTS_PORT/" 25) || { stop_bg "$imports_pid" "$TMP_DIR/imports-app/imports-bin"; fail "binary with file imports did not respond on /"; }
+stop_bg "$imports_pid" "$TMP_DIR/imports-app/imports-bin"
+[ "$imports_body" = '{"message":"Hello, world!"}' ] || fail "binary with file imports served unexpected body: $imports_body"
+
+step "negative: a handler with no capsule answers for its dependency under the default profile"
+mkdir -p "$TMP_DIR/default-profile-app"
+cat > "$TMP_DIR/default-profile-app/dep.ts" <<'EOF'
+let count: number = 0;
+export function bump(): number {
+  count = count + 1;
+  return count;
+}
+EOF
+cat > "$TMP_DIR/default-profile-app/h.ts" <<'EOF'
+import { bump } from "./dep.ts";
+export function handler(req: Request): Response {
+  return Response.text("ok");
+}
+EOF
+default_status=0
+default_out=$(cd "$TMP_DIR/default-profile-app" && "$ZTTP" compile h.ts -o default-bin --no-attest 2>&1 </dev/null) || default_status=$?
+[ "$default_status" -eq 1 ] || fail "compile of a dependency that breaks the default profile exited $default_status, expected 1: $default_out"
+[ ! -e "$TMP_DIR/default-profile-app/default-bin" ] || fail "refused compile of a dependency that breaks the default profile wrote a binary"
+grep -qF -- "ZTS500" <<<"$default_out" || fail "compile of a dependency that breaks the default profile named no ZTS500: $default_out"
+grep -qF -- "No binary was written." <<<"$default_out" || fail "compile of a dependency that breaks the default profile did not say that no binary exists: $default_out"
+
+step "a capability read with a computed name in a dependency obeys the project policy"
+mkdir -p "$TMP_DIR/guard-app/src"
+cat > "$TMP_DIR/guard-app/src/dep.ts" <<'EOF'
+import { env } from "zttp:env";
+export function read(name: string): string {
+  return env(name) ?? "unset";
+}
+EOF
+cat > "$TMP_DIR/guard-app/src/h.ts" <<'EOF'
+import { read } from "./dep.ts";
+export function handler(req: Request): Proof<Response, "state_isolated"> {
+  const name = req.url === "/other" ? "OTHER_KEY" : "ALLOWED_KEY";
+  if (read(name) === "unset") {
+    return Response.text("missing");
+  }
+  return Response.text("present");
+}
+EOF
+cat > "$TMP_DIR/guard-app/zttp.json" <<'EOF'
+{ "entry": "src/h.ts", "port": 3000, "policy": "policy.json" }
+EOF
+cat > "$TMP_DIR/guard-app/policy.json" <<'EOF'
+{ "env": { "allow": ["ALLOWED_KEY"], "public": ["ALLOWED_KEY"] } }
+EOF
+guard_status=0
+guard_out=$(cd "$TMP_DIR/guard-app" && "$ZTTP" build --no-attest 2>&1 </dev/null) || guard_status=$?
+[ "$guard_status" -eq 0 ] || fail "build with a computed capability read in a dependency exited $guard_status, expected 0: $guard_out"
+ALLOWED_KEY=one OTHER_KEY=two "$TMP_DIR/guard-app/.zttp/build/guard-app" -p "$GUARD_PORT" >/dev/null 2>&1 </dev/null &
+guard_pid=$!
+guard_body=$(wait_for_http "http://127.0.0.1:$GUARD_PORT/" 25) || { stop_bg "$guard_pid" "$TMP_DIR/guard-app/.zttp/build/guard-app"; fail "binary with a dependency guard did not serve"; }
+guard_denied=$(/usr/bin/curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$GUARD_PORT/other" </dev/null)
+stop_bg "$guard_pid" "$TMP_DIR/guard-app/.zttp/build/guard-app"
+[ "$guard_body" = 'present' ] || fail "a key inside the policy read as: $guard_body"
+[ "$guard_denied" = '500' ] || fail "a key outside the policy gave status $guard_denied, expected 500"
 
 step "negative: two modules that bind one top-level name are refused by compile and serve"
 mkdir -p "$TMP_DIR/shared-name-app"
@@ -255,8 +317,8 @@ export function greet(): Response {
 TS
 import_type_ok_status=0
 import_type_ok_out=$(cd "$TMP_DIR/import-type-app" && "$ZTTP" compile h.ts -o import-type-bin --no-attest 2>&1 </dev/null) || import_type_ok_status=$?
-[ "$import_type_ok_status" -eq 1 ] || fail "compile of a Response imported from a file exited $import_type_ok_status, expected 1: $import_type_ok_out"
-grep -qF -- "Build refused: the compiler builds no proof certificate for a handler with file imports" <<<"$import_type_ok_out" || fail "compile of a Response imported from a file did not reach the missing certificate refusal: $import_type_ok_out"
+[ "$import_type_ok_status" -eq 0 ] || fail "compile of a Response imported from a file exited $import_type_ok_status, expected 0: $import_type_ok_out"
+[ -x "$TMP_DIR/import-type-app/import-type-bin" ] || fail "compile of a Response imported from a file wrote no binary: $import_type_ok_out"
 if grep -qF -- "ZTS204" <<<"$import_type_ok_out"; then fail "compile of a Response imported from a file printed a type error: $import_type_ok_out"; fi
 cat > "$TMP_DIR/import-type-app/dep.ts" <<'TS'
 export function pick<T>(value: T): T {

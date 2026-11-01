@@ -839,3 +839,32 @@ test "the kernel re-derives results_checked wherever the verifier says result_sa
     }
     try testing.expect(!failed);
 }
+
+// ---------------------------------------------------------------------------
+// Module graph
+// ---------------------------------------------------------------------------
+
+test "a handler with file imports certifies and reaches production acceptance" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "entry.ts", .data = "import { greet } from \"./dep.ts\";\n" ++
+        "export function handler(req: Request): Proof<Response, \"state_isolated\" | \"no_secret_leakage\" | \"result_safe\"> {\n" ++
+        "  return Response.json({ message: greet(\"world\") });\n" ++
+        "}\n" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "dep.ts", .data = "export function greet(name: string): string {\n" ++
+        "  return [\"Hello, \", name, \"!\"].join(\"\");\n" ++
+        "}\n" });
+    const entry_path = try tmp.dir.realPathFileAlloc(testing.io, "entry.ts", allocator);
+    defer allocator.free(entry_path);
+    const source = try zts.file_io.readFile(allocator, entry_path, 1024 * 1024);
+    defer allocator.free(source);
+
+    var certified = try certifyAt(allocator, source, entry_path);
+    defer certified.deinit();
+
+    try testing.expectEqual(@as(usize, 1), (certified.compiled.dep_bytecodes orelse return error.TestUnexpectedResult).len);
+    try expectAcceptedAtTrusted(&certified);
+    try testing.expectEqual(cert.EdgeKind.not_established, try capabilityBoundedEdge(&certified));
+    try testing.expectEqual(@as(u32, 3), try irTagCount(&certified, .function));
+}

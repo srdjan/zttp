@@ -509,21 +509,31 @@ fn applyGraphPaths(
     applyContractFacts(allocator, contract, .{ .paths = &summary });
 }
 
-/// Refuse the build when a spec diagnostic of error severity remains. The
-/// implicit default profile is advisory here, as it is on the single-module
-/// compile path: only a diagnostic the author asked for refuses.
-fn refuseSpecErrors(contract: *const HandlerContract, filename: []const u8) !void {
-    var refused: u32 = 0;
+/// Which spec errors a caller gates on: the ones the author asked for, or those
+/// and the implicit default profile too.
+pub const SpecGate = enum { authored, every };
+
+/// Print each spec error that `gate` reaches, and return the count.
+pub fn reportSpecErrors(contract: *const HandlerContract, filename: []const u8, gate: SpecGate) u32 {
+    var count: u32 = 0;
     for (contract.spec_diagnostics.items) |diagnostic| {
-        if (diagnostic.kind.severity() != .err or diagnostic.implicit_default) continue;
-        refused += 1;
+        if (diagnostic.kind.severity() != .err) continue;
+        if (gate == .authored and diagnostic.implicit_default) continue;
+        count += 1;
         if (!builtin.is_test) debugPrint("{s}: {s} {s}\n", .{
             filename,
             diagnostic_catalog.specCode(diagnostic.kind),
             diagnostic.spec_name,
         });
     }
-    if (refused > 0) return error.SpecDiagnosticsRefused;
+    return count;
+}
+
+/// Refuse a compile when an authored spec error remains. The implicit default
+/// profile is advisory here, as it is on the single-module compile path. A sealed
+/// build gates it on the merged contract in `runBuild`.
+fn refuseSpecErrors(contract: *const HandlerContract, filename: []const u8) !void {
+    if (reportSpecErrors(contract, filename, .authored) > 0) return error.SpecDiagnosticsRefused;
 }
 
 fn enforcePolicyForContract(

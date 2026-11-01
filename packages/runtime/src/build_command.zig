@@ -468,10 +468,6 @@ fn acceptArtifactCapability(
     }, pcc.policy.production);
 
     if (contract_runtime.promote(&validated, assessment, input.policy_section_digest) == null) {
-        if (input.certificate == null and input.dep_bytecodes.len > 0) {
-            reportBuildRefusal("the compiler builds no proof certificate for a handler with file imports");
-            return error.ProofAcceptanceFailed;
-        }
         if (!builtin.is_test) {
             if (assessment.rejection()) |rejection| {
                 std.debug.print(
@@ -890,6 +886,24 @@ fn runBuild(
             \\
         , .{ handler_path, spec_errors });
         return error.ProofAcceptanceFailed;
+    }
+
+    // The check above reads the entry alone. A handler with file imports answers
+    // for each module, so the merged contract gates the default profile as well.
+    if (compiled.dep_bytecodes != null) {
+        const merged_errors = if (compiled.contract) |*contract|
+            precompile.reportSpecErrors(contract, handler_path, .every)
+        else
+            0;
+        if (merged_errors > 0) {
+            std.debug.print(
+                \\
+                \\Aborted: the merged contract of {s} has {d} spec error(s). No binary was written.
+                \\Fix the errors above, or declare a narrow Proof capsule with only the properties the handler holds.
+                \\
+            , .{ handler_path, merged_errors });
+            return error.ProofAcceptanceFailed;
+        }
     }
 
     const retired_input: ArtifactTailInput = .{
@@ -1627,9 +1641,7 @@ test "a certificate built from a folded graph passes production acceptance" {
         .emit_proof_evidence = true,
     });
     defer compiled.deinit(allocator);
-    // The refusal for a handler with file imports stays until the evidence moves.
-    try std.testing.expect(compiled.proof_evidence == null);
-    const evidence = compiled.graph_evidence orelse return error.TestUnexpectedResult;
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
     try std.testing.expect(evidence.handlerIsTotal());
     try std.testing.expect(evidence.results_proved);
 
@@ -1664,8 +1676,8 @@ test "two folds of one graph give identical certificate bytes" {
         .emit_proof_evidence = true,
     });
     defer second.deinit(allocator);
-    const first_evidence = first.graph_evidence orelse return error.TestUnexpectedResult;
-    const second_evidence = second.graph_evidence orelse return error.TestUnexpectedResult;
+    const first_evidence = first.proof_evidence orelse return error.TestUnexpectedResult;
+    const second_evidence = second.proof_evidence orelse return error.TestUnexpectedResult;
 
     var first_certificate = try GraphCertificate.init(allocator, &first, &first_evidence, dischargedProperties(&first.contract.?), null);
     defer first_certificate.deinit();
@@ -1689,7 +1701,7 @@ test "the kernel refuses a folded graph whose dependency reads a Result without 
         .emit_proof_evidence = true,
     });
     defer compiled.deinit(allocator);
-    var evidence = compiled.graph_evidence orelse return error.TestUnexpectedResult;
+    var evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
     // The producer's own copy of the pass sees the unguarded read.
     try std.testing.expect(!evidence.results_proved);
 
@@ -1719,7 +1731,7 @@ test "a graph with Result events that the producer cannot prove gets no certific
         .emit_proof_evidence = true,
     });
     defer compiled.deinit(allocator);
-    const evidence = compiled.graph_evidence orelse return error.TestUnexpectedResult;
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
     try std.testing.expect(!evidence.results_proved);
     try std.testing.expectError(error.GraphResultsNotProved, GraphCertificate.init(
         allocator,
@@ -1763,7 +1775,7 @@ test "a dependency capability call with a computed resource appears in the resid
         .policy = policy,
     });
     defer compiled.deinit(allocator);
-    const evidence = compiled.graph_evidence orelse return error.TestUnexpectedResult;
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
 
     var certificate = try GraphCertificate.init(allocator, &compiled, &evidence, dischargedProperties(&compiled.contract.?), &policy);
     defer certificate.deinit();
@@ -1929,7 +1941,7 @@ test "the folded evidence numbers its functions as the artifact does" {
         .emit_proof_evidence = true,
     });
     defer compiled.deinit(allocator);
-    const evidence = compiled.graph_evidence orelse return error.TestUnexpectedResult;
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
 
     // The artifact numbers function spans over the entry and then each
     // dependency, and the fold offsets the later modules by the same order.
@@ -3501,7 +3513,7 @@ test "a handler that production acceptance accepts reaches artifact creation onc
     try std.testing.expectEqual(@as(usize, 1), probe.create_calls);
 }
 
-test "a handler with file imports passes contract validation and stops at the missing certificate" {
+test "a handler with file imports passes contract validation and production acceptance" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
@@ -3529,7 +3541,7 @@ test "a handler with file imports passes contract validation and stops at the mi
     });
     defer compiled.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), compiled.dep_bytecodes.?.len);
-    try std.testing.expect(compiled.proof_evidence == null);
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
     const contract = compiled.contract orelse return error.TestUnexpectedResult;
 
     const json = try serializeContractJson(allocator, &contract);
@@ -3537,6 +3549,47 @@ test "a handler with file imports passes contract validation and stops at the mi
     const raw = try contract_runtime.parseContractJson(allocator, json);
     var validated = try contract_runtime.validate(raw, .{ .bytecode = compiled.bytecode });
     validated.deinit();
+
+    var probe = ProductionAcceptanceProbe{};
+    try writeArtifactTail(allocator, .{
+        .runtime_binary = "runtime",
+        .output_path = "artifact.bin",
+        .attest_requested = false,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract = &contract,
+        .proof_evidence = &evidence,
+    }, probe.capabilities());
+    try std.testing.expectEqual(@as(usize, 1), probe.create_calls);
+}
+
+test "a handler with file imports and no certificate is refused by production acceptance" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const entry_source =
+        \\import { greet } from "./dep.ts";
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(greet());
+        \\}
+        \\
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "entry.ts", .data = entry_source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.ts", .data =
+        \\export function greet(): string {
+        \\  return "hello";
+        \\}
+        \\
+    });
+    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "entry.ts", allocator);
+    defer allocator.free(entry_path);
+
+    var compiled = try precompile.compileHandler(allocator, entry_source, entry_path, .{
+        .emit_verify = true,
+        .emit_contract = true,
+    });
+    defer compiled.deinit(allocator);
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
 
     var probe = ProductionAcceptanceProbe{};
     try std.testing.expectError(error.ProofAcceptanceFailed, writeArtifactTail(allocator, .{

@@ -64,17 +64,9 @@ pub const CompiledHandler = struct {
     /// relation between an IR member and its final bytecode offsets exists only
     /// during compilation, so it is captured here or not at all.
     proof_evidence: ?zts.ProofEvidence = null,
-    /// The proof evidence of every module of a handler with file imports, folded
-    /// into one program. Present only when the caller asked for evidence. The
-    /// build still refuses a handler with file imports until the folded value
-    /// moves into `proof_evidence`.
-    graph_evidence: ?zts.ProofEvidence = null,
 
     pub fn deinit(self: *CompiledHandler, allocator: std.mem.Allocator) void {
         if (self.proof_evidence) |*evidence| {
-            evidence.deinit();
-        }
-        if (self.graph_evidence) |*evidence| {
             evidence.deinit();
         }
         if (self.dep_bytecodes) |deps| {
@@ -126,6 +118,7 @@ const precompile_cli_mod = @import("precompile_cli.zig");
 const debugPrint = precompile_stderr_mod.debugPrint;
 const printParseErrors = precompile_stderr_mod.printParseErrors;
 const debugPrintStripError = precompile_stderr_mod.debugPrintStripError;
+pub const reportSpecErrors = precompile_contract_mod.reportSpecErrors;
 pub const main = precompile_cli_mod.main;
 pub const runCompileWithArgs = precompile_cli_mod.runCompileWithArgs;
 pub const CheckOptions = precompile_check_run_mod.CheckOptions;
@@ -912,11 +905,11 @@ fn compileMultiModule(
 
     // The evidence of each module folds into one program. A graph that the fold
     // cannot classify is refused here, with the entry file named.
-    var graph_evidence: ?zts.ProofEvidence = null;
-    errdefer if (graph_evidence) |*evidence| evidence.deinit();
+    var proof_evidence: ?zts.ProofEvidence = null;
+    errdefer if (proof_evidence) |*evidence| evidence.deinit();
     if (opts.emit_proof_evidence) {
         const entry_position = evidences.items.len - 1;
-        graph_evidence = zts.foldProofEvidence(
+        proof_evidence = zts.foldProofEvidence(
             allocator,
             &evidences.items[entry_position],
             evidences.items[0..entry_position],
@@ -1002,7 +995,7 @@ fn compileMultiModule(
         .bytecode = entry_bytecode,
         .dep_bytecodes = dep_bytecodes,
         .contract = contract,
-        .graph_evidence = graph_evidence,
+        .proof_evidence = proof_evidence,
     };
 }
 

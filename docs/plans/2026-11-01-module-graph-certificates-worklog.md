@@ -238,3 +238,38 @@ Sonnet implemented the unit, slightly past its turn budget of 60. I reviewed the
 Results at the G4 tree, each from an unfiltered run: `zig build test` 214 of 214 steps, `test-zruntime` 274 of 275 tests with 1 skipped, and `test-cli`, `test-bytecode-identity`, `smoke-v1`, `test-module-boundary`, `test-expert-app`, `test-proof-swallow`, `test-proof-checker`, `test-proof-ratchet`, `test-proof-ratchet-drift`, `test-zts-layering`, `zig fmt --check`, and `zig build` each exit 0.
 
 Against the G3 tables, `zts check` and `zts compile` each moved 0 of 215 rows. The command surface moved 0 of 38 rows against G0. `git diff` on `packages/proof-checker` is empty.
+
+## G5
+
+A handler with file imports now builds and serves. `compileMultiModule` returns the folded evidence in `proof_evidence`, and the refusal is gone. `zttp compile`, `zttp build`, and `zttp deploy` each exit 0 on `examples/handler/handler-with-imports.ts`, signed and with `--no-attest`. Each of the 6 binaries serves `{"message":"Hello, world!"}` and prints "Proof accepted: weakest edge trusted, 3 disclosed edge(s)".
+
+`zttp proofs bundle` and then `zttp proofs verify <dir> --require-proof` exit 0 for the signed and the unsigned deploy. The output says `policy_accepted`, and "Checked: response_total, results_checked".
+
+**Tamper measurement** on real binaries, with the method from the legacy removal worklog. No edited binary served a request. Each edited case exited 1 at boot.
+
+| Case | Exit | Stopped by |
+|---|---|---|
+| Control, signed | Serves | Not applicable |
+| Control, unsigned | Serves | Not applicable |
+| Dependency edit, signed | 1 | Attestation: `ExecutableGraphMismatch` |
+| Dependency edit, attestation removed | 1 | Proof acceptance: `artifact_binding`, `graph_member_digest_mismatch` |
+| Dependency edit, unsigned | 1 | Proof acceptance: `artifact_binding`, `graph_member_digest_mismatch` |
+| Dependency section grafted onto a single-module binary, signed | 1 | Attestation: `ExecutableGraphMismatch` |
+| Graft, attestation removed | 1 | Proof acceptance: `artifact_binding`, `graph_member_extra` |
+| Graft onto an unsigned single-module binary | 1 | Proof acceptance: `artifact_binding`, `graph_member_extra` |
+
+These replace the unsigned edit rows of the legacy removal worklog. Those rows stopped at `missing_required_section` only because no certificate existed, so they showed little. The certificate now binds the dependency bytes.
+
+**Named refusals through `zttp compile --no-attest`.** `GraphResultLimit` (33 Results in the entry and 33 in the dependency) and `ModuleNotClassified` (65 in the dependency) each exit 1, write no binary, and name the cause. A real source did not reach `GraphResultsNotProved`, as G4 records.
+
+**Default profile on the merged contract.** This closes the item from G3. A handler with no capsule that imports a dependency and never calls it passed the entry-only check. A single file with an uncalled function that mutates module state fails `state_isolated`, and the same function in a dependency compiled. `runBuild` now gates each spec error of the merged contract, for a handler with file imports only. A new step in `smoke-v1` exited 0 from the compile before the fix and passes after it.
+
+The gate is stricter than a single file in one case. A single file with an uncalled function that calls `uuid()` compiles. The same function in a dependency now fails with `ZTS500 cost_bounded, pure`, because a dependency contract counts every function in the module. Decision 5 accepts a build that is stricter than `zttp check`. A capsule that does not demand those properties still compiles.
+
+**Residual guard in a dependency.** The guard holds at run time. A dependency calls `env(name)` with a computed name, and the policy allows one key. With both keys in the process environment, the allowed key reads `present`. The other key gives HTTP 500. With both keys in the policy, the second key reads `present` too, so the 500 comes from the policy. `smoke-v1` now holds this flow. Returning the value itself fails the build with ZTS400 across the dependency, so flow tracking also crosses the module boundary.
+
+Sonnet implemented items 1 to 4 and took about 55 calls against a turn budget of 30. It left the default-profile gate and the guard smoke step open. I measured the single-file analogue, and I wrote both, with the failing step first.
+
+Results at the G5 tree, each from an unfiltered run: `zig build test` 214 of 214 steps, `test-zruntime` 274 of 275 tests with 1 skipped, and `test-cli`, `test-precompile`, `test-bytecode-identity`, `smoke-v1`, `smoke-getting-started`, `test-module-boundary`, `test-expert-app`, `test-proof-swallow`, `test-proof-checker`, `test-proof-ratchet`, `test-proof-ratchet-drift`, `zig fmt --check`, and `zig build` each exit 0.
+
+Against the G4 tables, `zts check` and `zts compile` each moved 0 of 215 rows. The command surface moved 0 of 38 rows against G0. `git diff` on `packages/proof-checker` is empty.
