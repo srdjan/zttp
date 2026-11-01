@@ -524,7 +524,7 @@ Reset Phase 11 ran the same command at `5329a60b` on 2026-10-31: exit 0 at load 
 
 ## Decision 14 measurement
 
-Status: complete on 2026-10-31 at `5329a60b`, for a single-module handler. The owner selected this measurement in Decision 14, and the owner decides whether a change follows.
+Status: closed on 2026-11-01. The single-module cases ran on 2026-10-31 at `5329a60b`, and the dependency cases ran on 2026-11-01. The owner selected this measurement in Decision 14. On 2026-11-01 the owner chose to keep `verifyArtifactHash` unchanged, so no code change follows.
 
 Result: the all-zero `artifactSha256` lost no tamper detection in these cases. Each of the 18 edits stopped at boot with exit 1 and served no request. 17 stopped at another check. The one exception needed a hash that I stamped by hand.
 
@@ -551,4 +551,36 @@ The last three rows show what a stamped hash would add. A hash in the payload ca
 
 Limits: these are Debug binaries from `zig build`, on macOS, with one handler. Each case is an in-place edit. A person who can run `zttp compile` can make a new valid binary, and no check inside that file can detect it. That last statement is an inference, not a measurement.
 
-Dependency bytecode is not measured. `zttp compile` refuses `examples/handler/handler-with-imports.ts` with "the serialized contract fails validation", at `5329a60b` and at the legacy-removal base `03318b5a`, so no multi-module binary exists to edit. `zts compile` writes that contract with `capabilityHash`, `policyHash`, `coreGrammarHash`, and `semanticsHash` all-zero, because `buildMultiModuleContract` does not set them. A scratch patch that stamped only the two identity hashes did not clear the refusal. `docs/roadmap.md` lists the defect.
+### Dependency bytecode
+
+Result: no binary that holds dependency bytecode starts. Each of the 8 cases exited 1 at boot and served no request. Both single-module controls served HTTP 200.
+
+Method: the normal build refuses a handler with file imports, so no such binary exists to edit. A scratch patch skipped that one build refusal and left every boot check in place. I built `examples/handler/handler-with-imports.ts` and a one-file handler, once signed and once with `--no-attest`, with a scratch `HOME`. The edit changes `Hello, ` to `Hullo, ` in section 2 and recomputes the CRC-32. The graft copies section 2 of the multi-module binary into a copy of an accepted single-module binary.
+
+| Case | Signed binary stops at | Unsigned binary stops at |
+|---|---|---|
+| Multi-module binary, no edit | Proof acceptance: `decode`, `missing_required_section` | Proof acceptance: `decode`, `missing_required_section` |
+| Dependency edit | Attestation: the executable graph does not match the signed root | Proof acceptance: `decode`, `missing_required_section` |
+| Dependency edit, attestation removed | Proof acceptance: `decode`, `missing_required_section` | Not applicable |
+| Dependency section grafted onto a single-module binary | Attestation: the executable graph does not match the signed root | Proof acceptance: `artifact_binding`, `graph_member_extra` |
+| Dependency section grafted, attestation removed | Proof acceptance: `artifact_binding`, `graph_member_extra` | Not applicable |
+
+Limits: these are Debug binaries, on macOS. The unsigned edit rows show little alone, because the unedited control stops at the same check. The graft rows are the cases that apply to a binary that can exist today. From reading `validate`, `verifyArtifactHash` receives section 1 only, so that check never covers dependency bytecode. A certificate for a multi-module handler changes this result, so that work must run these cases again.
+
+## Multi-module build refusal
+
+Status: the refusal stays, and `bf19a10a` corrects its reason. On 2026-11-01 the owner selected a fix for this refusal. A real fix proved to be a design change, so I stopped at the correction.
+
+Correction: I reported that the four all-zero hashes in `buildMultiModuleContract` were the probable cause. That cause was incomplete. In a scratch build with all four hashes stamped, `zttp compile` still refused, at `decode`, `missing_required_section`.
+
+The certificate gap has three parts. `compileMultiModule` captures no proof evidence, so the build holds no certificate. The merged contract holds no `properties`, because no flow pass runs over the merged graph. Production acceptance requires `no_secret_leakage` as well as `response_total` and `results_checked`.
+
+That gap is recorded design. The test `multi-module compile proves no security property in the extracted facts` holds the empty `properties`. The P7 flow specification records that merged contracts omit flow claims, and P8 of the flow redesign plan left the choice open.
+
+From reading `proof_ir.zig`, a call to a file import lowers as a plain call, so a dependency body is not in the proof IR. A certificate over the entry module alone would then claim properties of code that it does not cover. I did not build that certificate. Whether `packages/proof-checker` must change needs to be measured.
+
+The change in `bf19a10a` does two things. `buildMultiModuleContract` stamps the source identity, the capability matrix, and the policy hash. `acceptArtifactCapability` names the missing certificate in the refusal. The new test in `build_command.zig` failed without the fix with `SourceIdentityMissing`. I did not run the new `smoke-v1` step on the unfixed binary. That binary printed the older line by direct run, which the step refuses.
+
+On 2026-11-01, `zttp compile`, `zttp build`, and `zttp deploy` each exited 1 with the new line. `zttp build` and `zttp deploy` wrote no file under `.zttp`, and the `smoke-v1` step confirms that `zttp compile` wrote no binary. `zttp serve` returned HTTP 200 for the same handler.
+
+Gates, on the fix before commit, from empty caches and with no provider key: `zig build test` exit 0, with 8469 of 8475 tests and 6 skipped, the Phase 11 count. `scripts/verify.sh` exit 0, with `test-cli` at 696 passed and 1 skipped. `zig build`, `smoke-v1`, and `test-contract-golden` each exit 0. The offline replay ran 13 of 13 cases, so the fix moved no corpus case. Against Phase 11, `zts check` moved 0 of 215 rows. `zts compile` moved 1 of 215, `examples/handler/handler-with-imports.ts`. No exit status moved.

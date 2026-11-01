@@ -16,7 +16,7 @@ Release v0.26.0 was published on 2026-10-30. The release fixes plan shipped as 0
 
 Standing rule D-012 in [decisions.md](decisions.md): a model-visible change waits for one batched re-record window. The v0.26.0 window ran on 2026-10-29. The owner runs any later window.
 
-Next work: the owner selects it. No reset is active. The first open defect is the multi-module build refusal under "Current Limitations".
+Next work: the owner selects it. No reset is active. The first open item is the refusal of a handler with file imports, under "Current Limitations".
 
 M1, M2, and M3 are complete.
 M4 is complete: T1a to T7 were delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 2 later removed both runtime products. No release date is assigned.
@@ -107,19 +107,14 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
   predicate on an arrow function reports no ZTS211, while the same predicate on
   a function declaration does. A predicate that names a different parameter,
   such as `(y: unknown): x is string`, reports no error.
-- `zttp compile` refuses a multi-module handler, such as
-  `examples/handler/handler-with-imports.ts`, with "the serialized contract
-  fails validation". `buildMultiModuleContract` leaves `capabilityHash`,
-  `policyHash`, `coreGrammarHash`, and `semanticsHash` all-zero. Measured on
-  2026-10-31, at `5329a60b` and at the legacy-removal base `03318b5a`. A scratch
-  patch that stamped only the two identity hashes did not clear the refusal.
-- A binary from `zttp compile` holds an all-zero `artifactSha256`, so
-  `verifyArtifactHash` skips that binary. Only `zts compile` stamps the hash.
-  On 2026-10-31, each of 18 in-place edits of a single-module binary stopped at
-  boot, and 17 stopped at another check. Dependency bytecode is not
-  measured, because of the refusal above. The
-  [measurement](plans/2026-10-30-legacy-removal-worklog.md#decision-14-measurement)
-  states its limits. The owner decides whether a change follows.
+- `zttp compile`, `zttp build`, and `zttp deploy` refuse a handler with file
+  imports, such as `examples/handler/handler-with-imports.ts`. The compiler
+  builds no proof certificate for that handler, and production acceptance
+  requires one. `zttp serve` runs the same handler. A fix needs a flow pass
+  over the merged graph and proof IR that covers each dependency body. Whether
+  `packages/proof-checker` must change needs to be measured. The
+  [record](plans/2026-10-30-legacy-removal-worklog.md#multi-module-build-refusal)
+  states the evidence. The owner decides whether this work starts.
 
 ## Runtime And Product Work
 

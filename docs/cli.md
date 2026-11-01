@@ -155,6 +155,10 @@ directory or a parent and defaults the output to `.zttp/build/<project-name>`.
 `compile` is the explicit-path form for scripts that name both sides. Both sign
 a proof receipt by default; `--no-attest` skips signing for that build.
 
+`build`, `compile`, and `deploy` refuse a handler with file imports, because
+the compiler builds no proof certificate for one. `zttp serve` runs that
+handler.
+
 `zttp deploy` is the project-level verb built on the same path; see below.
 
 ## Deploy And Proof Receipts
