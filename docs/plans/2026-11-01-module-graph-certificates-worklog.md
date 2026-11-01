@@ -114,3 +114,25 @@ Results at the G1 tree, each from an unfiltered run: `zig build test` 214 of 214
 Probes through `zttp compile` and `zttp serve` exit 1 with the identifier and files for eight cases: `label`, `helper`, a `const` collision, a `let` collision, a dependency `const Response`, a dependency `handler`, a missing export, and an alias whose local name collides. `examples/handler/handler-with-imports.ts` serves 200. The corpus case `sibling-helper-holes` loads and serves its own 503 body `{"error":"unconfigured"}`.
 
 **Correction to the plan for G1b.** The plan calls Checks 6 and 7 "the two state checks". In `packages/zts/src/handler_verifier.zig`, Check 6 is optional checking and only Check 7 is state isolation. A probe at `8d62cb07` read an optional in a helper through `env`, and `zts check` reported ZTS309 from another path. Check 6 therefore has no helper gap to close, and G1b changes Check 7 only.
+
+## G1b
+
+`HandlerVerifier.verify` now sweeps every function that is not a request root. A write to module state in such a function sets `has_module_mutation` and adds a ZTS310 warning. A direct write in a request root stays the ZTS310 error. The sweep does not follow calls, so a helper that only module initialization calls also clears `state_isolated`. A write through a function parameter is not modeled.
+
+The red run failed at `expect(!result.state_isolated)` in the test "check does not prove state isolation when a same-file helper mutates module state", because the value was true.
+
+Sonnet implemented the unit, and I reviewed the diff. My review replaced the loops in two tests with literal assertions, renamed one test that claimed a binary compile, and added a `smoke-v1` step for the capsule-dependent result through `zttp compile`.
+
+Behavior of the `count` probe through `zttp check` and `zttp compile`:
+
+| Capsule | `zttp check` | `zttp compile` |
+| --- | --- | --- |
+| `Proof<Response, "state_isolated">` | Exit 1, ZTS500 | Exit 1, no binary |
+| No capsule | Exit 1, ZTS500 on the default profile | Exit 1, no binary |
+| `Proof<Response, "deterministic">` | Exit 2, one ZTS310 warning | Exit 0 |
+
+The binary from the third row booted with "Proof accepted: weakest edge trusted, 3 disclosed edge(s)" and served 2, 3, 4 on three requests after its readiness probe. That capsule does not claim `state_isolated`, so this behavior is by design. `zttp check` already exits 2 on any warning.
+
+Results at the G1b tree, each from an unfiltered run: `zig build test` 214 of 214 steps, `test-zruntime` 274 of 275 tests with 1 skipped, and `test-cli`, `test-bytecode-identity`, `smoke-v1`, `test-module-boundary`, `test-expert-app`, `test-proof-swallow`, and `zig fmt --check packages scripts` exit 0. `test-expert-app` holds the replay.
+
+Against the G0 tables, `zts compile` moved 0 of 215 rows and the command surface moved 0 of 38 rows. `zts check` moved 1 of 215 rows, the named exception of this unit. The row is `tests/corpus/check/bad/module_scope_mutation.ts`. A byte comparison shows that the only difference is the `.failing` proof trace text, which now reads "A function mutates a module-scope variable." The exit status and stderr of that row did not move. No corpus case moved, so the stop condition did not apply.

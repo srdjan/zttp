@@ -633,6 +633,7 @@ pub const HandlerVerifier = struct {
             }
         }
         try self.checkUnresolvedRouteDispatches(&route_resolver);
+        self.sweepHelperMutations(handler_func, route_roots.functions.items);
 
         // Phase 4: Result uses, over every function of the program and not
         // only the request roots. A Result in a sibling helper is as unchecked
@@ -2317,37 +2318,148 @@ pub const HandlerVerifier = struct {
     // -----------------------------------------------------------------------
 
     fn checkModuleScopeMutation(self: *HandlerVerifier, target: NodeIndex, assign_node: NodeIndex) void {
-        const handler_scope = self.handler_scope_id orelse return;
-        const target_tag = self.ir_view.getTag(target) orelse return;
+        if (!self.writesSharedState(target)) return;
+        self.has_module_mutation = true;
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .module_scope_mutation,
+            .node = assign_node,
+            .message = "handler mutates module-scope variable (breaks cross-request isolation)",
+            .help = "use const instead of let for module-scope declarations, or move state to zttp:cache",
+        });
+    }
+
+    /// True when the assignment target writes a binding that requests share:
+    /// a module-scope binding, a builtin object, or an alias of one. The test
+    /// is relative to `handler_scope_id`, the function under inspection.
+    fn writesSharedState(self: *const HandlerVerifier, target: NodeIndex) bool {
+        const handler_scope = self.handler_scope_id orelse return false;
+        const target_tag = self.ir_view.getTag(target) orelse return false;
         // A member or index write changes the object its base names, so the base
         // decides whether the object is shared between requests.
         const base = switch (target_tag) {
             .identifier => target,
-            .member_access, .computed_access => self.memberBase(target) orelse return,
+            .member_access, .computed_access => self.memberBase(target) orelse return false,
             // exhaustive: any other target form names no binding to test, and the
             // check returned for it before member writes were added. A write through
             // a call result such as `getStore().x = 1` stays unchecked here.
-            else => return,
+            else => return false,
         };
 
-        const binding = self.bindingOf(base) orelse return;
+        const binding = self.bindingOf(base) orelse return false;
         // Module-scope bindings have a scope_id lower than the handler's. A builtin
         // such as Math is an undeclared global: a write to the name itself is not
         // state, a write through it changes an object every request shares.
-        const shared = if (base == target)
+        return if (base == target)
             binding.scope_id < handler_scope and binding.kind != .undeclared_global
         else
             binding.scope_id < handler_scope or binding.kind == .undeclared_global or self.isSharedAlias(binding);
-        if (shared) {
+    }
+
+    /// The deepest node the helper sweep reads before it gives up. A program
+    /// this deep is not read, so state isolation is not proven for it.
+    const max_sweep_depth: u16 = 1024;
+
+    /// Check 7 reaches past the request roots. A function that is not a request
+    /// root can still run on a request, and a write it makes to module state is
+    /// shared between requests. The sweep visits every function of the program
+    /// at any depth, skips a request root because `verifyRequestRoot` already
+    /// walked it, and tests each write in the outermost remaining function
+    /// against that function's own scope. The result is `has_module_mutation`
+    /// and a warning: the handler rule stays the error, so a helper write
+    /// clears the property without refusing a capsule that does not demand it.
+    /// Code outside every function is module initialization and is not tested.
+    /// A helper that only module initialization calls clears the property too,
+    /// because the sweep does not follow calls. That is conservative.
+    fn sweepHelperMutations(
+        self: *HandlerVerifier,
+        handler_func: NodeIndex,
+        route_functions: []const NodeIndex,
+    ) void {
+        const root = self.programRoot() orelse return;
+        const saved_scope = self.handler_scope_id;
+        defer self.handler_scope_id = saved_scope;
+        self.sweepForHelpers(root, handler_func, route_functions, 0);
+    }
+
+    fn sweepForHelpers(
+        self: *HandlerVerifier,
+        node: NodeIndex,
+        handler_func: NodeIndex,
+        route_functions: []const NodeIndex,
+        depth: u16,
+    ) void {
+        if (depth >= max_sweep_depth) {
             self.has_module_mutation = true;
-            self.addDiagnostic(.{
-                .severity = .err,
-                .kind = .module_scope_mutation,
-                .node = assign_node,
-                .message = "handler mutates module-scope variable (breaks cross-request isolation)",
-                .help = "use const instead of let for module-scope declarations, or move state to zttp:cache",
-            });
+            return;
         }
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .function_expr, .arrow_function => {
+                if (node == handler_func) return;
+                for (route_functions) |route_function| {
+                    if (route_function == node) return;
+                }
+                const function = self.ir_view.getFunction(node) orelse return;
+                self.handler_scope_id = function.scope_id;
+                self.sweepHelperBody(function.body, 0);
+            },
+            // exhaustive: every other node is module-level code or a container
+            // of functions. The shared child map reaches each function inside
+            // a block, a declaration, an export, an object literal, or a call.
+            else => {
+                var children = self.ir_view.expressionChildren(node);
+                while (children.next()) |child| {
+                    self.sweepForHelpers(child, handler_func, route_functions, depth + 1);
+                }
+            },
+        }
+    }
+
+    /// Visit every node of a helper body, nested functions included. Only a
+    /// write and an alias declaration are tested. This walk records no
+    /// binding and runs no Result or optional check, so it adds no diagnostic
+    /// other than the mutation warning.
+    fn sweepHelperBody(self: *HandlerVerifier, node: NodeIndex, depth: u16) void {
+        if (depth >= max_sweep_depth) {
+            self.has_module_mutation = true;
+            return;
+        }
+        const tag = self.ir_view.getTag(node) orelse return;
+        switch (tag) {
+            .assignment => {
+                self.checkHelperWrite(node);
+                self.sweepHelperChildren(node, depth);
+            },
+            .var_decl => {
+                if (self.ir_view.getVarDecl(node)) |decl| {
+                    if (decl.init != null_node) self.recordSharedAlias(decl);
+                }
+                self.sweepHelperChildren(node, depth);
+            },
+            // exhaustive: every other node tests nothing itself and descends
+            // through the shared child map, so a node kind that holds code is
+            // walked by default. A leaf has no children.
+            else => self.sweepHelperChildren(node, depth),
+        }
+    }
+
+    fn sweepHelperChildren(self: *HandlerVerifier, node: NodeIndex, depth: u16) void {
+        var children = self.ir_view.expressionChildren(node);
+        while (children.next()) |child| self.sweepHelperBody(child, depth + 1);
+    }
+
+    fn checkHelperWrite(self: *HandlerVerifier, assign_node: NodeIndex) void {
+        const assign = self.ir_view.getAssignment(assign_node) orelse return;
+        if (!self.writesSharedState(assign.target)) return;
+        self.has_module_mutation = true;
+        self.addDiagnostic(.{
+            .severity = .warning,
+            .kind = .module_scope_mutation,
+            .node = assign_node,
+            .message = "helper function mutates module-scope variable (breaks cross-request isolation)",
+            .help = "make the variable const, or move the state to zttp:cache",
+        });
     }
 
     /// The identifier at the root of a chain of member and index accesses.

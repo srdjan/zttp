@@ -117,9 +117,6 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
   modules that bind one private name share one function, and the last module
   loaded wins. On 2026-11-01, a helper in one file read another file's secret
   through this collision. `zttp check` reported ZTS400 for that handler.
-- `state_isolated` reads PROVEN for a handler whose same-file helper mutates
-  module state. On 2026-11-01, a binary from `zttp compile` served 2, 3, 4, 5
-  on four requests. Unit G1b of the certificates plan owns the fix.
 - Past 64 Result bindings, the proof IR emits no Result events, and the
   certificate states a `tested` edge from the producer. That edge meets the
   production floor, so `results_checked` then gets no kernel check.

@@ -224,6 +224,10 @@ Fix: use `const` for module-level declarations, or move mutable state to `zttp:c
 
 A member or index write gets the same error when its base is a builtin such as `Math` or `parseInt`, a module-scope binding, or a local initialized from one of them. The check follows one level of alias. It does not follow an alias through a call or a member chain.
 
+The verifier also visits every other function of the program: a helper declared before or after the handler, a top-level arrow, a function in an object literal, and a function nested in any of them. A write in such a function to a module-scope binding, a builtin object, or an alias of one sets `state_isolated` to false. The write is a `module_scope_mutation` warning that names a helper. It is not an error, so a capsule that does not demand `state_isolated` still compiles. A capsule that demands it, and a handler with no capsule, stop at ZTS500.
+
+The helper sweep does not follow calls. A helper that only module initialization calls therefore also clears `state_isolated`. That result is conservative. Code at the top level outside a function is module initialization and is not tested. A write through a function parameter, such as `p.hits = 1` where `p` is an argument, is not modeled.
+
 The runtime does not freeze builtin objects. A handler with no accepted certificate runs on `.reuse_bounded_by_count`: one runtime serves up to a fixed count of requests. State that such a handler writes, in a module-scope binding or in a builtin object, can cross requests within that count. The check above keeps that handler from proving `state_isolated`, which is the property that allows wider reuse.
 
 The result feeds into `HandlerProperties.state_isolated`. When no module-scope mutations are detected, `state_isolated` is proven true, enabling safe multi-tenant handler sharing. A contract built without `precompile --verify` leaves `state_isolated` false. `false` on any property means unproven, not violated.

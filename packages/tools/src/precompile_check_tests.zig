@@ -11437,3 +11437,238 @@ test "ZTS100 on an isOk call is tagged method_call with its subject" {
     try std.testing.expectEqual(zts.ResultShape.method_call, diagnostic.result_shape.?);
     try std.testing.expectEqualStrings("r", diagnostic.result_subject.?);
 }
+
+// ---------------------------------------------------------------------------
+// State isolation reaches every function of the program (G1b)
+// ---------------------------------------------------------------------------
+
+const helper_count_source =
+    \\let count = 0;
+    \\function bump(): number {
+    \\  count = count + 1;
+    \\  return count;
+    \\}
+    \\export function handler(req: Request): Proof<Response, "state_isolated"> {
+    \\  return Response.text(String(bump()));
+    \\}
+;
+
+test "check does not prove state isolation when a same-file helper mutates module state" {
+    const allocator = std.testing.allocator;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, helper_count_source, "helper-count.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expect(!result.state_isolated);
+}
+
+const StateIsolationCase = struct {
+    name: []const u8,
+    source: []const u8,
+    state_isolated: bool,
+};
+
+test "state isolation across helper shapes" {
+    const allocator = std.testing.allocator;
+    const cases = [_]StateIsolationCase{
+        .{ .name = "helper declared before the handler", .state_isolated = false, .source = helper_count_source },
+        .{ .name = "helper declared after the handler", .state_isolated = false, .source =
+        \\let count = 0;
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text("ok");
+        \\}
+        \\function bump(): number {
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        },
+        .{ .name = "top-level arrow", .state_isolated = false, .source =
+        \\let count = 0;
+        \\const bump = (): number => {
+        \\  count = count + 1;
+        \\  return count;
+        \\};
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text(String(bump()));
+        \\}
+        },
+        .{ .name = "function in an object literal", .state_isolated = false, .source =
+        \\let count = 0;
+        \\const ops = {
+        \\  bump: (): number => {
+        \\    count = count + 1;
+        \\    return count;
+        \\  },
+        \\};
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text(String(ops.bump()));
+        \\}
+        },
+        .{ .name = "function nested in a helper", .state_isolated = false, .source =
+        \\let count = 0;
+        \\function outer(): number {
+        \\  const inner = (): number => {
+        \\    count = count + 1;
+        \\    return count;
+        \\  };
+        \\  return inner();
+        \\}
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text(String(outer()));
+        \\}
+        },
+        .{ .name = "member write through an alias of a module object", .state_isolated = false, .source =
+        \\const table = { hits: 0 };
+        \\function touch(): number {
+        \\  const t = table;
+        \\  t.hits = 1;
+        \\  return t.hits;
+        \\}
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text(String(touch()));
+        \\}
+        },
+        .{ .name = "helper called only at module initialization", .state_isolated = false, .source =
+        \\let count = 0;
+        \\function seed(): number {
+        \\  count = 5;
+        \\  return count;
+        \\}
+        \\const start = seed();
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text(String(start));
+        \\}
+        },
+        .{ .name = "helper that writes only its own locals", .state_isolated = true, .source =
+        \\const count = 0;
+        \\function local(): number {
+        \\  let n: number = 0;
+        \\  n = n + 1;
+        \\  return n;
+        \\}
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text(String(local() + count));
+        \\}
+        },
+        .{ .name = "helper with a local that shadows a module name", .state_isolated = true, .source =
+        \\const count = 0;
+        \\function shadow(): number {
+        \\  let count: number = 1;
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text(String(shadow()));
+        \\}
+        },
+        .{ .name = "handler with a local that shadows a module name", .state_isolated = true, .source =
+        \\const count = 0;
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  let count: number = 1;
+        \\  count = count + 1;
+        \\  return Response.text(String(count));
+        \\}
+        },
+    };
+    for (cases) |case| {
+        errdefer std.debug.print("state isolation case failed: {s}\n", .{case.name});
+        var result = try runCheckOnlyFromSourceWithOptions(allocator, case.source, "helper-case.ts", .{ .json_mode = true });
+        defer result.deinit(allocator);
+        try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+        try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+        try std.testing.expectEqual(case.state_isolated, result.state_isolated);
+        const properties = (result.contract orelse return error.TestUnexpectedResult).properties orelse return error.TestUnexpectedResult;
+        try std.testing.expectEqual(case.state_isolated, properties.state_isolated);
+    }
+}
+
+test "a direct handler mutation is still the ZTS310 error" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\let count = 0;
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  count = count + 1;
+        \\  return Response.text(String(count));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "direct-count.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expect(!result.state_isolated);
+    try std.testing.expect(result.totalErrors() > 0);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
+    try std.testing.expectEqualStrings("error", diagnostics[0].severity);
+}
+
+test "a helper mutation is a ZTS310 warning that names a helper and adds no error" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\let count = 0;
+        \\function bump(): number {
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text(String(bump()));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "helper-warning.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expect(!result.state_isolated);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
+    try std.testing.expectEqualStrings("warning", diagnostics[0].severity);
+    try std.testing.expectEqualStrings("helper function mutates module-scope variable (breaks cross-request isolation)", diagnostics[0].message);
+    try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
+}
+
+test "check refuses a helper mutation only when the capsule demands state_isolated" {
+    const allocator = std.testing.allocator;
+
+    // The capsule names the property, so the check refuses.
+    var demanded = try runCheckOnlyFromSourceWithOptions(allocator, helper_count_source, "helper-demanded.ts", .{ .json_mode = true });
+    defer demanded.deinit(allocator);
+    try std.testing.expect(!demanded.state_isolated);
+    try std.testing.expectEqual(@as(u32, 1), demanded.totalErrors());
+    try std.testing.expectEqual(@as(usize, 2), demanded.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS310", demanded.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("ZTS500", demanded.json_diagnostics.items[1].code);
+
+    // No capsule: the default profile demands the property, so the check refuses.
+    const bare_source =
+        \\let count = 0;
+        \\function bump(): number {
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(String(bump()));
+        \\}
+    ;
+    var bare = try runCheckOnlyFromSourceWithOptions(allocator, bare_source, "helper-bare.ts", .{ .json_mode = true });
+    defer bare.deinit(allocator);
+    try std.testing.expect(!bare.state_isolated);
+    try std.testing.expectEqual(@as(u32, 1), bare.totalErrors());
+    try std.testing.expectEqual(@as(usize, 2), bare.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS310", bare.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("ZTS500", bare.json_diagnostics.items[1].code);
+
+    // A capsule that leaves the property out: the check passes with the warning only.
+    const narrow_source =
+        \\let count = 0;
+        \\function bump(): number {
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text(String(bump()));
+        \\}
+    ;
+    var narrow = try runCheckOnlyFromSourceWithOptions(allocator, narrow_source, "helper-narrow.ts", .{ .json_mode = true });
+    defer narrow.deinit(allocator);
+    try std.testing.expect(!narrow.state_isolated);
+    try std.testing.expectEqual(@as(u32, 0), narrow.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), narrow.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS310", narrow.json_diagnostics.items[0].code);
+}

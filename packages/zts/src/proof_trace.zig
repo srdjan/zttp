@@ -169,7 +169,7 @@ const property_info = [_]PropertyInfo{
         .name = "state_isolated",
         .family = .structural,
         .passing = "No module-scope mutation in the handler body: requests cannot leak state into one another.",
-        .failing = "A module-scope variable is mutated inside the handler body.",
+        .failing = "A function mutates a module-scope variable.",
     },
     .{
         .name = "retry_safe",

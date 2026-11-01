@@ -116,7 +116,7 @@ const suggestion_rows = [_]SuggestionRow{
     .{ .name = "read_only", .text = "remove writing calls to zttp:cache / zttp:sql, or drop `read_only` from your proof-property set." },
     .{ .name = "retry_safe", .text = "remove writes from the handler, or drop `retry_safe` from the proof-property set." },
     .{ .name = "idempotent", .text = "remove varying reads and writes, or drop `idempotent` from the proof-property set." },
-    .{ .name = "state_isolated", .text = "move module-scope mutations into the handler body or behind zttp:cache." },
+    .{ .name = "state_isolated", .text = "move module-scope state behind zttp:cache." },
     .{ .name = "fault_covered", .text = "add an explicit failure path for every failable I/O call: bind the call to a const in the handler body and branch on its failure before its value is used." },
     .{ .name = "pure", .text = "remove side effects (virtual-module calls, Date.now, Math.random) from the handler body." },
     .{ .name = "stateless", .text = "move module-scope mutable state into the handler body or behind zttp:cache." },
