@@ -136,3 +136,25 @@ The binary from the third row booted with "Proof accepted: weakest edge trusted,
 Results at the G1b tree, each from an unfiltered run: `zig build test` 214 of 214 steps, `test-zruntime` 274 of 275 tests with 1 skipped, and `test-cli`, `test-bytecode-identity`, `smoke-v1`, `test-module-boundary`, `test-expert-app`, `test-proof-swallow`, and `zig fmt --check packages scripts` exit 0. `test-expert-app` holds the replay.
 
 Against the G0 tables, `zts compile` moved 0 of 215 rows and the command surface moved 0 of 38 rows. `zts check` moved 1 of 215 rows, the named exception of this unit. The row is `tests/corpus/check/bad/module_scope_mutation.ts`. A byte comparison shows that the only difference is the `.failing` proof trace text, which now reads "A function mutates a module-scope variable." The exit status and stderr of that row did not move. No corpus case moved, so the stop condition did not apply.
+
+## G2a
+
+`compileMultiModule` now calls `checkGraphModule` for each module in execution order, after code generation. The function runs virtual import validation, the boolean, type, and strict checks, the verifier when `emit_verify` is true, and the bytecode verifier. The entry was unchecked before this unit too. Flow stays out of scope until G3.
+
+A dependency has no handler, so `HandlerVerifier.verifyModule` checks it. It runs the import scan, unresolved route dispatch, the G1b helper sweep with no request roots, the Result check over the program, the typed absence check, and the unused-import report. It leaves out return totality, the Optional narrowing walk, and unused-variable reporting, because each one needs a handler. ZTS309 still reaches a dependency through the typed absence check. The plan's stop condition did not apply.
+
+`StrictChecker.allow_raw_exported_boundary` exempts a dependency from ZTS061 alone. `checkExportedBoundaryTypes` emits no other kind, so the exemption goes by diagnostic kind, and ZTS609 stays enforced. A dependency with a top-level `assert`, nested in a top-level block or not, fails with `error.DependencyTopLevelAssert`. That refusal has no ZTS code, so it needs no defect seed.
+
+Sonnet implemented the unit, and I reviewed the diff. Three decisions came from the implementation:
+
+- `verifyModule` also runs `checkUnresolvedRouteDispatches`, so an unresolvable route dispatch in a dependency is a verifier error, as it is for a handler.
+- A graph verifier failure returns `verify_failed` without the violations JSONL and summary of the single-module path. The diagnostics still print, and the build stops.
+- The test "compileHandler graph accepts current type boolean and strict diagnostics" asserted the defect, so "compileHandler graph rejects an entry with an unsupported extension" replaced it and keeps its extension case. Three other tests gained type annotations, because their untyped sources now fail ZTS601.
+
+The red run failed 11 of 17 tests, for example "expected error.SoundModeViolation, found .{ .bytecode = ... }". That run used a filter, so it shows only the red state.
+
+No test can drive the bytecode verifier to fail from source, so no test kills a mutant of that call.
+
+Results at the G2a tree, each from an unfiltered run: `zig build test` 214 of 214 steps, `test-zruntime` 274 of 275 tests with 1 skipped, and `test-cli`, `test-bytecode-identity`, `smoke-v1`, `test-module-boundary`, `test-expert-app`, `test-proof-swallow`, and `zig fmt --check packages scripts` exit 0. The `git diff` on `packages/proof-checker` is empty.
+
+Against the G0 tables, `zts check` moved only the G1b row, and the command surface moved 0 of 38 rows. `zts compile` moved 1 of 215 rows: `examples/handler/handler-with-imports.ts`. Its `out.zig`, `contract.json`, and stdout are byte-identical. Its stderr gained a correct ZTS305 warning for the unused `body` variable in that example, because the entry now reaches the verifier.

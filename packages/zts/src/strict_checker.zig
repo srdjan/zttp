@@ -232,6 +232,10 @@ pub const StrictChecker = struct {
     /// registration there may use any expression; inside a function the
     /// request can reach the argument.
     in_function_body: bool = false,
+    /// Skip ZTS061. A dependency of a multi-module build exports functions by
+    /// nature, and no certificate property reads an exported signature. The
+    /// entry and a single-module build never set it. No other rule changes.
+    allow_raw_exported_boundary: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -1018,6 +1022,7 @@ pub const StrictChecker = struct {
     /// raw open types must be named. The source spelling is load-bearing: a
     /// structural scalar alias resolves to the same TypeIndex as its base.
     fn checkExportedBoundaryTypes(self: *StrictChecker, node: NodeIndex) void {
+        if (self.allow_raw_exported_boundary) return;
         const func = self.ir_view.getFunction(node) orelse return;
         const source_sig = self.functionSignature(node, func) orelse return;
         const sig = source_sig.sig;

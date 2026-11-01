@@ -166,6 +166,70 @@ shared_serve_out=$(cd "$TMP_DIR/shared-name-app" && perl -e 'alarm 60; exec @ARG
 [ "$shared_serve_status" -eq 1 ] || fail "serve with a shared top-level name exited $shared_serve_status, expected 1: $shared_serve_out"
 printf '%s\n' "$shared_serve_out" | grep -qxF "$shared_want" || fail "serve did not name the shared top-level name: $shared_serve_out"
 
+step "negative: a defect in a dependency is refused by compile for each check"
+mkdir -p "$TMP_DIR/dep-check-app"
+cat > "$TMP_DIR/dep-check-app/h.ts" <<'TS'
+import { value } from "./dep.ts";
+export function handler(req: Request): Response {
+  return Response.text(String(value()));
+}
+TS
+dep_check_case() {
+  dep_name="$1"
+  dep_want="$2"
+  dep_status=0
+  dep_out=$(cd "$TMP_DIR/dep-check-app" && "$ZTTP" compile h.ts -o "dep-bin-$dep_name" --no-attest 2>&1 </dev/null) || dep_status=$?
+  [ "$dep_status" -eq 1 ] || fail "compile with a $dep_name defect in a dependency exited $dep_status, expected 1: $dep_out"
+  [ ! -e "$TMP_DIR/dep-check-app/dep-bin-$dep_name" ] || fail "refused compile with a $dep_name defect in a dependency wrote a binary"
+  printf '%s\n' "$dep_out" | grep -qF "$dep_want" || fail "compile with a $dep_name defect in a dependency did not print '$dep_want': $dep_out"
+}
+cat > "$TMP_DIR/dep-check-app/dep.ts" <<'TS'
+export function value(): number {
+  if (5) return 1;
+  return 2;
+}
+TS
+dep_check_case boolean "error[ZTS100]: boolean context requires a value of type boolean"
+cat > "$TMP_DIR/dep-check-app/dep.ts" <<'TS'
+export function value(): number {
+  const wrong: number = "wrong";
+  return wrong;
+}
+TS
+dep_check_case type "type error[ZTS200]: type '\"wrong\"' is not assignable to type 'number'"
+cat > "$TMP_DIR/dep-check-app/dep.ts" <<'TS'
+export function value() {
+  return 1;
+}
+TS
+dep_check_case strict "strict error[ZTS601]: strict ZigTS requires explicit function parameter and return types"
+cat > "$TMP_DIR/dep-check-app/dep.ts" <<'TS'
+export const value = (): number => 1;
+TS
+dep_check_case canonical-export "strict error[ZTS609]: exported function-valued const should be an export function declaration"
+cat > "$TMP_DIR/dep-check-app/dep.ts" <<'TS'
+import { jwtVerify } from "zttp:auth";
+export function value(): string {
+  const result = jwtVerify("token", "secret");
+  return String(result.value);
+}
+TS
+dep_check_case verifier "verify error[ZTS303]: result.value accessed without checking result.ok first"
+cat > "$TMP_DIR/dep-check-app/dep.ts" <<'TS'
+import { definitelyMissing } from "zttp:sql";
+export function value(): number {
+  return 1;
+}
+TS
+dep_check_case virtual-import "import error: module 'zttp:sql' does not export 'definitelyMissing'"
+cat > "$TMP_DIR/dep-check-app/dep.ts" <<'TS'
+assert 1 === 1, "boot";
+export function value(): number {
+  return 1;
+}
+TS
+dep_check_case top-level-assert "dep.ts: a dependency may not hold a top-level assert, because a failed one leaves the later exports undefined"
+
 step "negative: a helper mutation stops only a capsule that demands state_isolated"
 mkdir -p "$TMP_DIR/helper-state-app"
 cat > "$TMP_DIR/helper-state-app/demanded.ts" <<'TS'

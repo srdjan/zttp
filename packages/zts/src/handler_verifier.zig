@@ -661,6 +661,41 @@ pub const HandlerVerifier = struct {
         return error_count;
     }
 
+    /// Run the program-wide checks on a module that has no handler function:
+    /// a dependency of a multi-module build. No function is a request root, so
+    /// the helper sweep tests every function for a write to module state, the
+    /// Result and typed-absence checks cover the whole program, and the unused
+    /// import report runs. The handler-scoped checks (return totality,
+    /// Optional narrowing, unused variables) need a handler and do not run.
+    /// Returns the number of error-severity diagnostics. The caller reads
+    /// `has_module_mutation` and `unresolved_route_dispatch` afterwards.
+    pub fn verifyModule(self: *HandlerVerifier) !u32 {
+        if (self.type_checker) |tc| try tc.ensureHealthy();
+        self.scanImports();
+
+        const facts = self.resolveFacts() orelse return error.OutOfMemory;
+        const route_resolver = route_resolution.Resolver.init(self.ir_view, self.atoms, facts);
+        try self.checkUnresolvedRouteDispatches(&route_resolver);
+        self.sweepHelperMutations(null_node, &.{});
+
+        // `result_route_roots` stays empty and `null_node` stands for the
+        // absent handler, so no function is a route root.
+        self.checkResultUses(null_node);
+        self.reportTypedAbsentReads();
+
+        self.collectImportBindings();
+        self.markUsedImports();
+        self.reportUnusedImports();
+        if (self.type_checker) |tc| try tc.ensureHealthy();
+        if (self.allocation_failed) return error.OutOfMemory;
+
+        var error_count: u32 = 0;
+        for (self.diagnostics.items) |diag| {
+            if (diag.severity == .err) error_count += 1;
+        }
+        return error_count;
+    }
+
     /// Apply the handler-scoped checks to one request entry point. A route
     /// function receives the same untrusted request and owns the same proof
     /// obligations as the exported handler that dispatches to it.

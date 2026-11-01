@@ -209,6 +209,8 @@ pub const ResolveOptions = struct {
     /// Which sections the configured capability policy declares. Empty means no
     /// policy file, which is what a caller that has none passes.
     policy_sections: guard_catalog.SectionSet = .{},
+    /// A dependency of a multi-module build is exempt from ZTS061 only.
+    allow_raw_exported_boundary: bool = false,
 };
 
 pub const ResolvedModule = struct {
@@ -358,6 +360,7 @@ pub fn resolve(
         );
         sc.facts = opts.module_facts;
         sc.policy_sections = opts.policy_sections;
+        sc.allow_raw_exported_boundary = opts.allow_raw_exported_boundary;
         errdefer sc.deinit();
         strict_errors = try sc.check(parsed.root);
         if (type_checker_opt) |*tc| try tc.ensureHealthy();
@@ -470,6 +473,17 @@ pub const CheckedModule = struct {
         self.verifier_state = .attempted;
 
         const error_count = try self.verifier.verify(handler_func);
+        if (self.resolved.type_checker) |*tc| try tc.ensureHealthy();
+        self.verifier_error_count = error_count;
+        self.verifier_state = .completed;
+        return error_count;
+    }
+
+    pub fn runModuleVerifier(self: *CheckedModule) !u32 {
+        if (self.verifier_state != .ready) return error.PassAlreadyRun;
+        self.verifier_state = .attempted;
+
+        const error_count = try self.verifier.verifyModule();
         if (self.resolved.type_checker) |*tc| try tc.ensureHealthy();
         self.verifier_error_count = error_count;
         self.verifier_state = .completed;
@@ -725,6 +739,8 @@ pub const ModuleAnalysisSession = struct {
         policy_sections: guard_catalog.SectionSet = .{},
         select_verifier: bool = false,
         select_flow: bool = false,
+        /// Exempt the module from ZTS061 (`raw_exported_boundary_type`) alone.
+        allow_raw_exported_boundary: bool = false,
     };
 
     pub const ContractOnlyOptions = struct {
@@ -744,6 +760,7 @@ pub const ModuleAnalysisSession = struct {
     profile: Profile = undefined,
     /// One option set for every profile. `.full` fills only `strict` and `manifest_registry`.
     extraction_opts: ExtractContractOptions = .{},
+    allow_raw_exported_boundary: bool = false,
     policy_sections: guard_catalog.SectionSet = .{},
     /// `env.public` names for the standalone flow checker of a contract-only session.
     env_public: []const []const u8 = &.{},
@@ -786,6 +803,7 @@ pub const ModuleAnalysisSession = struct {
             },
             .policy_sections = opts.policy_sections,
             .source_types = source_types,
+            .allow_raw_exported_boundary = opts.allow_raw_exported_boundary,
             .state = .ready,
             .resolution_state = .ready,
             .contract_type_state = .ready,
@@ -961,6 +979,30 @@ pub const ModuleAnalysisSession = struct {
         return count;
     }
 
+    /// Run the module checks on a module that has no handler function.
+    /// `prepareChecked` creates no checked module without a handler, so this
+    /// creates one. The flow pass stays unselected: a graph build runs flow
+    /// over the whole graph in a later unit. The caller reads
+    /// `has_module_mutation` and `unresolved_route_dispatch` from the verifier.
+    pub fn runModuleVerifier(self: *ModuleAnalysisSession, opts: CheckOptions) !u32 {
+        if (self.profile != .full or self.resolution_state != .completed) {
+            return error.AnalysisNotResolved;
+        }
+        if (self.verifier_state != .ready) return error.AnalysisPassUnavailable;
+        if (self.checked != null) return error.AnalysisPassAlreadyPrepared;
+        self.checked = try CheckedModule.init(
+            self.allocator,
+            try self.resolvedForReport(),
+            opts,
+        );
+        self.verifier_state = .attempted;
+        const checked = &self.checked.?;
+        const count = try checked.runModuleVerifier();
+        if (!checked.verifierCompleted()) return error.AnalysisPassIncomplete;
+        self.verifier_state = .completed;
+        return count;
+    }
+
     pub fn runFlow(self: *ModuleAnalysisSession, handler_func: NodeIndex) !u32 {
         if (self.flow_state != .ready) return error.AnalysisPassUnavailable;
         self.flow_state = .attempted;
@@ -1110,6 +1152,7 @@ pub const ModuleAnalysisSession = struct {
             .module_facts = &self.contract_facts.?,
             .type_import_facts = &self.contract_facts.?,
             .policy_sections = self.policy_sections,
+            .allow_raw_exported_boundary = self.allow_raw_exported_boundary,
         });
         if (self.resolved.?.type_checker) |*checker| try checker.ensureHealthy();
         self.resolution_state = .completed;

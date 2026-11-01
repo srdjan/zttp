@@ -285,6 +285,7 @@ pub fn compileHandler(
             policy,
             sql_schema_path,
             manifest_registry,
+            opts,
         );
     }
 
@@ -842,6 +843,7 @@ fn compileMultiModule(
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
     manifest_registry: ?*const zts.ManifestRegistry,
+    opts: CompileOptions,
 ) !CompiledHandler {
     // Build module graph
     var graph = zts.modules.ModuleGraph.init(allocator);
@@ -872,6 +874,13 @@ fn compileMultiModule(
     defer compile_result.deinit();
     defer {
         for (compile_result.codegens) |*cg| cg.freeOwnedConstantPayloads();
+    }
+
+    // Check every module, dependencies first and the entry last. Code
+    // generation above already ran on the kept parsers, so no bytecode moves.
+    for (0..compile_result.modules.len) |module_index| {
+        const checks = try checkGraphModule(allocator, &graph, &compile_result, module_index, atoms, opts);
+        if (checks.verify_failed) return .{ .verify_failed = true };
     }
 
     // Serialize each module and collect dependency bytecodes
@@ -946,6 +955,186 @@ fn compileMultiModule(
     };
 }
 
+/// What the checks of one graph module leave for the caller. Unit G3 reads
+/// the two state facts when it merges the contract.
+const GraphModuleChecks = struct {
+    verify_failed: bool = false,
+    has_module_mutation: bool = false,
+    unresolved_route_dispatch: bool = false,
+};
+
+const max_assert_walk_depth: u16 = 1024;
+
+/// True when a top-level statement of the program is an `assert`, in the
+/// program body or in a block that is not inside a function. The walk stops at
+/// each function and descends through the shared child map. A program nested
+/// beyond the depth limit counts as holding one, so the walk fails closed.
+fn hasTopLevelAssert(view: zts.IrView, node: ir.NodeIndex, depth: u16) bool {
+    if (depth >= max_assert_walk_depth) return true;
+    const tag = view.getTag(node) orelse return false;
+    switch (tag) {
+        .assert_stmt => return true,
+        .function_decl, .function_expr, .arrow_function => return false,
+        else => {
+            var children = view.expressionChildren(node);
+            while (children.next()) |child| {
+                if (hasTopLevelAssert(view, child, depth + 1)) return true;
+            }
+            return false;
+        },
+    }
+}
+
+fn printGraphDiagnostics(
+    allocator: std.mem.Allocator,
+    owner: anytype,
+    comptime formatFn: anytype,
+    view: zts.SourceView,
+) void {
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    formatFn(owner, view, &writer.writer) catch {};
+    output = writer.toArrayList();
+    if (output.items.len > 0) debugPrint("{s}", .{output.items});
+}
+
+/// Run on one module of a loaded graph the checks that the single-module path
+/// runs on its only module: virtual import validation, the boolean, type, and
+/// strict checks, the verifier, and the bytecode verifier. `module_index`
+/// counts in execution order, so dependencies come first and the entry last.
+///
+/// A dependency has no handler, so it gets the module verifier. It is exempt
+/// from ZTS061 alone, because a dependency exports functions by nature, and it
+/// may not hold a top-level `assert`: a failed one ends module initialization
+/// and leaves the later exports undefined.
+fn checkGraphModule(
+    allocator: std.mem.Allocator,
+    graph: *const zts.modules.ModuleGraph,
+    compile_result: *const zts.modules.CompileResult,
+    module_index: usize,
+    atoms: *zts.AtomTable,
+    opts: CompileOptions,
+) !GraphModuleChecks {
+    const is_entry = module_index == compile_result.modules.len - 1;
+    const module = &graph.module_list.items[graph.execution_order[module_index]];
+    const parser = &compile_result.parsers[module_index];
+    const compiled = &compile_result.modules[module_index];
+    const root = compiled.root;
+    const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var diag_view = zts.SourceView.of(module.source);
+    diag_view.name = module.path;
+    diag_view.normalize_positions = true;
+
+    try validateVirtualModuleImports(view, atoms, module.path, null);
+
+    if (!is_entry and hasTopLevelAssert(view, root, 0)) {
+        if (!builtin.is_test) debugPrint(
+            "{s}: a dependency may not hold a top-level assert, because a failed one leaves the later exports undefined\n",
+            .{module.path},
+        );
+        return error.DependencyTopLevelAssert;
+    }
+
+    var parsed = zts.pipeline.ParsedModule.fromTypedExisting(view, root, atoms, &parser.type_store);
+    parsed.scopes = &parser.scopes;
+    var analysis: zts.pipeline.ModuleAnalysisSession = .{};
+    try analysis.initFull(allocator, parsed, .{
+        .source_types = .direct,
+        .strict = opts.strict,
+        .manifest_registry = opts.manifest_registry,
+        .policy_sections = if (opts.policy) |*configured| configured.declaredSections() else .{},
+        .select_verifier = opts.emit_verify,
+        .select_flow = false,
+        .allow_raw_exported_boundary = !is_entry,
+    });
+    defer analysis.deinit();
+    try analysis.complete();
+    const resolved = try analysis.resolvedForReport();
+
+    const bool_diags = resolved.boolDiagnostics();
+    if (bool_diags.len > 0 and !builtin.is_test) {
+        debugPrint("\n", .{});
+        printGraphDiagnostics(allocator, resolved, zts.pipeline.ResolvedModule.formatBoolDiagnostics, diag_view);
+        debugPrint("{d} boolean check error(s), {d} warning(s)\n", .{
+            resolved.bool_error_count,
+            bool_diags.len - resolved.bool_error_count,
+        });
+    }
+    if (resolved.bool_error_count > 0) {
+        analysis.refuseResolution();
+        if (!builtin.is_test) debugPrint("\nBoolean check failed for {s}\n", .{module.path});
+        return error.SoundModeViolation;
+    }
+
+    if (resolved.typeDiagnostics().len > 0 and !builtin.is_test) {
+        printGraphDiagnostics(allocator, resolved, zts.pipeline.ResolvedModule.formatTypeDiagnostics, diag_view);
+    }
+    if (resolved.typeErrorCount() > 0) {
+        analysis.refuseResolution();
+        if (!builtin.is_test) debugPrint("\nType check failed for {s}\n", .{module.path});
+        return error.SoundModeViolation;
+    }
+
+    if (resolved.strict_checker != null) {
+        if (resolved.strictDiagnostics().len > 0 and !builtin.is_test) {
+            printGraphDiagnostics(allocator, resolved, zts.pipeline.ResolvedModule.formatStrictDiagnostics, diag_view);
+        }
+        if (resolved.strict_error_count > 0) {
+            analysis.refuseResolution();
+            if (!builtin.is_test) debugPrint("\nStrict check failed for {s}\n", .{module.path});
+            return error.SoundModeViolation;
+        }
+    }
+
+    var checks: GraphModuleChecks = .{};
+    if (opts.emit_verify) {
+        const handler_fn = if (is_entry) findHandlerFunction(view, root) else null;
+        const facts = try analysis.facts();
+        var error_count: u32 = 0;
+        var ran = false;
+        if (is_entry) {
+            if (handler_fn) |hf| {
+                try analysis.prepareChecked(hf, .{ .module_facts = facts });
+                error_count = try analysis.runVerifier(hf);
+                ran = true;
+            } else if (!builtin.is_test) {
+                debugPrint("Warning: no handler function found for verification\n", .{});
+            }
+        } else {
+            error_count = try analysis.runModuleVerifier(.{ .module_facts = facts });
+            ran = true;
+        }
+        if (ran) {
+            const checked = analysis.checkedModule() orelse return error.AnalysisPassIncomplete;
+            const diags = checked.verifierDiagnostics();
+            if (diags.len > 0 and !builtin.is_test) {
+                debugPrint("\n", .{});
+                printGraphDiagnostics(allocator, &checked.verifier, zts.HandlerVerifier.formatDiagnostics, diag_view);
+                debugPrint("{d} error(s), {d} warning(s)\n", .{ error_count, diags.len - error_count });
+            }
+            checks.has_module_mutation = checked.verifier.has_module_mutation;
+            checks.unresolved_route_dispatch = checked.verifier.unresolved_route_dispatch;
+            if (error_count > 0) {
+                if (!builtin.is_test) debugPrint("\nVerification failed for {s}\n", .{module.path});
+                checks.verify_failed = true;
+                return checks;
+            }
+        }
+    }
+
+    const verified = zts.BytecodeVerifier.verify(&compiled.func);
+    if (!verified.valid) {
+        debugPrint("Bytecode verification failed for {s} at offset {d}: {s}\n", .{
+            module.path,
+            verified.offset,
+            verified.message,
+        });
+        return error.BytecodeVerificationFailed;
+    }
+    return checks;
+}
+
 const readFilePosixForGraph = zts.file_io.readFileForModuleGraph;
 
 const findHandlerFunction = zts.findHandlerFunction;
@@ -1003,13 +1192,13 @@ fn expectSameGraphArtifact(first: *const CompiledHandler, second: *const Compile
 test "compileHandler aggregates contract across file imports" {
     const entry_source =
         \\import { readSecret } from "./dep.ts";
-        \\export function handler(req) {
+        \\export function handler(req: Request): Response {
         \\  return Response.text(readSecret());
         \\}
     ;
     const dep_source =
         \\import { env } from "zttp:env";
-        \\export function readSecret() {
+        \\export function readSecret(): string {
         \\  return env("JWT_SECRET") ?? "";
         \\}
     ;
@@ -1070,13 +1259,13 @@ test "compileHandler proves no_secret_leakage for a name only when the policy li
 test "compileHandler discloses env.public in the merged contract of a file-import graph" {
     const entry_source =
         \\import { readName } from "./dep.ts";
-        \\export function handler(req) {
+        \\export function handler(req: Request): Response {
         \\  return Response.text(readName());
         \\}
     ;
     const dep_source =
         \\import { env } from "zttp:env";
-        \\export function readName() {
+        \\export function readName(): string {
         \\  return env("APP_NAME") ?? "";
         \\}
     ;
@@ -1165,13 +1354,13 @@ test "multi-module compile proves no security property in the extracted facts" {
 test "compileHandler rejects disallowed policy from imported module" {
     const entry_source =
         \\import { readSecret } from "./dep.ts";
-        \\export function handler(req) {
+        \\export function handler(req: Request): Response {
         \\  return Response.text(readSecret());
         \\}
     ;
     const dep_source =
         \\import { env } from "zttp:env";
-        \\export function readSecret() {
+        \\export function readSecret(): string {
         \\  return env("JWT_SECRET") ?? "";
         \\}
     ;
@@ -1190,50 +1379,252 @@ test "compileHandler rejects disallowed policy from imported module" {
     );
 }
 
-test "compileHandler graph accepts current type boolean and strict diagnostics" {
-    // Single-module checks reject these nodes. Graph compilation currently accepts them.
-    const typed_dependency =
-        \\export function count(): number {
-        \\  const value: number = "wrong";
-        \\  return value;
+const graph_clean_entry =
+    \\import { value } from "./dep.ts";
+    \\export function handler(req: Request): Response {
+    \\  return Response.text(String(value()));
+    \\}
+    \\
+;
+
+fn graphDependencyFixture(dep_source: []const u8) !CompileGraphFixture {
+    var fixture = try CompileGraphFixture.init("entry.ts", graph_clean_entry);
+    errdefer fixture.deinit();
+    try fixture.add("dep.ts", dep_source);
+    return fixture;
+}
+
+test "compileHandler graph refuses a dependency that fails the boolean check" {
+    var fixture = try graphDependencyFixture(
+        \\export function value(): number {
+        \\  if (5) return 1;
+        \\  return 2;
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try std.testing.expectError(error.SoundModeViolation, fixture.compile(.{ .emit_verify = true }));
+}
+
+test "compileHandler graph refuses a dependency that fails the type check" {
+    var fixture = try graphDependencyFixture(
+        \\export function value(): number {
+        \\  const wrong: number = "wrong";
+        \\  return wrong;
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try std.testing.expectError(error.SoundModeViolation, fixture.compile(.{ .emit_verify = true }));
+}
+
+test "compileHandler graph refuses a dependency that fails the strict check" {
+    var fixture = try graphDependencyFixture(
+        \\export function value() {
+        \\  return 1;
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try std.testing.expectError(error.SoundModeViolation, fixture.compile(.{ .emit_verify = true }));
+}
+
+test "compileHandler graph skips the strict rules of a dependency when strict is off" {
+    var fixture = try graphDependencyFixture(
+        \\export function value() {
+        \\  return 1;
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(.{ .emit_verify = true, .strict = false });
+    defer compiled.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), compiled.dep_bytecodes.?.len);
+}
+
+test "compileHandler graph fails verification for a dependency with an unchecked result" {
+    var fixture = try graphDependencyFixture(
+        \\import { jwtVerify } from "zttp:auth";
+        \\export function value(): string {
+        \\  const result = jwtVerify("token", "secret");
+        \\  return String(result.value);
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(.{ .emit_verify = true });
+    defer compiled.deinit(std.testing.allocator);
+    try std.testing.expect(compiled.verify_failed);
+    try std.testing.expectEqual(@as(usize, 0), compiled.bytecode.len);
+}
+
+test "compileHandler graph does not verify a dependency when verification is off" {
+    var fixture = try graphDependencyFixture(
+        \\import { jwtVerify } from "zttp:auth";
+        \\export function value(): string {
+        \\  const result = jwtVerify("token", "secret");
+        \\  return String(result.value);
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(.{});
+    defer compiled.deinit(std.testing.allocator);
+    try std.testing.expect(!compiled.verify_failed);
+    try std.testing.expectEqual(@as(usize, 1), compiled.dep_bytecodes.?.len);
+}
+
+test "compileHandler graph refuses an invalid virtual import in a dependency" {
+    var fixture = try graphDependencyFixture(
+        \\import { definitelyMissing } from "zttp:sql";
+        \\export function value(): number {
+        \\  return 1;
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try std.testing.expectError(error.InvalidImportSpecifier, fixture.compile(.{ .emit_verify = true }));
+}
+
+test "compileHandler graph refuses a top-level assert in a dependency" {
+    var fixture = try graphDependencyFixture(
+        \\assert 1 === 1, "boot";
+        \\export function value(): number {
+        \\  return 1;
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try std.testing.expectError(error.DependencyTopLevelAssert, fixture.compile(.{ .emit_verify = true }));
+}
+
+test "compileHandler graph refuses an assert nested in a top-level block of a dependency" {
+    var fixture = try graphDependencyFixture(
+        \\if (1 === 1) {
+        \\  assert 1 === 1, "boot";
+        \\}
+        \\export function value(): number {
+        \\  return 1;
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try std.testing.expectError(error.DependencyTopLevelAssert, fixture.compile(.{ .emit_verify = true }));
+}
+
+test "compileHandler graph accepts an assert inside a dependency function" {
+    var fixture = try graphDependencyFixture(
+        \\export function value(): string {
+        \\  assert 1 === 1, "inside";
+        \\  return "ok";
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(.{ .emit_verify = true });
+    defer compiled.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 1), compiled.dep_bytecodes.?.len);
+}
+
+test "compileHandler graph exempts a dependency that fails only ZTS061" {
+    var fixture = try graphDependencyFixture(
+        \\export function value(): number {
+        \\  return 1;
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(.{ .emit_verify = true });
+    defer compiled.deinit(std.testing.allocator);
+    try std.testing.expect(!compiled.verify_failed);
+    try std.testing.expectEqual(@as(usize, 1), compiled.dep_bytecodes.?.len);
+}
+
+test "compileHandler graph refuses a dependency that fails ZTS609" {
+    var fixture = try graphDependencyFixture(
+        \\export const value = (): number => 1;
+        \\
+    );
+    defer fixture.deinit();
+    try std.testing.expectError(error.SoundModeViolation, fixture.compile(.{ .emit_verify = true }));
+}
+
+test "compileHandler graph refuses an entry that fails the boolean check" {
+    const entry_source =
+        \\import { value } from "./dep.ts";
+        \\export function handler(req: Request): Response {
+        \\  if (5) return Response.text("five");
+        \\  return Response.text(String(value()));
         \\}
         \\
     ;
-    const typed_entry =
-        \\import { count } from "./dep.ts";
-        \\const typedMarker: number = 1;
-        \\export function handler(req) {
-        \\  if (5) return Response.text(String(count() + typedMarker));
-        \\  return Response.text("zero");
+    var fixture = try CompileGraphFixture.init("entry.ts", entry_source);
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export function value(): number {
+        \\  return 1;
+        \\}
+        \\
+    );
+    try std.testing.expectError(error.SoundModeViolation, fixture.compile(.{ .emit_verify = true }));
+}
+
+test "compileHandler graph still enforces ZTS061 on the entry" {
+    const entry_source =
+        \\import { value } from "./dep.ts";
+        \\export function label(): string {
+        \\  return "entry";
+        \\}
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(String(value()));
         \\}
         \\
     ;
-    const untyped_entry =
+    var fixture = try CompileGraphFixture.init("entry.ts", entry_source);
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export function value(): number {
+        \\  return 1;
+        \\}
+        \\
+    );
+    try std.testing.expectError(error.SoundModeViolation, fixture.compile(.{ .emit_verify = true }));
+}
+
+test "compileHandler graph fails verification for an entry with an unchecked result" {
+    const entry_source =
+        \\import { jwtVerify } from "zttp:auth";
+        \\import { value } from "./dep.ts";
+        \\export function handler(req: Request): Response {
+        \\  const result = jwtVerify("token", "secret");
+        \\  return Response.text(String(result.value) + String(value()));
+        \\}
+        \\
+    ;
+    var fixture = try CompileGraphFixture.init("entry.ts", entry_source);
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export function value(): number {
+        \\  return 1;
+        \\}
+        \\
+    );
+    var compiled = try fixture.compile(.{ .emit_verify = true });
+    defer compiled.deinit(std.testing.allocator);
+    try std.testing.expect(compiled.verify_failed);
+}
+
+test "compileHandler graph rejects an entry with an unsupported extension" {
+    const entry_source =
         \\import { count } from "./dep.ts";
         \\export function handler(req) {
         \\  return Response.text(String(count()));
         \\}
         \\
     ;
-    const cases = [_][]const u8{ typed_entry, untyped_entry };
-
-    for (cases) |entry_source| {
-        var fixture = try CompileGraphFixture.init("entry.ts", entry_source);
-        defer fixture.deinit();
-        try fixture.add("dep.ts", typed_dependency);
-
-        var strict = try fixture.compile(.{ .emit_contract = true, .strict = true });
-        defer strict.deinit(std.testing.allocator);
-        var relaxed = try fixture.compile(.{ .emit_contract = true, .strict = false });
-        defer relaxed.deinit(std.testing.allocator);
-
-        try std.testing.expectEqual(@as(usize, 1), strict.dep_bytecodes.?.len);
-        try expectSameGraphArtifact(&strict, &relaxed);
-    }
-
-    var unsupported = try CompileGraphFixture.init("entry.js", untyped_entry);
+    var unsupported = try CompileGraphFixture.init("entry.js", entry_source);
     defer unsupported.deinit();
-    try unsupported.add("dep.ts", typed_dependency);
+    try unsupported.add("dep.ts", "export function count(): number { return 1; }\n");
     try std.testing.expectError(error.UnsupportedSourceExtension, unsupported.compile(.{}));
 }
 
