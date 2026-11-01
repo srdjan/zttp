@@ -178,6 +178,8 @@ pub const FlowModuleGraph = struct {
     /// imports or borrow the independent fault scan's revision selection.
     imported_effects: std.ArrayList(zts.pipeline.ImportedEffect) = .empty,
     owned: std.ArrayList(*Owned) = .empty,
+    /// Capture tables of the graph modules that `fromModuleGraph` borrows; this owns them.
+    graph_captures: std.ArrayList(*zts.pipeline.FlowCaptureTable) = .empty,
     root_path: []u8,
     root_captures: *zts.pipeline.FlowCaptureTable,
     /// A failed load, type check, cycle, depth or finite-ID bound must not turn
@@ -223,6 +225,11 @@ pub const FlowModuleGraph = struct {
             allocator.destroy(owner);
         }
         self.owned.deinit(allocator);
+        for (self.graph_captures.items) |table| {
+            table.deinit();
+            allocator.destroy(table);
+        }
+        self.graph_captures.deinit(allocator);
         self.root_captures.deinit();
         allocator.destroy(self.root_captures);
         allocator.free(self.root_path);
@@ -265,6 +272,122 @@ pub const FlowModuleGraph = struct {
         try self.initialization_order.append(self.allocator, id);
     }
 };
+
+/// The flow modules of one loaded module graph, each module once.
+///
+/// The entry is module 0 and each dependency takes the id of its position in
+/// `execution_order` plus one. The views borrow the parsers of `compile_result`,
+/// so no file is read again. The initialization order follows `execution_order`,
+/// which lists a shared dependency once. A target that the flow evaluator cannot
+/// follow (a data export, a bare specifier) leaves `complete` false, the same
+/// rule that `loadFlowModulesForCheck` applies.
+pub fn flowModulesForGraph(
+    allocator: std.mem.Allocator,
+    graph: *const zts.modules.ModuleGraph,
+    compile_result: *const zts.modules.CompileResult,
+    atoms: *zts.AtomTable,
+) !FlowModuleGraph {
+    const count = compile_result.modules.len;
+    const entry_position = count - 1;
+    const entry_module = &graph.module_list.items[graph.execution_order[entry_position]];
+    var entry_parsed = zts.pipeline.ParsedModule.fromExisting(
+        zts.IrView.fromIRStore(&compile_result.parsers[entry_position].nodes, &compile_result.parsers[entry_position].constants),
+        compile_result.modules[entry_position].root,
+        atoms,
+    );
+    entry_parsed.scopes = &compile_result.parsers[entry_position].scopes;
+    var flow = try FlowModuleGraph.init(allocator, entry_parsed, entry_module.source, entry_module.path);
+    errdefer flow.deinit();
+
+    for (0..entry_position) |position| {
+        const module = &graph.module_list.items[graph.execution_order[position]];
+        const parser = &compile_result.parsers[position];
+        try flow.graph_captures.ensureUnusedCapacity(allocator, 1);
+        try flow.views.ensureUnusedCapacity(allocator, 1);
+        const captures = try allocator.create(zts.pipeline.FlowCaptureTable);
+        errdefer allocator.destroy(captures);
+        captures.* = try zts.pipeline.FlowCaptureTable.init(allocator, &parser.scopes);
+        flow.graph_captures.appendAssumeCapacity(captures);
+        var revision: [32]u8 = undefined;
+        std.crypto.hash.sha2.Sha256.hash(module.source, &revision, .{});
+        flow.views.appendAssumeCapacity(.{
+            .id = flowIdAtPosition(position, entry_position),
+            .path = module.path,
+            .revision = revision,
+            .root = compile_result.modules[position].root,
+            .ir_view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants),
+            .atoms = atoms,
+            .captures = captures,
+            .imports = &.{},
+        });
+    }
+
+    for (0..count) |position| {
+        const module = &graph.module_list.items[graph.execution_order[position]];
+        const id = flowIdAtPosition(position, entry_position);
+        const view = flow.views.items[id].ir_view;
+        var facts = try zts.pipeline.buildModuleFacts(
+            allocator,
+            zts.pipeline.ParsedModule.fromExisting(view, flow.views.items[id].root, atoms),
+            null,
+        );
+        defer facts.deinit();
+        var targets: std.ArrayList(zts.pipeline.FlowImportTarget) = .empty;
+        defer targets.deinit(allocator);
+        for (facts.imports.items) |rec| {
+            if (rec.resolution != .unresolved) continue;
+            const specifier = switch (zts.modules.resolver.resolve(rec.module_specifier)) {
+                .file => |file| file,
+                .virtual, .unknown => {
+                    flow.complete = false;
+                    continue;
+                },
+            };
+            const path = try zts.modules.file_resolver.resolve(
+                allocator,
+                specifier,
+                zts.modules.file_resolver.dirName(module.path),
+                null,
+            );
+            defer allocator.free(path);
+            const target_index = graph.modules.get(path) orelse {
+                flow.complete = false;
+                continue;
+            };
+            const target_position = positionInOrder(graph, target_index) orelse {
+                flow.complete = false;
+                continue;
+            };
+            const target_id = flowIdAtPosition(target_position, entry_position);
+            const function_node = importedFunctionNode(
+                flow.views.items[target_id].ir_view,
+                atoms,
+                rec.imported_name,
+            ) orelse {
+                flow.complete = false;
+                continue;
+            };
+            const key = importBindingKey(view, rec.slot) orelse {
+                flow.complete = false;
+                continue;
+            };
+            try targets.append(allocator, .{ .binding_key = key, .target = .{ .module = target_id, .node = function_node } });
+        }
+        try flow.finishModule(id, targets.items);
+    }
+    return flow;
+}
+
+fn flowIdAtPosition(position: usize, entry_position: usize) zts.pipeline.FlowModuleId {
+    return if (position == entry_position) 0 else @intCast(position + 1);
+}
+
+fn positionInOrder(graph: *const zts.modules.ModuleGraph, module_index: zts.modules.module_graph.ModuleIndex) ?usize {
+    for (graph.execution_order, 0..) |candidate, position| {
+        if (candidate == module_index) return position;
+    }
+    return null;
+}
 
 /// Retain the production flow traversal's parser and capture owners. The
 /// fault reader remains independent, and explicit paths keep their read order.

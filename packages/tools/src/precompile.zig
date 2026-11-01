@@ -882,9 +882,12 @@ fn compileMultiModule(
     defer exports.deinit();
     // Check every module, dependencies first and the entry last. Code
     // generation above already ran on the kept parsers, so no bytecode moves.
+    // The module state facts fold over the whole graph for the contract.
+    var state_isolated = true;
     for (0..compile_result.modules.len) |module_index| {
         const checks = try checkGraphModule(allocator, &graph, &compile_result, module_index, atoms, &exports, opts);
         if (checks.verify_failed) return .{ .verify_failed = true };
+        if (checks.has_module_mutation or checks.unresolved_route_dispatch) state_isolated = false;
     }
 
     // Serialize each module and collect dependency bytecodes
@@ -940,17 +943,16 @@ fn compileMultiModule(
 
     if (!builtin.is_test) debugPrint("Multi-module bundle: {d} dependency modules + entry\n", .{dep_bytecodes.len});
 
-    const contract = try buildMultiModuleContract(
-        allocator,
-        &graph,
-        &compile_result,
-        atoms,
-        filename,
-        emit_contract,
-        policy,
-        sql_schema_path,
-        manifest_registry,
-    );
+    const contract = try buildMultiModuleContract(allocator, &graph, &compile_result, atoms, &exports, .{
+        .filename = filename,
+        .emit_contract = emit_contract,
+        .emit_verify = opts.emit_verify,
+        .strict = opts.strict,
+        .policy = policy,
+        .sql_schema_path = sql_schema_path,
+        .manifest_registry = manifest_registry,
+        .state_isolated = state_isolated,
+    });
 
     return .{
         .bytecode = entry_bytecode,
@@ -959,8 +961,8 @@ fn compileMultiModule(
     };
 }
 
-/// What the checks of one graph module leave for the caller. Unit G3 reads
-/// the two state facts when it merges the contract.
+/// What the checks of one graph module leave for the caller. The contract
+/// build folds the two state facts over the whole graph.
 const GraphModuleChecks = struct {
     verify_failed: bool = false,
     has_module_mutation: bool = false,
@@ -1037,16 +1039,7 @@ fn checkGraphModule(
     // that the checked target module exports under the imported name, or none.
     var link_arena = std.heap.ArenaAllocator.init(allocator);
     defer link_arena.deinit();
-    const links = try graph.fileImportLinks(link_arena.allocator(), module.path, view, atoms);
-    const import_rows = try link_arena.allocator().alloc(zts.FileImportSignatures.Row, links.len);
-    for (links, import_rows) |link, *row| {
-        row.* = .{ .specifier = link.specifier, .imported = link.imported, .sig = null, .value_type = zts.null_type_idx };
-        const target = link.target orelse continue;
-        const exported = exports.find(target, link.imported) orelse continue;
-        row.sig = exported.sig;
-        row.value_type = exported.value_type;
-    }
-    const file_imports: zts.FileImportSignatures = .{ .source = &exports.pool, .rows = import_rows };
+    const file_imports = try precompile_contract_mod.fileImportSignatures(link_arena.allocator(), graph, module.path, view, atoms, exports);
 
     if (!is_entry and hasTopLevelAssert(view, root, 0)) {
         if (!builtin.is_test) debugPrint(
@@ -1321,7 +1314,7 @@ test "compileHandler discloses env.public in the merged contract of a file-impor
     try std.testing.expectEqualStrings("APP_NAME", contract.env.public.items[0]);
 }
 
-test "compileHandler keeps merged properties null after loaded graph effects" {
+test "compileHandler carries loaded graph effects into the merged properties" {
     const entry_source =
         \\import { saveAlias } from "./dep.ts";
         \\export function handler(req: Request): Response {
@@ -1342,11 +1335,14 @@ test "compileHandler keeps merged properties null after loaded graph effects" {
     var compiled = try fixture.compile(.{ .emit_contract = true });
     defer compiled.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 1), compiled.dep_bytecodes.?.len);
-    const merged = compiled.contract orelse return error.TestUnexpectedResult;
-    try std.testing.expect(merged.properties == null);
+    const props = try graphProperties(&compiled);
+    try std.testing.expect(!props.pure);
+    try std.testing.expect(!props.read_only);
+    try std.testing.expect(!props.stateless);
+    try std.testing.expect(!props.retry_safe);
 }
 
-test "multi-module compile proves no security property in the extracted facts" {
+test "multi-module compile extracts no proven fact without verification" {
     const deploy_manifest = @import("deploy_manifest.zig");
     const entry_source =
         \\import { saveAlias } from "./dep.ts";
@@ -1370,7 +1366,7 @@ test "multi-module compile proves no security property in the extracted facts" {
     defer compiled.deinit(allocator);
     try std.testing.expectEqual(@as(usize, 1), compiled.dep_bytecodes.?.len);
     const merged = compiled.contract orelse return error.TestUnexpectedResult;
-    try std.testing.expect(merged.properties == null);
+    try std.testing.expect(merged.properties != null);
 
     const extracted = try deploy_manifest.extractProvenFacts(allocator, &merged);
     defer allocator.free(extracted.routes_buf);
@@ -1387,6 +1383,36 @@ test "multi-module compile proves no security property in the extracted facts" {
     inline for (names) |name| {
         try std.testing.expect(!@field(extracted.facts, name));
     }
+}
+
+test "multi-module compile extracts the proven facts of a verified graph" {
+    const deploy_manifest = @import("deploy_manifest.zig");
+    var fixture = try importFixture(capsuleEntry("no_secret_leakage"),
+        \\export function f(): string {
+        \\  return "x";
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    const allocator = std.testing.allocator;
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(allocator);
+    const merged = compiled.contract orelse return error.TestUnexpectedResult;
+    const extracted = try deploy_manifest.extractProvenFacts(allocator, &merged);
+    defer allocator.free(extracted.routes_buf);
+    try std.testing.expectEqual(@as(@TypeOf(extracted.facts.proof_level), .complete), extracted.facts.proof_level);
+    try std.testing.expect(extracted.facts.retry_safe);
+    try std.testing.expect(extracted.facts.read_only);
+    try std.testing.expect(extracted.facts.injection_safe);
+    try std.testing.expect(extracted.facts.idempotent);
+    try std.testing.expect(extracted.facts.state_isolated);
+    try std.testing.expect(extracted.facts.deterministic);
+    try std.testing.expect(extracted.facts.no_secret_leakage);
+    try std.testing.expect(extracted.facts.no_credential_leakage);
+    try std.testing.expect(extracted.facts.input_validated);
+    try std.testing.expect(extracted.facts.pii_contained);
+    try std.testing.expect(extracted.facts.results_safe);
+    try std.testing.expect(extracted.facts.fault_covered);
 }
 
 test "compileHandler rejects disallowed policy from imported module" {
@@ -1415,6 +1441,497 @@ test "compileHandler rejects disallowed policy from imported module" {
         error.PolicyViolation,
         fixture.compile(.{ .policy = policy }),
     );
+}
+
+// ---------------------------------------------------------------------------
+// Unit G3: the contract of a graph build holds each property across the graph.
+// ---------------------------------------------------------------------------
+
+const graph_verified: CompileOptions = .{ .emit_verify = true, .emit_contract = true };
+
+fn graphProperties(compiled: *const CompiledHandler) !handler_contract.HandlerProperties {
+    const contract = compiled.contract orelse return error.MissingContract;
+    return contract.properties orelse error.MissingProperties;
+}
+
+const secret_dep =
+    \\import { env } from "zttp:env";
+    \\export function f(): string {
+    \\  return env("SECRET_KEY") ?? "";
+    \\}
+    \\
+;
+
+fn capsuleEntry(comptime capsule: []const u8) []const u8 {
+    return "import { f } from \"./dep.ts\";\n" ++
+        "export function handler(req: Request): Proof<Response, \"" ++ capsule ++ "\"> {\n" ++
+        "  return Response.text(f());\n}\n";
+}
+
+test "compileHandler graph holds no_secret_leakage for a clean graph" {
+    var fixture = try importFixture(capsuleEntry("no_secret_leakage"),
+        \\export function f(): string {
+        \\  return "hello";
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const props = try graphProperties(&compiled);
+    try std.testing.expect(props.no_secret_leakage);
+    try std.testing.expectEqual(@as(usize, 0), compiled.contract.?.spec_diagnostics.items.len);
+}
+
+test "compileHandler graph clears no_secret_leakage when a dependency secret reaches the response" {
+    var fixture = try importFixture(capsuleEntry("result_safe"), secret_dep);
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const props = try graphProperties(&compiled);
+    try std.testing.expect(!props.no_secret_leakage);
+}
+
+test "compileHandler graph clears no_secret_leakage for an incomplete graph with a data export" {
+    var fixture = try importFixture(
+        \\import { label } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  return Response.text(label);
+        \\}
+        \\
+    ,
+        \\export const label: string = "x";
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const props = try graphProperties(&compiled);
+    try std.testing.expect(!props.no_secret_leakage);
+    try std.testing.expect(!props.no_credential_leakage);
+    try std.testing.expect(!props.injection_safe);
+}
+
+const LoadedFlowGraph = struct {
+    graph: zts.modules.ModuleGraph,
+    strings: zts.StringTable,
+    atoms: zts.AtomTable,
+    compile_result: zts.modules.CompileResult,
+    flow: FlowModuleGraph,
+
+    fn load(self: *LoadedFlowGraph, fixture: *const CompileGraphFixture) !void {
+        const allocator = std.testing.allocator;
+        self.graph = zts.modules.ModuleGraph.init(allocator);
+        errdefer self.graph.deinit();
+        try self.graph.build(fixture.entry_path, fixture.entry_source, readFilePosixForGraph);
+        self.strings = zts.StringTable.init(allocator);
+        errdefer self.strings.deinit();
+        self.atoms = zts.AtomTable.init(allocator);
+        errdefer self.atoms.deinit();
+        var module_compiler = zts.modules.ModuleCompiler.init(allocator, &self.atoms, &self.strings);
+        self.compile_result = try module_compiler.compileAll(&self.graph);
+        errdefer self.compile_result.deinit();
+        self.flow = try imports_mod.flowModulesForGraph(allocator, &self.graph, &self.compile_result, &self.atoms);
+    }
+
+    fn deinit(self: *LoadedFlowGraph) void {
+        self.flow.deinit();
+        for (self.compile_result.codegens) |*cg| cg.freeOwnedConstantPayloads();
+        self.compile_result.deinit();
+        self.atoms.deinit();
+        self.strings.deinit();
+        self.graph.deinit();
+    }
+};
+
+test "flow modules of a graph with a data export are incomplete" {
+    var fixture = try importFixture(
+        \\import { label } from "./dep.ts";
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(label);
+        \\}
+        \\
+    ,
+        \\export const label: string = "x";
+        \\
+    );
+    defer fixture.deinit();
+    var loaded: LoadedFlowGraph = undefined;
+    try loaded.load(&fixture);
+    defer loaded.deinit();
+    try std.testing.expect(!loaded.flow.complete);
+}
+
+test "flow modules of a graph with function exports are complete" {
+    var fixture = try importFixture(capsuleEntry("result_safe"),
+        \\export function f(): string {
+        \\  return "hello";
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var loaded: LoadedFlowGraph = undefined;
+    try loaded.load(&fixture);
+    defer loaded.deinit();
+    try std.testing.expect(loaded.flow.complete);
+    try std.testing.expectEqual(@as(usize, 2), loaded.flow.views.items.len);
+    try std.testing.expectEqualSlices(zts.pipeline.FlowModuleId, &.{ 1, 0 }, loaded.flow.initialization_order.items);
+}
+
+const diamond_entry =
+    \\import { a } from "./a.ts";
+    \\import { b } from "./b.ts";
+    \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+    \\  return Response.text([a(), b()].join(""));
+    \\}
+    \\
+;
+
+fn addDiamond(fixture: *CompileGraphFixture) !void {
+    try fixture.add("a.ts",
+        \\import { c } from "./c.ts";
+        \\export function a(): string {
+        \\  return c();
+        \\}
+        \\
+    );
+    try fixture.add("b.ts",
+        \\import { c } from "./c.ts";
+        \\export function b(): string {
+        \\  return c();
+        \\}
+        \\
+    );
+    try fixture.add("c.ts",
+        \\export function c(): string {
+        \\  return "c";
+        \\}
+        \\
+    );
+}
+
+test "flow modules of a diamond graph initialize the shared dependency once" {
+    var fixture = try CompileGraphFixture.init("entry.ts", diamond_entry);
+    defer fixture.deinit();
+    try addDiamond(&fixture);
+    var loaded: LoadedFlowGraph = undefined;
+    try loaded.load(&fixture);
+    defer loaded.deinit();
+    try std.testing.expect(loaded.flow.complete);
+    try std.testing.expectEqual(@as(usize, 4), loaded.flow.views.items.len);
+    try std.testing.expectEqualSlices(zts.pipeline.FlowModuleId, &.{ 1, 2, 3, 0 }, loaded.flow.initialization_order.items);
+}
+
+test "compileHandler graph holds no_secret_leakage over a diamond graph" {
+    var fixture = try CompileGraphFixture.init("entry.ts", diamond_entry);
+    defer fixture.deinit();
+    try addDiamond(&fixture);
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), compiled.dep_bytecodes.?.len);
+    try std.testing.expect((try graphProperties(&compiled)).no_secret_leakage);
+}
+
+test "compileHandler graph refuses a dependency call outside the entry Effects ceiling" {
+    var fixture = try importFixture(
+        \\import { f } from "./dep.ts";
+        \\export function handler(req: Request): Effects<Response, "crypto"> {
+        \\  return Response.text(f());
+        \\}
+        \\
+    , secret_dep);
+    defer fixture.deinit();
+    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+}
+
+test "compileHandler graph clears state_isolated when a dependency mutates module state" {
+    var fixture = try importFixture(capsuleEntry("result_safe"),
+        \\let count: number = 0;
+        \\export function f(): string {
+        \\  count = count + 1;
+        \\  return String(count);
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    try std.testing.expect(!(try graphProperties(&compiled)).state_isolated);
+}
+
+test "compileHandler graph holds state_isolated when no module mutates state" {
+    var fixture = try importFixture(capsuleEntry("state_isolated"),
+        \\export function f(): string {
+        \\  return "x";
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const props = try graphProperties(&compiled);
+    try std.testing.expect(props.state_isolated);
+    try std.testing.expect(props.result_safe);
+    try std.testing.expect(props.optional_safe);
+}
+
+test "compileHandler graph leaves verifier facts unproven when verification is off" {
+    var fixture = try importFixture(capsuleEntry("canonical"),
+        \\export function f(): string {
+        \\  return "x";
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(.{ .emit_contract = true });
+    defer compiled.deinit(std.testing.allocator);
+    const props = try graphProperties(&compiled);
+    try std.testing.expect(!props.state_isolated);
+    try std.testing.expect(!props.result_safe);
+    try std.testing.expect(!props.optional_safe);
+}
+
+const Props = handler_contract.HandlerProperties;
+
+const StructuralRow = struct {
+    dep: []const u8,
+    property: []const u8,
+    read: *const fn (Props) bool,
+    expected: bool,
+};
+
+fn readPure(p: Props) bool {
+    return p.pure;
+}
+fn readReadOnly(p: Props) bool {
+    return p.read_only;
+}
+fn readStateless(p: Props) bool {
+    return p.stateless;
+}
+fn readRetrySafe(p: Props) bool {
+    return p.retry_safe;
+}
+fn readIdempotent(p: Props) bool {
+    return p.idempotent;
+}
+fn readDeterministic(p: Props) bool {
+    return p.deterministic;
+}
+fn readFaultCovered(p: Props) bool {
+    return p.fault_covered;
+}
+fn readHasEgress(p: Props) bool {
+    return p.has_egress;
+}
+
+const structural_rows = [_]StructuralRow{
+    .{ .property = "pure", .read = readPure, .expected = false, .dep = secret_dep },
+    .{ .property = "read_only", .read = readReadOnly, .expected = false, .dep =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function f(): string {
+    \\  cacheSet("items", "key", "value");
+    \\  return "x";
+    \\}
+    \\
+    },
+    .{ .property = "stateless", .read = readStateless, .expected = false, .dep =
+    \\import { cacheGet } from "zttp:cache";
+    \\export function f(): string {
+    \\  return cacheGet("items", "key") ?? "";
+    \\}
+    \\
+    },
+    .{ .property = "retry_safe", .read = readRetrySafe, .expected = false, .dep =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function f(): string {
+    \\  cacheSet("items", "key", "value");
+    \\  return "x";
+    \\}
+    \\
+    },
+    .{ .property = "idempotent", .read = readIdempotent, .expected = false, .dep =
+    \\import { cacheSet } from "zttp:cache";
+    \\export function f(): string {
+    \\  cacheSet("items", "key", "value");
+    \\  return "x";
+    \\}
+    \\
+    },
+    .{ .property = "deterministic", .read = readDeterministic, .expected = false, .dep =
+    \\export function f(): string {
+    \\  return String(Date.now());
+    \\}
+    \\
+    },
+    .{ .property = "fault_covered", .read = readFaultCovered, .expected = false, .dep =
+    \\import { jwtVerify } from "zttp:auth";
+    \\export function f(): string {
+    \\  const result = jwtVerify("token", "secret");
+    \\  if (!result.ok) return "no";
+    \\  return "yes";
+    \\}
+    \\
+    },
+    .{ .property = "has_egress", .read = readHasEgress, .expected = true, .dep =
+    \\import { fetch } from "zttp:fetch";
+    \\export function f(): string {
+    \\  const result = fetch("https://example.com");
+    \\  if (!result.ok) return "no";
+    \\  return "yes";
+    \\}
+    \\
+    },
+};
+
+test "compileHandler graph reads each structural property off the dependency that breaks it" {
+    for (structural_rows) |row| {
+        var fixture = try importFixture(capsuleEntry("canonical"), row.dep);
+        defer fixture.deinit();
+        var compiled = try fixture.compile(graph_verified);
+        defer compiled.deinit(std.testing.allocator);
+        const props = try graphProperties(&compiled);
+        const actual = row.read(props);
+        std.testing.expectEqual(row.expected, actual) catch |err| {
+            std.debug.print("structural property {s}\n", .{row.property});
+            return err;
+        };
+    }
+}
+
+test "compileHandler graph holds the structural properties for a graph of pure helpers" {
+    var fixture = try importFixture(capsuleEntry("canonical"),
+        \\export function f(): string {
+        \\  return "x";
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const props = try graphProperties(&compiled);
+    try std.testing.expect(props.read_only);
+    try std.testing.expect(props.stateless);
+    try std.testing.expect(props.retry_safe);
+    try std.testing.expect(props.deterministic);
+    try std.testing.expect(props.idempotent);
+    try std.testing.expect(!props.has_egress);
+    try std.testing.expect(props.cost_bounded);
+    try std.testing.expectEqual(@as(?u32, 0), props.max_io_depth);
+}
+
+test "compileHandler graph clears the cost bound when a dependency makes a module call" {
+    var fixture = try importFixture(capsuleEntry("canonical"),
+        \\import { cacheGet } from "zttp:cache";
+        \\export function f(): string {
+        \\  return cacheGet("items", "key") ?? "";
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const props = try graphProperties(&compiled);
+    try std.testing.expect(!props.cost_bounded);
+    try std.testing.expectEqual(@as(?u32, null), props.max_io_depth);
+    const contract = compiled.contract orelse return error.MissingContract;
+    try std.testing.expect(contract.cost_envelope == null);
+}
+
+const CapsuleRefusal = struct {
+    capsule_entry: []const u8,
+    dep: []const u8,
+};
+
+const capsule_refusals = [_]CapsuleRefusal{
+    .{ .capsule_entry = capsuleEntry("no_secret_leakage"), .dep = secret_dep },
+    .{ .capsule_entry = capsuleEntry("deterministic"), .dep =
+    \\export function f(): string {
+    \\  return String(Date.now());
+    \\}
+    \\
+    },
+    .{ .capsule_entry = capsuleEntry("stateless"), .dep =
+    \\import { cacheGet } from "zttp:cache";
+    \\export function f(): string {
+    \\  return cacheGet("items", "key") ?? "";
+    \\}
+    \\
+    },
+    .{ .capsule_entry = capsuleEntry("state_isolated"), .dep =
+    \\let count: number = 0;
+    \\export function f(): string {
+    \\  count = count + 1;
+    \\  return String(count);
+    \\}
+    \\
+    },
+};
+
+test "compileHandler graph refuses a capsule that demands a property a dependency breaks" {
+    for (capsule_refusals) |row| {
+        var fixture = try importFixture(row.capsule_entry, row.dep);
+        defer fixture.deinit();
+        try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+    }
+}
+
+test "compileHandler graph unions the fetch URLs of a dependency" {
+    var fixture = try importFixture(capsuleEntry("result_safe"),
+        \\export function f(): string {
+        \\  return fetchSync("https://example.com/status");
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    // The raw `fetchSync` global is outside the strict profile, and it is the one
+    // source of full fetch URLs, so this compile relaxes the strict rules.
+    var compiled = try fixture.compile(.{ .emit_verify = true, .emit_contract = true, .strict = false });
+    defer compiled.deinit(std.testing.allocator);
+    const contract = compiled.contract orelse return error.MissingContract;
+    try std.testing.expectEqual(@as(usize, 1), contract.egress.urls.items.len);
+    try std.testing.expectEqualStrings("https://example.com/status", contract.egress.urls.items[0]);
+}
+
+fn schemaEntry(comptime schema: []const u8) []const u8 {
+    return "import { schemaCompile } from \"zttp:validate\";\n" ++
+        "import { f } from \"./dep.ts\";\n" ++
+        "schemaCompile(\"user\", JSON.stringify(" ++ schema ++ "));\n" ++
+        "export function handler(req: Request): Proof<Response, \"result_safe\"> {\n" ++
+        "  return Response.text(f());\n}\n";
+}
+
+fn schemaDep(comptime schema: []const u8) []const u8 {
+    return "import { schemaCompile } from \"zttp:validate\";\n" ++
+        "schemaCompile(\"user\", JSON.stringify(" ++ schema ++ "));\n" ++
+        "export function f(): string {\n  return \"x\";\n}\n";
+}
+
+test "compileHandler graph refuses two modules that register one schema name with different JSON" {
+    var fixture = try importFixture(schemaEntry("{ type: \"object\" }"), schemaDep("{ type: \"string\" }"));
+    defer fixture.deinit();
+    try std.testing.expectError(error.ApiSchemaConflict, fixture.compile(graph_verified));
+}
+
+test "compileHandler graph accepts two modules that register one schema name with identical JSON" {
+    var fixture = try importFixture(schemaEntry("{ type: \"object\" }"), schemaDep("{ type: \"object\" }"));
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const contract = compiled.contract orelse return error.MissingContract;
+    try std.testing.expectEqual(@as(usize, 1), contract.api.schemas.items.len);
+    try std.testing.expectEqualStrings("user", contract.api.schemas.items[0].name);
+}
+
+test "compileHandler graph gives identical contract JSON on two compiles" {
+    var fixture = try CompileGraphFixture.init("entry.ts", diamond_entry);
+    defer fixture.deinit();
+    try addDiamond(&fixture);
+    var first = try fixture.compile(graph_verified);
+    defer first.deinit(std.testing.allocator);
+    var second = try fixture.compile(graph_verified);
+    defer second.deinit(std.testing.allocator);
+    try expectSameGraphArtifact(&first, &second);
 }
 
 const graph_clean_entry =
@@ -2108,8 +2625,8 @@ test "compileHandler preserves fanout order shared dependencies and imported rou
     try std.testing.expectEqualStrings("GET", contract.api.routes.items[0].method);
     try std.testing.expectEqualStrings("/shared", contract.api.routes.items[0].path);
     try std.testing.expect(contract.verification == null);
-    try std.testing.expect(contract.properties == null);
-    try std.testing.expect(contract.fault_coverage == null);
+    try std.testing.expect(contract.properties != null);
+    try std.testing.expect(contract.fault_coverage != null);
 }
 
 test "compileHandler keeps its default missing-handler outputs" {

@@ -17,6 +17,10 @@ const stderr_mod = @import("precompile_stderr.zig");
 const debugPrint = stderr_mod.debugPrint;
 const sql_mod = @import("precompile_sql.zig");
 const validateSqlContract = sql_mod.validateSqlContract;
+const imports_mod = @import("precompile_imports.zig");
+const check_run_mod = @import("precompile_check_run.zig");
+const refreshContractSpecDiagnostics = check_mod.refreshContractSpecDiagnostics;
+const applyContractFacts = check_run_mod.applyContractFacts;
 
 const AotAnalysis = struct {
     dispatch: ?*zts.PatternDispatchTable = null,
@@ -164,20 +168,66 @@ pub fn validateContractPolicyInputs(
     if (policy != null and !builtin.is_test) debugPrint("Capability policy check passed\n", .{});
 }
 
+/// What `buildMultiModuleContract` reads besides the loaded graph.
+pub const MultiModuleBuild = struct {
+    filename: []const u8,
+    emit_contract: bool,
+    emit_verify: bool,
+    strict: bool,
+    policy: ?HandlerPolicy,
+    sql_schema_path: ?[]const u8,
+    manifest_registry: ?*const zts.ManifestRegistry,
+    /// True when no module of the graph mutates module state or dispatches an
+    /// unresolved route. Read only when `emit_verify` is set.
+    state_isolated: bool,
+};
+
+/// The file-import signature table of one module: for each file import, the
+/// signature or value type that the checked target module exports under the
+/// imported name, or none. Rows and strings live in `arena`.
+pub fn fileImportSignatures(
+    arena: std.mem.Allocator,
+    graph: *const zts.modules.ModuleGraph,
+    module_path: []const u8,
+    view: zts.IrView,
+    atoms: *zts.AtomTable,
+    exports: *const zts.ExportedSignatures,
+) !zts.FileImportSignatures {
+    const links = try graph.fileImportLinks(arena, module_path, view, atoms);
+    const rows = try arena.alloc(zts.FileImportSignatures.Row, links.len);
+    for (links, rows) |link, *row| {
+        row.* = .{ .specifier = link.specifier, .imported = link.imported, .sig = null, .value_type = zts.null_type_idx };
+        const target = link.target orelse continue;
+        const exported = exports.find(target, link.imported) orelse continue;
+        row.sig = exported.sig;
+        row.value_type = exported.value_type;
+    }
+    return .{ .source = &exports.pool, .rows = rows };
+}
+
+const DependencyContract = struct {
+    path: []const u8,
+    contract: HandlerContract,
+    /// The dependency imports a file export whose effect the graph could not resolve.
+    blocked_import: bool,
+};
+
+/// Build the contract of a handler with file imports.
+///
+/// The base is the full contract of the entry module with its authored source
+/// types, so the entry capsule, budget, and intent survive. Each dependency
+/// yields a contract-only extraction, whose facts are unioned into the base.
+/// The flow pass runs once over the deduplicated graph modules in load order.
+/// Every property that the graph cannot establish reads false: a property never
+/// reads true from the entry alone.
 pub fn buildMultiModuleContract(
     allocator: std.mem.Allocator,
     graph: *const zts.modules.ModuleGraph,
     compile_result: *const zts.modules.CompileResult,
     atoms: *zts.AtomTable,
-    entry_filename: []const u8,
-    emit_contract: bool,
-    policy: ?HandlerPolicy,
-    sql_schema_path: ?[]const u8,
-    manifest_registry: ?*const zts.ManifestRegistry,
+    exports: *const zts.ExportedSignatures,
+    inputs: MultiModuleBuild,
 ) !HandlerContract {
-    var merged = try handler_contract.initMergedContract(allocator, entry_filename);
-    errdefer merged.deinit(allocator);
-
     const entry_index = compile_result.modules.len - 1;
     var policy_checked = false;
     var loaded_effects: std.ArrayList(zts.pipeline.LoadedModuleEffects) = .empty;
@@ -185,17 +235,15 @@ pub fn buildMultiModuleContract(
         for (loaded_effects.items) |*loaded| loaded.deinit(allocator);
         loaded_effects.deinit(allocator);
     }
+    var dependencies: std.ArrayList(DependencyContract) = .empty;
+    defer {
+        for (dependencies.items) |*dependency| dependency.contract.deinit(allocator);
+        dependencies.deinit(allocator);
+    }
 
-    for (compile_result.modules, compile_result.parsers, 0..) |compiled_module, *js_parser, idx| {
+    for (compile_result.modules[0..entry_index], compile_result.parsers[0..entry_index], 0..) |compiled_module, *js_parser, idx| {
         const graph_idx = graph.execution_order[idx];
         const module = &graph.module_list.items[graph_idx];
-        const is_entry = idx == entry_index;
-
-        var temp_aot = if (is_entry and emit_contract)
-            try analyzeAot(allocator, js_parser, atoms, compiled_module.root)
-        else
-            null;
-        defer if (temp_aot) |*aot| aot.deinit(allocator);
 
         const module_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
         var parsed = zts.pipeline.ParsedModule.fromExisting(module_view, compiled_module.root, atoms);
@@ -205,9 +253,7 @@ pub fn buildMultiModuleContract(
             allocator,
             parsed,
             .{ .extraction = .{
-                .dispatch = if (temp_aot) |analysis| analysis.dispatch else null,
-                .has_default_response = if (temp_aot) |analysis| analysis.default_response != null else false,
-                .manifest_registry = manifest_registry,
+                .manifest_registry = inputs.manifest_registry,
                 .capture_export_effects = true,
             } },
         );
@@ -225,7 +271,7 @@ pub fn buildMultiModuleContract(
         try module_analysis.setImportedEffects(imported_effects);
 
         var module_contract = try module_analysis.extractContract(module.path);
-        defer module_contract.deinit(allocator);
+        errdefer module_contract.deinit(allocator);
         var pending_export_effects = module_analysis.takeExportEffects();
         errdefer if (pending_export_effects) |*effects| effects.deinit(allocator);
         try loaded_effects.append(allocator, .{
@@ -234,29 +280,250 @@ pub fn buildMultiModuleContract(
         });
         pending_export_effects = null;
 
-        try validateSqlContract(allocator, &module_contract, sql_schema_path);
-        try enforcePolicyForContract(allocator, module.path, &module_contract, policy);
-        if (policy != null) policy_checked = true;
+        try validateSqlContract(allocator, &module_contract, inputs.sql_schema_path);
+        try enforcePolicyForContract(allocator, module.path, &module_contract, inputs.policy);
+        if (inputs.policy != null) policy_checked = true;
 
-        try handler_contract.mergeModuleContract(allocator, &merged, &module_contract, is_entry);
+        var blocked_import = false;
+        for (imported_effects) |imported| {
+            switch (imported.effect) {
+                .blocked => blocked_import = true,
+                .callable, .data => {},
+            }
+        }
+        try dependencies.append(allocator, .{ .path = module.path, .contract = module_contract, .blocked_import = blocked_import });
     }
 
-    if (policy_checked) {
-        if (!builtin.is_test) debugPrint("Capability policy check passed\n", .{});
+    // The entry: a full session with its authored source types and file-import table.
+    const entry_graph_idx = graph.execution_order[entry_index];
+    const entry_module = &graph.module_list.items[entry_graph_idx];
+    const entry_parser = &compile_result.parsers[entry_index];
+    const entry_root = compile_result.modules[entry_index].root;
+    const entry_view = zts.IrView.fromIRStore(&entry_parser.nodes, &entry_parser.constants);
+    var parsed = zts.pipeline.ParsedModule.fromTypedExisting(entry_view, entry_root, atoms, &entry_parser.type_store);
+    parsed.scopes = &entry_parser.scopes;
+
+    var link_arena = std.heap.ArenaAllocator.init(allocator);
+    defer link_arena.deinit();
+    const file_imports = try fileImportSignatures(link_arena.allocator(), graph, entry_module.path, entry_view, atoms, exports);
+
+    var flow_modules = try imports_mod.flowModulesForGraph(allocator, graph, compile_result, atoms);
+    defer flow_modules.deinit();
+
+    var analysis: zts.pipeline.ModuleAnalysisSession = .{};
+    try analysis.initFull(allocator, parsed, .{
+        .source_types = .direct,
+        .strict = inputs.strict,
+        .manifest_registry = inputs.manifest_registry,
+        .policy_sections = if (inputs.policy) |*configured| configured.declaredSections() else .{},
+        .select_verifier = inputs.emit_verify,
+        .select_flow = true,
+        .file_import_signatures = &file_imports,
+    });
+    defer analysis.deinit();
+    try analysis.complete();
+
+    const facts = try analysis.facts();
+    const env_public: []const []const u8 = if (inputs.policy) |*configured| configured.envPublic() else &.{};
+    const handler_fn = findHandlerFunction(entry_view, entry_root);
+    try analysis.prepareChecked(handler_fn, .{
+        .module_facts = facts,
+        .flow_modules = flow_modules.views.items,
+        .flow_initialization_order = flow_modules.initialization_order.items,
+        .flow_modules_complete = flow_modules.complete,
+        .env_public = env_public,
+    });
+
+    var verify_info: ?VerificationInfo = null;
+    if (inputs.emit_verify) {
+        if (handler_fn) |hf| {
+            // `checkGraphModule` already ran the verifier on the entry and found no error.
+            const error_count = try analysis.runVerifier(hf);
+            if (error_count > 0) return error.AnalysisPassIncomplete;
+            const checked = analysis.checkedModule() orelse return error.AnalysisPassIncomplete;
+            var has_unreachable = false;
+            for (checked.verifierDiagnostics()) |diagnostic| {
+                if (diagnostic.kind == .unreachable_after_return) has_unreachable = true;
+            }
+            verify_info = .{
+                .exhaustive_returns = true,
+                .results_safe = true,
+                .unreachable_code = has_unreachable,
+                .bytecode_verified = true,
+            };
+        }
     }
 
-    // No flow pass ran over the merged graph, so `properties` stays null here;
-    // the names are still disclosed so the contract matches the single-module one.
-    if (policy) |*configured| try disclosePublicEnv(allocator, &merged, configured.envPublic());
+    const entry_imported_effects = try zts.pipeline.importedEffectsForLoadedModule(
+        allocator,
+        graph,
+        entry_graph_idx,
+        facts,
+        loaded_effects.items,
+    );
+    defer allocator.free(entry_imported_effects);
 
-    // The merged contract does not pass through the single-module builder, so it
-    // stamps the three identity fields that runtime validation compares here.
-    merged.source_identity = zts.sourceIdentityForPath(entry_filename);
-    merged.capabilities = zts.computeCapabilityMatrix(merged.modules.items);
+    var temp_aot = if (inputs.emit_contract)
+        try analyzeAot(allocator, entry_parser, atoms, entry_root)
+    else
+        null;
+    defer if (temp_aot) |*aot| aot.deinit(allocator);
+
+    var contract = try extractContractFromAnalysis(&analysis, inputs.filename, .{
+        .aot = temp_aot,
+        .verification = verify_info,
+        .imported_effects = entry_imported_effects,
+    });
+    errdefer contract.deinit(allocator);
+    if (handler_fn != null) {
+        try reportCompletedFlow(allocator, try analysis.completedFlow(), analysis.flowErrorCount(), true, null, entry_view);
+    }
+    try validateContractPolicyInputs(allocator, inputs.filename, &contract, inputs.sql_schema_path, inputs.policy);
+    if (inputs.policy != null) policy_checked = true;
+    if (policy_checked and !builtin.is_test) debugPrint("Capability policy check passed\n", .{});
+
+    // Union the facts of every dependency into the entry contract.
+    var effects_complete = contract.effect_analysis_complete;
+    var dependency_properties: ?handler_contract.HandlerProperties = null;
+    var established = true;
+    for (dependencies.items) |*dependency| {
+        var conflict: ?handler_contract.ApiSchemaConflict = null;
+        if (handler_contract.unionDependencyContract(allocator, &contract, &dependency.contract, &conflict)) |_| {} else |err| {
+            if (err == error.ApiSchemaConflict and !builtin.is_test) debugPrint(
+                "{s}: API schema '{s}' is registered with different JSON by another module\n",
+                .{ dependency.path, if (conflict) |found| found.name else "" },
+            );
+            return err;
+        }
+        if (dependency.blocked_import) effects_complete = false;
+        if (dependency.contract.properties) |properties| {
+            dependency_properties = joinStructural(dependency_properties, properties);
+        } else {
+            established = false;
+        }
+    }
+    contract.effect_analysis_complete = effects_complete;
+    try disclosePublicEnv(allocator, &contract, env_public);
+    contract.source_identity = zts.sourceIdentityForPath(inputs.filename);
+    contract.capabilities = zts.computeCapabilityMatrix(contract.modules.items);
     const policy_hex = zts.policyHash();
-    _ = try std.fmt.hexToBytes(&merged.policy_hash, &policy_hex);
+    _ = try std.fmt.hexToBytes(&contract.policy_hash, &policy_hex);
 
-    return merged;
+    const verified = inputs.emit_verify and handler_fn != null;
+    applyContractFacts(allocator, &contract, .{ .verifier = .{
+        .state_isolated = verified and inputs.state_isolated,
+        .result_safe = verified,
+        .optional_safe = verified,
+    } });
+
+    if (inputs.emit_contract) {
+        if (handler_fn) |hf| try applyGraphPaths(allocator, &contract, &analysis, parsed, atoms, hf, inputs.filename);
+    }
+    foldDependencyProperties(allocator, &contract, dependency_properties, established);
+    try refreshContractSpecDiagnostics(allocator, &contract);
+    try refuseSpecErrors(&contract, inputs.filename);
+    return contract;
+}
+
+/// Keep, across the dependencies, the structural facts that every one of them holds.
+fn joinStructural(
+    joined: ?handler_contract.HandlerProperties,
+    next: handler_contract.HandlerProperties,
+) handler_contract.HandlerProperties {
+    var out = joined orelse return next;
+    out.pure = out.pure and next.pure;
+    out.read_only = out.read_only and next.read_only;
+    out.stateless = out.stateless and next.stateless;
+    out.retry_safe = out.retry_safe and next.retry_safe;
+    out.has_egress = out.has_egress or next.has_egress;
+    return out;
+}
+
+/// Hold a structural property only when the entry and every dependency hold it.
+/// A dependency contract that carries no properties establishes none, so the
+/// properties read false. The cost bound counts module calls on the paths of the
+/// entry. A pure dependency makes no module call, so the bound stands. Any other
+/// dependency adds calls that the entry paths do not show, so the bound, the I/O
+/// depth, and the cost envelope are all cleared.
+fn foldDependencyProperties(
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+    dependency: ?handler_contract.HandlerProperties,
+    established: bool,
+) void {
+    const props = if (contract.properties) |*value| value else return;
+    if (!established) {
+        props.pure = false;
+        props.read_only = false;
+        props.stateless = false;
+        props.retry_safe = false;
+        props.fault_covered = false;
+    }
+    if (dependency) |held| {
+        props.pure = props.pure and held.pure;
+        props.read_only = props.read_only and held.read_only;
+        props.stateless = props.stateless and held.stateless;
+        props.retry_safe = props.retry_safe and held.retry_safe;
+        props.has_egress = props.has_egress or held.has_egress;
+    }
+    props.idempotent = props.deterministic and props.retry_safe;
+    const all_pure = established and (dependency == null or dependency.?.pure);
+    if (all_pure) return;
+    props.cost_bounded = false;
+    props.max_io_depth = null;
+    if (contract.cost_envelope) |*envelope| envelope.deinit(allocator);
+    contract.cost_envelope = null;
+}
+
+/// Run the path enumeration and the fault coverage analysis on the entry
+/// handler, as the single-module build does. The files that the entry imports
+/// decide `fault_covered`.
+fn applyGraphPaths(
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+    analysis: *zts.pipeline.ModuleAnalysisSession,
+    parsed: zts.pipeline.ParsedModule,
+    atoms: *zts.AtomTable,
+    handler_fn: ir.NodeIndex,
+    filename: []const u8,
+) !void {
+    var path_module_facts = try zts.pipeline.buildModuleFacts(allocator, parsed, null);
+    defer path_module_facts.deinit();
+    var imported_scan = try imports_mod.collectImportedFailableCalls(allocator, &path_module_facts, filename, null);
+    defer if (imported_scan) |*scan| scan.deinit(allocator);
+    const path_effects = try analysis.pathEffectFacts();
+    var gen = zts.PathGenerator.init(allocator, parsed.ir_view, atoms, path_effects);
+    defer gen.deinit();
+    gen.facts = &path_module_facts;
+    gen.setImportedScan(if (imported_scan) |scan| scan.entries.items else null);
+    try gen.generate(handler_fn);
+
+    var summary = try check_run_mod.summarizeGeneratedPaths(allocator, &gen, true);
+    defer summary.deinit(allocator);
+    var fc = zts.FaultCoverageChecker.init(allocator, gen.getTests());
+    defer fc.deinit();
+    try fc.analyze();
+    var fault_stamp = try check_run_mod.stampFaultCoverage(allocator, parsed.ir_view, &gen, &fc);
+    defer fault_stamp.deinit(allocator);
+    summary.takeFaultStamp(&fault_stamp);
+    applyContractFacts(allocator, contract, .{ .paths = &summary });
+}
+
+/// Refuse the build when a spec diagnostic of error severity remains. The
+/// implicit default profile is advisory here, as it is on the single-module
+/// compile path: only a diagnostic the author asked for refuses.
+fn refuseSpecErrors(contract: *const HandlerContract, filename: []const u8) !void {
+    var refused: u32 = 0;
+    for (contract.spec_diagnostics.items) |diagnostic| {
+        if (diagnostic.kind.severity() != .err or diagnostic.implicit_default) continue;
+        refused += 1;
+        if (!builtin.is_test) debugPrint("{s}: {s} {s}\n", .{
+            filename,
+            diagnostic_catalog.specCode(diagnostic.kind),
+            diagnostic.spec_name,
+        });
+    }
+    if (refused > 0) return error.SpecDiagnosticsRefused;
 }
 
 fn enforcePolicyForContract(

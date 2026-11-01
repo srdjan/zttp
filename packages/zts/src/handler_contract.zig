@@ -121,6 +121,42 @@ pub fn initMergedContract(allocator: std.mem.Allocator, handler_path: []const u8
     };
 }
 
+/// A schema name that two modules registered with different JSON.
+pub const ApiSchemaConflict = struct {
+    name: []const u8,
+};
+
+/// Union the facts of one dependency into the contract of the entry module.
+/// Every field that `mergeModuleContract` handles is merged, then the full
+/// fetch URLs and the spec diagnostics of the dependency are added. Two modules
+/// that register one schema name with different JSON fail with
+/// `error.ApiSchemaConflict`, and `conflict` names the schema. A single module
+/// keeps last-wins: that rule lives in the contract builder, not here.
+pub fn unionDependencyContract(
+    allocator: std.mem.Allocator,
+    target: *HandlerContract,
+    source: *const HandlerContract,
+    conflict: *?ApiSchemaConflict,
+) !void {
+    for (source.api.schemas.items) |schema| {
+        for (target.api.schemas.items) |existing| {
+            if (!std.mem.eql(u8, existing.name, schema.name)) continue;
+            if (std.mem.eql(u8, existing.schema_json, schema.schema_json)) continue;
+            conflict.* = .{ .name = schema.name };
+            return error.ApiSchemaConflict;
+        }
+    }
+    try mergeModuleContract(allocator, target, source, false);
+    for (source.egress.urls.items) |url| {
+        try appendUniqueString(allocator, &target.egress.urls, url, false);
+    }
+    for (source.spec_diagnostics.items) |diag| {
+        var copy = try diag.clone(allocator);
+        errdefer copy.deinit(allocator);
+        try target.spec_diagnostics.append(allocator, copy);
+    }
+}
+
 /// Merge one module's extracted facts into a multi-module contract.
 pub fn mergeModuleContract(
     allocator: std.mem.Allocator,
@@ -1095,4 +1131,60 @@ test "sandbox block roundtrips through writeContractJson and parseFromJson" {
     try std.testing.expectEqualSlices(u8, &written_caps.hash, &parsed_caps.hash);
     try std.testing.expect(parsed_caps.has(.clock));
     try std.testing.expect(parsed_caps.has(.crypto));
+}
+
+fn testContractWithSchema(allocator: std.mem.Allocator, path: []const u8, schema_json: []const u8) !HandlerContract {
+    var contract = try initMergedContract(allocator, path);
+    errdefer contract.deinit(allocator);
+    try upsertApiSchema(allocator, &contract.api.schemas, "user", schema_json);
+    return contract;
+}
+
+test "unionDependencyContract adds fetch URLs and spec diagnostics of a dependency" {
+    const allocator = std.testing.allocator;
+    var target = try initMergedContract(allocator, "entry.ts");
+    defer target.deinit(allocator);
+    var source = try initMergedContract(allocator, "dep.ts");
+    defer source.deinit(allocator);
+    try source.egress.urls.append(allocator, try allocator.dupe(u8, "https://example.com/a"));
+    try source.spec_diagnostics.append(allocator, .{
+        .kind = .not_discharged,
+        .spec_name = try allocator.dupe(u8, "pure"),
+        .function = try allocator.dupe(u8, "helper"),
+    });
+
+    var conflict: ?ApiSchemaConflict = null;
+    try unionDependencyContract(allocator, &target, &source, &conflict);
+    try unionDependencyContract(allocator, &target, &source, &conflict);
+
+    try std.testing.expectEqual(@as(usize, 1), target.egress.urls.items.len);
+    try std.testing.expectEqualStrings("https://example.com/a", target.egress.urls.items[0]);
+    try std.testing.expectEqual(@as(usize, 2), target.spec_diagnostics.items.len);
+    try std.testing.expectEqualStrings("pure", target.spec_diagnostics.items[0].spec_name);
+    try std.testing.expectEqualStrings("helper", target.spec_diagnostics.items[0].function.?);
+}
+
+test "unionDependencyContract refuses one schema name with different JSON" {
+    const allocator = std.testing.allocator;
+    var target = try testContractWithSchema(allocator, "entry.ts", "{\"type\":\"object\"}");
+    defer target.deinit(allocator);
+    var source = try testContractWithSchema(allocator, "dep.ts", "{\"type\":\"string\"}");
+    defer source.deinit(allocator);
+
+    var conflict: ?ApiSchemaConflict = null;
+    try std.testing.expectError(error.ApiSchemaConflict, unionDependencyContract(allocator, &target, &source, &conflict));
+    try std.testing.expectEqualStrings("user", conflict.?.name);
+    try std.testing.expectEqualStrings("{\"type\":\"object\"}", target.api.schemas.items[0].schema_json);
+}
+
+test "unionDependencyContract accepts one schema name with identical JSON" {
+    const allocator = std.testing.allocator;
+    var target = try testContractWithSchema(allocator, "entry.ts", "{\"type\":\"object\"}");
+    defer target.deinit(allocator);
+    var source = try testContractWithSchema(allocator, "dep.ts", "{\"type\":\"object\"}");
+    defer source.deinit(allocator);
+
+    var conflict: ?ApiSchemaConflict = null;
+    try unionDependencyContract(allocator, &target, &source, &conflict);
+    try std.testing.expectEqual(@as(usize, 1), target.api.schemas.items.len);
 }

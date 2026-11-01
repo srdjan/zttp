@@ -180,3 +180,29 @@ Sonnet implemented the unit in two rounds, and I reviewed each diff. The first r
 Results at the G2b tree, each from an unfiltered run: `zig build test` 214 of 214 steps, 8045 of 8051 tests with 6 skipped, `test-zruntime` 274 of 275 tests with 1 skipped, and `test-cli`, `test-bytecode-identity`, `smoke-v1`, `test-module-boundary`, `test-expert-app`, `test-proof-swallow`, and `zig fmt --check packages scripts` exit 0. `examples/handler/handler-with-imports.ts` and the expected handler of `sibling-helper-holes` compile with exit 0.
 
 Against the G2a tables, `zts check` and `zts compile` each moved 0 of 215 rows. The command surface moved 0 of 38 rows against G0.
+
+## G3
+
+`compileMultiModule` now builds its contract from a full entry contract and folds each dependency into it. The flow pass reads the modules of `ModuleGraph`, each module once, in load order. The entry is module 0, and a shared dependency initializes once. The refusal for a handler with file imports stays in place until G5.
+
+The contract of `examples/handler/handler-with-imports.ts` now holds real values. `faultCovered` and `costBounded` read true, and `maxIoDepth` reads 0, because its dependency makes no module call. `pure` reads false, because the entry calls a file import. Its digest row moved in `zts compile`, which the plan names under "Moved by this plan".
+
+**Decision on `cost_bounded`.** The Sonnet hand-back cleared `cost_bounded` on every graph, and it said that the path generator does not walk a callee. That statement is wrong for a same-file helper: a single-file probe gave a `linear` bound with its source at the helper loop. The gap applies only to a call across files.
+
+The bound counts module calls on the paths of the entry. A dependency that is `pure` makes no module call, so the bound stands. Any other dependency adds calls that the entry paths do not show, so `cost_bounded`, `max_io_depth`, and `cost_envelope` are all cleared. The third field matters, because `zttp deploy` writes the envelope into the proof ledger, and an entry-only envelope understates the cost. A chain of pure helpers gives `costBounded` true and `maxIoDepth` 0.
+
+The corpus handler of the case `sibling-helper-holes` keeps its refusal for this reason. Its capsule demands `cost_bounded`, and its dependency `lib/settings.ts` calls `env`. Decision 5 accepts that the build is stricter than `zttp check`, and G6 must record the case.
+
+**Budget.** `Effects<...>` is a capability set, not a call count. ZTS506 and ZTS607 run on the entry, and the merged capability set reaches them, so a dependency call outside the entry ceiling exits 1. `capability_bounded` is not a field of `HandlerProperties`. It stays derived in `packages/runtime/src/build_command.zig#dischargedProperties`.
+
+**Measured.** `fault_covered` fails closed across two import levels. Entry to `a` to `b`, with an unguarded failable call in `b`, gives false. The same chain of pure helpers gives true. `pure` reads false for an entry that calls any file import, because the call counts as a call. So a handler with no capsule that calls a file import fails the default profile in `zttp compile`.
+
+**Open for G5.** `refuseSpecErrors` in `precompile_contract.zig` skips `implicit_default` diagnostics, as the single-module path does. The entry-only CHECK in `runBuild` gates the default profile. The measured `pure` rule above covers a no-capsule entry that calls a file import. A no-capsule entry that imports a dependency and never calls it is not yet measured. G5 must probe that case, and it must gate the merged contract if the case passes.
+
+**Limits.** Three records describe the entry paths only: `cost_envelope` when the bound stands, `behaviors`, and `fault_coverage`. Dependency helper capsules stay hidden, because dependency extraction reads the contract only. The diamond test asserts the views and the order on the constructor, and the end-to-end compile of a diamond holds `no_secret_leakage`.
+
+Sonnet implemented the unit, past its turn budget at about 62 turns. The first red run failed 16 of 466 tests. I reviewed the diff and changed the fold for `cost_bounded`.
+
+Results at the G3 tree, each from an unfiltered run: `zig build test` 214 of 214 steps, `test-zruntime` 274 of 275 tests with 1 skipped, and `test-cli`, `test-bytecode-identity`, `smoke-v1`, `test-module-boundary`, `test-expert-app`, `test-proof-swallow`, `zig fmt --check`, and `zig build` each exit 0. `test-precompile` passed 468 of 468 tests. The test count of `zig build test` is not comparable with G2b, because a warm cache leaves cached steps out of the summary. G7 gives the count from an empty cache.
+
+Against the G0 tables, `zts check` moved only the G1b row. `zts compile` moved 1 of 215 rows, `examples/handler/handler-with-imports.ts`. The command surface moved 0 of 38 rows. `git diff` on `packages/proof-checker` is empty.
