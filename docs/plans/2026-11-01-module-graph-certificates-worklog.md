@@ -206,3 +206,35 @@ Sonnet implemented the unit, past its turn budget at about 62 turns. The first r
 Results at the G3 tree, each from an unfiltered run: `zig build test` 214 of 214 steps, `test-zruntime` 274 of 275 tests with 1 skipped, and `test-cli`, `test-bytecode-identity`, `smoke-v1`, `test-module-boundary`, `test-expert-app`, `test-proof-swallow`, `zig fmt --check`, and `zig build` each exit 0. `test-precompile` passed 468 of 468 tests. The test count of `zig build test` is not comparable with G2b, because a warm cache leaves cached steps out of the summary. G7 gives the count from an empty cache.
 
 Against the G0 tables, `zts check` moved only the G1b row. `zts compile` moved 1 of 215 rows, `examples/handler/handler-with-imports.ts`. The command surface moved 0 of 38 rows. `git diff` on `packages/proof-checker` is empty.
+
+## G4
+
+The fold works, and the kernel accepts it. `foldEvidence` in `packages/zts/src/proof_ir.zig` joins the evidence of each module into one program, and a certificate from that program passes production acceptance. No kernel stage refused a fold, so Decision 2 stays closed. The refusal for a handler with file imports stays in place until G5.
+
+**Change from the plan.** The plan says that `compileMultiModule` does not return the evidence yet, but the acceptance tests need it. The evidence therefore sits in a new field, `CompiledHandler.graph_evidence`. `proof_evidence` stays null, so the refusal in `build_command.zig` stays. G5 moves the value.
+
+**Shape.** The entry root stays node 0, and each dependency root becomes a `function` node after the entry root children. Ids stay breadth first, so `residualPlan` in `proof_certificate.zig` needs no new sort. Result ordinals, witness nodes, witness scopes, and function ordinals move with the nodes, and every digest is computed again. `capability_call` keeps its catalog row. `pre_optimization_len` and `final_len` hold the sum over the modules, and only `proof_ir.zig` reads them. `Node` gained `leaf_kind`, `ProofIr` gained `result_binding_count`, and `Evidence` gained `scope_count`. None of the three is on the wire.
+
+**Refusal added in review.** The kernel derives Result events only under a `proved` edge. When the producer's own pass does not accept the events, the certificate states `tested`, and that edge meets the production floor with no kernel check. That state is the exposure that the plan makes G4 refuse past the Result limit, so `build` in `proof_certificate.zig` now fails with `error.GraphResultsNotProved` when a graph holds Result events that are not proved.
+
+No real source reached that state. With verification on, I probed 11 guard shapes in a dependency: a ternary, `&&`, `||`, `=== true`, `match`, a copied flag, a guard in a loop, an error read, an unguarded top-level read, a guarded top-level read, and a copied flag at top level. Each one was refused by a check or proved. The refusal is a defensive rule, and its test uses a compile with verification off. That test failed before the fix, because the certificate built.
+
+**Correction.** The Sonnet hand-back said that a top-level guard in a dependency loses its proof, because the walk stops at a `function`. That holds only for an early-exit guard, and top-level code has no `return`. A read inside the guarded `if` arm is still proved.
+
+**Test 4.** With verification on, the verifier refuses an unguarded dependency read at compile. The kernel test therefore compiles with verification off and sets `results_proved` to model a producer that claims the proof. The kernel rejects it at `evidence_check` with `result_read_unguarded`.
+
+**Counts** for the three multi-module handlers, at the fold. Each folds to 4 `function` nodes, is total, and passes production acceptance. Each holds 0 Result bindings and 0 capability calls, so none of them exercises the Result limit. `sibling-helper` used the policy `env.allow=[APP_NAME,API_TOKEN]` and `env.public=[APP_NAME]`. `sibling-helper-holes` used the same policy and a scratch copy with `cost_bounded` removed from its capsule. Both come from `packages/tools/tests/fixtures/flow_precision/corpus`.
+
+| Handler | Nodes | Emissions | Jumps | Rewrites | Scopes | Certificate bytes |
+|---|---|---|---|---|---|---|
+| `handler-with-imports.ts` | 18 | 6 | 0 | 5 | 5 | 2527 |
+| `sibling-helper` | 20 | 9 | 1 | 7 | 5 | 2891 |
+| `sibling-helper-holes` | 18 | 9 | 1 | 7 | 5 | 2779 |
+
+**For G7.** The test "a single-module certificate keeps its pinned bytes" pins one SHA-256 that I confirmed at `23ec4980` before any edit. The executable root folds the semantics and grammar hashes, so an unrelated later change moves it. G7 removes the test after the final gate. `function_ordinal` is not on the wire, so no consumer checks its offset. A test compares it with the span counts of the artifact.
+
+Sonnet implemented the unit, slightly past its turn budget of 60. I reviewed the diff and added the refusal.
+
+Results at the G4 tree, each from an unfiltered run: `zig build test` 214 of 214 steps, `test-zruntime` 274 of 275 tests with 1 skipped, and `test-cli`, `test-bytecode-identity`, `smoke-v1`, `test-module-boundary`, `test-expert-app`, `test-proof-swallow`, `test-proof-checker`, `test-proof-ratchet`, `test-proof-ratchet-drift`, `test-zts-layering`, `zig fmt --check`, and `zig build` each exit 0.
+
+Against the G3 tables, `zts check` and `zts compile` each moved 0 of 215 rows. The command surface moved 0 of 38 rows against G0. `git diff` on `packages/proof-checker` is empty.

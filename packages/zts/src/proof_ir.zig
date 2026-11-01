@@ -108,6 +108,10 @@ pub const Node = struct {
     source: NodeIndex,
     /// The consumer catalog row for a `capability_call`. Zero for every other tag.
     aux: u32 = 0,
+    /// Discriminator folded into the digest, so two parser forms that both
+    /// collapse to one tag stay different members. Zero for a structural node and
+    /// for a Result event.
+    leaf_kind: u16 = 0,
 };
 
 pub const ProofIr = struct {
@@ -121,6 +125,10 @@ pub const ProofIr = struct {
     /// the event walk reads. A program with this flag false carries no Result
     /// evidence, and no `proved` results edge may rest on it.
     results_classified: bool = false,
+    /// How many Result bindings the lowering classified. Zero when the program
+    /// is not classified. A graph fold offsets the ordinals of the later modules
+    /// by this count.
+    result_binding_count: u32 = 0,
 
     pub fn deinit(self: *ProofIr) void {
         self.allocator.free(self.nodes);
@@ -945,22 +953,31 @@ const Lowerer = struct {
 fn digestTree(node: *Tree) void {
     for (node.children.items) |*child| digestTree(child);
 
+    var hasher = digestHeader(node.tag, node.leaf_kind, node.aux, @intCast(node.children.items.len));
+    for (node.children.items) |child| hasher.update(&child.digest);
+    node.digest = hasher.finalResult();
+}
+
+/// The one definition of a node digest, shared by the lowering and the graph
+/// fold. It covers the node domain, the tag, the leaf kind, the auxiliary word,
+/// and the child count. The caller adds the child digests in order and
+/// finalizes the hash.
+fn digestHeader(tag: Tag, leaf_kind: u16, aux: u32, child_count: u32) Sha256 {
     var hasher = Sha256.init(.{});
     hasher.update(node_domain);
     var tag_le: [2]u8 = undefined;
-    std.mem.writeInt(u16, &tag_le, @backingInt(node.tag), .little);
+    std.mem.writeInt(u16, &tag_le, @backingInt(tag), .little);
     hasher.update(&tag_le);
     var kind_le: [2]u8 = undefined;
-    std.mem.writeInt(u16, &kind_le, node.leaf_kind, .little);
+    std.mem.writeInt(u16, &kind_le, leaf_kind, .little);
     hasher.update(&kind_le);
     var aux_le: [4]u8 = undefined;
-    std.mem.writeInt(u32, &aux_le, node.aux, .little);
+    std.mem.writeInt(u32, &aux_le, aux, .little);
     hasher.update(&aux_le);
     var count_le: [4]u8 = undefined;
-    std.mem.writeInt(u32, &count_le, @intCast(node.children.items.len), .little);
+    std.mem.writeInt(u32, &count_le, child_count, .little);
     hasher.update(&count_le);
-    for (node.children.items) |child| hasher.update(&child.digest);
-    node.digest = hasher.finalResult();
+    return hasher;
 }
 
 /// Lower a parsed program into the proof IR.
@@ -1014,6 +1031,7 @@ pub fn lower(
         .digest = tree.digest,
         .source = tree.source,
         .aux = tree.aux,
+        .leaf_kind = tree.leaf_kind,
     });
     try queue.append(allocator, .{ .tree = &tree, .id = 0, .parent = 0 });
 
@@ -1033,6 +1051,7 @@ pub fn lower(
                 .digest = child.digest,
                 .source = child.source,
                 .aux = child.aux,
+                .leaf_kind = child.leaf_kind,
             });
             try queue.append(allocator, .{ .tree = child, .id = id, .parent = frame.id });
         }
@@ -1053,6 +1072,7 @@ pub fn lower(
         .nodes = owned,
         .handler_function = handler_function,
         .results_classified = lowerer.results_active and !lowerer.overflow,
+        .result_binding_count = if (lowerer.results_active) @intCast(bindings.items.len) else 0,
     };
 }
 
@@ -1371,6 +1391,10 @@ pub const Evidence = struct {
     rewrites: []translation_witness.Rewrite,
     pre_optimization_len: u32,
     final_len: u32,
+    /// How many code buffers the module generated: the module function and each
+    /// nested function, in the pre-order that the serialized stream uses. A graph
+    /// fold offsets `function_ordinal` of the later modules by this count.
+    scope_count: u32,
 
     pub fn deinit(self: *Evidence) void {
         self.proof.deinit();
@@ -1410,7 +1434,10 @@ pub const Jump = struct {
     target_offset: u32,
 };
 
-/// Assemble the evidence for one compiled handler.
+/// Assemble the evidence for one compiled module.
+///
+/// `handler_source` is the handler function of the module, or null for a
+/// dependency, which has none.
 ///
 /// `recorder` is the translation evidence code generation captured, or null for
 /// a compile that did not record any. A run with no recorder yields evidence
@@ -1420,7 +1447,7 @@ pub fn buildEvidence(
     allocator: std.mem.Allocator,
     view: IrView,
     root: NodeIndex,
-    handler_source: NodeIndex,
+    handler_source: ?NodeIndex,
     recorder: ?*const translation_witness.Recorder,
     resolver: ?Resolver,
 ) Error!Evidence {
@@ -1446,8 +1473,10 @@ pub fn buildEvidence(
 
     var pre_len: u32 = 0;
     var final_len: u32 = 0;
+    var scope_count: u32 = 0;
 
     if (recorder) |rec| {
+        scope_count = @intCast(rec.scopes.items.len);
         for (rec.scopes.items, 0..) |scope, scope_index| {
             // The module's buffer is the proof IR's root; a nested function's
             // buffer is the node that function lowered to.
@@ -1509,6 +1538,271 @@ pub fn buildEvidence(
         .rewrites = try rewrites.toOwnedSlice(allocator),
         .pre_optimization_len = pre_len,
         .final_len = final_len,
+        .scope_count = scope_count,
+    };
+}
+
+// ---------------------------------------------------------------------------
+// Graph fold
+// ---------------------------------------------------------------------------
+
+pub const FoldError = Error || error{
+    /// A module holds a Result binding that the lowering did not classify, so
+    /// the folded program could carry no Result evidence for it.
+    ModuleNotClassified,
+    /// The modules together bind more Results than the consumer accepts in one
+    /// program. Past the limit the lowering would clear the classification and
+    /// the certificate would state a weaker edge, so the fold refuses instead.
+    GraphResultLimit,
+};
+
+/// Where a folded node came from. Module 0 is the entry; module `k` is
+/// `dependencies[k - 1]`.
+const NodeOrigin = struct { module: u32, old: u32 };
+
+fn originEvidence(entry: *const Evidence, dependencies: []const Evidence, module: usize) *const Evidence {
+    return if (module == 0) entry else &dependencies[module - 1];
+}
+
+/// The auxiliary word of a node after the fold. A Result event names a binding
+/// ordinal, which moves past the bindings of the earlier modules. A guarded
+/// call names a catalog row, so it stays. An escape stays too: it ends the
+/// results pass whatever it names, so its word feeds only the digest.
+fn foldedAux(tag: Tag, aux: u32, ordinal_offset: u32) u32 {
+    return switch (tag) {
+        .result_def,
+        .result_guard_ok,
+        .result_guard_err,
+        .result_read_ok,
+        .result_read_err,
+        => aux +| ordinal_offset,
+        .function,
+        .sequence,
+        .branch,
+        .loop_node,
+        .return_node,
+        .plain,
+        .capability_call,
+        .result_escape,
+        => aux,
+    };
+}
+
+/// Fold the evidence of every module of a graph into the evidence of one
+/// program.
+///
+/// The entry root stays the root, and its children come first. Each dependency
+/// root follows as a `function` node that keeps its own children. A function
+/// contributes no totality to its parent, so a dependency cannot make the entry
+/// look total, and the consumer accepts a function as a translation scope.
+///
+/// `dependencies` is in the order of the dependency bytecodes of the artifact.
+/// Node ids are assigned breadth first over the merged shape, so the children
+/// of each node stay one contiguous range and the residual plan, which the
+/// certificate reads in ascending node id, stays in canonical order. Result
+/// ordinals, witness nodes, witness scopes, and function ordinals move with the
+/// nodes. Every digest is computed again from the leaves up.
+///
+/// The fold needs a witness recorded per module, because a witness names a
+/// parser node and a parser node means something only inside its own parse.
+pub fn foldEvidence(
+    allocator: std.mem.Allocator,
+    entry: *const Evidence,
+    dependencies: []const Evidence,
+) FoldError!Evidence {
+    const module_count = dependencies.len + 1;
+
+    var binding_total: u64 = 0;
+    for (0..module_count) |module| {
+        const evidence = originEvidence(entry, dependencies, module);
+        if (!evidence.proof.results_classified) return error.ModuleNotClassified;
+        binding_total += evidence.proof.result_binding_count;
+    }
+    if (binding_total > max_result_bindings) return error.GraphResultLimit;
+
+    // Per-module offsets, entry first. Both run in the order of the artifact.
+    const ordinal_offsets = try allocator.alloc(u32, module_count);
+    defer allocator.free(ordinal_offsets);
+    const function_offsets = try allocator.alloc(u32, module_count);
+    defer allocator.free(function_offsets);
+    const node_bases = try allocator.alloc(usize, module_count + 1);
+    defer allocator.free(node_bases);
+    var ordinal_sum: u32 = 0;
+    var function_sum: u32 = 0;
+    var node_sum: usize = 0;
+    var pre_optimization_sum: u32 = 0;
+    var final_sum: u32 = 0;
+    for (0..module_count) |module| {
+        const evidence = originEvidence(entry, dependencies, module);
+        ordinal_offsets[module] = ordinal_sum;
+        function_offsets[module] = function_sum;
+        node_bases[module] = node_sum;
+        ordinal_sum += evidence.proof.result_binding_count;
+        function_sum +|= evidence.scope_count;
+        node_sum += evidence.proof.nodes.len;
+        pre_optimization_sum +|= evidence.pre_optimization_len;
+        final_sum +|= evidence.final_len;
+    }
+    node_bases[module_count] = node_sum;
+
+    // Breadth first over the merged shape. `origins[id]` is what the folded
+    // node `id` came from, and `old_to_new` runs the other way for each module.
+    const old_to_new = try allocator.alloc(u32, node_sum);
+    defer allocator.free(old_to_new);
+    const origins = try allocator.alloc(NodeOrigin, node_sum);
+    defer allocator.free(origins);
+    const nodes = try allocator.alloc(Node, node_sum);
+    var proof = ProofIr{
+        .allocator = allocator,
+        .nodes = nodes,
+        .handler_function = null,
+        .results_classified = true,
+        .result_binding_count = ordinal_sum,
+    };
+    errdefer proof.deinit();
+
+    const entry_root = entry.proof.nodes[0];
+    origins[0] = .{ .module = 0, .old = 0 };
+    old_to_new[node_bases[0]] = 0;
+    nodes[0] = .{
+        .id = 0,
+        .tag = entry_root.tag,
+        .parent = 0,
+        .first_child = 0,
+        .child_count = entry_root.child_count + @as(u32, @intCast(dependencies.len)),
+        .digest = @as([32]u8, @splat(0)),
+        .source = entry_root.source,
+        .aux = entry_root.aux,
+        .leaf_kind = entry_root.leaf_kind,
+    };
+
+    var assigned: u32 = 1;
+    var head: u32 = 0;
+    while (head < assigned) : (head += 1) {
+        const origin = origins[head];
+        const evidence = originEvidence(entry, dependencies, origin.module);
+        const old = evidence.proof.nodes[origin.old];
+        nodes[head].first_child = if (nodes[head].child_count == 0) 0 else assigned;
+
+        var slot: u32 = 0;
+        while (slot < old.child_count) : (slot += 1) {
+            const child_old = old.first_child + slot;
+            const child = evidence.proof.nodes[child_old];
+            const id = assigned;
+            assigned += 1;
+            origins[id] = .{ .module = origin.module, .old = child_old };
+            old_to_new[node_bases[origin.module] + child_old] = id;
+            nodes[id] = .{
+                .id = id,
+                .tag = child.tag,
+                .parent = head,
+                .first_child = 0,
+                .child_count = child.child_count,
+                .digest = @as([32]u8, @splat(0)),
+                .source = if (origin.module == 0) child.source else null_node,
+                .aux = foldedAux(child.tag, child.aux, ordinal_offsets[origin.module]),
+                .leaf_kind = child.leaf_kind,
+            };
+        }
+        if (head == 0) {
+            // The dependency roots follow the children of the entry root.
+            for (dependencies, 1..) |dependency, module| {
+                const root = dependency.proof.nodes[0];
+                const id = assigned;
+                assigned += 1;
+                origins[id] = .{ .module = @intCast(module), .old = 0 };
+                old_to_new[node_bases[module]] = id;
+                nodes[id] = .{
+                    .id = id,
+                    .tag = .function,
+                    .parent = 0,
+                    .first_child = 0,
+                    .child_count = root.child_count,
+                    .digest = @as([32]u8, @splat(0)),
+                    .source = null_node,
+                    .aux = 0,
+                    .leaf_kind = root.leaf_kind,
+                };
+            }
+        }
+    }
+
+    // A child id is above its parent id, so one reverse sweep settles every
+    // digest.
+    var index: usize = nodes.len;
+    while (index > 0) {
+        index -= 1;
+        const node = &nodes[index];
+        var hasher = digestHeader(node.tag, node.leaf_kind, node.aux, node.child_count);
+        var slot: u32 = 0;
+        while (slot < node.child_count) : (slot += 1) {
+            hasher.update(&nodes[node.first_child + slot].digest);
+        }
+        node.digest = hasher.finalResult();
+    }
+
+    if (entry.proof.handler_function) |handler| {
+        proof.handler_function = old_to_new[node_bases[0] + handler];
+    }
+
+    var declared: std.ArrayList(u32) = .empty;
+    errdefer declared.deinit(allocator);
+    var emissions: std.ArrayList(Emission) = .empty;
+    errdefer emissions.deinit(allocator);
+    var jumps: std.ArrayList(Jump) = .empty;
+    errdefer jumps.deinit(allocator);
+    var rewrites: std.ArrayList(translation_witness.Rewrite) = .empty;
+    errdefer rewrites.deinit(allocator);
+
+    for (0..module_count) |module| {
+        const evidence = originEvidence(entry, dependencies, module);
+        const map = old_to_new[node_bases[module]..node_bases[module + 1]];
+        for (evidence.declared) |node| try declared.append(allocator, map[node]);
+        for (evidence.emissions) |emission| {
+            try emissions.append(allocator, .{
+                .function_ordinal = emission.function_ordinal +| function_offsets[module],
+                .scope = map[emission.scope],
+                .node = map[emission.node],
+                .code_start = emission.code_start,
+                .code_len = emission.code_len,
+            });
+        }
+        for (evidence.jumps) |jump| {
+            try jumps.append(allocator, .{
+                .scope = map[jump.scope],
+                .node = map[jump.node],
+                .instruction_offset = jump.instruction_offset,
+                .target_node = map[jump.target_node],
+                .target_offset = jump.target_offset,
+            });
+        }
+        try rewrites.appendSlice(allocator, evidence.rewrites);
+    }
+
+    const declared_owned = try declared.toOwnedSlice(allocator);
+    errdefer allocator.free(declared_owned);
+    const total = try deriveTotality(allocator, proof, declared_owned);
+    errdefer allocator.free(total);
+    const results_proved = hasResultEvents(proof) and try deriveResults(allocator, proof);
+
+    const emissions_owned = try emissions.toOwnedSlice(allocator);
+    errdefer allocator.free(emissions_owned);
+    const jumps_owned = try jumps.toOwnedSlice(allocator);
+    errdefer allocator.free(jumps_owned);
+    const rewrites_owned = try rewrites.toOwnedSlice(allocator);
+
+    return .{
+        .allocator = allocator,
+        .proof = proof,
+        .total = total,
+        .declared = declared_owned,
+        .results_proved = results_proved,
+        .emissions = emissions_owned,
+        .jumps = jumps_owned,
+        .rewrites = rewrites_owned,
+        .pre_optimization_len = pre_optimization_sum,
+        .final_len = final_sum,
+        .scope_count = function_sum,
     };
 }
 
@@ -2364,4 +2658,259 @@ test "the ambient Result globals match the ones abi_types registers" {
             std.mem.indexOf(u8, line, "\"requestText\"") != null);
     }
     try testing.expectEqual(result_globals.len, registered);
+}
+
+// ---------------------------------------------------------------------------
+// Graph fold tests
+// ---------------------------------------------------------------------------
+
+const ParsedEvidence = struct {
+    allocator: std.mem.Allocator,
+    parser: *JsParser,
+    evidence: Evidence,
+
+    fn deinit(self: *ParsedEvidence) void {
+        self.evidence.deinit();
+        self.parser.deinit();
+        self.allocator.destroy(self.parser);
+    }
+};
+
+fn parseEvidence(allocator: std.mem.Allocator, source: []const u8, resolver: ?Resolver) !ParsedEvidence {
+    const parser = try allocator.create(JsParser);
+    errdefer allocator.destroy(parser);
+    parser.* = try JsParser.initAdmission(allocator, allocator, source, .compile);
+    errdefer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler_source = handler_function_mod.findHandlerFunction(view, root);
+    const evidence = try buildEvidence(allocator, view, root, handler_source, null, resolver);
+    return .{ .allocator = allocator, .parser = parser, .evidence = evidence };
+}
+
+const fold_entry_source =
+    \\function handler(req) {
+    \\  return Response.text("ok");
+    \\}
+;
+
+const fold_dependency_source =
+    \\function helper(value) {
+    \\  return value;
+    \\}
+;
+
+test "a fold keeps the entry root and adds each dependency root as a function node" {
+    const allocator = testing.allocator;
+    var never = NeverResolver{};
+    var entry = try parseEvidence(allocator, fold_entry_source, never.resolver());
+    defer entry.deinit();
+    var dependency = try parseEvidence(allocator, fold_dependency_source, never.resolver());
+    defer dependency.deinit();
+
+    var folded = try foldEvidence(allocator, &entry.evidence, &.{dependency.evidence});
+    defer folded.deinit();
+
+    const nodes = folded.proof.nodes;
+    try testing.expectEqual(@as(usize, 4), entry.evidence.proof.nodes.len);
+    try testing.expectEqual(@as(usize, 4), dependency.evidence.proof.nodes.len);
+    try testing.expectEqual(@as(usize, 8), nodes.len);
+    // The entry root stays the root and the handler keeps its place.
+    try testing.expectEqual(Tag.sequence, nodes[0].tag);
+    try testing.expectEqual(@as(?u32, entry.evidence.proof.handler_function), folded.proof.handler_function);
+    // The entry root children come first, then the dependency root.
+    try testing.expectEqual(@as(u32, 2), nodes[0].child_count);
+    try testing.expectEqual(Tag.function, nodes[2].tag);
+    try testing.expectEqual(@as(u32, 0), nodes[2].parent);
+    try testing.expectEqual(@as(usize, 3), countTag(folded.proof, .function));
+    // The dependency function keeps its own children, and no node is lost.
+    try testing.expectEqual(@as(u32, 1), nodes[2].child_count);
+    try testing.expectEqual(@as(u32, 4), nodes[2].first_child);
+    // A fold of two modules that each return still has the handler total.
+    try testing.expect(folded.handlerIsTotal());
+    try testing.expectEqual(@as(u32, 0), folded.scope_count);
+}
+
+test "a fold of an entry alone is that entry" {
+    const allocator = testing.allocator;
+    var never = NeverResolver{};
+    var entry = try parseEvidence(allocator, fold_entry_source, never.resolver());
+    defer entry.deinit();
+
+    var folded = try foldEvidence(allocator, &entry.evidence, &.{});
+    defer folded.deinit();
+
+    try testing.expectEqualSlices(Node, entry.evidence.proof.nodes, folded.proof.nodes);
+    try testing.expectEqual(entry.evidence.proof.handler_function, folded.proof.handler_function);
+}
+
+const fold_guarded_entry_source =
+    \\import { validateJson } from "zttp:validate";
+    \\function handler(req) {
+    \\  const r = validateJson("a", "b");
+    \\  if (!r.ok) {
+    \\    return Response.text("no");
+    \\  }
+    \\  return Response.text(r.value);
+    \\}
+;
+
+const fold_guarded_dependency_source =
+    \\import { validateJson } from "zttp:validate";
+    \\function check(input) {
+    \\  const s = validateJson("a", "b");
+    \\  if (!s.ok) {
+    \\    return "no";
+    \\  }
+    \\  return s.value;
+    \\}
+;
+
+const fold_unguarded_dependency_source =
+    \\import { validateJson } from "zttp:validate";
+    \\function check(input) {
+    \\  const s = validateJson("a", "b");
+    \\  return s.value;
+    \\}
+;
+
+test "a fold moves the Result ordinals of a dependency past the bindings of the entry" {
+    const allocator = testing.allocator;
+    var never = NeverResolver{};
+    var entry = try parseEvidence(allocator, fold_guarded_entry_source, never.resolver());
+    defer entry.deinit();
+    var dependency = try parseEvidence(allocator, fold_guarded_dependency_source, never.resolver());
+    defer dependency.deinit();
+    try testing.expect(entry.evidence.results_proved);
+    try testing.expect(dependency.evidence.results_proved);
+
+    var folded = try foldEvidence(allocator, &entry.evidence, &.{dependency.evidence});
+    defer folded.deinit();
+
+    try testing.expectEqual(@as(u32, 2), folded.proof.result_binding_count);
+    try testing.expectEqual(@as(usize, 2), countTag(folded.proof, .result_def));
+    try testing.expectEqual(@as(?u32, 0), firstAuxOf(folded.proof, .result_def, 0));
+    try testing.expectEqual(@as(?u32, 1), firstAuxOf(folded.proof, .result_def, 1));
+    try testing.expectEqual(@as(?u32, 0), firstAuxOf(folded.proof, .result_read_ok, 0));
+    try testing.expectEqual(@as(?u32, 1), firstAuxOf(folded.proof, .result_read_ok, 1));
+    // The consumer re-derives the same answer over the folded events.
+    try testing.expect(folded.results_proved);
+}
+
+/// The auxiliary word of the `skip`-th node with `tag`, in node order.
+fn firstAuxOf(proof: ProofIr, tag: Tag, skip: usize) ?u32 {
+    var seen: usize = 0;
+    for (proof.nodes) |node| {
+        if (node.tag != tag) continue;
+        if (seen == skip) return node.aux;
+        seen += 1;
+    }
+    return null;
+}
+
+test "a fold does not hide an unguarded Result read in a dependency" {
+    const allocator = testing.allocator;
+    var never = NeverResolver{};
+    var entry = try parseEvidence(allocator, fold_guarded_entry_source, never.resolver());
+    defer entry.deinit();
+    var dependency = try parseEvidence(allocator, fold_unguarded_dependency_source, never.resolver());
+    defer dependency.deinit();
+    try testing.expect(entry.evidence.results_proved);
+    try testing.expect(!dependency.evidence.results_proved);
+
+    var folded = try foldEvidence(allocator, &entry.evidence, &.{dependency.evidence});
+    defer folded.deinit();
+
+    try testing.expect(!folded.results_proved);
+}
+
+test "a fold refuses a dependency whose Results the lowering did not classify" {
+    const allocator = testing.allocator;
+    var never = NeverResolver{};
+    var entry = try parseEvidence(allocator, fold_guarded_entry_source, never.resolver());
+    defer entry.deinit();
+    // No resolver, so the lowering classifies nothing.
+    var dependency = try parseEvidence(allocator, fold_guarded_dependency_source, null);
+    defer dependency.deinit();
+    try testing.expect(!dependency.evidence.proof.results_classified);
+
+    try testing.expectError(
+        error.ModuleNotClassified,
+        foldEvidence(allocator, &entry.evidence, &.{dependency.evidence}),
+    );
+}
+
+test "a dependency with no Result binding is classified and folds" {
+    const allocator = testing.allocator;
+    var never = NeverResolver{};
+    var entry = try parseEvidence(allocator, fold_guarded_entry_source, never.resolver());
+    defer entry.deinit();
+    var dependency = try parseEvidence(allocator, fold_dependency_source, never.resolver());
+    defer dependency.deinit();
+    try testing.expect(dependency.evidence.proof.results_classified);
+    try testing.expectEqual(@as(u32, 0), dependency.evidence.proof.result_binding_count);
+
+    var folded = try foldEvidence(allocator, &entry.evidence, &.{dependency.evidence});
+    defer folded.deinit();
+
+    try testing.expectEqual(@as(u32, 1), folded.proof.result_binding_count);
+    try testing.expect(folded.results_proved);
+}
+
+const thirty_three_bindings_source =
+    \\import { validateJson } from "zttp:validate";
+    \\function many(input) {
+    \\  const b00 = validateJson("a", "b");
+    \\  const b01 = validateJson("a", "b");
+    \\  const b02 = validateJson("a", "b");
+    \\  const b03 = validateJson("a", "b");
+    \\  const b04 = validateJson("a", "b");
+    \\  const b05 = validateJson("a", "b");
+    \\  const b06 = validateJson("a", "b");
+    \\  const b07 = validateJson("a", "b");
+    \\  const b08 = validateJson("a", "b");
+    \\  const b09 = validateJson("a", "b");
+    \\  const b10 = validateJson("a", "b");
+    \\  const b11 = validateJson("a", "b");
+    \\  const b12 = validateJson("a", "b");
+    \\  const b13 = validateJson("a", "b");
+    \\  const b14 = validateJson("a", "b");
+    \\  const b15 = validateJson("a", "b");
+    \\  const b16 = validateJson("a", "b");
+    \\  const b17 = validateJson("a", "b");
+    \\  const b18 = validateJson("a", "b");
+    \\  const b19 = validateJson("a", "b");
+    \\  const b20 = validateJson("a", "b");
+    \\  const b21 = validateJson("a", "b");
+    \\  const b22 = validateJson("a", "b");
+    \\  const b23 = validateJson("a", "b");
+    \\  const b24 = validateJson("a", "b");
+    \\  const b25 = validateJson("a", "b");
+    \\  const b26 = validateJson("a", "b");
+    \\  const b27 = validateJson("a", "b");
+    \\  const b28 = validateJson("a", "b");
+    \\  const b29 = validateJson("a", "b");
+    \\  const b30 = validateJson("a", "b");
+    \\  const b31 = validateJson("a", "b");
+    \\  const b32 = validateJson("a", "b");
+    \\  return 1;
+    \\}
+;
+
+test "a fold refuses a graph whose modules bind more Results than one certificate carries" {
+    const allocator = testing.allocator;
+    var never = NeverResolver{};
+    var entry = try parseEvidence(allocator, thirty_three_bindings_source, never.resolver());
+    defer entry.deinit();
+    var dependency = try parseEvidence(allocator, thirty_three_bindings_source, never.resolver());
+    defer dependency.deinit();
+    try testing.expect(entry.evidence.proof.results_classified);
+    try testing.expect(dependency.evidence.proof.results_classified);
+    try testing.expectEqual(@as(u32, 33), entry.evidence.proof.result_binding_count);
+    try testing.expectEqual(@as(u32, 33), dependency.evidence.proof.result_binding_count);
+
+    try testing.expectError(
+        error.GraphResultLimit,
+        foldEvidence(allocator, &entry.evidence, &.{dependency.evidence}),
+    );
 }

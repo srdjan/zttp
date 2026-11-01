@@ -1462,6 +1462,488 @@ test "a real compile produces a certificate that binds its own IR and artifact" 
     }
 }
 
+test "a single-module certificate keeps its pinned bytes" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "state_isolated" | "no_secret_leakage" | "result_safe"> {
+        \\  if (req.method === "GET") {
+        \\    return Response.text("get");
+        \\  } else {
+        \\    return Response.text("other");
+        \\  }
+        \\}
+    ;
+    var compiled = try precompile.compileHandler(allocator, source, "handler.ts", .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+    const evidence = compiled.proof_evidence orelse return error.TestUnexpectedResult;
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+    const contract_json = try serializeContractJson(allocator, &contract);
+    defer allocator.free(contract_json);
+    const policy = zts.handler_policy.contractToRuntimePolicy(&contract, null);
+    const policy_section = try self_extract.serializePolicy(allocator, &policy);
+    defer allocator.free(policy_section);
+    var built = try proof_certificate.build(allocator, .{
+        .evidence = &evidence,
+        .properties = dischargedProperties(&contract),
+        .artifact = .{
+            .bytecode = compiled.bytecode,
+            .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+            .contract_section = contract_json,
+            .policy_section_digest = artifact_graph.digestOf(policy_section),
+            .identity = artifact_graph.identityFromContract(&contract),
+        },
+        .contract_digest = artifact_graph.digestOf(contract_json),
+    });
+    defer built.deinit();
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(built.bytes, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    try std.testing.expectEqual(@as(usize, 1729), built.bytes.len);
+    try std.testing.expectEqualStrings("e4fa9860cb2ed7c4782a2ffeaa6f3ef3762768b3f2faa5a0b0270bf6baf03d1d", &hex);
+}
+
+/// A certificate built from the folded evidence of a handler with file imports,
+/// with the sections that the activation reads.
+const GraphCertificate = struct {
+    allocator: std.mem.Allocator,
+    contract_json: []u8,
+    policy_section: []u8,
+    policy_digest: [32]u8,
+    built: proof_certificate.Built,
+
+    fn init(
+        allocator: std.mem.Allocator,
+        compiled: *const precompile.CompiledHandler,
+        evidence: *const zts.ProofEvidence,
+        properties: proof_certificate.DischargedProperties,
+        configured_policy: ?*const zts.HandlerPolicy,
+    ) !GraphCertificate {
+        const contract = &(compiled.contract orelse return error.TestUnexpectedResult);
+        const contract_json = try serializeContractJson(allocator, contract);
+        errdefer allocator.free(contract_json);
+        const runtime_policy = zts.handler_policy.contractToRuntimePolicy(contract, configured_policy);
+        const policy_section = try self_extract.serializePolicy(allocator, &runtime_policy);
+        errdefer allocator.free(policy_section);
+        const policy_digest = artifact_graph.digestOf(policy_section);
+        const built = try proof_certificate.build(allocator, .{
+            .evidence = evidence,
+            .properties = properties,
+            .artifact = .{
+                .bytecode = compiled.bytecode,
+                .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+                .contract_section = contract_json,
+                .policy_section_digest = policy_digest,
+                .identity = artifact_graph.identityFromContract(contract),
+            },
+            .contract_digest = artifact_graph.digestOf(contract_json),
+            .runtime_policy_digest = policy_digest,
+        });
+        return .{
+            .allocator = allocator,
+            .contract_json = contract_json,
+            .policy_section = policy_section,
+            .policy_digest = policy_digest,
+            .built = built,
+        };
+    }
+
+    fn deinit(self: *GraphCertificate) void {
+        self.built.deinit();
+        self.allocator.free(self.policy_section);
+        self.allocator.free(self.contract_json);
+    }
+
+    /// Production acceptance of the certificate against the artifact sections,
+    /// which the activation rebuilds on its own.
+    fn assess(self: *const GraphCertificate, compiled: *const precompile.CompiledHandler) !pcc.Assessment {
+        const contract = &(compiled.contract orelse return error.TestUnexpectedResult);
+        return proof_activation.accept(self.allocator, .{
+            .certificate = self.built.bytes,
+            .bytecode = compiled.bytecode,
+            .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+            .contract_section = self.contract_json,
+            .policy_section_digest = self.policy_digest,
+            .policy_section = self.policy_section,
+            .identity = artifact_graph.identityFromContract(contract),
+        }, pcc.policy.production);
+    }
+};
+
+const graph_entry_source =
+    \\import { parseTitle } from "./dep.ts";
+    \\export function handler(req: Request): Response {
+    \\  return parseTitle("{}");
+    \\}
+    \\
+;
+
+const graph_guarded_dependency =
+    \\import { validateJson } from "zttp:validate";
+    \\export function parseTitle(input: string): Response {
+    \\  const r = validateJson("todo", input);
+    \\  if (!r.ok) {
+    \\    return Response.json({ error: r.errors }, { status: 400 });
+    \\  }
+    \\  return Response.json({ title: r.value }, { status: 200 });
+    \\}
+    \\
+;
+
+const graph_unguarded_dependency =
+    \\import { validateJson } from "zttp:validate";
+    \\export function parseTitle(input: string): Response {
+    \\  const r = validateJson("todo", input);
+    \\  return Response.json({ title: r.value }, { status: 200 });
+    \\}
+    \\
+;
+
+/// Write the two modules of a graph and return the absolute path of the entry.
+fn writeGraphFixture(
+    allocator: std.mem.Allocator,
+    tmp: *std.testing.TmpDir,
+    entry_source: []const u8,
+    dependency_source: []const u8,
+) ![:0]u8 {
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "entry.ts", .data = entry_source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.ts", .data = dependency_source });
+    return tmp.dir.realPathFileAlloc(std.testing.io, "entry.ts", allocator);
+}
+
+test "a certificate built from a folded graph passes production acceptance" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const entry_path = try writeGraphFixture(allocator, &tmp, graph_entry_source, graph_guarded_dependency);
+    defer allocator.free(entry_path);
+
+    var compiled = try precompile.compileHandler(allocator, graph_entry_source, entry_path, .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+    // The refusal for a handler with file imports stays until the evidence moves.
+    try std.testing.expect(compiled.proof_evidence == null);
+    const evidence = compiled.graph_evidence orelse return error.TestUnexpectedResult;
+    try std.testing.expect(evidence.handlerIsTotal());
+    try std.testing.expect(evidence.results_proved);
+
+    var certificate = try GraphCertificate.init(allocator, &compiled, &evidence, dischargedProperties(&compiled.contract.?), null);
+    defer certificate.deinit();
+    const assessment = try certificate.assess(&compiled);
+    if (assessment.rejection()) |rejection| {
+        std.debug.print("unexpected rejection: {s} / {s}\n", .{ rejection.stage.name(), rejection.code.text() });
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(pcc.SemanticState.policy_accepted, assessment.semantic());
+    try std.testing.expectEqual(@as(?pcc.verdict.AssuranceGrade, .trusted), assessment.properties.gradeFor(.response_total));
+    try std.testing.expectEqual(@as(?pcc.verdict.AssuranceGrade, .trusted), assessment.properties.gradeFor(.results_checked));
+}
+
+test "two folds of one graph give identical certificate bytes" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const entry_path = try writeGraphFixture(allocator, &tmp, graph_entry_source, graph_guarded_dependency);
+    defer allocator.free(entry_path);
+
+    var first = try precompile.compileHandler(allocator, graph_entry_source, entry_path, .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer first.deinit(allocator);
+    var second = try precompile.compileHandler(allocator, graph_entry_source, entry_path, .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer second.deinit(allocator);
+    const first_evidence = first.graph_evidence orelse return error.TestUnexpectedResult;
+    const second_evidence = second.graph_evidence orelse return error.TestUnexpectedResult;
+
+    var first_certificate = try GraphCertificate.init(allocator, &first, &first_evidence, dischargedProperties(&first.contract.?), null);
+    defer first_certificate.deinit();
+    var second_certificate = try GraphCertificate.init(allocator, &second, &second_evidence, dischargedProperties(&second.contract.?), null);
+    defer second_certificate.deinit();
+    try std.testing.expectEqualSlices(u8, first_certificate.built.bytes, second_certificate.built.bytes);
+}
+
+test "the kernel refuses a folded graph whose dependency reads a Result without a guard" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const entry_path = try writeGraphFixture(allocator, &tmp, graph_entry_source, graph_unguarded_dependency);
+    defer allocator.free(entry_path);
+
+    // The verifier refuses this dependency when verification is on, so the
+    // compile runs with it off. The certificate then has to carry the read.
+    var compiled = try precompile.compileHandler(allocator, graph_entry_source, entry_path, .{
+        .emit_verify = false,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+    var evidence = compiled.graph_evidence orelse return error.TestUnexpectedResult;
+    // The producer's own copy of the pass sees the unguarded read.
+    try std.testing.expect(!evidence.results_proved);
+
+    // A producer that claimed the proof anyway, with the contract also saying
+    // that the Results are checked.
+    evidence.results_proved = true;
+    var certificate = try GraphCertificate.init(allocator, &compiled, &evidence, .{ .results_checked = true }, null);
+    defer certificate.deinit();
+    const assessment = try certificate.assess(&compiled);
+    const rejection = assessment.rejection() orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(pcc.verdict.Stage.evidence_check, rejection.stage);
+    try std.testing.expectEqualStrings("result_read_unguarded", rejection.code.text());
+}
+
+test "a graph with Result events that the producer cannot prove gets no certificate" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const entry_path = try writeGraphFixture(allocator, &tmp, graph_entry_source, graph_unguarded_dependency);
+    defer allocator.free(entry_path);
+
+    // With verification on, the verifier refuses this dependency first. This
+    // compile holds the state that a `tested` edge would otherwise carry.
+    var compiled = try precompile.compileHandler(allocator, graph_entry_source, entry_path, .{
+        .emit_verify = false,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+    const evidence = compiled.graph_evidence orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!evidence.results_proved);
+    try std.testing.expectError(error.GraphResultsNotProved, GraphCertificate.init(
+        allocator,
+        &compiled,
+        &evidence,
+        .{ .results_checked = true },
+        null,
+    ));
+}
+
+test "a dependency capability call with a computed resource appears in the residual plan" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var policy = try zts.handler_policy.parsePolicyJson(
+        allocator,
+        "{\"env\":{\"allow\":[\"APP_NAME\"]}}",
+    );
+    defer policy.deinit(allocator);
+    const entry_source =
+        \\import { isSet } from "./dep.ts";
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(isSet(req.method) ? "set" : "missing");
+        \\}
+        \\
+    ;
+    const dependency_source =
+        \\import { env } from "zttp:env";
+        \\export function isSet(name: string): boolean {
+        \\  return env(name) !== undefined;
+        \\}
+        \\
+    ;
+    const entry_path = try writeGraphFixture(allocator, &tmp, entry_source, dependency_source);
+    defer allocator.free(entry_path);
+
+    var compiled = try precompile.compileHandler(allocator, entry_source, entry_path, .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+        .policy = policy,
+    });
+    defer compiled.deinit(allocator);
+    const evidence = compiled.graph_evidence orelse return error.TestUnexpectedResult;
+
+    var certificate = try GraphCertificate.init(allocator, &compiled, &evidence, dischargedProperties(&compiled.contract.?), &policy);
+    defer certificate.deinit();
+    var budget = pcc.limits.Budget.init(.{});
+    const decoded = try pcc.certificate.decode(certificate.built.bytes, .{}, &budget);
+    try std.testing.expectEqual(@as(u32, 1), decoded.residual.len());
+    try std.testing.expectEqual(pcc.residual.GuardKind.env_key, (try decoded.residual.get(0)).kind);
+
+    const assessment = try certificate.assess(&compiled);
+    if (assessment.rejection()) |rejection| {
+        std.debug.print("unexpected rejection: {s} / {s}\n", .{ rejection.stage.name(), rejection.code.text() });
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqual(@as(u32, 1), assessment.guards.required);
+    try std.testing.expectEqual(@as(u32, 1), assessment.guards.covered);
+}
+
+const graph_many_results_body =
+    \\  const b00 = validateJson("todo", "{}");
+    \\  const b01 = validateJson("todo", "{}");
+    \\  const b02 = validateJson("todo", "{}");
+    \\  const b03 = validateJson("todo", "{}");
+    \\  const b04 = validateJson("todo", "{}");
+    \\  const b05 = validateJson("todo", "{}");
+    \\  const b06 = validateJson("todo", "{}");
+    \\  const b07 = validateJson("todo", "{}");
+    \\  const b08 = validateJson("todo", "{}");
+    \\  const b09 = validateJson("todo", "{}");
+    \\  const b10 = validateJson("todo", "{}");
+    \\  const b11 = validateJson("todo", "{}");
+    \\  const b12 = validateJson("todo", "{}");
+    \\  const b13 = validateJson("todo", "{}");
+    \\  const b14 = validateJson("todo", "{}");
+    \\  const b15 = validateJson("todo", "{}");
+    \\  const b16 = validateJson("todo", "{}");
+    \\  const b17 = validateJson("todo", "{}");
+    \\  const b18 = validateJson("todo", "{}");
+    \\  const b19 = validateJson("todo", "{}");
+    \\  const b20 = validateJson("todo", "{}");
+    \\  const b21 = validateJson("todo", "{}");
+    \\  const b22 = validateJson("todo", "{}");
+    \\  const b23 = validateJson("todo", "{}");
+    \\  const b24 = validateJson("todo", "{}");
+    \\  const b25 = validateJson("todo", "{}");
+    \\  const b26 = validateJson("todo", "{}");
+    \\  const b27 = validateJson("todo", "{}");
+    \\  const b28 = validateJson("todo", "{}");
+    \\  const b29 = validateJson("todo", "{}");
+    \\  const b30 = validateJson("todo", "{}");
+    \\  const b31 = validateJson("todo", "{}");
+    \\  const b32 = validateJson("todo", "{}");
+    \\
+;
+
+test "a graph whose modules bind more Results than one certificate carries is refused at compile" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // 33 bindings in each module: under the limit alone, over it together.
+    const entry_source =
+        \\import { validateJson } from "zttp:validate";
+        \\import { many } from "./dep.ts";
+        \\export function handler(req: Request): Response {
+    ++ graph_many_results_body ++
+        \\  return Response.text(many());
+        \\}
+        \\
+    ;
+    const dependency_source =
+        \\import { validateJson } from "zttp:validate";
+        \\export function many(): string {
+    ++ graph_many_results_body ++
+        \\  return "ok";
+        \\}
+        \\
+    ;
+    const entry_path = try writeGraphFixture(allocator, &tmp, entry_source, dependency_source);
+    defer allocator.free(entry_path);
+
+    try std.testing.expectError(error.GraphResultLimit, precompile.compileHandler(allocator, entry_source, entry_path, .{
+        .emit_verify = false,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    }));
+}
+
+const graph_more_results_body =
+    \\  const d00 = validateJson("todo", "{}");
+    \\  const d01 = validateJson("todo", "{}");
+    \\  const d02 = validateJson("todo", "{}");
+    \\  const d03 = validateJson("todo", "{}");
+    \\  const d04 = validateJson("todo", "{}");
+    \\  const d05 = validateJson("todo", "{}");
+    \\  const d06 = validateJson("todo", "{}");
+    \\  const d07 = validateJson("todo", "{}");
+    \\  const d08 = validateJson("todo", "{}");
+    \\  const d09 = validateJson("todo", "{}");
+    \\  const d10 = validateJson("todo", "{}");
+    \\  const d11 = validateJson("todo", "{}");
+    \\  const d12 = validateJson("todo", "{}");
+    \\  const d13 = validateJson("todo", "{}");
+    \\  const d14 = validateJson("todo", "{}");
+    \\  const d15 = validateJson("todo", "{}");
+    \\  const d16 = validateJson("todo", "{}");
+    \\  const d17 = validateJson("todo", "{}");
+    \\  const d18 = validateJson("todo", "{}");
+    \\  const d19 = validateJson("todo", "{}");
+    \\  const d20 = validateJson("todo", "{}");
+    \\  const d21 = validateJson("todo", "{}");
+    \\  const d22 = validateJson("todo", "{}");
+    \\  const d23 = validateJson("todo", "{}");
+    \\  const d24 = validateJson("todo", "{}");
+    \\  const d25 = validateJson("todo", "{}");
+    \\  const d26 = validateJson("todo", "{}");
+    \\  const d27 = validateJson("todo", "{}");
+    \\  const d28 = validateJson("todo", "{}");
+    \\  const d29 = validateJson("todo", "{}");
+    \\  const d30 = validateJson("todo", "{}");
+    \\  const d31 = validateJson("todo", "{}");
+    \\
+;
+
+test "a graph whose dependency binds more Results than the lowering classifies is refused at compile" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    // 65 bindings in one module: past the limit, so the lowering classifies none.
+    const dependency_source =
+        \\import { validateJson } from "zttp:validate";
+        \\export function many(): string {
+    ++ graph_many_results_body ++ graph_more_results_body ++
+        \\  return "ok";
+        \\}
+        \\
+    ;
+    const entry_source =
+        \\import { many } from "./dep.ts";
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(many());
+        \\}
+        \\
+    ;
+    const entry_path = try writeGraphFixture(allocator, &tmp, entry_source, dependency_source);
+    defer allocator.free(entry_path);
+
+    try std.testing.expectError(error.ModuleNotClassified, precompile.compileHandler(allocator, entry_source, entry_path, .{
+        .emit_verify = false,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    }));
+}
+
+test "the folded evidence numbers its functions as the artifact does" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const entry_path = try writeGraphFixture(allocator, &tmp, graph_entry_source, graph_guarded_dependency);
+    defer allocator.free(entry_path);
+
+    var compiled = try precompile.compileHandler(allocator, graph_entry_source, entry_path, .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+    const evidence = compiled.graph_evidence orelse return error.TestUnexpectedResult;
+
+    // The artifact numbers function spans over the entry and then each
+    // dependency, and the fold offsets the later modules by the same order.
+    var spans: [64]zts.bytecode_cache.ExecutableSpan = undefined;
+    const entry_functions = try zts.bytecode_cache.walkExecutableSpans(compiled.bytecode, &spans);
+    const dependency_functions = try zts.bytecode_cache.walkExecutableSpans(compiled.dep_bytecodes.?[0], &spans);
+    try std.testing.expectEqual(@as(usize, 2), entry_functions);
+    try std.testing.expectEqual(@as(usize, 2), dependency_functions);
+    try std.testing.expectEqual(@as(u32, 4), evidence.scope_count);
+    try std.testing.expectEqual(@as(usize, 7), evidence.emissions.len);
+    try std.testing.expectEqual(@as(usize, 1), evidence.jumps.len);
+    try std.testing.expectEqual(@as(usize, 22), evidence.proof.nodes.len);
+}
+
 test "a build certificate claims capability_bounded only under a declared Effects ceiling" {
     const allocator = std.testing.allocator;
     const plain =

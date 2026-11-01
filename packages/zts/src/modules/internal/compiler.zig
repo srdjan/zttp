@@ -11,6 +11,7 @@ const context = @import("../../context.zig");
 const string = @import("../../string.zig");
 const bytecode = @import("../../bytecode.zig");
 const object = @import("../../object.zig");
+const translation_witness = @import("../../translation_witness.zig");
 
 pub const CompiledModule = struct {
     func: bytecode.FunctionBytecode,
@@ -24,6 +25,10 @@ pub const ModuleCompiler = struct {
     allocator: std.mem.Allocator,
     atoms: *context.AtomTable,
     strings: *string.StringTable,
+    /// When set, `CompileResult` owns one translation recorder per module and
+    /// code generation fills it. Off by default: recording costs a null check
+    /// per emitted node and an owned copy of the witness arrays.
+    record_witnesses: bool = false,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -55,8 +60,16 @@ pub const ModuleCompiler = struct {
         errdefer self.allocator.free(parsers);
         const codegens = try self.allocator.alloc(zts_parser.CodeGen, count);
         errdefer self.allocator.free(codegens);
+        // The recorders are allocated before the first module, so each pointer
+        // that a code generator keeps stays stable.
+        const recorders: []translation_witness.Recorder = if (self.record_witnesses)
+            try self.allocator.alloc(translation_witness.Recorder, count)
+        else
+            &.{};
+        errdefer if (self.record_witnesses) self.allocator.free(recorders);
         var completed: usize = 0;
         errdefer {
+            for (recorders[0..@min(completed, recorders.len)]) |*recorder| recorder.deinit();
             for (codegens[0..completed]) |*cg| {
                 cg.freeOwnedConstantPayloads();
                 cg.deinit();
@@ -83,6 +96,11 @@ pub const ModuleCompiler = struct {
                 cg.freeOwnedConstantPayloads();
                 cg.deinit();
             }
+            if (self.record_witnesses) {
+                recorders[index] = translation_witness.Recorder.init(self.allocator);
+                cg.witness = &recorders[index];
+            }
+            errdefer if (self.record_witnesses) recorders[index].deinit();
             const func = cg.generate(root) catch |err| {
                 if (!@import("builtin").is_test) std.log.err("Codegen error in module '{s}': {}", .{ module.path, err });
                 return err;
@@ -96,7 +114,7 @@ pub const ModuleCompiler = struct {
             };
             completed += 1;
         }
-        return .{ .modules = compiled, .parsers = parsers, .codegens = codegens, .allocator = self.allocator };
+        return .{ .modules = compiled, .parsers = parsers, .codegens = codegens, .recorders = recorders, .allocator = self.allocator };
     }
 };
 
@@ -106,9 +124,16 @@ pub const CompileResult = struct {
     modules: []CompiledModule,
     parsers: []zts_parser.JsParser,
     codegens: []zts_parser.CodeGen,
+    /// One per module, in the order of `modules`. Empty unless the compiler
+    /// asked for witnesses.
+    recorders: []translation_witness.Recorder = &.{},
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *CompileResult) void {
+        if (self.recorders.len > 0) {
+            for (self.recorders) |*recorder| recorder.deinit();
+            self.allocator.free(self.recorders);
+        }
         for (self.codegens) |*cg| cg.deinit();
         self.allocator.free(self.codegens);
         for (self.parsers) |*p| p.deinit();

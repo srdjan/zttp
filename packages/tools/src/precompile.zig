@@ -64,9 +64,17 @@ pub const CompiledHandler = struct {
     /// relation between an IR member and its final bytecode offsets exists only
     /// during compilation, so it is captured here or not at all.
     proof_evidence: ?zts.ProofEvidence = null,
+    /// The proof evidence of every module of a handler with file imports, folded
+    /// into one program. Present only when the caller asked for evidence. The
+    /// build still refuses a handler with file imports until the folded value
+    /// moves into `proof_evidence`.
+    graph_evidence: ?zts.ProofEvidence = null,
 
     pub fn deinit(self: *CompiledHandler, allocator: std.mem.Allocator) void {
         if (self.proof_evidence) |*evidence| {
+            evidence.deinit();
+        }
+        if (self.graph_evidence) |*evidence| {
             evidence.deinit();
         }
         if (self.dep_bytecodes) |deps| {
@@ -867,6 +875,7 @@ fn compileMultiModule(
 
     // Compile all modules with shared atoms
     var module_compiler = zts.modules.ModuleCompiler.init(allocator, atoms, strings);
+    module_compiler.record_witnesses = opts.emit_proof_evidence;
     var compile_result = module_compiler.compileAll(&graph) catch |err| {
         debugPrint("Multi-module compilation error: {}\n", .{err});
         return err;
@@ -884,10 +893,45 @@ fn compileMultiModule(
     // generation above already ran on the kept parsers, so no bytecode moves.
     // The module state facts fold over the whole graph for the contract.
     var state_isolated = true;
+    var evidences: std.ArrayList(zts.ProofEvidence) = .empty;
+    defer {
+        for (evidences.items) |*evidence| evidence.deinit();
+        evidences.deinit(allocator);
+    }
     for (0..compile_result.modules.len) |module_index| {
-        const checks = try checkGraphModule(allocator, &graph, &compile_result, module_index, atoms, &exports, opts);
+        var checks = try checkGraphModule(allocator, &graph, &compile_result, module_index, atoms, &exports, opts);
+        if (checks.evidence) |*evidence| {
+            evidences.append(allocator, evidence.*) catch |err| {
+                evidence.deinit();
+                return err;
+            };
+        }
         if (checks.verify_failed) return .{ .verify_failed = true };
         if (checks.has_module_mutation or checks.unresolved_route_dispatch) state_isolated = false;
+    }
+
+    // The evidence of each module folds into one program. A graph that the fold
+    // cannot classify is refused here, with the entry file named.
+    var graph_evidence: ?zts.ProofEvidence = null;
+    errdefer if (graph_evidence) |*evidence| evidence.deinit();
+    if (opts.emit_proof_evidence) {
+        const entry_position = evidences.items.len - 1;
+        graph_evidence = zts.foldProofEvidence(
+            allocator,
+            &evidences.items[entry_position],
+            evidences.items[0..entry_position],
+        ) catch |err| {
+            if (!builtin.is_test) debugPrint("{s}: the proof evidence of the module graph does not fold: {s}\n", .{
+                filename,
+                switch (err) {
+                    error.ModuleNotClassified => "a module holds a Result binding that the proof IR cannot classify",
+                    error.GraphResultLimit => "the modules bind more Results than one certificate carries",
+                    error.OutOfMemory => "out of memory",
+                    error.ProgramTooDeep => "a module nests deeper than the proof IR walk",
+                },
+            });
+            return err;
+        };
     }
 
     // Serialize each module and collect dependency bytecodes
@@ -958,6 +1002,7 @@ fn compileMultiModule(
         .bytecode = entry_bytecode,
         .dep_bytecodes = dep_bytecodes,
         .contract = contract,
+        .graph_evidence = graph_evidence,
     };
 }
 
@@ -967,6 +1012,9 @@ const GraphModuleChecks = struct {
     verify_failed: bool = false,
     has_module_mutation: bool = false,
     unresolved_route_dispatch: bool = false,
+    /// The proof evidence of this module, when the caller asked for it. The
+    /// caller owns it.
+    evidence: ?zts.ProofEvidence = null,
 };
 
 const max_assert_walk_depth: u16 = 1024;
@@ -1162,6 +1210,35 @@ fn checkGraphModule(
             verified.message,
         });
         return error.BytecodeVerificationFailed;
+    }
+
+    // The proof IR of this module is lowered from the parse that code
+    // generation just walked, while its witnesses still name parser nodes. A
+    // dependency has no handler. Its guards resolve against its own strict
+    // checker, so the resolver and the module stay together.
+    if (opts.emit_proof_evidence) {
+        const recorder = &compile_result.recorders[module_index];
+        recorder.check() catch |err| {
+            debugPrint("{s}: translation evidence is incomplete ({s}); refusing to emit a proof certificate\n", .{ module.path, @errorName(err) });
+            return error.TranslationWitnessIncomplete;
+        };
+        const handler_source: ?ir.NodeIndex = if (is_entry)
+            findHandlerFunction(view, root) orelse return error.HandlerNotFound
+        else
+            null;
+        var guard_resolver = GuardResolver{
+            .checker = if (resolved.strict_checker) |*checker| checker else null,
+            .view = view,
+            .atoms = atoms,
+        };
+        checks.evidence = try zts.buildProofEvidence(
+            allocator,
+            view,
+            root,
+            handler_source,
+            recorder,
+            guard_resolver.resolver(),
+        );
     }
     return checks;
 }

@@ -28,6 +28,9 @@ pub const Error = error{
     /// The proof IR carries no function, so there is no entry function for the
     /// totality obligation to be about.
     NoEntryFunction,
+    /// A handler with file imports holds Result events that the producer's copy
+    /// of the consumer's pass does not accept.
+    GraphResultsNotProved,
     TooManyMembers,
     TooManyFunctions,
     MalformedBytecodeStream,
@@ -227,6 +230,16 @@ pub fn build(allocator: std.mem.Allocator, inputs: Inputs) Error!Built {
 
     const entry = inputs.evidence.proof.handler_function orelse return error.NoEntryFunction;
     if (entry >= nodes.len or nodes[entry].tag != .function) return error.NoEntryFunction;
+    // The certificate of a graph holds no `tested` results edge, because that
+    // edge meets the production floor with no check by the consumer. The
+    // consumer derives the Result events again, or the build stops. A graph with
+    // no Result event has nothing to derive.
+    if (inputs.artifact.dep_bytecodes.len > 0 and
+        zts.proofHasResultEvents(inputs.evidence.proof) and
+        !inputs.evidence.results_proved)
+    {
+        return error.GraphResultsNotProved;
+    }
     const ir_root = cert.irRootFromNodes(nodes);
 
     const residual_plan = try residualPlan(allocator, nodes);
