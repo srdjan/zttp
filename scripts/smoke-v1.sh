@@ -128,6 +128,16 @@ fi
 [ ! -e "$BROKEN_APP_DIR/.zttp/build/broken-app" ] || fail "broken handler emitted a build artifact"
 printf '%s' "$broken_out" | grep -Eq "Compilation failed|Parse|error" || fail "broken-handler diagnostic was not actionable: $broken_out"
 
+step "negative: a handler with file imports names the missing certificate"
+mkdir -p "$TMP_DIR/imports-app"
+cp "$REPO_ROOT/examples/handler/handler-with-imports.ts" "$REPO_ROOT/examples/handler/utils.ts" "$TMP_DIR/imports-app/"
+imports_status=0
+imports_out=$(cd "$TMP_DIR/imports-app" && "$ZTTP" compile handler-with-imports.ts -o imports-bin --no-attest 2>&1 </dev/null) || imports_status=$?
+[ "$imports_status" -eq 1 ] || fail "compile with file imports exited $imports_status, expected 1: $imports_out"
+[ ! -e "$TMP_DIR/imports-app/imports-bin" ] || fail "refused compile with file imports wrote a binary"
+imports_want='Build refused: the compiler builds no proof certificate for a handler with file imports; the artifact would refuse to serve.'
+printf '%s\n' "$imports_out" | grep -qxF "$imports_want" || fail "compile with file imports did not name the missing certificate: $imports_out"
+
 step "negative: test prints each error that its summary counts"
 cat > "$BROKEN_APP_DIR/src/handler.ts" <<'TS'
 import { env } from "zttp:env";

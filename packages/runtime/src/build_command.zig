@@ -468,6 +468,10 @@ fn acceptArtifactCapability(
     }, pcc.policy.production);
 
     if (contract_runtime.promote(&validated, assessment, input.policy_section_digest) == null) {
+        if (input.certificate == null and input.dep_bytecodes.len > 0) {
+            reportBuildRefusal("the compiler builds no proof certificate for a handler with file imports");
+            return error.ProofAcceptanceFailed;
+        }
         if (!builtin.is_test) {
             if (assessment.rejection()) |rejection| {
                 std.debug.print(
@@ -3013,6 +3017,55 @@ test "a handler that production acceptance accepts reaches artifact creation onc
         .proof_evidence = &evidence,
     }, probe.capabilities());
     try std.testing.expectEqual(@as(usize, 1), probe.create_calls);
+}
+
+test "a handler with file imports passes contract validation and stops at the missing certificate" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const entry_source =
+        \\import { greet } from "./dep.ts";
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(greet());
+        \\}
+        \\
+    ;
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "entry.ts", .data = entry_source });
+    try tmp.dir.writeFile(std.testing.io, .{ .sub_path = "dep.ts", .data =
+        \\export function greet(): string {
+        \\  return "hello";
+        \\}
+        \\
+    });
+    const entry_path = try tmp.dir.realPathFileAlloc(std.testing.io, "entry.ts", allocator);
+    defer allocator.free(entry_path);
+
+    var compiled = try precompile.compileHandler(allocator, entry_source, entry_path, .{
+        .emit_verify = true,
+        .emit_contract = true,
+        .emit_proof_evidence = true,
+    });
+    defer compiled.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), compiled.dep_bytecodes.?.len);
+    try std.testing.expect(compiled.proof_evidence == null);
+    const contract = compiled.contract orelse return error.TestUnexpectedResult;
+
+    const json = try serializeContractJson(allocator, &contract);
+    defer allocator.free(json);
+    const raw = try contract_runtime.parseContractJson(allocator, json);
+    var validated = try contract_runtime.validate(raw, .{ .bytecode = compiled.bytecode });
+    validated.deinit();
+
+    var probe = ProductionAcceptanceProbe{};
+    try std.testing.expectError(error.ProofAcceptanceFailed, writeArtifactTail(allocator, .{
+        .runtime_binary = "runtime",
+        .output_path = "artifact.bin",
+        .attest_requested = false,
+        .bytecode = compiled.bytecode,
+        .dep_bytecodes = compiled.dep_bytecodes orelse &.{},
+        .contract = &contract,
+    }, probe.capabilities()));
+    try std.testing.expectEqual(@as(usize, 0), probe.create_calls);
 }
 
 test "production acceptance in the build refuses a missing certificate and a missing contract" {

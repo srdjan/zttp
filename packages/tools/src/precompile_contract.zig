@@ -249,6 +249,13 @@ pub fn buildMultiModuleContract(
     // the names are still disclosed so the contract matches the single-module one.
     if (policy) |*configured| try disclosePublicEnv(allocator, &merged, configured.envPublic());
 
+    // The merged contract does not pass through the single-module builder, so it
+    // stamps the three identity fields that runtime validation compares here.
+    merged.source_identity = zts.sourceIdentityForPath(entry_filename);
+    merged.capabilities = zts.computeCapabilityMatrix(merged.modules.items);
+    const policy_hex = zts.policyHash();
+    _ = try std.fmt.hexToBytes(&merged.policy_hash, &policy_hex);
+
     return merged;
 }
 
