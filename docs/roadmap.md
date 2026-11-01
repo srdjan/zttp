@@ -16,7 +16,7 @@ Release v0.26.0 was published on 2026-10-30. The release fixes plan shipped as 0
 
 Standing rule D-012 in [decisions.md](decisions.md): a model-visible change waits for one batched re-record window. The v0.26.0 window ran on 2026-10-29. The owner runs any later window.
 
-Next work: the owner selects it. No reset is active. The first open item is the refusal of a handler with file imports, under "Current Limitations". The [module graph certificates plan](plans/2026-11-01-module-graph-certificates-plan.md) is a draft that waits for owner approval.
+Next work: the owner selects it. No reset is active. The first open item is the refusal of a handler with file imports, under "Current Limitations". The [module graph certificates plan](plans/2026-11-01-module-graph-certificates-plan.md) is approved and owns that work.
 
 M1, M2, and M3 are complete.
 M4 is complete: T1a to T7 were delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 2 later removed both runtime products. No release date is assigned.
@@ -117,6 +117,12 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
   modules that bind one private name share one function, and the last module
   loaded wins. On 2026-11-01, a helper in one file read another file's secret
   through this collision. `zttp check` reported ZTS400 for that handler.
+- `state_isolated` reads PROVEN for a handler whose same-file helper mutates
+  module state. On 2026-11-01, a binary from `zttp compile` served 2, 3, 4, 5
+  on four requests. Unit G1b of the certificates plan owns the fix.
+- Past 64 Result bindings, the proof IR emits no Result events, and the
+  certificate states a `tested` edge from the producer. That edge meets the
+  production floor, so `results_checked` then gets no kernel check.
 
 ## Runtime And Product Work
 
