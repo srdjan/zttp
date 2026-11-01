@@ -92,3 +92,7 @@ export function later(): string { return "x"; }
 The entry-only certificate spike set `cg.witness` on the entry module in `compileAll`, built evidence with no strict checker, and forced `properties` true in `compileMultiModule`.
 
 ## G0
+
+Status: complete on 2026-11-01 at `b050ccab`.
+
+From an empty cache and with no provider key, `zig build test` exited 0: 214 of 214 steps, 8469 of 8475 tests, 6 skipped. `zig build` exited 0. The digest tables match `bf19a10a`: `zts check` and `zts compile` each moved 0 of 215 rows. Table hashes, first 16 hex digits: check `f3f96aea53920149`, compile `ef6ae4c00207df54`, surface `ce54095059001b3b`. The disk had 14 GiB free.
