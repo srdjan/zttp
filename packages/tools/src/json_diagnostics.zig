@@ -55,8 +55,13 @@ pub const JsonDiagnostic = struct {
     result_shape: ?zts.ResultShape = null,
     result_subject: ?[]const u8 = null,
     result_subject_owned: bool = false,
+    /// True when `file` is a heap copy owned by this diagnostic. A diagnostic
+    /// about a dependency names a path that the module graph owns, and the graph
+    /// is gone before the result is read.
+    file_owned: bool = false,
 
     pub fn deinit(self: *JsonDiagnostic, allocator: std.mem.Allocator) void {
+        if (self.file_owned) allocator.free(self.file);
         if (self.message_owned) allocator.free(self.message);
         if (self.suggestion_owned) {
             if (self.suggestion) |sug| allocator.free(sug);

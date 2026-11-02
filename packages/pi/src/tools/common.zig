@@ -411,7 +411,7 @@ pub fn writeProductionDiagnostic(
 /// that passed every earlier stage. The diagnostics list cannot tell this from
 /// other early stops: the spec stage adds a ZTS500 to a handler-less file.
 pub fn hasNoHandler(check: *const zts_cli.precompile.CheckResult) bool {
-    return check.has_handler == false and check.parse_errors == 0 and check.bool_errors == 0 and
+    return check.has_handler == false and check.parse_errors == 0 and check.link_errors == 0 and check.bool_errors == 0 and
         check.type_errors == 0 and check.strict_errors == 0;
 }
 

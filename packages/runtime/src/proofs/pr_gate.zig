@@ -876,8 +876,8 @@ fn addReverseEdges(arena: std.mem.Allocator, reverse: *ReverseGraph, side: *cons
 }
 
 /// The handler candidates that reach `seed` through relative imports on either
-/// side, sorted. Depth is not bounded here: CHECK stops at `max_import_depth`
-/// and marks the side incomplete, and `isComparable` turns that into exit 2.
+/// side, sorted. Depth is not bounded here: the module graph of CHECK follows a
+/// chain in full, and a side that CHECK refuses or marks incomplete exits 2.
 fn handlersReaching(
     arena: std.mem.Allocator,
     reverse: *const ReverseGraph,
@@ -1199,6 +1199,7 @@ fn classifySource(gpa: std.mem.Allocator, src: []const u8, path: []const u8) !So
 
 fn hasAnalysisErrors(result: *const zts_cli.precompile.CheckResult) bool {
     return result.parse_errors > 0 or
+        result.link_errors > 0 or
         result.bool_errors > 0 or
         result.type_errors > 0 or
         result.strict_errors > 0 or
@@ -1706,7 +1707,7 @@ test "with --head the after side reads the helper at head, not the working tree"
     try testing.expect(!try faultCoveredOf(&sides.after));
 }
 
-test "a helper missing at the base revision is unresolved, not read from the working tree" {
+test "a helper missing at the base revision refuses the base side, not read from the working tree" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -1730,8 +1731,11 @@ test "a helper missing at the base revision is unresolved, not read from the wor
     var sides = try checkSides(testing.allocator, cwd, "HEAD", null, "handler.ts", helper_handler_base, helper_handler_base);
     defer sides.deinit(testing.allocator);
 
-    // The helper did not exist at base: the answer is unresolved, which fails closed.
-    try testing.expect(!try faultCoveredOf(&sides.before));
+    // The helper did not exist at base: the check refuses the module graph, so
+    // the base side holds no contract and the gate cannot compare against it.
+    try testing.expect(sides.before.contract == null);
+    try testing.expectEqual(@as(u32, 1), sides.before.link_errors);
+    try testing.expectEqualStrings("ZTS063", sides.before.json_diagnostics.items[0].code);
     // The working-tree side finds the pure helper.
     try testing.expect(try faultCoveredOf(&sides.after));
 }
@@ -2487,7 +2491,9 @@ test "run: an unchanged file that fails strict checks and imports nothing does n
     try testing.expect(std.mem.indexOf(u8, g.report, "probe.ts") == null);
 }
 
-test "run: a handler that reaches a changed helper through a chain deeper than the import limit exits 2" {
+// The module graph has no depth limit, so the chain of nine helpers is checked in
+// full and the new cache write at its end is a lost property, not an incomplete side.
+test "run: a handler that reaches a changed helper through a chain of nine helpers sees the change and exits 1" {
     const h0 =
         \\import { f1 } from "./c1.ts";
         \\function handler(req: Request): Response {
@@ -2523,8 +2529,8 @@ test "run: a handler that reaches a changed helper through a chain deeper than t
         .json,
     );
     defer g.deinit();
-    try testing.expectEqual(@as(u8, 2), g.code);
-    try testing.expect(std.mem.indexOf(u8, g.stderr, "analysis failed for `handler.ts`") != null);
+    try testing.expectEqual(@as(u8, 1), g.code);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"path\":\"handler.ts\"") != null);
 }
 
 test "run: an unparseable file that names a changed helper stops the gate" {

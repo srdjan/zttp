@@ -242,6 +242,7 @@ pub const LiveReloadState = struct {
 
     fn firstFailingStage(result: *const precompile.CheckResult) []const u8 {
         if (result.parse_errors > 0) return "parse";
+        if (result.link_errors > 0) return "link";
         if (result.bool_errors > 0) return "sound";
         if (result.type_errors > 0) return "types";
         if (result.strict_errors > 0) return "strict";

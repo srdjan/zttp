@@ -1364,7 +1364,11 @@ pub const CodeGen = struct {
         // Register new shape
         const shape_idx = std.math.cast(u16, self.shapes.items.len) orelse return error.TooManyShapes;
         const atoms_copy = try self.allocator.dupe(js_object.Atom, atoms);
-        try self.shapes.append(self.allocator, atoms_copy);
+        // Once appended, `shapes` owns the copy and frees it with the code generator.
+        self.shapes.append(self.allocator, atoms_copy) catch |err| {
+            self.allocator.free(atoms_copy);
+            return err;
+        };
         try self.shape_dedup.put(self.allocator, hash, shape_idx);
         return shape_idx;
     }

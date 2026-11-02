@@ -133,6 +133,7 @@ const applyContractFacts = precompile_check_run_mod.applyContractFacts;
 pub const runCheckOnlyFromSourceWithOptions = precompile_check_run_mod.runCheckOnlyFromSourceWithOptions;
 pub const runGenTests = precompile_gen_tests_mod.runGenTests;
 const validateVirtualModuleImports = precompile_virtual_imports_mod.validateVirtualModuleImports;
+const VirtualImportDiagnostic = precompile_virtual_imports_mod.VirtualImportDiagnostic;
 const analyzeAot = precompile_contract_mod.analyzeAot;
 const extractContractFromAnalysis = precompile_contract_mod.extractContractFromAnalysis;
 const reportCompletedFlow = precompile_contract_mod.reportCompletedFlow;
@@ -278,7 +279,7 @@ pub fn compileHandler(
     );
 
     // Check for file imports before proceeding with single-module compilation
-    const has_file_imports = hasFileImports(&js_parser, root);
+    const has_file_imports = hasFileImports(zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants));
 
     if (has_file_imports) {
         if (!builtin.is_test) debugPrint("File imports detected, building module graph...\n", .{});
@@ -789,9 +790,9 @@ pub fn compileHandler(
     };
 }
 
-/// Scan parsed IR for file import declarations
-fn hasFileImports(js_parser: *zts.parser.JsParser, _: ir.NodeIndex) bool {
-    const view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+/// True when the parsed IR has a file import declaration. The build and the
+/// check share this predicate, so that both read the same graph.
+pub fn hasFileImports(view: zts.IrView) bool {
     const node_count = view.nodeCount();
 
     for (0..node_count) |idx| {
@@ -903,7 +904,7 @@ fn compileMultiModule(
         evidences.deinit(allocator);
     }
     for (0..compile_result.modules.len) |module_index| {
-        var checks = try checkGraphModule(allocator, &graph, &compile_result, module_index, atoms, &exports, opts);
+        var checks = try checkGraphModule(allocator, &graph, &compile_result, module_index, atoms, &exports, opts, null);
         if (checks.evidence) |*evidence| {
             evidences.append(allocator, evidence.*) catch |err| {
                 evidence.deinit();
@@ -925,15 +926,10 @@ fn compileMultiModule(
             &evidences.items[entry_position],
             evidences.items[0..entry_position],
         ) catch |err| {
-            if (!builtin.is_test) debugPrint("{s}: the proof evidence of the module graph does not fold: {s}\n", .{
-                filename,
-                switch (err) {
-                    error.ModuleNotClassified => "a module holds a Result binding that the proof IR cannot classify",
-                    error.GraphResultLimit => "the modules bind more Results than one certificate carries",
-                    error.OutOfMemory => "out of memory",
-                    error.ProgramTooDeep => "a module nests deeper than the proof IR walk",
-                },
-            });
+            if (!builtin.is_test) {
+                var message_buffer: [256]u8 = undefined;
+                debugPrint("{s}: {s}\n", .{ filename, foldRefusalMessage(&message_buffer, err) });
+            }
             return err;
         };
     }
@@ -1057,6 +1053,94 @@ fn printGraphDiagnostics(
     if (output.items.len > 0) debugPrint("{s}", .{output.items});
 }
 
+/// The message of a dependency that holds a top-level `assert`.
+const dependency_assert_message = "a dependency may not hold a top-level assert, because a failed one leaves the later exports undefined";
+
+/// The format of the refusal of a file import that has no type across modules.
+/// It takes the imported name.
+pub const untyped_import_format = "import '{s}' has no type that can cross modules. Export a non-generic function or a value with a declared type.";
+
+/// The reason that `foldProofEvidence` refused a graph, in the words of the build.
+pub fn foldRefusalMessage(buffer: []u8, err: error{ ModuleNotClassified, GraphResultLimit, OutOfMemory, ProgramTooDeep }) []const u8 {
+    return std.fmt.bufPrint(buffer, "the proof evidence of the module graph does not fold: {s}", .{switch (err) {
+        error.ModuleNotClassified => "a module holds a Result binding that the proof IR cannot classify",
+        error.GraphResultLimit => "the modules bind more Results than one certificate carries",
+        error.OutOfMemory => "out of memory",
+        error.ProgramTooDeep => "a module nests deeper than the proof IR walk",
+    }}) catch "the proof evidence of the module graph does not fold";
+}
+
+/// Where `checkGraphModule` reports when its caller is a check. A check reports
+/// each finding as a coded diagnostic with the file at fault and keeps going to
+/// the next stage of that module, where the build prints to stderr and stops.
+/// The caller reads the counts after the call.
+pub const GraphSink = struct {
+    allocator: std.mem.Allocator,
+    diagnostics: *std.ArrayList(json_diag.JsonDiagnostic),
+    json_mode: bool,
+    bool_errors: u32 = 0,
+    bool_warnings: u32 = 0,
+    type_errors: u32 = 0,
+    strict_errors: u32 = 0,
+    strict_warnings: u32 = 0,
+    strict_advisories: u32 = 0,
+    verify_errors: u32 = 0,
+    verify_warnings: u32 = 0,
+    link_errors: u32 = 0,
+
+    pub fn errorTotal(self: *const GraphSink) u32 {
+        return self.bool_errors + self.type_errors + self.strict_errors + self.verify_errors + self.link_errors;
+    }
+
+    /// Append one checker diagnostic of a module. Its position is read against
+    /// the source of that module.
+    pub fn appendChecker(
+        self: *GraphSink,
+        comptime source: zts.DiagnosticProjection.Source,
+        diag: anytype,
+        view: zts.IrView,
+        path: []const u8,
+        text: []const u8,
+    ) !void {
+        var projected = json_diag.fromCheckerDiagnostic(self.allocator, source, diag, view, path) orelse return;
+        errdefer projected.deinit(self.allocator);
+        try self.place(&projected, path, text);
+        try self.diagnostics.append(self.allocator, projected);
+    }
+
+    /// Give a diagnostic its own copy of the path, and read its position
+    /// against the source text.
+    fn place(self: *GraphSink, projected: *json_diag.JsonDiagnostic, path: []const u8, text: []const u8) !void {
+        projected.file = try self.allocator.dupe(u8, path);
+        projected.file_owned = true;
+        const mapped = (zts.SourceView{ .text = text, .normalize_positions = true }).position(projected.line, projected.column);
+        projected.line = mapped.line;
+        projected.column = mapped.column;
+    }
+
+    /// Append the coded refusal of a module that cannot join the program, and
+    /// count it.
+    pub fn appendLink(self: *GraphSink, kind: diagnostic_catalog.DriverKind, path: []const u8, message: []const u8) !void {
+        const owned_message = try self.allocator.dupe(u8, message);
+        var refusal: json_diag.JsonDiagnostic = .{
+            .code = diagnostic_catalog.driverCode(kind),
+            .severity = "error",
+            .message = owned_message,
+            .file = path,
+            .line = 1,
+            .column = 1,
+            .suggestion = null,
+            .message_owned = true,
+        };
+        errdefer refusal.deinit(self.allocator);
+        refusal.file = try self.allocator.dupe(u8, path);
+        refusal.file_owned = true;
+        try self.diagnostics.append(self.allocator, refusal);
+        self.link_errors += 1;
+        if (!self.json_mode and !builtin.is_test) debugPrint("{s}: {s} {s}\n", .{ path, refusal.code, message });
+    }
+};
+
 /// Run on one module of a loaded graph the checks that the single-module path
 /// runs on its only module: virtual import validation, the boolean, type, and
 /// strict checks, the verifier, and the bytecode verifier. `module_index`
@@ -1066,6 +1150,11 @@ fn printGraphDiagnostics(
 /// from ZTS061 alone, because a dependency exports functions by nature, and it
 /// may not hold a top-level `assert`: a failed one ends module initialization
 /// and leaves the later exports undefined.
+///
+/// With no `sink` the findings print to stderr and the first refusal returns an
+/// error, as the build needs. With a `sink` each finding is a coded diagnostic,
+/// the boolean, type, and strict stages all report before the refusal, and an
+/// error that the sink counted needs no message from the caller.
 pub fn checkGraphModule(
     allocator: std.mem.Allocator,
     graph: *const zts.modules.ModuleGraph,
@@ -1074,6 +1163,7 @@ pub fn checkGraphModule(
     atoms: *zts.AtomTable,
     exports: *zts.ExportedSignatures,
     opts: CompileOptions,
+    sink: ?*GraphSink,
 ) !GraphModuleChecks {
     const is_entry = module_index == compile_result.modules.len - 1;
     const module = &graph.module_list.items[graph.execution_order[module_index]];
@@ -1085,7 +1175,19 @@ pub fn checkGraphModule(
     diag_view.name = module.path;
     diag_view.normalize_positions = true;
 
-    try validateVirtualModuleImports(view, atoms, module.path, null);
+    var import_diagnostic: ?VirtualImportDiagnostic = null;
+    validateVirtualModuleImports(view, atoms, module.path, if (sink != null) &import_diagnostic else null) catch |err| {
+        if (sink) |s| {
+            s.link_errors += 1;
+            if (s.json_mode) if (import_diagnostic) |found| {
+                var projected = try precompile_virtual_imports_mod.virtualImportJsonDiagnostic(allocator, found, module.path);
+                errdefer projected.deinit(allocator);
+                try s.place(&projected, module.path, module.source);
+                try s.diagnostics.append(allocator, projected);
+            };
+        }
+        return err;
+    };
 
     // What this module knows of its file imports: the signature or value type
     // that the checked target module exports under the imported name, or none.
@@ -1094,10 +1196,9 @@ pub fn checkGraphModule(
     const file_imports = try precompile_contract_mod.fileImportSignatures(link_arena.allocator(), graph, module.path, view, atoms, exports);
 
     if (!is_entry and hasTopLevelAssert(view, root, 0)) {
-        if (!builtin.is_test) debugPrint(
-            "{s}: a dependency may not hold a top-level assert, because a failed one leaves the later exports undefined\n",
-            .{module.path},
-        );
+        if (sink) |s| {
+            try s.appendLink(.module_link_refused, module.path, dependency_assert_message);
+        } else if (!builtin.is_test) debugPrint("{s}: " ++ dependency_assert_message ++ "\n", .{module.path});
         return error.DependencyTopLevelAssert;
     }
 
@@ -1122,45 +1223,91 @@ pub fn checkGraphModule(
     // checks a value they cannot read, so the build stops here.
     const untyped_checker = if (resolved.type_checker) |*checker| checker else return error.AnalysisPassIncomplete;
     if (untyped_checker.firstUntypedFileImport()) |name| {
-        if (!builtin.is_test) debugPrint(
-            "{s}: import '{s}' has no type that can cross modules. Export a non-generic function or a value with a declared type.\n",
-            .{ module.path, name },
-        );
+        if (sink) |s| {
+            const message = try allocator.print(untyped_import_format, .{name});
+            defer allocator.free(message);
+            try s.appendLink(.file_import_untyped, module.path, message);
+        } else if (!builtin.is_test) debugPrint("{s}: " ++ untyped_import_format ++ "\n", .{ module.path, name });
         analysis.refuseResolution();
         return error.FileImportUntyped;
     }
 
+    // One message per node: a boolean or strict diagnostic under a node that
+    // has a type error repeats it.
+    if (sink != null) resolved.dropRepeatsOfTypeErrors();
+
     const bool_diags = resolved.boolDiagnostics();
-    if (bool_diags.len > 0 and !builtin.is_test) {
-        debugPrint("\n", .{});
-        printGraphDiagnostics(allocator, resolved, zts.pipeline.ResolvedModule.formatBoolDiagnostics, diag_view);
-        debugPrint("{d} boolean check error(s), {d} warning(s)\n", .{
-            resolved.bool_error_count,
-            bool_diags.len - resolved.bool_error_count,
-        });
-    }
-    if (resolved.bool_error_count > 0) {
-        analysis.refuseResolution();
-        if (!builtin.is_test) debugPrint("\nBoolean check failed for {s}\n", .{module.path});
-        return error.SoundModeViolation;
+    if (sink) |s| {
+        s.bool_errors += @intCast(resolved.bool_error_count);
+        s.bool_warnings += @intCast(bool_diags.len -| resolved.bool_error_count);
+        if (s.json_mode) {
+            for (bool_diags) |diag| try s.appendChecker(.boolean, diag, view, module.path, module.source);
+        } else if (bool_diags.len > 0 and !builtin.is_test) {
+            printGraphDiagnostics(allocator, resolved, zts.pipeline.ResolvedModule.formatBoolDiagnostics, diag_view);
+        }
+    } else {
+        if (bool_diags.len > 0 and !builtin.is_test) {
+            debugPrint("\n", .{});
+            printGraphDiagnostics(allocator, resolved, zts.pipeline.ResolvedModule.formatBoolDiagnostics, diag_view);
+            debugPrint("{d} boolean check error(s), {d} warning(s)\n", .{
+                resolved.bool_error_count,
+                bool_diags.len - resolved.bool_error_count,
+            });
+        }
+        if (resolved.bool_error_count > 0) {
+            analysis.refuseResolution();
+            if (!builtin.is_test) debugPrint("\nBoolean check failed for {s}\n", .{module.path});
+            return error.SoundModeViolation;
+        }
     }
 
-    if (resolved.typeDiagnostics().len > 0 and !builtin.is_test) {
-        printGraphDiagnostics(allocator, resolved, zts.pipeline.ResolvedModule.formatTypeDiagnostics, diag_view);
-    }
-    if (resolved.typeErrorCount() > 0) {
-        analysis.refuseResolution();
-        if (!builtin.is_test) debugPrint("\nType check failed for {s}\n", .{module.path});
-        return error.SoundModeViolation;
+    if (sink) |s| {
+        s.type_errors += @intCast(resolved.typeErrorCount());
+        if (s.json_mode) {
+            for (resolved.typeDiagnostics()) |diag| try s.appendChecker(.type, diag, view, module.path, module.source);
+        } else if (resolved.typeDiagnostics().len > 0 and !builtin.is_test) {
+            printGraphDiagnostics(allocator, resolved, zts.pipeline.ResolvedModule.formatTypeDiagnostics, diag_view);
+        }
+    } else {
+        if (resolved.typeDiagnostics().len > 0 and !builtin.is_test) {
+            printGraphDiagnostics(allocator, resolved, zts.pipeline.ResolvedModule.formatTypeDiagnostics, diag_view);
+        }
+        if (resolved.typeErrorCount() > 0) {
+            analysis.refuseResolution();
+            if (!builtin.is_test) debugPrint("\nType check failed for {s}\n", .{module.path});
+            return error.SoundModeViolation;
+        }
     }
 
     if (resolved.strict_checker != null) {
-        if (resolved.strictDiagnostics().len > 0 and !builtin.is_test) {
-            printGraphDiagnostics(allocator, resolved, zts.pipeline.ResolvedModule.formatStrictDiagnostics, diag_view);
+        const strict_diags = resolved.strictDiagnostics();
+        if (sink) |s| {
+            s.strict_errors += @intCast(resolved.strict_error_count);
+            for (strict_diags) |diag| {
+                switch (diag.severity) {
+                    .err => {},
+                    .warning => s.strict_warnings += 1,
+                    .advisory => s.strict_advisories += 1,
+                }
+                try s.appendChecker(.strict, diag, view, module.path, module.source);
+            }
+            if (!s.json_mode and strict_diags.len > 0 and !builtin.is_test) {
+                printGraphDiagnostics(allocator, resolved, zts.pipeline.ResolvedModule.formatStrictDiagnostics, diag_view);
+            }
+        } else {
+            if (strict_diags.len > 0 and !builtin.is_test) {
+                printGraphDiagnostics(allocator, resolved, zts.pipeline.ResolvedModule.formatStrictDiagnostics, diag_view);
+            }
+            if (resolved.strict_error_count > 0) {
+                analysis.refuseResolution();
+                if (!builtin.is_test) debugPrint("\nStrict check failed for {s}\n", .{module.path});
+                return error.SoundModeViolation;
+            }
         }
-        if (resolved.strict_error_count > 0) {
+    }
+    if (sink) |s| {
+        if (s.bool_errors + s.type_errors + s.strict_errors > 0) {
             analysis.refuseResolution();
-            if (!builtin.is_test) debugPrint("\nStrict check failed for {s}\n", .{module.path});
             return error.SoundModeViolation;
         }
     }
@@ -1191,7 +1338,15 @@ pub fn checkGraphModule(
         if (ran) {
             const checked = analysis.checkedModule() orelse return error.AnalysisPassIncomplete;
             const diags = checked.verifierDiagnostics();
-            if (diags.len > 0 and !builtin.is_test) {
+            if (sink) |s| {
+                s.verify_errors += error_count;
+                s.verify_warnings += @intCast(diags.len -| error_count);
+                if (s.json_mode) {
+                    for (diags) |diag| try s.appendChecker(.verifier, diag, view, module.path, module.source);
+                } else if (diags.len > 0 and !builtin.is_test) {
+                    printGraphDiagnostics(allocator, &checked.verifier, zts.HandlerVerifier.formatDiagnostics, diag_view);
+                }
+            } else if (diags.len > 0 and !builtin.is_test) {
                 debugPrint("\n", .{});
                 printGraphDiagnostics(allocator, &checked.verifier, zts.HandlerVerifier.formatDiagnostics, diag_view);
                 debugPrint("{d} error(s), {d} warning(s)\n", .{ error_count, diags.len - error_count });
@@ -1199,7 +1354,7 @@ pub fn checkGraphModule(
             checks.has_module_mutation = checked.verifier.has_module_mutation;
             checks.unresolved_route_dispatch = checked.verifier.unresolved_route_dispatch;
             if (error_count > 0) {
-                if (!builtin.is_test) debugPrint("\nVerification failed for {s}\n", .{module.path});
+                if (sink == null and !builtin.is_test) debugPrint("\nVerification failed for {s}\n", .{module.path});
                 checks.verify_failed = true;
                 return checks;
             }
@@ -2670,6 +2825,297 @@ test "compileHandler graph refuses an import cycle" {
         \\
     );
     try std.testing.expectError(error.CircularImport, fixture.compile(.{ .emit_verify = true }));
+}
+
+// ---------------------------------------------------------------------------
+// Check parity: `zts check` reports each refusal that `zts compile` makes
+// ---------------------------------------------------------------------------
+
+fn parityEntry(comptime capsule: []const u8) []const u8 {
+    return "import { f } from \"./lib.ts\";\n" ++
+        "export function handler(req: Request): Proof<Response, \"" ++ capsule ++ "\"> {\n" ++
+        "  return Response.text(f());\n}\n";
+}
+
+const parity_schema_entry =
+    \\import { schemaCompile } from "zttp:validate";
+    \\import { f } from "./lib.ts";
+    \\schemaCompile("user", JSON.stringify({ type: "object" }));
+    \\export function handler(req: Request): Proof<Response, "result_safe"> {
+    \\  return Response.text(f());
+    \\}
+    \\
+;
+
+const parity_schema_lib =
+    \\import { schemaCompile } from "zttp:validate";
+    \\schemaCompile("user", JSON.stringify({ type: "string" }));
+    \\export function f(): string {
+    \\  return "x";
+    \\}
+    \\
+;
+
+const parity_pure_lib =
+    \\export function f(): string {
+    \\  return "x";
+    \\}
+    \\
+;
+
+const ParityFile = struct { name: []const u8, source: []const u8 };
+
+const ParityRow = struct {
+    label: []const u8,
+    entry: []const u8,
+    files: []const ParityFile,
+    policy: ?[]const u8 = null,
+    /// The code of the first `zts check` diagnostic, and the basename of its file.
+    code: []const u8,
+    file: []const u8,
+};
+
+fn parityFixture(entry: []const u8, files: []const ParityFile) !CompileGraphFixture {
+    var fixture = try CompileGraphFixture.init("entry.ts", entry);
+    errdefer fixture.deinit();
+    for (files) |file| try fixture.add(file.name, file.source);
+    return fixture;
+}
+
+/// True when `compileHandler` refuses the graph: it fails, or the verifier does.
+fn compileRefuses(fixture: *const CompileGraphFixture, policy_json: ?[]const u8) !bool {
+    const allocator = std.testing.allocator;
+    var policy: ?HandlerPolicy = if (policy_json) |json| try handler_policy.parsePolicyJson(allocator, json) else null;
+    defer if (policy) |*configured| configured.deinit(allocator);
+    var compiled = fixture.compile(.{ .emit_verify = true, .emit_contract = true, .policy = policy }) catch return true;
+    defer compiled.deinit(allocator);
+    return compiled.verify_failed;
+}
+
+fn parityCheck(fixture: *const CompileGraphFixture, policy_json: ?[]const u8) !CheckResult {
+    return runCheckOnlyWithOptions(std.testing.allocator, fixture.entry_path, .{
+        .json_mode = true,
+        .policy_source = policy_json,
+    });
+}
+
+const parity_refused_rows = [_]ParityRow{
+    .{
+        .label = "dependency type error",
+        .entry = parityEntry("result_safe"),
+        .files = &.{.{ .name = "lib.ts", .source = "export function f(): string {\n  const n: number = \"a\";\n  return \"x\";\n}\n" }},
+        .code = "ZTS200",
+        .file = "lib.ts",
+    },
+    .{
+        .label = "dependency parse error",
+        .entry = parityEntry("result_safe"),
+        .files = &.{.{ .name = "lib.ts", .source = "export function f(): string {\n  const b = while;\n  return \"x\";\n}\n" }},
+        .code = "ZTS002",
+        .file = "lib.ts",
+    },
+    .{
+        .label = "generic export imported",
+        .entry = "import { pick } from \"./lib.ts\";\n" ++
+            "export function handler(req: Request): Proof<Response, \"result_safe\"> {\n  return Response.text(pick(\"a\"));\n}\n",
+        .files = &.{.{ .name = "lib.ts", .source = "export function pick<T>(x: T): T {\n  return x;\n}\n" }},
+        .code = "ZTS064",
+        .file = "entry.ts",
+    },
+    .{
+        .label = "named import the target does not export",
+        .entry = "import { missing } from \"./lib.ts\";\n" ++
+            "export function handler(req: Request): Proof<Response, \"result_safe\"> {\n  return Response.text(missing());\n}\n",
+        .files = &.{.{ .name = "lib.ts", .source = parity_pure_lib }},
+        .code = "ZTS063",
+        .file = "entry.ts",
+    },
+    .{
+        .label = "import of a file that does not exist",
+        .entry = "import { f } from \"./nope.ts\";\n" ++
+            "export function handler(req: Request): Proof<Response, \"result_safe\"> {\n  return Response.text(f());\n}\n",
+        .files = &.{},
+        .code = "ZTS063",
+        .file = "entry.ts",
+    },
+    .{
+        .label = "import cycle",
+        .entry = parityEntry("result_safe"),
+        .files = &.{
+            .{ .name = "lib.ts", .source = "import { g } from \"./back.ts\";\nexport function f(): string {\n  return g();\n}\n" },
+            .{ .name = "back.ts", .source = "import { f } from \"./lib.ts\";\nexport function g(): string {\n  return f();\n}\n" },
+        },
+        .code = "ZTS063",
+        .file = "lib.ts",
+    },
+    .{
+        .label = "one top-level name bound in two modules",
+        .entry = "import { f } from \"./lib.ts\";\nconst shared: string = \"b\";\n" ++
+            "export function handler(req: Request): Proof<Response, \"result_safe\"> {\n  return Response.text([f(), shared].join(\"\"));\n}\n",
+        .files = &.{.{ .name = "lib.ts", .source = "const shared: string = \"a\";\nexport function f(): string {\n  return shared;\n}\n" }},
+        .code = "ZTS063",
+        .file = "lib.ts",
+    },
+    .{
+        .label = "dependency binds a built-in global",
+        .entry = parityEntry("result_safe"),
+        .files = &.{.{ .name = "lib.ts", .source = "const Math: number = 1;\nexport function f(): string {\n  return String(Math);\n}\n" }},
+        .code = "ZTS063",
+        .file = "lib.ts",
+    },
+    .{
+        .label = "dependency binds handler",
+        .entry = parityEntry("result_safe"),
+        .files = &.{.{
+            .name = "lib.ts",
+            .source = "export function handler(req: Request): Response {\n  return Response.text(\"x\");\n}\n" ++
+                "export function f(): string {\n  return \"x\";\n}\n",
+        }},
+        .code = "ZTS063",
+        .file = "lib.ts",
+    },
+    .{
+        .label = "dependency top-level assert",
+        .entry = parityEntry("result_safe"),
+        .files = &.{.{ .name = "lib.ts", .source = "assert 1 === 1, \"boot\";\nexport function f(): string {\n  return \"x\";\n}\n" }},
+        .code = "ZTS063",
+        .file = "lib.ts",
+    },
+    .{
+        // A mutation is a ZTS310 warning in the dependency. The capsule of the
+        // entry demands state_isolated, so the compile refuses on the spec.
+        .label = "dependency mutates module state under a state_isolated capsule",
+        .entry = parityEntry("state_isolated"),
+        .files = &.{.{
+            .name = "lib.ts",
+            .source = "let count: number = 0;\nexport function f(): string {\n  count = count + 1;\n  return String(count);\n}\n",
+        }},
+        .code = "ZTS310",
+        .file = "lib.ts",
+    },
+    .{
+        .label = "two modules register one API schema name with different JSON",
+        .entry = parity_schema_entry,
+        .files = &.{.{ .name = "lib.ts", .source = parity_schema_lib }},
+        .code = "ZTS063",
+        .file = "lib.ts",
+    },
+};
+
+test "check parity: zts check reports each refusal that zts compile makes, with the file at fault" {
+    for (parity_refused_rows) |row| {
+        errdefer std.debug.print("parity row failed: {s}\n", .{row.label});
+        var fixture = try parityFixture(row.entry, row.files);
+        defer fixture.deinit();
+        var checked = try parityCheck(&fixture, row.policy);
+        defer checked.deinit(std.testing.allocator);
+        try std.testing.expect(checked.json_diagnostics.items.len > 0);
+        try std.testing.expectEqualStrings(row.code, checked.json_diagnostics.items[0].code);
+        try std.testing.expectEqualStrings(row.file, std.fs.path.basename(checked.json_diagnostics.items[0].file));
+        try std.testing.expect(checked.totalErrors() > 0);
+        try std.testing.expect(try compileRefuses(&fixture, row.policy));
+    }
+}
+
+const sibling_helper_handler =
+    \\import { apiToken, displayName } from "./lib/settings.ts";
+    \\
+    \\structural Guard<T> = Proof<T, "state_isolated" | "no_secret_leakage">;
+    \\
+    \\export function handler(req: Request): Guard<Response> {
+    \\  const token = apiToken();
+    \\  if (token === undefined) {
+    \\    return Response.json({ error: "settings unavailable" }, { status: 503 });
+    \\  }
+    \\  return Response.json({ name: displayName() });
+    \\}
+    \\
+;
+
+// The seed of the corpus case `sibling-helper` in packages/pi/src/expert_codegen_record.zig.
+const sibling_helper_seed =
+    \\import { env } from "zttp:env";
+    \\
+    \\export structural ApiToken = string | undefined;
+    \\export structural DisplayName = string;
+    \\
+    \\export function apiToken(): ApiToken {
+    \\  return env("API_TOKEN");
+    \\}
+    \\
+    \\export function displayName(): DisplayName {
+    \\  return env("APP_NAME") ?? "unnamed";
+    \\}
+    \\
+;
+
+const sibling_helper_policy = "{\"env\":{\"allow\":[\"APP_NAME\",\"API_TOKEN\"],\"public\":[\"APP_NAME\"]}}";
+
+test "check parity: a graph that compiles passes zts check with no error" {
+    const allocator = std.testing.allocator;
+
+    var pure = try parityFixture(parityEntry("result_safe"), &.{.{ .name = "lib.ts", .source = parity_pure_lib }});
+    defer pure.deinit();
+    var pure_checked = try parityCheck(&pure, null);
+    defer pure_checked.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), pure_checked.totalErrors());
+    try std.testing.expect(!(try compileRefuses(&pure, null)));
+
+    var sibling = try parityFixture(sibling_helper_handler, &.{});
+    defer sibling.deinit();
+    try sibling.tmp.dir.createDirPath(std.testing.io, "lib");
+    try sibling.add("lib/settings.ts", sibling_helper_seed);
+    var sibling_checked = try parityCheck(&sibling, sibling_helper_policy);
+    defer sibling_checked.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), sibling_checked.totalErrors());
+    try std.testing.expect(!(try compileRefuses(&sibling, sibling_helper_policy)));
+}
+
+test "check parity: examples/handler/handler-with-imports.ts passes zts check and zts compile" {
+    const allocator = std.testing.allocator;
+    const path = "examples/handler/handler-with-imports.ts";
+    var checked = try runCheckOnlyWithOptions(allocator, path, .{ .json_mode = true });
+    defer checked.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), checked.totalErrors());
+
+    const source = try zts.file_io.readFile(allocator, path, 1024 * 1024);
+    defer allocator.free(source);
+    var compiled = try compileHandler(allocator, source, path, .{ .emit_verify = true, .emit_contract = true });
+    defer compiled.deinit(allocator);
+    try std.testing.expect(!compiled.verify_failed);
+}
+
+test "check parity: zts check reports the default profile failure of an uncalled state change in a dependency (smoke-v1 shape)" {
+    // The shape of the negative step in scripts/smoke-v1.sh: the handler holds no
+    // capsule and never calls `bump`, yet the dependency mutates module state.
+    // `zttp build` counts one spec error on the merged contract through
+    // `reportSpecErrors(contract, filename, .every)`.
+    const allocator = std.testing.allocator;
+    var fixture = try CompileGraphFixture.init("entry.ts",
+        \\import { bump } from "./dep.ts";
+        \\export function handler(req: Request): Response {
+        \\  return Response.text("ok");
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\let count: number = 0;
+        \\export function bump(): number {
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\
+    );
+    var compiled = try fixture.compile(.{ .emit_verify = true, .emit_contract = true });
+    defer compiled.deinit(allocator);
+    const contract = compiled.contract orelse return error.MissingContract;
+    try std.testing.expectEqual(@as(u32, 1), reportSpecErrors(&contract, "entry.ts", .every));
+
+    var checked = try runCheckOnlyWithOptions(allocator, fixture.entry_path, .{ .json_mode = true });
+    defer checked.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 1), checked.specErrors());
+    try std.testing.expectEqualStrings("ZTS500", checked.json_diagnostics.items[checked.json_diagnostics.items.len - 1].code);
 }
 
 test "compileHandler preserves fanout order shared dependencies and imported routes" {

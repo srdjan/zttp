@@ -302,6 +302,19 @@ pub fn collectDependencyContracts(
     return result;
 }
 
+/// Why `mergeDependencyContracts` refused, when the caller asks for the reason.
+/// A caller that passes none gets the stderr text that `zts compile` prints.
+pub const MergeRefusal = struct {
+    /// The dependency at fault. It borrows from the graph.
+    path: []const u8 = "",
+    buffer: [512]u8 = undefined,
+    len: usize = 0,
+
+    pub fn message(self: *const MergeRefusal) []const u8 {
+        return self.buffer[0..self.len];
+    }
+};
+
 /// What the dependencies contribute to the structural properties of the entry.
 pub const DependencyFacts = struct {
     properties: ?handler_contract.HandlerProperties,
@@ -318,6 +331,7 @@ pub fn mergeDependencyContracts(
     deps: *DependencyContracts,
     env_public: []const []const u8,
     filename: []const u8,
+    refusal: ?*MergeRefusal,
 ) !DependencyFacts {
     var effects_complete = contract.effect_analysis_complete;
     var dependency_properties: ?handler_contract.HandlerProperties = null;
@@ -325,10 +339,20 @@ pub fn mergeDependencyContracts(
     for (deps.dependencies.items) |*dependency| {
         var conflict: ?handler_contract.ApiSchemaConflict = null;
         if (handler_contract.unionDependencyContract(allocator, contract, &dependency.contract, &conflict)) |_| {} else |err| {
-            if (err == error.ApiSchemaConflict and !builtin.is_test) debugPrint(
-                "{s}: API schema '{s}' is registered with different JSON by another module\n",
-                .{ dependency.path, if (conflict) |found| found.name else "" },
-            );
+            if (err == error.ApiSchemaConflict) {
+                const name = if (conflict) |found| found.name else "";
+                if (refusal) |record| {
+                    record.path = dependency.path;
+                    const written = std.fmt.bufPrint(
+                        &record.buffer,
+                        "API schema '{s}' is registered with different JSON by another module",
+                        .{name},
+                    ) catch record.buffer[0..0];
+                    record.len = written.len;
+                } else if (!builtin.is_test) {
+                    debugPrint("{s}: API schema '{s}' is registered with different JSON by another module\n", .{ dependency.path, name });
+                }
+            }
             return err;
         }
         if (dependency.blocked_import) effects_complete = false;
@@ -456,7 +480,7 @@ pub fn buildMultiModuleContract(
     if (inputs.policy != null) policy_checked = true;
     if (policy_checked and !builtin.is_test) debugPrint("Capability policy check passed\n", .{});
 
-    const dependency_facts = try mergeDependencyContracts(allocator, &contract, &deps, env_public, inputs.filename);
+    const dependency_facts = try mergeDependencyContracts(allocator, &contract, &deps, env_public, inputs.filename, null);
 
     const verified = inputs.emit_verify and handler_fn != null;
     applyContractFacts(allocator, &contract, .{ .verifier = .{

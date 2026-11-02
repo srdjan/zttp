@@ -789,7 +789,7 @@ const Lowerer = struct {
                 const decl = self.view.getExportDecl(index) orelse break :blk try self.leaf(.plain, index, @backingInt(tag));
                 var node = Tree{ .tag = .sequence, .source = index, .leaf_kind = 0 };
                 errdefer node.deinit(self.allocator);
-                try node.children.append(self.allocator, try self.build(decl.declaration));
+                try self.appendBuilt(&node, decl.declaration);
                 break :blk node;
             },
             .function_decl => blk: {
@@ -806,18 +806,18 @@ const Lowerer = struct {
                 const saved_events_off = self.events_off;
                 self.events_off = false;
                 defer self.events_off = saved_events_off;
-                try node.children.append(self.allocator, try self.build(func.body));
+                try self.appendBuilt(&node, func.body);
                 break :blk node;
             },
             .if_stmt => blk: {
                 const stmt = self.view.getIfStmt(index) orelse break :blk try self.leaf(.plain, index, @backingInt(tag));
                 var branch = Tree{ .tag = .branch, .source = index, .leaf_kind = 0 };
                 errdefer branch.deinit(self.allocator);
-                try branch.children.append(self.allocator, try self.build(stmt.then_branch));
+                try self.appendBuilt(&branch, stmt.then_branch);
                 // An `if` with no `else` has one arm, and one arm is exactly why
                 // it cannot establish totality. The shape says so.
                 if (stmt.else_branch != null_node) {
-                    try branch.children.append(self.allocator, try self.build(stmt.else_branch));
+                    try self.appendBuilt(&branch, stmt.else_branch);
                 }
                 // A condition that is exactly `b.ok` or `!b.ok` guards the
                 // Result `b`. The guard heads a wrapper of two children, the
@@ -844,7 +844,7 @@ const Lowerer = struct {
                 // that either branch returns.
                 var node = Tree{ .tag = .sequence, .source = index, .leaf_kind = 0 };
                 errdefer node.deinit(self.allocator);
-                try node.children.append(self.allocator, try self.build(stmt.condition));
+                try self.appendBuilt(&node, stmt.condition);
                 try node.children.append(self.allocator, branch);
                 break :blk node;
             },
@@ -853,7 +853,7 @@ const Lowerer = struct {
                 var node = Tree{ .tag = .loop_node, .source = index, .leaf_kind = 0 };
                 errdefer node.deinit(self.allocator);
                 try self.appendGuarded(&node, loop.iterable);
-                try node.children.append(self.allocator, try self.build(loop.body));
+                try self.appendBuilt(&node, loop.body);
                 break :blk node;
             },
             .return_stmt => try self.leaf(.return_node, index, @backingInt(tag)),
@@ -867,15 +867,23 @@ const Lowerer = struct {
         errdefer node.deinit(self.allocator);
         for (0..block.stmts_count) |i| {
             const child = self.view.getListIndex(block.stmts_start, @intCast(i));
-            try node.children.append(self.allocator, try self.build(child));
+            try self.appendBuilt(&node, child);
         }
         return node;
+    }
+
+    /// Lower `child` and append it to `parent`. A failed append releases the
+    /// lowered tree, which `parent` does not own yet.
+    fn appendBuilt(self: *Lowerer, parent: *Tree, child: NodeIndex) Error!void {
+        var built = try self.build(child);
+        errdefer built.deinit(self.allocator);
+        try parent.children.append(self.allocator, built);
     }
 
     fn appendGuarded(self: *Lowerer, parent: *Tree, child: NodeIndex) Error!void {
         if (child == null_node) return;
         if (!self.containsRelevantCall(child) and !self.containsEventSite(child)) return;
-        try parent.children.append(self.allocator, try self.build(child));
+        try self.appendBuilt(parent, child);
     }
 
     /// A node with no structural children of its own.
@@ -1527,15 +1535,23 @@ pub fn buildEvidence(
         }
     }
 
+    // Each list gives its storage away on success, so a later failure frees
+    // the slices already taken.
+    const owned_emissions = try emissions.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_emissions);
+    const owned_jumps = try jumps.toOwnedSlice(allocator);
+    errdefer allocator.free(owned_jumps);
+    const owned_rewrites = try rewrites.toOwnedSlice(allocator);
+
     return .{
         .allocator = allocator,
         .proof = proof,
         .total = total,
         .declared = declared,
         .results_proved = results_proved,
-        .emissions = try emissions.toOwnedSlice(allocator),
-        .jumps = try jumps.toOwnedSlice(allocator),
-        .rewrites = try rewrites.toOwnedSlice(allocator),
+        .emissions = owned_emissions,
+        .jumps = owned_jumps,
+        .rewrites = owned_rewrites,
         .pre_optimization_len = pre_len,
         .final_len = final_len,
         .scope_count = scope_count,

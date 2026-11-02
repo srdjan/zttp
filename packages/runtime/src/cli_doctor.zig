@@ -200,6 +200,7 @@ fn printDoctorCheckFailure(check: *const precompile.CheckResult) void {
 
 pub fn printCheckStageFailures(check: *const precompile.CheckResult, prefix: []const u8) void {
     if (check.parse_errors > 0) std.debug.print("{s}parse    {d} error(s)\n", .{ prefix, check.parse_errors });
+    if (check.link_errors > 0) std.debug.print("{s}link     {d} error(s)\n", .{ prefix, check.link_errors });
     if (check.bool_errors > 0) std.debug.print("{s}sound    {d} error(s)\n", .{ prefix, check.bool_errors });
     if (check.type_errors > 0) std.debug.print("{s}types    {d} error(s)\n", .{ prefix, check.type_errors });
     if (check.strict_errors > 0) std.debug.print("{s}strict   {d} error(s)\n", .{ prefix, check.strict_errors });
@@ -208,7 +209,7 @@ pub fn printCheckStageFailures(check: *const precompile.CheckResult, prefix: []c
     if (check.policy_errors > 0) std.debug.print("{s}policy   {d} error(s)\n", .{ prefix, check.policy_errors });
     if (check.canonical_errors > 0) std.debug.print("{s}canonical {d} error(s)\n", .{ prefix, check.canonical_errors });
     const spec_errors = check.totalErrors() -|
-        (check.parse_errors + check.bool_errors + check.type_errors + check.strict_errors + check.verify_errors + check.flow_errors + check.policy_errors + check.canonical_errors);
+        (check.parse_errors + check.link_errors + check.bool_errors + check.type_errors + check.strict_errors + check.verify_errors + check.flow_errors + check.policy_errors + check.canonical_errors);
     if (spec_errors > 0) std.debug.print("{s}spec     {d} error(s)\n", .{ prefix, spec_errors });
 }
 

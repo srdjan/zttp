@@ -75,6 +75,11 @@ pub const CheckResult = struct {
     /// Constructs the flow interpreter could not follow. Zero over every frozen
     /// corpus case; any other count clears the proven properties.
     flow_unresolved: usize = 0,
+    /// Refusals of the module graph of a handler with file imports: a link
+    /// failure, an import with no type, a dependency top-level assert, an API
+    /// schema conflict, or a proof fold. Dependency checker errors count in the
+    /// field of their stage.
+    link_errors: u32 = 0,
     canonical_errors: u32 = 0,
     /// Capability-policy violations (POL0xx). Only ever non-zero when the
     /// caller supplied a policy; a project that declares none cannot fail this.
@@ -108,7 +113,7 @@ pub const CheckResult = struct {
     proof_trace_json: ?[]u8 = null,
 
     pub fn totalErrors(self: *const CheckResult) u32 {
-        return self.parse_errors + self.bool_errors + self.type_errors + self.strict_errors + self.verify_errors + self.flow_errors + self.canonical_errors + self.policy_errors + self.specErrors();
+        return self.parse_errors + self.link_errors + self.bool_errors + self.type_errors + self.strict_errors + self.verify_errors + self.flow_errors + self.canonical_errors + self.policy_errors + self.specErrors();
     }
 
     pub fn totalWarnings(self: *const CheckResult) u32 {
@@ -533,6 +538,13 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
         writer.print("FAIL ({d} errors)\n", .{r.strict_errors}) catch return;
     } else {
         writer.print("OK\n", .{}) catch return;
+    }
+
+    // The module graph of a handler with file imports. A single-module check
+    // never refuses here, so its card has no such line.
+    if (r.link_errors > 0) {
+        writeDotted(writer, "Module graph", 24);
+        writer.print("FAIL ({d} errors)\n", .{r.link_errors}) catch return;
     }
 
     // Verification

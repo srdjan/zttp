@@ -291,11 +291,12 @@ fn runProbe(allocator: std.mem.Allocator, probe: Probe) !void {
         fn diagnostics(name: []const u8, check: *const zts_cli.precompile.CheckResult) void {
             std.debug.print(
                 "[security-probe] {s}: unexpected compiler diagnostics " ++
-                    "total={d} parse={d} bool={d} type={d} strict={d} verify={d} flow={d} canonical={d}\n",
+                    "total={d} parse={d} link={d} bool={d} type={d} strict={d} verify={d} flow={d} canonical={d}\n",
                 .{
                     name,
                     check.totalErrors(),
                     check.parse_errors,
+                    check.link_errors,
                     check.bool_errors,
                     check.type_errors,
                     check.strict_errors,

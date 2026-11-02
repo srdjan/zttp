@@ -30,6 +30,9 @@ const virtual_imports_mod = @import("precompile_virtual_imports.zig");
 const VirtualImportDiagnostic = virtual_imports_mod.VirtualImportDiagnostic;
 const validateVirtualModuleImports = virtual_imports_mod.validateVirtualModuleImports;
 const contract_mod = @import("precompile_contract.zig");
+const graph_check_mod = @import("precompile_graph_check.zig");
+const GraphCheck = graph_check_mod.GraphCheck;
+const precompile_mod = @import("precompile.zig");
 const extractContractFromAnalysis = contract_mod.extractContractFromAnalysis;
 const validateContractPolicyInputs = contract_mod.validateContractPolicyInputs;
 const appendPolicyDiagnostics = contract_mod.appendPolicyDiagnostics;
@@ -411,7 +414,7 @@ pub fn runCheckOnlyFromSourceWithPathAllocator(
 }
 
 /// Apply source-view coordinates after the recorded diagnostic boundary.
-fn remapDiagnosticsToSource(
+pub fn remapDiagnosticsToSource(
     result: *CheckResult,
     source_view: zts.SourceView,
     already_mapped: usize,
@@ -442,6 +445,57 @@ fn appendCheckAdmissionDiagnostic(
             if (projected.suggestion != null) "; " else "",
             projected.suggestion orelse "",
         });
+    }
+}
+
+/// Report why the front end refused a source, under `path`, and say whether it
+/// did. An accepted source leaves the result unchanged except for the parse
+/// stage. The entry and each dependency of a graph go through here.
+pub fn appendSourceRefusals(
+    allocator: std.mem.Allocator,
+    result: *CheckResult,
+    source_owner: *zts.DirectCheckSource,
+    source: []const u8,
+    path: []const u8,
+    json_mode: bool,
+) !bool {
+    switch (source_owner.outcome().*) {
+        .recovered_admission_refused => {
+            const start = result.json_diagnostics.items.len;
+            const diagnostics = source_owner.selectedAdmissionDiagnostics();
+            for (diagnostics) |diagnostic| {
+                appendCheckAdmissionDiagnostic(allocator, result, source, diagnostic, path);
+            }
+            remapDiagnosticsToSource(result, .{ .text = source, .normalize_positions = true }, start);
+            result.parse_errors += @intCast(diagnostics.len);
+            return true;
+        },
+        .terminal_admission_refused => |failure| {
+            if (source_owner.terminalAdmissionDiagnostic()) |diagnostic| {
+                appendCheckAdmissionDiagnostic(allocator, result, source, diagnostic, path);
+            }
+            if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{zts.prepareErrorForAdmissionFailure(failure)});
+            result.parse_errors += 1;
+            return true;
+        },
+        .parser_refused => {
+            result.stages_run.insert(.parse);
+            const errors = source_owner.parserErrors();
+            if (json_mode) {
+                for (errors) |parse_error| {
+                    var diagnostic = json_diag.fromParseErrorOwned(allocator, parse_error, path);
+                    result.json_diagnostics.append(allocator, diagnostic) catch diagnostic.deinit(allocator);
+                }
+            } else if (!builtin.is_test) {
+                printParseErrors(allocator, source_owner.sourceView(), errors);
+            }
+            result.parse_errors += @intCast(errors.len);
+            return true;
+        },
+        .accepted => {
+            result.stages_run.insert(.parse);
+            return false;
+        },
     }
 }
 
@@ -494,56 +548,21 @@ fn runCheckOnParsedSource(
                 else => return err,
             };
             source_owner_initialized = true;
-            switch (source_owner.outcome().*) {
-                .recovered_admission_refused => {
-                    const diagnostics = source_owner.selectedAdmissionDiagnostics();
-                    for (diagnostics) |diagnostic| {
-                        appendCheckAdmissionDiagnostic(allocator, &result, source, diagnostic, handler_path);
-                    }
-                    remapDiagnosticsToSource(&result, .{ .text = source, .normalize_positions = true }, 0);
-                    result.parse_errors = @intCast(diagnostics.len);
-                    return result;
-                },
-                .terminal_admission_refused => |failure| {
-                    if (source_owner.terminalAdmissionDiagnostic()) |diagnostic| {
-                        appendCheckAdmissionDiagnostic(allocator, &result, source, diagnostic, handler_path);
-                    }
-                    if (!builtin.is_test) debugPrint("TypeScript strip error: {}\n", .{zts.prepareErrorForAdmissionFailure(failure)});
-                    result.parse_errors = 1;
-                    return result;
-                },
-                .parser_refused => {
-                    result.stages_run.insert(.parse);
-                    const errors = source_owner.parserErrors();
-                    if (json_mode) {
-                        for (errors) |parse_error| {
-                            var diagnostic = json_diag.fromParseErrorOwned(allocator, parse_error, handler_path);
-                            result.json_diagnostics.append(allocator, diagnostic) catch diagnostic.deinit(allocator);
-                        }
-                    } else if (!builtin.is_test) {
-                        printParseErrors(allocator, source_owner.sourceView(), errors);
-                    }
-                    result.parse_errors = @intCast(errors.len);
-                    return result;
-                },
-                .accepted => {
-                    result.stages_run.insert(.parse);
-                    const capabilities = source_owner.acceptedCapabilities() orelse return error.DirectTypeSyntaxUnavailable;
-                    break :typed .{
-                        .parser = &source_owner.parser,
-                        .atoms = capabilities.atoms,
-                        .root = capabilities.root,
-                    };
-                },
-            }
+            if (try appendSourceRefusals(allocator, &result, &source_owner, source, handler_path, json_mode)) return result;
+            const capabilities = source_owner.acceptedCapabilities() orelse return error.DirectTypeSyntaxUnavailable;
+            break :typed .{
+                .parser = &source_owner.parser,
+                .atoms = capabilities.atoms,
+                .root = capabilities.root,
+            };
         },
     };
     already_mapped.* = result.json_diagnostics.items.len;
     var diag_view = zts.SourceView.of(source);
     diag_view.name = handler_path;
-    const js_parser = parsed_input.parser;
-    const atoms = parsed_input.atoms;
-    const root = parsed_input.root;
+    var js_parser = parsed_input.parser;
+    var atoms = parsed_input.atoms;
+    var root = parsed_input.root;
 
     // Stage 3: Import validation
     result.stages_run.insert(.imports);
@@ -556,33 +575,17 @@ fn runCheckOnParsedSource(
     ) catch {
         if (json_mode) {
             if (import_diagnostic) |diagnostic| {
-                const message = switch (diagnostic.kind) {
-                    .unknown_module => try allocator.print("unknown virtual module '{s}'", .{diagnostic.module}),
-                    .missing_export => try allocator.print("module '{s}' does not export '{s}'", .{ diagnostic.module, diagnostic.missing_export.? }),
-                };
-                errdefer allocator.free(message);
-                const suggestion = switch (diagnostic.kind) {
-                    .unknown_module => "Use a specifier published by meta.module_catalog.",
-                    .missing_export => "Use an export published for this module by meta.module_catalog.",
-                };
-                try result.json_diagnostics.append(allocator, .{
-                    .code = diagnostic_catalog.virtualImportCode(diagnostic.kind),
-                    .severity = "error",
-                    .message = message,
-                    .file = handler_path,
-                    .line = diagnostic.line,
-                    .column = diagnostic.column,
-                    .suggestion = suggestion,
-                    .message_owned = true,
-                });
+                var projected = try virtual_imports_mod.virtualImportJsonDiagnostic(allocator, diagnostic, handler_path);
+                errdefer projected.deinit(allocator);
+                try result.json_diagnostics.append(allocator, projected);
             }
         }
         result.parse_errors = 1;
         return result;
     };
 
-    const ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
-    const handler_fn = zts.findHandlerFunction(ir_view, root);
+    var ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+    var handler_fn = zts.findHandlerFunction(ir_view, root);
     result.has_handler = handler_fn != null;
     var parsed = zts.parsedModuleFromDirectCheck(&source_owner) orelse return error.DirectTypeSyntaxUnavailable;
     parsed.scopes = &js_parser.scopes;
@@ -599,6 +602,41 @@ fn runCheckOnParsedSource(
     defer if (live_policy) |*policy| policy.deinit(allocator);
     const env_public: []const []const u8 = if (live_policy) |*policy| policy.envPublic() else &.{};
 
+    // A handler with a file import gets every check that the build runs on each
+    // module. The graph keeps the parsers that code generation walked, so the
+    // entry is analyzed over the parser of the graph, with typed file imports.
+    var graph_check: ?*GraphCheck = null;
+    defer if (graph_check) |graph| graph.destroy();
+    var entry_imports: ?*const zts.FileImportSignatures = null;
+    if (comptime builtin.target.os.tag != .freestanding) {
+        if (handler_fn != null and precompile_mod.hasFileImports(ir_view)) {
+            const graph = try GraphCheck.create(allocator);
+            graph_check = graph;
+            const graph_opts: graph_check_mod.RunOptions = .{
+                .handler_path = handler_path,
+                .source = source,
+                .import_reader = opts.import_reader,
+                .skip_contract = skip_contract,
+                .json_mode = json_mode,
+                .policy = live_policy,
+                .sql_schema_path = sql_schema_path,
+            };
+            const outcome = try graph.run(&result, graph_opts);
+            // `remapDiagnosticsToSource` reads each later diagnostic against
+            // the entry source. Every finding so far has its own coordinates.
+            already_mapped.* = result.json_diagnostics.items.len;
+            if (outcome == .refused) return result;
+            js_parser = graph.entryParser();
+            root = graph.entryRoot();
+            atoms = &graph.atoms;
+            ir_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+            handler_fn = zts.findHandlerFunction(ir_view, root);
+            parsed = zts.pipeline.ParsedModule.fromTypedExisting(ir_view, root, atoms, &js_parser.type_store);
+            parsed.scopes = &js_parser.scopes;
+            entry_imports = try graph.entryFileImports(ir_view);
+        }
+    }
+
     var analysis: zts.pipeline.ModuleAnalysisSession = .{};
     try analysis.initFull(
         allocator,
@@ -613,11 +651,25 @@ fn runCheckOnParsedSource(
             .policy_sections = if (live_policy) |*policy| policy.declaredSections() else .{},
             .select_verifier = !skip_contract,
             .select_flow = !skip_contract,
+            .file_import_signatures = entry_imports,
         },
     );
     defer analysis.deinit();
     try analysis.complete();
     const resolved = try analysis.resolvedForReport();
+    // A file import with no type that crosses a module would hand the later
+    // checks a value they cannot read, as the build refuses it.
+    if (graph_check != null) {
+        const untyped_checker = if (resolved.type_checker) |*checker| checker else return error.AnalysisPassIncomplete;
+        if (untyped_checker.firstUntypedFileImport()) |name| {
+            const message = try allocator.print(precompile_mod.untyped_import_format, .{name});
+            defer allocator.free(message);
+            try graph_check_mod.appendLinkRefusal(allocator, &result, json_mode, .file_import_untyped, handler_path, message);
+            analysis.refuseResolution();
+            already_mapped.* = result.json_diagnostics.items.len;
+            return result;
+        }
+    }
     // One message per node: a boolean or strict diagnostic under a node that
     // has a type error repeats it.
     resolved.dropRepeatsOfTypeErrors();
@@ -625,8 +677,8 @@ fn runCheckOnParsedSource(
 
     {
         const bool_diags = resolved.boolDiagnostics();
-        result.bool_errors = @intCast(resolved.bool_error_count);
-        result.bool_warnings = @intCast(bool_diags.len -| result.bool_errors);
+        result.bool_errors += @intCast(resolved.bool_error_count);
+        result.bool_warnings += @intCast(bool_diags.len -| resolved.bool_error_count);
         if (bool_diags.len > 0) {
             if (json_mode) {
                 for (bool_diags) |diag| {
@@ -655,7 +707,7 @@ fn runCheckOnParsedSource(
 
     result.stages_run.insert(.types);
     const tc_diags = resolved.typeDiagnostics();
-    result.type_errors = @intCast(resolved.typeErrorCount());
+    result.type_errors += @intCast(resolved.typeErrorCount());
     if (tc_diags.len > 0) {
         if (json_mode) {
             for (tc_diags) |diag| {
@@ -679,7 +731,7 @@ fn runCheckOnParsedSource(
     if (resolved.strict_checker != null) {
         result.stages_run.insert(.strict);
         const strict_diags = resolved.strictDiagnostics();
-        result.strict_errors = @intCast(resolved.strict_error_count);
+        result.strict_errors += @intCast(resolved.strict_error_count);
         // Count by severity rather than by subtraction. `len - errors` folded
         // advisories into the warning count, and a warning sets exit code 2, so
         // a non-idiomatic spelling changed the exit code of a build - which
@@ -695,8 +747,8 @@ fn runCheckOnParsedSource(
                 .advisory => strict_advisories += 1,
             }
         }
-        result.strict_warnings = strict_warnings;
-        result.strict_advisories = strict_advisories;
+        result.strict_warnings += strict_warnings;
+        result.strict_advisories += strict_advisories;
         if (strict_diags.len > 0) {
             for (strict_diags) |diag| {
                 if (json_diag.fromCheckerDiagnostic(allocator, .strict, diag, ir_view, handler_path)) |jd| {
@@ -732,7 +784,10 @@ fn runCheckOnParsedSource(
     if (handler_fn) |hf| {
         // Retain exactly the flow/effect reader's snapshots. The fault scan
         // below still performs its own independent traversal and reads.
-        imported_graph = try loadFlowModulesForCheck(allocator, parsed, source, try analysis.facts(), handler_path, opts.import_reader);
+        imported_graph = if (graph_check) |gc|
+            try gc.flowModules()
+        else
+            try loadFlowModulesForCheck(allocator, parsed, source, try analysis.facts(), handler_path, opts.import_reader);
         const graph = &imported_graph.?;
         result.imports_complete = graph.complete;
 
@@ -756,9 +811,9 @@ fn runCheckOnParsedSource(
         result.verify_ran = true;
         result.stages_run.insert(.verifier);
         result.stages_run.insert(.flow);
-        result.verify_errors = @intCast(checked.verifier_error_count);
+        result.verify_errors += @intCast(checked.verifier_error_count);
         const verifier_diags = checked.verifierDiagnostics();
-        result.verify_warnings = @intCast(verifier_diags.len -| result.verify_errors);
+        result.verify_warnings += @intCast(verifier_diags.len -| checked.verifier_error_count);
 
         if (verifier_diags.len > 0) {
             if (json_mode) {
@@ -781,6 +836,7 @@ fn runCheckOnParsedSource(
         }
 
         result.state_isolated = !checked.verifier.has_module_mutation and !checked.verifier.unresolved_route_dispatch;
+        if (graph_check) |gc| result.state_isolated = result.state_isolated and gc.state_isolated;
         if (result.verify_errors == 0) {
             result.exhaustive_returns = true;
             result.results_safe = true;
@@ -819,18 +875,58 @@ fn runCheckOnParsedSource(
         }
     }
 
+    // The proof evidence of the modules folds into one program, as the build
+    // folds it. A graph that the fold cannot classify is refused here.
+    if (graph_check) |gc| {
+        if (result.verify_errors == 0) {
+            const strict_checker: ?*const zts.StrictChecker = if (resolved.strict_checker) |*checker| checker else null;
+            const folded = try gc.foldEntryEvidence(&result, json_mode, ir_view, strict_checker);
+            if (folded == .refused) return result;
+        }
+    }
+
     // Stage 8: Contract. Untyped full analysis creates a separate real type
     // session only now. The contract borrows the completed session.
+    var entry_effects: ?[]const zts.pipeline.ImportedEffect = null;
+    defer if (entry_effects) |effects| allocator.free(effects);
+    if (graph_check) |gc| {
+        try gc.collectDependencies(.{
+            .handler_path = handler_path,
+            .source = source,
+            .import_reader = opts.import_reader,
+            .skip_contract = skip_contract,
+            .json_mode = json_mode,
+            .policy = live_policy,
+            .sql_schema_path = sql_schema_path,
+        });
+        entry_effects = try gc.entryImportedEffects(try analysis.facts());
+    }
     result.contract = try extractContractFromAnalysis(
         &analysis,
         handler_path,
         .{
             .verification = verify_info,
-            .imported_effects = if (imported_graph) |*graph| graph.imported_effects.items else &.{},
+            .imported_effects = if (entry_effects) |effects|
+                effects
+            else if (imported_graph) |*graph|
+                graph.imported_effects.items
+            else
+                &.{},
         },
     );
     try validateContractPolicyInputs(allocator, handler_path, &result.contract.?, sql_schema_path, null);
-    try contract_mod.disclosePublicEnv(allocator, &result.contract.?, env_public);
+    if (graph_check) |gc| {
+        // The contract of the build is the merge of the entry and each
+        // dependency, so the policy and spec reports below read the same facts.
+        const merged = try gc.mergeInto(&result, json_mode, &result.contract.?, env_public, handler_path);
+        if (merged == .refused) {
+            result.contract.?.deinit(allocator);
+            result.contract = null;
+            return result;
+        }
+    } else {
+        try contract_mod.disclosePublicEnv(allocator, &result.contract.?, env_public);
+    }
     result.stages_run.insert(.contract);
 
     // Stage 8b: capability policy. Reported, not thrown.
@@ -891,6 +987,12 @@ fn runCheckOnParsedSource(
             // Populate behavioral contract
             if (result.contract) |*c| {
                 applyContractFacts(allocator, c, .{ .paths = &path_analysis });
+                // The cost facts of the paths came from the entry alone. The
+                // dependencies decide what survives of them.
+                if (graph_check) |gc| {
+                    gc.foldProperties(c);
+                    if (c.properties) |properties| result.max_io_depth = properties.max_io_depth;
+                }
             }
         }
     }

@@ -7,6 +7,7 @@ const diagnostic_catalog = zts.DiagnosticCatalog;
 const ir = zts.parser;
 const stderr_mod = @import("precompile_stderr.zig");
 const debugPrint = stderr_mod.debugPrint;
+const json_diag = @import("json_diagnostics.zig");
 
 fn resolveImportedAtomName(
     atom_value: u32,
@@ -100,4 +101,32 @@ pub fn validateVirtualModuleImports(
             return error.InvalidImportSpecifier;
         }
     }
+}
+
+/// The JSON diagnostic for a refused virtual import. The message is a heap copy
+/// that the diagnostic owns. `file` stays borrowed.
+pub fn virtualImportJsonDiagnostic(
+    allocator: std.mem.Allocator,
+    diagnostic: VirtualImportDiagnostic,
+    file: []const u8,
+) !json_diag.JsonDiagnostic {
+    const message = switch (diagnostic.kind) {
+        .unknown_module => try allocator.print("unknown virtual module '{s}'", .{diagnostic.module}),
+        .missing_export => try allocator.print("module '{s}' does not export '{s}'", .{ diagnostic.module, diagnostic.missing_export.? }),
+    };
+    errdefer allocator.free(message);
+    const suggestion = switch (diagnostic.kind) {
+        .unknown_module => "Use a specifier published by meta.module_catalog.",
+        .missing_export => "Use an export published for this module by meta.module_catalog.",
+    };
+    return .{
+        .code = diagnostic_catalog.virtualImportCode(diagnostic.kind),
+        .severity = "error",
+        .message = message,
+        .file = file,
+        .line = diagnostic.line,
+        .column = diagnostic.column,
+        .suggestion = suggestion,
+        .message_owned = true,
+    };
 }

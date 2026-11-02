@@ -1750,7 +1750,7 @@ pub fn normalizeSourceWithOptions(
             if (s.intents_owned) allocator.free(s.intents);
             return err;
         }
-        const hard_errors = next_check.parse_errors + next_check.type_errors + next_check.bool_errors;
+        const hard_errors = next_check.parse_errors + next_check.link_errors + next_check.type_errors + next_check.bool_errors;
         const next_band = countBand(next_check.json_diagnostics.items);
         next_check.deinit(allocator);
         if (hard_errors > 0 or next_band >= cur_band) {

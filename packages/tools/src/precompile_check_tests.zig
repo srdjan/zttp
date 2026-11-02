@@ -138,21 +138,19 @@ const AllocationImportReader = struct {
     fn read(raw: *anyopaque, allocator: std.mem.Allocator, path: []const u8) anyerror![]u8 {
         const self: *AllocationImportReader = @ptrCast(@alignCast(raw));
         self.reads += 1;
-        // The unused import needs no flow summary. A missing first read keeps
-        // the chain fixture focused on the whole-file fault scan.
-        if (self.file_count > 1 and self.reads == 1) return error.FileNotFound;
         const name = std.fs.path.basename(path);
         if (!std.mem.startsWith(u8, name, "lib") or !std.mem.endsWith(u8, name, ".ts")) return error.FileNotFound;
         const index = try std.fmt.parseInt(usize, name[3 .. name.len - 3], 10);
         if (index >= self.file_count) return error.FileNotFound;
-        if (index + 1 == self.file_count) return allocator.dupe(u8, "export function helper(): string { return 'ok'; }");
-        return allocator.print("import {{ helper as next }} from './lib{d}.ts'; export function helper(): string {{ return next(); }}", .{index + 1});
+        // Modules share one namespace, so each file binds its own helper name.
+        if (index + 1 == self.file_count) return allocator.print("export function helper{d}(): string {{ return 'ok'; }}", .{index});
+        return allocator.print("import {{ helper{d} }} from './lib{d}.ts'; export function helper{d}(): string {{ return helper{d}(); }}", .{ index + 1, index + 1, index, index + 1 });
     }
 };
 
 fn checkImportAllocationFixture(allocator: std.mem.Allocator, reader: *AllocationImportReader) !CheckResult {
     const source =
-        \\import { helper } from "./lib0.ts";
+        \\import { helper0 } from "./lib0.ts";
         \\function handler(req: Request): Proof<Response, "canonical" | "cost_bounded"> {
         \\  return Response.json({ ok: true });
         \\}
@@ -163,7 +161,7 @@ fn checkImportAllocationFixture(allocator: std.mem.Allocator, reader: *Allocatio
     });
 }
 
-fn expectImportAllocationCleanup(file_count: usize) !void {
+fn expectImportAllocationCleanup(file_count: usize, expected_reads: usize) !void {
     var baseline_arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer baseline_arena.deinit();
     var counted = std.testing.FailingAllocator.init(baseline_arena.allocator(), .{ .resize_fail_index = 0 });
@@ -173,7 +171,9 @@ fn expectImportAllocationCleanup(file_count: usize) !void {
         defer baseline.deinit(counted.allocator());
         try std.testing.expectEqual(@as(u32, 0), baseline.totalErrors());
         try std.testing.expectEqual(@as(u32, 1), baseline.paths_enumerated);
-        try std.testing.expectEqual(file_count + 1, reader.reads);
+        // The module graph reads each file once. The fault scan then reads each
+        // file again through the same reader.
+        try std.testing.expectEqual(expected_reads, reader.reads);
         const contract = baseline.contract orelse return error.TestUnexpectedResult;
         const coverage = contract.fault_coverage orelse return error.TestUnexpectedResult;
         try std.testing.expect(coverage.analysis_complete);
@@ -204,12 +204,12 @@ fn expectImportAllocationCleanup(file_count: usize) !void {
     }
 }
 
-test "CHECK releases allocations when a sibling import scan fails" {
-    try expectImportAllocationCleanup(1);
+test "CHECK releases allocations when the graph checks a sibling import" {
+    try expectImportAllocationCleanup(1, 2);
 }
 
-test "CHECK releases allocations when a nested import scan fails" {
-    try expectImportAllocationCleanup(max_import_depth - 1);
+test "CHECK releases allocations when the graph checks a chain of seven imports" {
+    try expectImportAllocationCleanup(7, 14);
 }
 
 test "runCheckOnlyFromSource: helper reaching outside its Effects ceiling gets ZTS503" {
@@ -2538,6 +2538,20 @@ const SiblingFixture = struct {
     }
 };
 
+/// The check refused the handler: no contract, one error counted, and the first
+/// finding has `code` under `file_name` in the directory of the fixture.
+fn expectRefusedAt(fixture: *const SiblingFixture, result: *const CheckResult, code: []const u8, file_name: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const directory = std.fs.path.dirname(fixture.handler_path) orelse return error.TestUnexpectedResult;
+    const expected = try std.fs.path.join(allocator, &.{ directory, file_name });
+    defer allocator.free(expected);
+    try std.testing.expect(result.contract == null);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expect(result.json_diagnostics.items.len >= 1);
+    try std.testing.expectEqualStrings(code, result.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings(expected, result.json_diagnostics.items[0].file);
+}
+
 fn hasDiagnosticCode(result: *const CheckResult, code: []const u8) bool {
     for (result.json_diagnostics.items) |d| {
         if (std.mem.eql(u8, d.code, code)) return true;
@@ -2582,10 +2596,12 @@ test "CHECK applies a sibling writer effect to handler properties" {
     try std.testing.expect(!properties.idempotent);
     var refused_read_only = false;
     var refused_retry_safe = false;
+    // The merged contract lists the module of the dependency, as the build does:
+    // `read_only` is incompatible with the import (ZTS501), and `retry_safe` is
+    // not discharged (ZTS500).
     for (result.contract.?.spec_diagnostics.items) |diagnostic| {
-        if (diagnostic.kind != .not_discharged) continue;
-        if (std.mem.eql(u8, diagnostic.spec_name, "read_only")) refused_read_only = true;
-        if (std.mem.eql(u8, diagnostic.spec_name, "retry_safe")) refused_retry_safe = true;
+        if (diagnostic.kind == .incompatible_with_import and std.mem.eql(u8, diagnostic.spec_name, "read_only")) refused_read_only = true;
+        if (diagnostic.kind == .not_discharged and std.mem.eql(u8, diagnostic.spec_name, "retry_safe")) refused_retry_safe = true;
     }
     try std.testing.expect(refused_read_only);
     try std.testing.expect(refused_retry_safe);
@@ -2613,7 +2629,7 @@ test "CHECK applies sibling effects through an alias and a holder" {
             .dependency =
             \\import { cacheSet } from "zttp:cache";
             \\function save(): undefined { cacheSet("items", "key", "value"); return undefined; }
-            \\export const holder = { save };
+            \\export const holder: { save: () => undefined } = { save: save };
             \\
             ,
         },
@@ -2664,7 +2680,7 @@ test "CHECK reports incomplete effects for an imported callback invocation" {
     );
     defer fixture.deinit();
     try fixture.add("dep.ts",
-        \\export function run(callback) { callback(); return undefined; }
+        \\export function run(callback: () => undefined): undefined { callback(); return undefined; }
         \\
     );
 
@@ -2703,8 +2719,8 @@ test "CHECK preserves sibling cache reads and egress facts" {
         .{
             .name = "readIt",
             .dependency =
-            \\import { fetchSync } from "zttp:fetch";
-            \\export function readIt(): string { return fetchSync("https://example.com"); }
+            \\import { fetch } from "zttp:fetch";
+            \\export function readIt(): string { fetch("https://example.com"); return "x"; }
             \\
             ,
             .stateless = false,
@@ -2758,8 +2774,8 @@ test "CHECK does not classify a factory-produced callable as data" {
     defer fixture.deinit();
     try fixture.add("dep.ts",
         \\import { cacheSet } from "zttp:cache";
-        \\function writer() { cacheSet("items", "key", "value"); return undefined; }
-        \\function factory() { return writer; }
+        \\function writer(): undefined { cacheSet("items", "key", "value"); return undefined; }
+        \\function factory(): () => undefined { return writer; }
         \\export const save = factory();
         \\
     );
@@ -2772,13 +2788,14 @@ test "CHECK does not classify a factory-produced callable as data" {
     try std.testing.expect(!properties.retry_safe);
 }
 
-test "CHECK blocks effects for missing unreadable and malformed sibling exports" {
-    const cases = [_]?[]const u8{
-        null,
-        "export function other(): string { return \"ok\"; }\n",
-        "export function work( {{{\n",
+test "CHECK refuses a sibling that is missing, lacks the export, or does not parse" {
+    const cases = [_]struct { dependency: ?[]const u8, code: []const u8, file: []const u8 }{
+        .{ .dependency = null, .code = "ZTS063", .file = "handler.ts" },
+        .{ .dependency = "export function other(): string { return \"ok\"; }\n", .code = "ZTS063", .file = "handler.ts" },
+        .{ .dependency = "export function work( {{{\n", .code = "ZTS001", .file = "dep.ts" },
     };
-    for (cases) |dependency| {
+    for (cases) |case| {
+        const dependency = case.dependency;
         var fixture = try SiblingFixture.init(
             \\import { work } from "./dep.ts";
             \\function handler(req: Request): Response { work(); return Response.text("ok"); }
@@ -2789,13 +2806,11 @@ test "CHECK blocks effects for missing unreadable and malformed sibling exports"
 
         var result = try fixture.check();
         defer result.deinit(std.testing.allocator);
-        const properties = result.contract.?.properties.?;
-        try std.testing.expect(!properties.read_only);
-        try std.testing.expect(!properties.retry_safe);
+        try expectRefusedAt(&fixture, &result, case.code, case.file);
     }
 }
 
-test "CHECK blocks effects at an import cycle" {
+test "CHECK refuses an import cycle between siblings, under the first module of the cycle" {
     var fixture = try SiblingFixture.init(
         \\import { first } from "./a.ts";
         \\function handler(req: Request): Response { first(); return Response.text("ok"); }
@@ -2815,12 +2830,13 @@ test "CHECK blocks effects at an import cycle" {
 
     var result = try fixture.check();
     defer result.deinit(std.testing.allocator);
-    const properties = result.contract.?.properties.?;
-    try std.testing.expect(!properties.read_only);
-    try std.testing.expect(!properties.retry_safe);
+    try expectRefusedAt(&fixture, &result, "ZTS063", "a.ts");
 }
 
-test "CHECK blocks effects past the sibling import depth limit" {
+// The module graph has no depth limit, as the build has none: the effects of
+// all eight files are known and none writes. The fault scan keeps its limit of
+// `max_import_depth` files, so `fault_covered` stays unproven.
+test "CHECK follows a chain of eight siblings and leaves fault_covered unproven" {
     var fixture = try SiblingFixture.init(
         \\import { f0 } from "./f0.ts";
         \\function handler(req: Request): Response { f0(); return Response.text("ok"); }
@@ -2841,8 +2857,9 @@ test "CHECK blocks effects past the sibling import depth limit" {
     var result = try fixture.check();
     defer result.deinit(std.testing.allocator);
     const properties = result.contract.?.properties.?;
-    try std.testing.expect(!properties.read_only);
-    try std.testing.expect(!properties.retry_safe);
+    try std.testing.expect(properties.read_only);
+    try std.testing.expect(properties.retry_safe);
+    try std.testing.expect(!properties.fault_covered);
 }
 
 const logs_param_helper =
@@ -2998,7 +3015,7 @@ test "a sink two imports deep reports at the handler's call" {
     try std.testing.expect(clean_result.contract.?.properties.?.no_secret_leakage);
 }
 
-test "an imported helper whose file will not parse leaves the secret unproven" {
+test "an imported helper whose file will not parse is refused under that file" {
     var fixture = try SiblingFixture.init(
         \\import { env } from "zttp:env";
         \\import { logIt } from "./dep.ts";
@@ -3012,7 +3029,7 @@ test "an imported helper whose file will not parse leaves the secret unproven" {
     try fixture.add("dep.ts", "export function logIt(x: string): number {{{\n");
     var result = try fixture.check();
     defer result.deinit(std.testing.allocator);
-    try std.testing.expect(!result.contract.?.properties.?.no_secret_leakage);
+    try expectRefusedAt(&fixture, &result, "ZTS003", "dep.ts");
 }
 
 test "an imported helper with more parameters than the summary cap leaves the secret unproven" {
@@ -3380,26 +3397,23 @@ test "a sibling that exports a failable builtin as a value blocks fault_covered"
     try std.testing.expectEqualStrings("fetch in ./dep.ts", try faultCauseSnippet(&result));
 }
 
-test "a sibling that does not exist blocks fault_covered" {
+test "a sibling that does not exist is refused at the handler" {
     var fixture = try SiblingFixture.init(fault_sibling_handler);
     defer fixture.deinit();
     var result = try fixture.check();
     defer result.deinit(std.testing.allocator);
 
-    try std.testing.expect(!try faultCovered(&result));
-    try std.testing.expectEqual(@as(u32, 1), try faultUnseenCalls(&result));
-    try std.testing.expectEqualStrings("./dep.ts (unreadable)", try faultCauseSnippet(&result));
+    try expectRefusedAt(&fixture, &result, "ZTS063", "handler.ts");
 }
 
-test "a sibling that does not parse blocks fault_covered" {
+test "a sibling that does not parse is refused under that sibling" {
     var fixture = try SiblingFixture.init(fault_sibling_handler);
     defer fixture.deinit();
     try fixture.add("dep.ts", "export function enrich( {{{\n");
     var result = try fixture.check();
     defer result.deinit(std.testing.allocator);
 
-    try std.testing.expect(!try faultCovered(&result));
-    try std.testing.expectEqualStrings("./dep.ts (unreadable)", try faultCauseSnippet(&result));
+    try expectRefusedAt(&fixture, &result, "ZTS001", "dep.ts");
 }
 
 test "a bare specifier import blocks fault_covered" {
@@ -3423,11 +3437,10 @@ test "a bare specifier import blocks fault_covered" {
     try std.testing.expectEqualStrings("lodash (not a relative path)", try faultCauseSnippet(&result));
 }
 
-test "an import cycle through the handler ends without listing the handler's own sites" {
+test "an import cycle through the handler is refused under the handler" {
     var fixture = try SiblingFixture.init(fault_sibling_handler);
     defer fixture.deinit();
-    // The helper imports the handler back. The handler's own fetch is checked
-    // and the scan must not list it again.
+    // The helper imports the handler back.
     try fixture.add("dep.ts",
         \\import { handler } from "./handler.ts";
         \\export function enrich(): string {
@@ -3438,11 +3451,10 @@ test "an import cycle through the handler ends without listing the handler's own
     var result = try fixture.check();
     defer result.deinit(std.testing.allocator);
 
-    try std.testing.expectEqual(@as(u32, 0), try faultUnseenCalls(&result));
-    try std.testing.expect(try faultCovered(&result));
+    try expectRefusedAt(&fixture, &result, "ZTS063", "handler.ts");
 }
 
-test "an import cycle between siblings still finds a failable call inside it" {
+test "an import cycle between siblings is refused under the first sibling of the cycle" {
     var fixture = try SiblingFixture.init(fault_sibling_handler);
     defer fixture.deinit();
     try fixture.add("dep.ts",
@@ -3464,8 +3476,7 @@ test "an import cycle between siblings still finds a failable call inside it" {
     var result = try fixture.check();
     defer result.deinit(std.testing.allocator);
 
-    try std.testing.expect(!try faultCovered(&result));
-    try std.testing.expectEqualStrings("fetch in ./other.ts", try faultCauseSnippet(&result));
+    try expectRefusedAt(&fixture, &result, "ZTS063", "dep.ts");
 }
 
 test "two names imported from one failing sibling count once per record" {
@@ -3713,19 +3724,21 @@ test "CHECK keeps the reader trace for two names imported from one file" {
     const allocator = std.testing.allocator;
     const handler_source =
         \\import { first, second } from "./lib.ts";
-        \\function handler(req: Request): Proof<Response, "no_secret_leakage" | "canonical" | "cost_bounded"> {
+        \\function handler(req: Request): Proof<Response, "no_secret_leakage" | "canonical"> {
         \\  return Response.json({ first: first(), second: second() });
         \\}
         \\
     ;
-    // Only the final revision is fault-clean. Earlier fault reads must fail
-    // the public unseen-call assertion. The first flow/effect revision writes,
-    // so the exact reads also prove that effects use the flow load.
+    // The module graph reads the file once, and the fault scan reads it once
+    // more through the same reader. The first revision writes and holds an
+    // unchecked fetch, so the effects and the egress come from the read of the
+    // graph. Only the second revision is fault-clean, so a fault scan that
+    // reused the first read would fail the unseen-call assertion.
     const reader_sources = [_][]const u8{
         "import { cacheSet } from \"zttp:cache\";\n" ++
             "export function first(): string { cacheSet(\"n\", \"k\", \"v\"); return \"first\"; }\n" ++
+            "export function second(): string { return \"second\"; }\n" ++
             fault_unchecked_helper,
-        "export function second(): string { return \"second\"; }\n" ++ fault_unchecked_helper,
         "export function first(): string { return \"first\"; }\n" ++
             "export function second(): string { return \"second\"; }\n",
     };
@@ -3739,7 +3752,6 @@ test "CHECK keeps the reader trace for two names imported from one file" {
     defer result.deinit(allocator);
 
     const expected_paths = [_][]const u8{
-        "/virtual/lib.ts",
         "/virtual/lib.ts",
         "/virtual/lib.ts",
     };
@@ -3760,7 +3772,7 @@ test "CHECK keeps the reader trace for two names imported from one file" {
     try std.testing.expect(!properties.retry_safe);
     try std.testing.expect(!properties.idempotent);
     try std.testing.expect(!properties.stateless);
-    try std.testing.expect(!properties.has_egress);
+    try std.testing.expect(properties.has_egress);
     try std.testing.expectEqual(true, properties.fault_covered);
     try std.testing.expectEqual(@as(usize, 1), contract.behaviors.items.len);
     try std.testing.expect(contract.behaviors_exhaustive);
@@ -3774,7 +3786,7 @@ test "CHECK keeps the reader trace for two names imported from one file" {
     }, contract.fault_coverage orelse return error.TestUnexpectedResult);
 }
 
-test "CHECK accepts a compile-caught imported type and retains measured direct effects" {
+test "CHECK refuses an imported file with an unterminated string, under the path of that file" {
     const allocator = std.testing.allocator;
     const handler_source =
         \\import { clean } from "./lib.ts";
@@ -3804,22 +3816,20 @@ test "CHECK accepts a compile-caught imported type and retains measured direct e
 
     const expected_paths = [_][]const u8{
         "/virtual/lib.ts",
-        "/virtual/lib.ts",
     };
     try std.testing.expectEqual(expected_paths.len, tracing_reader.paths.items.len);
     for (expected_paths, tracing_reader.paths.items) |expected, actual| {
         try std.testing.expectEqualStrings(expected, actual);
     }
-    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
-    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
-    const contract = result.contract orelse return error.TestUnexpectedResult;
-    const properties = contract.properties orelse return error.TestUnexpectedResult;
-    try std.testing.expect(contract.effect_analysis_complete);
-    try std.testing.expect(!properties.pure);
-    try std.testing.expect(properties.read_only);
+    try std.testing.expect(result.contract == null);
+    try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS008", result.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("/virtual/lib.ts", result.json_diagnostics.items[0].file);
 }
 
-test "CHECK stops nested effect reads after an imported type failure" {
+test "CHECK stops at the first dependency with a type error and reads each file once" {
     const allocator = std.testing.allocator;
     const handler_source =
         \\import { outer } from "./a.ts";
@@ -3836,7 +3846,6 @@ test "CHECK stops nested effect reads after an imported type failure" {
     ;
     const reader_sources = [_][]const u8{
         failed_outer,
-        failed_outer,
         "export function inner(): string { return \"ok\"; }\n",
     };
     var tracing_reader: TracingImportReader = .{ .sources = &reader_sources };
@@ -3850,7 +3859,6 @@ test "CHECK stops nested effect reads after an imported type failure" {
 
     const expected_paths = [_][]const u8{
         "/virtual/a.ts",
-        "/virtual/a.ts",
         "/virtual/b.ts",
     };
     try std.testing.expectEqual(expected_paths.len, tracing_reader.paths.items.len);
@@ -3858,9 +3866,12 @@ test "CHECK stops nested effect reads after an imported type failure" {
         try std.testing.expectEqualStrings(expected, actual);
     }
 
-    const properties = result.contract.?.properties.?;
-    try std.testing.expect(!properties.read_only);
-    try std.testing.expect(!properties.retry_safe);
+    try std.testing.expect(result.contract == null);
+    try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS200", result.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("/virtual/a.ts", result.json_diagnostics.items[0].file);
 }
 
 test "CHECK resolves an extensionless import against the importer directory" {
@@ -3956,6 +3967,152 @@ const MemoryImportReader = struct {
         return .{ .context = self, .read = read };
     }
 };
+
+const reader_parity_entry =
+    \\import { f } from "./lib.ts";
+    \\export function handler(req: Request): Proof<Response, "result_safe"> {
+    \\  return Response.text(f());
+    \\}
+    \\
+;
+
+const reader_parity_clean_lib = "export function f(): string {\n  return \"x\";\n}\n";
+
+const reader_parity_broken_lib = "export function f(): string {\n  const n: number = \"a\";\n  return \"x\";\n}\n";
+
+test "CHECK reports the type error of a dependency that the base reader serves, under the dependency path" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(reader_parity_entry);
+    defer fixture.deinit();
+    try fixture.add("lib.ts", reader_parity_clean_lib);
+    const lib_path = try std.fs.path.join(allocator, &.{ std.fs.path.dirname(fixture.handler_path).?, "lib.ts" });
+    defer allocator.free(lib_path);
+
+    var base: MemoryImportReader = .{ .source = reader_parity_broken_lib };
+    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{
+        .json_mode = true,
+        .import_reader = base.reader(),
+    });
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.json_diagnostics.items.len > 0);
+    try std.testing.expectEqualStrings("ZTS200", result.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings(lib_path, result.json_diagnostics.items[0].file);
+    try std.testing.expect(result.totalErrors() > 0);
+}
+
+test "text mode counts a dependency type error and prints its Types line" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(reader_parity_entry);
+    defer fixture.deinit();
+    try fixture.add("lib.ts", reader_parity_broken_lib);
+    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{ .json_mode = false });
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+    try std.testing.expectEqual(@as(u32, 0), result.link_errors);
+    try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    formatProofCard(&aw.writer, &result, "handler.ts");
+    buf = aw.toArrayList();
+    try std.testing.expectEqualStrings(
+        "\ncheck: handler.ts\n\n" ++
+            "  Parse .................. OK (5 lines)\n" ++
+            "  Types .................. FAIL (1 errors)\n" ++
+            "  Sound mode ............. OK\n" ++
+            "  Strict ZigTS ........... OK\n" ++
+            "\n\n  1 errors, 0 warnings\n",
+        buf.items,
+    );
+}
+
+test "text mode counts a missing import as a link error and prints a Module graph line" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(reader_parity_entry);
+    defer fixture.deinit();
+    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{ .json_mode = false });
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 0), result.parse_errors);
+    try std.testing.expectEqual(@as(u32, 1), result.link_errors);
+    try std.testing.expectEqual(@as(u32, 0), result.type_errors);
+    try std.testing.expectEqual(@as(u32, 1), result.totalErrors());
+    try std.testing.expectEqualStrings("ZTS063", result.json_diagnostics.items[0].code);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    formatProofCard(&aw.writer, &result, "handler.ts");
+    buf = aw.toArrayList();
+    try std.testing.expectEqualStrings(
+        "\ncheck: handler.ts\n\n" ++
+            "  Parse .................. OK (5 lines)\n" ++
+            "  Types .................. OK\n" ++
+            "  Sound mode ............. OK\n" ++
+            "  Strict ZigTS ........... OK\n" ++
+            "  Module graph ........... FAIL (1 errors)\n" ++
+            "\n\n  1 errors, 0 warnings\n",
+        buf.items,
+    );
+}
+
+test "CHECK without the contract reports a dependency type error under the dependency path" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(reader_parity_entry);
+    defer fixture.deinit();
+    try fixture.add("lib.ts", reader_parity_broken_lib);
+    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{ .json_mode = true, .skip_contract = true });
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.contract == null);
+    try std.testing.expectEqual(@as(u32, 1), result.type_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS200", result.json_diagnostics.items[0].code);
+    try expectRefusedAt(&fixture, &result, "ZTS200", "lib.ts");
+}
+
+test "CHECK without the contract refuses a generic import with ZTS064" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(
+        \\import { pick } from "./lib.ts";
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(pick("a"));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("lib.ts", "export function pick<T>(x: T): T {\n  return x;\n}\n");
+    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{ .json_mode = true, .skip_contract = true });
+    defer result.deinit(allocator);
+
+    try std.testing.expect(result.contract == null);
+    try std.testing.expectEqual(@as(u32, 1), result.link_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try expectRefusedAt(&fixture, &result, "ZTS064", "handler.ts");
+}
+
+test "CHECK reads a clean dependency from the base reader when the working tree dependency has a type error" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(reader_parity_entry);
+    defer fixture.deinit();
+    try fixture.add("lib.ts", reader_parity_broken_lib);
+
+    var base: MemoryImportReader = .{ .source = reader_parity_clean_lib };
+    var result = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{
+        .json_mode = true,
+        .import_reader = base.reader(),
+    });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+
+    var tree = try runCheckOnlyWithOptions(allocator, fixture.handler_path, .{ .json_mode = true });
+    defer tree.deinit(allocator);
+    try std.testing.expectEqualStrings("ZTS200", tree.json_diagnostics.items[0].code);
+}
 
 test "ImportedFile loads the file a reader serves and reduces it to module facts" {
     var served: MemoryImportReader = .{ .source =
@@ -8641,9 +8798,18 @@ fn proveBehaviorCounts(
     before_src: []const u8,
     after_src: []const u8,
 ) !ProveCounts {
-    var before = try runCheckOnlyFromSourceWithOptions(allocator, before_src, "handler.ts", .{ .json_mode = true });
+    return proveBehaviorCountsRead(allocator, before_src, after_src, null);
+}
+
+fn proveBehaviorCountsRead(
+    allocator: std.mem.Allocator,
+    before_src: []const u8,
+    after_src: []const u8,
+    import_reader: ?ImportReader,
+) !ProveCounts {
+    var before = try runCheckOnlyFromSourceWithOptions(allocator, before_src, "handler.ts", .{ .json_mode = true, .import_reader = import_reader });
     defer before.deinit(allocator);
-    var after = try runCheckOnlyFromSourceWithOptions(allocator, after_src, "handler.ts", .{ .json_mode = true });
+    var after = try runCheckOnlyFromSourceWithOptions(allocator, after_src, "handler.ts", .{ .json_mode = true, .import_reader = import_reader });
     defer after.deinit(allocator);
     const before_contract = before.contract orelse return error.NoContractFromBefore;
     const after_contract = after.contract orelse return error.NoContractFromAfter;
@@ -8842,9 +9008,22 @@ test "prove-behavior: P1 controls keep their verdicts" {
 
 test "prove-behavior: an unknown status with a local import is breaking against itself" {
     const source = "import { x } from \"./lib.ts\";\n" ++ p1_helper_a;
-    const counts = try proveBehaviorCounts(std.testing.allocator, source, source);
+    var lib: FixedImportReader = .{ .source = "export function x(): number { return 1; }\n" };
+    const counts = try proveBehaviorCountsRead(std.testing.allocator, source, source, lib.reader());
     try std.testing.expectEqual(zts.contract_diff.Classification.breaking, counts.verdict);
     try std.testing.expectEqual(@as(u32, 1), counts.response_changed);
+}
+
+test "prove-behavior: a local import that cannot be read leaves no contract to diff" {
+    const allocator = std.testing.allocator;
+    const source = "import { x } from \"./missing.ts\";\n" ++ p1_helper_a;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "/virtual/handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expect(result.contract == null);
+    try std.testing.expectEqual(@as(u32, 1), result.link_errors);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS063", result.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("/virtual/handler.ts", result.json_diagnostics.items[0].file);
 }
 
 test "contract: the status of a returned value follows the runtime rules" {

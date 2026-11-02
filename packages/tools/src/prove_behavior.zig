@@ -122,7 +122,9 @@ pub fn runWithArgs(allocator: std.mem.Allocator, argv: []const []const u8) !void
     defer after_result.deinit(allocator);
 
     for ([_]*const precompile.CheckResult{ &before_result, &after_result }) |result| {
-        if (result.analyzer_error != null) {
+        // A refused module graph has diagnostics and no contract. Report them
+        // as the failure, as for a stopped analyzer, instead of a bare message.
+        if (result.analyzer_error != null or (result.contract == null and result.json_diagnostics.items.len > 0)) {
             var output: std.Io.Writer.Allocating = .init(allocator);
             defer output.deinit();
             if (json_mode) {
