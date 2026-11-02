@@ -9925,7 +9925,7 @@ fn expectDirectPredicateConsumerInner(
     direct_checker.scopes = &direct.scopes;
     const type_ok = try direct_checker.check(direct_root);
     const expected_type: []const type_checker_mod.DiagnosticKind = switch (case) {
-        .named_guard_unverified, .quoted_marker_space, .quoted_marker_tab, .ordinary_tab, .readonly_tab => &.{.invalid_type_predicate},
+        .named_guard_unverified, .arrow_guard_unverified, .arrow_ordinary_tab, .compact_target_position, .repeated_target, .captured_generic, .unresolved_target, .mixed_untyped_target, .target_after_sixteen, .quoted_marker_space, .quoted_marker_tab, .ordinary_tab, .readonly_tab => &.{.invalid_type_predicate},
         .quoted_value => &.{.return_type_mismatch},
         else => &.{},
     };

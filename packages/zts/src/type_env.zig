@@ -327,6 +327,10 @@ pub const FunctionSig = struct {
     /// Absent on an ordinary function. The declaration alone installs nothing -
     /// the checker admits the guard only after reading the body that claims it.
     type_predicate: ?TypePredicate = null,
+    /// The predicate names a target that is not a parameter of the function
+    /// (`function f(y: unknown): x is string`). No `type_predicate` is recorded;
+    /// the checker reports it, so the function is not read as a plain boolean one.
+    type_predicate_unbound: bool = false,
 
     pub fn typeParams(self: *const FunctionSig) []const GenericParam {
         return self.type_params[0..self.type_param_count];
@@ -1046,7 +1050,12 @@ pub const TypeEnv = struct {
             accumulator.publish_name = input.ir_view.getTag(signature.owner) == .function_expr;
 
             switch (predicate.target) {
-                .unresolved => return,
+                .unresolved => {
+                    // The parser resolves a target only when a parameter bears
+                    // that name, so this is a target naming no parameter.
+                    accumulator.signature.type_predicate_unbound = true;
+                    return;
+                },
                 .resolved => {},
             }
             switch (predicate.narrowed.root) {
@@ -1058,7 +1067,10 @@ pub const TypeEnv = struct {
                 input.atoms,
                 signature,
                 predicate.target_span.text(input.store.source),
-            ) orelse return;
+            ) orelse {
+                accumulator.signature.type_predicate_unbound = true;
+                return;
+            };
             const narrowed = try self.lowerDirectHeaderRoot(
                 input.store,
                 application_bases,
@@ -4126,6 +4138,7 @@ fn growthExpectExactSignature(left: FunctionSig, right: FunctionSig) !void {
         try std.testing.expectEqual(a.constraint, b.constraint);
     }
     try std.testing.expect(std.meta.eql(left.type_predicate, right.type_predicate));
+    try std.testing.expectEqual(left.type_predicate_unbound, right.type_predicate_unbound);
 }
 
 const GrowthTraceEvent = struct {
@@ -5005,7 +5018,8 @@ fn growthSignatureEqual(left: FunctionSig, right: FunctionSig) bool {
         left.max_arg_count != right.max_arg_count or
         left.return_type != right.return_type or
         left.type_param_count != right.type_param_count or
-        !std.meta.eql(left.type_predicate, right.type_predicate)) return false;
+        !std.meta.eql(left.type_predicate, right.type_predicate) or
+        left.type_predicate_unbound != right.type_predicate_unbound) return false;
     for (left.type_params[0..left.type_param_count], right.type_params[0..right.type_param_count]) |a, b| {
         if (!std.mem.eql(u8, a.name, b.name) or a.idx != b.idx or a.constraint != b.constraint) return false;
     }

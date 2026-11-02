@@ -328,7 +328,7 @@ pub const TypeChecker = struct {
         // Before the main walk, so a call to a predicate declared later in the
         // file still narrows. A predicate whose body is not an admitted test is
         // rejected here and installs nothing anywhere.
-        self.admitTypePredicates(root, 0);
+        self.admitTypePredicates(root, 0, true);
         self.scanClosureWrites(root, 0, false);
         self.walkStmt(root);
         if (self.bound_var_annotations != self.env.varAnnotationCount()) {
@@ -2158,38 +2158,89 @@ pub const TypeChecker = struct {
     // is a narrowing the author asserted and nothing confirmed.
     // -------------------------------------------------------------------
 
-    fn admitTypePredicates(self: *TypeChecker, node: NodeIndex, depth: u8) void {
-        if (depth > 32) return;
+    /// `module_level` stays true only through the program, its blocks, and
+    /// export wrappers. Every other node passes false to its children, so a
+    /// predicate on a function reached through a function body, an `if`, a
+    /// loop, or an expression is refused and not ignored.
+    fn admitTypePredicates(self: *TypeChecker, node: NodeIndex, depth: u8, module_level: bool) void {
+        if (depth > 200) return;
         const tag = self.ir_view.getTag(node) orelse return;
         switch (tag) {
             .program, .block => {
                 const block = self.ir_view.getBlock(node) orelse return;
                 for (0..block.stmts_count) |i| {
-                    self.admitTypePredicates(self.ir_view.getListIndex(block.stmts_start, @intCast(i)), depth + 1);
+                    self.admitTypePredicates(self.ir_view.getListIndex(block.stmts_start, @intCast(i)), depth + 1, module_level);
                 }
             },
             .export_decl => {
                 const export_decl = self.ir_view.getExportDecl(node) orelse return;
-                self.admitTypePredicates(export_decl.declaration, depth + 1);
+                self.admitTypePredicates(export_decl.declaration, depth + 1, module_level);
             },
-            .function_decl => self.admitOneTypePredicate(node),
-            // Scope boundary: a type predicate is a named module-level function
-            // declaration. One declared inside a block, an `if` or loop body, or
-            // a function body is not visited here.
-            .if_stmt, .for_of_stmt, .function_expr, .arrow_function => {},
+            .function_decl, .var_decl => {
+                const decl = self.ir_view.getVarDecl(node) orelse return;
+                const init_tag = self.ir_view.getTag(decl.init) orelse return;
+                const init_is_function = init_tag == .arrow_function or init_tag == .function_expr;
+                if (tag == .function_decl and module_level) {
+                    self.admitOneTypePredicate(node);
+                } else if (init_is_function) {
+                    const name = self.resolveAtomName(decl.binding.name_atom) orelse "<anonymous>";
+                    self.refuseMisplacedPredicate(node, decl.init, name);
+                }
+                // The function is read through its own node only when it has
+                // no binding to name it, so one predicate is reported once.
+                if (init_is_function) {
+                    var children = self.ir_view.expressionChildren(decl.init);
+                    while (children.next()) |child| self.admitTypePredicates(child, depth + 1, false);
+                } else {
+                    self.admitTypePredicates(decl.init, depth + 1, false);
+                }
+            },
+            .function_expr, .arrow_function => {
+                self.refuseMisplacedPredicate(node, node, "<anonymous>");
+                var children = self.ir_view.expressionChildren(node);
+                while (children.next()) |child| self.admitTypePredicates(child, depth + 1, false);
+            },
             // Any other tag passes each child it holds back to this walk, so a
             // new node kind is read by default.
             else => {
                 var children = self.ir_view.expressionChildren(node);
-                while (children.next()) |child| self.admitTypePredicates(child, depth + 1);
+                while (children.next()) |child| self.admitTypePredicates(child, depth + 1, false);
             },
         }
+    }
+
+    /// A predicate on a function that is not a named module-level declaration
+    /// installs no narrowing. It is refused here, once, and not left silent.
+    fn refuseMisplacedPredicate(self: *TypeChecker, report_at: NodeIndex, function_node: NodeIndex, name: []const u8) void {
+        const sig = self.sourceFunctionSignature(function_node) orelse return;
+        if (sig.type_predicate == null and !sig.type_predicate_unbound) return;
+        self.addGenericDiagnostic(
+            .invalid_type_predicate,
+            report_at,
+            "type predicate '{s}' must be a named module-level function declaration",
+            .{name},
+            "a type predicate is not a named module-level function declaration",
+            "Declare the predicate as a function declaration at module level, or return boolean.",
+        );
     }
 
     fn admitOneTypePredicate(self: *TypeChecker, node: NodeIndex) void {
         const decl = self.ir_view.getVarDecl(node) orelse return;
         const func = self.ir_view.getFunction(decl.init) orelse return;
         const fn_name = self.resolveAtomName(decl.binding.name_atom) orelse return;
+        if (self.sourceFunctionSignature(decl.init)) |own| {
+            if (own.type_predicate_unbound) {
+                self.addGenericDiagnostic(
+                    .invalid_type_predicate,
+                    node,
+                    "type predicate on '{s}' does not name an annotated parameter of '{s}'",
+                    .{ fn_name, fn_name },
+                    "a type predicate does not name an annotated parameter",
+                    "Name an annotated parameter of the function before 'is'.",
+                );
+                return;
+            }
+        }
         const sig = self.env.getSourceFnSigByName(fn_name) orelse return;
         const predicate = sig.type_predicate orelse return;
         if (predicate.param_index >= func.params_count) return;
@@ -10446,4 +10497,76 @@ test "predicate claim: a discriminant shared by two members does not back a one-
         \\    return v.kind === "a";
         \\}
     , .invalid_type_predicate);
+}
+
+// F3 and F4 (2026-11-02): a type predicate is a named module-level function
+// declaration, and its target names a parameter. Any other predicate is
+// refused with one ZTS211, never ignored.
+
+test "predicate position: a module-level const arrow predicate is ZTS211" {
+    try expectOnlyDiagnostic(
+        \\const isStr = (x: unknown): x is string => typeof x === "string";
+    , .invalid_type_predicate);
+}
+
+test "predicate position: a local const arrow predicate is ZTS211" {
+    try expectOnlyDiagnostic(
+        \\function handler(req: Request): Response {
+        \\    const isStr = (x: unknown): x is string => typeof x === "string";
+        \\    return Response.json({ ok: true });
+        \\}
+    , .invalid_type_predicate);
+}
+
+test "predicate position: a function declaration nested in a function body is ZTS211" {
+    try expectOnlyDiagnostic(
+        \\function handler(req: Request): Response {
+        \\    function isStr(x: unknown): x is string {
+        \\        return typeof x === "string";
+        \\    }
+        \\    return Response.json({ ok: true });
+        \\}
+    , .invalid_type_predicate);
+}
+
+test "predicate position: an arrow predicate passed as a callback is ZTS211" {
+    try expectOnlyDiagnostic(
+        \\function apply(f: (x: unknown) => boolean): boolean {
+        \\    return f(1);
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const r = apply((x: unknown): x is string => typeof x === "number");
+        \\    return Response.json({ r: r });
+        \\}
+    , .invalid_type_predicate);
+}
+
+test "predicate target: a predicate that names no parameter is ZTS211" {
+    try expectOnlyDiagnostic(
+        \\function isStr(y: unknown): x is string {
+        \\    return typeof y === "string";
+        \\}
+    , .invalid_type_predicate);
+}
+
+test "predicate target: an arrow predicate that names no parameter gets one ZTS211" {
+    try expectOnlyDiagnostic(
+        \\const isStr = (y: unknown): x is string => typeof y === "string";
+    , .invalid_type_predicate);
+}
+
+test "predicate position: a module-level function declaration predicate is admitted and narrows" {
+    try expectNoDiagnostics(
+        \\function isStr(x: unknown): x is string {
+        \\    return typeof x === "string";
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const raw: unknown = "a";
+        \\    if (isStr(raw)) {
+        \\        const s: string = raw;
+        \\        return Response.json({ s: s });
+        \\    }
+        \\    return Response.json({ ok: true });
+        \\}
+    );
 }
