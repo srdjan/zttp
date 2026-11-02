@@ -27,9 +27,10 @@ packages/zts/src/type_checker.zig inferType catch-return
 packages/zts/src/type_checker.zig walkExpr catch-return
 packages/zts/src/type_checker.zig walkStmt catch-return
 
-# The three narrowing-guard extractors partition a union's members onto the
+# The narrowing-guard extractors partition a union's members onto the
 # heap, and they run on `*const TypeChecker`, so an allocation failure has no
-# sticky flag to set. Returning null installs no narrowing, and a binding that
+# sticky flag to set. `extractDiscriminantGuard` joined them on 2026-11-02, when
+# it stopped taking the first matching member. Returning null installs no narrowing, and a binding that
 # is not narrowed keeps its declared type - which is wider, never narrower.
 # Every check downstream therefore sees more of the type than the guard proved,
 # so the failure can add a diagnostic and can never remove one. It cannot turn
@@ -39,6 +40,7 @@ packages/zts/src/type_checker.zig extractTypeofGuard catch-return
 packages/zts/src/type_checker.zig extractIsArrayGuard catch-return
 packages/zts/src/type_checker.zig extractIsDictGuard catch-return
 packages/zts/src/type_checker.zig extractIsBytesGuard catch-return
+packages/zts/src/type_checker.zig extractDiscriminantGuard catch-return
 
 # --- Consumer-side acceptance kernel ---
 #

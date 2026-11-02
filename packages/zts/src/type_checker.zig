@@ -2202,7 +2202,25 @@ pub const TypeChecker = struct {
         self.registerParamTypes(func, sig);
 
         if (self.predicateBodyProves(func.body, param_binding)) {
-            self.admitted_predicates.put(self.allocator, fn_name, {}) catch self.markAllocationFailure();
+            // The form is admitted. The claim must also follow from the test:
+            // `typeof x === "number"` is a well-formed test that proves
+            // `number`, and it must not back `x is string`.
+            const proven = self.predicateProvenType(func.body, param_binding);
+            if (self.env.isAssignableTo(proven, predicate.narrowed)) {
+                self.admitted_predicates.put(self.allocator, fn_name, {}) catch self.markAllocationFailure();
+                return;
+            }
+            var buf: [256]u8 = undefined;
+            const claimed_str = self.env.pool.formatType(predicate.narrowed, buf[0..128]);
+            const proven_str = self.env.pool.formatType(proven, buf[128..256]);
+            self.addGenericDiagnostic(
+                .invalid_type_predicate,
+                node,
+                "type predicate '{s}' claims '{s}', but its test proves '{s}'",
+                .{ fn_name, claimed_str, proven_str },
+                "a type predicate claims a type its test does not prove",
+                "Claim the type the test proves, or change the test to prove the claimed type.",
+            );
             return;
         }
         self.addGenericDiagnostic(
@@ -2226,6 +2244,94 @@ pub const TypeChecker = struct {
         if (self.ir_view.getTag(statement) != .return_stmt) return false;
         const value = self.ir_view.getOptValue(statement) orelse return false;
         return self.predicateTestProves(value, param, 0);
+    }
+
+    /// The type the returned test proves for the parameter when it is true.
+    /// The body already passed `predicateBodyProves`, so it is one `return`.
+    /// Every narrowing written here is undone before this returns.
+    fn predicateProvenType(self: *TypeChecker, body: NodeIndex, param: ir.BindingRef) TypeIndex {
+        var statement = body;
+        if (self.ir_view.getTag(body) == .block) {
+            const block = self.ir_view.getBlock(body) orelse return self.env.pool.idx_unknown;
+            if (block.stmts_count != 1) return self.env.pool.idx_unknown;
+            statement = self.ir_view.getListIndex(block.stmts_start, 0);
+        }
+        const value = self.ir_view.getOptValue(statement) orelse return self.env.pool.idx_unknown;
+        const mark = self.beginNarrowScope();
+        const proven = self.provenTypeOfTest(value, true, param, 0);
+        _ = self.endNarrowScope(mark);
+        return proven;
+    }
+
+    /// The type of the parameter where `node` evaluated to `sense`. A side that
+    /// the test does not constrain leaves the parameter's current type. Nothing
+    /// that cannot be computed is read as proven: it answers `unknown`.
+    fn provenTypeOfTest(self: *TypeChecker, node: NodeIndex, sense: bool, param: ir.BindingRef, depth: u8) TypeIndex {
+        const pool = self.env.pool;
+        if (depth > 16) return pool.idx_unknown;
+        const tag = self.ir_view.getTag(node) orelse return pool.idx_unknown;
+
+        if (tag == .unary_op) {
+            const un = self.ir_view.getUnary(node) orelse return pool.idx_unknown;
+            if (un.op == .not) return self.provenTypeOfTest(un.operand, !sense, param, depth + 1);
+        }
+
+        if (tag == .binary_op) {
+            const bin = self.ir_view.getBinary(node) orelse return pool.idx_unknown;
+            if (bin.op == .and_op or bin.op == .or_op) {
+                // `&&` that is true and `||` that is false hold both sides, the
+                // right one after the left. The other two senses hold one side.
+                const both = (bin.op == .and_op) == sense;
+                if (both) {
+                    self.installBranchNarrowing(bin.left, sense, .{});
+                    return self.provenTypeOfTest(bin.right, sense, param, depth + 1);
+                }
+                const left_mark = self.beginNarrowScope();
+                const left = self.provenTypeOfTest(bin.left, sense, param, depth + 1);
+                _ = self.endNarrowScope(left_mark);
+                const right_mark = self.beginNarrowScope();
+                self.installBranchNarrowing(bin.left, !sense, .{});
+                const right = self.provenTypeOfTest(bin.right, sense, param, depth + 1);
+                _ = self.endNarrowScope(right_mark);
+                return pool.addUnion(self.allocator, &.{ left, right });
+            }
+            // `p === "a"` proves "a" when true, and `p !== "a"` when false.
+            const equal = bin.op == .strict_eq;
+            if ((bin.op == .strict_eq or bin.op == .strict_neq) and equal == sense) {
+                if (self.literalEqualityType(bin, param)) |literal| return literal;
+            }
+        }
+
+        const mark = self.beginNarrowScope();
+        defer _ = self.endNarrowScope(mark);
+        self.installBranchNarrowing(node, sense, .{});
+        const key = bindingKey(param);
+        const result = self.narrowed.get(key) orelse self.currentBindingType(param) orelse pool.idx_unknown;
+        return if (result == null_type_idx) pool.idx_unknown else result;
+    }
+
+    /// For `p === <literal>` (either order): the type of that literal. Only a bare identifier operand is read here; a property
+    /// read off the parameter goes through the guard extractor.
+    fn literalEqualityType(self: *TypeChecker, bin: anytype, param: ir.BindingRef) ?TypeIndex {
+        const left_tag = self.ir_view.getTag(bin.left) orelse return null;
+        const right_tag = self.ir_view.getTag(bin.right) orelse return null;
+        const operand, const literal = if (left_tag == .identifier)
+            .{ bin.left, bin.right }
+        else if (right_tag == .identifier)
+            .{ bin.right, bin.left }
+        else
+            return null;
+        const binding = self.ir_view.getBinding(operand) orelse return null;
+        if (bindingKey(binding) != bindingKey(param)) return null;
+        const literal_tag = self.ir_view.getTag(literal) orelse return null;
+        switch (literal_tag) {
+            .lit_string, .lit_int, .lit_bool, .lit_undefined, .lit_null => {},
+            // exhaustive: only a literal or an absent-value sentinel has a
+            // type this equality proves.
+            else => return null,
+        }
+        const literal_type = self.inferType(literal);
+        return if (literal_type == null_type_idx) null else literal_type;
     }
 
     fn predicateTestProves(self: *const TypeChecker, node: NodeIndex, param: ir.BindingRef, depth: u8) bool {
@@ -2632,8 +2738,19 @@ pub const TypeChecker = struct {
     }
 
     /// Extract a discriminated union narrowing guard from x.prop === <literal>.
-    /// Returns the matched union member for the then-branch. The caller handles
-    /// else-branch narrowing via the negated flag.
+    ///
+    /// Each union member goes to the then-branch, the else-branch, or both:
+    /// a member whose field is exactly the literal holds only where the test
+    /// is true; a member whose field admits the literal and more, or whose
+    /// field is optional, holds on both sides; a member whose field cannot
+    /// hold the literal, or that lacks the
+    /// field, holds only where the test is false. Taking the first member that
+    /// matched narrowed `{ kind: "a", n } | { kind: "a", s }` to the first one,
+    /// and a field of `string` was read as no match at all.
+    ///
+    /// The union and each member are resolved only to read the field. The
+    /// narrowed type keeps the member as written, so a named record stays its
+    /// alias. The caller handles else-branch narrowing via the negated flag.
     fn extractDiscriminantGuard(
         self: *const TypeChecker,
         member_node: NodeIndex,
@@ -2644,50 +2761,79 @@ pub const TypeChecker = struct {
         const obj_tag = self.ir_view.getTag(member.object) orelse return null;
         if (obj_tag != .identifier) return null;
 
+        const pool = self.env.pool;
         const binding = self.ir_view.getBinding(member.object) orelse return null;
         const key = bindingKey(binding);
-        const current = self.currentBindingType(binding) orelse return null;
-        if (self.env.pool.getTag(current) != .t_union) return null;
+        const declared = self.currentBindingType(binding) orelse return null;
+        const current = pool.unwrapNominal(self.env.resolveRef(declared));
+        if (pool.getTag(current) != .t_union) return null;
 
         const prop_name = self.resolveAtomName(member.property) orelse return null;
         const literal_type = self.inferType(literal_node);
-        const literal_tag = self.env.pool.getTag(literal_type) orelse return null;
+        const literal_tag = pool.getTag(literal_type) orelse return null;
         if (literal_tag != .t_literal_string and literal_tag != .t_literal_number and literal_tag != .t_literal_bool) return null;
 
-        const matched = blk: {
-            for (self.env.pool.getUnionMembers(current)) |member_type| {
-                const field = self.env.pool.lookupRecordField(member_type, prop_name) orelse continue;
-                if (self.env.isAssignableTo(field.type_idx, literal_type) and
-                    self.env.isAssignableTo(literal_type, field.type_idx))
-                {
-                    break :blk member_type;
+        // One allocation holds both sides: a member is on one side or both, so
+        // each side needs at most one slot for each member.
+        const members = pool.getUnionMembers(current);
+        const slots = self.allocator.alloc(TypeIndex, members.len * 2) catch return null;
+        defer self.allocator.free(slots);
+        const then_slots = slots[0..members.len];
+        const else_slots = slots[members.len..];
+        var then_len: usize = 0;
+        var else_len: usize = 0;
+
+        for (members) |candidate| {
+            const resolved = pool.unwrapNominal(self.env.resolveRef(candidate));
+            // A member without the field, or whose field cannot hold the
+            // literal, stays on the else side only.
+            var in_then = false;
+            var in_else = true;
+            if (pool.lookupRecordField(resolved, prop_name)) |field| {
+                // An optional field can be absent, so the test can be false for
+                // that member even when its declared field is exactly the literal.
+                if (!field.optional and self.mutuallyAssignable(field.type_idx, literal_type)) {
+                    in_then = true;
+                    in_else = false;
+                } else if (self.env.isAssignableTo(literal_type, field.type_idx)) {
+                    in_then = true;
                 }
             }
-            break :blk null_type_idx;
-        };
-        if (matched == null_type_idx) return null;
+            if (in_then) {
+                then_slots[then_len] = candidate;
+                then_len += 1;
+            }
+            if (in_else) {
+                else_slots[else_len] = candidate;
+                else_len += 1;
+            }
+        }
+        if (then_len == 0) return null;
+
+        const then_type = pool.addUnion(self.allocator, then_slots[0..then_len]);
+        const else_type = if (else_len == 0)
+            null_type_idx
+        else
+            pool.addUnion(self.allocator, else_slots[0..else_len]);
 
         if (op == .strict_eq) {
-            // x.prop === "literal": then-branch narrows to matched member,
-            // else_type is the union with matched excluded (for after early return)
-            const excluded = self.env.pool.excludeUnionMember(self.allocator, current, matched);
+            // x.prop === "literal": then-branch narrows to the members that can
+            // hold the literal; else_type is what remains after an early return.
             return .{
                 .key = key,
-                .narrowed_type = matched,
+                .narrowed_type = then_type,
                 .negated = false,
-                .else_type = excluded,
-            };
-        } else {
-            // x.prop !== "literal": narrow to union excluding the matched member
-            const excluded = self.env.pool.excludeUnionMember(self.allocator, current, matched);
-            if (excluded == null_type_idx) return null;
-            return .{
-                .key = key,
-                .narrowed_type = excluded,
-                .negated = false,
-                .else_type = matched,
+                .else_type = else_type,
             };
         }
+        // x.prop !== "literal": narrow to the members that can differ.
+        if (else_type == null_type_idx) return null;
+        return .{
+            .key = key,
+            .narrowed_type = else_type,
+            .negated = false,
+            .else_type = then_type,
+        };
     }
 
     /// Check if a branch unconditionally returns (simple check for early-return pattern).
@@ -8848,13 +8994,11 @@ test "admitted tests combine with && and !" {
     );
 }
 
-test "a test over an unknown parameter is admitted on its form, not its effect" {
-    // `typeof x === "object"` narrows nothing when the declared type is
-    // `unknown`, because `unknown` is not a union - and it is still exactly the
-    // test a predicate is allowed to be made of. Checking admission by asking
-    // whether a narrowing came out rejected this shape, which is the one the
-    // corpus writes.
-    try checkTypedSource(
+test "a typeof object test over unknown does not back an object claim" {
+    // `typeof null === "object"`, so `typeof x === "object"` over `unknown`
+    // does not prove `object`. The test is well formed, and the claim is
+    // refused because the test does not prove it.
+    try expectOnlyDiagnostic(
         \\function isObject(x: unknown): x is object {
         \\    return typeof x === "object";
         \\}
@@ -8865,10 +9009,7 @@ test "a test over an unknown parameter is admitted on its form, not its effect" 
         \\    }
         \\    return Response.json({ ok: false });
         \\}
-    ,
-        0,
-        null,
-    );
+    , .invalid_type_predicate);
 }
 
 // T1 (D21): a call in a member base, a computed key, or a spread operand.
@@ -10083,4 +10224,226 @@ test "function value: a record holding a function is refused at a number field" 
         \\  return 1;
         \\}
     , .type_mismatch);
+}
+
+// F2 (2026-11-02): a predicate is admitted only when the type its test proves
+// is assignable to the type it claims.
+
+test "predicate claim: a test that proves number does not back a string claim" {
+    try expectOnlyDiagnostic(
+        \\function isStr(x: unknown): x is string {
+        \\    return typeof x === "number";
+        \\}
+    , .invalid_type_predicate);
+}
+
+test "predicate claim: a test that proves string backs a string claim over unknown" {
+    try expectNoDiagnostics(
+        \\function isStr(x: unknown): x is string {
+        \\    return typeof x === "string";
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const raw: unknown = "a";
+        \\    if (isStr(raw)) {
+        \\        const s: string = raw;
+        \\        return Response.json({ s: s });
+        \\    }
+        \\    return Response.json({ ok: true });
+        \\}
+    );
+}
+
+test "predicate claim: a discriminant test for the other member does not back the claim" {
+    try expectOnlyDiagnostic(
+        \\structural A = { kind: "a", n: number };
+        \\function isA(v: { kind: "a", n: number } | { kind: "b", s: string }): v is A {
+        \\    return v.kind === "b";
+        \\}
+    , .invalid_type_predicate);
+}
+
+test "predicate claim: a discriminant test for the claimed member is admitted and narrows" {
+    try expectNoDiagnostics(
+        \\structural A = { kind: "a", n: number };
+        \\function isA(v: { kind: "a", n: number } | { kind: "b", s: string }): v is A {
+        \\    return v.kind === "a";
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const raw: { kind: "a", n: number } | { kind: "b", s: string } = { kind: "a", n: 1 };
+        \\    if (isA(raw)) {
+        \\        const a: A = raw;
+        \\        return Response.json({ n: a.n });
+        \\    }
+        \\    return Response.json({ ok: true });
+        \\}
+    );
+}
+
+test "predicate claim: a negated typeof test backs the other member of a union" {
+    try expectNoDiagnostics(
+        \\function isNum(v: string | number): v is number {
+        \\    return !(typeof v === "string");
+        \\}
+    );
+}
+
+test "predicate claim: a disjunction proves the union of its sides" {
+    try expectNoDiagnostics(
+        \\function isSN(x: unknown): x is string | number {
+        \\    return typeof x === "string" || typeof x === "number";
+        \\}
+    );
+}
+
+test "predicate claim: an equality with a literal proves that literal" {
+    try expectNoDiagnostics(
+        \\function isA(x: string): x is "a" {
+        \\    return x === "a";
+        \\}
+    );
+}
+
+test "predicate claim: Array.isArray over unknown does not back a string array claim" {
+    try expectOnlyDiagnostic(
+        \\function isArr(x: unknown): x is string[] {
+        \\    return Array.isArray(x);
+        \\}
+    , .invalid_type_predicate);
+}
+
+test "predicate claim: a refused predicate installs no narrowing at its call site" {
+    // ZTS211 for the predicate, ZTS200 for `const s: string = v` because the
+    // refused predicate narrows nothing.
+    const seen = try typedDiagnostics(std.testing.allocator,
+        \\function isStr(x: unknown): x is string {
+        \\    return typeof x === "number";
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const v: string | number = 7;
+        \\    if (isStr(v)) {
+        \\        const s: string = v;
+        \\        return Response.json({ s: s });
+        \\    }
+        \\    return Response.json({ ok: true });
+        \\}
+    , false);
+    defer freeSeenDiagnostics(std.testing.allocator, seen);
+    try std.testing.expectEqual(@as(usize, 2), seen.len);
+    try std.testing.expectEqual(@as(usize, 1), countKind(seen, .invalid_type_predicate));
+    try std.testing.expectEqual(@as(usize, 1), countKind(seen, .type_mismatch));
+}
+
+// A literal discriminant test selects every member that can hold the literal,
+// reads named records and aliases of unions, and keeps the original members.
+
+test "discriminant guard: members sharing the discriminant value are all kept" {
+    // Both members have `kind: "a"`, so the then-branch is either one and
+    // `v.n` is not proven. The guard took the first match and read `n` as a
+    // number.
+    try expectOnlyDiagnostic(
+        \\function pick(v: { kind: "a", n: number } | { kind: "a", s: string }): number {
+        \\    if (v.kind === "a") {
+        \\        const k: number = v.n;
+        \\        return k;
+        \\    }
+        \\    return 0;
+        \\}
+    , .type_mismatch);
+}
+
+test "discriminant guard: a member with a wider field stays in the then-branch" {
+    try expectOnlyDiagnostic(
+        \\function pick(v: { kind: "a", n: number } | { kind: string, s: string }): number {
+        \\    if (v.kind === "a") {
+        \\        const k: number = v.n;
+        \\        return k;
+        \\    }
+        \\    return 0;
+        \\}
+    , .type_mismatch);
+}
+
+test "discriminant guard: a member with an optional discriminant stays in the else-branch" {
+    // `kind?: "a"` can be absent, so `v.kind === "a"` can be false for that
+    // member, and the code after the early return can still hold it.
+    try expectOnlyDiagnostic(
+        \\function pick(v: { kind?: "a", n: number } | { kind: "b", s: string }): number {
+        \\    if (v.kind === "a") {
+        \\        return 0;
+        \\    }
+        \\    const k: string = v.s;
+        \\    return 1;
+        \\}
+    , .type_mismatch);
+}
+
+test "discriminant guard: named records narrow in the then-branch" {
+    try expectNoDiagnostics(
+        \\structural A = { kind: "a", n: number };
+        \\structural B = { kind: "b", s: string };
+        \\function f(v: A | B): number {
+        \\    if (v.kind === "a") {
+        \\        const a: A = v;
+        \\        return a.n;
+        \\    }
+        \\    return 0;
+        \\}
+    );
+}
+
+test "discriminant guard: named records narrow after an early return" {
+    try expectNoDiagnostics(
+        \\structural A = { kind: "a", n: number };
+        \\structural B = { kind: "b", s: string };
+        \\function f(v: A | B): number {
+        \\    if (v.kind === "a") {
+        \\        return 1;
+        \\    }
+        \\    const b: B = v;
+        \\    return b.s.length;
+        \\}
+    );
+}
+
+test "discriminant guard: an alias of a union of named records narrows" {
+    try expectNoDiagnostics(
+        \\structural A = { kind: "a", n: number };
+        \\structural B = { kind: "b", s: string };
+        \\structural AB = A | B;
+        \\function f(v: AB): number {
+        \\    if (v.kind === "a") {
+        \\        const a: A = v;
+        \\        return a.n;
+        \\    }
+        \\    return 0;
+        \\}
+    );
+}
+
+test "predicate claim: a discriminant test over named records is admitted and narrows" {
+    try expectNoDiagnostics(
+        \\structural A = { kind: "a", n: number };
+        \\structural B = { kind: "b", s: string };
+        \\function isA(v: A | B): v is A {
+        \\    return v.kind === "a";
+        \\}
+        \\function handler(req: Request): Response {
+        \\    const raw: A | B = { kind: "a", n: 1 };
+        \\    if (isA(raw)) {
+        \\        const a: A = raw;
+        \\        return Response.json({ n: a.n });
+        \\    }
+        \\    return Response.json({ ok: true });
+        \\}
+    );
+}
+
+test "predicate claim: a discriminant shared by two members does not back a one-member claim" {
+    try expectOnlyDiagnostic(
+        \\structural A1 = { kind: "a", n: number };
+        \\structural A2 = { kind: "a", s: string };
+        \\function isA1(v: A1 | A2): v is A1 {
+        \\    return v.kind === "a";
+        \\}
+    , .invalid_type_predicate);
 }
