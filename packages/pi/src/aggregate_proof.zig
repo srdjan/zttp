@@ -382,7 +382,9 @@ fn markReachableChanges(
         .skip_contract = true,
     });
     defer front_end.deinit(allocator);
-    if (front_end.parse_errors > 0) return;
+    // A refused file or module graph has no paths to follow. The check of each
+    // root reports the coded refusal.
+    if (front_end.parse_errors > 0 or front_end.link_errors > 0) return;
     const module_paths = try zts_cli.precompile.discoverModulePaths(allocator, source, root_path);
     defer zts_cli.precompile.freeModulePaths(allocator, module_paths);
     for (module_paths) |module_path| {
@@ -475,12 +477,19 @@ fn appendCheckDiagnostics(
     materialized_root: []const u8,
     diagnostics: anytype,
 ) !void {
+    // A module graph refusal names its modules by path, and each side of the
+    // proof has its own scratch root. Without the root, a refusal reads the same
+    // on both sides and in each run.
+    const scratch_prefix = try std.fmt.allocPrint(allocator, "{s}/", .{materialized_root});
+    defer allocator.free(scratch_prefix);
     for (diagnostics) |diagnostic| {
         const file = if (std.fs.path.isAbsolute(diagnostic.file) and common.isPathInsideRoot(materialized_root, diagnostic.file))
             common.relativeToRoot(materialized_root, diagnostic.file)
         else
             diagnostic.file;
-        try appendDiagnostic(allocator, out, file, diagnostic.code, diagnostic.severity, diagnostic.message);
+        const message = try std.mem.replaceOwned(u8, allocator, diagnostic.message, scratch_prefix, "");
+        defer allocator.free(message);
+        try appendDiagnostic(allocator, out, file, diagnostic.code, diagnostic.severity, message);
     }
 }
 
@@ -835,9 +844,8 @@ test "only a new failed full analysis rejects an edit" {
     try testing.expectEqualStrings("analysis_incomplete", rejected.code);
 }
 
-/// Prove an edit that replaces `src/handler.ts` with an empty file and return
-/// whether the aggregate proof rejected it.
-fn replacedHandlerIsRejected(baseline_source: []const u8, candidate_source: []const u8) !bool {
+/// Prove an edit that replaces `src/handler.ts`. The caller owns the result.
+fn replaceHandlerAndProve(baseline_source: []const u8, candidate_source: []const u8) !Result {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(testing.io, "src");
@@ -854,7 +862,12 @@ fn replacedHandlerIsRejected(baseline_source: []const u8, candidate_source: []co
     defer prepared.deinit(testing.allocator);
     var snapshot = try workspace_snapshot.Snapshot.capture(testing.allocator, &prepared);
     defer snapshot.deinit(testing.allocator);
-    var result = try prove(testing.allocator, &prepared, &snapshot);
+    return prove(testing.allocator, &prepared, &snapshot);
+}
+
+/// Whether the aggregate proof rejects an edit that replaces `src/handler.ts`.
+fn replacedHandlerIsRejected(baseline_source: []const u8, candidate_source: []const u8) !bool {
+    var result = try replaceHandlerAndProve(baseline_source, candidate_source);
     defer result.deinit(testing.allocator);
     return result == .rejected;
 }
@@ -886,4 +899,31 @@ test "aggregate proof rejects a lost handler when both sides stop before the con
         "const n: number = \"x\";\n" ++
             "function helper(): string { return \"old\"; }\n",
     ));
+}
+
+const handler_without_imports =
+    "export function handler(req: Request): Response {\n  return Response.text(\"old\");\n}\n";
+
+fn handlerWithMissingImport(comptime text: []const u8) []const u8 {
+    return "import { f } from \"./missing.ts\";\n" ++
+        "export function handler(req: Request): Response {\n  return Response.text(\"" ++ text ++ "\");\n}\n";
+}
+
+test "aggregate proof accepts an edit when both sides carry the same module graph refusal" {
+    // Each side of the proof has its own scratch root. The refusal must read
+    // the same on both, or a refusal that the edit did not add rejects the edit.
+    var result = try replaceHandlerAndProve(handlerWithMissingImport("old"), handlerWithMissingImport("new"));
+    defer result.deinit(testing.allocator);
+    try testing.expect(result == .accepted);
+}
+
+test "aggregate proof reports a new module graph refusal by its workspace path" {
+    var result = try replaceHandlerAndProve(handler_without_imports, handlerWithMissingImport("new"));
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("ZTS063", result.rejected.code);
+    try testing.expectEqualStrings(
+        "aggregate proof rejected src/handler.ts: ZTS063: Module 'src/handler.ts' imports './missing.ts', " ++
+            "but that file cannot be read. Check the path and the file name.",
+        result.rejected.message,
+    );
 }
