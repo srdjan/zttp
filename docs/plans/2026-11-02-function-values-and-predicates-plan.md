@@ -191,3 +191,7 @@ The roadmap lists these under Current Limitations, with the probe results:
 - A member read on a union of named records passes when one member has no such field.
 - A discriminant test treats a record without the field as a value where the test is false, and a record with an extra field breaks that assumption.
 - `if (r.ok)` does not narrow a union of named records, and `typeof x === "object"` does not narrow `unknown`.
+
+### Final gate
+
+At `f4bdd3b3`, each from a new empty `ZIG_LOCAL_CACHE_DIR` and with no provider key: `zig build test` exited 0, and `bash scripts/verify.sh` exited 0 with "all per-commit gates passed". The host load average was 13 to 28 during the run. `bench-check` did not run, because no unit changed runtime code. Nothing was pushed.
