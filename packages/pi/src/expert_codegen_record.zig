@@ -812,11 +812,9 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        // The 2026-10-27 recording first failed at ZTS203, then reached green.
+        // The 2026-11-01 recording first failed at ZTS203, then reached green.
         .expect_first_attempt_green = false,
-        // The 2026-10-29 recording ended on a ZTS056 refusal, so the committed
-        // handler does not do the task.
-        .expect_committed_intent_pass = false,
+        .expect_committed_intent_pass = true,
     },
     .{
         .name = "jwt-auth",
@@ -850,7 +848,8 @@ const record_corpus = [_]RecordCase{
         // meant to measure. Asking for raw claims and accepting a confirmation
         // instead would count a dropped requirement as convergence, which the
         // phase-7 gate explicitly forbids.
-        .expect_first_attempt_green = true,
+        // The 2026-11-01 recording first failed at ZTS049, then reached green.
+        .expect_first_attempt_green = false,
         .expect_committed_intent_pass = true,
     },
     .{
@@ -928,7 +927,8 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        .expect_first_attempt_green = true,
+        // The 2026-11-01 recording first failed at ZTS056, then reached green.
+        .expect_first_attempt_green = false,
     },
     .{
         // Fence: a read from mutable module state is its own varying source,
@@ -1031,7 +1031,7 @@ const record_corpus = [_]RecordCase{
             \\
             ,
         },
-        // The 2026-10-27 recording first failed at ZTS207 and missed its intent.
+        // The 2026-11-01 recording applied no edit and missed its intent.
         .expect_first_attempt_green = false,
         .expect_committed_intent_pass = false,
     },
@@ -1262,7 +1262,7 @@ const record_corpus = [_]RecordCase{
             ,
         },
         .mode = .holes,
-        // The 2026-10-27 recording applied no edit and missed its intent.
+        // The 2026-11-01 recording applied no edit and missed its intent.
         .expect_first_attempt_green = false,
         .expect_committed_intent_pass = false,
     },
@@ -2505,11 +2505,12 @@ fn coverageBaseline(
     headline_input: evidence_identity.HeadlineInputIdentity,
 ) ?CoverageBaseline {
     if (provider != headline_provider or !std.mem.eql(u8, model, headline_model) or
-        !std.mem.eql(u8, headline_input.slice(), "db16cf2221a6fcc63c7b8cdfbee2c3df52bcad54c5ddf9bf59ba0670e7bc189e"))
+        !std.mem.eql(u8, headline_input.slice(), "91c9e8aaf5e4fed0b828dc417f5eb4931a99cf56499abab1e6d16c9a90874d89"))
         return null;
-    // The 2026-10-29 recording trips ZTS400 (sibling-helper-holes) and, outside
-    // the registry, ZTS056 and ZTS001. Its handlers leave no proof
-    // spec undischarged, so ZTS500 and ZTS502 appear only in the published union.
+    // The 2026-11-01 recording trips ZTS400 (sibling-helper) and, outside the
+    // registry, ZTS001, ZTS002, ZTS049, ZTS050, ZTS056, ZTS202, and ZTS203. Its
+    // handlers leave no proof spec undischarged, so ZTS500 and ZTS502 appear
+    // only in the published union.
     return .{ .minimum_rules = &.{"ZTS400"} };
 }
 
