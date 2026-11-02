@@ -129,6 +129,7 @@ packages/zts/src/type_checker.zig addDiagnostic catch-block
 packages/zts/src/type_checker.zig admitOneTypePredicate catch-poison
 packages/zts/src/type_checker.zig bindCallableMetadata catch-block
 packages/zts/src/type_checker.zig bindForOfElement catch-poison
+packages/zts/src/type_checker.zig bindForOfElement catch-poison@2
 packages/zts/src/type_checker.zig bindPatternBindings catch-poison
 packages/zts/src/type_checker.zig bindVarDeclaration catch-poison
 # A file import whose table write fails stays unrecorded: an import with no callable
@@ -151,13 +152,16 @@ packages/zts/src/type_checker.zig walkStmt catch-poison
 
 # The A3 records and bindings below follow the same rule: each catch sets the
 # checker's poison flag, which ensureHealthy reports before a build can use the
-# types. A dropped absent-read record, opaque pattern binding, callback element
-# type, or narrowing arm is therefore a failed build, never a reported pass.
-packages/zts/src/type_checker.zig bindCallbackElement catch-poison
-packages/zts/src/type_checker.zig bindCallbackElement catch-poison@2
+# types. A dropped absent-read record, opaque pattern binding, callback parameter,
+# range loop variable, or reduce-accumulator diagnostic,
+# or narrowing arm is therefore a failed build, never a reported pass.
+packages/zts/src/type_checker.zig bindCallbackParam catch-poison
+packages/zts/src/type_checker.zig bindCallbackParam catch-poison@2
 packages/zts/src/type_checker.zig markOpaqueBinding catch-poison
 packages/zts/src/type_checker.zig markOpaqueBinding catch-poison@2
 packages/zts/src/type_checker.zig recordAbsentReceiver catch-poison
+packages/zts/src/type_checker.zig reportReduceAccumulator catch-block
+packages/zts/src/type_checker.zig reportReduceAccumulator catch-block@2
 packages/zts/src/type_checker.zig walkMatchWithNarrowing catch-poison
 packages/zts/src/type_checker.zig walkMatchWithNarrowing catch-poison@2
 

@@ -1878,6 +1878,10 @@ pub const TypeEnv = struct {
         try self.var_types_by_binding.put(self.allocator, packBindingNameKey(scope_id, name_atom), type_idx);
     }
 
+    pub fn unbindVarType(self: *TypeEnv, scope_id: u16, name_atom: u16) void {
+        _ = self.var_types_by_binding.remove(packBindingNameKey(scope_id, name_atom));
+    }
+
     pub fn getVarTypeByBinding(self: *const TypeEnv, scope_id: u16, name_atom: u16) ?TypeIndex {
         return self.var_types_by_binding.get(packBindingNameKey(scope_id, name_atom));
     }

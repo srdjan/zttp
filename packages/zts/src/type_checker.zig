@@ -982,6 +982,12 @@ pub const TypeChecker = struct {
     /// Record the type of a for-of element variable when the iterable is an
     /// array. Any other iterable leaves the variable untyped, as before.
     fn bindForOfElement(self: *TypeChecker, fi: Node.ForIterStmt) void {
+        // `range(...)` returns a lazy iterator of integers (`globalRange`).
+        // Only the builtin counts: a parameter named `range` is another binding.
+        if (self.isBuiltinRangeCall(fi.iterable)) {
+            self.binding_types.put(self.allocator, bindingKey(fi.binding), self.env.pool.idx_number) catch self.markAllocationFailure();
+            return;
+        }
         const iterable = self.env.resolveRef(self.inferType(fi.iterable));
         if (iterable == null_type_idx) return;
         const array = self.env.pool.unwrapNominal(iterable);
@@ -989,6 +995,13 @@ pub const TypeChecker = struct {
         const element = self.env.pool.getArrayElement(array);
         if (element == null_type_idx) return;
         self.binding_types.put(self.allocator, bindingKey(fi.binding), element) catch self.markAllocationFailure();
+    }
+
+    fn isBuiltinRangeCall(self: *const TypeChecker, node: NodeIndex) bool {
+        if (self.ir_view.getTag(node) != .call) return false;
+        const call = self.ir_view.getCall(node) orelse return false;
+        const name = self.builtinGlobalName(call.callee) orelse return false;
+        return std.mem.eql(u8, name, "range");
     }
 
     /// Walk a nested function's body in its own narrow scope and discard what
@@ -4298,26 +4311,51 @@ pub const TypeChecker = struct {
         return self.env.getFnSigByName(name);
     }
 
-    /// An unannotated first parameter of an array callback (`map`, `filter`,
-    /// `find`, `findIndex`, `forEach`, `some`, `every`, `flatMap`) takes the
-    /// receiver's element type, so a read of it is checked like any other.
+    /// How the runtime calls the inline callback of an array method, which
+    /// decides the parameters that the checker can type.
+    const CallbackShape = enum {
+        /// `(element, index, array)`: `map`, `filter`, `find`, `findIndex`,
+        /// `forEach`, `some`, and `every`.
+        element_index_array,
+        /// Only the element is typed. `flatMap` is not installed.
+        element_only,
+        /// `toSorted` calls its comparator with two elements.
+        comparator,
+        /// `reduce` calls `(accumulator, element, index, array)`.
+        reduce,
+    };
+
+    fn callbackShape(name: []const u8) ?CallbackShape {
+        const element_index_array = [_][]const u8{ "map", "filter", "find", "findIndex", "forEach", "some", "every" };
+        for (element_index_array) |m| {
+            if (std.mem.eql(u8, m, name)) return .element_index_array;
+        }
+        if (std.mem.eql(u8, name, "flatMap")) return .element_only;
+        if (std.mem.eql(u8, name, "toSorted")) return .comparator;
+        if (std.mem.eql(u8, name, "reduce")) return .reduce;
+        return null;
+    }
+
+    /// An unannotated parameter of an inline array callback takes the type of
+    /// the value that the runtime passes in its position, so a read of it is
+    /// checked like any other. The switch below lists the positions.
+    ///
+    /// Annotations are stored compactly: the signature of a function holds
+    /// the annotated parameters only, with no position. A callback with any
+    /// annotation therefore binds nothing here, because the annotation cannot
+    /// be told from a gap. An annotation wins.
     fn bindCallbackElement(self: *TypeChecker, c: Node.CallExpr) void {
         if (c.args_count == 0) return;
         const callee_tag = self.ir_view.getTag(c.callee) orelse return;
         if (callee_tag != .member_access) return;
         const member = self.ir_view.getMember(c.callee) orelse return;
         const name = self.resolveAtomName(member.property) orelse return;
-        const methods = [_][]const u8{ "map", "filter", "find", "findIndex", "forEach", "some", "every", "flatMap" };
-        var known = false;
-        for (methods) |m| {
-            if (std.mem.eql(u8, m, name)) known = true;
-        }
-        if (!known) return;
+        const shape = callbackShape(name) orelse return;
         const pool = self.env.pool;
         const previous = self.report_inference_diagnostics;
         self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
         const raw = self.inferType(member.object);
-        self.report_inference_diagnostics = previous;
         if (raw == null_type_idx) return;
         var arr = pool.unwrapNominal(self.env.resolveRef(raw));
         const tag = pool.getTag(arr) orelse return;
@@ -4330,12 +4368,102 @@ pub const TypeChecker = struct {
         const func = self.ir_view.getFunction(arg) orelse return;
         if (func.params_count == 0) return;
         if (self.sourceFunctionSignature(arg)) |sig| {
-            if (sig.param_count > 0 and sig.param_types[0] != null_type_idx) return;
+            if (sig.param_count > 0) return;
         }
-        const param_idx = self.ir_view.getListIndex(func.params_start, 0);
-        const binding = self.ir_view.paramBinding(param_idx) orelse return;
-        self.param_types.put(self.allocator, bindingKey(binding), elem) catch self.markAllocationFailure();
-        self.env.bindVarType(binding.scope_id, binding.name_atom, elem) catch self.markAllocationFailure();
+        switch (shape) {
+            .element_index_array => {
+                _ = self.bindCallbackParam(func, 0, elem);
+                _ = self.bindCallbackParam(func, 1, pool.idx_number);
+                _ = self.bindCallbackParam(func, 2, arr);
+            },
+            .element_only => _ = self.bindCallbackParam(func, 0, elem),
+            .comparator => {
+                _ = self.bindCallbackParam(func, 0, elem);
+                _ = self.bindCallbackParam(func, 1, elem);
+            },
+            .reduce => {
+                _ = self.bindCallbackParam(func, 1, elem);
+                _ = self.bindCallbackParam(func, 2, pool.idx_number);
+                _ = self.bindCallbackParam(func, 3, arr);
+                self.bindReduceAccumulator(c, arg, func, elem);
+            },
+        }
+    }
+
+    /// Bind parameter `position` of `func` to `type_idx`. Returns the binding,
+    /// or null when the function has no such parameter.
+    fn bindCallbackParam(self: *TypeChecker, func: ir.Node.FunctionExpr, position: u16, type_idx: TypeIndex) ?ir.BindingRef {
+        if (position >= func.params_count) return null;
+        const param_idx = self.ir_view.getListIndex(func.params_start, position);
+        const binding = self.ir_view.paramBinding(param_idx) orelse return null;
+        self.param_types.put(self.allocator, bindingKey(binding), type_idx) catch self.markAllocationFailure();
+        self.env.bindVarType(binding.scope_id, binding.name_atom, type_idx) catch self.markAllocationFailure();
+        return binding;
+    }
+
+    fn unbindCallbackParam(self: *TypeChecker, binding: ir.BindingRef) void {
+        _ = self.param_types.remove(bindingKey(binding));
+        self.env.unbindVarType(binding.scope_id, binding.name_atom);
+    }
+
+    /// The runtime passes the accumulator of `reduce` as the initial value
+    /// first, and as each callback result after that. The widened initial
+    /// value type (the element type when there is no initial value) describes
+    /// the accumulator on every call only when the callback returns a value
+    /// of that type. So the checker binds the accumulator to that type, reads
+    /// the callback's return type under the binding, and keeps the binding
+    /// only when the return type is known and assignable to it. A return type
+    /// that is not assignable is reported (ZTS200). A return type that is not
+    /// known leaves the accumulator untyped.
+    fn bindReduceAccumulator(self: *TypeChecker, c: Node.CallExpr, arg: NodeIndex, func: ir.Node.FunctionExpr, elem: TypeIndex) void {
+        const pool = self.env.pool;
+        const seed_source = if (c.args_count >= 2) self.inferType(self.ir_view.getListIndex(c.args_start, 1)) else elem;
+        if (seed_source == null_type_idx) return;
+        const seed = pool.widenLiteral(seed_source);
+        if (!self.isDefiniteType(seed, 0)) return;
+        const binding = self.bindCallbackParam(func, 0, seed) orelse return;
+        const callback_type = self.functionExprType(arg);
+        const returned = if (callback_type == null_type_idx) null_type_idx else self.callbackReturnType(callback_type);
+        if (returned == null_type_idx) {
+            self.unbindCallbackParam(binding);
+            return;
+        }
+        if (self.env.isAssignableTo(returned, seed)) return;
+        self.unbindCallbackParam(binding);
+        self.reportReduceAccumulator(arg, returned, seed);
+    }
+
+    fn reportReduceAccumulator(self: *TypeChecker, callback: NodeIndex, returned: TypeIndex, accumulator: TypeIndex) void {
+        for (self.diagnostics.items) |existing| {
+            if (existing.node == callback and existing.kind == .type_mismatch) return;
+        }
+        var buf: [256]u8 = undefined;
+        const returned_str = self.env.pool.formatType(returned, buf[0..128]);
+        const accumulator_str = self.env.pool.formatType(accumulator, buf[128..256]);
+        const message = self.allocator.print(
+            "reduce callback returns '{s}', but its accumulator is '{s}'",
+            .{ returned_str, accumulator_str },
+        ) catch {
+            self.markAllocationFailure();
+            return;
+        };
+        const help = self.allocator.print(
+            "annotate the accumulator with a type that holds both, or return a '{s}'",
+            .{accumulator_str},
+        ) catch {
+            self.allocator.free(message);
+            self.markAllocationFailure();
+            return;
+        };
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .type_mismatch,
+            .node = callback,
+            .message = message,
+            .help = help,
+            .allocated = true,
+            .help_owned = true,
+        });
     }
 
     fn sourceFunctionSignature(
