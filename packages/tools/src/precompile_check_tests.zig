@@ -13,7 +13,7 @@ const formatProofCard = check_mod.formatProofCard;
 const appendExportCapsuleDiagnostics = check_mod.appendExportCapsuleDiagnostics;
 const imports_mod = @import("precompile_imports.zig");
 const ImportReader = imports_mod.ImportReader;
-const loadFlowModulesForCheck = imports_mod.loadFlowModulesForCheck;
+const flowModulesForSingleModule = imports_mod.flowModulesForSingleModule;
 const max_import_depth = imports_mod.max_import_depth;
 const ImportedFile = imports_mod.ImportedFile;
 const collectImportedFailableCalls = imports_mod.collectImportedFailableCalls;
@@ -3614,61 +3614,9 @@ const TracingImportReader = struct {
     }
 };
 
-test "retained flow modules keep per-read dependency revisions and stable owners" {
+test "flow loading of a single module borrows a virtual JavaScript parser and stays incomplete for a bare specifier" {
     const allocator = std.testing.allocator;
-    const handler_source =
-        \\import { outer as first } from "./a.ts";
-        \\import { outer as second } from "./a.ts";
-        \\function handler(req: Request): Response { return Response.text(first() + second()); }
-    ;
-    const parent =
-        \\import { inner } from "./b.ts";
-        \\export function outer(): string { return inner(); }
-    ;
-    const sources = [_][]const u8{
-        parent, "export function inner(): string { return \"first\"; }",
-        parent, "export function inner(): string { return \"second\"; }",
-    };
-    var reader: TracingImportReader = .{ .sources = &sources };
-    defer reader.deinit(allocator);
-    var source_owner: zts.DirectCheckSource = undefined;
-    try source_owner.initInPlace(allocator, allocator, handler_source, "/virtual/handler.ts");
-    defer source_owner.deinit();
-    const parsed = zts.parsedModuleFromDirectCheck(&source_owner) orelse return error.TestUnexpectedResult;
-    var facts = try zts.pipeline.buildModuleFacts(allocator, parsed, null);
-    defer facts.deinit();
-    var graph = try loadFlowModulesForCheck(allocator, parsed, handler_source, &facts, "/virtual/handler.ts", reader.reader());
-    defer graph.deinit();
-
-    try std.testing.expect(graph.complete);
-    try std.testing.expectEqual(@as(usize, 4), reader.paths.items.len);
-    const paths = [_][]const u8{ "/virtual/a.ts", "/virtual/b.ts", "/virtual/a.ts", "/virtual/b.ts" };
-    for (paths, reader.paths.items) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
-    try std.testing.expectEqual(@as(usize, 5), graph.views.items.len);
-    try std.testing.expectEqual(@as(usize, 2), graph.imported_effects.items.len);
-    try std.testing.expectEqualSlices(zts.pipeline.FlowModuleId, &.{ 2, 1, 4, 3, 0 }, graph.initialization_order.items);
-    // Identical parent bytes do not identify their reader-selected children.
-    try std.testing.expectEqualSlices(u8, &graph.views.items[1].revision, &graph.views.items[3].revision);
-    try std.testing.expect(!std.mem.eql(u8, &graph.views.items[2].revision, &graph.views.items[4].revision));
-    try std.testing.expectEqual(@as(zts.pipeline.FlowModuleId, 1), graph.views.items[0].imports[0].target.module);
-    try std.testing.expectEqual(@as(zts.pipeline.FlowModuleId, 3), graph.views.items[0].imports[1].target.module);
-    try std.testing.expectEqual(@as(zts.pipeline.FlowModuleId, 2), graph.views.items[1].imports[0].target.module);
-    try std.testing.expectEqual(@as(zts.pipeline.FlowModuleId, 4), graph.views.items[3].imports[0].target.module);
-    // The summary temporaries have been freed. Both independent ASTs,
-    // atom tables and capture tables must still be usable through the graph.
-    for (graph.views.items) |view| {
-        try std.testing.expectEqual(ir.NodeTag.program, view.ir_view.getTag(view.root).?);
-        try std.testing.expect(view.atoms == if (view.id == 0) &source_owner.atoms else &graph.owned.items[view.id - 1].file.source_owner.atoms);
-        for (view.imports) |edge| {
-            const target_view = graph.views.items[edge.target.module];
-            try std.testing.expect(target_view.ir_view.getFunction(edge.target.node) != null);
-        }
-    }
-}
-
-test "retained flow loading borrows a virtual JavaScript parser" {
-    const allocator = std.testing.allocator;
-    const source = "import { greet } from \"./a.ts\"; function handler(req) { return greet(); }";
+    const source = "import { greet } from \"lodash\"; function handler(req) { return greet(); }";
     var atoms = zts.AtomTable.init(allocator);
     defer atoms.deinit();
     var parser = try zts.parser.JsParser.initAdmission(allocator, allocator, source, .compile);
@@ -3680,44 +3628,74 @@ test "retained flow loading borrows a virtual JavaScript parser" {
     parsed.scopes = &parser.scopes;
     var facts = try zts.pipeline.buildModuleFacts(allocator, parsed, null);
     defer facts.deinit();
-    var reader: TracingImportReader = .{ .sources = &.{"export function greet(): string { return \"hello\"; }"} };
-    defer reader.deinit(allocator);
-    var graph = try loadFlowModulesForCheck(allocator, parsed, source, &facts, "/virtual/<handler>", reader.reader());
+    var graph = try flowModulesForSingleModule(allocator, parsed, source, &facts, "/virtual/<handler>");
     defer graph.deinit();
-    try std.testing.expect(graph.complete);
-    try std.testing.expectEqual(@as(usize, 1), reader.paths.items.len);
-    try std.testing.expectEqualStrings("/virtual/a.ts", reader.paths.items[0]);
-    try std.testing.expectEqual(@as(usize, 2), graph.views.items.len);
+    try std.testing.expect(!graph.complete);
+    try std.testing.expectEqual(@as(usize, 1), graph.views.items.len);
     try std.testing.expect(graph.views.items[0].atoms == &atoms);
     try std.testing.expectEqual(view.nodeCount(), graph.views.items[0].ir_view.nodeCount());
-    try std.testing.expectEqual(@as(usize, 1), graph.views.items[0].imports.len);
+    try std.testing.expectEqual(@as(usize, 0), graph.views.items[0].imports.len);
+    try std.testing.expectEqual(@as(usize, 0), graph.imported_effects.items.len);
+    try std.testing.expectEqualSlices(zts.pipeline.FlowModuleId, &.{0}, graph.initialization_order.items);
 }
 
-test "retained flow source loading preserves type-failure early stopping" {
+test "flow loading of a single module is complete when every import is a builtin" {
     const allocator = std.testing.allocator;
-    const handler_source =
-        \\import { outer } from "./a.ts";
-        \\function handler(req: Request): Response { return Response.text(outer()); }
+    const source =
+        \\import { env } from "zttp:env";
+        \\function handler(req: Request): Response { return Response.text(env("NAME") ?? ""); }
     ;
-    const failed_outer =
-        \\import { inner } from "./b.ts";
-        \\export function outer(): string { const value: number = "wrong"; return inner(); }
-    ;
-    var reader: TracingImportReader = .{ .sources = &.{failed_outer} };
-    defer reader.deinit(allocator);
     var source_owner: zts.DirectCheckSource = undefined;
-    try source_owner.initInPlace(allocator, allocator, handler_source, "/virtual/handler.ts");
+    try source_owner.initInPlace(allocator, allocator, source, "/virtual/handler.ts");
     defer source_owner.deinit();
     const parsed = zts.parsedModuleFromDirectCheck(&source_owner) orelse return error.TestUnexpectedResult;
     var facts = try zts.pipeline.buildModuleFacts(allocator, parsed, null);
     defer facts.deinit();
-    var graph = try loadFlowModulesForCheck(allocator, parsed, handler_source, &facts, "/virtual/handler.ts", reader.reader());
+    var graph = try flowModulesForSingleModule(allocator, parsed, source, &facts, "/virtual/handler.ts");
     defer graph.deinit();
-    try std.testing.expect(!graph.complete);
-    try std.testing.expectEqual(@as(usize, 1), reader.paths.items.len);
-    try std.testing.expectEqualStrings("/virtual/a.ts", reader.paths.items[0]);
-    try std.testing.expectEqual(@as(usize, 0), graph.views.items[0].imports.len);
+    try std.testing.expect(graph.complete);
+    try std.testing.expectEqual(@as(usize, 1), graph.views.items.len);
     try std.testing.expectEqualSlices(zts.pipeline.FlowModuleId, &.{0}, graph.initialization_order.items);
+}
+
+test "CHECK reads a shared dependency once in the graph and once in the fault scan" {
+    const allocator = std.testing.allocator;
+    const handler_source =
+        \\import { outer as first } from "./a.ts";
+        \\import { outer as second } from "./a.ts";
+        \\function handler(req: Request): Proof<Response, "no_secret_leakage" | "canonical"> {
+        \\  return Response.json({ a: first(), b: second() });
+        \\}
+        \\
+    ;
+    const parent =
+        \\import { inner } from "./b.ts";
+        \\export function outer(): string { return inner(); }
+        \\
+    ;
+    // The second read of b.ts is the one that the fault scan sees. It holds an
+    // unchecked fetch that the graph read did not contain.
+    const sources = [_][]const u8{
+        parent,
+        "export function inner(): string { return \"first\"; }\n",
+        parent,
+        "export function inner(): string { return \"second\"; }\n" ++ fault_unchecked_helper,
+    };
+    var reader: TracingImportReader = .{ .sources = &sources };
+    defer reader.deinit(allocator);
+
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, handler_source, "/virtual/handler.ts", .{
+        .json_mode = true,
+        .import_reader = reader.reader(),
+    });
+    defer result.deinit(allocator);
+
+    const expected_paths = [_][]const u8{ "/virtual/a.ts", "/virtual/b.ts", "/virtual/a.ts", "/virtual/b.ts" };
+    try std.testing.expectEqual(expected_paths.len, reader.paths.items.len);
+    for (expected_paths, reader.paths.items) |expected, actual| try std.testing.expectEqualStrings(expected, actual);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expect(result.imports_complete);
+    try std.testing.expect(!try faultCovered(&result));
 }
 
 test "CHECK keeps the reader trace for two names imported from one file" {

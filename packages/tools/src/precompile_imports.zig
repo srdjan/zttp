@@ -1,7 +1,8 @@
-//! Imported-file analysis for CHECK: the flow module graph, the imported
-//! effect collection, and the imported fault scan. The orchestrators that call
-//! these live in precompile.zig. D-006 binds the reader paths, calls, order,
-//! and revision selection of both traversals, not this file placement.
+//! Imported-file analysis for CHECK: the flow module graph and the imported
+//! fault scan. The orchestrators that call these live in precompile.zig. The
+//! flow modules of a handler with file imports come from the module graph
+//! (`flowModulesForGraph`); the fault scan reads each file through its own
+//! reader.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -15,20 +16,6 @@ const readFilePosix = zts.file_io.readFile;
 /// unresolved, which fails closed.
 pub const max_import_depth = 8;
 
-/// The files being summarized, outermost first. A file that imports itself,
-/// directly or through others, finds its own path here and stays unresolved.
-const ImportStack = struct {
-    paths: [max_import_depth][]const u8 = undefined,
-    len: usize = 0,
-
-    fn contains(self: *const ImportStack, path: []const u8) bool {
-        for (self.paths[0..self.len]) |open| {
-            if (std.mem.eql(u8, open, path)) return true;
-        }
-        return false;
-    }
-};
-
 /// Where the bytes of an imported file come from. A null reader means the
 /// working tree (`readFilePosix`). A caller that analyzes a revision other than
 /// the working tree passes a reader that serves that revision, so a helper is
@@ -41,9 +28,9 @@ pub const ImportReader = struct {
 };
 
 /// One imported file, read, prepared, parsed, and reduced to its module facts.
-/// Both import walkers (`scanImportedFileTree` for fault coverage and
-/// `analyzeImportedFunction` for flow) start here, so a change to how an
-/// imported file is loaded is one change.
+/// The import walkers (`scanImportedFileTree` for fault coverage and
+/// `scanSource`) start here, so a change to how an imported file is loaded is
+/// one change.
 ///
 /// Initialize in place with `load`. The parser holds a pointer to `atoms`, so
 /// the struct must not move after `load`.
@@ -158,32 +145,23 @@ pub fn scanSource(
     };
 }
 
-/// Retains the exact source snapshots observed by CHECK's flow reader. Repeated
-/// reads are deliberately not coalesced: a reader can serve a different nested
-/// dependency revision even when two parent files have identical bytes.
-/// Root parser storage remains borrowed from the caller; every helper parser,
-/// atom table, capture table and import edge stays owned until deinit.
+/// The modules that the flow checker follows, with the import edges between
+/// them and their initialization order. The entry is module 0 and borrows the
+/// parser of the caller. A module graph supplies the other modules from the
+/// parsers that code generation kept (`flowModulesForGraph`). Each capture table
+/// and import edge stays owned until deinit.
 pub const FlowModuleGraph = struct {
-    const Owned = struct {
-        path: []u8,
-        file: ImportedFile,
-        captures: zts.pipeline.FlowCaptureTable,
-        id: zts.pipeline.FlowModuleId,
-    };
-
     allocator: std.mem.Allocator,
     views: std.ArrayList(zts.pipeline.FlowModuleView) = .empty,
     initialization_order: std.ArrayList(zts.pipeline.FlowModuleId) = .empty,
-    /// Effects computed by this same traversal; using them must not reread
-    /// imports or borrow the independent fault scan's revision selection.
+    /// The effects of the imports of the entry. Empty for a single module.
     imported_effects: std.ArrayList(zts.pipeline.ImportedEffect) = .empty,
-    owned: std.ArrayList(*Owned) = .empty,
     /// Capture tables of the graph modules that `fromModuleGraph` borrows; this owns them.
     graph_captures: std.ArrayList(*zts.pipeline.FlowCaptureTable) = .empty,
     root_path: []u8,
     root_captures: *zts.pipeline.FlowCaptureTable,
-    /// A failed load, type check, cycle, depth or finite-ID bound must not turn
-    /// an unvisited module initializer into evidence that it is clean.
+    /// An import with no module to follow must not turn an unvisited module
+    /// initializer into evidence that it is clean.
     complete: bool = true,
 
     fn init(allocator: std.mem.Allocator, parsed: zts.pipeline.ParsedModule, source: []const u8, path: []const u8) !FlowModuleGraph {
@@ -218,13 +196,6 @@ pub const FlowModuleGraph = struct {
         self.views.deinit(allocator);
         self.initialization_order.deinit(allocator);
         self.imported_effects.deinit(allocator);
-        for (self.owned.items) |owner| {
-            owner.captures.deinit();
-            owner.file.deinit();
-            allocator.free(owner.path);
-            allocator.destroy(owner);
-        }
-        self.owned.deinit(allocator);
         for (self.graph_captures.items) |table| {
             table.deinit();
             allocator.destroy(table);
@@ -233,38 +204,6 @@ pub const FlowModuleGraph = struct {
         self.root_captures.deinit();
         allocator.destroy(self.root_captures);
         allocator.free(self.root_path);
-    }
-
-    fn load(self: *FlowModuleGraph, reader: ?ImportReader, path: []const u8) !?*Owned {
-        if (self.views.items.len > std.math.maxInt(zts.pipeline.FlowModuleId)) {
-            self.complete = false;
-            return null;
-        }
-        const allocator = self.allocator;
-        const owner = try allocator.create(Owned);
-        errdefer allocator.destroy(owner);
-        owner.path = try allocator.dupe(u8, path);
-        errdefer allocator.free(owner.path);
-        try owner.file.load(allocator, reader, owner.path);
-        errdefer owner.file.deinit();
-        owner.captures = try zts.pipeline.FlowCaptureTable.init(allocator, &owner.file.source_owner.parser.scopes);
-        errdefer owner.captures.deinit();
-        owner.id = @intCast(self.views.items.len);
-        var revision: [32]u8 = undefined;
-        std.crypto.hash.sha2.Sha256.hash(owner.file.source, &revision, .{});
-        try self.owned.ensureUnusedCapacity(allocator, 1);
-        try self.views.append(allocator, .{
-            .id = owner.id,
-            .path = owner.path,
-            .revision = revision,
-            .root = owner.file.root,
-            .ir_view = owner.file.view,
-            .atoms = &owner.file.source_owner.atoms,
-            .captures = &owner.captures,
-            .imports = &.{},
-        });
-        self.owned.appendAssumeCapacity(owner);
-        return owner;
     }
 
     fn finishModule(self: *FlowModuleGraph, id: zts.pipeline.FlowModuleId, targets: []const zts.pipeline.FlowImportTarget) !void {
@@ -280,7 +219,7 @@ pub const FlowModuleGraph = struct {
 /// so no file is read again. The initialization order follows `execution_order`,
 /// which lists a shared dependency once. A target that the flow evaluator cannot
 /// follow (a data export, a bare specifier) leaves `complete` false, the same
-/// rule that `loadFlowModulesForCheck` applies.
+/// rule that `flowModulesForSingleModule` applies.
 pub fn flowModulesForGraph(
     allocator: std.mem.Allocator,
     graph: *const zts.modules.ModuleGraph,
@@ -389,105 +328,32 @@ fn positionInOrder(graph: *const zts.modules.ModuleGraph, module_index: zts.modu
     return null;
 }
 
-/// Retain the production flow traversal's parser and capture owners. The
-/// fault reader remains independent, and explicit paths keep their read order.
-/// Extensionless imports use the owner-approved compiler `.ts` selection.
-/// A production caller must first pass CHECK's existing root admission,
-/// boolean, type, strict and handler-selection gates. This loader does not
-/// repeat or bypass those gates on the root source.
-pub fn loadFlowModulesForCheck(
+/// The flow modules of a handler with no file import: the entry alone.
+///
+/// A handler with a file import goes through `flowModulesForGraph`, so this
+/// function reads no file. An import that is neither a builtin nor resolved (a
+/// bare specifier) has no module to follow, so `complete` is false. The
+/// freestanding build has no module graph, so any import that is not a builtin
+/// leaves `complete` false there. A production caller must first pass the root
+/// admission, boolean, type, strict, and handler-selection gates of CHECK.
+pub fn flowModulesForSingleModule(
     allocator: std.mem.Allocator,
     parsed: zts.pipeline.ParsedModule,
     source: []const u8,
     facts: *const zts.pipeline.ModuleFacts,
     handler_path: []const u8,
-    reader: ?ImportReader,
 ) !FlowModuleGraph {
     var graph = try FlowModuleGraph.init(allocator, parsed, source, handler_path);
     errdefer graph.deinit();
-    var stack: ImportStack = .{};
-    stack.paths[0] = graph.root_path;
-    stack.len = 1;
-    var analyses = try collectImportedAnalyses(allocator, facts, handler_path, &stack, reader, &graph, 0);
-    defer analyses.deinit(allocator);
-    try graph.finishModule(0, analyses.targets.items);
-    graph.imported_effects = analyses.effects;
-    analyses.effects = .empty;
-    return graph;
-}
-
-/// The retained target and effect of one reader-selected imported export.
-const ImportedFunctionAnalysis = struct {
-    effect: zts.pipeline.ExportEffect = .blocked,
-    target: ?zts.pipeline.FlowFunctionRef = null,
-};
-
-const ImportedFunctionAnalyses = struct {
-    effects: std.ArrayList(zts.pipeline.ImportedEffect) = .empty,
-    targets: std.ArrayList(zts.pipeline.FlowImportTarget) = .empty,
-
-    fn deinit(self: *ImportedFunctionAnalyses, allocator: std.mem.Allocator) void {
-        self.effects.deinit(allocator);
-        self.targets.deinit(allocator);
-    }
-};
-
-fn collectImportedAnalyses(
-    allocator: std.mem.Allocator,
-    facts: *const zts.pipeline.ModuleFacts,
-    importer_path: []const u8,
-    stack: *ImportStack,
-    /// Where each imported file's bytes come from; null is the working tree.
-    reader: ?ImportReader,
-    graph: *FlowModuleGraph,
-    importer: zts.pipeline.FlowModuleId,
-) error{OutOfMemory}!ImportedFunctionAnalyses {
-    var out: ImportedFunctionAnalyses = .{};
-    errdefer out.deinit(allocator);
-    // Browser analysis receives one source buffer and has no filesystem. Keep
-    // the conservative empty answer while compiling the POSIX reader entirely
-    // out of the freestanding build.
-    if (comptime builtin.target.os.tag == .freestanding) {
-        for (facts.imports.items) |record| {
+    for (facts.imports.items) |record| {
+        if (comptime builtin.target.os.tag == .freestanding) {
             if (record.resolution != .builtin) graph.complete = false;
-        }
-        return out;
-    }
-
-    const base_dir = std.fs.path.dirname(importer_path) orelse ".";
-
-    for (facts.imports.items) |rec| {
-        if (rec.resolution != .unresolved) continue;
-        if (!std.mem.startsWith(u8, rec.module_specifier, "./") and
-            !std.mem.startsWith(u8, rec.module_specifier, "../"))
-        {
-            graph.complete = false;
-            continue;
-        }
-
-        const path = try resolveCheckImportPath(allocator, base_dir, rec.module_specifier);
-        defer allocator.free(path);
-
-        const imported = try analyzeImportedFunction(
-            allocator,
-            path,
-            rec.imported_name,
-            stack,
-            reader,
-            graph,
-        );
-        try out.effects.append(allocator, .{ .slot = rec.slot, .effect = imported.effect });
-        if (imported.target) |target| {
-            // ImportRecord is slot-keyed, but the interpreter uses the actual
-            // IR binding identity so a local with the same slot cannot match.
-            const view = graph.views.items[importer].ir_view;
-            if (importBindingKey(view, rec.slot)) |key|
-                try out.targets.append(allocator, .{ .binding_key = key, .target = target })
-            else
-                graph.complete = false;
+        } else {
+            if (record.resolution == .unresolved) graph.complete = false;
         }
     }
-    return out;
+    try graph.finishModule(0, &.{});
+    return graph;
 }
 
 const importBindingKey = zts.pipeline.flowImportBindingKey;
@@ -532,9 +398,7 @@ fn isRelativeSpecifier(specifier: []const u8) bool {
 }
 
 /// Scan the files that the handler imports for failable calls, for fault
-/// coverage (unit F2 of the R4 plan). The polarity is the opposite of
-/// `collectImportedAnalyses`: for the flow checker a missing entry is the
-/// conservative answer, and here a missing or partial answer would mean
+/// coverage (unit F2 of the R4 plan). A missing or partial answer would mean
 /// "scanned clean". So this returns one entry for every import record of the
 /// handler that is not a builtin, and every failure to reach a verdict is a
 /// blocking entry, never an omitted one.
@@ -692,104 +556,4 @@ fn scanImportedFileTree(
         }
     }
     return .clean;
-}
-
-/// Load one imported export and preserve the existing nested read order and
-/// type-failure stopping point. Effects use these same retained snapshots.
-fn analyzeImportedFunction(
-    allocator: std.mem.Allocator,
-    path: []const u8,
-    name: []const u8,
-    stack: *ImportStack,
-    reader: ?ImportReader,
-    graph: *FlowModuleGraph,
-) error{OutOfMemory}!ImportedFunctionAnalysis {
-    var result: ImportedFunctionAnalysis = .{};
-    if (stack.len >= max_import_depth or stack.contains(path)) {
-        graph.complete = false;
-        return result;
-    }
-    stack.paths[stack.len] = path;
-    stack.len += 1;
-    defer stack.len -= 1;
-
-    const retained_file = (graph.load(reader, path) catch |err| switch (err) {
-        error.OutOfMemory => return error.OutOfMemory,
-        else => {
-            graph.complete = false;
-            return result;
-        },
-    }) orelse return result;
-    const file = &retained_file.file;
-    const view = file.view;
-    const module_facts = &file.module_facts;
-
-    var type_env_storage: zts.pipeline.TypeEnvStorage = .{};
-    defer type_env_storage.deinit(allocator);
-    var type_check_clean = true;
-    const capabilities = file.source_owner.acceptedCapabilities() orelse return result;
-    type_env_storage.initWithSource(allocator, .{ .direct = .{
-        .store = capabilities.type_store,
-        .ir_view = capabilities.ir_view,
-        .atoms = capabilities.atoms,
-    } }) catch {
-        type_check_clean = false;
-    };
-    var type_checker: ?zts.TypeChecker = null;
-    defer if (type_checker) |*checker| checker.deinit();
-    if (type_check_clean) {
-        if (type_env_storage.envPtr()) |type_env| {
-            type_checker = zts.TypeChecker.init(allocator, view, capabilities.atoms, type_env);
-            type_checker.?.scopes = &file.source_owner.parser.scopes;
-            const type_errors = type_checker.?.check(file.root) catch blk: {
-                type_check_clean = false;
-                break :blk 0;
-            };
-            if (type_errors != 0) type_check_clean = false;
-            if (type_check_clean) {
-                type_checker.?.ensureHealthy() catch {
-                    type_check_clean = false;
-                };
-            }
-        }
-    }
-
-    // The helpers of this helper come first, so a call into one of them applies
-    // that file's sinks and effects to this file. A failed type check stops
-    // the collection early. Effects still inspect the loaded IR with every
-    // nested file import blocked, without reading another file.
-    var nested: ImportedFunctionAnalyses = if (type_check_clean)
-        try collectImportedAnalyses(allocator, module_facts, path, stack, reader, graph, retained_file.id)
-    else
-        .{};
-    defer nested.deinit(allocator);
-    if (!type_check_clean) {
-        for (module_facts.imports.items) |rec| {
-            if (rec.resolution != .unresolved or !isRelativeSpecifier(rec.module_specifier)) continue;
-            try nested.effects.append(allocator, .{ .slot = rec.slot, .effect = .blocked });
-        }
-    }
-
-    if (type_check_clean) {
-        const id = retained_file.id;
-        try graph.finishModule(id, nested.targets.items);
-        if (importedFunctionNode(view, capabilities.atoms, name)) |function_node|
-            result.target = .{ .module = id, .node = function_node }
-        else
-            graph.complete = false;
-    } else graph.complete = false;
-
-    var effects = zts.EffectAnalyzer.init(allocator, view, capabilities.atoms);
-    defer effects.deinit();
-    effects.facts = module_facts;
-    effects.type_source = if (type_check_clean)
-        .{ .direct = type_env_storage.envPtr().? }
-    else
-        .omitted;
-    effects.imported_effects = nested.effects.items;
-    effects.analyze(file.root) catch return result;
-    var exported = effects.exportEffects() catch return result;
-    defer exported.deinit(allocator);
-    result.effect = exported.lookup(name);
-    return result;
 }

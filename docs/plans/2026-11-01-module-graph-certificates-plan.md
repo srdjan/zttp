@@ -83,7 +83,7 @@ When the module graph is incomplete, the flow pass clears all six flow propertie
 
 `state_isolated`, `result_safe`, and `optional_safe` stay entry-only in `zttp check`. The contract in `zttp check` does not merge the inventories of each dependency.
 
-`packages/tools/src/precompile_imports.zig#loadFlowModulesForCheck` loads one view for each import record, so a shared module initializes twice in `zttp check`. The runtime initializes it once. The build input removes that difference, so a verdict can differ only where `zttp check` refuses and the build proves. That direction is safe.
+Before W4 of the check parity plan, `zttp check` loaded one view for each import record, so a shared module initialized twice. The runtime initializes it once, and `packages/tools/src/precompile_imports.zig#flowModulesForGraph` now loads each module once in `zttp check` too. The build input removes that difference, so a verdict can differ only where `zttp check` refuses and the build proves. That direction is safe.
 
 **Model-visible surface.** `packages/pi` calls `runCheckOnlyWithOptions` and `runCheckOnlyFromSourceWithOptions`, and never calls `compileHandler`. Compile-path work therefore moves no model text, with one route to avoid. `packages/pi/src/aggregate_proof.zig` calls `discoverModulePaths`, which runs `ModuleGraph.build`, and an error there reaches `proof_roots_failed` output. Unit G1 stays out of `build`.
 

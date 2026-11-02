@@ -19,7 +19,7 @@ const readFilePosix = zts.file_io.readFile;
 const imports_mod = @import("precompile_imports.zig");
 const ImportReader = imports_mod.ImportReader;
 const FlowModuleGraph = imports_mod.FlowModuleGraph;
-const loadFlowModulesForCheck = imports_mod.loadFlowModulesForCheck;
+const flowModulesForSingleModule = imports_mod.flowModulesForSingleModule;
 const collectImportedFailableCalls = imports_mod.collectImportedFailableCalls;
 const findHandlerFunction = zts.findHandlerFunction;
 const stderr_mod = @import("precompile_stderr.zig");
@@ -782,12 +782,12 @@ fn runCheckOnParsedSource(
     defer if (imported_graph) |*graph| graph.deinit();
     var verify_info: ?VerificationInfo = null;
     if (handler_fn) |hf| {
-        // Retain exactly the flow/effect reader's snapshots. The fault scan
-        // below still performs its own independent traversal and reads.
+        // A graph supplies the flow modules from the parsers that it compiled.
+        // The fault scan below performs its own independent traversal and reads.
         imported_graph = if (graph_check) |gc|
             try gc.flowModules()
         else
-            try loadFlowModulesForCheck(allocator, parsed, source, try analysis.facts(), handler_path, opts.import_reader);
+            try flowModulesForSingleModule(allocator, parsed, source, try analysis.facts(), handler_path);
         const graph = &imported_graph.?;
         result.imports_complete = graph.complete;
 

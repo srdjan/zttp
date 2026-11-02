@@ -101,7 +101,6 @@ pub const writeFilePosix = util.writeFilePosix;
 const imports_mod = @import("precompile_imports.zig");
 pub const ImportReader = imports_mod.ImportReader;
 pub const FlowModuleGraph = imports_mod.FlowModuleGraph;
-pub const loadFlowModulesForCheck = imports_mod.loadFlowModulesForCheck;
 pub const SourceScan = imports_mod.SourceScan;
 pub const scanSource = imports_mod.scanSource;
 const max_import_depth = imports_mod.max_import_depth;
