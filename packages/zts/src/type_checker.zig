@@ -33,6 +33,7 @@ const type_pool_mod = @import("type_pool.zig");
 const type_key = @import("type_key.zig");
 const type_env_mod = @import("type_env.zig");
 const abi_types = @import("abi_types.zig");
+const builtin_results = @import("builtin_results.zig");
 const match_analysis_mod = @import("match_analysis.zig");
 const ir_json_literal = @import("ir_json_literal.zig");
 const module_facts_mod = @import("module_facts.zig");
@@ -3210,7 +3211,7 @@ pub const TypeChecker = struct {
     fn inferMemberAccessType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         const member = self.ir_view.getMember(node) orelse return null_type_idx;
         const raw_obj_type = self.inferType(member.object);
-        if (raw_obj_type == null_type_idx) return null_type_idx;
+        if (raw_obj_type == null_type_idx) return self.inferBuiltinConstantType(member);
 
         // A field of a record type keeps a named type as a reference: the
         // `todo` of `{ todo: Todo }` is a `Todo` ref, not the record it names.
@@ -3282,6 +3283,11 @@ pub const TypeChecker = struct {
             }
 
             return self.env.pool.addUnion(self.allocator, field_types[0..count]);
+        }
+
+        if (std.mem.eql(u8, prop_name, "length")) {
+            const length = self.inferLengthType(obj_type);
+            if (length != null_type_idx) return length;
         }
 
         // Array (and tuple-typed array literal) receivers. A heterogeneous literal
@@ -3383,6 +3389,135 @@ pub const TypeChecker = struct {
         return null_type_idx;
     }
 
+    // -------------------------------------------------------------------
+    // Builtin results (`builtin_results.zig`)
+    // -------------------------------------------------------------------
+
+    /// The name of the builtin global that `node` reads, or null. The name
+    /// qualifies only when no declaration answers for it: the identifier is an
+    /// `undeclared_global` and has no type. A parameter, a local, a top-level
+    /// declaration, and an import of the same name are other bindings (T3). A
+    /// top-level declaration has the kind `global`, which a builtin never has,
+    /// so `global` does not qualify.
+    fn builtinGlobalName(self: *const TypeChecker, node: NodeIndex) ?[]const u8 {
+        if (self.ir_view.getTag(node) != .identifier) return null;
+        const binding = self.ir_view.getBinding(node) orelse return null;
+        if (binding.kind != .undeclared_global) return null;
+        if (self.inferType(node) != null_type_idx) return null;
+        return self.resolveAtomName(binding.name_atom);
+    }
+
+    /// The type of a read of an installed builtin constant, such as `Math.PI`.
+    fn inferBuiltinConstantType(self: *const TypeChecker, member: Node.MemberExpr) TypeIndex {
+        if (member.computed != null_node or member.is_optional) return null_type_idx;
+        const namespace = self.builtinGlobalName(member.object) orelse return null_type_idx;
+        const name = self.resolveAtomName(member.property) orelse return null_type_idx;
+        const row = builtin_results.find(.property, namespace, name) orelse return null_type_idx;
+        return self.builtinResultType(row.result);
+    }
+
+    fn builtinResultType(self: *const TypeChecker, result: builtin_results.Result) TypeIndex {
+        const pool = self.env.pool;
+        return switch (result) {
+            .number => pool.idx_number,
+            .boolean => pool.idx_boolean,
+            .string => pool.idx_string,
+            .string_array => pool.addArray(self.allocator, pool.idx_string),
+            .optional_string => pool.addNullable(self.allocator, pool.idx_string),
+            .undefined_value => pool.idx_undefined,
+        };
+    }
+
+    /// The type of `.length` on a receiver of type `receiver`: `number` for a
+    /// string (a literal receiver widens), an array, and a tuple, and null for
+    /// every other receiver.
+    fn inferLengthType(self: *const TypeChecker, receiver: TypeIndex) TypeIndex {
+        const pool = self.env.pool;
+        const tag = pool.getTag(pool.widenLiteral(receiver)) orelse return null_type_idx;
+        const scope = switch (tag) {
+            .t_string => "String.prototype",
+            .t_array, .t_tuple => "Array.prototype",
+            // exhaustive: every other receiver type has no `length` row, so the
+            // read stays untyped.
+            else => return null_type_idx,
+        };
+        const row = builtin_results.find(.property, scope, "length") orelse return null_type_idx;
+        return self.builtinResultType(row.result);
+    }
+
+    /// The result of calling `row` with the arguments of `call`, or null when
+    /// the result stays untyped (T1): the count is outside the runtime's range,
+    /// an argument is a spread, or an argument that the runtime reads as a
+    /// number or a string has no type or a type that is not assignable to
+    /// that parameter type.
+    fn builtinCallResult(self: *const TypeChecker, call: Node.CallExpr, row: builtin_results.Row) TypeIndex {
+        if (!row.acceptsCount(call.args_count)) return null_type_idx;
+        const pool = self.env.pool;
+        for (0..call.args_count) |position| {
+            const arg = self.ir_view.getListIndex(call.args_start, @intCast(position));
+            if (self.ir_view.getTag(arg) == .spread) return null_type_idx;
+            const param = row.paramAt(position) orelse return null_type_idx;
+            const required = switch (param) {
+                .any => continue,
+                .number => pool.idx_number,
+                .string => pool.idx_string,
+            };
+            const arg_type = self.inferType(arg);
+            if (arg_type == null_type_idx or pool.mentionsError(arg_type)) return null_type_idx;
+            if (!self.env.isAssignableTo(arg_type, required)) return null_type_idx;
+        }
+        return self.builtinResultType(row.result);
+    }
+
+    /// Whether `node` reads `headers` from a value of the `Request` type. The
+    /// type of `req.headers` is the opaque `object`, which a record with its own
+    /// `get` also satisfies, so a row applies only to the headers that the
+    /// runtime creates for a request, and not to any value typed `object`.
+    fn isRequestHeaders(self: *const TypeChecker, node: NodeIndex) bool {
+        if (self.ir_view.getTag(node) != .member_access) return false;
+        const member = self.ir_view.getMember(node) orelse return false;
+        if (member.computed != null_node or member.is_optional) return false;
+        const name = self.resolveAtomName(member.property) orelse return false;
+        if (!std.mem.eql(u8, name, "headers")) return false;
+        const holder = self.inferType(member.object);
+        if (holder == null_type_idx) return false;
+        const request = abi_types.requestType(self.env);
+        if (request == null_type_idx) return false;
+        return self.env.resolveRef(holder) == request;
+    }
+
+    /// The result of a call of a builtin member: a method of a builtin
+    /// namespace, of a string, or of the headers of a request.
+    fn inferBuiltinMemberCall(self: *const TypeChecker, call: Node.CallExpr) TypeIndex {
+        const callee = self.ir_view.getMember(call.callee) orelse return null_type_idx;
+        if (callee.computed != null_node or callee.is_optional) return null_type_idx;
+        const method = self.resolveAtomName(callee.property) orelse return null_type_idx;
+        if (self.builtinGlobalName(callee.object)) |namespace| {
+            const row = builtin_results.find(.call, namespace, method) orelse return null_type_idx;
+            return self.builtinCallResult(call, row);
+        }
+        if (self.isRequestHeaders(callee.object)) {
+            const row = builtin_results.find(.call, "Headers.prototype", method) orelse return null_type_idx;
+            return self.builtinCallResult(call, row);
+        }
+        const raw = self.inferType(callee.object);
+        if (raw == null_type_idx) return null_type_idx;
+        const pool = self.env.pool;
+        const receiver = pool.widenLiteral(pool.unwrapNominal(self.env.resolveRef(raw)));
+        if (pool.getTag(receiver) != .t_string) return null_type_idx;
+        const row = builtin_results.find(.call, "String.prototype", method) orelse return null_type_idx;
+        return self.builtinCallResult(call, row);
+    }
+
+    /// The result of a call of a builtin global function that no signature or
+    /// callable binding answers. A name qualifies only as `builtinGlobalName`
+    /// says.
+    fn inferBuiltinGlobalCall(self: *const TypeChecker, call: Node.CallExpr) TypeIndex {
+        const name = self.builtinGlobalName(call.callee) orelse return null_type_idx;
+        const row = builtin_results.find(.call, "global", name) orelse return null_type_idx;
+        return self.builtinCallResult(call, row);
+    }
+
     /// The `Response` type when `call` is one of the four constructors on the
     /// `Response` global, otherwise `null_type_idx`.
     ///
@@ -3410,7 +3545,9 @@ pub const TypeChecker = struct {
         if (callee_tag == .member_access) {
             const constructed = self.inferResponseConstructorType(call);
             if (constructed != null_type_idx) return constructed;
-            return self.inferFunctionReturnType(self.inferType(call.callee));
+            const declared = self.inferFunctionReturnType(self.inferType(call.callee));
+            if (declared != null_type_idx) return declared;
+            return self.inferBuiltinMemberCall(call);
         }
         if (callee_tag != .identifier) return null_type_idx;
 
@@ -3452,7 +3589,7 @@ pub const TypeChecker = struct {
                 return alias_type;
             }
         }
-        const sig = self.env.getFnSigByName(name) orelse return null_type_idx;
+        const sig = self.env.getFnSigByName(name) orelse return self.inferBuiltinGlobalCall(call);
         return self.instantiatedReturnType(node, sig, call);
     }
 
@@ -5512,6 +5649,11 @@ fn bindingKey(binding: ir.BindingRef) u64 {
     return (@as(u64, binding.scope_id) << 32) |
         (@as(u64, @backingInt(binding.kind)) << 16) |
         @as(u64, binding.slot);
+}
+
+test {
+    // The census over the builtin result table lives beside the table.
+    _ = @import("builtin_results.zig");
 }
 
 test "TypeChecker init and deinit" {

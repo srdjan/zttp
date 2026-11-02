@@ -2424,7 +2424,7 @@ test "compileHandler graph fails verification for an entry with an unchecked res
         \\import { value } from "./dep.ts";
         \\export function handler(req: Request): Response {
         \\  const result = jwtVerify("token", "secret");
-        \\  return Response.text(String(result.value) + String(value()));
+        \\  return Response.text([String(result.value), String(value())].join(""));
         \\}
         \\
     ;

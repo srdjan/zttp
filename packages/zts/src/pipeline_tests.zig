@@ -3990,3 +3990,237 @@ test "ModuleAnalysisSession leaves the flow properties unproven for a module wit
     try testing.expectEqual(false, properties.injection_safe);
     try testing.expect(!properties.deterministic);
 }
+
+// ---------------------------------------------------------------------------
+// Builtin result types (U1a of the builtin result types plan)
+//
+// Each form is assigned to `structural Nope = { zz: Bytes };`. A form with a
+// type gets one ZTS200 whose message names that type. A form with no type
+// gets none, which is how an untyped result passes today.
+// ---------------------------------------------------------------------------
+
+/// The one ZTS200 that `source` must report, with its exact message.
+fn expectOneMismatch(source: []const u8, comptime message: []const u8) !void {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.typeDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqual(type_checker_mod.DiagnosticKind.type_mismatch, diagnostics[0].kind);
+            try testing.expectEqualStrings(message, diagnostics[0].message);
+        }
+    };
+    try withSession(testing.allocator, source, Probe.run);
+}
+
+/// `source` must report no type diagnostic.
+fn expectNoTypeDiagnostic(source: []const u8) !void {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            try testing.expectEqual(@as(usize, 0), session.resolved.typeDiagnostics().len);
+        }
+    };
+    try withSession(testing.allocator, source, Probe.run);
+}
+
+test "builtin result: length of an array is number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[]): number { const p: Nope = xs.length; return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: length of a string literal is number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = "abc".length; return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: length of a string is number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string): number { const p: Nope = s.length; return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: Math.floor of a number is number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(n: number): number { const p: Nope = Math.floor(n); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: Math.PI is number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = Math.PI; return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: Number.MAX_SAFE_INTEGER is number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = Number.MAX_SAFE_INTEGER; return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: parseInt of a string and a radix is number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string): number { const p: Nope = parseInt(s, 10); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: Number of a string is number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string): number { const p: Nope = Number(s); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: Number.isInteger of a number is boolean" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(n: number): number { const p: Nope = Number.isInteger(n); return 0; }
+    , "type 'boolean' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: String of a number is string" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(n: number): number { const p: Nope = String(n); return 0; }
+    , "type 'string' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: indexOf on a string is number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string): number { const p: Nope = s.indexOf("b"); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: split on a string is string array" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string): number { const p: Nope = s.split(","); return 0; }
+    , "type 'string[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: toUpperCase on a string is string" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string): number { const p: Nope = s.toUpperCase(); return 0; }
+    , "type 'string' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: repeat on a string is string or undefined" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string): number { const p: Nope = s.repeat(2); return 0; }
+    , "type 'string | undefined' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: Date.now is number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = Date.now(); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: renderToString is string" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = renderToString("x"); return 0; }
+    , "type 'string' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: Headers get on a request is string or undefined" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(req: Request): number { const p: Nope = req.headers.get("x"); return 0; }
+    , "type 'string | undefined' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: Headers has on a request is boolean" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(req: Request): number { const p: Nope = req.headers.has("x"); return 0; }
+    , "type 'boolean' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "false proof F1: the length of an array is not a string" {
+    try expectOneMismatch(
+        \\function f(xs: number[]): number { const a: string = xs.length; return 0; }
+    , "type 'number' is not assignable to type 'string'");
+}
+
+test "false proof F2: a header that may be missing is not a string" {
+    try expectOneMismatch(
+        \\function f(req: Request): number { const token: string = req.headers.get("x"); return 0; }
+    , "type 'string | undefined' is not assignable to type 'string'");
+}
+
+test "builtin result: an argument of the wrong type leaves the result untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string): number { const p: Nope = Math.floor(s); return 0; }
+    );
+}
+
+test "builtin result: an argument that may be undefined leaves the result untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(n: number | undefined): number { const p: Nope = Math.floor(n); return 0; }
+    );
+}
+
+test "builtin result: a missing argument leaves the result untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = Math.floor(); return 0; }
+    );
+}
+
+test "builtin result: split with a separator that is not a string stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string, n: number): number { const p: Nope = s.split(n); return 0; }
+    );
+}
+
+test "builtin result: the length of a string that may be undefined stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string | undefined): number { const p: Nope = s.length; return 0; }
+    );
+}
+
+test "builtin result: a parameter named Math keeps its own type" {
+    try expectNoTypeDiagnostic(
+        \\structural M = { floor: (n: number) => string };
+        \\function f(Math: M): string { const s: string = Math.floor(1); return s; }
+    );
+}
+
+test "builtin result: a parameter named Math is not the builtin" {
+    try expectOneMismatch(
+        \\structural M = { floor: (n: number) => string };
+        \\structural Nope = { zz: Bytes };
+        \\function f(Math: M): number { const p: Nope = Math.floor(1); return 0; }
+    , "type 'string' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: a top-level binding named Math is not the builtin" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\const Math = { floor: (n: number): string => "x" };
+        \\function f(): number { const p: Nope = Math.floor(1); return 0; }
+    , "type 'string' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: a parameter named parseInt is not the builtin" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(parseInt: (s: string) => string): number { const p: Nope = parseInt("1"); return 0; }
+    , "type 'string' is not assignable to type '{ zz: Bytes }'");
+}

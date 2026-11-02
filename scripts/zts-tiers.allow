@@ -132,6 +132,7 @@ zts-compiler compiler_root.zig
 zts-compiler binding_key.zig
 zts-compiler behavior_canonical.zig
 zts-compiler bool_checker.zig
+zts-compiler builtin_results.zig
 zts-compiler compiler.zig
 zts-compiler contract_builder.zig
 zts-compiler contract_diff.zig
