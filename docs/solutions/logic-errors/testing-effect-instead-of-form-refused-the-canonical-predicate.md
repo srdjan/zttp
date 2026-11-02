@@ -1,6 +1,7 @@
 ---
 title: Testing effect instead of form refused the canonical predicate
 date: 2026-08-04
+last_updated: 2026-11-02
 category: logic-errors
 module: ZigTS type checker, type-predicate admission (ZTS211)
 problem_type: logic_error
@@ -22,11 +23,34 @@ tags:
   - type-predicates
   - narrowing
   - admission-check
+  - claim-check
   - false-rejection
   - corpus-replay
 ---
 
 # Testing effect instead of form refused the canonical predicate
+
+## Update 2026-11-02: the form check is necessary, not sufficient
+
+The form-only rule below let a false predicate through. This body is a well-formed test, so the form check admitted it:
+
+```ts
+function isStr(x: unknown): x is string {
+    return typeof x === "number";
+}
+```
+
+A call `if (isStr(v))` then narrowed `v` to `string`. A handler that called `v.toUpperCase()` in that branch passed `zts check`, and `zttp dev` answered 500 with "Possible soundness incident".
+
+Commit `471d4d14` on local `main` adds a second question after the form check. `admitOneTypePredicate` in `packages/zts/src/type_checker.zig#TypeChecker` computes the type that the test proves. It admits the predicate only when that type is assignable to the claimed type. Otherwise it reports `ZTS211`, for example "type predicate 'isStr' claims 'string', but its test proves 'number'".
+
+The claim check runs the narrowing guards on purpose, because the claim is a question about types. It runs after the form check and does not replace it. The lesson of this doc still holds for the form check: do not refuse a test form because it narrows nothing over the declared type.
+
+The `isObject` predicate in Symptoms is refused again, now by the claim check. The reason is that `typeof null === "object"`, so the test does not prove `object` over `unknown`. On 2026-11-02, `zts check` reported "type predicate 'isObject' claims 'object', but its test proves 'unknown'". This refusal is correct. Do not restore form-only admission to accept it.
+
+Commit `62aafb76` adds two more refusals. A predicate must be on a named module-level function declaration. A predicate must name an annotated parameter of its function.
+
+The rest of this doc is the 2026-08-04 record. Where it says that the `isObject` predicate is accepted, the update above replaces it.
 
 ## Problem
 
@@ -154,6 +178,8 @@ is a different source of cases than anything a test author would think to write:
 a model reaching for `typeof x === "object"` over an `unknown` parameter is an
 ordinary way to write `isObject`, not an adversarial one.
 
+This section describes the form check only. Since 2026-11-02, the claim check in the update above asks the type question as a separate second step.
+
 ## Prevention
 
 - When an admission check and the mechanism it gates share a code path, confirm
@@ -165,6 +191,9 @@ ordinary way to write `isObject`, not an adversarial one.
   equivalent to the right one. Here that property was a union-typed parameter.
 - Probe an admission rule with an input outside its own tests' shared
   assumption. Here that is the same test form over a non-union declared type.
+- A check of the form of a claim does not check the claim. After the form
+  check, confirm that the type the test proves fits within the claimed type.
+  The probe for this is a well-formed test that proves a different type.
 - Regenerate `docs/coverage.md` and `docs/coverage.json` in the same commit as
   any change that moves what the corpus trips, and read the diff. A rule that
   starts appearing in `Codes the registry does not carry` is a new diagnostic
@@ -193,8 +222,16 @@ accepted; a test over an `unknown` parameter is accepted on its form; `in` is
 refused. Gate: `zig build test`, `bash scripts/test-examples.sh`,
 `bash scripts/verify.sh`.
 
+Since 2026-11-02, the `unknown` test above asserts the claim-check refusal, under
+the name "a typeof object test over unknown does not back an object claim". The
+tests whose names start with "predicate claim:" cover the claim check. The plan
+for that change found no type predicate in the recorded corpus, so the corpus
+draft and the coverage row above are history.
+
 ## Related Issues
 
+- [an-untyped-value-passed-every-typed-position](an-untyped-value-passed-every-typed-position.md) - the 2026-11-02 sibling: the same plan added the claim check, and that doc records the probe that found the false predicate.
+- [Function values and type predicates plan](../../plans/2026-11-02-function-values-and-predicates-plan.md) - finding F2 (the form-only admission) and findings F3 and F4 (the misplaced and unbound predicates).
 - [a-proxy-signal-carried-a-proof-it-never-claimed](a-proxy-signal-carried-a-proof-it-never-claimed.md) - the closest sibling by mechanism: a real, correctly computed signal reused as the answer to a question it was never designed to answer. The polarity is opposite, a false PROVEN rather than a false refusal.
 - [a-label-union-that-never-narrows-refuses-a-clean-program](a-label-union-that-never-narrows-refuses-a-clean-program.md) - the same symptom polarity, a conservative checker refusing a clean program, but there the refusal is an accepted cost because removing it would reopen a fail-open. Here it was a defect with a free fix.
 - [a-gate-that-counts-nothing-still-reports-a-pass](../conventions/a-gate-that-counts-nothing-still-reports-a-pass.md) and [difference-is-not-the-claim-and-a-probe-must-compile](../conventions/difference-is-not-the-claim-and-a-probe-must-compile.md) - the umbrella convention, and the mirror image of this case. Both describe a check that reports a pass while verifying nothing. This check held a full input and asked a real question, the wrong one, so it failed loudly on a valid case instead of passing quietly on an invalid one. A red result can fail to mean what it says for the same reason a green one can.
