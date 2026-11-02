@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS106","severity":"error","message":"'number | undefined' operand in '+' operator; addition requires numbers","file":"check/bad/arith_on_optional_number.ts","line":3,"column":12,"suggestion":"compare with undefined in an if and compute inside the branch, or supply a default with ??","repair_intent":null}

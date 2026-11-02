@@ -2651,17 +2651,250 @@ test "arithmetic on a parameter declared number is accepted" {
         .arithmetic_on_non_numeric,
         false,
     );
-    // The lattice has no optional number, so this stays undecided.
-    try expectBoolKind(
-        "const f = (n: number | undefined): number => n - 1;",
-        .arithmetic_on_non_numeric,
-        false,
+}
+
+/// How many ZTS104 and ZTS106 diagnostics the boolean checker reported over one source.
+fn expectArithCounts(source: []const u8, comptime arith: usize, comptime addable: usize) !void {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.boolDiagnostics();
+            try testing.expectEqual(arith, countKind(diagnostics, bool_checker_mod.DiagnosticKind.arithmetic_on_non_numeric));
+            try testing.expectEqual(addable, countKind(diagnostics, bool_checker_mod.DiagnosticKind.add_on_non_addable));
+        }
+    };
+    try withSession(testing.allocator, source, Probe.run);
+}
+
+test "plus on a parameter declared number or undefined is refused" {
+    try expectArithCounts(
+        "function inc(x: number | undefined): number { return x + 1; }",
+        0,
+        1,
     );
-    // Unknown and generic parameters stay undecided.
-    try expectBoolKind(
-        "const f = (v: unknown): number => v - 1;",
-        .arithmetic_on_non_numeric,
-        false,
+}
+
+test "times on a result that may be undefined is refused" {
+    try expectArithCounts(
+        \\function pick(flag: boolean): number | undefined { return flag ? 3 : undefined; }
+        \\const x = pick(false);
+        \\const total = x * 2;
+    ,
+        1,
+        0,
+    );
+}
+
+test "minus on an optional field is refused" {
+    try expectArithCounts(
+        \\structural Box = { n?: number };
+        \\const b: Box = {};
+        \\const total = b.n - 1;
+    ,
+        1,
+        0,
+    );
+}
+
+test "unary minus on a value that may be undefined is refused" {
+    try expectArithCounts(
+        "function neg(x: number | undefined): number { return -x; }",
+        1,
+        0,
+    );
+}
+
+test "plus on an array index read is refused" {
+    try expectArithCounts(
+        \\const xs: number[] = [1, 2];
+        \\const total = xs[5] + 1;
+    ,
+        0,
+        1,
+    );
+}
+
+test "times on a parameter declared unknown is refused" {
+    try expectArithCounts(
+        "function twice(v: unknown): number { return v * 2; }",
+        1,
+        0,
+    );
+}
+
+test "plus on a parameter declared number or null is refused" {
+    try expectArithCounts(
+        "function inc(x: number | null): number { return x + 1; }",
+        0,
+        1,
+    );
+}
+
+test "a refused plus does not refuse the times around it" {
+    try expectArithCounts(
+        "function f(x: number | undefined): number { return (x + 1) * 2; }",
+        0,
+        1,
+    );
+}
+
+test "minus on a type parameter is refused" {
+    try expectArithCounts(
+        "const f = <T>(v: T): number => v - 1;",
+        1,
+        0,
+    );
+}
+
+test "unary minus on a boolean is refused" {
+    try expectArithCounts(
+        "function neg(b: boolean): number { return -b; }",
+        1,
+        0,
+    );
+}
+
+test "a plus on an optional string leaves the times around it alone" {
+    try expectArithCounts(
+        \\structural Box = { s?: string };
+        \\const b: Box = {};
+        \\const total = (b.s + 1) * 2;
+    ,
+        0,
+        1,
+    );
+}
+
+test "the refusal of an optional number names the type and the guard to write" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.boolDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqualStrings("'number | undefined' operand in '*' operator; arithmetic requires numbers", diagnostics[0].message);
+            try testing.expectEqualStrings(
+                "compare with undefined in an if and compute inside the branch, or supply a default with ??",
+                diagnostics[0].help orelse "",
+            );
+        }
+    };
+    try withSession(testing.allocator, "function f(x: number | undefined): number { return x * 2; }", Probe.run);
+}
+
+test "the refusal of a nullable number gives the null help text" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.boolDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqualStrings(
+                "compare with null in an if, and compute inside the branch",
+                diagnostics[0].help orelse "",
+            );
+        }
+    };
+    try withSession(testing.allocator, "function f(x: number | null): number { return x * 2; }", Probe.run);
+}
+
+test "the refusal of a number that may be null or undefined gives the nested if help text" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.boolDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqualStrings(
+                "compare with undefined and with null in nested ifs, and compute inside the inner branch",
+                diagnostics[0].help orelse "",
+            );
+        }
+    };
+    try withSession(testing.allocator, "function f(x: number | null | undefined): number { return x * 2; }", Probe.run);
+}
+
+test "the refusal of an unknown operand gives the typeof help text" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.boolDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqualStrings("'unknown' operand in '*' operator; arithmetic requires numbers", diagnostics[0].message);
+            try testing.expectEqualStrings(
+                "narrow the value to number first, for example with typeof in an if",
+                diagnostics[0].help orelse "",
+            );
+        }
+    };
+    try withSession(testing.allocator, "function f(v: unknown): number { return v * 2; }", Probe.run);
+}
+
+test "a plus on an optional number reports the addition message" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.boolDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqualStrings("'number | undefined' operand in '+' operator; addition requires numbers", diagnostics[0].message);
+        }
+    };
+    try withSession(testing.allocator, "function f(x: number | undefined): number { return x + 1; }", Probe.run);
+}
+
+test "arithmetic on a value proven to be a number is accepted" {
+    try expectArithCounts(
+        "function f(x: number | undefined): number { if (x !== undefined) { return x + 1; } return 0; }",
+        0,
+        0,
+    );
+    try expectArithCounts(
+        "function f(x: number | undefined): number { return x !== undefined ? x + 1 : 0; }",
+        0,
+        0,
+    );
+    try expectArithCounts(
+        "function f(x: number | undefined): boolean { return x !== undefined && x * 2 > 1; }",
+        0,
+        0,
+    );
+    try expectArithCounts(
+        "function f(xs: number[]): number[] { return xs.map((v: number): number => v * 2); }",
+        0,
+        0,
+    );
+    try expectArithCounts(
+        "function f(x: number | undefined): number { if (x === undefined) { return 0; } return x + 1; }",
+        0,
+        0,
+    );
+    try expectArithCounts(
+        "function f(x: number | undefined): number { return (x ?? 0) + 1; }",
+        0,
+        0,
+    );
+    try expectArithCounts(
+        "function f(v: unknown): number { if (typeof v === \"number\") { return v * 2; } return 0; }",
+        0,
+        0,
+    );
+    try expectArithCounts(
+        \\function f(xs: number[]): number {
+        \\  let total = 0;
+        \\  for (const v of xs) { total = total + v * 2; }
+        \\  return total;
+        \\}
+    ,
+        0,
+        0,
+    );
+    try expectArithCounts(
+        \\structural Msg = { kind: "n", value: number } | { kind: "s", text: string };
+        \\function f(m: Msg): number {
+        \\  return match (m) {
+        \\    when { kind: "n", value }: value + 1
+        \\    default: 0
+        \\  };
+        \\}
+    ,
+        0,
+        0,
+    );
+    try expectArithCounts(
+        "function f(xs: number[]): number { return xs.length - 1; }",
+        0,
+        0,
     );
 }
 

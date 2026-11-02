@@ -10683,6 +10683,12 @@ const absent_read_refused = [_]AbsentReadCase{
     \\  };
     \\}
     },
+    .{ .name = "r21_arith", .expect = "ZTS106@3", .source =
+    \\function handler(req: Request): Response {
+    \\  const xs: number[] = [1, 2];
+    \\  return Response.json({ a: 1 + xs[5] });
+    \\}
+    },
 };
 
 const absent_read_accepted = [_]AbsentReadCase{
@@ -10957,12 +10963,6 @@ const absent_read_accepted = [_]AbsentReadCase{
     .{ .name = "r16_query_member", .expect = "clean", .source =
     \\function handler(req: Request): Response {
     \\  return Response.json({ a: req.query.q.length });
-    \\}
-    },
-    .{ .name = "r21_arith", .expect = "clean", .source =
-    \\function handler(req: Request): Response {
-    \\  const xs: number[] = [1, 2];
-    \\  return Response.json({ a: 1 + xs[5] });
     \\}
     },
     .{ .name = "r23_tuple_in_range", .expect = "clean", .source =

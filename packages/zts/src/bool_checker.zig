@@ -466,10 +466,10 @@ pub const BoolChecker = struct {
                         const left_type = self.inferForDiagnostic(bin.left);
                         const right_type = self.inferForDiagnostic(bin.right);
                         if (left_type != .string and right_type != .string) {
-                            // Unknown is handled by strict-mode inference; every
-                            // known operand that reaches `+` must be numeric.
-                            self.requireAddable(bin.left, left_type);
-                            self.requireAddable(bin.right, right_type);
+                            // Every operand the lattice names must be numeric. An
+                            // operand it cannot name takes the type checker's type.
+                            self.requireAddable(node, bin.left, left_type);
+                            self.requireAddable(node, bin.right, right_type);
                         }
                     },
                     // S7: Tautological comparisons
@@ -494,6 +494,10 @@ pub const BoolChecker = struct {
                 // S3: ! operand must be boolean
                 if (un.op == .not) {
                     self.requireBoolean(un.operand, "!");
+                }
+                // S3b: unary - operand must be numeric
+                if (un.op == .neg) {
+                    self.requireNumeric(un.operand, "-");
                 }
                 self.walkExpr(un.operand);
             },
@@ -1034,7 +1038,9 @@ pub const BoolChecker = struct {
     fn requireNumeric(self: *BoolChecker, node: NodeIndex, op_name: []const u8) void {
         const inferred = self.inferForDiagnostic(node);
         switch (inferred) {
-            .number, .unknown => return, // number is valid, unknown defers to runtime
+            .number => return,
+            // The lattice cannot name this operand; the type checker can.
+            .unknown => self.requireNumericFromTypeChecker(node, op_name),
             .boolean => {
                 self.emitArithDiagnostic(node, "boolean", op_name, "use explicit conversion: (b ? 1 : 0)");
             },
@@ -1056,6 +1062,70 @@ pub const BoolChecker = struct {
             .optional_object => {
                 self.emitArithDiagnostic(node, "optional object", op_name, "objects cannot be used in arithmetic");
             },
+        }
+    }
+
+    fn requireNumericFromTypeChecker(self: *BoolChecker, node: NodeIndex, op_name: []const u8) void {
+        const operand_type = self.operandTypeNotNumber(node) orelse return;
+        self.emitOperandTypeDiagnostic(node, .arithmetic_on_non_numeric, operand_type, op_name, "arithmetic requires numbers");
+    }
+
+    /// The type the type checker holds for an operand, when that type is not
+    /// assignable to `number`. Null when there is no type checker, no type
+    /// (`null_type_idx`: the checker cannot say, so the operand passes), or
+    /// the type is a number. The recorded type was taken with the walk's
+    /// narrowing live; the fallback covers a node the walk never recorded.
+    fn operandTypeNotNumber(self: *BoolChecker, node: NodeIndex) ?type_pool_mod.TypeIndex {
+        const checker = self.authoritative_type_checker orelse return null;
+        const inferred = checker.contextTypeOf(node) orelse checker.inferTypeWithoutDiagnostics(node);
+        if (inferred == type_pool_mod.null_type_idx) return null;
+        if (checker.env.isAssignableTo(inferred, checker.env.pool.idx_number)) return null;
+        return inferred;
+    }
+
+    fn operandHelp(self: *BoolChecker, operand_type: type_pool_mod.TypeIndex) []const u8 {
+        const checker = self.authoritative_type_checker orelse
+            return "narrow the value to number first, for example with typeof in an if";
+        const absent = checker.absentValuesOf(operand_type);
+        if (absent.null_value and absent.undefined_value) {
+            return "compare with undefined and with null in nested ifs, and compute inside the inner branch";
+        }
+        if (absent.null_value) return "compare with null in an if, and compute inside the branch";
+        if (absent.undefined_value) {
+            return "compare with undefined in an if and compute inside the branch, or supply a default with ??";
+        }
+        return "narrow the value to number first, for example with typeof in an if";
+    }
+
+    fn emitOperandTypeDiagnostic(
+        self: *BoolChecker,
+        node: NodeIndex,
+        kind: DiagnosticKind,
+        operand_type: type_pool_mod.TypeIndex,
+        op_name: []const u8,
+        requirement: []const u8,
+    ) void {
+        const checker = self.authoritative_type_checker orelse return;
+        const help = self.operandHelp(operand_type);
+        var type_buf: [512]u8 = undefined;
+        const type_name = checker.env.pool.formatType(operand_type, &type_buf);
+        if (std.fmt.allocPrint(self.allocator, "'{s}' operand in '{s}' operator; {s}", .{ type_name, op_name, requirement })) |message| {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = kind,
+                .node = node,
+                .message = message,
+                .help = help,
+                .allocated = true,
+            });
+        } else |_| {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = kind,
+                .node = node,
+                .message = "non-numeric operand in arithmetic operator",
+                .help = help,
+            });
         }
     }
 
@@ -1111,9 +1181,17 @@ pub const BoolChecker = struct {
     // Addable requirement check (type-directed + safety)
     // -----------------------------------------------------------------------
 
-    fn requireAddable(self: *BoolChecker, node: NodeIndex, inferred: ExprType) void {
+    fn requireAddable(self: *BoolChecker, add_node: NodeIndex, node: NodeIndex, inferred: ExprType) void {
         switch (inferred) {
-            .number, .unknown => return,
+            .number => return,
+            .unknown => {
+                // The type checker already refused this `+` with ZTS105; one mistake gets one message.
+                if (self.authoritative_type_checker) |checker| {
+                    if (checker.isRefused(add_node)) return;
+                }
+                const operand_type = self.operandTypeNotNumber(node) orelse return;
+                self.emitOperandTypeDiagnostic(node, .add_on_non_addable, operand_type, "+", "addition requires numbers");
+            },
             .string => unreachable,
             .boolean => {
                 self.addDiagnostic(.{

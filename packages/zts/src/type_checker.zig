@@ -637,11 +637,48 @@ pub const TypeChecker = struct {
     /// diagnostics the checker recorded, not from a second record, so the
     /// error type exists for exactly the expressions that have a diagnostic:
     /// there is no state to fall out of step and no allocation to fail.
-    fn isRefused(self: *const TypeChecker, node: NodeIndex) bool {
+    pub fn isRefused(self: *const TypeChecker, node: NodeIndex) bool {
         for (self.diagnostics.items) |diag| {
             if (diag.kind == .string_add and diag.node == node) return true;
         }
         return false;
+    }
+
+    /// Which absent values a type admits. `unknown` and a type parameter admit
+    /// neither by name: they are not a union with `null` or `undefined`.
+    pub const AbsentValues = struct {
+        null_value: bool = false,
+        undefined_value: bool = false,
+    };
+
+    pub fn absentValuesOf(self: *const TypeChecker, raw: TypeIndex) AbsentValues {
+        return self.absentValuesAt(raw, 0);
+    }
+
+    fn absentValuesAt(self: *const TypeChecker, raw: TypeIndex, depth: u8) AbsentValues {
+        if (raw == null_type_idx or depth > 8) return .{};
+        const pool = self.env.pool;
+        const t = pool.unwrapNominal(self.env.resolveRef(raw));
+        const tag = pool.getTag(t) orelse return .{};
+        switch (tag) {
+            .t_undefined, .t_void => return .{ .undefined_value = true },
+            .t_null => return .{ .null_value = true },
+            .t_nullable => {
+                const inner = self.absentValuesAt(pool.getNullableInner(t), depth + 1);
+                return .{ .null_value = inner.null_value, .undefined_value = true };
+            },
+            .t_union => {
+                var found: AbsentValues = .{};
+                for (pool.getUnionMembers(t)) |member| {
+                    const part = self.absentValuesAt(member, depth + 1);
+                    found.null_value = found.null_value or part.null_value;
+                    found.undefined_value = found.undefined_value or part.undefined_value;
+                }
+                return found;
+            },
+            // exhaustive: every other type names no absent value of its own.
+            else => return .{},
+        }
     }
 
     /// How many expressions had an operator refused. A test reads it to check
@@ -1324,6 +1361,16 @@ pub const TypeChecker = struct {
                 } else {
                     self.walkExpr(bin.left);
                     self.walkExpr(bin.right);
+                    // The boolean checker reads an arithmetic operand's type
+                    // here, with the narrowing that reaches it still live.
+                    switch (bin.op) {
+                        .add, .sub, .mul, .div, .mod, .pow => {
+                            self.recordContextType(bin.left);
+                            self.recordContextType(bin.right);
+                        },
+                        // exhaustive: only an arithmetic operator puts a numeric obligation on its operands.
+                        else => {},
+                    }
                 }
                 if (bin.op == .add and
                     (self.typeMayBeString(self.inferType(bin.left)) or
@@ -1342,7 +1389,7 @@ pub const TypeChecker = struct {
             .unary_op => {
                 const un = self.ir_view.getUnary(node) orelse return;
                 self.walkExpr(un.operand);
-                if (un.op == .not) self.recordContextType(un.operand);
+                if (un.op == .not or un.op == .neg) self.recordContextType(un.operand);
             },
 
             .ternary => {

@@ -62,7 +62,7 @@ const zts = @import("zts");
 /// it, so deleting a case fails. Raise it in the commit that adds cases, to
 /// the count the gate prints. Never lower it to make a deletion pass.
 // The unfiltered Phase 3 run measured 182 retained cases.
-pub const minimum_cases: usize = 182;
+pub const minimum_cases: usize = 183;
 
 const corpus_root = "tests/corpus";
 const max_file_bytes = 1024 * 1024;
