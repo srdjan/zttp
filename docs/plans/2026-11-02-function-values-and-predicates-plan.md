@@ -82,6 +82,15 @@ No new diagnostic code. No change to the rule registry, the spec text, or `packa
 
 Stop condition: if a step needs a parameter list in the inferred type, stop and hand back. That is a larger change with its own risk to generic inference.
 
+Revision 1, 2026-11-02. The U1 executor reached this stop condition. With an empty parameter list, `const JSON = { stringify: (value) => "ignored" }; JSON.stringify(x)` got a false ZTS202, "expected 0, got 1". The member call reads its arity from the field type, and an empty list looks the same as a declared `() => number`. Opus chose the parameter list. Items 1 and 2 above change as follows, and items 3 and 4 stay:
+
+- The inferred type of a function value has one parameter for each parameter node, up to the `FunctionSig` limit of 16.
+- A parameter takes its type from the signature only when the signature has one entry for each parameter node. A signature built from annotations skips an unannotated parameter, so in any other case every parameter is `unknown`.
+- A generic signature gives every parameter `unknown` and no return type, so no type parameter reaches an assignability check unresolved.
+- `functionExprType` and generic inference keep the empty list.
+
+The parameter list also closes a case that the empty list left open: a function stored in an unannotated record and later assigned to a typed position. The parameter list makes the parameter and arity checks apply at a function target. `(x: number, y: number) => number` is then refused at `(x: number) => number`, and that is the TypeScript verdict too.
+
 ### U2 design (F2)
 
 1. Keep `predicateBodyProves` as the form check. After it passes, compute the type that the test proves for the parameter, and admit the predicate only when that type is assignable to `predicate.narrowed`. Otherwise report ZTS211 with the message `type predicate '<name>' claims '<claimed>', but its test proves '<proven>'`.
