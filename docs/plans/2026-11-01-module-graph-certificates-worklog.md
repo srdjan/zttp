@@ -349,3 +349,21 @@ The coverage union starts again with the new corpus identity. It holds one publi
 **Measurements at `95b704b2`.** Against the base at `7d9349f0`, `zts check` and `zts compile` moved 0 of 215 rows. No example or corpus file has a failing dependency, so this set does not show the new refusals. The parity table in `packages/tools/src/precompile.zig` and my 6 command-line probes show them: `zts check` and `zts compile` agreed on each probe. `zts check --json examples/handler/handler-with-imports.ts` takes 8.8 ms, against 8.2 ms at the base. These are medians of 20 runs in two rounds, on the Debug binaries, on macOS. `git diff` from `7d9349f0` on `packages/proof-checker` is empty.
 
 **Open items.** `zts check --json` prints an `unterminated string literal` line on stderr for a dependency with that error. Stdout stays clean JSON. A dependency chain has no depth limit in `zts check`, as in the build. The fault scan keeps its limit of 8.
+
+**Final gate at `861c1737`.** Each step ran unfiltered from empty private caches, with no provider key. `/tmp/zttp-final-gate.sh` is not committed.
+
+| Step | Exit | Note |
+|---|---|---|
+| `zig build test --summary all` | 0 | 214 of 214 steps, 8859 of 8865 tests, 6 skipped |
+| `bash scripts/verify.sh` | 0 | |
+| `zig build test-expert-app` | 0 | Offline replay of the new corpus |
+| `zig build smoke-v1` | 0 | |
+| `zig build test-proof-checker` | 0 | |
+| `zig build test-proof-checker-mutants` | 0 | |
+| `zig build test-proof-ratchet` | 0 | |
+| `zig build test-proof-ratchet-drift` | 0 | |
+| `zig build test-bytecode-identity` | 0 | |
+| `zig build check-spine` | 0 | |
+| `zig build bench-check -Doptimize=ReleaseFast` | 1, then 0 | The first run followed the ReleaseFast compile at once, at load 11.25, and reported a 3.48% geomean regression. The same binary at load 2.78 reports geomean 1.01959 and regression 0.00% over 9 benchmarks |
+
+The website has 2 new local commits, and `deno task verify` exits 0 on each. No push, deploy, or release ran. These runs used Debug binaries on macOS, except `bench-check`, which used ReleaseFast.
