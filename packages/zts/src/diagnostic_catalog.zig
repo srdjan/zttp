@@ -81,6 +81,8 @@ pub const DriverKind = enum {
     compiler_io_failure,
     unsupported_source_extension,
     missing_sql_schema,
+    module_link_refused,
+    file_import_untyped,
 };
 
 pub const VirtualImportKind = enum {
@@ -114,6 +116,8 @@ pub fn driverCode(kind: DriverKind) []const u8 {
         .compiler_io_failure => "ZTS000",
         .unsupported_source_extension => "ZTS052",
         .missing_sql_schema => "ZTS700",
+        .module_link_refused => "ZTS063",
+        .file_import_untyped => "ZTS064",
     };
 }
 
@@ -343,6 +347,7 @@ fn driverMetadata(kind: DriverKind) Metadata {
             .compiler_io_failure => .infrastructure,
             .unsupported_source_extension => .source_profile,
             .missing_sql_schema => .system_contract,
+            .module_link_refused, .file_import_untyped => .module_contract,
         },
         .risk = .correctness,
     };

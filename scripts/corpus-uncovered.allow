@@ -45,6 +45,8 @@
 ZTS000 I/O failure: needs a missing or unreadable file, which an in-process source string cannot express; only the CLI drivers emit it
 ZTS052 needs a non-.ts extension; the corpus admits only .ts files and refuses other files as unexpected_file
 ZTS700 emitted by the CLI and agent-protocol drivers when zttp:sql is used without --sql-schema; the in-process check takes no schema option and never reaches that code
+ZTS063 emitted only by the multi-module check driver in zts check when a handler has a file import; the corpus checks one in-memory source and has no dependency files
+ZTS064 emitted only by the multi-module check driver when a file import has no type that can cross modules; the corpus checks one in-memory source and has no dependency files
 
 # --- Parser kinds with no producer on the default path ---------------------
 #
