@@ -117,6 +117,15 @@ Expected results, as literal test cases:
 | `isA(x: string): x is "a" { return x === "a"; }` | admitted |
 | `isArr(x: unknown): x is string[] { return Array.isArray(x); }` | ZTS211 |
 
+Revision 2, 2026-11-02. The U2 executor stopped on two cases, and my review of them found a fifth defect.
+
+- `function isObject(x: unknown): x is object { return typeof x === "object"; }` now gets ZTS211, because the `typeof` guard does not narrow `unknown` for `"object"`. Opus keeps the refusal: `typeof null === "object"`, so the claim is false for `null`. The test that pinned its admission now pins the refusal.
+- F5: `extractDiscriminantGuard` in `packages/zts/src/type_checker.zig#TypeChecker` narrows to the first union member whose discriminant matches. With `{ kind: "a", n: number } | { kind: "a", s: string }`, a branch that reads `v.n` passes `zts check`, and `zttp dev` answers 500 "Possible soundness incident". The same guard reads no field of a named record, so `if (v.kind === "a")` over `A | B` with `structural A` and `structural B` narrows nothing. U2 would then refuse the true predicate `isA(v: A | B): v is A { return v.kind === "a"; }`.
+
+U2 reuses this guard, so U2 now also fixes it. The then-branch holds every member whose field admits the literal. The else-branch holds every member whose field is not exactly the literal, and every member without the field. A named member is resolved to read its field, and the result keeps the alias. The predicate `isA` over two members that share `kind: "a"` gets ZTS211.
+
+Still open, and not in this plan: a member read on a union of named records without narrowing. `v.n` on `A | B`, where `B` has no `n`, passes with 0 errors. The same read on inline records gets ZTS204.
+
 ### U3 design (F3 and F4)
 
 1. `admitTypePredicates` descends into function bodies, arrow functions, and function expressions. A function there whose signature has a `type_predicate` gets ZTS211 with the message `type predicate '<name>' must be a named module-level function declaration`. Use `<anonymous>` when the function has no name. It installs no narrowing, as today.
@@ -146,4 +155,5 @@ The units run in order, because all three edit `type_checker.zig`.
 
 - A parameter list in the inferred type of a function value (see the U1 stop condition).
 - Narrowing of a bare identifier against a literal in an `if`. Spec section 5.4 lists it, and the guard extractor does not implement it. This plan uses it only inside a predicate body.
+- A member read on a union of named records (see revision 2).
 - The three items left open by the 2026-11-01 window: the `--json` stderr line, the import chain depth, and the fault scan limit.
