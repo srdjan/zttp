@@ -3380,7 +3380,8 @@ test "a sibling that exports a failable builtin as a value blocks fault_covered"
         \\  if (!res.ok) {
         \\    return Response.json({ error: "upstream" }, { status: 502 });
         \\  }
-        \\  return Response.json({ a: res.body, b: enrich });
+        \\  const kept = enrich;
+        \\  return Response.json({ a: res.body });
         \\}
         \\
     );

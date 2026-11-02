@@ -1800,7 +1800,11 @@ pub const TypeChecker = struct {
             .lit_undefined => pool.idx_undefined,
             .object_literal => self.inferObjectLiteralType(node),
             .array_literal => self.inferArrayLiteralType(node),
-            .function_expr, .arrow_function, .function_decl => null_type_idx, // Function types handled via signatures
+            // A function value has a function type with one parameter for each
+            // parameter node, so a position that admits no function refuses
+            // it. See `functionValueType`.
+            .function_expr, .arrow_function => self.functionValueType(node),
+            .function_decl => null_type_idx,
 
             .binary_op => self.inferBinaryType(node),
             .unary_op => self.inferUnaryType(node),
@@ -1820,7 +1824,9 @@ pub const TypeChecker = struct {
                 if (self.narrowed.get(key)) |t| return t;
                 // Check tracked binding types
                 if (self.binding_types.get(key)) |t| return t;
-                return self.declaredTypeForBinding(binding);
+                const declared = self.declaredTypeForBinding(binding);
+                if (declared != null_type_idx) return declared;
+                return self.functionBindingType(binding);
             },
 
             .member_access => self.inferMemberAccessType(node),
@@ -4052,22 +4058,119 @@ pub const TypeChecker = struct {
         return .{ .ok = bindings };
     }
 
+    /// The type of a function written as an expression. A value that is a
+    /// function must not pass where a number, a record, or JSON is required,
+    /// so `inferType` answers a function type and not "unknown".
+    ///
+    /// The parameter list has one entry for each parameter node, so a call
+    /// through a value of this type (`o.f(1, 2)`) is checked for arity like
+    /// any call through a declared function type. See `functionTypeWithParams`
+    /// for the parameter types. `functionExprType` keeps its empty list, because
+    /// generic inference unifies a callback only as far as both sides carry
+    /// parameters. A return the body does not determine is `unknown`.
+    ///
+    /// The body is read to find its return type, and the walk of the function
+    /// reports its own diagnostics, so inference reports none here.
+    fn functionValueType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
+        const mutable = @constCast(self);
+        const previous = mutable.report_inference_diagnostics;
+        mutable.report_inference_diagnostics = false;
+        defer mutable.report_inference_diagnostics = previous;
+        const built = self.functionExprType(node);
+        const returned = if (built != null_type_idx) self.env.pool.getFunctionInfo(built).ret else null_type_idx;
+        const unknown_return = if (returned == null_type_idx) self.env.pool.idx_unknown else returned;
+        const func = self.ir_view.getFunction(node) orelse return self.emptyFunctionType(unknown_return);
+        return self.functionTypeWithParams(func.params_count, self.sourceFunctionSignature(node), unknown_return);
+    }
+
+    fn emptyFunctionType(self: *const TypeChecker, returned: TypeIndex) TypeIndex {
+        return self.env.pool.addFunctionWithReturn(self.allocator, &.{}, returned);
+    }
+
+    /// A function type with `count` parameters. The count always comes from the
+    /// parameter nodes, or from `max_arg_count`. A signature built from
+    /// annotations can hold fewer entries than the function has parameters, so
+    /// its types are used only when its count equals `count`; otherwise each
+    /// parameter is `unknown`. A generic signature gives every parameter
+    /// `unknown` and no return, so a type parameter never reaches an
+    /// assignability check unresolved. Past 16 parameters the list stays empty.
+    fn functionTypeWithParams(
+        self: *const TypeChecker,
+        count: usize,
+        sig: ?type_env_mod.FunctionSig,
+        returned: TypeIndex,
+    ) TypeIndex {
+        const pool = self.env.pool;
+        const generic = if (sig) |s| s.type_param_count > 0 else false;
+        const final_return = if (generic) null_type_idx else returned;
+        if (count > 16) return self.emptyFunctionType(final_return);
+        var params: [16]type_pool_mod.FuncParam = undefined;
+        for (0..count) |i| {
+            var param_type = pool.idx_unknown;
+            var optional = false;
+            if (sig) |s| {
+                if (!generic and s.param_count == count and s.param_types[i] != null_type_idx) {
+                    param_type = s.param_types[i];
+                }
+                if (s.required_param_count) |required| optional = i >= required;
+            }
+            params[i] = .{ .name_start = 0, .name_len = 0, .type_idx = param_type, .optional = optional };
+        }
+        return pool.addFunctionWithReturn(self.allocator, params[0..count], final_return);
+    }
+
+    /// The type of an identifier that names a function and holds no recorded
+    /// type: a function declaration, or a binding whose callable was recorded.
+    /// The return is the signature's, or `unknown` when the signature declares
+    /// none. `null_type_idx` when the binding is not known to be a function.
+    ///
+    /// The by-name signature answers only for a module-level binding. A local
+    /// or a parameter can share a name with a module function.
+    fn functionBindingType(self: *const TypeChecker, binding: ir.BindingRef) TypeIndex {
+        const pool = self.env.pool;
+        if (self.boundCallableMetadata(binding)) |metadata| {
+            return switch (metadata) {
+                .unavailable => null_type_idx,
+                .arity => |count| self.functionTypeWithParams(count, null, pool.idx_unknown),
+                .signature => |sig| self.functionTypeOfSignature(sig),
+            };
+        }
+        const declaration = self.captureSource(binding) orelse return null_type_idx;
+        if (declaration.kind != .global) return null_type_idx;
+        const name = self.resolveAtomName(binding.name_atom) orelse return null_type_idx;
+        const sig = self.env.getFnSigByName(name) orelse return null_type_idx;
+        return self.functionTypeOfSignature(sig);
+    }
+
+    fn functionTypeOfSignature(self: *const TypeChecker, sig: type_env_mod.FunctionSig) TypeIndex {
+        const pool = self.env.pool;
+        const returned = self.env.stripProofMarkers(sig.return_type);
+        const count: usize = sig.max_arg_count orelse sig.param_count;
+        return self.functionTypeWithParams(count, sig, if (returned == null_type_idx) pool.idx_unknown else returned);
+    }
+
     /// The type of one call argument, for the purpose of binding type
     /// parameters.
     ///
-    /// `inferType` answers `null_type_idx` for a function expression, because
-    /// the rest of the checker reaches a function through its recorded
-    /// signature rather than through a type. That is fine everywhere a callee
-    /// is named and wrong here: a callback passed as an argument is the only
-    /// evidence a signature like `run(key: string, fn: () => T): T` has for
-    /// what `T` is, and skipping it leaves `T` unbound and reports the call as
-    /// ambiguous. This builds the function type that argument position needs.
+    /// `inferType` gives a function value a function type whose return is
+    /// `unknown` when nothing determines it. Generic inference must not read
+    /// that as evidence: a callback passed as an argument is the only evidence
+    /// a signature like `run(key: string, fn: () => T): T` has for what `T`
+    /// is, and an unresolved one leaves `T` unbound so that the call is
+    /// reported as ambiguous. A function literal therefore gets
+    /// `functionExprType`, which is null when the body decides nothing, and a
+    /// named function whose return is `unknown` is treated the same way.
     fn argumentTypeForInference(self: *const TypeChecker, node: NodeIndex) TypeIndex {
-        const inferred = self.inferType(node);
-        if (inferred != null_type_idx) return inferred;
         const tag = self.ir_view.getTag(node) orelse return null_type_idx;
-        if (tag != .arrow_function and tag != .function_expr) return null_type_idx;
-        return self.functionExprType(node);
+        if (tag == .arrow_function or tag == .function_expr) return self.functionExprType(node);
+        const inferred = self.inferType(node);
+        if (tag == .identifier and self.hasUnknownReturn(inferred)) return null_type_idx;
+        return inferred;
+    }
+
+    fn hasUnknownReturn(self: *const TypeChecker, type_idx: TypeIndex) bool {
+        if (self.env.pool.getTag(type_idx) != .t_function) return false;
+        return self.env.pool.getFunctionInfo(type_idx).ret == self.env.pool.idx_unknown;
     }
 
     /// The argument type used for assignability checks. Generic inference may
@@ -4078,7 +4181,9 @@ pub const TypeChecker = struct {
         const inferred = self.argumentTypeForInference(node);
         if (inferred != null_type_idx) return inferred;
         const tag = self.ir_view.getTag(node) orelse return null_type_idx;
-        if (tag != .arrow_function and tag != .function_expr) return null_type_idx;
+        // A named function with no determined return keeps the `unknown`
+        // return `inferType` gave it, so a number target still refuses it.
+        if (tag != .arrow_function and tag != .function_expr) return self.inferType(node);
         return self.env.pool.addFunctionWithReturn(self.allocator, &.{}, self.env.pool.idx_unknown);
     }
 
@@ -8280,26 +8385,17 @@ test "Response.json refuses a payload JSON cannot carry" {
     );
 }
 
-test "a bare function name in an object literal is not caught, and that is inference" {
-    // Measured, not assumed: `{ f: helper }` where `helper` is a plain
-    // declaration infers a record whose field has no type, so the rule has
-    // nothing to refuse. The limit is in what an object literal infers for a
-    // bare callable identifier, not in the encodability walk - the same
-    // program with the function bound to a declared function type reports.
-    //
-    // Recorded rather than worked around: making the walk guess from a name
-    // would be the rule claiming knowledge the type system did not give it.
-    try checkTypedSource(
+test "Response.json refuses a bare function name in an object literal with ZTS213" {
+    // A function value has a function type, so `{ f: helper }` infers a record
+    // whose field is a function, and the encodability walk refuses it.
+    try expectOnlyDiagnostic(
         \\function helper(n: number): number {
         \\    return n;
         \\}
         \\function handler(req: Request): Response {
         \\    return Response.json({ f: helper });
         \\}
-    ,
-        0,
-        null,
-    );
+    , .unencodable_json_payload);
 }
 
 test "Response.json still admits every payload JSON can carry" {
@@ -9735,4 +9831,256 @@ test "TypeChecker: each type refusal carries a fixed help string" {
         \\  return Response.json({ s: s });
         \\}
     , 1, "does not satisfy constraint", "Pass a type argument that satisfies the constraint, or relax the constraint.");
+}
+
+// F1 (2026-11-02): a function value has a function type, so a typed position
+// that admits no function refuses it with the code it uses for any wrong value.
+
+fn expectOnlyDiagnostic(source: []const u8, kind: DiagnosticKind) !void {
+    const allocator = std.testing.allocator;
+    const seen = try typedDiagnostics(allocator, source, false);
+    defer freeSeenDiagnostics(allocator, seen);
+    if (seen.len != 1) for (seen) |d| std.debug.print("diagnostic: {s}\n", .{d.message});
+    try std.testing.expectEqual(@as(usize, 1), seen.len);
+    try std.testing.expectEqual(kind, seen[0].kind);
+}
+
+fn expectNoDiagnostics(source: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const seen = try typedDiagnostics(allocator, source, false);
+    defer freeSeenDiagnostics(allocator, seen);
+    if (seen.len != 0) for (seen) |d| std.debug.print("diagnostic: {s}\n", .{d.message});
+    try std.testing.expectEqual(@as(usize, 0), seen.len);
+}
+
+test "function value: returning an arrow from a number function is ZTS204" {
+    try expectOnlyDiagnostic(
+        \\function f(): number {
+        \\  return (x: number): number => x;
+        \\}
+    , .return_type_mismatch);
+}
+
+test "function value: returning a const arrow from a number function is ZTS204" {
+    try expectOnlyDiagnostic(
+        \\function h(): number {
+        \\  const f = (x: number): number => x;
+        \\  return f;
+        \\}
+    , .return_type_mismatch);
+}
+
+test "function value: returning a named function from a number function is ZTS204" {
+    try expectOnlyDiagnostic(
+        \\function g(x: number): number { return x; }
+        \\function h(): number {
+        \\  return g;
+        \\}
+    , .return_type_mismatch);
+}
+
+test "function value: returning an arrow into number or undefined is ZTS204" {
+    try expectOnlyDiagnostic(
+        \\function f(): number | undefined {
+        \\  return (x: number): number => x;
+        \\}
+    , .return_type_mismatch);
+}
+
+test "function value: a ternary branch that is an arrow is ZTS204" {
+    try expectOnlyDiagnostic(
+        \\function f(flag: boolean): number {
+        \\  return flag ? (x: number): number => x : 1;
+        \\}
+    , .return_type_mismatch);
+}
+
+test "function value: an arrow in a number annotation is ZTS200" {
+    try expectOnlyDiagnostic(
+        \\function f(): number {
+        \\  const n: number = (x: number): number => x;
+        \\  return 1;
+        \\}
+    , .type_mismatch);
+}
+
+test "function value: a named function in a number annotation is ZTS200" {
+    try expectOnlyDiagnostic(
+        \\function g(x: number): number { return x; }
+        \\function f(): number {
+        \\  const n: number = g;
+        \\  return 1;
+        \\}
+    , .type_mismatch);
+}
+
+test "function value: assigning an arrow to a number variable is ZTS200" {
+    try expectOnlyDiagnostic(
+        \\function f(): number {
+        \\  let n: number = 0;
+        \\  n = (x: number): number => x;
+        \\  return n;
+        \\}
+    , .type_mismatch);
+}
+
+test "function value: an arrow in a number record field is ZTS200" {
+    try expectOnlyDiagnostic(
+        \\structural Box = { n: number };
+        \\function f(): number {
+        \\  const b: Box = { n: (x: number): number => x };
+        \\  return 1;
+        \\}
+    , .type_mismatch);
+}
+
+test "function value: an arrow in a number array is ZTS200" {
+    try expectOnlyDiagnostic(
+        \\function f(): number {
+        \\  const a: number[] = [(x: number): number => x];
+        \\  return 1;
+        \\}
+    , .type_mismatch);
+}
+
+test "function value: an arrow in a number tuple slot is ZTS200" {
+    try expectOnlyDiagnostic(
+        \\function f(): number {
+        \\  const t: [number, string] = [(x: number): number => x, "a"];
+        \\  return 1;
+        \\}
+    , .type_mismatch);
+}
+
+test "function value: a named function passed as a number argument is ZTS203" {
+    try expectOnlyDiagnostic(
+        \\function g(x: number): number { return x; }
+        \\function take(n: number): number { return n; }
+        \\function f(): number {
+        \\  return take(g);
+        \\}
+    , .arg_type_mismatch);
+}
+
+test "function value: a const arrow passed as a number argument is ZTS203" {
+    try expectOnlyDiagnostic(
+        \\function take(n: number): number { return n; }
+        \\function f(): number {
+        \\  const g = (x: number): number => x;
+        \\  return take(g);
+        \\}
+    , .arg_type_mismatch);
+}
+
+test "function value: an arrow nested in a record argument is ZTS203" {
+    try expectOnlyDiagnostic(
+        \\structural Box = { n: number };
+        \\function take2(b: Box): number { return 1; }
+        \\function f(): number {
+        \\  return take2({ n: (x: number): number => x });
+        \\}
+    , .arg_type_mismatch);
+}
+
+test "function value: a function in a JSON payload is ZTS213" {
+    try expectOnlyDiagnostic(
+        \\function g(x: number): number { return x; }
+        \\export function handler(req: Request): Response {
+        \\  return Response.json({ f: g });
+        \\}
+    , .unencodable_json_payload);
+}
+
+test "function value: calling a const arrow keeps its arity" {
+    try expectNoDiagnostics(
+        \\function r(): number {
+        \\  const f = (x: number): number => x;
+        \\  return f(1);
+        \\}
+    );
+    try expectOnlyDiagnostic(
+        \\function r(): number {
+        \\  const f = (x: number): number => x;
+        \\  return f(1, 2);
+        \\}
+    , .arg_count_mismatch);
+}
+
+test "function value: a function stays assignable to a function type" {
+    try expectNoDiagnostics(
+        \\function g(x: number): number { return x; }
+        \\function r(): number {
+        \\  const h: (x: number) => number = g;
+        \\  return h(1);
+        \\}
+    );
+    try expectNoDiagnostics(
+        \\function r(): number {
+        \\  const k: (x: number) => number = (x: number): number => x;
+        \\  return k(1);
+        \\}
+    );
+}
+
+test "function value: a named function passes to an array callback" {
+    try expectNoDiagnostics(
+        \\function g(x: number): number { return x; }
+        \\function r(): number[] {
+        \\  return [1, 2].map(g);
+        \\}
+    );
+}
+
+test "function value: an unannotated object holding an arrow keeps its call arity" {
+    try expectNoDiagnostics(
+        \\function r(): number {
+        \\  const o = { f: (x: number): number => x };
+        \\  return o.f(1);
+        \\}
+    );
+    try expectOnlyDiagnostic(
+        \\function r(): number {
+        \\  const o = { f: (x: number): number => x };
+        \\  return o.f(1, 2);
+        \\}
+    , .arg_count_mismatch);
+}
+
+test "function value: an unannotated arrow in a shadowing JSON object takes its argument" {
+    try expectNoDiagnostics(
+        \\function r(): string {
+        \\  const JSON = { stringify: (value) => "ignored" };
+        \\  return JSON.stringify({ a: 1 });
+        \\}
+    );
+}
+
+test "function value: a function with an extra parameter is refused at a function type" {
+    try expectOnlyDiagnostic(
+        \\function r(): number {
+        \\  const k: (x: number) => number = (x: number, y: number): number => x;
+        \\  return 1;
+        \\}
+    , .type_mismatch);
+}
+
+test "function value: a function with a wrong parameter type is refused at a function type" {
+    try expectOnlyDiagnostic(
+        \\function r(): number {
+        \\  const k: (x: number) => number = (x: string): number => 1;
+        \\  return 1;
+        \\}
+    , .type_mismatch);
+}
+
+test "function value: a record holding a function is refused at a number field" {
+    try expectOnlyDiagnostic(
+        \\structural Box = { n: number };
+        \\function g(x: number): number { return x; }
+        \\function r(): number {
+        \\  const o = { n: g };
+        \\  const b: Box = o;
+        \\  return 1;
+        \\}
+    , .type_mismatch);
 }
