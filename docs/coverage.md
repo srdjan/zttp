@@ -34,7 +34,7 @@ publishing first-draft, intent, or round-trip measurements still requires the
 named model. Developing and verifying the harness, veto, salvage, repair, and
 hole-loop machinery does not.
 
-Recorded 2026-10-29 over corpus `db16cf2221a6`. The replay fails
+Recorded 2026-11-02 over corpus `91c9e8aaf5e4`. The replay fails
 when this page drifts from the run, so it is regenerated in the same commit as
 whatever moved it, and `git log docs/coverage.json` is the history.
 
@@ -63,15 +63,15 @@ Untripped: `ZTS302`, `ZTS303`, `ZTS304`, `ZTS305`, `ZTS306`, `ZTS308`, `ZTS309`,
 
 The row above is one draw. Recordings of the same headline corpus have measured
 different sets. A rule is counted only when the recorded model output makes the
-mistake that trips it. Across the 21 published runs of corpus `db16cf2221a6`,
-the tripped set took 7 distinct shapes, the smallest naming 0
-rules and the largest 3.
+mistake that trips it. Across the single published run of corpus `91c9e8aaf5e4`,
+the tripped set took one shape, the smallest naming 1
+rules and the largest 1.
 
 | Union across runs | Smallest single run | Largest single run |
 |---|---|---|
-| 4 | 0 | 3 |
+| 1 | 1 | 1 |
 
-Ever tripped: `ZTS400`, `ZTS500`, `ZTS501`, `ZTS502`
+Ever tripped: `ZTS400`
 
 This is the fairer answer to "what do these prompts reach", and no single row
 can give it. It is computed by `zig build coverage-union` from
@@ -127,7 +127,7 @@ since covered. Neither list can drift from the registry without failing a build.
 
 ## Codes the registry does not carry
 
-`ZTS001`, `ZTS056`, `ZTS203`
+`ZTS001`, `ZTS002`, `ZTS049`, `ZTS050`, `ZTS056`, `ZTS202`, `ZTS203`
 
 These are real diagnostics the corpus trips that no `rule_registry` entry
 carries - the parser, type-position admission, bool-checker, and type-checker families. The
