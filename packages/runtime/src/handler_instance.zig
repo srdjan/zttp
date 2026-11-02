@@ -702,6 +702,9 @@ pub const HandlerInstance = struct {
                 error.ImportNestingTooDeep => std.log.err("Import nesting too deep (max 32) from '{s}'", .{filename}),
                 else => std.log.err("Module graph error for '{s}': {}", .{ filename, err }),
             }
+            var message_buffer: [1024]u8 = undefined;
+            const message = graph.importRefusalMessage(&message_buffer);
+            if (message.len > 0) std.log.err("{s}", .{message});
             return err;
         };
 

@@ -24,6 +24,26 @@ const MAX_NESTING_DEPTH = 32;
 /// Callback type for reading file contents. Returns owned slice or error.
 pub const ReadFileFn = *const fn (allocator: std.mem.Allocator, path: []const u8) ReadFileError![]const u8;
 
+/// Callback type for reading file contents through a caller-owned context.
+pub const ContextReadFn = *const fn (context: *anyopaque, allocator: std.mem.Allocator, path: []const u8) ReadFileError![]const u8;
+
+/// How the graph reads a file: a bare function, or a function with a context.
+pub const SourceReader = union(enum) {
+    plain: ReadFileFn,
+    contextual: struct {
+        context: *anyopaque,
+        read: ContextReadFn,
+    },
+
+    /// Read one file. The caller owns the returned slice.
+    pub fn read(self: SourceReader, allocator: std.mem.Allocator, path: []const u8) ReadFileError![]const u8 {
+        return switch (self) {
+            .plain => |read_file| read_file(allocator, path),
+            .contextual => |contextual| contextual.read(contextual.context, allocator, path),
+        };
+    }
+};
+
 pub const ReadFileError = error{
     FileNotFound,
     OutOfMemory,
@@ -107,6 +127,16 @@ pub const BindingRefusal = struct {
     pub const Kind = enum { ambiguous, reserved, dependency_handler, missing_export };
 };
 
+/// Why `build` failed. Both strings belong to the graph. `specifier` is empty
+/// unless the refusal names an import.
+pub const ImportRefusal = struct {
+    kind: Kind,
+    module_path: []const u8,
+    specifier: []const u8,
+
+    pub const Kind = enum { unreadable, circular, too_deep, not_admitted };
+};
+
 pub const CheckBindingsError = error{
     AmbiguousBinding,
     ReservedBinding,
@@ -122,6 +152,8 @@ pub const ModuleGraph = struct {
     execution_order: []ModuleIndex,
     /// Detail of the last refusal that `checkBindings` returned.
     binding_refusal: ?BindingRefusal = null,
+    /// Detail of the last refusal that `build` returned.
+    import_refusal: ?ImportRefusal = null,
 
     /// Whether a top-level binding would overwrite a global that the runtime installs.
     pub const isReservedName = known_globals.isRuntimeGlobal;
@@ -145,6 +177,54 @@ pub const ModuleGraph = struct {
             self.allocator.free(self.execution_order);
         }
         if (self.binding_refusal) |refusal| self.allocator.free(refusal.name);
+        self.clearImportRefusal();
+    }
+
+    fn clearImportRefusal(self: *ModuleGraph) void {
+        const refusal = self.import_refusal orelse return;
+        self.allocator.free(refusal.module_path);
+        self.allocator.free(refusal.specifier);
+        self.import_refusal = null;
+    }
+
+    /// Record why `build` failed. An allocation failure leaves no record.
+    fn recordImportRefusal(self: *ModuleGraph, kind: ImportRefusal.Kind, module_path: []const u8, specifier: []const u8) void {
+        self.clearImportRefusal();
+        const path_copy = self.allocator.dupe(u8, module_path) catch return;
+        const specifier_copy = self.allocator.dupe(u8, specifier) catch {
+            self.allocator.free(path_copy);
+            return;
+        };
+        self.import_refusal = .{ .kind = kind, .module_path = path_copy, .specifier = specifier_copy };
+    }
+
+    /// Format the last `build` refusal into `buffer`. Paths appear as the graph
+    /// holds them. The text is empty when no refusal is recorded.
+    pub fn importRefusalMessage(self: *const ModuleGraph, buffer: []u8) []const u8 {
+        const refusal = self.import_refusal orelse return "";
+        const written = switch (refusal.kind) {
+            .unreadable => std.fmt.bufPrint(
+                buffer,
+                "Module '{s}' imports '{s}', but that file cannot be read. Check the path and the file name.",
+                .{ refusal.module_path, refusal.specifier },
+            ),
+            .circular => std.fmt.bufPrint(
+                buffer,
+                "Module '{s}' is part of an import cycle. Remove one import so that the modules form no cycle.",
+                .{refusal.module_path},
+            ),
+            .too_deep => std.fmt.bufPrint(
+                buffer,
+                "Imports below '{s}' nest more than {d} levels. Flatten the chain of imports.",
+                .{ refusal.module_path, MAX_NESTING_DEPTH },
+            ),
+            .not_admitted => std.fmt.bufPrint(
+                buffer,
+                "Dependency '{s}' is refused at admission. Use a TypeScript file that the parser admits.",
+                .{refusal.module_path},
+            ),
+        } catch return "Module imports are refused.";
+        return written;
     }
 
     /// Get the number of modules (excluding the entry file)
@@ -162,7 +242,17 @@ pub const ModuleGraph = struct {
         entry_source: []const u8,
         read_file: ReadFileFn,
     ) !void {
-        return self.buildEntry(entry_path, entry_source, read_file, false);
+        return self.buildEntry(entry_path, entry_source, .{ .plain = read_file }, false);
+    }
+
+    /// Build as `build` does, and read each dependency through `reader`.
+    pub fn buildWithReader(
+        self: *ModuleGraph,
+        entry_path: []const u8,
+        entry_source: []const u8,
+        reader: SourceReader,
+    ) !void {
+        return self.buildEntry(entry_path, entry_source, reader, false);
     }
 
     /// Build a fixed prepared-evaluation entry with ordinary file dependencies.
@@ -173,16 +263,17 @@ pub const ModuleGraph = struct {
         read_file: ReadFileFn,
     ) !void {
         if (source_frontend.classifyPath(entry_path) != .virtual_javascript) return error.UnsupportedSourceExtension;
-        return self.buildEntry(entry_path, entry_source, read_file, true);
+        return self.buildEntry(entry_path, entry_source, .{ .plain = read_file }, true);
     }
 
     fn buildEntry(
         self: *ModuleGraph,
         entry_path: []const u8,
         entry_source: []const u8,
-        read_file: ReadFileFn,
+        reader: SourceReader,
         prepared_eval: bool,
     ) !void {
+        self.clearImportRefusal();
         // Add entry module (dupe path and source since addModule takes ownership)
         const owned_path = try self.allocator.dupe(u8, entry_path);
         const owned_source = self.allocator.dupe(u8, entry_source) catch |err| {
@@ -192,7 +283,7 @@ pub const ModuleGraph = struct {
         const entry_idx = try self.addModule(owned_path, owned_source, !prepared_eval);
 
         // Recursively discover dependencies
-        try self.discoverDependencies(entry_idx, read_file, 0);
+        try self.discoverDependencies(entry_idx, reader, 0);
 
         // Topological sort
         try self.topologicalSort();
@@ -229,8 +320,11 @@ pub const ModuleGraph = struct {
         return idx;
     }
 
-    fn discoverDependencies(self: *ModuleGraph, module_idx: ModuleIndex, read_file: ReadFileFn, depth: u32) !void {
-        if (depth > MAX_NESTING_DEPTH) return error.ImportNestingTooDeep;
+    fn discoverDependencies(self: *ModuleGraph, module_idx: ModuleIndex, reader: SourceReader, depth: u32) !void {
+        if (depth > MAX_NESTING_DEPTH) {
+            self.recordImportRefusal(.too_deep, self.module_list.items[module_idx].path, "");
+            return error.ImportNestingTooDeep;
+        }
 
         var module = &self.module_list.items[module_idx];
         const module_path = module.path;
@@ -269,22 +363,27 @@ pub const ModuleGraph = struct {
                     }
 
                     // Read the file
-                    const dep_source = read_file(self.allocator, resolved_path) catch {
-                        std.debug.print(
-                            "Module graph read failed: importer={s} specifier={s} resolved={s}\n",
-                            .{ module_path, specifier, resolved_path },
-                        );
+                    const dep_source = reader.read(self.allocator, resolved_path) catch {
+                        self.recordImportRefusal(.unreadable, module_path, specifier);
                         self.allocator.free(resolved_path);
                         return error.ImportFileNotFound;
                     };
 
+                    // Admit before addModule, which frees the path when it fails.
+                    admitModule(self.allocator, dep_source, resolved_path) catch |err| {
+                        if (err != error.OutOfMemory) self.recordImportRefusal(.not_admitted, resolved_path, "");
+                        self.allocator.free(resolved_path);
+                        self.allocator.free(dep_source);
+                        return err;
+                    };
+
                     // addModule takes ownership of resolved_path and dep_source
-                    const dep_idx = try self.addModule(resolved_path, dep_source, true);
+                    const dep_idx = try self.addModule(resolved_path, dep_source, false);
 
                     try deps.append(self.allocator, dep_idx);
 
                     // Recurse into the dependency
-                    try self.discoverDependencies(dep_idx, read_file, depth + 1);
+                    try self.discoverDependencies(dep_idx, reader, depth + 1);
                 },
                 .virtual, .unknown => {},
             }
@@ -513,7 +612,10 @@ pub const ModuleGraph = struct {
     fn dfsVisit(self: *ModuleGraph, idx: ModuleIndex, order: *std.ArrayList(ModuleIndex)) !void {
         var module = &self.module_list.items[idx];
 
-        if (module.state == .visiting) return error.CircularImport;
+        if (module.state == .visiting) {
+            self.recordImportRefusal(.circular, module.path, "");
+            return error.CircularImport;
+        }
         if (module.state == .visited) return;
 
         module.state = .visiting;
@@ -790,6 +892,117 @@ test "graph refuses an imported module with an unterminated comment" {
         error.UnterminatedComment,
         graph.build("entry.ts", "import { value } from \"./lib.ts\";\nexport const result = value;\n", Reader.read),
     );
+}
+
+test "build records an unreadable import" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try std.testing.expectError(
+        error.ImportFileNotFound,
+        graph.build("/app/handler.ts", "import { x } from \"./missing.ts\"; export const y = x;", testReadFile),
+    );
+    const refusal = graph.import_refusal.?;
+    try std.testing.expectEqual(ImportRefusal.Kind.unreadable, refusal.kind);
+    try std.testing.expectEqualStrings("/app/handler.ts", refusal.module_path);
+    try std.testing.expectEqualStrings("./missing.ts", refusal.specifier);
+    var buffer: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Module '/app/handler.ts' imports './missing.ts', but that file cannot be read. Check the path and the file name.",
+        graph.importRefusalMessage(&buffer),
+    );
+}
+
+test "build records an import cycle" {
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try std.testing.expectError(
+        error.CircularImport,
+        graph.build("/app/circular_a.ts", "import { b } from \"./circular_b.ts\"; export const a = 1;", testReadFile),
+    );
+    const refusal = graph.import_refusal.?;
+    try std.testing.expectEqual(ImportRefusal.Kind.circular, refusal.kind);
+    try std.testing.expectEqualStrings("/app/circular_a.ts", refusal.module_path);
+    try std.testing.expectEqualStrings("", refusal.specifier);
+    var buffer: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Module '/app/circular_a.ts' is part of an import cycle. Remove one import so that the modules form no cycle.",
+        graph.importRefusalMessage(&buffer),
+    );
+}
+
+test "build records an import chain that nests too deep" {
+    const Reader = struct {
+        fn read(allocator: std.mem.Allocator, path: []const u8) ReadFileError![]const u8 {
+            const stem = path["/deep/m".len .. path.len - ".ts".len];
+            const level = std.fmt.parseInt(u32, stem, 10) catch return error.FileNotFound;
+            return std.fmt.allocPrint(
+                allocator,
+                "import {{ x }} from \"./m{d}.ts\"; export const x{d} = 1;",
+                .{ level + 1, level },
+            ) catch return error.OutOfMemory;
+        }
+    };
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try std.testing.expectError(
+        error.ImportNestingTooDeep,
+        graph.build("/deep/m0.ts", "import { x } from \"./m1.ts\"; export const x0 = 1;", Reader.read),
+    );
+    const refusal = graph.import_refusal.?;
+    try std.testing.expectEqual(ImportRefusal.Kind.too_deep, refusal.kind);
+    try std.testing.expectEqualStrings("/deep/m33.ts", refusal.module_path);
+    try std.testing.expectEqualStrings("", refusal.specifier);
+    var buffer: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Imports below '/deep/m33.ts' nest more than 32 levels. Flatten the chain of imports.",
+        graph.importRefusalMessage(&buffer),
+    );
+}
+
+test "build records a dependency that admission refuses" {
+    const Reader = struct {
+        fn read(allocator: std.mem.Allocator, _: []const u8) ReadFileError![]const u8 {
+            return allocator.dupe(u8, "export const value = 1; /* open") catch return error.OutOfMemory;
+        }
+    };
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try std.testing.expectError(
+        error.UnterminatedComment,
+        graph.build("/app/entry.ts", "import { value } from \"./lib.ts\";\nexport const result = value;\n", Reader.read),
+    );
+    const refusal = graph.import_refusal.?;
+    try std.testing.expectEqual(ImportRefusal.Kind.not_admitted, refusal.kind);
+    try std.testing.expectEqualStrings("/app/lib.ts", refusal.module_path);
+    var buffer: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Dependency '/app/lib.ts' is refused at admission. Use a TypeScript file that the parser admits.",
+        graph.importRefusalMessage(&buffer),
+    );
+}
+
+test "buildWithReader reads a dependency from the reader context" {
+    const Store = struct {
+        utils_source: []const u8,
+
+        fn read(store_ptr: *anyopaque, allocator: std.mem.Allocator, path: []const u8) ReadFileError![]const u8 {
+            const store: *const @This() = @ptrCast(@alignCast(store_ptr));
+            if (!std.mem.eql(u8, path, "/app/utils.ts")) return error.FileNotFound;
+            return allocator.dupe(u8, store.utils_source) catch return error.OutOfMemory;
+        }
+    };
+    var store: Store = .{ .utils_source = "export const answer = 42;" };
+    var graph = ModuleGraph.init(std.testing.allocator);
+    defer graph.deinit();
+    try graph.buildWithReader(
+        "/app/handler.ts",
+        "import { answer } from \"./utils.ts\"; export const y = answer;",
+        .{ .contextual = .{ .context = &store, .read = Store.read } },
+    );
+    try std.testing.expectEqual(@as(usize, 2), graph.module_list.items.len);
+    try std.testing.expectEqualStrings("/app/utils.ts", graph.module_list.items[1].path);
+    try std.testing.expectEqualStrings("export const answer = 42;", graph.module_list.items[1].source);
+    try std.testing.expect(graph.import_refusal == null);
 }
 
 test "graph build allocation failure cannot select raw" {

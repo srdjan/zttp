@@ -851,7 +851,12 @@ fn compileMultiModule(
     defer graph.deinit();
 
     graph.build(filename, entry_source, readFilePosixForGraph) catch |err| {
-        if (!builtin.is_test) debugPrint("Module graph error: {}\n", .{err});
+        if (!builtin.is_test) {
+            debugPrint("Module graph error: {}\n", .{err});
+            var message_buffer: [1024]u8 = undefined;
+            const message = graph.importRefusalMessage(&message_buffer);
+            if (message.len > 0) debugPrint("{s}\n", .{message});
+        }
         return err;
     };
 
