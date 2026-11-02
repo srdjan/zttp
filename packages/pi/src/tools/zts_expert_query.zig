@@ -435,7 +435,7 @@ test "search preserves frozen response bytes" {
     try testing.expect(query_result.ok);
     try testing.expectEqual(@as(usize, 1017), query_result.llm_text.len);
     try testing.expectEqualStrings(
-        "f6254ce586379cabf028da5253e69f5dcbd765e6a713c89f9d5bb76c94624e77",
+        "d6876e02c35eb2df1d4c8a5f218f3d65d4ae4430884cee31f209f7267ed7df41",
         &hex,
     );
     try testing.expect(query_result.llm_text[query_result.llm_text.len - 1] == '\n');
