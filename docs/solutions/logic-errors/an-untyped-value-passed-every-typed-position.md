@@ -1,8 +1,9 @@
 ---
 title: An untyped value passed every typed position
 date: 2026-11-02
+last_updated: 2026-11-02
 category: logic-errors
-module: ZigTS type checker, value inference and narrowing guards
+module: ZigTS type checker and sound-mode checker, value inference, narrowing guards, arithmetic operands
 problem_type: logic_error
 component: tooling
 severity: high
@@ -10,6 +11,7 @@ symptoms:
   - "`const n: number = g;`, with `g` a named function, passed `zts check` with 0 errors, and `zttp dev` answered 500 with \"Possible soundness incident\"."
   - "`Response.json({ f: g })` passed `zts check` and served `{\"f\":{}}`."
   - "The roadmap described a narrower gap than the probes measured: 15 probes at 8 kinds of typed position passed `zts check`."
+  - "`x + 1` with `x: number | undefined` passed `zts check` with `optionals_safe` PROVEN, and `zttp dev` answered 500 with \"Possible soundness incident\"."
 root_cause: logic_error
 resolution_type: code_fix
 related_components:
@@ -22,6 +24,8 @@ tags:
   - narrowing-guards
   - false-proof
   - soundness-probe
+  - sound-mode
+  - arithmetic-operands
 ---
 
 # An untyped value passed every typed position
@@ -55,6 +59,16 @@ Until commit `9ce546c0` on local `main`, a function value was such a form. An ar
 
 The discriminant guard now keeps every member that can hold the literal on the then-side. It keeps every member whose field is not exactly the literal, is optional, or is absent on the else-side.
 
+## Second instance: a coarse lattice read "cannot name" as "pass"
+
+The same fail-open was also in a second checker. The sound-mode arithmetic check (`requireNumeric` and `requireAddable` in `packages/zts/src/bool_checker.zig#BoolChecker`) reads its own small type lattice. That lattice has no member for an optional number or for `null`. An optional number, a `null`-admitting type, and the declared type `unknown` all mapped to the member `.unknown`, and the check passed `.unknown` with the comment "defers to runtime". The runtime did fault, but the verifier had already proven `optionals_safe`. The unary minus had no operand check at all.
+
+The 2026-11-02 arithmetic plan measured eight such handlers. Examples are `x + 1` with `x: number | undefined`, `b.n - 1` with an optional field, `xs[5] + 1`, `v * 2` with `v: unknown`, and `-b` with `b: boolean`. Each one passed `zts check`, and `zttp dev` answered 500 with "Possible soundness incident".
+
+The fix (commit `c92f8f67` on local `main`) keeps every lattice verdict. Where the lattice answers `.unknown`, the check reads the type that the type checker recorded for that operand while its narrowing was live (`recordContextType` and `contextTypeOf` in `packages/zts/src/type_checker.zig#TypeChecker`). The boolean-context check `requireBoolean` already worked this way. A typed operand that is not assignable to `number` gets ZTS104, or ZTS106 for `+`.
+
+**What did not work: refusing an operand with no type.** The first plan also refused an operand for which the type checker returns `null_type_idx`. A Fable review found, before any code changed, that the type checker leaves common numeric forms untyped: `xs.length`, `Math.floor(...)`, and `parseInt(...)`, among others. That refusal would have refused valid code such as `xs.length - 1`. The fix lets an untyped operand pass, and the roadmap lists the limit. The untyped forms are themselves a false proof of the kind in this doc: `const a: string = xs.length;` passes, and `a.toUpperCase()` then faults.
+
 ## Why This Works
 
 The hole was at the source: one inference result that every consumer reads as "pass". A type at the source reaches each consumer at once, including sinks that no one listed, such as the ZTS213 JSON check. Nineteen new tests failed on the previous commit and pass now.
@@ -62,12 +76,15 @@ The hole was at the source: one inference result that every consumer reads as "p
 ## Prevention
 
 - Treat `null_type_idx` from `inferType` as a fail-open at every typed position. When a new expression form is added, give it a type, or show that no typed position can receive it.
+- A secondary checker with a coarser type model than the type checker must not read "I cannot name this type" as "pass". Ask the type checker for the type it recorded with narrowing live, as `requireBoolean` and the arithmetic checks now do.
+- Before a check refuses an operand with no type, list the forms that the type checker leaves untyped at that position, and probe each one with `const s: string = <form>;`. Silence means the form has no type.
 - Find false proofs with a runtime probe, not only with `zts check`. Write a handler with a narrow `Proof<Response, "deterministic" | "read_only">` capsule so that `zts check` passes. Serve it with `zttp dev` and send one request. A fault prints "Possible soundness incident". This found each false proof of the 2026-11-02 plan.
 - Measure a reported gap before you plan its size. Probe the same wrong value at each kind of typed position.
-- `docs/roadmap.md` lists four type checker gaps that stay open. For two of them, `zttp dev` measured a wrong result: `x + 1` with `x: number | undefined`, and a discriminant test that meets a record with an extra field.
+- `docs/roadmap.md` lists the type checker gaps that stay open. For two of them, `zttp dev` measured a wrong result: the untyped numeric forms above, and a discriminant test that meets a record with an extra field.
 
 ## Related Issues
 
 - [Function values and type predicates plan](../../plans/2026-11-02-function-values-and-predicates-plan.md): findings F1 to F5, the probes, and the execution record.
+- [Arithmetic operand types plan](../../plans/2026-11-02-arithmetic-operand-types-plan.md): probes A1 to A8, finding B1, the validation record, and the execution record.
 - [testing-effect-instead-of-form-refused-the-canonical-predicate](testing-effect-instead-of-form-refused-the-canonical-predicate.md): the type predicate admission history, which the same plan changed.
 - [a-proxy-signal-carried-a-proof-it-never-claimed](a-proxy-signal-carried-a-proof-it-never-claimed.md): another false PROVEN from a value read as an answer it never gave.
