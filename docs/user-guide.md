@@ -360,7 +360,7 @@ A capsule applies to every file. If a dependency breaks a property that the caps
 
 A dependency runs its top-level code at load, once for each pooled runtime. No request deadline applies to that code. `zttp serve` refuses an ambiguous top-level binding too.
 
-`zttp build` can refuse a handler that `zttp check` passes. Fix the refusal that `zttp build` names. See [Handlers with file imports](verification.md#handlers-with-file-imports) for the limits of the certificate.
+`zttp check` reports these refusals too. A diagnostic in a dependency names that file. ZTS063 names a module graph refusal, and ZTS064 names a file import with no type that can cross modules. See [Handlers with file imports](verification.md#handlers-with-file-imports) for the limits of the certificate.
 
 ## Tests And Replay
 

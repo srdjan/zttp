@@ -27,7 +27,7 @@ The owner approved the window. I made these design decisions, and D-018 will rec
 2. **The entry keeps the check path.** The entry runs the existing stages of `runCheckOnParsedSource`, on the parser of the graph and with typed imports. Each dependency runs `checkGraphModule`. The check result, the proof trace, and the policy report stay in one place.
 3. **The merged contract replaces the entry contract** for a handler with file imports. The policy and spec reports then read the same facts as the build.
 4. **Two new codes.** ZTS063 `module_link_refused`: the modules cannot run as one program. ZTS064 `file_import_untyped`: a file import has no type that can cross modules. Each refusal keeps its own message. A diagnostic in a dependency keeps its existing code, with the dependency in `file`.
-5. **`discoverModulePaths` calls `checkBindings`.** The `zttp check` result already carries the coded refusal, so `markReachableChanges` returns on the front end refusal first. The call stays as a defense for a caller that reaches it without a check.
+5. **`markReachableChanges` returns on a link refusal.** The `zttp check` result already carries the coded refusal. Revised during W5: `discoverModulePaths` does not call `checkBindings`. Its only caller returns first, so the call would be dead code, and the paths of a graph with a binding refusal stay correct.
 6. **`sibling-helper-holes` drops `cost_bounded` from its capsule.** Its seed dependency calls `env`, so the graph cannot establish that property, and the model cannot repair the seed. The re-record covers this seed edit.
 7. **The proof fold runs in `zttp check`,** so that the Result limit refuses in check too. `error.GraphResultsNotProved` stays build-only: no real source reached it in 11 probes.
 
@@ -64,9 +64,10 @@ Each later stage stays, with four changes for a graph:
 | W2. Sink and contract split | Sonnet | `precompile.zig`, `precompile_contract.zig`, `precompile_check_run.zig` | `test-precompile`, `test-cli`, `test-contract-golden`. `zts compile` output is byte-identical | 25 |
 | W3. New codes | Sonnet | `diagnostic_catalog.zig`, `rule_registry`, `json_diagnostics.zig`, `defect_seeds.zig`, docs | `test-standin`, `test-diagnostic-producers`, `test-grammar-drift` | 25 |
 | W4. Check driver | Sonnet | `precompile_check_run.zig`, `precompile_check_tests.zig`, `precompile.zig` | Failing tests first, then `test-precompile` and the parity table | 40 |
-| W5. Reachability | Sonnet | `precompile.zig`, `aggregate_proof.zig` | `test-expert-app` names only the expected stale cassettes | 10 |
+| W4b. Remove the replaced walker | Sonnet | `precompile_imports.zig`, `precompile_check_run.zig`, `proof-swallow.allow` | Digest equal to W4, `test-precompile`, `test-proof-swallow`. Added during W4 | 15 |
+| W5. Reachability | Opus | `aggregate_proof.zig` | A refused root stays coded. A ZTS063 message reads the same on both scratch roots. `test-expert-app` names only the expected stale cassettes | 10 |
 | W6. Unit 9d | Opus | `net/fetch.zig`, generated module spec, meta pin | `test-modules`, `test-docs-drift`, `test-meta-drift`, `test-expert-golden` | 10 |
-| W7. Seed edit | Opus | `expert_codegen_record.zig` | `sibling-helper-holes` passes `zts check` with the expected handler | 5 |
+| W7. Seed edit | Opus | `expert_codegen_record.zig` | The `sibling-helper-holes` seed passes `zts check`. The plan first asked this of the filled handler, which was wrong: `env` data is secret without a policy, so that handler gets ZTS400 before and after this plan | 5 |
 | W8. Documentation | Opus | `decisions.md`, `verification.md`, `cli.md`, `user-guide.md`, `roadmap.md`, `README.md`, website | `test-doc-links`, `test-docs-drift`, `check-spine`, `deno task verify` | 15 |
 | W9. Re-record | Owner or Opus | Corpus, pins, `docs/convergence.*`, `docs/coverage.*` | One case, then whole corpus, then replay offline | 25 |
 | W10. Final gate | Opus | Worklog | Empty caches, no provider key, every step exit 0 | 15 |
@@ -77,7 +78,7 @@ W4 adds one table of literal cases. Each case is a set of files. Each row states
 
 ## Risks
 
-- **A deterministic replay needs stable paths.** A dependency path reaches the model. `appendCheckDiagnostics` already relativizes a path inside the workspace. W5 confirms each expert route, and the replay in W9 confirms the text.
+- **A deterministic replay needs stable paths.** A dependency path reaches the model. Each expert tool passes a workspace path, so its text is stable. The aggregate proof passes a scratch path. W5 found that a ZTS063 message carried that path, so `appendCheckDiagnostics` removes the scratch root from `file` and from the message.
 - **Cost.** A graph check compiles each module. I will measure `zts check` on `handler-with-imports` before and after W4.
 - **Evidence consumers.** `pr_gate` and `agent_protocol_check` read `file`. W4 tests a base side reader and a dependency diagnostic.
 

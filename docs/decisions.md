@@ -73,6 +73,13 @@ unchanged. Resolution uses no filesystem existence probes. The selected path
 is read through the caller's revision reader, and flow and fault retain their
 separate traversals, read order, repeated reads, and revision selection.
 
+Amendment, 2026-11-01, for check parity: `zttp check` of a handler with file
+imports takes its flow and effect inputs from the module graph of D-018, and
+the imported flow traversal is removed. The graph reads each module once through
+the caller's revision reader. The imported fault traversal stays, with its own
+reads and stopping rules, so the fault scan reads a file again after the graph.
+The statements above about a separate flow traversal are now history.
+
 ### D-007 Persistent reads carry unknown provenance
 
 - Status: standing
@@ -200,7 +207,7 @@ A file on a user machine outlives the binary that wrote it. The owner chose Deci
 
 - Status: standing
 - Decided: 2026-11-01
-- Binds: packages/zts/src/proof_ir.zig, packages/tools/src/precompile.zig, packages/tools/src/precompile_contract.zig, packages/runtime/src/proof_certificate.zig
+- Binds: packages/zts/src/proof_ir.zig, packages/tools/src/precompile.zig, packages/tools/src/precompile_contract.zig, packages/tools/src/precompile_graph_check.zig, packages/tools/src/precompile_check_run.zig, packages/runtime/src/proof_certificate.zig
 - Gate: zig build test-proof-ratchet
 
 Before this decision, `zttp compile`, `zttp build`, and `zttp deploy` refused a handler with file imports, because the compiler built no certificate for one. The multi-module path also skipped most checks of the single-module path. The owner chose option (a) for Decisions 1 to 6 of the module graph certificates plan on 2026-11-01.
@@ -214,3 +221,5 @@ Decision 3 (a): the build runs every check on every module, except ZTS061. A dep
 Decision 4 (a): this supersedes the line of the P7 specification that merged multi-module contracts omit flow claims. A build runs FlowInterp over the modules of the graph, each module once, in load order. FlowInterp does not change, so the flow facts keep one producer, as D-011 requires.
 
 Decision 5 (a): `zttp check` does not change, except that every top-level function is a root for the state checks. Until unit G8 of the plan, the build is the stricter gate, and `zttp build` refuses some handlers that `zttp check` passes. D-012 freezes the output of `zttp check`, and G8 waits for a re-record window.
+
+Check parity, 2026-11-01: the owner opened that window, and the [check parity plan](plans/2026-11-01-check-parity-plan.md) closes Decision 5. `zttp check` calls the graph checks and the contract merge of the build, so one implementation serves both. A diagnostic in a dependency keeps its code and names the dependency in `file`. ZTS063 `module_link_refused` and ZTS064 `file_import_untyped` name the refusals that no checker reports. `zttp check` folds the proof evidence, so the Result limit refuses there too. `GraphResultsNotProved` stays build-only, because no source reached it in 11 probes.

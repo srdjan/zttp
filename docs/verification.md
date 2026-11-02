@@ -769,7 +769,7 @@ The ZTS061 exemption lets `examples/handler/utils.ts` and the corpus seeds compi
 
 An uncalled function in a dependency that calls a module fails the default profile. The same function in one file passes. The default profile is stricter here, because a dependency contract counts every function of the module.
 
-A corpus handler whose capsule demands `cost_bounded` and whose dependency calls `env` stays refused. The case `sibling-helper-holes` is an example.
+A capsule that demands `cost_bounded` stays refused when a dependency calls `env`, because the graph cannot establish the property. The corpus case `sibling-helper-holes` dropped that spec on 2026-11-01 for this reason.
 
 ### Tampering and bundles
 
@@ -779,11 +779,18 @@ A dependency edit on a built binary exits 1 at boot. So does a dependency sectio
 
 A computed capability call in a dependency appears in the residual plan. The call obeys the policy at run time: a key outside the policy gives HTTP 500.
 
-### Difference from `zttp check`
+### `zttp check` and the build
 
-`zttp check` stays unchanged, with one rule. Every top-level function is now a root for the state checks. A same-file helper that mutates module state therefore clears `state_isolated`.
+`zttp check` runs the checks and the contract merge of the build on every module of a handler with file imports. A handler that passes `zttp check` therefore passes `zttp build`, with one exception. `GraphResultsNotProved` stays build-only, because no source reached it in 11 probes.
 
-Until unit G8 of the [plan](plans/2026-11-01-module-graph-certificates-plan.md), `zttp build` refuses some handlers that `zttp check` passes. D-012 freezes the output of `zttp check`. G8 runs in a re-record window that the owner opens.
+A diagnostic in a dependency keeps its code and names the dependency in `file`. Two codes cover the refusals that no checker reports:
+
+| Code | Name | Cause |
+|---|---|---|
+| ZTS063 | `module_link_refused` | The modules cannot run as one program: a file that cannot be read, an import cycle, a binding refusal, a dependency top-level `assert`, an API schema conflict, or proof evidence that does not fold |
+| ZTS064 | `file_import_untyped` | A file import has no type that can cross modules |
+
+The proof card shows a `Module graph` line only when one of these refusals occurs. A single-module handler keeps its output. Every top-level function is a root for the state checks, so a same-file helper that mutates module state clears `state_isolated`.
 
 ## Running Tests
 

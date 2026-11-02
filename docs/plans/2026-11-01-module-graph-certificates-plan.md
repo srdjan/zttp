@@ -211,6 +211,8 @@ The refusal for a handler with file imports stays in place until Unit G5. No ear
 
 ### G8: `zttp check` parity, deferred
 
+The [check parity plan](2026-11-01-check-parity-plan.md) carries out this unit, with one change: `discoverModulePaths` does not call `checkBindings`, because its only caller stops on the ZTS063 first.
+
 - Model: Opus plans, Sonnet implements. It runs only inside a re-record window that the owner opens.
 - Work: run the per-module checks, typed imports, and the binding refusal in `zttp check` and in `discoverModulePaths`.
 - Acceptance: a handler that passes `zttp check` passes `zttp build`. This plan closes without this unit, and the roadmap keeps it open.

@@ -168,10 +168,11 @@ capsule property or when the proof evidence of the graph does not fold.
 refusals and the limits of the certificate, see
 [Handlers with file imports](verification.md#handlers-with-file-imports).
 
-`zttp check` is unchanged, except that every top-level function is a root for
-the state checks. Until the parity unit in the
-[roadmap](roadmap.md#current-limitations), `zttp build` refuses some handlers
-that `zttp check` passes.
+`zttp check` runs the same checks on every module and reports each refusal with
+a code and the file at fault. ZTS063 names a module graph refusal, and ZTS064
+names a file import with no type that can cross modules. A handler that passes
+`zttp check` passes `zttp build`, with the one exception that
+[`zttp check` and the build](verification.md#zttp-check-and-the-build) states.
 
 `zttp deploy` is the project-level verb built on the same path; see below.
 
@@ -398,7 +399,7 @@ and the payload sections this compiler does not yet generate. A request naming
 any other `schema_version` gets a frozen three-key negotiation response, so
 version discovery is one deterministic round trip.
 
-Exit codes for gating: `check` returns 0 (ok), 1 (errors), or 2 (warnings only, no errors). `prove-behavior` returns 0 (safe), 1 (breaking), or 2 (usage or error). `spec-check` validates the semantics registry against the IR/bytecode tables and returns 0 (conform), 1 (divergence), or 2 (error); `spec-hash` prints the registry hash for CI assertions, the way `describe-rule --hash` prints the policy hash. `spec-render --check <path>` returns 0 when the committed readable spec matches the registry, or 1 when it is stale. See [Semantics Verification](internals/semantics-verification.md) for the four mechanisms, the soundness boundary, and the generated artifacts these commands own.
+Exit codes for gating: `check` returns 0 (ok), 1 (errors), or 2 (warnings only, no errors). `prove-behavior` returns 0 (safe), 1 (breaking), or 2 (usage or error). When a side has no contract, it prints the coded diagnostics of that side and exits 2. `spec-check` validates the semantics registry against the IR/bytecode tables and returns 0 (conform), 1 (divergence), or 2 (error); `spec-hash` prints the registry hash for CI assertions, the way `describe-rule --hash` prints the policy hash. `spec-render --check <path>` returns 0 when the committed readable spec matches the registry, or 1 when it is stale. See [Semantics Verification](internals/semantics-verification.md) for the four mechanisms, the soundness boundary, and the generated artifacts these commands own.
 
 ### Canonicalize And Normalize
 

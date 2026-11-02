@@ -107,8 +107,7 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
   predicate on an arrow function reports no ZTS211, while the same predicate on
   a function declaration does. A predicate that names a different parameter,
   such as `(y: unknown): x is string`, reports no error.
-- `zttp build` is stricter than `zttp check` for a handler with file imports. The build runs every check on every module, and `zttp check` does not. Unit G8 of the [module graph certificates plan](plans/2026-11-01-module-graph-certificates-plan.md) closes that gap: it runs the per-module checks, typed imports, and the binding refusal in `zttp check` and in `discoverModulePaths`. G8 moves `zttp check` output, so it waits for a re-record window under D-012. Until then `zttp build` refuses some handlers that `zttp check` passes. [Handlers with file imports](verification.md#handlers-with-file-imports) lists the refusals.
-- The runtime links the modules of a handler in one flat namespace. Two modules that bind one top-level name would share one binding, and the last module loaded would win. `zttp serve`, `zttp compile`, `zttp build`, and `zttp deploy` now refuse that graph (D-018). `zttp check` and `discoverModulePaths` do not yet, and unit G8 adds the refusal.
+- The runtime links the modules of a handler in one flat namespace. Two modules that bind one top-level name would share one binding, and the last module loaded would win. `zttp serve`, `zttp compile`, `zttp build`, and `zttp deploy` refuse that graph (D-018), and `zttp check` reports the refusal as ZTS063.
 - Past 64 Result bindings, the proof IR emits no Result events, and the
   certificate states a `tested` edge from the producer. That edge meets the
   production floor, so `results_checked` then gets no kernel check. A
@@ -130,7 +129,6 @@ contract must identify which ones it needs.
 | Server rate limiting | Conditional | Standalone unproxied server selected as a product target | Decide whether application limits through `zttp:ratelimit` are insufficient | Approved server policy and accept-path tests, or a recorded decision to retain application limits |
 | Computed SQL guards | Deferred | Policy preserves read/write authority | Design that policy distinction before enabling the family | Consumer coverage and sink tests reject cross-authority use; guard drift gate passes |
 | Certificate assurance | Open, incremental | Select one property or opcode family | Add a producer case and an independent checker rule or witness | Checker rejects a mutation; `test-proof-ratchet` and `test-proof-ratchet-drift` pass with the revised disclosed boundary |
-| `zttp check` parity for file imports (unit G8) | Deferred to a re-record window | The owner opens a window under D-012, because the unit moves `zttp check` output | Run the per-module checks, typed imports, and the binding refusal in `zttp check` and `discoverModulePaths` | A handler that passes `zttp check` passes `zttp build` |
 | Runtime cost fuse | Open product question | The server, the CLI, and the build do not set `cost_ceilings` in `RuntimeConfig`; only tests set it | Decide whether to wire the fuse into the server or to delete it (unit 9g of the [reset plan](plans/2026-10-30-reset-implementation-plan.md)). The code stays until the owner decides | A shipped binary records the incident, or the field and `CostMeter` are deleted; [Verification](verification.md) matches |
 
 Socket health/readiness, in-flight shutdown-drain, and grace-expiry tests exist in
@@ -233,7 +231,6 @@ Plans that earlier resets archived stay readable at the local tags `pre-rebase`,
 | Shared IR shape helpers | Deferred | A concrete new consumer, such as a build cache or incremental compile | Identify the repeated shape operation the consumer needs | A shared helper replaces measured duplication and preserves analyzer behavior |
 | Collector role | Measurement required | Reproduce remaining memory growth after the lifetime-arena fix | Attribute retained allocations before selecting any deletion | Repeatable allocation and RSS evidence identifies what grows and whether collection is required |
 | VM-loop deduplication | Deferred | Runtime hardening, engine facade, and the existing measurement gates | Revalidate the deferred plan (`pre-rebase:docs/archive/DEFERRED_VM_LOOP_DEDUPE_PLAN.md`) against the selected runtime path | Public behavior preserved and the plan's measurements justify the change |
-| `zttp:fetch` summary names `AgentTurnRefused` | Deferred | The next D-012 re-record window: the summary reaches `zts meta`, moves `builtin_registry_hash`, and stales 11 cassettes | Remove the sentence from the binding, regenerate the module spec, update the meta pin, and re-record | `AgentTurnRefused` has no match in live source and offline replay passes |
 
 ## Proposal Decisions
 
