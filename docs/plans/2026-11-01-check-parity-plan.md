@@ -1,6 +1,6 @@
 # `zttp check` parity and the 2026-11-01 re-record window
 
-Status: approved by the owner on 2026-11-01, as the D-012 re-record window. The window covers unit G8 of the [module graph certificates plan](2026-11-01-module-graph-certificates-plan.md), unit 9d of the [reset plan](2026-10-30-reset-implementation-plan.md), one seed edit, and one DeepSeek re-record of the corpus. It covers no push, no deploy, and no release.
+Status: complete on 2026-11-01, on local `main`. The [worklog](2026-11-01-module-graph-certificates-worklog.md#check-parity-and-the-re-record-window) holds the evidence. The owner approved this plan on 2026-11-01, as the D-012 re-record window. The window covers unit G8 of the [module graph certificates plan](2026-11-01-module-graph-certificates-plan.md), unit 9d of the [reset plan](2026-10-30-reset-implementation-plan.md), one seed edit, and one DeepSeek re-record of the corpus. It covers no push, no deploy, and no release.
 
 ## Problem
 

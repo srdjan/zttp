@@ -14,9 +14,9 @@ The 2026-10-25 reset is complete through R13 (2026-10-25). Its [plan](plans/2026
 The [2026-10-14 reset plan](plans/2026-10-14-reset-implementation-plan.md) is also complete (U1 to U20) and is not an authority.
 Release v0.26.0 was published on 2026-10-30. The release fixes plan shipped as 0.25.0.
 
-Standing rule D-012 in [decisions.md](decisions.md): a model-visible change waits for one batched re-record window. The v0.26.0 window ran on 2026-10-29. The owner runs any later window.
+Standing rule D-012 in [decisions.md](decisions.md): a model-visible change waits for one batched re-record window. The latest window ran on 2026-11-01, under the [check parity plan](plans/2026-11-01-check-parity-plan.md). The owner runs any later window.
 
-Next work: the owner selects it. No reset is active. Units G0 to G7 of the [module graph certificates plan](plans/2026-11-01-module-graph-certificates-plan.md) are done, on local `main`, and await release. Unit G8 (`zttp check` parity) is deferred to a re-record window that the owner opens.
+Next work: the owner selects it. No reset is active. All units of the [module graph certificates plan](plans/2026-11-01-module-graph-certificates-plan.md) are done, on local `main`, and await release. This includes unit G8 (`zttp check` parity) and unit 9d of the reset plan.
 
 M1, M2, and M3 are complete.
 M4 is complete: T1a to T7 were delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 2 later removed both runtime products. No release date is assigned.

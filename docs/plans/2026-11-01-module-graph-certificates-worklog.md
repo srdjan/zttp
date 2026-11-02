@@ -309,3 +309,43 @@ Against the G0 tables, `zts check` moved 1 of 215 rows and `zts compile` moved 1
 That result replaces the pinned test, which I removed as G4 planned. The test pinned one digest that an unrelated change to the semantics or grammar hash would move.
 
 **Limits.** These runs used Debug binaries on macOS, except `bench-check`, which used ReleaseFast. No provider call, corpus re-record, push, or deploy ran. `test-expert-app` ran offline inside `zig build test`. Unit G8 stays open, and `zttp build` stays stricter than `zttp check` until a re-record window.
+
+## Check parity and the re-record window
+
+The owner opened the D-012 window on 2026-11-01. The [check parity plan](2026-11-01-check-parity-plan.md) owns the design. Commits `557cfb37` to `95b704b2` carry the units. `test-expert-app` was red from `068a45d0` until the coverage commit `95b704b2`.
+
+| Unit | Commit | Result |
+|---|---|---|
+| W1, W2, W3 | `557cfb37`, `5fc33830`, `38d02969` | Reader, contract split, and ZTS063 and ZTS064. No output moved |
+| W4 | `068a45d0` | `zts check` runs the graph checks. 19 tests changed to the graph result |
+| W4b | `2255590d` | The replaced walker is removed. Digest equal to W4 |
+| W5 | `a196e850` | A refused root stays coded, and a ZTS063 message reads the same on both scratch roots |
+| W6 | `cef9f086`, `94086f0a` | `AgentTurnRefused` is gone. `builtin_registry_hash` moved to `7992519a`, and the frozen search bytes follow |
+| W7 | `3753da89` | `sibling-helper-holes` drops `cost_bounded` |
+| W8 | `614449c8` | Documentation |
+| W9 | `df3a6757`, `ce8e21ce`, `95b704b2` | Corpus, convergence report, and coverage report |
+
+**Deviations.** W4b did not exist in the first plan. A Sonnet implementer reached its turn budget in W4, and a second Sonnet implementer finished W4 and W4b. The review of W4 found the aggregate proof defect of W5: a ZTS063 message carried a scratch path, so a refusal on both sides read as new. Both new tests failed without the fix. Plan decision 5 changed: `discoverModulePaths` does not call `checkBindings`, because its only caller returns first.
+
+I stated a wrong acceptance for W7. The filled `sibling-helper-holes` handler does not pass `zts check`: it gets ZTS400, because `env` data is secret without a policy. The base binary gives the same verdict, so G8 did not cause it.
+
+W6 missed the frozen bytes of `search_rules`, because `test-expert-app` was already red. The test passes with the old fetch summary and fails with the new one, which confirms the cause.
+
+`prove-behavior` changed outside the plan. When a side has no contract, it now prints the coded diagnostics of that side, for a single-module parse failure too. The exit status stays 2.
+
+**Recording.** The one-case validation of `sibling-helper-holes` ended in the expected quarantine. The whole run took 7 minutes 51 seconds on `deepseek-v4-flash`, with `ZTTP_CODEGEN_TURN_TIMEOUT_MS=600000`. It ran on 2026-11-01 local time, and the convergence row states the UTC date 2026-11-02.
+
+| Measure | Corpus `db16cf2221a6` | Corpus `91c9e8aaf5e4` |
+|---|---|---|
+| First-attempt green | 10/13 | 8/13 |
+| Reached green | not compared | 11/13 |
+| Intent pass | 10/13 | 11/13 |
+| Median round-trips | 4 | 5 |
+
+`jwt-auth` and `log-timestamp` lost first-attempt green. Each first failed at a parser code on a single-module handler, ZTS049 and ZTS056, then reached green with intent passed. G8 does not touch that path, so the probable cause is variance between model runs. Only a repeat recording could confirm that, and I did not run one. `validate-body` gained its intent pass. `sibling-helper` and `sibling-helper-holes` applied no edit and missed their intent, as their pins already stated.
+
+The coverage union starts again with the new corpus identity. It holds one published run, which trips ZTS400 alone.
+
+**Measurements at `95b704b2`.** Against the base at `7d9349f0`, `zts check` and `zts compile` moved 0 of 215 rows. No example or corpus file has a failing dependency, so this set does not show the new refusals. The parity table in `packages/tools/src/precompile.zig` and my 6 command-line probes show them: `zts check` and `zts compile` agreed on each probe. `zts check --json examples/handler/handler-with-imports.ts` takes 8.8 ms, against 8.2 ms at the base. These are medians of 20 runs in two rounds, on the Debug binaries, on macOS. `git diff` from `7d9349f0` on `packages/proof-checker` is empty.
+
+**Open items.** `zts check --json` prints an `unterminated string literal` line on stderr for a dependency with that error. Stdout stays clean JSON. A dependency chain has no depth limit in `zts check`, as in the build. The fault scan keeps its limit of 8.
