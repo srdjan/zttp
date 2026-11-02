@@ -10,6 +10,11 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+- A function value now has a function type. `zts check` refuses a function where the type admits no function: ZTS204 for a `return`, ZTS200 for an annotation, an assignment, a record field, or an array or tuple element, ZTS203 for an argument, and ZTS213 for a JSON payload. Before, such a handler passed and could fault at runtime. Call the function, or correct the type.
+- A function value is checked against a declared function type by its parameters. `(x: number, y: number) => number` and `(x: string) => number` are refused where `(x: number) => number` is declared (ZTS200).
+- A type guard narrows only when its test proves the type after `is`. `function isStr(x: unknown): x is string { return typeof x === "number"; }` now reports ZTS211, and so does `typeof x === "object"` for `x is object`. Change the test, or claim the type the test proves.
+- A type guard on an arrow function, on a function declared inside another function, or on a callback now reports ZTS211. So does a guard whose name before `is` is not an annotated parameter. Declare the guard as a function at module level.
+- A discriminant test such as `v.kind === "a"` now keeps every union member that can hold `"a"`, and it narrows a union of `structural` records. Before, it took the first member that matched, and a union of named records did not narrow.
 - A `.ts` import or an `-e` source that admission refuses now fails at start with the admission message. Some forms used to run, or to report a second and less exact message.
 - Rebuild and redeploy earlier artifacts. `semanticsHash` moved, so the new runtime refuses an artifact from an earlier binary with `SemanticsHashMismatch`. A self-extracting binary keeps running.
 - An erased type prefix now reports ZTS002, such as `const x = <T>(1);` and `const x = <T> { id: 1 };`. Remove the prefix.

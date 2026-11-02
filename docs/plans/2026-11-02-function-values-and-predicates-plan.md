@@ -1,6 +1,6 @@
 # Function values and type predicates, 2026-11-02
 
-Status: approved 2026-11-02. The owner chose option (a) of Decision 1: fix the three type checker gaps in the roadmap, with a failing test first, and commit locally. The approval does not cover a push, a provider call, or a re-record.
+Status: complete 2026-11-02 on local `main`, units U1 to U4; see "Execution record" at the end. Approved 2026-11-02. The owner chose option (a) of Decision 1: fix the three type checker gaps in the roadmap, with a failing test first, and commit locally. The approval does not cover a push, a provider call, or a re-record.
 
 The probes found four defects, not three. Two of them let a handler that `zts check` accepts fault at runtime on a path the proof calls safe. All four are in `packages/zts/src/type_checker.zig`. One also needs `packages/zts/src/type_env.zig`.
 
@@ -153,7 +153,41 @@ The units run in order, because all three edit `type_checker.zig`.
 
 ## Out of scope
 
-- A parameter list in the inferred type of a function value (see the U1 stop condition).
 - Narrowing of a bare identifier against a literal in an `if`. Spec section 5.4 lists it, and the guard extractor does not implement it. This plan uses it only inside a predicate body.
 - A member read on a union of named records (see revision 2).
 - The three items left open by the 2026-11-01 window: the `--json` stderr line, the import chain depth, and the fault scan limit.
+
+## Execution record
+
+| Unit | Commit | Result |
+|---|---|---|
+| Plan | `b8106463`, `2c2f3216`, `8e487258` | Plan, revision 1 (parameter list), revision 2 (discriminant guard) |
+| U1 | `9ce546c0` | F1 closed. 19 new tests; all 19 failed on the previous HEAD |
+| U2 | `471d4d14` | F2 and F5 closed. 17 new tests; 11 failed on the previous HEAD, and the 6 admitted-predicate tests passed there |
+| U3 | `62aafb76` | F3 and F4 closed. 7 new tests; the 6 expected-diagnostic tests failed on the previous HEAD |
+| U4 | this record | Docs, changelog, roadmap, website |
+
+Each "failed on the previous HEAD" count comes from an unfiltered `zig build test-zts` run by Opus, in a scratch worktree at the previous HEAD with only the new tests appended.
+
+### Measurements
+
+- After U1, the binaries refuse the two runtime probes of F1. `const n: number = g` gets ZTS200, and `Response.json({ f: g })` gets ZTS213.
+- After U2, the predicate probe of F2 gets ZTS211, and the named-record discriminant probe gets no diagnostic.
+- `zts check` takes 3 to 4 percent longer after U1. This was measured on `examples/patterns/annotate-not-assert.ts`, `examples/routing/api-surface.ts`, and `examples/handler/handler-with-imports.ts`, with Debug builds, 30 runs each, at a host load of 6.6 to 9.6.
+- The offline replay in `test-expert-app` did not move after any unit, so no change was model-visible under D-012.
+
+### Deviations from the plan
+
+- U1: the plan said the inferred function type has no parameter list. Revision 1 changed that to one parameter for each parameter node.
+- U2: the `isObject` predicate stays refused, and the discriminant guard joined U2 (revision 2). Opus also added a case to the guard: a member with an optional discriminant field (`kind?: "a"`) stays in both branches. That case had its own failing test first. The guard's five fallible appends became one allocation, with one new row in `scripts/proof-swallow.allow`. The U2 gate list did not include the proof-swallow check, and the aggregate `zig build test` found the missing row.
+- U3: the F4 flag is set in two places in `type_env.zig`. One is the `.unresolved` arm of the target switch, and the other is where `directPredicateParameterIndex` returns null. The message is `type predicate on '<name>' does not name an annotated parameter of '<name>'`, because the target can be a parameter without an annotation. The predicate walk's depth limit went from 32 to 200, because the walk now visits expressions. Thirteen fixture rows that pinned the silent behavior now expect ZTS211: eight in the typed frontend predicate table and five in two CHECK tests. One CHECK row that asserted ZTS601 on an arrow predicate now stops at ZTS211, so the row uses `: boolean` in place of the predicate and still asserts ZTS601.
+- `test-zruntime` was not in the U1 and U2 gate lists. Opus ran it on `471d4d14`, and it exited 0. It was in the U3 list.
+
+### Found and left open
+
+The roadmap lists these under Current Limitations, with the probe results:
+
+- F7: arithmetic on a value that may be `undefined` passes `zts check`, and `zttp dev` then answers 500. This is a false proof.
+- A member read on a union of named records passes when one member has no such field.
+- A discriminant test treats a record without the field as a value where the test is false, and a record with an extra field breaks that assumption.
+- `if (r.ok)` does not narrow a union of named records, and `typeof x === "object"` does not narrow `unknown`.

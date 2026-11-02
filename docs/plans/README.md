@@ -6,7 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
-| [Function values and type predicates, 2026-11-02](2026-11-02-function-values-and-predicates-plan.md) | Active; four type checker defects (F1 to F4), two of them false proofs; units U1 to U4 | Owner chose option (a) of Decision 1 on 2026-11-02; no push, provider call, or re-record |
+| [Function values and type predicates, 2026-11-02](2026-11-02-function-values-and-predicates-plan.md) | Complete 2026-11-02, units U1 to U4, on local `main`; five type checker defects closed (F1 to F5), three of them false proofs; four gaps left open in the roadmap | Owner chose option (a) of Decision 1 on 2026-11-02; no push, provider call, or re-record |
 | [`zttp check` parity and re-record window, 2026-11-01](2026-11-01-check-parity-plan.md) | Complete 2026-11-01; units W1 to W10, on local `main` | The owner opened the D-012 window on 2026-11-01. It covered units G8 and 9d, one seed edit, and one re-record, and no push, deploy, or release |
 | [Module graph certificates, 2026-11-01](2026-11-01-module-graph-certificates-plan.md) | Approved 2026-11-01, revision 2; units G0 to G8 complete; findings, target, owner decisions, and units | Owner chose option (a) for Decisions 1 to 6, which authorizes units G0 to G7 |
 | [Reset implementation, 2026-10-30](2026-10-30-reset-implementation-plan.md) | Closed 2026-10-31; no longer the reset authority; findings, target design, phases, and owner decisions | Owner chose the recommended option for Decisions 1 to 6 on 2026-10-30 |

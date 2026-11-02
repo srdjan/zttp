@@ -272,6 +272,15 @@ assert isString(name), Response.json({ error: "name required" }, { status: 400 }
 
 When `assert` fails with no error expression, the handler halts. With an explicit error expression, that value is returned.
 
+The checker reads the body of a type guard before it uses the guard. A guard narrows only when all of these are true:
+
+- The guard is a named function declaration at module level.
+- The name before `is` is an annotated parameter.
+- The body is one `return` of narrowing tests over that parameter, combined with `&&`, `||`, and `!`.
+- The type that the test proves is assignable to the type after `is`.
+
+Any other guard gets ZTS211 and narrows nothing. For example, `return typeof x === "number";` does not prove `x is string`. Also, `typeof x === "object"` does not prove `x is object`, because `typeof null` is `"object"`.
+
 ### Nominal Types
 
 `nominal` creates types that prevent accidental cross-assignment:
