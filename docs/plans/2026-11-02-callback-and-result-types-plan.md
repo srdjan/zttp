@@ -13,18 +13,20 @@ Each probe ran on the `zts` and `zttp` binaries built from `977143a2`. A "false 
 - P1 (false proof): `xs.map((s: string) => s.toUpperCase())` over `number[]`. `zttp dev` answers 500 (`map` error `NotCallable`). The same holds for a receiver of type `number[] | string[]`.
 - P2: `xs.map(up)` with `function up(s: string): string` over `number[]` passes `zts check`, and so does `xs.filter((s: string) => s.toUpperCase() === "A")`. `xs.map(sha256)` over `number[]` serves `[null,null]`.
 - P3: `ok(21)` and `err("x")` have the type `{ ok: boolean; value?: unknown; error?: string; errors?: unknown }`. The parameter of a `mapResult` callback has no type. `unwrapOr(ok(21), 0)` is `unknown`.
-- P4 (false proof): after `const r = err(5)`, `if (!r.ok)`, and `if (e !== undefined)` with `const e = r.error`, the call `e.toUpperCase()` faults: "Possible soundness incident ... at 7:28".
+- P4 (false proof): after `const r = err(5)`, `if (!r.ok)`, and `if (e !== undefined)` with `const e = r.error`, the call `shout(e)` passes, where `shout(s: string)` returns `s.toUpperCase()`. It faults: "Possible soundness incident ... at 3:10". The direct form `e.toUpperCase()` also faults, at 7:28, but the cause of that form is P9.
 - P5 (false proof): `andThen(ok(1), (n) => n + 1)`. The runtime returns `undefined` for a callback result that is not a Result, and a read of `r.error` on it faults.
 - P6 (false proof): `collectAll([1, 2])`. The runtime answers `err(undefined)` for an element that is not a Result.
 - P7 (false proof): `mapResult({ ok: true, value: 21 }, (n: number) => String(n))`. The checker admits a record literal where a Result is expected, the runtime returns that record unchanged, and a string method on its `value` faults at 5:24.
 - P8: the U3 entry check of the builtin result types plan failed. It refused `n * 2` and `n + 1` in the `mapResult` and `andThen` callbacks of `examples/patterns/result-combinators.ts`, and `addOne(iterations) + 1` in the runtime fixture "loadCodeNoHandler supports imported benchmark-style scripts" in `packages/runtime/src/zruntime_tests.zig`. It also added diagnostics to programs that strict mode already refuses, and to two corpus cases that read a `Dict` value.
+- P9 (false proof, found during revision 1): a call of a member that the receiver type does not have passes when the receiver is a `number` or `unknown`. `const n: number = 5; n.toUpperCase()` faults at 3:24 with `NotCallable`, and so does `e.toUpperCase()` on the `unknown` error of `requestText`. A record receiver gets ZTS201 for a missing member.
 
 ### Cause
 
 - P1 and P2: no check compares a callback's parameter types with the values that the array method passes. `map`, `forEach`, and `reduce` have no function type, so `checkCallArgs` in `packages/zts/src/type_checker.zig#TypeChecker` checks no argument. `filter`, `find`, `findIndex`, `some`, and `every` have the predicate type `() => boolean`. An inline callback reaches the check through `functionExprType`, which drops its parameters, so it always passes. A named predicate with parameters fails `isFunctionAssignable` in `packages/zts/src/type_pool.zig#TypePool` on its parameter count, which refuses valid code.
-- P3 to P7: `populateModuleTypes` in `packages/zts/src/module_types.zig` gives every export that returns `.result`, and every `.result` parameter, one shared record with `value?: unknown` and `error?: string`. A `.result_fn` or `.result_list` parameter is the coarse `object`. A Codex census found the `.result` exports in nine modules. Only `jwtVerify` returns string errors. The `zttp:result` exports store any value as the error, and the other modules store records, or strings and arrays under `errors`. `sseEvents` declares its own types.
+- P3 to P7: `populateModuleTypes` in `packages/zts/src/module_types.zig` gives every export that returns `.result`, and every `.result` parameter, one shared record with `value?: unknown` and `error?: string`. A `.result_fn` or `.result_list` parameter is the coarse `object`. A Codex census found the `.result` exports in nine modules. Codex reports that only `jwtVerify` returns string errors; R1 confirms each export from its runtime code. The `zttp:result` exports store any value as the error, and the other modules store records, or strings and arrays under `errors`. `sseEvents` declares its own types.
 - The combinators in `packages/zts/src/builtins/result.zig` return a value that is not a native Result unchanged. `andThen` and `orElse` turn a callback result that is not Result-like into `undefined`, and `collectAll` answers `err(undefined)` for an element that is not a Result.
 - P8: the combinator callbacks have untyped parameters (P3). The runtime fixture loads a script with no handler. That load runs `pipeline.resolve` with `.strict = false`, and the sound-mode checker runs on it.
+- P9: `inferMemberAccessType` in `packages/zts/src/type_checker.zig#TypeChecker` reports a missing member only for a record receiver. For any other receiver that is not a union, an array, or a tuple, it returns no type and reports nothing, so a call of the member is not checked.
 
 ## Target
 
@@ -86,6 +88,7 @@ Gates for each unit: `zig build test-zts`, `test-zts-layering`, `test-diagnostic
 - A check of the other arguments of a builtin call (T4 of the builtin result types plan).
 - The partly annotated parameter defect: `(v, i: string)` binds the annotation to `v`. Strict mode refuses that form.
 - Precise record types for the error values of the other modules. They get `unknown` here.
+- P9, the unchecked member call on a receiver that is not a record. Its fix is a new refusal over every program, so it needs its own decision and an entry check. Until then, a precise type for a value closes only the paths that pass the value to a typed position, such as P4. It does not close a method call on the value.
 - The other gaps under Current Limitations in `docs/roadmap.md`.
 
 ## Validation record
@@ -100,3 +103,4 @@ Revision 1, 2026-11-02. A Fable review attacked the design and ran probes, and a
 - Fable: a union of arrays passes P1 as well. C1 covers a union receiver.
 - Fable: the corpus cases that read a `Dict` value run correctly and would take the U3 diagnostic, and the ZTS628 suggestion uses an untyped `dictFold` value. Design item 6 states which rule wins.
 - Fable: R2 was too large for one unit. It is split into R2a and R2b, and the units run in order.
+- Opus, during the revision: a method call on a `number` or an `unknown` value is not checked (P9). The R1 acceptance therefore uses the measured P4 form that passes the error to a `string` parameter.
