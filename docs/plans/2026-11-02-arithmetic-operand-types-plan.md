@@ -1,6 +1,6 @@
 # Arithmetic operand types, 2026-11-02
 
-Status: validated 2026-11-02 (revision 1), ready for U1. Approved 2026-11-02: the owner chose option (a) of Decision 1, which fixes arithmetic on a value that may be `undefined`. The approval covers this plan, the fix, and local commits. It does not cover a push, a provider call, or a re-record.
+Status: complete 2026-11-02 on local `main`, units U1 and U2; see "Execution record" at the end. Approved 2026-11-02: the owner chose option (a) of Decision 1, which fixes arithmetic on a value that may be `undefined`. The approval covers this plan, the fix, and local commits. It does not cover a push, a provider call, or a re-record.
 
 The probes found eight false proofs, not one. In each one, `zts check` proves `optionals_safe`, and `zttp dev` then answers 500 with "Possible soundness incident". Six have one cause: the arithmetic operand check reads a type lattice that cannot name the operand's type, and it passes what it cannot name. The other two (A4, A8) have no operand check, because the unary minus is not checked.
 
@@ -143,3 +143,26 @@ Revision 1, 2026-11-02. A Fable review attacked the design, and a Codex (gpt-6-a
 - Fable: the help text named `??` for a type that admits `null`, and one `&&` test of both absent values does not narrow. Item 4 now gives four help texts.
 - Codex: four claims were wrong and are corrected. The lattice does have a `.unknown` member. The pinned test asserts the absence of one diagnostic kind, not of every diagnostic. The commits after the build also change `CHANGELOG.md` and `CONCEPTS.md`. Two probes, A4 and A8, come from the missing unary check, not one.
 - Codex: `p` in `tests/corpus/check/bad/dict_entry_round_trip.ts` has no type, because `dictEntries` returns a coarse `object`. With T4 as revised, that case keeps its golden.
+
+## Execution record
+
+| Unit | Commit | Result |
+|---|---|---|
+| Plan | `f440bcde` | Revision 1, after the Fable and Codex reviews |
+| U1 | `c92f8f67` | A1 to A8 closed. 16 new tests; all 16 failed on the previous HEAD because no diagnostic was reported |
+| U2 | this commit | `docs/typescript.md`, `docs/roadmap.md`, `CHANGELOG.md`, the plan index, and this record |
+
+### Deviations from the plan
+
+- U1 made `isRefused` `pub` instead of adding a wrapper, and added `absentValuesOf` for the help text. Item 7 allows both.
+- U1 edited three files outside its list. The precompile case `r21_arith` (`1 + xs[5]`) was pinned as accepted. It is probe A5, a false proof, so it moved to the refused table with ZTS106. The new corpus case raised the corpus floor in `packages/tools/src/diagnostic_corpus_gate.zig` from 182 to 183, and three R7c census counts in `packages/pi/src/tools/common.zig` by one each.
+- Opus removed the plan labels ("R1" to "R11") from the test names. The names now state the behavior only.
+- `zts check examples/handler/feature-probes.ts` reports 14 ZTS600, 12 ZTS601, and 2 ZTS613, the same counts as on the previous HEAD, and no ZTS104 or ZTS106.
+
+### Probes after the fix
+
+On the binaries built from `c92f8f67`, A1 to A8 each get one diagnostic: ZTS106 for A1, A5, and A7, and ZTS104 for the other five. Each message names the operand type, for example `'number | undefined' operand in '+' operator; addition requires numbers`. N1, N2, N3, N4, and the guarded forms get no diagnostic.
+
+### Final gate
+
+At `c92f8f67`, each from a new empty `ZIG_LOCAL_CACHE_DIR` and with no provider key: `zig build test` exited 0, `bash scripts/verify.sh` exited 0 with "all per-commit gates passed", and `zig build test-zruntime` exited 0. The offline replay reported 13/13 cases. The host load average was 6.6 to 13 at the end of the run. `bench-check` did not run, because no unit changed runtime code. Nothing was pushed.

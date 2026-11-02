@@ -539,7 +539,9 @@ predicate callbacks face the same rule at runtime.
 
 ### Type-Directed Arithmetic Safety
 
-Arithmetic operators (`-`, `*`, `/`, `%`, `**`) require numeric operands. When the compiler can prove an operand is non-numeric, it emits a compile-time error.
+Arithmetic operators (`-`, `*`, `/`, `%`, `**`) and the unary `-` require numeric operands. An operand whose type is not assignable to `number` gets ZTS104. The compiler reads the type with the narrowing that reaches the operand, so a value that a guard proves to be a number is accepted.
+
+An operand that the type checker does not type passes. Examples are `xs.length`, `Math.floor(...)`, and `parseInt(...)`. [Roadmap](roadmap.md) lists this limit.
 
 #### Rejected arithmetic
 
@@ -549,6 +551,11 @@ true * 5                           // ERROR: 'boolean' operand in '*'; use (b ? 
 undefined / 2                     // ERROR: 'undefined' operand in '/'; result is always NaN
 env("TTL") * 1000                 // ERROR: 'optional string' operand in '*'; unwrap with ?? first
 {} - 1                            // ERROR: 'object' operand in '-'; objects cannot be used in arithmetic
+x * 2                              // ERROR when x: number | undefined: compare with undefined in an if first, or write (x ?? 0) * 2
+box.n - 1                          // ERROR when n?: number: the field may be absent
+xs[5] * 2                          // ERROR: an index read may be undefined
+v * 2                              // ERROR when v: unknown: narrow it with typeof in an if first
+-flag                              // ERROR when flag: boolean
 ```
 
 #### Accepted arithmetic
@@ -557,8 +564,9 @@ env("TTL") * 1000                 // ERROR: 'optional string' operand in '*'; un
 5 - 3                              // OK: number - number
 count * 2                          // OK: tracked const number
 cacheIncr("ns", "key") * 2        // OK: cacheIncr returns number
-parseInt(env("TTL") ?? "60") * 1000  // OK: parseInt returns number, ?? unwraps optional
-unknownParam - 1                   // OK: unknown defers to runtime
+parseInt(env("TTL") ?? "60") * 1000  // OK: parseInt has no type, so the operand passes; ?? unwraps optional
+(x ?? 0) * 2                       // OK: ?? removes undefined
+if (x !== undefined) { x * 2 }     // OK: the guard narrows x to number
 ```
 
 ### Type-Directed `+` Safety
@@ -575,6 +583,7 @@ array and `.join("")`, converting non-string values explicitly with
 "a" + "b"                         // ERROR: use ["a", "b"].join("")
 true + 1                          // ERROR: 'boolean' operand in '+'
 env("X") + "suffix"               // ERROR: 'optional string' operand in '+'
+x + 1                             // ERROR (ZTS106) when x: number | undefined or number | null
 ```
 
 #### Accepted `+` forms

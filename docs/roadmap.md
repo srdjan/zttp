@@ -16,7 +16,7 @@ Release v0.26.0 was published on 2026-10-30. The release fixes plan shipped as 0
 
 Standing rule D-012 in [decisions.md](decisions.md): a model-visible change waits for one batched re-record window. The latest window ran on 2026-11-01, under the [check parity plan](plans/2026-11-01-check-parity-plan.md). The owner runs any later window.
 
-Next work: the [arithmetic operand types plan](plans/2026-11-02-arithmetic-operand-types-plan.md), unit U1. No reset is active. The [function values and type predicates plan](plans/2026-11-02-function-values-and-predicates-plan.md) is done on local `main` and awaits release; its open gaps are under Current Limitations. All units of the [module graph certificates plan](plans/2026-11-01-module-graph-certificates-plan.md) are done, on local `main`, and await release. This includes unit G8 (`zttp check` parity) and unit 9d of the reset plan.
+Next work: the owner selects it. No reset is active. The [arithmetic operand types plan](plans/2026-11-02-arithmetic-operand-types-plan.md) is done on local `main` and awaits release. The [function values and type predicates plan](plans/2026-11-02-function-values-and-predicates-plan.md) is done on local `main` and awaits release; its open gaps are under Current Limitations. All units of the [module graph certificates plan](plans/2026-11-01-module-graph-certificates-plan.md) are done, on local `main`, and await release. This includes unit G8 (`zttp check` parity) and unit 9d of the reset plan.
 
 M1, M2, and M3 are complete.
 M4 is complete: T1a to T7 were delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 2 later removed both runtime products. No release date is assigned.
@@ -101,13 +101,15 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
 - Computed SQL resources remain refused. The configured SQL policy cannot
   distinguish read from write authority. Other residual-guard limits are in
   [Verification](verification.md#residual-runtime-guard-boundary).
-- Four type checker gaps stay open after the
-  [function values and type predicates plan](plans/2026-11-02-function-values-and-predicates-plan.md).
-  Each one was measured on 2026-11-02 with `zts check`. The first and the third
-  were also run with `zttp dev`.
-  - Arithmetic on a value that may be `undefined` passes, for example
-    `x + 1` with `x: number | undefined`. `zttp dev` then answers 500 with
-    "Possible soundness incident".
+- Type checker gaps measured on 2026-11-02 with `zts check`. The first and the
+  third were also run with `zttp dev`. The
+  [arithmetic operand types plan](plans/2026-11-02-arithmetic-operand-types-plan.md)
+  closed the arithmetic gap that this list used to name.
+  - Numeric forms such as `xs.length`, `Math.floor(...)`, and `parseInt(...)`
+    have no type, so they pass at every typed position.
+    `const a: string = xs.length;` passes, and a handler that then calls
+    `a.toUpperCase()` answers 500 with "Possible soundness incident". An
+    arithmetic operand with no type also passes for the same reason.
   - A member read on a union of named records passes when one member has no
     such field, for example `v.n` on `A | B` where `B` has no `n`. The same read
     on inline records gets ZTS204.
@@ -118,6 +120,11 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
   - `if (r.ok)` does not narrow a union of named records, and `typeof x ===
     "object"` does not narrow `unknown`. Each one refuses valid code; neither
     one gives a false proof.
+  - A ternary that selects a guarded value, such as `x !== undefined ? x : 0`,
+    keeps the type `number | undefined`. A guarded value captured in a closure
+    also keeps its declared type. Each one is refused at a `number` position
+    (ZTS200) and at an arithmetic operator (ZTS104 or ZTS106). Neither one gives
+    a false proof. Write `x ?? 0`, or compute inside the guarded branch.
 - The runtime links the modules of a handler in one flat namespace. Two modules that bind one top-level name would share one binding, and the last module loaded would win. `zttp serve`, `zttp compile`, `zttp build`, and `zttp deploy` refuse that graph (D-018), and `zttp check` reports the refusal as ZTS063.
 - Past 64 Result bindings, the proof IR emits no Result events, and the
   certificate states a `tested` edge from the producer. That edge meets the
