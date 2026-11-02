@@ -138,6 +138,12 @@ const extractContractFromAnalysis = precompile_contract_mod.extractContractFromA
 const reportCompletedFlow = precompile_contract_mod.reportCompletedFlow;
 const validateContractPolicyInputs = precompile_contract_mod.validateContractPolicyInputs;
 const buildMultiModuleContract = precompile_contract_mod.buildMultiModuleContract;
+pub const MultiModuleBuild = precompile_contract_mod.MultiModuleBuild;
+pub const DependencyContracts = precompile_contract_mod.DependencyContracts;
+pub const DependencyFacts = precompile_contract_mod.DependencyFacts;
+pub const collectDependencyContracts = precompile_contract_mod.collectDependencyContracts;
+pub const mergeDependencyContracts = precompile_contract_mod.mergeDependencyContracts;
+pub const foldDependencyProperties = precompile_contract_mod.foldDependencyProperties;
 
 /// Resolves a call site to a row of the acceptance kernel's guard catalog.
 ///
@@ -1006,7 +1012,7 @@ fn compileMultiModule(
 
 /// What the checks of one graph module leave for the caller. The contract
 /// build folds the two state facts over the whole graph.
-const GraphModuleChecks = struct {
+pub const GraphModuleChecks = struct {
     verify_failed: bool = false,
     has_module_mutation: bool = false,
     unresolved_route_dispatch: bool = false,
@@ -1060,7 +1066,7 @@ fn printGraphDiagnostics(
 /// from ZTS061 alone, because a dependency exports functions by nature, and it
 /// may not hold a top-level `assert`: a failed one ends module initialization
 /// and leaves the later exports undefined.
-fn checkGraphModule(
+pub fn checkGraphModule(
     allocator: std.mem.Allocator,
     graph: *const zts.modules.ModuleGraph,
     compile_result: *const zts.modules.CompileResult,
@@ -1200,45 +1206,72 @@ fn checkGraphModule(
         }
     }
 
-    const verified = zts.BytecodeVerifier.verify(&compiled.func);
+    try verifyModuleBytecode(module.path, &compiled.func);
+
+    if (opts.emit_proof_evidence) {
+        checks.evidence = try moduleProofEvidence(
+            allocator,
+            view,
+            root,
+            &compile_result.recorders[module_index],
+            if (resolved.strict_checker) |*checker| checker else null,
+            atoms,
+            module.path,
+            is_entry,
+        );
+    }
+    return checks;
+}
+
+/// Verify the bytecode of one module. A refusal prints the module path.
+pub fn verifyModuleBytecode(module_path: []const u8, func: *const zts.FunctionBytecode) !void {
+    const verified = zts.BytecodeVerifier.verify(func);
     if (!verified.valid) {
         debugPrint("Bytecode verification failed for {s} at offset {d}: {s}\n", .{
-            module.path,
+            module_path,
             verified.offset,
             verified.message,
         });
         return error.BytecodeVerificationFailed;
     }
+}
 
-    // The proof IR of this module is lowered from the parse that code
-    // generation just walked, while its witnesses still name parser nodes. A
-    // dependency has no handler. Its guards resolve against its own strict
-    // checker, so the resolver and the module stay together.
-    if (opts.emit_proof_evidence) {
-        const recorder = &compile_result.recorders[module_index];
-        recorder.check() catch |err| {
-            debugPrint("{s}: translation evidence is incomplete ({s}); refusing to emit a proof certificate\n", .{ module.path, @errorName(err) });
-            return error.TranslationWitnessIncomplete;
-        };
-        const handler_source: ?ir.NodeIndex = if (is_entry)
-            findHandlerFunction(view, root) orelse return error.HandlerNotFound
-        else
-            null;
-        var guard_resolver = GuardResolver{
-            .checker = if (resolved.strict_checker) |*checker| checker else null,
-            .view = view,
-            .atoms = atoms,
-        };
-        checks.evidence = try zts.buildProofEvidence(
-            allocator,
-            view,
-            root,
-            handler_source,
-            recorder,
-            guard_resolver.resolver(),
-        );
-    }
-    return checks;
+/// The proof evidence of one module of a loaded graph. The proof IR of this
+/// module is lowered from the parse that code generation just walked, while its
+/// witnesses still name parser nodes. A dependency has no handler. Its guards
+/// resolve against its own strict checker, so the resolver and the module stay
+/// together. The caller owns the evidence.
+pub fn moduleProofEvidence(
+    allocator: std.mem.Allocator,
+    view: zts.IrView,
+    root: ir.NodeIndex,
+    recorder: *zts.TranslationRecorder,
+    strict_checker: ?*const zts.StrictChecker,
+    atoms: *zts.AtomTable,
+    module_path: []const u8,
+    is_entry: bool,
+) !zts.ProofEvidence {
+    recorder.check() catch |err| {
+        debugPrint("{s}: translation evidence is incomplete ({s}); refusing to emit a proof certificate\n", .{ module_path, @errorName(err) });
+        return error.TranslationWitnessIncomplete;
+    };
+    const handler_source: ?ir.NodeIndex = if (is_entry)
+        findHandlerFunction(view, root) orelse return error.HandlerNotFound
+    else
+        null;
+    var guard_resolver = GuardResolver{
+        .checker = strict_checker,
+        .view = view,
+        .atoms = atoms,
+    };
+    return zts.buildProofEvidence(
+        allocator,
+        view,
+        root,
+        handler_source,
+        recorder,
+        guard_resolver.resolver(),
+    );
 }
 
 const readFilePosixForGraph = zts.file_io.readFileForModuleGraph;

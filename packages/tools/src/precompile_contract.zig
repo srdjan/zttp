@@ -180,6 +180,9 @@ pub const MultiModuleBuild = struct {
     /// True when no module of the graph mutates module state or dispatches an
     /// unresolved route. Read only when `emit_verify` is set.
     state_isolated: bool,
+    /// Abort on a policy violation in a dependency. A check clears this, because
+    /// it reports a violation on the merged contract and does not abort.
+    enforce_policy: bool = true,
 };
 
 /// The file-import signature table of one module: for each file import, the
@@ -205,41 +208,42 @@ pub fn fileImportSignatures(
     return .{ .source = &exports.pool, .rows = rows };
 }
 
-const DependencyContract = struct {
+pub const DependencyContract = struct {
     path: []const u8,
     contract: HandlerContract,
     /// The dependency imports a file export whose effect the graph could not resolve.
     blocked_import: bool,
 };
 
-/// Build the contract of a handler with file imports.
-///
-/// The base is the full contract of the entry module with its authored source
-/// types, so the entry capsule, budget, and intent survive. Each dependency
-/// yields a contract-only extraction, whose facts are unioned into the base.
-/// The flow pass runs once over the deduplicated graph modules in load order.
-/// Every property that the graph cannot establish reads false: a property never
-/// reads true from the entry alone.
-pub fn buildMultiModuleContract(
+/// The contracts of the dependency modules of a graph, in load order, with the
+/// export effects that each one loaded.
+pub const DependencyContracts = struct {
+    loaded_effects: std.ArrayList(zts.pipeline.LoadedModuleEffects) = .empty,
+    dependencies: std.ArrayList(DependencyContract) = .empty,
+    /// A configured policy checked at least one dependency contract.
+    policy_checked: bool = false,
+
+    pub fn deinit(self: *DependencyContracts, allocator: std.mem.Allocator) void {
+        for (self.loaded_effects.items) |*loaded| loaded.deinit(allocator);
+        self.loaded_effects.deinit(allocator);
+        for (self.dependencies.items) |*dependency| dependency.contract.deinit(allocator);
+        self.dependencies.deinit(allocator);
+    }
+};
+
+/// Extract the contract of each dependency module, in load order. The entry is
+/// the last module of the compile result and stays out. A policy violation
+/// aborts only when `inputs.enforce_policy` is set.
+pub fn collectDependencyContracts(
     allocator: std.mem.Allocator,
     graph: *const zts.modules.ModuleGraph,
     compile_result: *const zts.modules.CompileResult,
     atoms: *zts.AtomTable,
-    exports: *const zts.ExportedSignatures,
     inputs: MultiModuleBuild,
-) !HandlerContract {
+) !DependencyContracts {
     const entry_index = compile_result.modules.len - 1;
-    var policy_checked = false;
-    var loaded_effects: std.ArrayList(zts.pipeline.LoadedModuleEffects) = .empty;
-    defer {
-        for (loaded_effects.items) |*loaded| loaded.deinit(allocator);
-        loaded_effects.deinit(allocator);
-    }
-    var dependencies: std.ArrayList(DependencyContract) = .empty;
-    defer {
-        for (dependencies.items) |*dependency| dependency.contract.deinit(allocator);
-        dependencies.deinit(allocator);
-    }
+    var result: DependencyContracts = .{};
+    errdefer result.deinit(allocator);
 
     for (compile_result.modules[0..entry_index], compile_result.parsers[0..entry_index], 0..) |compiled_module, *js_parser, idx| {
         const graph_idx = graph.execution_order[idx];
@@ -265,7 +269,7 @@ pub fn buildMultiModuleContract(
             graph,
             graph_idx,
             try module_analysis.facts(),
-            loaded_effects.items,
+            result.loaded_effects.items,
         );
         defer allocator.free(imported_effects);
         try module_analysis.setImportedEffects(imported_effects);
@@ -274,15 +278,17 @@ pub fn buildMultiModuleContract(
         errdefer module_contract.deinit(allocator);
         var pending_export_effects = module_analysis.takeExportEffects();
         errdefer if (pending_export_effects) |*effects| effects.deinit(allocator);
-        try loaded_effects.append(allocator, .{
+        try result.loaded_effects.append(allocator, .{
             .graph_index = graph_idx,
             .effects = pending_export_effects orelse return error.AnalysisPassIncomplete,
         });
         pending_export_effects = null;
 
         try validateSqlContract(allocator, &module_contract, inputs.sql_schema_path);
-        try enforcePolicyForContract(allocator, module.path, &module_contract, inputs.policy);
-        if (inputs.policy != null) policy_checked = true;
+        if (inputs.enforce_policy) {
+            try enforcePolicyForContract(allocator, module.path, &module_contract, inputs.policy);
+            if (inputs.policy != null) result.policy_checked = true;
+        }
 
         var blocked_import = false;
         for (imported_effects) |imported| {
@@ -291,8 +297,76 @@ pub fn buildMultiModuleContract(
                 .callable, .data => {},
             }
         }
-        try dependencies.append(allocator, .{ .path = module.path, .contract = module_contract, .blocked_import = blocked_import });
+        try result.dependencies.append(allocator, .{ .path = module.path, .contract = module_contract, .blocked_import = blocked_import });
     }
+    return result;
+}
+
+/// What the dependencies contribute to the structural properties of the entry.
+pub const DependencyFacts = struct {
+    properties: ?handler_contract.HandlerProperties,
+    established: bool,
+};
+
+/// Union the facts of every dependency into the entry contract, then disclose
+/// the public environment variables and stamp the source identity, the
+/// capability matrix, and the policy hash. Pass the result to
+/// `foldDependencyProperties`.
+pub fn mergeDependencyContracts(
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+    deps: *DependencyContracts,
+    env_public: []const []const u8,
+    filename: []const u8,
+) !DependencyFacts {
+    var effects_complete = contract.effect_analysis_complete;
+    var dependency_properties: ?handler_contract.HandlerProperties = null;
+    var established = true;
+    for (deps.dependencies.items) |*dependency| {
+        var conflict: ?handler_contract.ApiSchemaConflict = null;
+        if (handler_contract.unionDependencyContract(allocator, contract, &dependency.contract, &conflict)) |_| {} else |err| {
+            if (err == error.ApiSchemaConflict and !builtin.is_test) debugPrint(
+                "{s}: API schema '{s}' is registered with different JSON by another module\n",
+                .{ dependency.path, if (conflict) |found| found.name else "" },
+            );
+            return err;
+        }
+        if (dependency.blocked_import) effects_complete = false;
+        if (dependency.contract.properties) |properties| {
+            dependency_properties = joinStructural(dependency_properties, properties);
+        } else {
+            established = false;
+        }
+    }
+    contract.effect_analysis_complete = effects_complete;
+    try disclosePublicEnv(allocator, contract, env_public);
+    contract.source_identity = zts.sourceIdentityForPath(filename);
+    contract.capabilities = zts.computeCapabilityMatrix(contract.modules.items);
+    const policy_hex = zts.policyHash();
+    _ = try std.fmt.hexToBytes(&contract.policy_hash, &policy_hex);
+    return .{ .properties = dependency_properties, .established = established };
+}
+
+/// Build the contract of a handler with file imports.
+///
+/// The base is the full contract of the entry module with its authored source
+/// types, so the entry capsule, budget, and intent survive. Each dependency
+/// yields a contract-only extraction, whose facts are unioned into the base.
+/// The flow pass runs once over the deduplicated graph modules in load order.
+/// Every property that the graph cannot establish reads false: a property never
+/// reads true from the entry alone.
+pub fn buildMultiModuleContract(
+    allocator: std.mem.Allocator,
+    graph: *const zts.modules.ModuleGraph,
+    compile_result: *const zts.modules.CompileResult,
+    atoms: *zts.AtomTable,
+    exports: *const zts.ExportedSignatures,
+    inputs: MultiModuleBuild,
+) !HandlerContract {
+    const entry_index = compile_result.modules.len - 1;
+    var deps = try collectDependencyContracts(allocator, graph, compile_result, atoms, inputs);
+    defer deps.deinit(allocator);
+    var policy_checked = deps.policy_checked;
 
     // The entry: a full session with its authored source types and file-import table.
     const entry_graph_idx = graph.execution_order[entry_index];
@@ -359,7 +433,7 @@ pub fn buildMultiModuleContract(
         graph,
         entry_graph_idx,
         facts,
-        loaded_effects.items,
+        deps.loaded_effects.items,
     );
     defer allocator.free(entry_imported_effects);
 
@@ -382,32 +456,7 @@ pub fn buildMultiModuleContract(
     if (inputs.policy != null) policy_checked = true;
     if (policy_checked and !builtin.is_test) debugPrint("Capability policy check passed\n", .{});
 
-    // Union the facts of every dependency into the entry contract.
-    var effects_complete = contract.effect_analysis_complete;
-    var dependency_properties: ?handler_contract.HandlerProperties = null;
-    var established = true;
-    for (dependencies.items) |*dependency| {
-        var conflict: ?handler_contract.ApiSchemaConflict = null;
-        if (handler_contract.unionDependencyContract(allocator, &contract, &dependency.contract, &conflict)) |_| {} else |err| {
-            if (err == error.ApiSchemaConflict and !builtin.is_test) debugPrint(
-                "{s}: API schema '{s}' is registered with different JSON by another module\n",
-                .{ dependency.path, if (conflict) |found| found.name else "" },
-            );
-            return err;
-        }
-        if (dependency.blocked_import) effects_complete = false;
-        if (dependency.contract.properties) |properties| {
-            dependency_properties = joinStructural(dependency_properties, properties);
-        } else {
-            established = false;
-        }
-    }
-    contract.effect_analysis_complete = effects_complete;
-    try disclosePublicEnv(allocator, &contract, env_public);
-    contract.source_identity = zts.sourceIdentityForPath(inputs.filename);
-    contract.capabilities = zts.computeCapabilityMatrix(contract.modules.items);
-    const policy_hex = zts.policyHash();
-    _ = try std.fmt.hexToBytes(&contract.policy_hash, &policy_hex);
+    const dependency_facts = try mergeDependencyContracts(allocator, &contract, &deps, env_public, inputs.filename);
 
     const verified = inputs.emit_verify and handler_fn != null;
     applyContractFacts(allocator, &contract, .{ .verifier = .{
@@ -419,7 +468,7 @@ pub fn buildMultiModuleContract(
     if (inputs.emit_contract) {
         if (handler_fn) |hf| try applyGraphPaths(allocator, &contract, &analysis, parsed, atoms, hf, inputs.filename);
     }
-    foldDependencyProperties(allocator, &contract, dependency_properties, established);
+    foldDependencyProperties(allocator, &contract, dependency_facts.properties, dependency_facts.established);
     try refreshContractSpecDiagnostics(allocator, &contract);
     try refuseSpecErrors(&contract, inputs.filename);
     return contract;
@@ -445,7 +494,7 @@ fn joinStructural(
 /// entry. A pure dependency makes no module call, so the bound stands. Any other
 /// dependency adds calls that the entry paths do not show, so the bound, the I/O
 /// depth, and the cost envelope are all cleared.
-fn foldDependencyProperties(
+pub fn foldDependencyProperties(
     allocator: std.mem.Allocator,
     contract: *HandlerContract,
     dependency: ?handler_contract.HandlerProperties,
