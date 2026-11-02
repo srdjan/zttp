@@ -384,6 +384,45 @@ For union annotations, the declared type is preserved to support exhaustiveness 
 
 Generic type aliases (`structural Result<T> = { ok: boolean; value: T }`) are instantiated when used in annotations. `Result<string>` resolves to `{ ok: boolean; value: string }` for structural checking. Up to 8 type parameters per alias.
 
+### Builtin Result Types
+
+A call of a builtin has the type of the value that the runtime returns. The types follow the runtime, not TypeScript. `packages/zts/src/builtin_results.zig` holds one row for each builtin, and a census test fails when an installed builtin has no row and no reason.
+
+A result has a type only when each argument has the type that the runtime reads. `Math.floor(n)` with `n: number` is a `number`. `Math.floor(s)` with `s: string` has no type, because the runtime returns `undefined` there. The checker does not refuse the call itself.
+
+| Form | Type |
+|---|---|
+| `xs.length`, `s.length`, `Math.PI`, the 8 `Number` constants | `number` |
+| `Math.floor(n)` and the other `Math` methods, with number arguments | `number` |
+| `parseInt(s, 10)`, `Number(x)`, `Date.now()` | `number` |
+| `String(x)`, `s.toUpperCase()`, `s.slice(1)`, `xs.join(",")` | `string` |
+| `s.split(",")` with a string separator | `string[]` |
+| `s.repeat(n)`, `req.headers.get("x")` | `string \| undefined` |
+| `xs.pop()`, `xs.shift()` | the element type or `undefined` |
+| `xs.slice(0, 1)`, `xs.concat(ys)`, `xs.map(f)` | an array |
+| `xs.reduce(f, seed)` | the seed type or the callback's return type |
+| `JSON.parse(s)` | `unknown` |
+| `JSON.tryParse(s)` | a Result with an `unknown` value and a `string` error |
+| `JSON.stringify(v)` | `string`; `string \| undefined` for a recursive type; no type when a part is `unknown` |
+| `Object.keys(o)` | `string[]` |
+| `Object.values(o)`, `Object.entries(o)` | no type: a record can hold a field that its type does not name |
+
+An unannotated parameter of an inline array callback takes the type of the value in its position: the element, the index (`number`), and the array. A `toSorted` comparator gets two elements. The loop variable of `for (const i of range(n))` is a `number`.
+
+A `reduce` accumulator gets the seed type only when the callback returns a value of that type. Otherwise the callback gets ZTS200: `reduce callback returns 'string', but its accumulator is 'number'`. Annotate the accumulator with a type that holds both, or return a value of the seed type.
+
+These programs are now refused, because the value can be `undefined`:
+
+```javascript
+const first: string = s.split(",")[0];          // write s.split(",")[0] ?? ""
+const last: number = xs.pop();                   // write xs.pop() ?? 0, or check for undefined in an if
+const token: string = req.headers.get("x");     // write req.headers.get("x") ?? ""
+const r: string = s.repeat(n);                  // write s.repeat(n) ?? ""
+return xs.map(f)[0];                            // in a number function: write xs.map(f)[0] ?? 0
+```
+
+`String(a) + String(b)` is now refused with ZTS105, because both operands are strings. Write `[String(a), String(b)].join("")`.
+
 ---
 
 ## Sound Mode
@@ -541,7 +580,7 @@ predicate callbacks face the same rule at runtime.
 
 Arithmetic operators (`-`, `*`, `/`, `%`, `**`) and the unary `-` require numeric operands. An operand whose type is not assignable to `number` gets ZTS104. The compiler reads the type with the narrowing that reaches the operand, so a value that a guard proves to be a number is accepted.
 
-An operand that the type checker does not type passes. Examples are `xs.length`, `Math.floor(...)`, and `parseInt(...)`. [Roadmap](roadmap.md) lists this limit.
+An operand that the type checker does not type passes. Builtin calls such as `xs.length`, `Math.floor(n)`, and `parseInt(s, 10)` now have types (see [Builtin Result Types](#builtin-result-types)). The remaining untyped sources include the callback parameters of the generic `zttp:result` combinators and a `Dict` value from `dictEntries`. [Roadmap](roadmap.md) lists them.
 
 #### Rejected arithmetic
 
@@ -564,7 +603,7 @@ v * 2                              // ERROR when v: unknown: narrow it with type
 5 - 3                              // OK: number - number
 count * 2                          // OK: tracked const number
 cacheIncr("ns", "key") * 2        // OK: cacheIncr returns number
-parseInt(env("TTL") ?? "60") * 1000  // OK: parseInt has no type, so the operand passes; ?? unwraps optional
+parseInt(env("TTL") ?? "60") * 1000  // OK: parseInt returns a number; ?? unwraps the optional
 (x ?? 0) * 2                       // OK: ?? removes undefined
 if (x !== undefined) { x * 2 }     // OK: the guard narrows x to number
 ```
@@ -593,7 +632,6 @@ x + 1                             // ERROR (ZTS106) when x: number | undefined o
 ["a", "b"].join("")               // OK: explicit text construction
 ["count: ", String(n)].join("")    // OK: explicit conversion
 [(env("X") ?? ""), "suffix"].join("") // OK: optional is resolved first
-x + 1                             // OK: unknown defers to runtime
 ```
 
 ### Tautological Comparison Detection

@@ -1,6 +1,6 @@
 # Builtin result types, 2026-11-02
 
-Status: validated 2026-11-02 (revision 1), ready for U1a. Approved 2026-11-02: the owner chose option (a) of Decision 2, which gives the untyped numeric builtins a type (B1 of the arithmetic operand types plan). The approval covers this plan, the fix, and local commits. It does not cover a push, a provider call, or a re-record.
+Status: complete 2026-11-02 on local `main`: U1a, U1b, U2, and U4 done; U3 stopped at its entry check. Validated 2026-11-02 (revision 1). Approved 2026-11-02: the owner chose option (a) of Decision 2, which gives the untyped numeric builtins a type (B1 of the arithmetic operand types plan). The approval covers this plan, the fix, and local commits. It does not cover a push, a provider call, or a re-record.
 
 B1 is wider than the numeric forms. The type checker gives no type to the result of most builtin calls and builtin property reads. A builtin result therefore passes at every typed position, and a handler that uses it wrongly can prove `optionals_safe` and then fault. This plan types the result of each builtin call whose arguments have the types that the runtime reads, and closes the set with a census.
 
@@ -122,3 +122,42 @@ Revision 1, 2026-11-02. A Fable review attacked the design, and a Codex (gpt-6-a
 - Fable: the shadowing test in `inferResponseConstructorType` does not see a parameter. Opus confirmed that a parameter named `Math` keeps its own type today. T3 now tests the binding kind.
 - Fable: a fixed `unknown[]` for `Object.values` would refuse valid code, literal receivers need widening, `flatMap` is not installed, and U1 was too large for one unit. Each is resolved above. U1 is split into U1a and U1b.
 - Fable proposed function types with `unknown` optional parameters, as `inferArrayMethodType` does. Opus did not take it: it adds arity checks against T4, and `FuncParam` has no rest marker for `Math.min`, `concat`, or `push`.
+
+## Execution record
+
+| Unit | Commit | Result |
+|---|---|---|
+| Plan | `f8698757` | Revision 1, after the Fable and Codex reviews |
+| U1a | `cf174f2c` | 64 result rows, a census over 137 members, and F1 and F2 closed. 18 new tests failed on the previous HEAD because no diagnostic was reported |
+| U1b | `019cf970` | 21 more rows; the census has 85 rows and 52 skips, with none left for U1b. 30 new tests failed on the previous HEAD |
+| U2 | `7cd53c65` | Callback parameter types and the `reduce` accumulator rule. 18 of 23 new tests failed on the previous HEAD |
+| U3 | none | The entry check failed; see "U3 entry check" below |
+| U4 | this commit | `docs/typescript.md`, `docs/roadmap.md`, `CHANGELOG.md`, the plan index, and this record |
+
+### Deviations from the plan
+
+- U1a: Opus found that the first draft typed `s.split(x)` for any separator. The runtime returns `undefined` for a separator that is not a string, so that was a false proof. A test failed first, and the `split` separator is now `string`.
+- U1a: `String(a) + String(b)` gets ZTS105, because both operands now have the type `string`. That refusal is not in the list of known new refusals. The precompile fixture for an unchecked result used the form incidentally; it now uses `.join("")`.
+- U1a: T3 tests the binding kind `.undeclared_global` only. A top-level declaration has the kind `.global`, so the plan's `.global` would have let a user's `const Math = ...` take the builtin rows.
+- U1b: `Object.values` and `Object.entries` stay untyped, against design item 2. A record can hold a field that its type does not name (the discriminant-test gap in `docs/roadmap.md`), so the declared field types do not bound the values.
+- U1b: Opus found that `map` and `reduce` took their result from the callback's return type without a check of the callback's parameters. `strings.map(g)` with `g: (n: number) => number` was typed `number[]`. Three tests failed first. A result now needs each callback parameter to accept what the runtime passes, and two draft tests that asserted the false proof were rewritten.
+- U1b: `reduce` with no seed joins the element type and the callback's return type, because a longer array returns the last callback result. `JSON.tryParse` uses a Result record with a `string` error, not the `requestJson` record, whose `value` is a JSON value that refuses member reads. `JSON.stringify` has three tiers: `string` for a type of bounded depth, `string | undefined` for a recursive type, and no type when a part is `unknown`.
+- U1b: the termination probe `r4` returned `[n].map(down)[0]` from a `number` function. That read can be `undefined`, the same class as `s.split(",")[0]`, so it is now refused. The probe now returns `[n].map(down)[0] ?? n`, as its sibling probes do. The recursion that the test checks is unchanged.
+- U2: the `reduce` accumulator rule is an amendment by Opus. The runtime passes the seed first and each callback result after it. So the accumulator keeps the seed type only when the callback's return type is assignable to it, and a return type that is not gets ZTS200.
+- U2: a callback with any annotation binds no parameter. The stored signature holds the annotated parameters without their positions, so `(v, i: string)` binds `string` to `v`. Strict mode refuses that form (ZTS601), so the defect gives a misleading extra ZTS200 and no false proof.
+
+### Findings during execution
+
+- An annotated callback parameter keeps its annotation when the array elements do not fit it. `xs.map((s: string) => s.toUpperCase())` over `number[]` passed `zts check` with every property PROVEN, and `zttp dev` answered 500 (`map` error `NotCallable`). Closing it needs an argument check, which T4 excludes.
+- `JSON.stringify` of a record type is `string` on the assumption that a record holds only its declared fields. The serializer gives `undefined` at 512 levels of nesting. A record that holds an undeclared field with a value 512 levels deep breaks that assumption. The extra-field gap in `docs/roadmap.md` is the cause, and closing it closes this case.
+
+### U3 entry check
+
+The entry check failed, so U3 was not built. A Sonnet executor applied the change and ran `zts check` on the 216 `.ts` files under `examples/` and `tests/corpus/`, and the gates. The change refused these operands:
+
+- `examples/patterns/result-combinators.ts`: `n * 2` and `n + 1` in the callbacks of the generic `zttp:result` combinators `mapResult` and `andThen`. The runtime gives a number, and the checker gives the parameter no type. This is a valid program, so the check fails.
+- The runtime fixture "loadCodeNoHandler supports imported benchmark-style scripts" in `packages/runtime/src/zruntime_tests.zig`: `addOne(iterations) + 1`, a call of an imported function with an unannotated parameter. The value is always a number.
+- `examples/handler/feature-probes.ts` and the corpus case `missing_parameter_annotation`: unannotated parameters in programs that strict mode already refuses.
+- The corpus cases `dict_entries_reduce` and `dict_entry_round_trip`: `p[1]`, a `Dict` value from `dictEntries`. These are the only operands whose type is unknown at runtime.
+
+`test-examples`, `test-diagnostic-corpus`, `test-expert-app` (the R7c tool census), and `test-zruntime` failed with the change. Opus restored `packages/zts/src/bool_checker.zig`. The arithmetic plan's T4 stays open in `docs/roadmap.md` with this list.
