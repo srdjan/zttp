@@ -3425,7 +3425,363 @@ pub const TypeChecker = struct {
             .string_array => pool.addArray(self.allocator, pool.idx_string),
             .optional_string => pool.addNullable(self.allocator, pool.idx_string),
             .undefined_value => pool.idx_undefined,
+            .unknown_value => pool.idx_unknown,
+            .json_result => self.typedResultType(pool.idx_unknown),
+            // These take their type from the receiver or the arguments.
+            .receiver_array,
+            .receiver_element_or_undefined,
+            .concat_array,
+            .map_array,
+            .reduce_value,
+            .json_text,
+            .array_of,
+            .array_from,
+            => null_type_idx,
         };
+    }
+
+    /// `type_idx` resolved through a named reference and a nominal wrapper.
+    fn resolvedType(self: *const TypeChecker, type_idx: TypeIndex) TypeIndex {
+        return self.env.pool.unwrapNominal(self.env.resolveRef(type_idx));
+    }
+
+    /// The array type of a receiver: the receiver itself for an array, the
+    /// array of the widened union of the elements for a tuple, and null for
+    /// every other type, for an empty tuple (whose element type is not known),
+    /// and for a receiver with no type. A union receiver is not an array.
+    fn arrayReceiverType(self: *const TypeChecker, receiver: TypeIndex) TypeIndex {
+        if (receiver == null_type_idx) return null_type_idx;
+        const pool = self.env.pool;
+        const resolved = self.resolvedType(receiver);
+        const tag = pool.getTag(resolved) orelse return null_type_idx;
+        switch (tag) {
+            .t_array => {
+                if (pool.getArrayElement(resolved) == null_type_idx) return null_type_idx;
+                return resolved;
+            },
+            .t_tuple => {
+                if (pool.getTupleElements(resolved).len == 0) return null_type_idx;
+                return self.tupleToArrayType(resolved);
+            },
+            // exhaustive: every other receiver type is not an array, so the
+            // array rows do not apply and the call stays untyped.
+            else => return null_type_idx,
+        }
+    }
+
+    /// Whether `type_idx` is a type that a result can be built from: it has a
+    /// type, and no part of it is `unknown`, `void`, a refused expression, or
+    /// an empty tuple. An empty array literal has no element type, so a
+    /// result built from it would claim an element that nothing determined.
+    fn isDefiniteType(self: *const TypeChecker, type_idx: TypeIndex, depth: u8) bool {
+        if (type_idx == null_type_idx or depth >= 8) return false;
+        const pool = self.env.pool;
+        if (type_idx == pool.idx_unknown or type_idx == pool.idx_json_value) return false;
+        if (pool.mentionsError(type_idx)) return false;
+        const tag = pool.getTag(type_idx) orelse return false;
+        return switch (tag) {
+            .t_unknown_type, .t_void, .t_never, .t_generic_param, .t_generic_app, .t_error => false,
+            .t_array => self.isDefiniteType(pool.getArrayElement(type_idx), depth + 1),
+            .t_nullable => self.isDefiniteType(pool.getNullableInner(type_idx), depth + 1),
+            .t_dict => self.isDefiniteType(pool.getDictValue(type_idx), depth + 1),
+            .t_tuple => blk: {
+                const elements = pool.getTupleElements(type_idx);
+                if (elements.len == 0) break :blk false;
+                for (elements) |element| {
+                    if (!self.isDefiniteType(element, depth + 1)) break :blk false;
+                }
+                break :blk true;
+            },
+            .t_union => blk: {
+                for (pool.getUnionMembers(type_idx)) |member| {
+                    if (!self.isDefiniteType(member, depth + 1)) break :blk false;
+                }
+                break :blk true;
+            },
+            .t_boolean,
+            .t_number,
+            .t_string,
+            .t_null,
+            .t_bytes,
+            .t_undefined,
+            .t_record,
+            .t_function,
+            .t_intersection,
+            .t_literal_string,
+            .t_literal_number,
+            .t_literal_bool,
+            .t_ref,
+            .t_template_literal,
+            => true,
+        };
+    }
+
+    /// The function type of a callback argument, or null when the argument
+    /// is not a function type.
+    fn callbackFunctionType(self: *const TypeChecker, callback: NodeIndex) TypeIndex {
+        const callback_type = self.resolvedType(self.inferType(callback));
+        if (self.env.pool.getTag(callback_type) != .t_function) return null_type_idx;
+        return callback_type;
+    }
+
+    /// The widened return type of the callback type `callback_type`, or null
+    /// when it is not definite.
+    fn callbackReturnType(self: *const TypeChecker, callback_type: TypeIndex) TypeIndex {
+        const pool = self.env.pool;
+        const returned = pool.getFunctionInfo(callback_type).ret;
+        if (!self.isDefiniteType(returned, 0)) return null_type_idx;
+        return pool.widenLiteral(returned);
+    }
+
+    /// Whether each parameter of the callback type `callback_type` accepts the
+    /// value that the runtime passes in its position. `passed` lists the types
+    /// of those values. The declared return type holds only for those
+    /// parameter types: `(n: number) => number` called with a string can
+    /// return `n + 1`, a string. A parameter past `passed` gets `undefined`,
+    /// and a parameter with no type admits anything, so either one leaves the
+    /// result untyped.
+    fn callbackAccepts(self: *const TypeChecker, callback_type: TypeIndex, passed: []const TypeIndex) bool {
+        const params = self.env.pool.getFunctionInfo(callback_type).params;
+        if (params.len > passed.len) return false;
+        for (params, passed[0..params.len]) |param, value_type| {
+            if (param.type_idx == null_type_idx or value_type == null_type_idx) return false;
+            if (!self.env.isAssignableTo(value_type, param.type_idx)) return false;
+        }
+        return true;
+    }
+
+    /// What one `concat` argument of type `arg_type` adds to the result's
+    /// element type: the elements of an array or a tuple, which the runtime
+    /// flattens one level, and the type itself for a scalar. Any other type
+    /// could be an array at runtime, so it adds nothing known (null).
+    fn concatContribution(self: *const TypeChecker, arg_type: TypeIndex) TypeIndex {
+        if (arg_type == null_type_idx) return null_type_idx;
+        const pool = self.env.pool;
+        const resolved = pool.widenLiteral(self.resolvedType(arg_type));
+        const tag = pool.getTag(resolved) orelse return null_type_idx;
+        switch (tag) {
+            .t_array => {
+                const element = pool.getArrayElement(resolved);
+                if (element == null_type_idx) return null_type_idx;
+                return pool.widenLiteral(element);
+            },
+            .t_tuple => {
+                // An empty tuple adds no element.
+                if (pool.getTupleElements(resolved).len == 0) return pool.idx_never;
+                return pool.getArrayElement(self.tupleToArrayType(resolved));
+            },
+            .t_number, .t_string, .t_boolean => return resolved,
+            // exhaustive: a record, a union, `unknown`, and every other type
+            // might be an array at runtime, and the runtime would then add its
+            // elements and not the value.
+            else => return null_type_idx,
+        }
+    }
+
+    /// How deep the values of a type can nest, for `JSON.stringify`, which
+    /// gives up at 512 levels (`JSON_MAX_DEPTH` in http.zig).
+    const JsonDepth = enum {
+        /// Every value is nested fewer than 512 levels deep.
+        bounded,
+        /// The type is recursive or deeper than 16 levels, so a value can
+        /// nest 512 levels.
+        deep,
+        /// A part of the type is `unknown` or a type that this walk does not
+        /// model, so nothing is known about the depth.
+        opaque_part,
+
+        fn join(self: JsonDepth, other: JsonDepth) JsonDepth {
+            if (self == .opaque_part or other == .opaque_part) return .opaque_part;
+            if (self == .deep or other == .deep) return .deep;
+            return .bounded;
+        }
+    };
+
+    fn jsonDepth(self: *const TypeChecker, type_idx: TypeIndex, depth: u8) JsonDepth {
+        if (type_idx == null_type_idx) return .opaque_part;
+        if (depth >= 16) return .deep;
+        const pool = self.env.pool;
+        const resolved = self.resolvedType(type_idx);
+        const tag = pool.getTag(resolved) orelse return .opaque_part;
+        switch (tag) {
+            .t_boolean,
+            .t_number,
+            .t_string,
+            .t_null,
+            .t_undefined,
+            .t_literal_string,
+            .t_literal_number,
+            .t_literal_bool,
+            => return .bounded,
+            .t_array => return self.jsonDepth(pool.getArrayElement(resolved), depth + 1),
+            .t_nullable => return self.jsonDepth(pool.getNullableInner(resolved), depth + 1),
+            .t_dict => return self.jsonDepth(pool.getDictValue(resolved), depth + 1),
+            .t_record => {
+                var found: JsonDepth = .bounded;
+                for (pool.getRecordFields(resolved)) |field| {
+                    found = found.join(self.jsonDepth(field.type_idx, depth + 1));
+                }
+                return found;
+            },
+            .t_tuple => {
+                var found: JsonDepth = .bounded;
+                for (pool.getTupleElements(resolved)) |element| {
+                    found = found.join(self.jsonDepth(element, depth + 1));
+                }
+                return found;
+            },
+            .t_union => {
+                var found: JsonDepth = .bounded;
+                for (pool.getUnionMembers(resolved)) |member| {
+                    found = found.join(self.jsonDepth(member, depth + 1));
+                }
+                return found;
+            },
+            .t_bytes,
+            .t_void,
+            .t_never,
+            .t_unknown_type,
+            .t_function,
+            .t_intersection,
+            .t_ref,
+            .t_generic_param,
+            .t_generic_app,
+            .t_template_literal,
+            .t_error,
+            => return .opaque_part,
+        }
+    }
+
+    /// The result of a row whose type depends on the receiver or on the
+    /// arguments, or null when a needed type is not known. `receiver_array`
+    /// is the array type of the receiver, or null for a row with no
+    /// receiver. A result is never built from `unknown[]`.
+    fn builtinShapedResult(
+        self: *const TypeChecker,
+        call: Node.CallExpr,
+        result: builtin_results.Result,
+        receiver_array: TypeIndex,
+    ) TypeIndex {
+        const pool = self.env.pool;
+        const element = if (receiver_array == null_type_idx)
+            null_type_idx
+        else
+            pool.widenLiteral(pool.getArrayElement(receiver_array));
+        switch (result) {
+            .receiver_array => {
+                if (element == null_type_idx) return null_type_idx;
+                return pool.addArray(self.allocator, element);
+            },
+            .receiver_element_or_undefined => {
+                if (!self.isDefiniteType(element, 0)) return null_type_idx;
+                if (pool.getTag(element) == .t_nullable) return element;
+                return pool.addNullable(self.allocator, element);
+            },
+            .concat_array => {
+                if (element == null_type_idx) return null_type_idx;
+                var members: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+                if (call.args_count + 1 > members.len) return null_type_idx;
+                members[0] = element;
+                for (0..call.args_count) |position| {
+                    const arg = self.ir_view.getListIndex(call.args_start, @intCast(position));
+                    const added = self.concatContribution(self.inferType(arg));
+                    if (added == null_type_idx) return null_type_idx;
+                    members[position + 1] = added;
+                }
+                const joined = pool.addUnion(self.allocator, members[0 .. call.args_count + 1]);
+                if (joined == null_type_idx) return null_type_idx;
+                return pool.addArray(self.allocator, joined);
+            },
+            .map_array => {
+                if (element == null_type_idx) return null_type_idx;
+                const callback = self.callbackFunctionType(self.ir_view.getListIndex(call.args_start, 0));
+                if (callback == null_type_idx) return null_type_idx;
+                const returned = self.callbackReturnType(callback);
+                if (returned == null_type_idx) return null_type_idx;
+                // `map` passes the element, its index, and the array.
+                const passed = [_]TypeIndex{ element, pool.idx_number, receiver_array };
+                if (!self.callbackAccepts(callback, &passed)) return null_type_idx;
+                return pool.addArray(self.allocator, returned);
+            },
+            .reduce_value => {
+                if (element == null_type_idx) return null_type_idx;
+                const callback = self.callbackFunctionType(self.ir_view.getListIndex(call.args_start, 0));
+                if (callback == null_type_idx) return null_type_idx;
+                const returned = self.callbackReturnType(callback);
+                if (returned == null_type_idx) return null_type_idx;
+                // With an initial value, an empty array returns it and any
+                // other array returns the last callback result. Without one, a
+                // one-element array returns its element.
+                const seed = if (call.args_count >= 2)
+                    pool.widenLiteral(self.inferType(self.ir_view.getListIndex(call.args_start, 1)))
+                else
+                    element;
+                if (!self.isDefiniteType(seed, 0)) return null_type_idx;
+                const members = [_]TypeIndex{ seed, returned };
+                const joined = pool.addUnion(self.allocator, &members);
+                if (joined == null_type_idx) return null_type_idx;
+                // `reduce` passes the accumulator (the seed first, then each
+                // callback result), the element, its index, and the array.
+                const passed = [_]TypeIndex{ joined, element, pool.idx_number, receiver_array };
+                if (!self.callbackAccepts(callback, &passed)) return null_type_idx;
+                return joined;
+            },
+            .json_text => {
+                const arg = self.ir_view.getListIndex(call.args_start, 0);
+                const arg_type = self.inferType(arg);
+                if (arg_type == null_type_idx) return null_type_idx;
+                // The same payloads that ZTS213 refuses stay untyped.
+                if (self.firstUnencodable(arg_type, 0) != null) return null_type_idx;
+                return switch (self.jsonDepth(arg_type, 0)) {
+                    .bounded => pool.idx_string,
+                    .deep => pool.addNullable(self.allocator, pool.idx_string),
+                    // Nothing is known about the depth of the value, so the
+                    // result stays untyped.
+                    .opaque_part => null_type_idx,
+                };
+            },
+            .array_of => {
+                var members: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+                if (call.args_count > members.len) return null_type_idx;
+                for (0..call.args_count) |position| {
+                    const arg = self.ir_view.getListIndex(call.args_start, @intCast(position));
+                    const arg_type = pool.widenLiteral(self.inferType(arg));
+                    if (!self.isDefiniteType(arg_type, 0)) return null_type_idx;
+                    members[position] = arg_type;
+                }
+                const joined = pool.addUnion(self.allocator, members[0..call.args_count]);
+                if (joined == null_type_idx) return null_type_idx;
+                return pool.addArray(self.allocator, joined);
+            },
+            .array_from => {
+                const arg = self.ir_view.getListIndex(call.args_start, 0);
+                const source = pool.widenLiteral(self.resolvedType(self.inferType(arg)));
+                const tag = pool.getTag(source) orelse return null_type_idx;
+                switch (tag) {
+                    .t_string => return pool.addArray(self.allocator, pool.idx_string),
+                    .t_array, .t_tuple => {
+                        const copied = self.arrayReceiverType(source);
+                        if (copied == null_type_idx) return null_type_idx;
+                        const copied_element = pool.widenLiteral(pool.getArrayElement(copied));
+                        if (copied_element == null_type_idx) return null_type_idx;
+                        return pool.addArray(self.allocator, copied_element);
+                    },
+                    // exhaustive: any other source, such as an object with a
+                    // length, gives an array whose elements nothing here
+                    // determines.
+                    else => return null_type_idx,
+                }
+            },
+            .number,
+            .boolean,
+            .string,
+            .string_array,
+            .optional_string,
+            .undefined_value,
+            .unknown_value,
+            .json_result,
+            => return self.builtinResultType(result),
+        }
     }
 
     /// The type of `.length` on a receiver of type `receiver`: `number` for a
@@ -3448,25 +3804,58 @@ pub const TypeChecker = struct {
     /// The result of calling `row` with the arguments of `call`, or null when
     /// the result stays untyped (T1): the count is outside the runtime's range,
     /// an argument is a spread, or an argument that the runtime reads as a
-    /// number or a string has no type or a type that is not assignable to
-    /// that parameter type.
-    fn builtinCallResult(self: *const TypeChecker, call: Node.CallExpr, row: builtin_results.Row) TypeIndex {
+    /// number, a string, a function, or an object has no type or a type that
+    /// is not one. `receiver_array` is the array type of the receiver for an
+    /// `Array.prototype` row, and null for every other row.
+    fn builtinCallResult(
+        self: *const TypeChecker,
+        call: Node.CallExpr,
+        row: builtin_results.Row,
+        receiver_array: TypeIndex,
+    ) TypeIndex {
         if (!row.acceptsCount(call.args_count)) return null_type_idx;
         const pool = self.env.pool;
         for (0..call.args_count) |position| {
             const arg = self.ir_view.getListIndex(call.args_start, @intCast(position));
             if (self.ir_view.getTag(arg) == .spread) return null_type_idx;
             const param = row.paramAt(position) orelse return null_type_idx;
-            const required = switch (param) {
-                .any => continue,
-                .number => pool.idx_number,
-                .string => pool.idx_string,
-            };
+            if (param == .any) continue;
             const arg_type = self.inferType(arg);
             if (arg_type == null_type_idx or pool.mentionsError(arg_type)) return null_type_idx;
-            if (!self.env.isAssignableTo(arg_type, required)) return null_type_idx;
+            switch (param) {
+                .any => {},
+                .number => if (!self.env.isAssignableTo(arg_type, pool.idx_number)) return null_type_idx,
+                .string => if (!self.env.isAssignableTo(arg_type, pool.idx_string)) return null_type_idx,
+                .function => if (pool.getTag(self.resolvedType(arg_type)) != .t_function) return null_type_idx,
+                .object => switch (pool.getTag(self.resolvedType(arg_type)) orelse return null_type_idx) {
+                    .t_record, .t_dict, .t_array, .t_tuple => {},
+                    // exhaustive: a union, a nullable, a scalar, and every
+                    // other type may not be an object at runtime, and
+                    // `Object.keys` then returns `undefined`.
+                    else => return null_type_idx,
+                },
+            }
         }
-        return self.builtinResultType(row.result);
+        return switch (row.result) {
+            .receiver_array,
+            .receiver_element_or_undefined,
+            .concat_array,
+            .map_array,
+            .reduce_value,
+            .json_text,
+            .array_of,
+            .array_from,
+            => self.builtinShapedResult(call, row.result, receiver_array),
+            .number,
+            .boolean,
+            .string,
+            .string_array,
+            .optional_string,
+            .undefined_value,
+            .unknown_value,
+            .json_result,
+            => self.builtinResultType(row.result),
+        };
     }
 
     /// Whether `node` reads `headers` from a value of the `Request` type. The
@@ -3494,19 +3883,24 @@ pub const TypeChecker = struct {
         const method = self.resolveAtomName(callee.property) orelse return null_type_idx;
         if (self.builtinGlobalName(callee.object)) |namespace| {
             const row = builtin_results.find(.call, namespace, method) orelse return null_type_idx;
-            return self.builtinCallResult(call, row);
+            return self.builtinCallResult(call, row, null_type_idx);
         }
         if (self.isRequestHeaders(callee.object)) {
             const row = builtin_results.find(.call, "Headers.prototype", method) orelse return null_type_idx;
-            return self.builtinCallResult(call, row);
+            return self.builtinCallResult(call, row, null_type_idx);
         }
         const raw = self.inferType(callee.object);
         if (raw == null_type_idx) return null_type_idx;
         const pool = self.env.pool;
         const receiver = pool.widenLiteral(pool.unwrapNominal(self.env.resolveRef(raw)));
-        if (pool.getTag(receiver) != .t_string) return null_type_idx;
-        const row = builtin_results.find(.call, "String.prototype", method) orelse return null_type_idx;
-        return self.builtinCallResult(call, row);
+        if (pool.getTag(receiver) == .t_string) {
+            const row = builtin_results.find(.call, "String.prototype", method) orelse return null_type_idx;
+            return self.builtinCallResult(call, row, null_type_idx);
+        }
+        const array = self.arrayReceiverType(raw);
+        if (array == null_type_idx) return null_type_idx;
+        const row = builtin_results.find(.call, "Array.prototype", method) orelse return null_type_idx;
+        return self.builtinCallResult(call, row, array);
     }
 
     /// The result of a call of a builtin global function that no signature or
@@ -3515,7 +3909,7 @@ pub const TypeChecker = struct {
     fn inferBuiltinGlobalCall(self: *const TypeChecker, call: Node.CallExpr) TypeIndex {
         const name = self.builtinGlobalName(call.callee) orelse return null_type_idx;
         const row = builtin_results.find(.call, "global", name) orelse return null_type_idx;
-        return self.builtinCallResult(call, row);
+        return self.builtinCallResult(call, row, null_type_idx);
     }
 
     /// The `Response` type when `call` is one of the four constructors on the

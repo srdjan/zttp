@@ -7765,7 +7765,7 @@ test "CHECK refuses termination claims when a function value recurses without en
         },
         .{ .name = "r4", .total_refused = true, .source =
         \\function down(n: number): Proof<number, "total"> {
-        \\  return [n].map(down)[0];
+        \\  return [n].map(down)[0] ?? n;
         \\}
         \\function handler(req: Request): Response {
         \\  return Response.json({ v: down(3) });

@@ -4224,3 +4224,370 @@ test "builtin result: a parameter named parseInt is not the builtin" {
         \\function f(parseInt: (s: string) => string): number { const p: Nope = parseInt("1"); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
+
+// ---------------------------------------------------------------------------
+// Builtin result types (U1b of the builtin result types plan): array
+// receivers, argument shapes, JSON, Object, and Array. Each form is assigned
+// to `Nope` as above.
+// ---------------------------------------------------------------------------
+
+test "builtin result: indexOf on an array is number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[]): number { const p: Nope = xs.indexOf(1); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: includes on an array is boolean" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[]): number { const p: Nope = xs.includes(1); return 0; }
+    , "type 'boolean' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: join on an array is string" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[]): number { const p: Nope = xs.join(","); return 0; }
+    , "type 'string' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: join with a separator that is not a string is still string" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[], n: number): number { const p: Nope = xs.join(n); return 0; }
+    , "type 'string' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: slice on an array is the receiver array" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[]): number { const p: Nope = xs.slice(0, 1); return 0; }
+    , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: splice on an array is the receiver array" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: string[]): number { const p: Nope = xs.splice(0, 1); return 0; }
+    , "type 'string[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: pop on an array is the element or undefined" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[]): number { const p: Nope = xs.pop(); return 0; }
+    , "type 'number | undefined' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: shift on an array is the element or undefined" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: string[]): number { const p: Nope = xs.shift(); return 0; }
+    , "type 'string | undefined' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "false proof: the last element of an array may be undefined" {
+    try expectOneMismatch(
+        \\function f(xs: number[]): number { const last: number = xs.pop(); return last; }
+    , "type 'number | undefined' is not assignable to type 'number'");
+}
+
+test "builtin result: push on an array is number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[]): number { const p: Nope = xs.push(1, 2); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: unshift on an array is number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[]): number { const p: Nope = xs.unshift(1); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: forEach on an array is undefined" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[], cb: (n: number) => number): number { const p: Nope = xs.forEach(cb); return 0; }
+    , "type 'undefined' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: concat of two number arrays is a number array" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[], ys: number[]): number { const p: Nope = xs.concat(ys); return 0; }
+    , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: concat of a number array and a string array has both element types" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[], ys: string[]): number { const p: Nope = xs.concat(ys); return 0; }
+    , "type 'number | string[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: concat of a string onto a number array has both element types" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[], s: string): number { const p: Nope = xs.concat(s); return 0; }
+    , "type 'number | string[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: concat of an argument with no type stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[], ys: number[] | undefined): number { const p: Nope = xs.concat(ys); return 0; }
+    );
+}
+
+test "builtin result: map is the array of the callback return type" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[], cb: (n: number) => string): number { const p: Nope = xs.map(cb); return 0; }
+    , "type 'string[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: map with a callback that has no type stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[], cb: (n: number) => unknown): number { const p: Nope = xs.map(cb); return 0; }
+    );
+}
+
+test "builtin result: reduce with an initial value joins its type and the callback return" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[], cb: (acc: number, n: number) => number): number { const p: Nope = xs.reduce(cb, 0); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: reduce keeps the initial value type when it differs from the callback return" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[], cb: (acc: string | number, n: number) => number): number { const p: Nope = xs.reduce(cb, ""); return 0; }
+    , "type 'string | number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: reduce with no initial value joins the element and the callback return" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[], cb: (acc: number | string, n: number) => string): number { const p: Nope = xs.reduce(cb); return 0; }
+    , "type 'number | string' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: map with a callback whose parameter does not accept the element stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: string[], cb: (n: number) => number): number { const p: Nope = xs.map(cb); return 0; }
+    );
+}
+
+test "builtin result: map with a callback that takes more parameters than the runtime passes stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[], cb: (n: number, i: number, a: number[], extra: number) => string): number { const p: Nope = xs.map(cb); return 0; }
+    );
+}
+
+test "builtin result: reduce with an accumulator that does not accept the callback return stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[], cb: (acc: string, n: number) => number): number { const p: Nope = xs.reduce(cb, ""); return 0; }
+    );
+}
+
+test "builtin result: an array method on a receiver that may be undefined stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[] | undefined): number { const p: Nope = xs.pop(); return 0; }
+    );
+}
+
+test "builtin result: an array method through an optional chain stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[]): number { const p: Nope = xs?.pop(); return 0; }
+    );
+}
+
+test "builtin result: pop on an array literal widens the element type" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = [1, 2].pop(); return 0; }
+    , "type 'number | undefined' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: pop on an empty array literal stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = [].pop(); return 0; }
+    );
+}
+
+test "builtin result: JSON.stringify of a number array is string" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[]): number { const p: Nope = JSON.stringify(xs); return 0; }
+    , "type 'string' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: JSON.stringify of a recursive type may be undefined" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\structural Tree = { kids: Tree[] };
+        \\function f(t: Tree): number { const p: Nope = JSON.stringify(t); return 0; }
+    , "type 'string | undefined' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: JSON.stringify of an unknown value stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(u: unknown): number { const p: Nope = JSON.stringify(u); return 0; }
+    );
+}
+
+test "builtin result: JSON.stringify of a function stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(cb: (n: number) => number): number { const p: Nope = JSON.stringify(cb); return 0; }
+    );
+}
+
+test "builtin result: JSON.stringify with no argument stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = JSON.stringify(); return 0; }
+    );
+}
+
+test "builtin result: JSON.parse is unknown" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string): number { const p: Nope = JSON.parse(s); return 0; }
+    , "type 'unknown' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: JSON.tryParse is a Result with an unknown value" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string): number { const p: Nope = JSON.tryParse(s); return 0; }
+    , "type '{ ok: boolean; value?: unknown; error?: string; errors?: unknown }' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: Object.keys of a record is a string array" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\structural O = { a: number };
+        \\function f(o: O): number { const p: Nope = Object.keys(o); return 0; }
+    , "type 'string[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: Object.keys of a string stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string): number { const p: Nope = Object.keys(s); return 0; }
+    );
+}
+
+test "builtin result: Object.hasOwn is boolean" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\structural O = { a: number };
+        \\function f(o: O): number { const p: Nope = Object.hasOwn(o, "a"); return 0; }
+    , "type 'boolean' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: Object.values of a record stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\structural O = { a: number };
+        \\function f(o: O): number { const p: Nope = Object.values(o); return 0; }
+    );
+}
+
+test "builtin result: Object.entries of a record stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\structural O = { a: number };
+        \\function f(o: O): number { const p: Nope = Object.entries(o); return 0; }
+    );
+}
+
+test "builtin result: Object.values of an object literal is accepted as a number array" {
+    try expectNoTypeDiagnostic(
+        \\function f(): number { const vs: number[] = Object.values({ a: 1, b: 2 }); return 0; }
+    );
+}
+
+test "builtin result: Array.isArray is boolean" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[]): number { const p: Nope = Array.isArray(xs); return 0; }
+    , "type 'boolean' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: Array.of of numbers is a number array" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = Array.of(1, 2); return 0; }
+    , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: Array.of with an argument that has no type stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(n: number | undefined): number { const p: Nope = Array.of(1, Math.floor(n)); return 0; }
+    );
+}
+
+test "builtin result: Array.of with no argument stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = Array.of(); return 0; }
+    );
+}
+
+test "builtin result: Array.from of a string is a string array" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string): number { const p: Nope = Array.from(s); return 0; }
+    , "type 'string[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: Array.from of an array is the same array type" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: number[]): number { const p: Nope = Array.from(xs); return 0; }
+    , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: Array.from with a map function stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string, cb: (c: string) => number): number { const p: Nope = Array.from(s, cb); return 0; }
+    );
+}
+
+test "builtin result: a parameter named JSON keeps its own type" {
+    try expectOneMismatch(
+        \\structural J = { parse: (s: string) => number };
+        \\structural Nope = { zz: Bytes };
+        \\function f(JSON: J): number { const p: Nope = JSON.parse("1"); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: a parameter named Array keeps its own type" {
+    try expectOneMismatch(
+        \\structural A = { isArray: (x: number) => string };
+        \\structural Nope = { zz: Bytes };
+        \\function f(Array: A): number { const p: Nope = Array.isArray(1); return 0; }
+    , "type 'string' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "builtin result: concat of a number array and a string array is assignable to the array of the union" {
+    try expectNoTypeDiagnostic(
+        \\function f(xs: number[], ys: string[]): number { const p: (number | string)[] = xs.concat(ys); return 0; }
+    );
+}

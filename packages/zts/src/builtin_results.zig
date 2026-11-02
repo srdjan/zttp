@@ -31,9 +31,17 @@ pub const Param = enum {
     number,
     /// A value of type `string`. A non-string gives `undefined` at runtime.
     string,
+    /// A value of a function type. A value that is not callable gives
+    /// `undefined` at runtime.
+    function,
+    /// A record, a Dict, an array, or a tuple: a value that the runtime reads
+    /// as an object. Any other value gives `undefined` at runtime.
+    object,
 };
 
-/// The type of a row's result.
+/// The type of a row's result. The first group has one type for every
+/// accepted call. The second group takes its type from the receiver or the
+/// arguments, in `builtinShapedResult` of `type_checker.zig`.
 pub const Result = enum {
     number,
     boolean,
@@ -42,6 +50,29 @@ pub const Result = enum {
     /// `string | undefined`.
     optional_string,
     undefined_value,
+    /// `unknown`.
+    unknown_value,
+    /// The Result record with an `unknown` value and a `string` error.
+    json_result,
+    /// `T[]` for the element type `T` of the receiver.
+    receiver_array,
+    /// `T | undefined` for the element type `T` of the receiver.
+    receiver_element_or_undefined,
+    /// The array of the union of the receiver's element type and what each
+    /// argument adds.
+    concat_array,
+    /// The array of the callback's return type.
+    map_array,
+    /// The join of the initial value type (or the element type) and the
+    /// callback's return type.
+    reduce_value,
+    /// `string` for an argument of bounded JSON depth, `string | undefined`
+    /// for a recursive type, and no result for a type with an `unknown` part.
+    json_text,
+    /// The array of the union of the arguments' types.
+    array_of,
+    /// `string[]` for a string, the same array for an array.
+    array_from,
 };
 
 pub const Kind = enum {
@@ -181,7 +212,76 @@ pub const rows =
     // `.length` of a string counts UTF-16 code units, and of an array counts
     // elements. Both are numbers.
     properties("String.prototype", &.{"length"}) ++
-    properties("Array.prototype", &.{"length"});
+    properties("Array.prototype", &.{"length"}) ++
+    // Array.prototype. The receiver is an array, and a call returns its normal
+    // result for any argument. Allocation failure and an arena escape install
+    // an exception instead of returning, so they are not a result.
+    //
+    // `push` and `unshift` return the new length. `pop` and `shift` return
+    // `undefined` on an empty array. They read no argument, so a call with an
+    // argument stays untyped.
+    [_]Row{
+        .{ .scope = "Array.prototype", .name = "push", .rest = .any, .result = .number },
+        .{ .scope = "Array.prototype", .name = "unshift", .rest = .any, .result = .number },
+        .{ .scope = "Array.prototype", .name = "pop", .result = .receiver_element_or_undefined },
+        .{ .scope = "Array.prototype", .name = "shift", .result = .receiver_element_or_undefined },
+        // `splice` reads a start and a count only when they are integers, else
+        // it deletes from 0 to the end. It always returns the deleted elements.
+        .{ .scope = "Array.prototype", .name = "splice", .rest = .any, .result = .receiver_array },
+        // `slice` converts a non-integer bound, and always returns an array.
+        .{ .scope = "Array.prototype", .name = "slice", .params = any_two, .result = .receiver_array },
+        // `indexOf` and `includes` return -1 or false for a missing element or
+        // a bound that is not an integer.
+        .{ .scope = "Array.prototype", .name = "indexOf", .params = any_two, .result = .number },
+        .{ .scope = "Array.prototype", .name = "includes", .params = any_two, .result = .boolean },
+        // `join` converts a separator that is not a string to a string
+        // (`valueToStringSimple`), and an undefined separator is a comma, so
+        // the separator is `any`.
+        .{ .scope = "Array.prototype", .name = "join", .params = any_one, .result = .string },
+        // `concat` flattens an argument that is an array one level and appends
+        // any other argument as one element.
+        .{ .scope = "Array.prototype", .name = "concat", .rest = .any, .result = .concat_array },
+        // `map` returns `undefined` for a callback that is not callable. A
+        // second argument is ignored.
+        .{ .scope = "Array.prototype", .name = "map", .min_args = 1, .params = &.{ .function, .any }, .result = .map_array },
+        // `reduce` returns the initial value for an empty array, and the last
+        // callback result otherwise. With no initial value, a one-element
+        // array returns its element, a longer array the last callback result,
+        // and an empty array throws.
+        .{ .scope = "Array.prototype", .name = "reduce", .min_args = 1, .params = &.{ .function, .any }, .result = .reduce_value },
+        // `forEach` returns `undefined`, with or without a callback.
+        .{ .scope = "Array.prototype", .name = "forEach", .rest = .any, .result = .undefined_value },
+    } ++
+    // JSON. `parse` returns the parsed value, or `undefined` for text that is
+    // not valid JSON, for a value that is not a string, and for JSON `null`.
+    // `unknown` covers all of them. `tryParse` returns a Result object for any
+    // argument. Its `ok`, `value`, and `error` are the core properties of the
+    // Result object (`getResultCoreProperty` in object.zig), the same ones
+    // that `requestJson` returns. A failure has a string `error`.
+    // `stringify` returns `undefined` for no argument, and for a value nested
+    // 512 levels deep or more; see `json_text`.
+    [_]Row{
+        .{ .scope = "JSON", .name = "parse", .params = any_one, .result = .unknown_value },
+        .{ .scope = "JSON", .name = "tryParse", .params = any_one, .result = .json_result },
+        .{ .scope = "JSON", .name = "stringify", .min_args = 1, .params = &.{ .any, .any, .any }, .result = .json_text },
+    } ++
+    // Object. `keys` returns `undefined` for a value that is not an object, so
+    // its argument is `object`. `hasOwn` returns false for a value that is not
+    // an object and for a key that is not a string.
+    [_]Row{
+        .{ .scope = "Object", .name = "keys", .min_args = 1, .params = &.{.object}, .result = .string_array },
+        .{ .scope = "Object", .name = "hasOwn", .params = any_two, .result = .boolean },
+    } ++
+    // Array. `isArray` is false for no argument and for a value that is not an
+    // array. `of` returns an array of its arguments. `from` returns
+    // `undefined` for no argument; a string gives an array of its characters,
+    // an array gives a copy, and a second argument maps the elements, so
+    // `from` has a result only for one argument.
+    [_]Row{
+        .{ .scope = "Array", .name = "isArray", .params = any_one, .result = .boolean },
+        .{ .scope = "Array", .name = "of", .min_args = 1, .rest = .any, .result = .array_of },
+        .{ .scope = "Array", .name = "from", .min_args = 1, .params = any_one, .result = .array_from },
+    };
 
 pub fn find(kind: Kind, scope: []const u8, name: []const u8) ?Row {
     for (rows) |row| {
@@ -202,6 +302,7 @@ pub const Skip = struct {
 };
 
 const u1b = "typed in U1b";
+const values_unbounded = "the declared field types do not bound the values: a record can hold a field that its type does not name (the discriminant-test gap in docs/roadmap.md), so the union of the field types would be a false proof";
 const typed_elsewhere_array = "typed elsewhere: inferArrayMethodType gives the method a function type";
 const typed_elsewhere_response = "typed elsewhere: inferResponseConstructorType gives the Response type";
 const typed_elsewhere_signature = "typed elsewhere: a function signature registered by name in abi_types.zig";
@@ -221,15 +322,9 @@ fn skipsOf(
 }
 
 pub const skips =
-    // Array.prototype: the seven methods that the checker already types, and
-    // the rest for the array rows of U1b.
+    // Array.prototype: the seven methods that the checker already types.
     skipsOf("Array.prototype", typed_elsewhere_array, &.{ "filter", "every", "some", "find", "findIndex", "toSorted", "toReversed" }) ++
-    skipsOf("Array.prototype", u1b, &.{
-        "push", "unshift", "pop", "shift", "splice", "indexOf", "includes", "join", "slice", "concat", "map", "forEach", "reduce",
-    }) ++
-    skipsOf("JSON", u1b, &.{ "parse", "tryParse", "stringify" }) ++
-    skipsOf("Object", u1b, &.{ "keys", "values", "entries", "hasOwn" }) ++
-    skipsOf("Array", u1b, &.{ "isArray", "of", "from" }) ++
+    skipsOf("Object", values_unbounded, &.{ "values", "entries" }) ++
     skipsOf("Response", typed_elsewhere_response, &.{ "json", "text", "html", "redirect", "rawJson" }) ++
     skipsOf("Result.prototype", result_unmodeled, &.{
         "isOk", "isErr", "unwrap", "unwrapOr", "unwrapErr", "map", "mapErr", "andThen", "match",
