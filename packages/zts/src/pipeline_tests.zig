@@ -4398,6 +4398,59 @@ test "builtin result: reduce with an accumulator that does not accept the callba
     , "callback parameter '#1' is 'string', but reduce passes 'number'");
 }
 
+/// The one ZTS201 (`missing_field`) that `source` must report, with its exact message and help.
+fn expectOneMissingField(source: []const u8, comptime message: []const u8, comptime help: []const u8) !void {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.typeDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqual(type_checker_mod.DiagnosticKind.missing_field, diagnostics[0].kind);
+            try testing.expectEqual(type_checker_mod.Severity.err, diagnostics[0].severity);
+            try testing.expectEqualStrings(message, diagnostics[0].message);
+            try testing.expectEqualStrings(help, diagnostics[0].help orelse return error.HelpMissing);
+        }
+    };
+    try withSession(testing.allocator, source, Probe.run);
+}
+
+test "string index: an index read on a string is ZTS201 with a repair" {
+    try expectOneMissingField(
+        \\function f(): number { const s: string = "ab"; const c: string = s[0]; return 0; }
+    , "an index read on a string yields undefined", "use s.charAt(i) or s.slice(i, i + 1)");
+}
+
+test "string index: an index read on a string literal is ZTS201" {
+    try expectOneMissingField(
+        \\function f(): number { const c = "ab"[0]; return 0; }
+    , "an index read on a string yields undefined", "use s.charAt(i) or s.slice(i, i + 1)");
+}
+
+test "string index: an index read on a string parameter is ZTS201" {
+    try expectOneMissingField(
+        \\function f(s: string): number { const c = s[1]; return 0; }
+    , "an index read on a string yields undefined", "use s.charAt(i) or s.slice(i, i + 1)");
+}
+
+test "string index: charAt, slice, and length on a string report nothing" {
+    try expectNoTypeDiagnostic(
+        \\function f(s: string): number { const a: string = s.charAt(0); const b: string = s.slice(0, 1); return s.length; }
+    );
+}
+
+test "string index: an index read on a string array keeps string or undefined" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(xs: string[]): number { const p: Nope = xs[0]; return 0; }
+    , "type 'string | undefined' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "string index: an index read on a union of string and string array is string or undefined" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(x: string | string[]): number { const p: Nope = x[0]; return 0; }
+    , "type 'string | undefined' is not assignable to type '{ zz: Bytes }'");
+}
+
 test "builtin result: an array method on a receiver that may be undefined stays untyped" {
     try expectNoTypeDiagnostic(
         \\structural Nope = { zz: Bytes };

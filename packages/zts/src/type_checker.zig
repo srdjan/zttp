@@ -595,6 +595,36 @@ pub const TypeChecker = struct {
         });
     }
 
+    /// Refuse an index read whose operand is a `string`. The interpreter's
+    /// `get_elem` yields `undefined` for every string receiver, so a read such
+    /// as `s[0]` never gives a character. A union with a string member is not
+    /// refused here: `inferIndexReadType` adds `undefined` to its read type.
+    fn reportStringIndexRead(self: *TypeChecker, read: NodeIndex, operand: NodeIndex) void {
+        if (read == null_node or operand == null_node) return;
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+        const operand_type = self.inferType(operand);
+        if (operand_type == null_type_idx) return;
+        const pool = self.env.pool;
+        const t = pool.unwrapNominal(self.env.resolveRef(operand_type));
+        const tag = pool.getTag(t) orelse return;
+        switch (tag) {
+            .t_string, .t_literal_string, .t_template_literal => {},
+            // exhaustive: only a string receiver makes every index read
+            // `undefined`. A union with a string member gets `undefined` in
+            // `inferIndexReadType`, and the other receivers are typed there.
+            else => return,
+        }
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .missing_field,
+            .node = read,
+            .message = "an index read on a string yields undefined",
+            .help = "use s.charAt(i) or s.slice(i, i + 1)",
+        });
+    }
+
     /// The type a function parameter was declared with, or `null_type_idx` for
     /// a binding that is not a parameter or whose parameter carries no
     /// annotation. Read after the walk: the table is filled as each function is
@@ -1516,6 +1546,7 @@ pub const TypeChecker = struct {
                 self.walkExpr(member.object);
                 self.walkExpr(member.computed);
                 self.reportDictEntryRead(node, member.object);
+                if (tag == .computed_access) self.reportStringIndexRead(node, member.object);
                 if (tag != .optional_chain) self.recordAbsentReceiver(node, member.object);
             },
 
@@ -3200,7 +3231,9 @@ pub const TypeChecker = struct {
     /// An index read of an array or tuple is `T | undefined`, as under
     /// noUncheckedIndexedAccess. A literal key on a record is the field's
     /// type. A union of arrays reads as the union of its elements, plus
-    /// `undefined`. Other receivers stay untyped, as before.
+    /// `undefined`. A string member of the union contributes `undefined`:
+    /// the interpreter yields `undefined` for an index read on a string.
+    /// Other receivers stay untyped, as before.
     fn inferIndexReadType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         const member = self.ir_view.getMember(node) orelse return null_type_idx;
         const raw = self.inferType(member.object);
@@ -3216,16 +3249,23 @@ pub const TypeChecker = struct {
         if (tag == .t_union) {
             var elems: [MAX_UNION_MEMBERS]TypeIndex = undefined;
             var count: usize = 0;
+            var has_string_member = false;
             for (pool.getUnionMembers(obj)) |m| {
                 var arr = pool.unwrapNominal(self.env.resolveRef(m));
                 const mt = pool.getTag(arr) orelse return null_type_idx;
-                if (mt == .t_tuple) arr = self.tupleToArrayType(arr) else if (mt != .t_array) return null_type_idx;
+                // The interpreter's `get_elem` yields `undefined` for every
+                // string receiver. A string member adds only that `undefined`.
+                if (mt == .t_string or mt == .t_literal_string or mt == .t_template_literal) {
+                    has_string_member = true;
+                    continue;
+                }
                 if (count >= elems.len) return null_type_idx;
+                if (mt == .t_tuple) arr = self.tupleToArrayType(arr) else if (mt != .t_array) return null_type_idx;
                 elems[count] = pool.getArrayElement(arr);
                 if (elems[count] == null_type_idx) return null_type_idx;
                 count += 1;
             }
-            if (count == 0) return null_type_idx;
+            if (count == 0) return if (has_string_member) pool.idx_undefined else null_type_idx;
             const joined = pool.addUnion(self.allocator, elems[0..count]);
             if (self.admitsUndefined(joined)) return joined;
             return pool.addNullable(self.allocator, joined);

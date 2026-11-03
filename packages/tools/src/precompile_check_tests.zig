@@ -10979,12 +10979,6 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\  return Response.json({ ...p, b: 1 });
     \\}
     },
-    .{ .name = "r33_string_index", .expect = "clean", .source =
-    \\function handler(req: Request): Response {
-    \\  const s: string = "abc";
-    \\  return Response.json({ a: s[5].length });
-    \\}
-    },
     .{ .name = "s01b_union_result_if_narrowed", .expect = "clean", .source =
     \\structural P = { age: number };
     \\structural R = { ok: true; value: P } | { ok: false; error: string };
@@ -11457,6 +11451,41 @@ test "A3: one ZTS309 for each read, with its own line and column" {
     try std.testing.expectEqual(@as(usize, 3), count);
     try std.testing.expectEqualSlices(u32, &.{ 4, 4, 5 }, lines[0..count]);
     try std.testing.expectEqualSlices(u32, &.{ 18, 30, 18 }, columns[0..count]);
+}
+
+const absent_read_string_index = [_]AbsentReadCase{
+    .{ .name = "q2_string_index_then_method", .expect = "ZTS201@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const s: string = "ab";
+    \\  const c: string = s[0];
+    \\  return Response.text(c.toUpperCase());
+    \\}
+    },
+    .{ .name = "q7_string_or_array_index_then_method", .expect = "ZTS309@3", .source =
+    \\function pick(x: string | string[]): string {
+    \\  const c = x[0];
+    \\  return c.toUpperCase();
+    \\}
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  return Response.text(pick("ab"));
+    \\}
+    },
+    .{ .name = "r33_string_index_then_member", .expect = "ZTS201@3", .source =
+    \\function handler(req: Request): Response {
+    \\  const s: string = "abc";
+    \\  return Response.json({ a: s[5].length });
+    \\}
+    },
+    .{ .name = "control_charat_and_length", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const s: string = "ab";
+    \\  return Response.text([s.charAt(0).toUpperCase(), String(s.length)].join(""));
+    \\}
+    },
+};
+
+test "string index: an index read on a string or on a string union is refused" {
+    try expectAbsentReadCases(&absent_read_string_index);
 }
 
 const ObserverProbe = struct {
