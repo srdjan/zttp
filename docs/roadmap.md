@@ -16,7 +16,7 @@ Release v0.26.0 was published on 2026-10-30. The release fixes plan shipped as 0
 
 Standing rule D-012 in [decisions.md](decisions.md): a model-visible change waits for one batched re-record window. The latest window ran on 2026-11-01, under the [check parity plan](plans/2026-11-01-check-parity-plan.md). The owner runs any later window.
 
-Next work: no plan is active, and no reset is active. The [builtin result types plan](plans/2026-11-02-builtin-result-types-plan.md) is done on local `main` and awaits release; its unit U3 stopped at its entry check, and its open gaps are under Current Limitations. The [arithmetic operand types plan](plans/2026-11-02-arithmetic-operand-types-plan.md) is done on local `main` and awaits release. The [function values and type predicates plan](plans/2026-11-02-function-values-and-predicates-plan.md) is done on local `main` and awaits release; its open gaps are under Current Limitations. All units of the [module graph certificates plan](plans/2026-11-01-module-graph-certificates-plan.md) are done, on local `main`, and await release. This includes unit G8 (`zttp check` parity) and unit 9d of the reset plan.
+Next work: no plan is active, and no reset is active. The [callback parameters and Result types plan](plans/2026-11-02-callback-and-result-types-plan.md) is done on local `main` and awaits release; its unit U3 stopped at its entry check again, and its open gaps are under Current Limitations. The [builtin result types plan](plans/2026-11-02-builtin-result-types-plan.md) is done on local `main` and awaits release; its unit U3 stopped at its entry check, and its open gaps are under Current Limitations. The [arithmetic operand types plan](plans/2026-11-02-arithmetic-operand-types-plan.md) is done on local `main` and awaits release. The [function values and type predicates plan](plans/2026-11-02-function-values-and-predicates-plan.md) is done on local `main` and awaits release; its open gaps are under Current Limitations. All units of the [module graph certificates plan](plans/2026-11-01-module-graph-certificates-plan.md) are done, on local `main`, and await release. This includes unit G8 (`zttp check` parity) and unit 9d of the reset plan.
 
 M1, M2, and M3 are complete.
 M4 is complete: T1a to T7 were delivered. Decision 3 of [plan 005](../advisor-plans/005-feature-removal-rebase.md) stopped M5 on 2026-10-11. Phase 2 later removed both runtime products. No release date is assigned.
@@ -102,26 +102,39 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
   distinguish read from write authority. Other residual-guard limits are in
   [Verification](verification.md#residual-runtime-guard-boundary).
 - Type checker gaps measured on 2026-11-02 with `zts check`. The second
-  and the fifth were also run with `zttp dev`. The
+  and the sixth were also run with `zttp dev`. The
   [arithmetic operand types plan](plans/2026-11-02-arithmetic-operand-types-plan.md)
   closed the arithmetic gap that this list used to name. The
   [builtin result types plan](plans/2026-11-02-builtin-result-types-plan.md)
   gave builtin calls, `.length`, and array callback parameters their types.
+  The
+  [callback parameters and Result types plan](plans/2026-11-02-callback-and-result-types-plan.md)
+  checked annotated callbacks and typed the Results of virtual modules.
   - A value with no type still passes at every typed position and as an
-    arithmetic operand. The remaining sources are the callback parameters of
-    the generic `zttp:result` combinators, a call of a function with
+    arithmetic operand. The remaining sources are a call of a function with
     unannotated parameters outside strict mode, a `Dict` value from
-    `dictEntries`, a member read on `unknown` such as `JSON.parse(s).n`, and
-    `Object.values` and `Object.entries`. A record can hold a field that its
-    type does not name, so the declared field types do not bound
-    `Object.values`. Refusing an operand with no type (step T4 of the
-    arithmetic plan) also refused `examples/patterns/result-combinators.ts`,
-    a valid program, so that step stays open.
-  - An annotated callback parameter keeps its annotation when the array
-    elements do not fit it. `xs.map((s: string) => s.toUpperCase())` over
-    `number[]` passes with every property PROVEN, and `zttp dev` answers 500
-    (`map` error `NotCallable`). Closing it needs an argument check on
-    builtin calls.
+    `dictEntries`, a member read on `unknown` such as `JSON.parse(s).n`, an
+    index read followed by a member read such as `ps[0].age`, `Object.values`
+    and `Object.entries`, and the callback parameter of `mapError` or
+    `orElse` over a module Result. A record can hold a field that its type
+    does not name, so the declared field types do not bound `Object.values`.
+    Refusing an operand with no type in strict mode (step T4 of the
+    arithmetic plan) stopped at its entry check twice. The second check found
+    three blockers. It moves the R7c tool census from 124 to 129
+    diagnostics, a model-visible change that needs a re-record window. It
+    refuses `dictFold(d, (acc, value, key) => acc + value, 0)`, the form that
+    the ZTS628 help recommends. It also replaces the three ZTS309 diagnostics
+    of the A3 precompile fixture with a misleading "no known type".
+  - A call of a member that the receiver type does not have passes when the
+    receiver is not a record, a union, an array, or a tuple.
+    `const n: number = 5; n.toUpperCase()` passes with every property PROVEN,
+    and `zttp dev` answers 500 (`NotCallable`). The same holds for a value of
+    type `unknown`, such as the `unknown` error of a module Result. A precise
+    type closes only the paths that pass a value to a typed position.
+  - `dictFold(d, f, 0)` refuses a `Dict<string, number>` argument with ZTS203
+    (`expected Dict<unknown, unknown>`). This false refusal was measured with
+    `zts check` before and after the callback parameters and Result types
+    plan.
   - A partly annotated parameter list such as `(v, i: string)` binds the
     annotation to the first parameter, `v`. Strict mode refuses that form
     with ZTS601, so the effect is an extra, misleading ZTS200 and no false

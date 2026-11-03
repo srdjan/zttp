@@ -409,6 +409,16 @@ A result has a type only when each argument has the type that the runtime reads.
 
 An unannotated parameter of an inline array callback takes the type of the value in its position: the element, the index (`number`), and the array. A `toSorted` comparator gets two elements. The loop variable of `for (const i of range(n))` is a `number`.
 
+An annotated or named callback of `map`, `filter`, `find`, `findIndex`, `forEach`, `some`, `every`, `toSorted`, or `reduce` must accept the value that the method passes in each position. A parameter past those values must accept `undefined`. Otherwise the call gets ZTS203:
+
+```javascript
+[1, 2].map((s: string) => s.toUpperCase());      // ZTS203: callback parameter 's' is 'string', but map passes 'number'
+[1, 2].map(sha256);                              // ZTS203: callback parameter '#1' is 'string', but map passes 'number'
+[1, 2].reduce((acc: string, n: number) => n, ""); // ZTS203: callback parameter 'acc' is 'string', but reduce passes 'number'
+```
+
+A named predicate whose parameters accept the element is accepted: `[1, 2].filter(isBig)` with `function isBig(n: number): boolean`.
+
 A `reduce` accumulator gets the seed type only when the callback returns a value of that type. Otherwise the callback gets ZTS200: `reduce callback returns 'string', but its accumulator is 'number'`. Annotate the accumulator with a type that holds both, or return a value of the seed type.
 
 These programs are now refused, because the value can be `undefined`:
@@ -422,6 +432,36 @@ return xs.map(f)[0];                            // in a number function: write x
 ```
 
 `String(a) + String(b)` is now refused with ZTS105, because both operands are strings. Write `[String(a), String(b)].join("")`.
+
+### Result Types
+
+A Result has the type `{ ok: boolean; value?: V; error?: E; errors?: S }`. The types follow what the runtime stores.
+
+| Form | `value` | `error` | `errors` |
+|---|---|---|---|
+| `ok(x)` | the type of `x` | `never` | `never` |
+| `err(e)` | `never` | the type of `e` | `never` |
+| `mapResult(r, f)` | the return type of `f` | the `error` of `r` | the `errors` of `r` |
+| `mapError(r, f)` | the `value` of `r` | the return type of `f` | `never`, or the return type of `f` when `r` can fill `errors` |
+| `andThen(r, f)`, `orElse(r, f)` | the join of `r` and the Result that `f` returns | the join | the join |
+| `collectAll(rs)` | an array of the joined values | the joined errors | the joined `errors` |
+| `jwtVerify(...)` | `unknown` | `string` | `never` |
+| `validateJson`, `validateObject`, `coerceJson`, the four `zttp:decode` exports | `unknown`, or the schema type | `string \| undefined` | `unknown` |
+| every other module export that returns a Result | `unknown` (a JSON value for `parseJson` and `parseJsonBytes`) | `unknown` | `never` |
+
+`unwrapOr(r, d)` is the join of the `value` of `r` and the type of `d`. A schema failure of `zttp:validate` or `zttp:decode` fills `errors` and leaves `error` absent, so their `error` admits `undefined`. `packages/zts/src/module_result_errors.zig` holds one row for each module export, and a census test fails when an export has no row.
+
+An unannotated callback of `mapResult` or `andThen` takes the `value` type, and of `mapError` or `orElse` the error payload type, when that type is known and is not `unknown`. An annotated or named callback must accept that type (ZTS203).
+
+A Result argument must be a Result that `ok`, `err`, or a module export returns. The runtime returns any other value unchanged, so a record literal is refused:
+
+```javascript
+mapResult({ ok: true, value: 21 }, f);   // ZTS203: mapResult argument 1 must be a Result
+collectAll([1, 2]);                      // ZTS203: collectAll argument 1 must be an array of Results
+andThen(ok(1), (n) => n + 1);            // ZTS203: andThen callback must return a Result, got 'number'
+```
+
+The runtime also accepts a record literal shaped like a Result as the return of an `andThen` or `orElse` callback and as a `collectAll` element. The checker refuses that form too. Return `ok(...)` or `err(...)`.
 
 ---
 
@@ -580,7 +620,7 @@ predicate callbacks face the same rule at runtime.
 
 Arithmetic operators (`-`, `*`, `/`, `%`, `**`) and the unary `-` require numeric operands. An operand whose type is not assignable to `number` gets ZTS104. The compiler reads the type with the narrowing that reaches the operand, so a value that a guard proves to be a number is accepted.
 
-An operand that the type checker does not type passes. Builtin calls such as `xs.length`, `Math.floor(n)`, and `parseInt(s, 10)` now have types (see [Builtin Result Types](#builtin-result-types)). The remaining untyped sources include the callback parameters of the generic `zttp:result` combinators and a `Dict` value from `dictEntries`. [Roadmap](roadmap.md) lists them.
+An operand that the type checker does not type passes. Builtin calls such as `xs.length`, `Math.floor(n)`, and `parseInt(s, 10)` now have types (see [Builtin Result Types](#builtin-result-types)), and so does the callback parameter of `mapResult` or `andThen` over a Result with a known value type (see [Result Types](#result-types)). The remaining untyped sources include a `Dict` value from `dictEntries` and an index read followed by a member read such as `ps[0].age`. [Roadmap](roadmap.md) lists them.
 
 #### Rejected arithmetic
 

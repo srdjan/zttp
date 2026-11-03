@@ -1,6 +1,6 @@
 # Callback parameters and Result types, 2026-11-02
 
-Status: validated 2026-11-02 (revision 1), ready for C1. Approved 2026-11-02: the owner chose option (a) of Decision 1 and option (a) of Decision 2 at the end of the builtin result types plan. The approval covers this plan, the fixes, and local commits. It does not cover a push, a provider call, or a re-record.
+Status: complete 2026-11-02 on local `main`, units C1, R1, R1b, R2a, R2b, and D. U3 stopped at its entry check; see the execution record. Approved 2026-11-02: the owner chose option (a) of Decision 1 and option (a) of Decision 2 at the end of the builtin result types plan. The approval covers this plan, the fixes, and local commits. It does not cover a push, a provider call, or a re-record.
 
 Decision 1 (a): an annotated callback parameter of a builtin array method must accept the value that the runtime passes, or the call gets ZTS203. Decision 2 (a): give the `zttp:result` combinator callbacks their types, then run the U3 entry check of the [builtin result types plan](2026-11-02-builtin-result-types-plan.md) again.
 
@@ -104,3 +104,45 @@ Revision 1, 2026-11-02. A Fable review attacked the design and ran probes, and a
 - Fable: the corpus cases that read a `Dict` value run correctly and would take the U3 diagnostic, and the ZTS628 suggestion uses an untyped `dictFold` value. Design item 6 states which rule wins.
 - Fable: R2 was too large for one unit. It is split into R2a and R2b, and the units run in order.
 - Opus, during the revision: a method call on a `number` or an `unknown` value is not checked (P9). The R1 acceptance therefore uses the measured P4 form that passes the error to a `string` parameter.
+
+## Execution record
+
+| Unit | Commit | Result |
+|---|---|---|
+| C1 | `8bf7322e` | Annotated and named array callbacks must accept what the method passes (ZTS203). P1 and P2 closed |
+| R1 | `83136e36` | A module Result's `error` has the type that the runtime stores; 25 rows and a census. P4 closed through a typed position |
+| (tests) | `4f56f80e` | The tests in `packages/tools/src/precompile_check.zig` ran in no build step; `test-precompile` now runs them |
+| R1b | `d0f0f38c` | `zts check --types` prints the same Result error types |
+| R2a | `e2ff5b98` | Result argument shapes, `ok`, `err`, `unwrapOr`, and Result joins. P6 and P7 closed |
+| R2b | `da79840f` | Combinator types, combinator callback bindings, annotated callback bindings, and the `errors` field. P5 and P10 closed |
+| (golden) | `c486b209` | The bytecode identity golden of the corpus case that R1 rewrote |
+| U3 | none | The entry check failed again; see "U3 entry check" below |
+| D | this commit | `docs/typescript.md`, `docs/roadmap.md`, `CHANGELOG.md`, the plan index, and this record |
+
+Each unit ran its gates unfiltered with a private cache and no provider key. The offline replay in `test-expert-app` held at every unit, so no change was model-visible.
+
+### Deviations from the plan
+
+- C1: Opus found that the return-only predicate comparison applied to every member call with a `() => X` parameter, so a record method `run(cb: () => number)` accepted a named `g(n: number)` again. The comparison is now limited to the five array predicate methods. Opus also found that a named `reduce` callback skipped the accumulator return check. Both had failing tests first.
+- R1: Opus found a second Result builder, `typedResultType`, used for the schema-literal calls of `zttp:validate` and `zttp:decode`, that hardcoded a `string` error. It now reads the same row. The corpus case `result_error_may_be_absent.ts` read a `parseJson` record error as a `string`; it now uses `validateJson`.
+- R1b was added by Opus. The `.d.ts` that `zts check --types` writes still claimed `error?: string` for every Result. The fix exposed that the tests of `precompile_check.zig`, including the frozen signature digest, ran in no build step.
+- R2a: Opus made a `.result_fn` callback that returns `unknown` or raw JSON a refusal, as a `.result` argument of those types already was.
+- R2b: Opus sent the unit back with four findings. A probable false proof (P10): a validate or decode schema failure fills `errors` and leaves `error` absent, yet `r.error` read as `string` after `!r.ok`. The runtime probe could not register a schema, so P10 rests on the code in `validate.zig`. A Result now tracks `errors`, and `error` admits `undefined` where `errors` is not `never`. The combinator parameter check had accepted any annotation where the passed type was `unknown`; it now compares as C1 does. A fully annotated inline callback now binds its parameters before the call checks, because C1's inline `reduce` return check and the P5 check saw no return type for a body that reads a parameter.
+- The bytecode identity golden: R1's gate list did not include `test-bytecode-identity`, which failed from R1 until `c486b209`.
+- The record-literal refusal: the runtime accepts a record literal shaped like a Result as an `andThen` or `orElse` callback return and as a `collectAll` element (`coerceResultLike`). The checker refuses it, which `docs/typescript.md` states.
+
+### U3 entry check
+
+The entry check failed, so U3 was not built. The executor gated the change on `ResolveOptions.strict`, confirmed that every path that produces a proof or a user-visible verdict runs strict, and ran the built `zts check` on all 264 tracked `.ts` files. `examples/patterns/result-combinators.ts` and the runtime fixture no longer stop it. Three stop conditions held:
+
+- The R7c tool census in `test-expert-app` moves from 124 to 129 diagnostics, the five new diagnostics of the corpus `bad` cases. That is model-visible under D-012, and this approval does not cover a re-record.
+- The change refuses `dictFold(d, (acc, value, key) => acc + value, 0)`, the form that the ZTS628 help recommends, because the `dictFold` callback parameters have no type.
+- In the A3 precompile fixture, `ps[0].age + ps[1].age` over `ps: P[]` loses its three ZTS309 diagnostics and gets two "no known type" diagnostics instead, because `ps[0].age` has no type.
+
+The refused operands were otherwise acceptable: unannotated parameters in `examples/handler/feature-probes.ts` and `missing_parameter_annotation` (programs that strict mode refuses), and `Dict` values in the `bad` cases `dict_entries_reduce` and `dict_entry_round_trip`. `docs/roadmap.md` records the three blockers.
+
+### Findings outside this plan
+
+- P9 stays open: a call of a member that a `number` or `unknown` receiver does not have passes and faults with `NotCallable`.
+- `dictFold(d, f, 0)` refuses a `Dict<string, number>` argument (ZTS203, `expected Dict<unknown, unknown>`), on the binary from before this plan and after it.
+- An index read followed by a member read, such as `ps[0].age`, has no type.
