@@ -5761,6 +5761,53 @@ test "callback parameter: a parameter named range keeps its own type in for...of
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
 
+test "for...of over a tuple of numbers binds the variable to number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { for (const n of [1, 2, 3]) { const p: Nope = n; } return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "for...of over a mixed tuple binds the union of the widened element types" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { for (const s of ["a", 1]) { const p: Nope = s; } return 0; }
+    , "type 'string | number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "for...of over a union of an array and a tuple binds the union of the element types" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(u: number[] | [string, string]): number { for (const v of u) { const p: Nope = v; } return 0; }
+    , "type 'number | string' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "for...of nested over an array of mixed rows binds the inner variable to number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { for (const row of [[1, 2], [3]]) { for (const m of row) { const p: Nope = m; } } return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "for...of over a tuple keeps the published let accumulation clean" {
+    try expectNoTypeDiagnostic(
+        \\function f(): number { let total = 0; for (const n of [1, 2, 3]) { total = total + n; } return total; }
+    );
+}
+
+test "for...of over a tuple of numbers refuses a string method on the variable" {
+    try expectOneMissingField(
+        \\function f(): number { let out = ""; for (const s of [1, 2]) { out = s.toUpperCase(); } return 0; }
+    , non_record_member_message, non_record_member_help);
+}
+
+test "for...of over a union with a member that is not an array or tuple leaves the variable untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(u: number[] | string): number { for (const v of u) { const p: Nope = v; } return 0; }
+    );
+}
+
 test "callback parameter: an annotated index parameter keeps its annotation" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };

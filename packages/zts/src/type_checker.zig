@@ -1164,8 +1164,12 @@ pub const TypeChecker = struct {
         }
     }
 
-    /// Record the type of a for-of element variable when the iterable is an
-    /// array. Any other iterable leaves the variable untyped, as before.
+    /// Record the type of a for-of element variable. An array binds its
+    /// element type. A tuple binds the union of its widened element types, so
+    /// `[1, 2, 3]` binds `number`. A union whose members are all arrays or
+    /// tuples binds the union of each member's element type. Any other
+    /// iterable, an empty tuple, and an element with no type leave the
+    /// variable untyped, as before.
     fn bindForOfElement(self: *TypeChecker, fi: Node.ForIterStmt) void {
         // `range(...)` returns a lazy iterator of integers (`globalRange`).
         // Only the builtin counts: a parameter named `range` is another binding.
@@ -1175,11 +1179,51 @@ pub const TypeChecker = struct {
         }
         const iterable = self.env.resolveRef(self.inferType(fi.iterable));
         if (iterable == null_type_idx) return;
-        const array = self.env.pool.unwrapNominal(iterable);
-        if (self.env.pool.getTag(array) != .t_array) return;
-        const element = self.env.pool.getArrayElement(array);
+        const element = self.forOfElementType(iterable);
         if (element == null_type_idx) return;
         self.binding_types.put(self.allocator, bindingKey(fi.binding), element) catch self.markAllocationFailure();
+    }
+
+    /// The element type that a loop variable takes over `iterable`, or
+    /// `null_type_idx` when the iterable is not an array, a tuple, or a union
+    /// of those.
+    fn forOfElementType(self: *TypeChecker, iterable: TypeIndex) TypeIndex {
+        const pool = self.env.pool;
+        const shape = pool.unwrapNominal(iterable);
+        if (pool.getTag(shape) != .t_union) return self.sequenceElementType(shape);
+        var joined: TypeIndex = null_type_idx;
+        for (pool.getUnionMembers(shape)) |member| {
+            const member_shape = pool.unwrapNominal(self.env.resolveRef(member));
+            const element = self.sequenceElementType(member_shape);
+            if (element == null_type_idx) return null_type_idx;
+            joined = self.joinElementTypes(joined, element);
+            if (joined == null_type_idx) return null_type_idx;
+        }
+        return joined;
+    }
+
+    /// The element type of an array, or the union of the widened element
+    /// types of a tuple. `null_type_idx` for any other type, for an empty
+    /// tuple, and for an element with no type.
+    fn sequenceElementType(self: *TypeChecker, shape: TypeIndex) TypeIndex {
+        const pool = self.env.pool;
+        const tag = pool.getTag(shape) orelse return null_type_idx;
+        if (tag == .t_array) return pool.getArrayElement(shape);
+        if (tag != .t_tuple) return null_type_idx;
+        var joined: TypeIndex = null_type_idx;
+        for (pool.getTupleElements(shape)) |member| {
+            if (member == null_type_idx) return null_type_idx;
+            joined = self.joinElementTypes(joined, pool.widenLiteral(member));
+            if (joined == null_type_idx) return null_type_idx;
+        }
+        return joined;
+    }
+
+    /// The union of `joined` and `next`, where `null_type_idx` for `joined`
+    /// means that nothing is joined yet. Joining pairwise needs no scratch list.
+    fn joinElementTypes(self: *TypeChecker, joined: TypeIndex, next: TypeIndex) TypeIndex {
+        if (joined == null_type_idx) return next;
+        return self.env.pool.addUnion(self.allocator, &.{ joined, next });
     }
 
     fn isBuiltinRangeCall(self: *const TypeChecker, node: NodeIndex) bool {
