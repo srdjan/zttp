@@ -1221,7 +1221,7 @@ pub const TypeChecker = struct {
 
     /// The union of `joined` and `next`, where `null_type_idx` for `joined`
     /// means that nothing is joined yet. Joining pairwise needs no scratch list.
-    fn joinElementTypes(self: *TypeChecker, joined: TypeIndex, next: TypeIndex) TypeIndex {
+    fn joinElementTypes(self: *const TypeChecker, joined: TypeIndex, next: TypeIndex) TypeIndex {
         if (joined == null_type_idx) return next;
         return self.env.pool.addUnion(self.allocator, &.{ joined, next });
     }
@@ -3536,6 +3536,11 @@ pub const TypeChecker = struct {
         }
 
         if (tag == .t_union) {
+            // A `length` read on a union of strings, arrays, and tuples.
+            if (std.mem.eql(u8, prop_name, "length")) {
+                const length = self.inferUnionBuiltinMember(obj_type, prop_name, null);
+                if (length != null_type_idx) return length;
+            }
             var field_types: [MAX_UNION_MEMBERS]TypeIndex = undefined;
             var count: usize = 0;
             var any_field = false;
@@ -3725,6 +3730,11 @@ pub const TypeChecker = struct {
             .boolean => pool.idx_boolean,
             .string => pool.idx_string,
             .string_array => pool.addArray(self.allocator, pool.idx_string),
+            .unknown_array => pool.addArray(self.allocator, pool.idx_unknown),
+            .entry_array => pool.addArray(
+                self.allocator,
+                pool.addTuple(self.allocator, &.{ pool.idx_string, pool.idx_unknown }),
+            ),
             .optional_string => pool.addNullable(self.allocator, pool.idx_string),
             .undefined_value => pool.idx_undefined,
             .unknown_value => pool.idx_unknown,
@@ -4079,6 +4089,8 @@ pub const TypeChecker = struct {
             .boolean,
             .string,
             .string_array,
+            .unknown_array,
+            .entry_array,
             .optional_string,
             .undefined_value,
             .unknown_value,
@@ -4102,6 +4114,48 @@ pub const TypeChecker = struct {
         };
         const row = builtin_results.find(.property, scope, "length") orelse return null_type_idx;
         return self.builtinResultType(row.result);
+    }
+
+    /// The type of a builtin member on a receiver whose type is the union
+    /// `union_type` of strings, arrays, and tuples: a read of `name` when
+    /// `call` is null, and the call `call` otherwise. The type is the union of
+    /// the result for each member. It is null when a member is another kind of
+    /// type, when a member has no row or no result type, and for a method whose
+    /// result depends on a callback (`map` and `reduce`), so the result of a
+    /// union stays untyped wherever one member's would.
+    fn inferUnionBuiltinMember(
+        self: *const TypeChecker,
+        union_type: TypeIndex,
+        name: []const u8,
+        call: ?Node.CallExpr,
+    ) TypeIndex {
+        const pool = self.env.pool;
+        var joined: TypeIndex = null_type_idx;
+        for (pool.getUnionMembers(union_type)) |raw_member| {
+            const member = pool.widenLiteral(self.resolvedType(raw_member));
+            const tag = pool.getTag(member) orelse return null_type_idx;
+            switch (tag) {
+                .t_string, .t_array, .t_tuple => {},
+                // exhaustive: a member that is not a string, an array, or a
+                // tuple has no row here, so the union result stays untyped.
+                else => return null_type_idx,
+            }
+            var result: TypeIndex = null_type_idx;
+            if (call) |member_call| {
+                const scope = if (tag == .t_string) "String.prototype" else "Array.prototype";
+                const row = builtin_results.find(.call, scope, name) orelse return null_type_idx;
+                if (row.result == .map_array or row.result == .reduce_value) return null_type_idx;
+                const array = if (tag == .t_string) null_type_idx else self.arrayReceiverType(member);
+                if (tag != .t_string and array == null_type_idx) return null_type_idx;
+                result = self.builtinCallResult(member_call, row, array);
+            } else if (std.mem.eql(u8, name, "length")) {
+                result = self.inferLengthType(member);
+            }
+            if (result == null_type_idx) return null_type_idx;
+            joined = self.joinElementTypes(joined, result);
+            if (joined == null_type_idx) return null_type_idx;
+        }
+        return joined;
     }
 
     /// The result of calling `row` with the arguments of `call`, or null when
@@ -4153,6 +4207,8 @@ pub const TypeChecker = struct {
             .boolean,
             .string,
             .string_array,
+            .unknown_array,
+            .entry_array,
             .optional_string,
             .undefined_value,
             .unknown_value,
@@ -4179,7 +4235,8 @@ pub const TypeChecker = struct {
     }
 
     /// The result of a call of a builtin member: a method of a builtin
-    /// namespace, of a string, or of the headers of a request.
+    /// namespace, of a string, of an array or a tuple, of a union of these, or
+    /// of the headers of a request.
     fn inferBuiltinMemberCall(self: *const TypeChecker, call: Node.CallExpr) TypeIndex {
         const callee = self.ir_view.getMember(call.callee) orelse return null_type_idx;
         if (callee.computed != null_node or callee.is_optional) return null_type_idx;
@@ -4196,6 +4253,7 @@ pub const TypeChecker = struct {
         if (raw == null_type_idx) return null_type_idx;
         const pool = self.env.pool;
         const receiver = pool.widenLiteral(pool.unwrapNominal(self.env.resolveRef(raw)));
+        if (pool.getTag(receiver) == .t_union) return self.inferUnionBuiltinMember(receiver, method, call);
         if (pool.getTag(receiver) == .t_string) {
             const row = builtin_results.find(.call, "String.prototype", method) orelse return null_type_idx;
             return self.builtinCallResult(call, row, null_type_idx);

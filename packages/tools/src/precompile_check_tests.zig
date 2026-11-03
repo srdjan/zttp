@@ -10689,6 +10689,14 @@ const absent_read_refused = [_]AbsentReadCase{
     \\  return Response.json({ a: 1 + xs[5] });
     \\}
     },
+    .{ .name = "t1_object_values_element_call", .expect = "ZTS309@4,ZTS500@2", .source =
+    \\structural P = { f: number };
+    \\function handler(req: Request): Response {
+    \\  const o: P = { f: 1 };
+    \\  Object.values(o)[0].f(1);
+    \\  return Response.text("ok");
+    \\}
+    },
 };
 
 const absent_read_accepted = [_]AbsentReadCase{

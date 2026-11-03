@@ -5520,25 +5520,32 @@ test "builtin result: Object.hasOwn is boolean" {
     , "type 'boolean' is not assignable to type '{ zz: Bytes }'");
 }
 
-test "builtin result: Object.values of a record stays untyped" {
-    try expectNoTypeDiagnostic(
+test "builtin result: Object.values of a record is an unknown array" {
+    try expectOneMismatch(
         \\structural Nope = { zz: Bytes };
         \\structural O = { a: number };
         \\function f(o: O): number { const p: Nope = Object.values(o); return 0; }
-    );
+    , "type 'unknown[]' is not assignable to type '{ zz: Bytes }'");
 }
 
-test "builtin result: Object.entries of a record stays untyped" {
-    try expectNoTypeDiagnostic(
+test "builtin result: Object.entries of a record is an array of string and unknown pairs" {
+    try expectOneMismatch(
         \\structural Nope = { zz: Bytes };
         \\structural O = { a: number };
         \\function f(o: O): number { const p: Nope = Object.entries(o); return 0; }
-    );
+    , "type '[string, unknown][]' is not assignable to type '{ zz: Bytes }'");
 }
 
-test "builtin result: Object.values of an object literal is accepted as a number array" {
-    try expectNoTypeDiagnostic(
+test "builtin result: Object.values of an object literal is not a number array" {
+    try expectOneMismatch(
         \\function f(): number { const vs: number[] = Object.values({ a: 1, b: 2 }); return 0; }
+    , "type 'unknown[]' is not assignable to type 'number[]'");
+}
+
+test "builtin result: Object.values and Object.entries of a string stay untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(s: string): number { const p: Nope = Object.values(s); const q: Nope = Object.entries(s); return 0; }
     );
 }
 
@@ -5891,6 +5898,67 @@ test "array literal binding: an array literal passed as an argument keeps its li
         \\function g(xs: string[]): number { return xs.length; }
         \\function f(): number { return g([4, 5]); }
     , "argument type does not match parameter type: expected string[], got [4, 5]");
+}
+
+test "untyped builtin results: the length of Object.values is a number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\structural O = { a: number };
+        \\function f(o: O): number { const p: Nope = Object.values(o).length; return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "untyped builtin results: arithmetic on the length of Object.values is clean" {
+    try expectNoTypeDiagnostic(
+        \\structural O = { a: number };
+        \\function f(o: O): number { return Object.values(o).length - 1; }
+    );
+}
+
+test "untyped builtin results: length of a union of a string and a string array is a number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(u: string | string[]): number { const p: Nope = u.length; return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "untyped builtin results: length of a union of a string and a tuple is a number" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(u: string | [number, number]): number { const p: Nope = u.length; return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "untyped builtin results: arithmetic on the length of a union of a string and a string array is clean" {
+    try expectNoTypeDiagnostic(
+        \\function f(u: string | string[]): number { return u.length - 1; }
+    );
+}
+
+test "untyped builtin results: slice of a union of a string and a string array is the union of both results" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(u: string | string[]): number { const p: Nope = u.slice(1); return 0; }
+    , "type 'string | string[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "untyped builtin results: a method call on a union of arrays that depends on a callback stays untyped" {
+    try expectNoTypeDiagnostic(
+        \\structural Nope = { zz: Bytes };
+        \\function f(u: number[] | string[]): number { const p: Nope = u.map((x) => x); return 0; }
+    );
+}
+
+test "untyped builtin results: a method that one union member lacks refuses a call on the slice result" {
+    try expectOneMissingField(
+        \\function f(x: string | string[]): string { return x.slice(1).trim(); }
+    , non_record_member_message, non_record_member_help);
+}
+
+test "untyped builtin results: a method that every union member has stays clean after the slice" {
+    try expectNoTypeDiagnostic(
+        \\function f(x: string | string[]): number { return x.slice(1).length; }
+    );
 }
 
 test "callback parameter: an annotated index parameter keeps its annotation" {

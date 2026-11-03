@@ -47,6 +47,12 @@ pub const Result = enum {
     boolean,
     string,
     string_array,
+    /// `unknown[]`: the values of an object. The declared field types do not
+    /// bound them, so the element is `unknown`.
+    unknown_array,
+    /// `[string, unknown][]`: the key and value pairs of an object. A key is
+    /// always a string, and the value is `unknown` for the reason above.
+    entry_array,
     /// `string | undefined`.
     optional_string,
     undefined_value,
@@ -265,11 +271,17 @@ pub const rows =
         .{ .scope = "JSON", .name = "tryParse", .params = any_one, .result = .json_result },
         .{ .scope = "JSON", .name = "stringify", .min_args = 1, .params = &.{ .any, .any, .any }, .result = .json_text },
     } ++
-    // Object. `keys` returns `undefined` for a value that is not an object, so
-    // its argument is `object`. `hasOwn` returns false for a value that is not
-    // an object and for a key that is not a string.
+    // Object. `keys`, `values`, and `entries` return `undefined` for a value
+    // that is not an object, so their argument is `object`. An array gives its
+    // indexes as string keys, and a Dict gives an empty array. A key is always
+    // a string. A value is `unknown`, because a record can hold a field that
+    // its type does not name (the discriminant-test gap in docs/roadmap.md).
+    // `hasOwn` returns false for a value that is not an object and for a key
+    // that is not a string.
     [_]Row{
         .{ .scope = "Object", .name = "keys", .min_args = 1, .params = &.{.object}, .result = .string_array },
+        .{ .scope = "Object", .name = "values", .min_args = 1, .params = &.{.object}, .result = .unknown_array },
+        .{ .scope = "Object", .name = "entries", .min_args = 1, .params = &.{.object}, .result = .entry_array },
         .{ .scope = "Object", .name = "hasOwn", .params = any_two, .result = .boolean },
     } ++
     // Array. `isArray` is false for no argument and for a value that is not an
@@ -311,7 +323,6 @@ pub const Skip = struct {
 };
 
 const u1b = "typed in U1b";
-const values_unbounded = "the declared field types do not bound the values: a record can hold a field that its type does not name (the discriminant-test gap in docs/roadmap.md), so the union of the field types would be a false proof";
 const typed_elsewhere_array = "typed elsewhere: inferArrayMethodType gives the method a function type";
 const typed_elsewhere_response = "typed elsewhere: inferResponseConstructorType gives the Response type";
 const typed_elsewhere_signature = "typed elsewhere: a function signature registered by name in abi_types.zig";
@@ -333,7 +344,6 @@ fn skipsOf(
 pub const skips =
     // Array.prototype: the seven methods that the checker already types.
     skipsOf("Array.prototype", typed_elsewhere_array, &.{ "filter", "every", "some", "find", "findIndex", "toSorted", "toReversed" }) ++
-    skipsOf("Object", values_unbounded, &.{ "values", "entries" }) ++
     skipsOf("Response", typed_elsewhere_response, &.{ "json", "text", "html", "redirect", "rawJson" }) ++
     skipsOf("Result.prototype", result_unmodeled, &.{
         "isOk", "isErr", "unwrap", "unwrapOr", "unwrapErr", "map", "mapErr", "andThen", "match",
