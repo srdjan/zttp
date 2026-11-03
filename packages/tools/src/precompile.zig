@@ -3453,6 +3453,7 @@ test "compileHandler without strict checking does not claim canonical form" {
 
 test {
     _ = @import("precompile_args.zig");
+    _ = check_mod;
     _ = @import("pipeline_mutation_tests.zig");
     _ = @import("flow_false_proofs.zig");
     _ = @import("flow_precision_expectations.zig");
