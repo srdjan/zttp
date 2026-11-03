@@ -458,9 +458,9 @@ test "an error read inside the err arm is proved" {
 
 test "an error read with a nullish fallback emits no event" {
     const allocator = testing.allocator;
-    var certified = try certify(allocator, "import { parseJson } from \"zttp:json\";\n" ++
+    var certified = try certify(allocator, validate_prelude ++
         "const describe = (text: string): string => {\n" ++
-        "  const r = parseJson(text);\n" ++
+        "  const r = validateJson(\"todo\", text);\n" ++
         "  const reason = r.error ?? \"none\";\n" ++
         "  return reason;\n" ++
         "};\n" ++
