@@ -2277,7 +2277,12 @@ pub const HandlerVerifier = struct {
     }
 
     /// The operand of `read` is `b.value`, `b.error`, or `b.errors` on a
-    /// tracked Result binding `b`. The Result check (ZTS303) owns that read.
+    /// tracked Result binding `b`. The Result check (ZTS303) owns that read,
+    /// with one exception: a read on `b.error` when the Result type of `b`
+    /// has an `errors` field that is not `never`. A failure of such a Result
+    /// fills `errors` and leaves `error` absent, so ZTS303 accepting the read
+    /// after `!b.ok` proves nothing and the typed read check reports it. When
+    /// ZTS303 already refused the `b.error` node, that diagnostic stands.
     fn isTrackedResultFieldRead(self: *const HandlerVerifier, read: NodeIndex) bool {
         const tag = self.ir_view.getTag(read) orelse return false;
         const operand: NodeIndex = switch (tag) {
@@ -2293,10 +2298,28 @@ pub const HandlerVerifier = struct {
             .value, .failure => {},
             .ok, .other => return false,
         }
-        return switch (self.resultReference(member.object)) {
-            .ordinal => true,
-            .none, .ambiguous => false,
-        };
+        switch (self.resultReference(member.object)) {
+            .ordinal => {},
+            .none, .ambiguous => return false,
+        }
+        if (!self.isErrorMember(member)) return true;
+        const tc = self.type_checker orelse return true;
+        if (!tc.resultMayFillErrors(member.object)) return true;
+        for (self.diagnostics.items) |d| {
+            if (d.kind == .unchecked_result_value and d.node == operand) return true;
+        }
+        return false;
+    }
+
+    /// Whether `member` names the `error` field, not `errors`.
+    fn isErrorMember(self: *const HandlerVerifier, member: Node.MemberExpr) bool {
+        if (member.computed != null_node) {
+            if (self.ir_view.getTag(member.computed) != .lit_string) return false;
+            const string_index = self.ir_view.getStringIdx(member.computed) orelse return false;
+            const name = self.ir_view.getString(string_index) orelse return false;
+            return std.mem.eql(u8, name, "error");
+        }
+        return member.property == @backingInt(object.Atom.@"error");
     }
 
     /// Every read, in any function, whose operand the type checker saw as

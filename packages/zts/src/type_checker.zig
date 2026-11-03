@@ -551,6 +551,18 @@ pub const TypeChecker = struct {
         self.absent_receivers.put(self.allocator, read, t) catch self.markAllocationFailure();
     }
 
+    /// Whether the type of `node` is a Result whose `errors` field is not
+    /// `never`. Such a Result ends a failure with `errors` filled and `error`
+    /// absent, so a read of its `error` may see `undefined`.
+    pub fn resultMayFillErrors(self: *TypeChecker, node: NodeIndex) bool {
+        if (node == null_node) return false;
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+        const errors_type = self.resultFieldType(self.inferType(node), "errors", 0);
+        return errors_type != null_type_idx and errors_type != self.env.pool.idx_never;
+    }
+
     /// Every recorded read, in ascending node order.
     pub fn absentReceiverReads(self: *const TypeChecker, allocator: std.mem.Allocator) ![]NodeIndex {
         const out = try allocator.alloc(NodeIndex, self.absent_receivers.count());

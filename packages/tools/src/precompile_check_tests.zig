@@ -11612,6 +11612,92 @@ test "dict callbacks: a fold over a typed Dict is clean and a fold over a Dict f
     try expectAbsentReadCases(&absent_read_dict_callbacks);
 }
 
+const absent_read_result_error = [_]AbsentReadCase{
+    .{ .name = "q9_error_of_validatejson_after_not_ok_may_be_undefined", .expect = "ZTS309@6", .source =
+    \\import { schemaCompile, validateJson } from "zttp:validate";
+    \\schemaCompile("todo", "{\"type\":\"object\",\"required\":[\"title\"]}");
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const r = validateJson("todo", "{}");
+    \\  if (!r.ok) {
+    \\    return Response.text(String(r.error.length + 1));
+    \\  }
+    \\  return Response.text("ok");
+    \\}
+    },
+    .{ .name = "q9_error_of_parsejson_after_not_ok_is_a_string", .expect = "clean", .source =
+    \\import { parseJson } from "zttp:json";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const r = parseJson("{}");
+    \\  if (!r.ok) {
+    \\    return Response.text(String(r.error.length + 1));
+    \\  }
+    \\  return Response.text("ok");
+    \\}
+    },
+    .{ .name = "q9_value_of_validatejson_after_ok_is_unchanged", .expect = "clean", .source =
+    \\import { schemaCompile, validateJson } from "zttp:validate";
+    \\schemaCompile("todo", "{\"type\":\"object\",\"required\":[\"title\"]}");
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const r = validateJson("todo", "{}");
+    \\  if (r.ok) {
+    \\    return Response.text(String(r.value.title));
+    \\  }
+    \\  return Response.text("bad");
+    \\}
+    },
+    .{ .name = "q9_error_of_a_mapped_validatejson_result_may_be_undefined", .expect = "ZTS309@8", .source =
+    \\import { schemaCompile, validateJson } from "zttp:validate";
+    \\import { mapResult } from "zttp:result";
+    \\schemaCompile("todo", "{\"type\":\"object\",\"required\":[\"title\"]}");
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const r = validateJson("todo", "{}");
+    \\  const m = mapResult(r, (v) => 1);
+    \\  if (!m.ok) {
+    \\    return Response.text(String(m.error.length + 1));
+    \\  }
+    \\  return Response.text("ok");
+    \\}
+    },
+    .{ .name = "q9_unchecked_error_read_reports_zts303_once", .expect = "ZTS303@5", .source =
+    \\import { schemaCompile, validateJson } from "zttp:validate";
+    \\schemaCompile("todo", "{\"type\":\"object\",\"required\":[\"title\"]}");
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const r = validateJson("todo", "{}");
+    \\  return Response.text(String(r.error.length));
+    \\}
+    },
+    .{ .name = "q9_errors_read_after_not_ok_is_unchanged", .expect = "clean", .source =
+    \\import { schemaCompile, validateJson } from "zttp:validate";
+    \\schemaCompile("todo", "{\"type\":\"object\",\"required\":[\"title\"]}");
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const r = validateJson("todo", "{}");
+    \\  if (!r.ok) {
+    \\    return Response.text(String(r.errors.length));
+    \\  }
+    \\  return Response.text("ok");
+    \\}
+    },
+    .{ .name = "q9_guarded_error_read_is_clean", .expect = "clean", .source =
+    \\import { schemaCompile, validateJson } from "zttp:validate";
+    \\schemaCompile("todo", "{\"type\":\"object\",\"required\":[\"title\"]}");
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const r = validateJson("todo", "{}");
+    \\  if (!r.ok) {
+    \\    const e = r.error;
+    \\    if (e === undefined) {
+    \\      return Response.text("invalid");
+    \\    }
+    \\    return Response.text(String(e.length));
+    \\  }
+    \\  return Response.text("ok");
+    \\}
+    },
+};
+
+test "result error: a read of an error that a schema failure leaves absent is refused once" {
+    try expectAbsentReadCases(&absent_read_result_error);
+}
+
 const ObserverProbe = struct {
     calls: u32 = 0,
     verifier_count: usize = 0,
