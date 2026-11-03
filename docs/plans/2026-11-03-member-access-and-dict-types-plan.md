@@ -1,6 +1,6 @@
 # Member access, string index, and Dict types, 2026-11-03
 
-Status: revision 1, 2026-11-03, validated, waiting for the owner. On 2026-11-03 the owner chose option (a) of D1, D2, and D3 at the end of the [callback parameters and Result types plan](2026-11-02-callback-and-result-types-plan.md). That approval covers writing and validating this plan. Execution needs a separate approval. No approval covers a push, a provider call, or a re-record.
+Status: revision 1, 2026-11-03, validated. Approved 2026-11-03: the owner chose option (a) of Decision 1 and option (a) of Decision 2. The approval covers the units S1, P9, K1a, K1b, R3, the conditional U3, and D, with local commits. On 2026-11-03 the owner chose option (a) of D1, D2, and D3 at the end of the [callback parameters and Result types plan](2026-11-02-callback-and-result-types-plan.md). That approval covers writing and validating this plan. Execution needs a separate approval. No approval covers a push, a provider call, or a re-record.
 
 D1 (a): give the `dictFold` callbacks and `ps[0].age` what U3 needs, then run the U3 entry check again. D2 (a): check a member call on a receiver that is not a record (P9). D3 (a): fix the false `dictFold` refusal in the same plan.
 
