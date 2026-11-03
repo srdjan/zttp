@@ -2278,11 +2278,13 @@ pub const HandlerVerifier = struct {
 
     /// The operand of `read` is `b.value`, `b.error`, or `b.errors` on a
     /// tracked Result binding `b`. The Result check (ZTS303) owns that read,
-    /// with one exception: a read on `b.error` when the Result type of `b`
-    /// has an `errors` field that is not `never`. A failure of such a Result
-    /// fills `errors` and leaves `error` absent, so ZTS303 accepting the read
-    /// after `!b.ok` proves nothing and the typed read check reports it. When
-    /// ZTS303 already refused the `b.error` node, that diagnostic stands.
+    /// with two exceptions. A read on `b.error` when the Result type of `b`
+    /// has an `errors` field that is not `never`: a failure of such a Result
+    /// fills `errors` and leaves `error` absent. A read on `b.value` when the
+    /// value type of the Result admits `undefined`: `ok(x)` with such an `x`
+    /// ends `ok` with an absent `value`. ZTS303 accepting either read after
+    /// its `ok` check proves nothing, so the typed read check reports it.
+    /// When ZTS303 already refused the node, that diagnostic stands.
     fn isTrackedResultFieldRead(self: *const HandlerVerifier, read: NodeIndex) bool {
         const tag = self.ir_view.getTag(read) orelse return false;
         const operand: NodeIndex = switch (tag) {
@@ -2302,9 +2304,14 @@ pub const HandlerVerifier = struct {
             .ordinal => {},
             .none, .ambiguous => return false,
         }
-        if (!self.isErrorMember(member)) return true;
+        const is_error = self.isErrorMember(member);
+        if (!is_error and !self.isValueMember(member)) return true;
         const tc = self.type_checker orelse return true;
-        if (!tc.resultMayFillErrors(member.object)) return true;
+        const may_be_absent = if (is_error)
+            tc.resultMayFillErrors(member.object)
+        else
+            tc.resultValueMayBeAbsent(member.object);
+        if (!may_be_absent) return true;
         for (self.diagnostics.items) |d| {
             if (d.kind == .unchecked_result_value and d.node == operand) return true;
         }
@@ -2313,13 +2320,21 @@ pub const HandlerVerifier = struct {
 
     /// Whether `member` names the `error` field, not `errors`.
     fn isErrorMember(self: *const HandlerVerifier, member: Node.MemberExpr) bool {
-        if (member.computed != null_node) {
-            if (self.ir_view.getTag(member.computed) != .lit_string) return false;
-            const string_index = self.ir_view.getStringIdx(member.computed) orelse return false;
-            const name = self.ir_view.getString(string_index) orelse return false;
-            return std.mem.eql(u8, name, "error");
-        }
+        if (member.computed != null_node) return self.isStringLiteralNamed(member.computed, "error");
         return member.property == @backingInt(object.Atom.@"error");
+    }
+
+    /// Whether `member` names the `value` field, not `unwrap`.
+    fn isValueMember(self: *const HandlerVerifier, member: Node.MemberExpr) bool {
+        if (member.computed != null_node) return self.isStringLiteralNamed(member.computed, "value");
+        return member.property == @backingInt(object.Atom.value);
+    }
+
+    fn isStringLiteralNamed(self: *const HandlerVerifier, node: NodeIndex, name: []const u8) bool {
+        if (self.ir_view.getTag(node) != .lit_string) return false;
+        const string_index = self.ir_view.getStringIdx(node) orelse return false;
+        const text = self.ir_view.getString(string_index) orelse return false;
+        return std.mem.eql(u8, text, name);
     }
 
     /// Every read, in any function, whose operand the type checker saw as

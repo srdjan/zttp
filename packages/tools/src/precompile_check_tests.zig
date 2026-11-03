@@ -11706,6 +11706,53 @@ test "result error: a read of an error that a schema failure leaves absent is re
     try expectAbsentReadCases(&absent_read_result_error);
 }
 
+const absent_read_result_value = [_]AbsentReadCase{
+    .{ .name = "q18_value_that_admits_undefined_after_ok_may_be_undefined", .expect = "ZTS309@6", .source =
+    \\import { ok } from "zttp:result";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const r = ok(req.headers.get("x-missing"));
+    \\  let n = 0;
+    \\  if (r.ok) {
+    \\    n = r.value.length + 1;
+    \\  }
+    \\  return Response.text(String(n));
+    \\}
+    },
+    .{ .name = "r4_number_value_after_ok_is_clean", .expect = "clean", .source =
+    \\import { ok } from "zttp:result";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const r = ok(1);
+    \\  let n = 0;
+    \\  if (r.ok) {
+    \\    n = r.value + 1;
+    \\  }
+    \\  return Response.text(String(n));
+    \\}
+    },
+    .{ .name = "r4_string_value_after_ok_is_clean", .expect = "clean", .source =
+    \\import { ok } from "zttp:result";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const r = ok("a");
+    \\  let s = "";
+    \\  if (r.ok) {
+    \\    s = r.value.trim();
+    \\  }
+    \\  return Response.text(s);
+    \\}
+    },
+    .{ .name = "r4_unchecked_value_keeps_zts303_only", .expect = "ZTS303@4", .source =
+    \\import { ok } from "zttp:result";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const r = ok(req.headers.get("x"));
+    \\  return Response.text(String(r.value.length));
+    \\}
+    },
+};
+
+test "result value: a read of a value that may be undefined after the ok check is refused once" {
+    try expectAbsentReadCases(&absent_read_result_value);
+}
+
 const ObserverProbe = struct {
     calls: u32 = 0,
     verifier_count: usize = 0,

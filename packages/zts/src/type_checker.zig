@@ -563,6 +563,19 @@ pub const TypeChecker = struct {
         return errors_type != null_type_idx and errors_type != self.env.pool.idx_never;
     }
 
+    /// Whether the type of `node` is a Result whose `value` field admits
+    /// `undefined`. The Result record stores the value type unchanged, so
+    /// such a Result can end `ok` with an absent `value`, and a successful
+    /// `ok` check proves nothing about a read of that value.
+    pub fn resultValueMayBeAbsent(self: *TypeChecker, node: NodeIndex) bool {
+        if (node == null_node) return false;
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+        const value_type = self.resultFieldType(self.inferType(node), "value", 0);
+        return value_type != null_type_idx and self.admitsUndefined(value_type);
+    }
+
     /// Every recorded read, in ascending node order.
     pub fn absentReceiverReads(self: *const TypeChecker, allocator: std.mem.Allocator) ![]NodeIndex {
         const out = try allocator.alloc(NodeIndex, self.absent_receivers.count());
