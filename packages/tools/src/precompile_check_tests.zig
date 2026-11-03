@@ -11504,7 +11504,7 @@ const absent_read_member_access = [_]AbsentReadCase{
     \\  return Response.text(n.toString());
     \\}
     },
-    .{ .name = "q3_unknown_from_dict_get", .expect = "ZTS201@5", .source =
+    .{ .name = "q3_absent_value_from_dict_get", .expect = "ZTS309@5", .source =
     \\import { dictEmpty, dictSet, dictGet } from "zttp:collections";
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const d = dictSet(dictEmpty(), "k", 5);
@@ -11551,6 +11551,37 @@ const absent_read_member_access = [_]AbsentReadCase{
 
 test "member access: a member read or call on a value that cannot hold it is refused" {
     try expectAbsentReadCases(&absent_read_member_access);
+}
+
+const absent_read_dict_types = [_]AbsentReadCase{
+    .{ .name = "q3_member_on_the_value_of_a_typed_dict_get", .expect = "ZTS309@4", .source =
+    \\import { dictEmpty, dictSet, dictGet } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const v = dictGet(dictSet(dictEmpty(), "k", 5), "k");
+    \\  return Response.text(v.trim());
+    \\}
+    },
+    .{ .name = "q4_typed_dict_from_dict_set", .expect = "clean", .source =
+    \\import { dictEmpty, dictSet, dictHas } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const d: Dict<string, number> = dictSet(dictEmpty(), "a", 1);
+    \\  return Response.text(String(dictHas(d, "a")));
+    \\}
+    },
+    .{ .name = "control_typed_dict_through_a_parameter", .expect = "clean", .source =
+    \\import { dictEmpty, dictSet, dictGet, dictHas } from "zttp:collections";
+    \\function count(d: Dict<string, number>): number {
+    \\  const v = dictGet(d, "a");
+    \\  return dictHas(d, "a") ? (v ?? 0) : 0;
+    \\}
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  return Response.text(String(count(dictSet(dictEmpty(), "a", 1))));
+    \\}
+    },
+};
+
+test "dict types: a typed Dict reaches the exports and the unchecked read of its value is refused" {
+    try expectAbsentReadCases(&absent_read_dict_types);
 }
 
 const ObserverProbe = struct {

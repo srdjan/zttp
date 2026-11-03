@@ -2457,7 +2457,7 @@ pub const seeds = [_]DefectSeed{
         \\  if (!built.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
         \\  const d = built.value;
         \\  if (!isDict(d)) { return Response.json({ error: "not-a-dict" }, { status: 400 }); }
-        \\  const doubled = dictFromEntries(dictEntries(d).map((p) => [p[0], p[1] * 2]));
+        \\  const doubled = dictFromEntries(dictEntries(d).map((p) => [p[0], String(p[1])]));
         \\  return Response.json({ ok: doubled.ok });
         \\}
         \\
@@ -2470,8 +2470,9 @@ pub const seeds = [_]DefectSeed{
         \\  if (!built.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
         \\  const d = built.value;
         \\  if (!isDict(d)) { return Response.json({ error: "not-a-dict" }, { status: 400 }); }
-        \\  const pairs = dictEntries(d);
-        \\  return Response.json({ first: pairs[0][0] });
+        \\  const first = dictEntries(d)[0];
+        \\  if (first === undefined) { return Response.json({ first: "none" }); }
+        \\  return Response.json({ first: String(first[0]) });
         \\}
         \\
         ,
@@ -2490,7 +2491,7 @@ pub const seeds = [_]DefectSeed{
         \\  if (!built.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
         \\  const d = built.value;
         \\  if (!isDict(d)) { return Response.json({ error: "not-a-dict" }, { status: 400 }); }
-        \\  const total = dictEntries(d).reduce((acc, p) => acc + p[1], 0);
+        \\  const total = dictEntries(d).reduce((acc, p) => p[0] === "a" ? acc + 1 : acc, 0);
         \\  return Response.json({ total: total });
         \\}
         \\
@@ -2503,8 +2504,9 @@ pub const seeds = [_]DefectSeed{
         \\  if (!built.ok) { return Response.json({ error: "bad" }, { status: 400 }); }
         \\  const d = built.value;
         \\  if (!isDict(d)) { return Response.json({ error: "not-a-dict" }, { status: 400 }); }
-        \\  const pairs = dictEntries(d);
-        \\  return Response.json({ first: pairs[0][0] });
+        \\  const first = dictEntries(d)[0];
+        \\  if (first === undefined) { return Response.json({ first: "none" }); }
+        \\  return Response.json({ first: String(first[0]) });
         \\}
         \\
         ,

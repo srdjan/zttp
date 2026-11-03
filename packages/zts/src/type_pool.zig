@@ -269,7 +269,7 @@ pub const TypePool = struct {
 
     /// `type_idx` with `undefined` added. `unknown`, `undefined`, an optional
     /// type, and a union that has `undefined` or `unknown` already admit it.
-    fn withUndefined(self: *TypePool, allocator: std.mem.Allocator, type_idx: TypeIndex) TypeIndex {
+    pub fn withUndefined(self: *TypePool, allocator: std.mem.Allocator, type_idx: TypeIndex) TypeIndex {
         if (type_idx == null_type_idx) return type_idx;
         if (type_idx == self.idx_never) return self.idx_undefined;
         const tag = self.getTag(type_idx) orelse return type_idx;
@@ -1642,10 +1642,20 @@ pub const TypePool = struct {
                 // A Dict is invariant in its key and covariant in its value.
                 // The key decides which entries exist, so widening it would
                 // let a lookup that cannot be satisfied type-check; the value
-                // is only ever read out, so widening it is sound.
+                // is only ever read out, so widening it is sound. Invariance
+                // is a usability choice and stays for every key but two. A
+                // Dict with a `never` key holds no entry, so it is assignable
+                // to every Dict type. A Dict is assignable to a Dict whose key
+                // is `unknown`, which is the type that the Dict-consuming
+                // exports declare. Both are sound because a Dict is immutable
+                // and a lookup of a missing key reads `undefined`.
                 .t_dict => blk: {
                     const src_key = self.getDictKey(source);
                     const tgt_key = self.getDictKey(target);
+                    if (self.getTag(src_key) == .t_never) break :blk true;
+                    if (self.getTag(tgt_key) == .t_unknown_type) {
+                        break :blk self.assignableIn(ctx, self.getDictValue(source), self.getDictValue(target));
+                    }
                     if (!self.assignableIn(ctx, src_key, tgt_key)) break :blk false;
                     if (!self.assignableIn(ctx, tgt_key, src_key)) break :blk false;
                     break :blk self.assignableIn(ctx, self.getDictValue(source), self.getDictValue(target));
@@ -2626,6 +2636,47 @@ test "a Dict is invariant in its key and covariant in its value" {
     // it is not.
     try std.testing.expect(pool.isAssignableTo(string_literal, string_string));
     try std.testing.expect(!pool.isAssignableTo(string_string, string_literal));
+}
+
+test "a Dict with a never key is assignable to every Dict type" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const empty = pool.addDict(allocator, pool.idx_never, pool.idx_never);
+    const string_number = parseTypeText(&pool, allocator, "Dict<string, number>");
+    const number_string = parseTypeText(&pool, allocator, "Dict<number, string>");
+
+    try std.testing.expect(pool.isAssignableTo(empty, string_number));
+    try std.testing.expect(pool.isAssignableTo(empty, number_string));
+    // A Dict that holds entries does not reach an empty Dict type.
+    try std.testing.expect(!pool.isAssignableTo(string_number, empty));
+}
+
+test "a Dict is assignable to a Dict whose key is unknown when the value is assignable" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const string_number = parseTypeText(&pool, allocator, "Dict<string, number>");
+    const unknown_unknown = parseTypeText(&pool, allocator, "Dict<unknown, unknown>");
+    const unknown_string = parseTypeText(&pool, allocator, "Dict<unknown, string>");
+
+    try std.testing.expect(pool.isAssignableTo(string_number, unknown_unknown));
+    try std.testing.expect(!pool.isAssignableTo(string_number, unknown_string));
+    // The wide key is not assignable back to a narrow one.
+    try std.testing.expect(!pool.isAssignableTo(unknown_unknown, string_number));
+}
+
+test "a Dict of string keys is still not assignable to a Dict of number keys" {
+    const allocator = std.testing.allocator;
+    var pool = TypePool.init(allocator);
+    defer pool.deinit(allocator);
+
+    const string_number = parseTypeText(&pool, allocator, "Dict<string, number>");
+    const number_number = parseTypeText(&pool, allocator, "Dict<number, number>");
+
+    try std.testing.expect(!pool.isAssignableTo(string_number, number_number));
 }
 
 test "null is admitted only where the type names it" {

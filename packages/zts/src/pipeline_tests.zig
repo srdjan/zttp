@@ -4533,11 +4533,18 @@ test "member access: a read on a union of named records types the shared field" 
     , "type '\"a\" | \"b\"' is not assignable to type '{ zz: Bytes }'");
 }
 
-test "member access: trim on the unknown result of dictGet is ZTS201" {
+test "member access: trim on the unknown result of dictGet over a Dict from isDict is ZTS201" {
     try expectOneMissingField(
+        \\import { dictGet } from "zttp:collections";
+        \\function f(u: unknown): number { if (isDict(u)) { const v = dictGet(u, "k"); const y = v.trim(); } return 0; }
+    , unknown_member_message, unknown_member_help);
+}
+
+test "member access: trim on the typed result of dictGet is left to the absent read check" {
+    try expectNoTypeDiagnostic(
         \\import { dictEmpty, dictSet, dictGet } from "zttp:collections";
         \\function f(): number { const d = dictSet(dictEmpty(), "k", 5); const v = dictGet(d, "k"); const y = v.trim(); return 0; }
-    , unknown_member_message, unknown_member_help);
+    );
 }
 
 test "member access: a typeof guard gives an unknown value a member" {
@@ -4593,6 +4600,208 @@ test "member access: a builtin constant reports nothing" {
     try expectNoTypeDiagnostic(
         \\function f(): number { return Math.PI; }
     );
+}
+
+// K1a: the types of the `zttp:collections` calls that read a Dict, and a Dict
+// that a typed annotation reaches. Each form is assigned to
+// `structural Nope = { zz: Bytes };` so that the message prints its type.
+
+test "dict types: dictEmpty is a Dict with no key and no value" {
+    try expectOneMismatch(
+        \\import { dictEmpty } from "zttp:collections";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = dictEmpty(); return 0; }
+    , "type 'Dict<never, never>' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict types: dictSet on an empty Dict takes the widened key and value" {
+    try expectOneMismatch(
+        \\import { dictEmpty, dictSet } from "zttp:collections";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = dictSet(dictEmpty(), "a", 1); return 0; }
+    , "type 'Dict<string, number>' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict types: dictSet with a second value type joins the value types" {
+    try expectOneMismatch(
+        \\import { dictEmpty, dictSet } from "zttp:collections";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = dictSet(dictSet(dictEmpty(), "a", 1), "b", "two"); return 0; }
+    , "type 'Dict<string, number | string>' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict types: dictSet with a number key after a string key joins the key types" {
+    try expectOneMismatch(
+        \\import { dictEmpty, dictSet } from "zttp:collections";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = dictSet(dictSet(dictEmpty(), "a", 1), 2, 3); return 0; }
+    , "type 'Dict<string | number, number>' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict types: dictGet reads the value type or undefined" {
+    try expectOneMismatch(
+        \\import { dictEmpty, dictSet, dictGet } from "zttp:collections";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = dictGet(dictSet(dictSet(dictEmpty(), "a", 1), "b", "two"), "a"); return 0; }
+    , "type 'number | string | undefined' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict types: dictGet on an empty Dict is undefined" {
+    try expectOneMismatch(
+        \\import { dictEmpty, dictGet } from "zttp:collections";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = dictGet(dictEmpty(), "x"); return 0; }
+    , "type 'undefined' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict types: dictHas is boolean" {
+    try expectOneMismatch(
+        \\import { dictEmpty, dictSet, dictHas } from "zttp:collections";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = dictHas(dictSet(dictEmpty(), "a", 1), "a"); return 0; }
+    , "type 'boolean' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict types: dictRemove keeps the Dict type" {
+    try expectOneMismatch(
+        \\import { dictEmpty, dictSet, dictRemove } from "zttp:collections";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = dictRemove(dictSet(dictEmpty(), "a", 1), "a"); return 0; }
+    , "type 'Dict<string, number>' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict types: dictEntries is an array of key and value pairs" {
+    try expectOneMismatch(
+        \\import { dictEmpty, dictSet, dictEntries } from "zttp:collections";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = dictEntries(dictSet(dictEmpty(), "a", 1)); return 0; }
+    , "type '[string, number][]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict types: a Dict from isDict keeps dictGet unknown" {
+    try expectOneMismatch(
+        \\import { dictGet } from "zttp:collections";
+        \\structural Nope = { zz: Bytes };
+        \\function f(u: unknown): number { if (isDict(u)) { const p: Nope = dictGet(u, "a"); } return 0; }
+    , "type 'unknown' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict types: a Dict built by dictSet reaches a typed annotation" {
+    try expectNoTypeDiagnostic(
+        \\import { dictEmpty, dictSet } from "zttp:collections";
+        \\function f(): number { const d: Dict<string, number> = dictSet(dictEmpty(), "a", 1); return 0; }
+    );
+}
+
+test "dict types: an empty Dict reaches any typed annotation" {
+    try expectNoTypeDiagnostic(
+        \\import { dictEmpty } from "zttp:collections";
+        \\function f(): number { const d: Dict<string, number> = dictEmpty(); return 0; }
+    );
+}
+
+test "dict types: a Dict of number keys does not reach a Dict of string keys" {
+    try expectOneMismatch(
+        \\import { dictEmpty, dictSet } from "zttp:collections";
+        \\function f(): number { const d: Dict<string, number> = dictSet(dictEmpty(), 2, 1); return 0; }
+    , "type 'Dict<number, number>' is not assignable to type 'Dict<string, number>'");
+}
+
+test "dict types: dictGet accepts a Dict of string keys" {
+    try expectNoTypeDiagnostic(
+        \\import { dictGet } from "zttp:collections";
+        \\function f(d: Dict<string, number>): number { const v = dictGet(d, "a"); return 0; }
+    );
+}
+
+test "dict types: dictHas accepts a Dict of string keys" {
+    try expectNoTypeDiagnostic(
+        \\import { dictHas } from "zttp:collections";
+        \\function f(d: Dict<string, number>): number { const v = dictHas(d, "a"); return 0; }
+    );
+}
+
+test "dict types: dictSet accepts a Dict of string keys" {
+    try expectNoTypeDiagnostic(
+        \\import { dictSet } from "zttp:collections";
+        \\function f(d: Dict<string, number>): number { const v = dictSet(d, "a", 1); return 0; }
+    );
+}
+
+test "dict types: dictRemove accepts a Dict of string keys" {
+    try expectNoTypeDiagnostic(
+        \\import { dictRemove } from "zttp:collections";
+        \\function f(d: Dict<string, number>): number { const v = dictRemove(d, "a"); return 0; }
+    );
+}
+
+test "dict types: dictEntries accepts a Dict of string keys" {
+    try expectNoTypeDiagnostic(
+        \\import { dictEntries } from "zttp:collections";
+        \\function f(d: Dict<string, number>): number { const v = dictEntries(d); return 0; }
+    );
+}
+
+test "dict types: dictMapValues accepts a Dict of string keys" {
+    try expectNoTypeDiagnostic(
+        \\import { dictMapValues } from "zttp:collections";
+        \\function f(d: Dict<string, number>): number { const v = dictMapValues(d, (x, k) => x); return 0; }
+    );
+}
+
+test "dict types: dictFilter accepts a Dict of string keys" {
+    try expectNoTypeDiagnostic(
+        \\import { dictFilter } from "zttp:collections";
+        \\function f(d: Dict<string, number>): number { const v = dictFilter(d, (x, k) => true); return 0; }
+    );
+}
+
+test "dict types: dictFold accepts a Dict of string keys" {
+    try expectNoTypeDiagnostic(
+        \\import { dictFold } from "zttp:collections";
+        \\function f(d: Dict<string, number>): number { const v = dictFold(d, (acc, x, k) => acc, 0); return 0; }
+    );
+}
+
+test "dict types: an unannotated let of an empty Dict takes a Dict with entries" {
+    try expectNoTypeDiagnostic(
+        \\import { dictEmpty, dictSet } from "zttp:collections";
+        \\function f(): number { let d = dictEmpty(); d = dictSet(d, "a", 1); return 0; }
+    );
+}
+
+test "dict types: an unannotated let of an empty Dict takes a loop accumulator" {
+    try expectNoTypeDiagnostic(
+        \\import { dictEmpty, dictSet } from "zttp:collections";
+        \\function f(): number { let d = dictEmpty(); for (const k of ["a", "b"]) { d = dictSet(d, k, 1); } return 0; }
+    );
+}
+
+test "dict types: a let of a Dict with entries keeps its type as a let of an array does" {
+    try expectOneMismatch(
+        \\import { dictEmpty, dictSet } from "zttp:collections";
+        \\function f(): number { let d = dictSet(dictEmpty(), "a", 1); d = dictSet(d, "b", "x"); return 0; }
+    , "type 'Dict<string, number | string>' is not assignable to type 'Dict<string, number>'");
+}
+
+test "dict types: a const of an empty Dict keeps the empty Dict type" {
+    try expectOneMismatch(
+        \\import { dictEmpty } from "zttp:collections";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const d = dictEmpty(); const p: Nope = d; return 0; }
+    , "type 'Dict<never, never>' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict types: a union of two Dict types keeps the declared dictGet type" {
+    try expectOneMismatch(
+        \\import { dictEmpty, dictSet, dictGet } from "zttp:collections";
+        \\structural Nope = { zz: Bytes };
+        \\function f(c: boolean): number {
+        \\  const d = c ? dictSet(dictEmpty(), "a", 1) : dictSet(dictEmpty(), "a", "x");
+        \\  const p: Nope = dictGet(d, "a");
+        \\  return 0;
+        \\}
+    , "type 'unknown' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: an array method on a receiver that may be undefined stays untyped" {

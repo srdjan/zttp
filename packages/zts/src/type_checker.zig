@@ -1281,7 +1281,7 @@ pub const TypeChecker = struct {
                         break :blk if (declared != null_type_idx) declared else inferred;
                     };
                     if (effective != null_type_idx and declared == null_type_idx and vd.kind == .let) {
-                        effective = self.env.pool.widenLiteral(effective);
+                        effective = self.widenEmptyDict(self.env.pool.widenLiteral(effective));
                     }
                     if (effective != null_type_idx) {
                         self.binding_types.put(self.allocator, key, effective) catch self.markAllocationFailure();
@@ -4197,6 +4197,7 @@ pub const TypeChecker = struct {
             };
         }
         if (self.resultExportCallType(binding, call)) |typed| return typed;
+        if (self.collectionsExportCallType(binding, call)) |typed| return typed;
         const name = self.resolveAtomName(binding.name_atom) orelse return null_type_idx;
         // `hole()` types as `never`, the bottom type, so it is assignable to
         // whatever the surrounding context expects and the rest of the program
@@ -6077,6 +6078,85 @@ pub const TypeChecker = struct {
         if (isCallbackCombinator(name) and call.args_count == 2) return self.combinatorCallType(name, call);
         if (std.mem.eql(u8, name, "collectAll") and call.args_count == 1) return self.collectAllCallType(call);
         return null;
+    }
+
+    /// `type_idx`, or `Dict<unknown, unknown>` when it is a Dict whose key type
+    /// is `never`. An unannotated `let` holds the empty Dict of `dictEmpty()`
+    /// and takes a Dict with entries later, so it needs the wide type. A Dict
+    /// with a known key keeps its type, as an array does at a `let`.
+    fn widenEmptyDict(self: *const TypeChecker, type_idx: TypeIndex) TypeIndex {
+        const pool = self.env.pool;
+        if (pool.getTag(type_idx) != .t_dict) return type_idx;
+        if (pool.getDictKey(type_idx) != pool.idx_never) return type_idx;
+        return pool.addDict(self.allocator, pool.idx_unknown, pool.idx_unknown);
+    }
+
+    /// The type that a `zttp:collections` call stores or reads for the value
+    /// `arg`: its widened type, or `unknown` when it has no type.
+    fn dictComponentType(self: *const TypeChecker, arg: NodeIndex) TypeIndex {
+        const pool = self.env.pool;
+        const arg_type = self.inferType(arg);
+        if (arg_type == null_type_idx or pool.mentionsError(arg_type)) return pool.idx_unknown;
+        return pool.widenLiteral(arg_type);
+    }
+
+    /// The join of a Dict key or value type with a stored one. A `never`
+    /// component holds nothing, so the stored type stands alone.
+    fn dictJoinComponent(self: *const TypeChecker, held: TypeIndex, stored: TypeIndex) TypeIndex {
+        const pool = self.env.pool;
+        if (held == pool.idx_never) return stored;
+        return pool.addUnion(self.allocator, &.{ held, stored });
+    }
+
+    /// The type of a call of a `zttp:collections` export that builds or reads
+    /// a Dict, resolved through the import so that a local function of the same
+    /// name keeps its own type. The first argument is read as one `Dict<K, V>`;
+    /// when it is a union, `unknown`, or has no type, the declared return type
+    /// of the binding stays. No rule refuses an argument.
+    fn collectionsExportCallType(self: *const TypeChecker, binding: ir.BindingRef, call: Node.CallExpr) ?TypeIndex {
+        const entry = self.resolveImportedExport(binding) orelse return null;
+        if (!std.mem.eql(u8, entry.module.specifier, "zttp:collections")) return null;
+        const pool = self.env.pool;
+        const name = entry.function.name;
+        if (std.mem.eql(u8, name, "dictEmpty") and call.args_count == 0) {
+            return pool.addDict(self.allocator, pool.idx_never, pool.idx_never);
+        }
+        const arity: u32 = if (std.mem.eql(u8, name, "dictSet"))
+            3
+        else if (std.mem.eql(u8, name, "dictGet") or std.mem.eql(u8, name, "dictHas") or std.mem.eql(u8, name, "dictRemove"))
+            2
+        else if (std.mem.eql(u8, name, "dictEntries"))
+            1
+        else
+            return null;
+        if (call.args_count != arity) return null;
+
+        const first = self.inferType(self.ir_view.getListIndex(call.args_start, 0));
+        if (first == null_type_idx) return null;
+        const source = self.resolvedType(self.env.stripProofMarkers(first));
+        if (pool.getTag(source) != .t_dict or pool.mentionsError(source)) return null;
+        const key_type = pool.getDictKey(source);
+        const value_type = pool.getDictValue(source);
+        const held_key = if (key_type == null_type_idx) pool.idx_unknown else key_type;
+        const held_value = if (value_type == null_type_idx) pool.idx_unknown else value_type;
+
+        if (std.mem.eql(u8, name, "dictSet")) {
+            const stored_key = self.dictComponentType(self.ir_view.getListIndex(call.args_start, 1));
+            const stored_value = self.dictComponentType(self.ir_view.getListIndex(call.args_start, 2));
+            return pool.addDict(
+                self.allocator,
+                self.dictJoinComponent(held_key, stored_key),
+                self.dictJoinComponent(held_value, stored_value),
+            );
+        }
+        if (std.mem.eql(u8, name, "dictGet")) {
+            if (held_key == pool.idx_never) return pool.idx_undefined;
+            return pool.withUndefined(self.allocator, held_value);
+        }
+        if (std.mem.eql(u8, name, "dictHas")) return pool.idx_boolean;
+        if (std.mem.eql(u8, name, "dictRemove")) return source;
+        const pair = pool.addTuple(self.allocator, &.{ held_key, held_value });
+        return pool.addArray(self.allocator, pair);
     }
 
     /// The `zttp:result` export that `call` names, resolved through the
