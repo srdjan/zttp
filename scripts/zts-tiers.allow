@@ -161,6 +161,7 @@ zts-compiler kernel_identity.zig
 zts-compiler manifest_registry.zig
 zts-compiler match_analysis.zig
 zts-compiler module_facts.zig
+zts-compiler module_result_errors.zig
 zts-compiler module_spec_render.zig
 zts-compiler module_types.zig
 zts-compiler ok_record.zig

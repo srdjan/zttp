@@ -4476,6 +4476,64 @@ test "builtin result: JSON.tryParse is a Result with an unknown value" {
     , "type '{ ok: boolean; value?: unknown; error?: string; errors?: unknown }' is not assignable to type '{ zz: Bytes }'");
 }
 
+test "result error type: the error of err(5) is not a string at a string parameter" {
+    try expectOneArgMismatch(
+        \\import { err } from "zttp:result";
+        \\function shout(s: string): string {
+        \\  return s.toUpperCase();
+        \\}
+        \\function f(): number {
+        \\  const r = err(5);
+        \\  if (!r.ok) {
+        \\    const e = r.error;
+        \\    if (e !== undefined) {
+        \\      const t = shout(e);
+        \\    }
+        \\  }
+        \\  return 0;
+        \\}
+    , "argument type does not match parameter type: expected string, got unknown");
+}
+
+test "result error type: the error of jwtVerify is a string at a string parameter" {
+    try expectNoTypeDiagnostic(
+        \\import { jwtVerify } from "zttp:auth";
+        \\function shout(s: string): string {
+        \\  return s.toUpperCase();
+        \\}
+        \\function f(token: string): number {
+        \\  const r = jwtVerify(token, "secret");
+        \\  if (!r.ok) {
+        \\    const e = r.error;
+        \\    if (e !== undefined) {
+        \\      const t = shout(e);
+        \\    }
+        \\  }
+        \\  return 0;
+        \\}
+    );
+}
+
+test "result error type: the error of parseJson is not a string" {
+    try expectOneMismatch(
+        \\import { parseJson } from "zttp:json";
+        \\function f(text: string): number {
+        \\  const s: string = parseJson(text).error;
+        \\  return 0;
+        \\}
+    , "type 'unknown' is not assignable to type 'string'");
+}
+
+test "result error type: a Result with an unknown error is accepted as a Result argument" {
+    try expectNoTypeDiagnostic(
+        \\import { err, mapResult } from "zttp:result";
+        \\function f(): number {
+        \\  const r = mapResult(err(5), (v) => v);
+        \\  return 0;
+        \\}
+    );
+}
+
 test "builtin result: Object.keys of a record is a string array" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };

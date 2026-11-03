@@ -203,10 +203,11 @@ fn populateRequestReaders(env: *TypeEnv, pool: *TypePool, allocator: std.mem.All
     const request = requestType(env);
     if (request == null_type_idx) return;
 
-    // The same four-field record every fallible module export returns, built
-    // the same way `module_types.populateModuleTypes` builds it. A reader with
-    // a shape of its own would make `result.ok` and `result.value` mean
-    // something different depending on which call produced them.
+    // The same four-field record as a module export that returns a Result, so
+    // `result.ok` and `result.value` mean the same after every call. Its
+    // `error` is `unknown`, not the per-export type that
+    // `module_result_errors.zig` gives a module export, because a reader
+    // stores a record taxonomy there (spec 6.4).
     const ok_n = pool.addName(allocator, "ok");
     const val_n = pool.addName(allocator, "value");
     const err_n = pool.addName(allocator, "error");

@@ -21,6 +21,7 @@ const type_pool_mod = @import("type_pool.zig");
 const type_env_mod = @import("type_env.zig");
 const mb = @import("zts-base").module_descriptors;
 const builtin_modules = @import("zts-engine").builtin_modules;
+const result_errors = @import("module_result_errors.zig");
 
 const TypePool = type_pool_mod.TypePool;
 const TypeIndex = type_pool_mod.TypeIndex;
@@ -142,30 +143,42 @@ fn addField(pool: *TypePool, allocator: std.mem.Allocator, name: []const u8, typ
     };
 }
 
-/// Populate the TypeEnv with full type signatures for all virtual module exports.
-/// Reads from the builtin_modules registry instead of hardcoded tables.
-pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Allocator) void {
-    // Build shared types
+/// The marked Result record `{ ok: boolean; value?: V; error?: E; errors?: unknown }`.
+/// The field order is the one every Result consumer reads.
+fn resultRecord(pool: *TypePool, allocator: std.mem.Allocator, value_type: TypeIndex, error_type: TypeIndex) TypeIndex {
     const ok_n = pool.addName(allocator, "ok");
     const val_n = pool.addName(allocator, "value");
     const err_n = pool.addName(allocator, "error");
     const errs_n = pool.addName(allocator, "errors");
-    const result_type = pool.markResultRecord(allocator, pool.addRecord(allocator, &.{
+    return pool.markResultRecord(allocator, pool.addRecord(allocator, &.{
         .{ .name_start = ok_n.start, .name_len = ok_n.len, .type_idx = pool.idx_boolean, .optional = false },
-        .{ .name_start = val_n.start, .name_len = val_n.len, .type_idx = pool.idx_unknown, .optional = true },
-        .{ .name_start = err_n.start, .name_len = err_n.len, .type_idx = pool.idx_string, .optional = true },
+        .{ .name_start = val_n.start, .name_len = val_n.len, .type_idx = value_type, .optional = true },
+        .{ .name_start = err_n.start, .name_len = err_n.len, .type_idx = error_type, .optional = true },
         .{ .name_start = errs_n.start, .name_len = errs_n.len, .type_idx = pool.idx_unknown, .optional = true },
     }));
-    // `parseJson` and `parseJsonBytes` answer the same record with a JSON
-    // `value` (Decision 44a): the document is a Dict at run time, so a member
-    // or index read on it is refused. The `.result` kind cannot carry that, so
-    // the two exports are named.
-    const json_result_type = pool.markResultRecord(allocator, pool.addRecord(allocator, &.{
-        .{ .name_start = ok_n.start, .name_len = ok_n.len, .type_idx = pool.idx_boolean, .optional = false },
-        .{ .name_start = val_n.start, .name_len = val_n.len, .type_idx = pool.idx_json_value, .optional = true },
-        .{ .name_start = err_n.start, .name_len = err_n.len, .type_idx = pool.idx_string, .optional = true },
-        .{ .name_start = errs_n.start, .name_len = errs_n.len, .type_idx = pool.idx_unknown, .optional = true },
-    }));
+}
+
+/// The type of the `error` field that the runtime stores for an export. An
+/// export with no row keeps `unknown`, the claim that cannot be false.
+pub fn errorTypeFor(pool: *const TypePool, module: []const u8, name: []const u8) TypeIndex {
+    const row = result_errors.find(module, name) orelse return pool.idx_unknown;
+    return switch (row.error_type) {
+        .string => pool.idx_string,
+        .unknown => pool.idx_unknown,
+    };
+}
+
+/// Populate the TypeEnv with full type signatures for all virtual module exports.
+/// Reads from the builtin_modules registry instead of hardcoded tables.
+pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Allocator) void {
+    // Build shared types.
+    //
+    // A `.result` parameter takes a Result with any error, so its record
+    // declares `error?: unknown`. A `.result` return takes its error type from
+    // `module_result_errors`, one row for each export: the runtime stores a
+    // string under `error` for some exports and a record or any value for the
+    // others.
+    const result_param_type = resultRecord(pool, allocator, pool.idx_unknown, pool.idx_unknown);
     const optional_string = pool.addNullable(allocator, pool.idx_string);
     const object_ref = pool.addRef(allocator, "object");
     const optional_object = pool.addNullable(allocator, object_ref);
@@ -181,17 +194,26 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
             // truncated to one, so `init` typed as nothing at all. It is the
             // first customer of the general mechanism rather than a case the
             // mechanism has to keep working around.
+            // `parseJson` and `parseJsonBytes` answer the same record with a
+            // JSON `value` (Decision 44a): the document is a Dict at run
+            // time, so a member or index read on it is refused. The `.result`
+            // kind cannot carry that, so the two exports are named.
             const is_parse_json = std.mem.eql(u8, binding.specifier, "zttp:json") and (std.mem.eql(u8, func.name, "parseJson") or std.mem.eql(u8, func.name, "parseJsonBytes"));
             const return_type_idx = if (func.signature) |declared|
                 env.resolveType(declared.returns)
-            else if (is_parse_json)
-                json_result_type
+            else if (func.returns == .result)
+                resultRecord(
+                    pool,
+                    allocator,
+                    if (is_parse_json) pool.idx_json_value else pool.idx_unknown,
+                    errorTypeFor(pool, binding.specifier, func.name),
+                )
             else
                 mapReturnKind(
                     func.returns,
                     pool,
                     allocator,
-                    result_type,
+                    result_param_type,
                     optional_string,
                     object_ref,
                     optional_object,
@@ -212,7 +234,7 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
                         pt,
                         pool,
                         allocator,
-                        result_type,
+                        result_param_type,
                         optional_string,
                         object_ref,
                         optional_object,

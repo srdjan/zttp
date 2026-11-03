@@ -34,6 +34,7 @@ const type_key = @import("type_key.zig");
 const type_env_mod = @import("type_env.zig");
 const abi_types = @import("abi_types.zig");
 const builtin_results = @import("builtin_results.zig");
+const module_result_errors = @import("module_result_errors.zig");
 const match_analysis_mod = @import("match_analysis.zig");
 const ir_json_literal = @import("ir_json_literal.zig");
 const module_facts_mod = @import("module_facts.zig");
@@ -1770,7 +1771,19 @@ pub const TypeChecker = struct {
         return null;
     }
 
-    fn typedResultType(self: *const TypeChecker, inner: TypeIndex) TypeIndex {
+    /// The `error` type of the export named `name`, from the table in
+    /// `module_result_errors.zig`. A name with no row gets `unknown`.
+    fn moduleResultErrorType(self: *const TypeChecker, name: []const u8) TypeIndex {
+        const pool = self.env.pool;
+        const row = module_result_errors.findByName(name) orelse return pool.idx_unknown;
+        return switch (row.error_type) {
+            .string => pool.idx_string,
+            .unknown => pool.idx_unknown,
+        };
+    }
+
+    /// A Result whose `value` is `inner` and whose `error` is `error_type`.
+    fn typedResultType(self: *const TypeChecker, inner: TypeIndex, error_type: TypeIndex) TypeIndex {
         const pool = self.env.pool;
         const ok_name = pool.addName(self.allocator, "ok");
         const val_name = pool.addName(self.allocator, "value");
@@ -1779,7 +1792,7 @@ pub const TypeChecker = struct {
         return pool.markResultRecord(self.allocator, pool.addRecord(self.allocator, &.{
             .{ .name_start = ok_name.start, .name_len = ok_name.len, .type_idx = pool.idx_boolean, .optional = false },
             .{ .name_start = val_name.start, .name_len = val_name.len, .type_idx = inner, .optional = true },
-            .{ .name_start = err_name.start, .name_len = err_name.len, .type_idx = pool.idx_string, .optional = true },
+            .{ .name_start = err_name.start, .name_len = err_name.len, .type_idx = error_type, .optional = true },
             .{ .name_start = errs_name.start, .name_len = errs_name.len, .type_idx = pool.idx_unknown, .optional = true },
         }));
     }
@@ -3439,7 +3452,8 @@ pub const TypeChecker = struct {
             .optional_string => pool.addNullable(self.allocator, pool.idx_string),
             .undefined_value => pool.idx_undefined,
             .unknown_value => pool.idx_unknown,
-            .json_result => self.typedResultType(pool.idx_unknown),
+            // `JSON.tryParse` is not a module export and keeps its record.
+            .json_result => self.typedResultType(pool.idx_unknown, pool.idx_string),
             // These take their type from the receiver or the arguments.
             .receiver_array,
             .receiver_element_or_undefined,
@@ -3982,7 +3996,7 @@ pub const TypeChecker = struct {
                 const schema_node = self.ir_view.getListIndex(call.args_start, 0);
                 if (self.getLiteralString(schema_node)) |schema_name| {
                     if (self.schemaTypeByName(schema_name)) |schema_type| {
-                        return self.typedResultType(schema_type);
+                        return self.typedResultType(schema_type, self.moduleResultErrorType(name));
                     }
                 }
             }

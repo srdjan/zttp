@@ -39,6 +39,7 @@ pub const function_specs = @import("function_specs.zig");
 pub const contract_builder = @import("contract_builder.zig");
 pub const contract_diff = @import("contract_diff.zig");
 pub const module_facts = @import("module_facts.zig");
+pub const module_result_errors = @import("module_result_errors.zig");
 pub const module_types = @import("module_types.zig");
 pub const manifest_registry = @import("manifest_registry.zig");
 pub const module_spec_render = @import("module_spec_render.zig");
