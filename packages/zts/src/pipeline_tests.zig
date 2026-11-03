@@ -5808,6 +5808,91 @@ test "for...of over a union with a member that is not an array or tuple leaves t
     );
 }
 
+test "array literal binding: a const of numbers is a number array" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const ys = [4, 5]; const p: Nope = ys; return 0; }
+    , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "array literal binding: a let of numbers is a number array" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { let ys = [4, 4]; const p: Nope = ys; return 0; }
+    , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "array literal binding: a const of mixed elements is a tuple of the widened types" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const t = ["a", 1]; const p: Nope = t; return 0; }
+    , "type '[string, number]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "array literal binding: an empty literal is an unknown array" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const out = []; const p: Nope = out; return 0; }
+    , "type 'unknown[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "array literal binding: a literal longer than the inference buffer is a number array" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const ys = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34]; const p: Nope = ys; return 0; }
+    , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "array literal binding: a module scope const of numbers is a number array" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\const ys = [4, 5];
+        \\function f(): number { const p: Nope = ys; return 0; }
+    , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "array literal binding: a pushed empty literal passes the collect form" {
+    try expectNoTypeDiagnostic(
+        \\function f(): number { const items = [1, 2]; const out = []; for (const item of items) { out.push(item); } return out.length; }
+    );
+}
+
+test "array literal binding: a let array takes another array of the same element type" {
+    try expectNoTypeDiagnostic(
+        \\function f(): number { let zs = [4, 5]; zs = [6, 7]; return zs.length; }
+    );
+}
+
+test "array literal binding: a literal index read may be undefined" {
+    try expectArithCounts(
+        \\function f(): number { const ys = [4, 5]; return ys[0] + 1; }
+    ,
+        0,
+        1,
+    );
+}
+
+test "array literal binding: an annotated array keeps its annotation" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const ys: number[] = [4, 5]; const p: Nope = ys; return 0; }
+    , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "array literal binding: an annotated tuple keeps its annotation" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const t: [number, number] = [4, 5]; const p: Nope = t; return 0; }
+    , "type '[number, number]' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "array literal binding: an array literal passed as an argument keeps its literal type" {
+    try expectOneArgMismatch(
+        \\function g(xs: string[]): number { return xs.length; }
+        \\function f(): number { return g([4, 5]); }
+    , "argument type does not match parameter type: expected string[], got [4, 5]");
+}
+
 test "callback parameter: an annotated index parameter keeps its annotation" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };

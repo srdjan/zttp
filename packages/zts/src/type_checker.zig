@@ -1336,6 +1336,9 @@ pub const TypeChecker = struct {
                         }
                         break :blk if (declared != null_type_idx) declared else inferred;
                     };
+                    if (declared == null_type_idx) {
+                        effective = self.arrayLiteralBindingType(vd.init, effective);
+                    }
                     if (effective != null_type_idx and declared == null_type_idx and vd.kind == .let) {
                         effective = self.widenEmptyDict(self.env.pool.widenLiteral(effective));
                     }
@@ -6208,6 +6211,55 @@ pub const TypeChecker = struct {
         if (isCallbackCombinator(name) and call.args_count == 2) return self.combinatorCallType(name, call);
         if (std.mem.eql(u8, name, "collectAll") and call.args_count == 1) return self.collectAllCallType(call);
         return null;
+    }
+
+    /// The type that a `const` or `let` binding takes from an array literal
+    /// initializer with no annotation. `inferred` is `inferArrayLiteralType`'s
+    /// result for `initializer`. Each element type is widened, as in TypeScript: the
+    /// binding is an array when the widened element types are equal and a tuple
+    /// otherwise, and `[]` is `unknown[]`. A literal that is not bound keeps its
+    /// inferred type, so only the `.var_decl` arm calls this. An initializer that
+    /// is not an array literal, or whose elements have no type, is returned
+    /// unchanged.
+    fn arrayLiteralBindingType(self: *TypeChecker, initializer: NodeIndex, inferred: TypeIndex) TypeIndex {
+        if (self.ir_view.getTag(initializer) != .array_literal) return inferred;
+        const pool = self.env.pool;
+        if (inferred == null_type_idx) {
+            const arr = self.ir_view.getArray(initializer) orelse return inferred;
+            if (arr.elements_count != 0) return inferred;
+            return pool.addArray(self.allocator, pool.idx_unknown);
+        }
+        switch (pool.getTag(inferred) orelse return inferred) {
+            .t_tuple => {
+                var widened: [32]TypeIndex = undefined;
+                const elements = pool.getTupleElements(inferred);
+                if (elements.len == 0 or elements.len > widened.len) return inferred;
+                var all_equal = true;
+                for (elements, 0..) |element, i| {
+                    widened[i] = pool.widenLiteral(element);
+                    if (widened[i] != widened[0]) all_equal = false;
+                }
+                if (all_equal) return pool.addArray(self.allocator, widened[0]);
+                return pool.addTuple(self.allocator, widened[0..elements.len]);
+            },
+            .t_array => {
+                const element = pool.getArrayElement(inferred);
+                if (pool.getTag(element) == .t_union) {
+                    // A literal longer than the inference buffer is an array of
+                    // a union. Each add below can move the pool's member list,
+                    // so the member is read again on every step.
+                    var joined: TypeIndex = null_type_idx;
+                    for (0..pool.getUnionMembers(element).len) |i| {
+                        const member = pool.getUnionMembers(element)[i];
+                        joined = self.joinElementTypes(joined, pool.widenLiteral(member));
+                    }
+                    return pool.addArray(self.allocator, joined);
+                }
+                return pool.addArray(self.allocator, pool.widenLiteral(element));
+            },
+            // exhaustive: only a tuple or an array initializer type has elements to widen, and any other type is already the binding type.
+            else => return inferred,
+        }
     }
 
     /// `type_idx`, or `Dict<unknown, unknown>` when it is a Dict whose key type
