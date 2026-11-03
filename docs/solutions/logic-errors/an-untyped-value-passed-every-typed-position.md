@@ -1,9 +1,9 @@
 ---
 title: An untyped value passed every typed position
 date: 2026-11-02
-last_updated: 2026-11-02
+last_updated: 2026-11-03
 category: logic-errors
-module: ZigTS type checker and sound-mode checker, value inference, narrowing guards, arithmetic operands, builtin results, callback parameters, Result types
+module: ZigTS type checker and sound-mode checker, value inference, narrowing guards, arithmetic operands, builtin results, callback parameters, Result types, member access, Dict types
 problem_type: logic_error
 component: tooling
 severity: high
@@ -14,6 +14,7 @@ symptoms:
   - "`x + 1` with `x: number | undefined` passed `zts check` with `optionals_safe` PROVEN, and `zttp dev` answered 500 with \"Possible soundness incident\"."
   - "`const token: string = req.headers.get(\"x\");` passed `zts check`, and `zttp dev` answered 500 with \"Possible soundness incident\" for a missing header."
   - "`strings.map(g)` with `g: (n: number) => number` passed `zts check`, and `r.error` read as a `string` after a `zttp:validate` schema failure that leaves `error` absent."
+  - "`n.toFixed(2)` on a number and `s[0]` on a string passed `zts check`, and `zttp dev` answered 500; an entry check over the tracked `.ts` files missed a published example in a Zig file."
 root_cause: logic_error
 resolution_type: code_fix
 related_components:
@@ -32,6 +33,9 @@ tags:
   - callback-types
   - result-types
   - dead-tests
+  - member-access
+  - dict-types
+  - entry-check
 ---
 
 # An untyped value passed every typed position
@@ -105,7 +109,19 @@ A check that compares with `unknown` passes. Before you trust a check, give it a
 
 **What did not work: a test that no step runs.** The tests in `packages/tools/src/precompile_check.zig` ran in no build step, because no test block referenced the file. A `-Dtest-filter` run selected zero tests, which showed the gap. A gate list also left out `test-bytecode-identity` for a unit that changed a corpus case, and the golden stayed stale for two commits.
 
-**The entry check failed again.** After the combinators had types, `examples/patterns/result-combinators.ts` no longer stopped the refusal of an operand with no type. Three other stops held. The R7c tool census moves from 124 to 129, which is model-visible and needs a re-record. `dictFold` callback parameters have no type. `ps[0].age` has no type. So that step stays open in `docs/roadmap.md`.
+**The entry check failed again.** After the combinators had types, `examples/patterns/result-combinators.ts` no longer stopped the refusal of an operand with no type. Three other stops held. The R7c tool census moves from 124 to 129. The plan record first called that move model-visible. That was wrong: the offline replay held, and D-012 now permits the move. `dictFold` callback parameters have no type. `ps[0].age` has no type. So that step stays open in `docs/roadmap.md`.
+
+## Fifth instance: a refusal of `unknown` does not cover "no type"
+
+The member access plan closed six measured false proofs (commits `9a4f9368` to `224f5a68` on local `main`, pending release). A member call on a `number`, `boolean`, `string`, array, or tuple must name a member that the runtime installs, so `n.toFixed(2)` gets ZTS201. An index read on a string gets ZTS201. A typed `Dict` reaches the `zttp:collections` exports, and their callbacks take the key and value types.
+
+**What did not work: a refusal keyed on `unknown`.** P9 refuses a member call on a receiver of type `unknown`. A receiver with no type (`null_type_idx`) is a different case, and it still passes. Four forms prove every property, and `zttp dev` answers 500 (`NotCallable`): `Object.values(o)[0].f(1)`, `x.slice(1).trim()` with `x: string | string[]`, `s.toUpperCase()` in `for (const s of [1, 2])`, and a `reduce` accumulator whose callback return does not fit the seed. A check for `unknown` and a check for "no type" are two checks.
+
+**What did not work: an entry check over the `.ts` files only.** The third U3 entry check ran `zts check` on the 264 files from `git ls-files '*.ts'`. Only three programs changed, and each was already refused. Then `zig build test` failed. U3 refused the published `let` example in `packages/tools/src/example_registry.zig`, whose `for (const n of [1, 2, 3]) { total = total + n; }` is correct. A `for...of` loop variable has a type only when the array has a declared type, such as a parameter `xs: number[]`. Handler sources in Zig files, such as the example registry, the stand-in defect seeds, and the pipeline tests, are not `.ts` files. So the entry check did not see them.
+
+**What did not work: a skip copied by hand from another stage.** U3 must skip an operand that the verifier will report as ZTS309. The bool stage runs before the verifier, and the precompile run stops at the first failing stage. So a U3 refusal there hides the ZTS309. The U3 brief copied the verifier's rule as a syntax test: a read on `r.value`, `r.error`, or `r.errors` belongs to ZTS303. One unit earlier, R3 had changed that rule in `HandlerVerifier`: an `error` read on a Result that can fill `errors` now gets ZTS309. The copy refused that read and hid the R3 diagnostic. The corrected skip asks `TypeChecker` the same question that the verifier asks (`resultMayFillErrors`).
+
+**What did not work: an executor's account of a runtime value.** Two executor claims about runtime values were wrong. The `parseJson` error is not a string: its row in `packages/zts/src/module_result_errors.zig` says a `{ kind, ... }` record, so `r.error.length` is `undefined`. R3 does cover a `mapResult` Result: a probe showed ZTS309. Each claim would have changed a decision.
 
 ## Why This Works
 
@@ -122,6 +138,10 @@ The hole was at the source: one inference result that every consumer reads as "p
 - Before you build a refusal, apply it and list every program that it refuses in the examples, the corpus, the fixtures, and the offline replay. Build it only when each refused value is truly unknown at runtime.
 - Read every failure path of a runtime constructor before you type its Result. One path can fill a different field.
 - Make sure that a new test file is reached from a build step. A filtered run that selects zero tests means that no step runs the file.
+- An entry check for a new refusal runs `zig build test` as well as `zts check` over the tracked `.ts` files. Handler sources in Zig files are reached only by the build steps.
+- When a check skips what another stage will report, call the predicate that the other stage uses. Keep a case from the unit that last changed that predicate in the new unit's test table.
+- Treat "no type" and `unknown` as two cases. A refusal of one does not cover the other.
+- Before you accept a claim about the runtime shape of a value, read its row in `module_result_errors.zig` or `builtin_results.zig`, or run a probe.
 - `docs/roadmap.md` lists the type checker gaps that stay open. One of them is a discriminant test that meets a record with an extra field, for which `zttp dev` measured a wrong result.
 
 ## Related Issues
@@ -130,5 +150,6 @@ The hole was at the source: one inference result that every consumer reads as "p
 - [Arithmetic operand types plan](../../plans/2026-11-02-arithmetic-operand-types-plan.md): probes A1 to A8, finding B1, the validation record, and the execution record.
 - [Builtin result types plan](../../plans/2026-11-02-builtin-result-types-plan.md): findings F1 and F2, the deviations that review found, and the failed entry check of U3.
 - [Callback parameters and Result types plan](../../plans/2026-11-02-callback-and-result-types-plan.md): probes P1 to P10, the deviations that review found, and the second failed entry check of U3.
+- [Member access plan](../../plans/2026-11-03-member-access-and-dict-types-plan.md): findings Q1 to Q11, the deviations, and the third failed entry check of U3.
 - [testing-effect-instead-of-form-refused-the-canonical-predicate](testing-effect-instead-of-form-refused-the-canonical-predicate.md): the type predicate admission history, which the same plan changed.
 - [a-proxy-signal-carried-a-proof-it-never-claimed](a-proxy-signal-carried-a-proof-it-never-claimed.md): another false PROVEN from a value read as an answer it never gave.
