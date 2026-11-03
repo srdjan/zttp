@@ -1,6 +1,6 @@
 # Untyped operands, untyped receivers, Dict keys, and container writes, 2026-11-03
 
-Status: revision 1, 2026-11-03, validated. On 2026-11-03 the owner chose option (a) of D1, D2, and D3 at the end of the [member access plan](2026-11-03-member-access-and-dict-types-plan.md). That approval covers writing and validating this plan. Execution needs a separate approval. No approval covers a push, a provider call, or a re-record.
+Status: revision 1, 2026-11-03, validated, in execution. On 2026-11-03 the owner chose option (a) of D1, D2, and D3 at the end of the [member access plan](2026-11-03-member-access-and-dict-types-plan.md). Approved 2026-11-03: the owner chose option (a) of Decisions 1, 2, and 3, and approved execution of the units F1, A1, T1, R4, U3, N1, J1, W1, and D on local `main`. No approval covers a push, a provider call, or a re-record.
 
 D1 (a): give the `for...of` loop variable over an array literal a type, apply the other U3 prototype fixes, and run the U3 entry check again with `zig build test`. D2 (a): refuse a member call on a receiver with no type in strict code, with its own entry check. D3 (a): confirm the encoder path, then refuse a Dict key that is not a string with ZTS213.
 
