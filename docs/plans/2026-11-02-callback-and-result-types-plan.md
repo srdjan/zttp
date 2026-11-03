@@ -117,7 +117,8 @@ Revision 1, 2026-11-02. A Fable review attacked the design and ran probes, and a
 | R2b | `da79840f` | Combinator types, combinator callback bindings, annotated callback bindings, and the `errors` field. P5 and P10 closed |
 | (golden) | `c486b209` | The bytecode identity golden of the corpus case that R1 rewrote |
 | U3 | none | The entry check failed again; see "U3 entry check" below |
-| D | this commit | `docs/typescript.md`, `docs/roadmap.md`, `CHANGELOG.md`, the plan index, and this record |
+| D | `c7f358cd` | `docs/typescript.md`, `docs/roadmap.md`, `CHANGELOG.md`, the plan index, and this record |
+| (fixture) | `f5d34f2f` | A proof ratchet fixture returned a `parseJson` record error as a `string`; it now uses `validateJson` |
 
 Each unit ran its gates unfiltered with a private cache and no provider key. The offline replay in `test-expert-app` held at every unit, so no change was model-visible.
 
@@ -129,6 +130,7 @@ Each unit ran its gates unfiltered with a private cache and no provider key. The
 - R2a: Opus made a `.result_fn` callback that returns `unknown` or raw JSON a refusal, as a `.result` argument of those types already was.
 - R2b: Opus sent the unit back with four findings. A probable false proof (P10): a validate or decode schema failure fills `errors` and leaves `error` absent, yet `r.error` read as `string` after `!r.ok`. The runtime probe could not register a schema, so P10 rests on the code in `validate.zig`. A Result now tracks `errors`, and `error` admits `undefined` where `errors` is not `never`. The combinator parameter check had accepted any annotation where the passed type was `unknown`; it now compares as C1 does. A fully annotated inline callback now binds its parameters before the call checks, because C1's inline `reduce` return check and the P5 check saw no return type for a body that reads a parameter.
 - The bytecode identity golden: R1's gate list did not include `test-bytecode-identity`, which failed from R1 until `c486b209`.
+- The proof ratchet fixture: the per-unit gate lists did not include `zig build test`. The final gate found that the test "an error read with a nullish fallback emits no event" returned `parseJson(text).error ?? "none"` as a `string`. R1 made `zts` refuse that false claim (ZTS204 and ZTS624). The fixture now uses `validateJson`. The final gate then passed from an empty cache: `zig build test`, `zig build test-zruntime`, and `bash scripts/verify.sh`.
 - The record-literal refusal: the runtime accepts a record literal shaped like a Result as an `andThen` or `orElse` callback return and as a `collectAll` element (`coerceResultLike`). The checker refuses it, which `docs/typescript.md` states.
 
 ### U3 entry check
