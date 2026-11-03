@@ -12,6 +12,11 @@
 //! `string`. A row names `unknown` when any path stores a record, `undefined`,
 //! or a value that came from an argument or a callback.
 //!
+//! A row sets `fills_errors` when any path ends in `resultErrs`, or when the
+//! export passes on a Result that holds `errors`. Those rows type `errors` as
+//! `unknown` and `error` as `E | undefined`; every other row types `errors`
+//! as `never`.
+//!
 //! The census test at the end fails when an export has no row and when a row
 //! names no such export.
 
@@ -24,36 +29,41 @@ pub const Row = struct {
     module: []const u8,
     name: []const u8,
     error_type: ErrorType,
-    /// What the runtime stores under `error`.
+    /// Whether any runtime path of the export fails with the payload under
+    /// `errors` (`resultErrs`) and leaves `error` absent. The checker then
+    /// types `errors` as `unknown` and adds `undefined` to `error`. A row that
+    /// never fills `errors` types it as `never`.
+    fills_errors: bool,
+    /// What the runtime stores under `error`, and the paths that fill `errors`.
     reason: []const u8,
 };
 
 pub const rows = [_]Row{
-    .{ .module = "zttp:auth", .name = "jwtVerify", .error_type = .string, .reason = "every error path is resultErr with a message" },
-    .{ .module = "zttp:validate", .name = "validateJson", .error_type = .string, .reason = "resultErr with a message; a schema failure fills errors, not error" },
-    .{ .module = "zttp:validate", .name = "validateObject", .error_type = .string, .reason = "resultErr with a message; a schema failure fills errors, not error" },
-    .{ .module = "zttp:validate", .name = "coerceJson", .error_type = .string, .reason = "resultErr with a message; a schema failure fills errors, not error" },
-    .{ .module = "zttp:decode", .name = "decodeJson", .error_type = .string, .reason = "resultErr with a message; a schema failure fills errors, not error" },
-    .{ .module = "zttp:decode", .name = "decodeForm", .error_type = .string, .reason = "resultErr with a message; a schema failure fills errors, not error" },
-    .{ .module = "zttp:decode", .name = "decodeQuery", .error_type = .string, .reason = "resultErr with a message; a schema failure fills errors, not error" },
-    .{ .module = "zttp:decode", .name = "decodeFormMultipart", .error_type = .string, .reason = "resultErr with a message; a schema failure fills errors, not error" },
-    .{ .module = "zttp:ratelimit", .name = "rateCheck", .error_type = .unknown, .reason = "resultErrValue with a { tag } or { tag, retryAfter } record" },
-    .{ .module = "zttp:bytes", .name = "bytesFromOctets", .error_type = .unknown, .reason = "createResultErr with a { kind, ... } record" },
-    .{ .module = "zttp:bytes", .name = "sliceBytes", .error_type = .unknown, .reason = "createResultErr with a { kind, start, end } record" },
-    .{ .module = "zttp:bytes", .name = "concatBytes", .error_type = .unknown, .reason = "createResultErr with a { kind, ... } record" },
-    .{ .module = "zttp:bytes", .name = "decodeUtf8", .error_type = .unknown, .reason = "createResultErr with a { kind, encoding, offset } record" },
-    .{ .module = "zttp:bytes", .name = "decodeBase64", .error_type = .unknown, .reason = "createResultErr with a { kind, ... } record" },
-    .{ .module = "zttp:collections", .name = "dictFromEntries", .error_type = .unknown, .reason = "createResultErr with undefined or a { kind, index } record" },
-    .{ .module = "zttp:json", .name = "parseJson", .error_type = .unknown, .reason = "createResultErr with a { kind, ... } record" },
-    .{ .module = "zttp:json", .name = "parseJsonBytes", .error_type = .unknown, .reason = "createResultErr with a { kind, ... } record" },
-    .{ .module = "zttp:json", .name = "stringifyJson", .error_type = .unknown, .reason = "createResultErr with a { kind, ... } record" },
-    .{ .module = "zttp:result", .name = "ok", .error_type = .unknown, .reason = "stores no error; unknown keeps the claim open" },
-    .{ .module = "zttp:result", .name = "err", .error_type = .unknown, .reason = "stores any value the caller passes" },
-    .{ .module = "zttp:result", .name = "mapResult", .error_type = .unknown, .reason = "keeps the input's error, or a callback's" },
-    .{ .module = "zttp:result", .name = "mapError", .error_type = .unknown, .reason = "stores the callback's return value" },
-    .{ .module = "zttp:result", .name = "andThen", .error_type = .unknown, .reason = "keeps the input's error, or the callback's Result error" },
-    .{ .module = "zttp:result", .name = "orElse", .error_type = .unknown, .reason = "keeps the callback's Result error" },
-    .{ .module = "zttp:result", .name = "collectAll", .error_type = .unknown, .reason = "keeps the first failing element's error, or undefined" },
+    .{ .module = "zttp:auth", .name = "jwtVerify", .error_type = .string, .fills_errors = false, .reason = "every error path is resultErr with a message" },
+    .{ .module = "zttp:validate", .name = "validateJson", .error_type = .string, .fills_errors = true, .reason = "resultErr with a message; a schema failure ends in resultErrs (validateValueAgainstSchema), which fills errors and leaves error absent" },
+    .{ .module = "zttp:validate", .name = "validateObject", .error_type = .string, .fills_errors = true, .reason = "resultErr with a message; a schema failure ends in resultErrs (validateValueAgainstSchema), which fills errors and leaves error absent" },
+    .{ .module = "zttp:validate", .name = "coerceJson", .error_type = .string, .fills_errors = true, .reason = "resultErr with a message; a schema failure ends in resultErrs (validateValueAgainstSchema), which fills errors and leaves error absent" },
+    .{ .module = "zttp:decode", .name = "decodeJson", .error_type = .string, .fills_errors = true, .reason = "resultErr with a message; a schema failure ends in resultErrs (validateValueAgainstSchema), which fills errors and leaves error absent" },
+    .{ .module = "zttp:decode", .name = "decodeForm", .error_type = .string, .fills_errors = true, .reason = "resultErr with a message; a schema failure ends in resultErrs (validateValueAgainstSchema), which fills errors and leaves error absent" },
+    .{ .module = "zttp:decode", .name = "decodeQuery", .error_type = .string, .fills_errors = true, .reason = "resultErr with a message; a schema failure ends in resultErrs (validateValueAgainstSchema), which fills errors and leaves error absent" },
+    .{ .module = "zttp:decode", .name = "decodeFormMultipart", .error_type = .string, .fills_errors = true, .reason = "resultErr with a message; a schema failure ends in resultErrs (validateValueAgainstSchema), which fills errors and leaves error absent" },
+    .{ .module = "zttp:ratelimit", .name = "rateCheck", .error_type = .unknown, .fills_errors = false, .reason = "resultErrValue with a { tag } or { tag, retryAfter } record" },
+    .{ .module = "zttp:bytes", .name = "bytesFromOctets", .error_type = .unknown, .fills_errors = false, .reason = "createResultErr with a { kind, ... } record" },
+    .{ .module = "zttp:bytes", .name = "sliceBytes", .error_type = .unknown, .fills_errors = false, .reason = "createResultErr with a { kind, start, end } record" },
+    .{ .module = "zttp:bytes", .name = "concatBytes", .error_type = .unknown, .fills_errors = false, .reason = "createResultErr with a { kind, ... } record" },
+    .{ .module = "zttp:bytes", .name = "decodeUtf8", .error_type = .unknown, .fills_errors = false, .reason = "createResultErr with a { kind, encoding, offset } record" },
+    .{ .module = "zttp:bytes", .name = "decodeBase64", .error_type = .unknown, .fills_errors = false, .reason = "createResultErr with a { kind, ... } record" },
+    .{ .module = "zttp:collections", .name = "dictFromEntries", .error_type = .unknown, .fills_errors = false, .reason = "createResultErr with undefined or a { kind, index } record" },
+    .{ .module = "zttp:json", .name = "parseJson", .error_type = .unknown, .fills_errors = false, .reason = "createResultErr with a { kind, ... } record" },
+    .{ .module = "zttp:json", .name = "parseJsonBytes", .error_type = .unknown, .fills_errors = false, .reason = "createResultErr with a { kind, ... } record" },
+    .{ .module = "zttp:json", .name = "stringifyJson", .error_type = .unknown, .fills_errors = false, .reason = "createResultErr with a { kind, ... } record" },
+    .{ .module = "zttp:result", .name = "ok", .error_type = .unknown, .fills_errors = false, .reason = "stores no error; unknown keeps the claim open" },
+    .{ .module = "zttp:result", .name = "err", .error_type = .unknown, .fills_errors = false, .reason = "stores any value the caller passes" },
+    .{ .module = "zttp:result", .name = "mapResult", .error_type = .unknown, .fills_errors = true, .reason = "keeps the input's error, or a callback's; an input that holds errors keeps that field" },
+    .{ .module = "zttp:result", .name = "mapError", .error_type = .unknown, .fills_errors = true, .reason = "stores the callback's return value; an input that holds errors keeps that field" },
+    .{ .module = "zttp:result", .name = "andThen", .error_type = .unknown, .fills_errors = true, .reason = "keeps the input's error, or the callback's Result error; an input that holds errors keeps that field" },
+    .{ .module = "zttp:result", .name = "orElse", .error_type = .unknown, .fills_errors = true, .reason = "keeps the callback's Result error; that Result can hold errors" },
+    .{ .module = "zttp:result", .name = "collectAll", .error_type = .unknown, .fills_errors = true, .reason = "keeps the first failing element's error, or undefined; an input that holds errors keeps that field" },
 };
 
 pub fn find(module: []const u8, name: []const u8) ?Row {

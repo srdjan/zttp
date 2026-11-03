@@ -143,19 +143,11 @@ fn addField(pool: *TypePool, allocator: std.mem.Allocator, name: []const u8, typ
     };
 }
 
-/// The marked Result record `{ ok: boolean; value?: V; error?: E; errors?: unknown }`.
-/// The field order is the one every Result consumer reads.
-fn resultRecord(pool: *TypePool, allocator: std.mem.Allocator, value_type: TypeIndex, error_type: TypeIndex) TypeIndex {
-    const ok_n = pool.addName(allocator, "ok");
-    const val_n = pool.addName(allocator, "value");
-    const err_n = pool.addName(allocator, "error");
-    const errs_n = pool.addName(allocator, "errors");
-    return pool.markResultRecord(allocator, pool.addRecord(allocator, &.{
-        .{ .name_start = ok_n.start, .name_len = ok_n.len, .type_idx = pool.idx_boolean, .optional = false },
-        .{ .name_start = val_n.start, .name_len = val_n.len, .type_idx = value_type, .optional = true },
-        .{ .name_start = err_n.start, .name_len = err_n.len, .type_idx = error_type, .optional = true },
-        .{ .name_start = errs_n.start, .name_len = errs_n.len, .type_idx = pool.idx_unknown, .optional = true },
-    }));
+/// The marked Result record `{ ok: boolean; value?: V; error?: E; errors?: S }`.
+/// The field order is the one every Result consumer reads. `TypePool.addTypedResult`
+/// adds `undefined` to `error` when `errors_type` is not `never`.
+fn resultRecord(pool: *TypePool, allocator: std.mem.Allocator, value_type: TypeIndex, error_type: TypeIndex, errors_type: TypeIndex) TypeIndex {
+    return pool.addTypedResult(allocator, value_type, error_type, errors_type);
 }
 
 /// The type of the `error` field that the runtime stores for an export. An
@@ -168,6 +160,14 @@ pub fn errorTypeFor(pool: *const TypePool, module: []const u8, name: []const u8)
     };
 }
 
+/// The type of the `errors` field: `unknown` where any runtime path of the
+/// export fills it, and `never` where none does. An export with no row keeps
+/// `unknown`.
+pub fn errorsTypeFor(pool: *const TypePool, module: []const u8, name: []const u8) TypeIndex {
+    const row = result_errors.find(module, name) orelse return pool.idx_unknown;
+    return if (row.fills_errors) pool.idx_unknown else pool.idx_never;
+}
+
 /// Populate the TypeEnv with full type signatures for all virtual module exports.
 /// Reads from the builtin_modules registry instead of hardcoded tables.
 pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Allocator) void {
@@ -178,7 +178,7 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
     // `module_result_errors`, one row for each export: the runtime stores a
     // string under `error` for some exports and a record or any value for the
     // others.
-    const result_param_type = resultRecord(pool, allocator, pool.idx_unknown, pool.idx_unknown);
+    const result_param_type = resultRecord(pool, allocator, pool.idx_unknown, pool.idx_unknown, pool.idx_unknown);
     const optional_string = pool.addNullable(allocator, pool.idx_string);
     const object_ref = pool.addRef(allocator, "object");
     const optional_object = pool.addNullable(allocator, object_ref);
@@ -207,6 +207,7 @@ pub fn populateModuleTypes(env: *TypeEnv, pool: *TypePool, allocator: std.mem.Al
                     allocator,
                     if (is_parse_json) pool.idx_json_value else pool.idx_unknown,
                     errorTypeFor(pool, binding.specifier, func.name),
+                    errorsTypeFor(pool, binding.specifier, func.name),
                 )
             else
                 mapReturnKind(

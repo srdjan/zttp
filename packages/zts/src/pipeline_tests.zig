@@ -4473,7 +4473,7 @@ test "builtin result: JSON.tryParse is a Result with an unknown value" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };
         \\function f(s: string): number { const p: Nope = JSON.tryParse(s); return 0; }
-    , "type '{ ok: boolean; value?: unknown; error?: string; errors?: unknown }' is not assignable to type '{ zz: Bytes }'");
+    , "type '{ ok: boolean; value?: unknown; error?: string; errors?: never }' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "result error type: the error of err(5) is not a string at a string parameter" {
@@ -4652,7 +4652,7 @@ test "result type: ok(21) carries the number value and a never error" {
         \\import { ok } from "zttp:result";
         \\structural Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = ok(21); return 0; }
-    , "type '{ ok: boolean; value?: number; error?: never; errors?: unknown }' is not assignable to type '{ zz: Bytes }'");
+    , "type '{ ok: boolean; value?: number; error?: never; errors?: never }' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "result type: err(\"x\") carries the string error and a never value" {
@@ -4660,7 +4660,7 @@ test "result type: err(\"x\") carries the string error and a never value" {
         \\import { err } from "zttp:result";
         \\structural Nope = { zz: Bytes };
         \\function f(): number { const p: Nope = err("x"); return 0; }
-    , "type '{ ok: boolean; value?: never; error?: string; errors?: unknown }' is not assignable to type '{ zz: Bytes }'");
+    , "type '{ ok: boolean; value?: never; error?: string; errors?: never }' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "result type: unwrapOr of ok(21) and 0 is number" {
@@ -4696,7 +4696,7 @@ test "result type: a ternary of ok and err is one Result record" {
         \\  const p: Nope = r;
         \\  return 0;
         \\}
-    , "type '{ ok: boolean; value?: number; error?: string; errors?: unknown }' is not assignable to type '{ zz: Bytes }'");
+    , "type '{ ok: boolean; value?: number; error?: string; errors?: never }' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "result type: the value of a joined Result reads as number after the ok guard" {
@@ -4719,6 +4719,206 @@ test "result type: a local function named ok keeps its own type" {
         \\function ok(x: number): string { return "x"; }
         \\function f(): number { const p: Nope = ok(21); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "result combinator: an andThen callback that adds to its parameter is ZTS203" {
+    try expectOneArgMismatch(
+        \\import { andThen, ok } from "zttp:result";
+        \\function f(): number {
+        \\  const r = andThen(ok(1), (n) => n + 1);
+        \\  return 0;
+        \\}
+    , "andThen callback must return a Result, got 'number'");
+}
+
+test "result combinator: an annotated andThen callback that adds to its parameter is ZTS203" {
+    try expectOneArgMismatch(
+        \\import { andThen, ok } from "zttp:result";
+        \\function f(): number {
+        \\  const r = andThen(ok(1), (n: number) => n + 1);
+        \\  return 0;
+        \\}
+    , "andThen callback must return a Result, got 'number'");
+}
+
+test "result combinator: a reduce callback that returns the element under a string accumulator is ZTS203" {
+    try expectOneArgMismatch(
+        \\function f(): number { [1, 2].reduce((acc: string, n: number) => n, ""); return 0; }
+    , "callback parameter 'acc' is 'string', but reduce passes 'number'");
+}
+
+test "result combinator: mapResult of ok(21) and a doubling callback is a number Result" {
+    try expectOneMismatch(
+        \\import { mapResult, ok } from "zttp:result";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = mapResult(ok(21), (n) => n * 2); return 0; }
+    , "type '{ ok: boolean; value?: number; error?: never; errors?: never }' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "result combinator: a mapResult callback parameter takes the value type" {
+    try expectOneMismatch(
+        \\import { mapResult, ok } from "zttp:result";
+        \\function f(): number {
+        \\  const r = mapResult(ok(21), (n) => { const s: string = n; return s; });
+        \\  return 0;
+        \\}
+    , "type 'number' is not assignable to type 'string'");
+}
+
+test "result combinator: an annotated mapResult callback that refuses the value is ZTS203" {
+    try expectOneArgMismatch(
+        \\import { mapResult, ok } from "zttp:result";
+        \\function f(): number {
+        \\  const r = mapResult(ok(21), (s: string) => s);
+        \\  return 0;
+        \\}
+    , "callback parameter 's' is 'string', but mapResult passes 'number'");
+}
+
+test "result combinator: a named mapResult callback that refuses the value is ZTS203" {
+    try expectOneArgMismatch(
+        \\import { mapResult, ok } from "zttp:result";
+        \\function up(s: string): string { return s; }
+        \\function f(): number {
+        \\  const r = mapResult(ok(21), up);
+        \\  return 0;
+        \\}
+    , "callback parameter '#1' is 'string', but mapResult passes 'number'");
+}
+
+test "result combinator: an annotated mapResult callback that accepts the value has no diagnostic" {
+    try expectNoTypeDiagnostic(
+        \\import { mapResult, ok } from "zttp:result";
+        \\function f(): number {
+        \\  const r = mapResult(ok(21), (n: number) => String(n));
+        \\  return 0;
+        \\}
+    );
+}
+
+test "result combinator: mapError of err(\"boom\") and a join callback has a string error" {
+    try expectOneMismatch(
+        \\import { err, mapError } from "zttp:result";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = mapError(err("boom"), (e) => [e, "!"].join("")); return 0; }
+    , "type '{ ok: boolean; value?: never; error?: string; errors?: never }' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "result combinator: andThen of ok(1) and a string Result is a string Result with a never error" {
+    try expectOneMismatch(
+        \\import { andThen, ok } from "zttp:result";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = andThen(ok(1), (n) => ok(String(n))); return 0; }
+    , "type '{ ok: boolean; value?: string; error?: never; errors?: never }' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "result combinator: orElse of err(\"x\") and ok(0) is a number Result with a never error" {
+    try expectOneMismatch(
+        \\import { err, ok, orElse } from "zttp:result";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = orElse(err("x"), (e) => ok(0)); return 0; }
+    , "type '{ ok: boolean; value?: number; error?: never; errors?: never }' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "result combinator: collectAll of an ok and an err is a number array Result with a string error" {
+    try expectOneMismatch(
+        \\import { collectAll, err, ok } from "zttp:result";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = collectAll([ok(1), err("e")]); return 0; }
+    , "type '{ ok: boolean; value?: number[]; error?: string; errors?: never }' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "result combinator: collectAll of an empty array keeps the table record" {
+    try expectOneMismatch(
+        \\import { collectAll } from "zttp:result";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = collectAll([]); return 0; }
+    , "type '{ ok: boolean; value?: unknown; error?: unknown; errors?: unknown }' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "result combinator: an andThen callback parameter takes the number value of a mapResult chain" {
+    try expectOneMismatch(
+        \\import { andThen, mapResult, ok } from "zttp:result";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number {
+        \\  const doubled = mapResult(ok(21), (n) => n * 2);
+        \\  const chained = andThen(doubled, (m) => { const q: Nope = m; return ok(m + 1); });
+        \\  return 0;
+        \\}
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "result combinator: an annotated mapError callback is not refused when the payload may sit under errors" {
+    try expectNoTypeDiagnostic(
+        \\import { err, mapError } from "zttp:result";
+        \\function f(): number {
+        \\  const r = mapError(err("boom"), (e: string) => e);
+        \\  return 0;
+        \\}
+    );
+}
+
+test "result errors: a validateJson error read after the failure guard may be undefined" {
+    try expectOneArgMismatch(
+        \\import { validateJson } from "zttp:validate";
+        \\function shout(s: string): string {
+        \\  return s.toUpperCase();
+        \\}
+        \\function f(text: string): number {
+        \\  const r = validateJson("user", text);
+        \\  if (!r.ok) {
+        \\    const t = shout(r.error);
+        \\  }
+        \\  return 0;
+        \\}
+    , "argument type does not match parameter type: expected string, got string | undefined");
+}
+
+test "result errors: a jwtVerify error read after the failure guard is a string" {
+    try expectNoTypeDiagnostic(
+        \\import { jwtVerify } from "zttp:auth";
+        \\function shout(s: string): string {
+        \\  return s.toUpperCase();
+        \\}
+        \\function f(token: string): number {
+        \\  const r = jwtVerify(token, "secret");
+        \\  if (!r.ok) {
+        \\    const t = shout(r.error);
+        \\  }
+        \\  return 0;
+        \\}
+    );
+}
+
+test "result errors: a validateJson error with a nullish fallback is a string" {
+    try expectNoTypeDiagnostic(
+        \\import { validateJson } from "zttp:validate";
+        \\function f(text: string): number {
+        \\  const r = validateJson("user", text);
+        \\  const reason = r.error ?? "none";
+        \\  const s: string = reason;
+        \\  return 0;
+        \\}
+    );
+}
+
+test "result errors: a validateJson Result declares unknown errors and an error that may be undefined" {
+    try expectOneMismatch(
+        \\import { validateJson } from "zttp:validate";
+        \\structural Nope = { zz: Bytes };
+        \\function f(text: string): number { const p: Nope = validateJson("user", text); return 0; }
+    , "type '{ ok: boolean; value?: unknown; error?: string | undefined; errors?: unknown }' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "result combinator: a mapResult callback annotated number refuses a JSON value" {
+    try expectOneArgMismatch(
+        \\import { mapResult } from "zttp:result";
+        \\import { parseJson } from "zttp:json";
+        \\function f(text: string): number {
+        \\  const r = mapResult(parseJson(text), (n: number) => n + 1);
+        \\  return 0;
+        \\}
+    , "callback parameter 'n' is 'number', but mapResult passes 'unknown'");
 }
 
 test "builtin result: Object.keys of a record is a string array" {

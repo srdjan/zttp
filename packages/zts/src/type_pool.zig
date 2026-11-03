@@ -243,6 +243,50 @@ pub const TypePool = struct {
         return self.result_records.contains(idx);
     }
 
+    /// The marked Result record `{ ok: boolean; value?: V; error?: E; errors?: S }`.
+    /// The field order is the one every Result consumer reads. A failure can
+    /// sit under `errors` instead of `error`, so when `errors_type` is not
+    /// `never` the `error` field also admits `undefined`.
+    pub fn addTypedResult(
+        self: *TypePool,
+        allocator: std.mem.Allocator,
+        value_type: TypeIndex,
+        error_type: TypeIndex,
+        errors_type: TypeIndex,
+    ) TypeIndex {
+        const ok_n = self.addName(allocator, "ok");
+        const val_n = self.addName(allocator, "value");
+        const err_n = self.addName(allocator, "error");
+        const errs_n = self.addName(allocator, "errors");
+        const declared_error = if (errors_type == self.idx_never) error_type else self.withUndefined(allocator, error_type);
+        return self.markResultRecord(allocator, self.addRecord(allocator, &.{
+            .{ .name_start = ok_n.start, .name_len = ok_n.len, .type_idx = self.idx_boolean, .optional = false },
+            .{ .name_start = val_n.start, .name_len = val_n.len, .type_idx = value_type, .optional = true },
+            .{ .name_start = err_n.start, .name_len = err_n.len, .type_idx = declared_error, .optional = true },
+            .{ .name_start = errs_n.start, .name_len = errs_n.len, .type_idx = errors_type, .optional = true },
+        }));
+    }
+
+    /// `type_idx` with `undefined` added. `unknown`, `undefined`, an optional
+    /// type, and a union that has `undefined` or `unknown` already admit it.
+    fn withUndefined(self: *TypePool, allocator: std.mem.Allocator, type_idx: TypeIndex) TypeIndex {
+        if (type_idx == null_type_idx) return type_idx;
+        if (type_idx == self.idx_never) return self.idx_undefined;
+        const tag = self.getTag(type_idx) orelse return type_idx;
+        switch (tag) {
+            .t_unknown_type, .t_undefined, .t_nullable => return type_idx,
+            .t_union => {
+                for (self.getUnionMembers(type_idx)) |member| {
+                    const member_tag = self.getTag(member) orelse continue;
+                    if (member_tag == .t_undefined or member_tag == .t_unknown_type) return type_idx;
+                }
+            },
+            // exhaustive: any other type does not admit `undefined`, so it is added below.
+            else => {},
+        }
+        return self.addUnion(allocator, &.{ type_idx, self.idx_undefined });
+    }
+
     // -------------------------------------------------------------------
     // Canonical key memo (see type_key.zig)
     // -------------------------------------------------------------------

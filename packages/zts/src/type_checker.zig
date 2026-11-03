@@ -1783,19 +1783,21 @@ pub const TypeChecker = struct {
         };
     }
 
-    /// A Result whose `value` is `inner` and whose `error` is `error_type`.
-    fn typedResultType(self: *const TypeChecker, inner: TypeIndex, error_type: TypeIndex) TypeIndex {
+    /// The `errors` type of the export named `name`: `unknown` where a runtime
+    /// path fills `errors`, `never` where none does. A name with no row gets
+    /// `unknown`.
+    fn moduleResultErrorsType(self: *const TypeChecker, name: []const u8) TypeIndex {
         const pool = self.env.pool;
-        const ok_name = pool.addName(self.allocator, "ok");
-        const val_name = pool.addName(self.allocator, "value");
-        const err_name = pool.addName(self.allocator, "error");
-        const errs_name = pool.addName(self.allocator, "errors");
-        return pool.markResultRecord(self.allocator, pool.addRecord(self.allocator, &.{
-            .{ .name_start = ok_name.start, .name_len = ok_name.len, .type_idx = pool.idx_boolean, .optional = false },
-            .{ .name_start = val_name.start, .name_len = val_name.len, .type_idx = inner, .optional = true },
-            .{ .name_start = err_name.start, .name_len = err_name.len, .type_idx = error_type, .optional = true },
-            .{ .name_start = errs_name.start, .name_len = errs_name.len, .type_idx = pool.idx_unknown, .optional = true },
-        }));
+        const row = module_result_errors.findByName(name) orelse return pool.idx_unknown;
+        return if (row.fills_errors) pool.idx_unknown else pool.idx_never;
+    }
+
+    /// A Result whose `value` is `inner`, whose `error` is `error_type`, and
+    /// whose `errors` is `errors_type`. When `errors_type` is not `never`, the
+    /// failure can sit under `errors` and leave `error` absent, so the pool
+    /// adds `undefined` to `error`.
+    fn typedResultType(self: *const TypeChecker, inner: TypeIndex, error_type: TypeIndex, errors_type: TypeIndex) TypeIndex {
+        return self.env.pool.addTypedResult(self.allocator, inner, error_type, errors_type);
     }
 
     // -------------------------------------------------------------------
@@ -1831,7 +1833,7 @@ pub const TypeChecker = struct {
         // 2. Structurally identical.
         if (type_key.structurallyEqual(pool, self.allocator, when_true, when_false)) return when_true;
 
-        // Two Results join to one Result whose value and error are the joins
+        // Two Results join to one Result whose value, error, and errors are the joins
         // of the two. A union of records would lose the marking, and with it
         // the Result rules for a field read.
         const true_resolved = self.resolvedType(when_true);
@@ -1841,12 +1843,16 @@ pub const TypeChecker = struct {
             const false_value = self.resultFieldType(false_resolved, "value", 0);
             const true_error = self.resultFieldType(true_resolved, "error", 0);
             const false_error = self.resultFieldType(false_resolved, "error", 0);
+            const true_errors = self.resultFieldType(true_resolved, "errors", 0);
+            const false_errors = self.resultFieldType(false_resolved, "errors", 0);
             if (true_value != null_type_idx and false_value != null_type_idx and
-                true_error != null_type_idx and false_error != null_type_idx)
+                true_error != null_type_idx and false_error != null_type_idx and
+                true_errors != null_type_idx and false_errors != null_type_idx)
             {
                 return self.typedResultType(
                     self.joinTypes(true_value, false_value),
                     self.joinTypes(true_error, false_error),
+                    self.joinTypes(true_errors, false_errors),
                 );
             }
         }
@@ -3474,7 +3480,7 @@ pub const TypeChecker = struct {
             .undefined_value => pool.idx_undefined,
             .unknown_value => pool.idx_unknown,
             // `JSON.tryParse` is not a module export and keeps its record.
-            .json_result => self.typedResultType(pool.idx_unknown, pool.idx_string),
+            .json_result => self.typedResultType(pool.idx_unknown, pool.idx_string, pool.idx_never),
             // These take their type from the receiver or the arguments.
             .receiver_array,
             .receiver_element_or_undefined,
@@ -4018,7 +4024,7 @@ pub const TypeChecker = struct {
                 const schema_node = self.ir_view.getListIndex(call.args_start, 0);
                 if (self.getLiteralString(schema_node)) |schema_name| {
                     if (self.schemaTypeByName(schema_name)) |schema_type| {
-                        return self.typedResultType(schema_type, self.moduleResultErrorType(name));
+                        return self.typedResultType(schema_type, self.moduleResultErrorType(name), self.moduleResultErrorsType(name));
                     }
                 }
             }
@@ -4377,17 +4383,29 @@ pub const TypeChecker = struct {
     /// checked like any other. The switch below lists the positions.
     ///
     /// Annotations are stored compactly: the signature of a function holds
-    /// the annotated parameters only, with no position. A callback with any
-    /// annotation therefore binds nothing here, because the annotation cannot
-    /// be told from a gap. An annotation wins.
+    /// the annotated parameters only, with no position. A callback with some
+    /// but not all parameters annotated therefore binds nothing here, because
+    /// an annotation cannot be told from a gap. A callback with every
+    /// parameter annotated binds each to its annotation (`bindAnnotatedCallbackParams`).
+    /// An annotation wins.
     fn bindCallbackElement(self: *TypeChecker, c: Node.CallExpr) void {
         if (c.args_count == 0) return;
         const callee_tag = self.ir_view.getTag(c.callee) orelse return;
+        if (callee_tag == .identifier) {
+            self.bindCombinatorCallback(c);
+            return;
+        }
         if (callee_tag != .member_access) return;
         const member = self.ir_view.getMember(c.callee) orelse return;
         const name = self.resolveAtomName(member.property) orelse return;
         const shape = callbackShape(name) orelse return;
         const pool = self.env.pool;
+        const arg = self.ir_view.getListIndex(c.args_start, 0);
+        const arg_tag = self.ir_view.getTag(arg) orelse return;
+        if (arg_tag != .arrow_function and arg_tag != .function_expr) return;
+        const func = self.ir_view.getFunction(arg) orelse return;
+        if (func.params_count == 0) return;
+        if (self.bindAnnotatedCallbackParams(arg, func)) return;
         const previous = self.report_inference_diagnostics;
         self.report_inference_diagnostics = false;
         defer self.report_inference_diagnostics = previous;
@@ -4398,14 +4416,6 @@ pub const TypeChecker = struct {
         if (tag == .t_tuple) arr = self.tupleToArrayType(arr) else if (tag != .t_array) return;
         const elem = pool.getArrayElement(arr);
         if (elem == null_type_idx) return;
-        const arg = self.ir_view.getListIndex(c.args_start, 0);
-        const arg_tag = self.ir_view.getTag(arg) orelse return;
-        if (arg_tag != .arrow_function and arg_tag != .function_expr) return;
-        const func = self.ir_view.getFunction(arg) orelse return;
-        if (func.params_count == 0) return;
-        if (self.sourceFunctionSignature(arg)) |sig| {
-            if (sig.param_count > 0) return;
-        }
         switch (shape) {
             .element_index_array => {
                 _ = self.bindCallbackParam(func, 0, elem);
@@ -4424,6 +4434,45 @@ pub const TypeChecker = struct {
                 self.bindReduceAccumulator(c, arg, func, elem);
             },
         }
+    }
+
+    /// Bind each parameter of an inline callback to its annotation when every
+    /// parameter is annotated, so the body reads under the types it declares
+    /// before the call is checked. A callback that has any annotation is
+    /// annotated here and nowhere else: a signature stores annotations without
+    /// positions, so a partly annotated callback binds nothing. Returns true
+    /// when the callback has an annotation.
+    fn bindAnnotatedCallbackParams(self: *TypeChecker, arg: NodeIndex, func: ir.Node.FunctionExpr) bool {
+        const sig = self.sourceFunctionSignature(arg) orelse return false;
+        if (sig.param_count == 0) return false;
+        if (sig.param_count != func.params_count or sig.type_param_count > 0) return true;
+        for (0..func.params_count) |i| {
+            const declared = sig.param_types[i];
+            if (declared == null_type_idx) continue;
+            _ = self.bindCallbackParam(func, @intCast(i), declared);
+        }
+        return true;
+    }
+
+    /// The callback of `mapResult`, `mapError`, `andThen`, or `orElse` from
+    /// `zttp:result` is called with one value: the payload of the Result. An
+    /// unannotated inline callback takes the type of that value (T4). A type
+    /// that is not known leaves the parameter untyped.
+    fn bindCombinatorCallback(self: *TypeChecker, c: Node.CallExpr) void {
+        const name = self.resultExportName(c) orelse return;
+        if (!isCallbackCombinator(name) or c.args_count != 2) return;
+        const arg = self.ir_view.getListIndex(c.args_start, 1);
+        const arg_tag = self.ir_view.getTag(arg) orelse return;
+        if (arg_tag != .arrow_function and arg_tag != .function_expr) return;
+        const func = self.ir_view.getFunction(arg) orelse return;
+        if (func.params_count == 0) return;
+        if (self.bindAnnotatedCallbackParams(arg, func)) return;
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+        const passed = self.bindableType(self.combinatorPassedType(name, c));
+        if (passed == null_type_idx) return;
+        _ = self.bindCallbackParam(func, 0, passed);
     }
 
     /// Bind parameter `position` of `func` to `type_idx`. Returns the binding,
@@ -5821,11 +5870,11 @@ pub const TypeChecker = struct {
         const name = entry.function.name;
         if (std.mem.eql(u8, name, "ok") and call.args_count == 1) {
             const payload = self.resultPayloadType(self.ir_view.getListIndex(call.args_start, 0));
-            return self.typedResultType(payload, pool.idx_never);
+            return self.typedResultType(payload, pool.idx_never, pool.idx_never);
         }
         if (std.mem.eql(u8, name, "err") and call.args_count == 1) {
             const payload = self.resultPayloadType(self.ir_view.getListIndex(call.args_start, 0));
-            return self.typedResultType(pool.idx_never, payload);
+            return self.typedResultType(pool.idx_never, payload, pool.idx_never);
         }
         if (std.mem.eql(u8, name, "unwrapOr") and call.args_count == 2) {
             const result_type = self.inferType(self.ir_view.getListIndex(call.args_start, 0));
@@ -5835,7 +5884,215 @@ pub const TypeChecker = struct {
             if (fallback == null_type_idx or pool.mentionsError(fallback)) return null;
             return self.joinTypes(value_type, pool.widenLiteral(fallback));
         }
+        if (isCallbackCombinator(name) and call.args_count == 2) return self.combinatorCallType(name, call);
+        if (std.mem.eql(u8, name, "collectAll") and call.args_count == 1) return self.collectAllCallType(call);
         return null;
+    }
+
+    /// The `zttp:result` export that `call` names, resolved through the
+    /// import so that a local function of the same name keeps its own type.
+    fn resultExportName(self: *const TypeChecker, call: Node.CallExpr) ?[]const u8 {
+        if (self.ir_view.getTag(call.callee) != .identifier) return null;
+        const binding = self.ir_view.getBinding(call.callee) orelse return null;
+        const entry = self.resolveImportedExport(binding) orelse return null;
+        if (!std.mem.eql(u8, entry.module.specifier, "zttp:result")) return null;
+        return entry.function.name;
+    }
+
+    /// The combinators whose second argument is a callback that the runtime
+    /// calls with one argument: the payload of the Result.
+    fn isCallbackCombinator(name: []const u8) bool {
+        const names = [_][]const u8{ "mapResult", "mapError", "andThen", "orElse" };
+        for (names) |known| {
+            if (std.mem.eql(u8, known, name)) return true;
+        }
+        return false;
+    }
+
+    /// The combinators that call the callback with the error payload. The
+    /// payload is whatever sits under `error` or under `errors`.
+    fn passesErrorPayload(name: []const u8) bool {
+        return std.mem.eql(u8, name, "mapError") or std.mem.eql(u8, name, "orElse");
+    }
+
+    /// The type of the one value that the runtime passes to the callback of
+    /// the combinator `name` in `call`: the `value` type of the first
+    /// argument for `mapResult` and `andThen`, and the join of its `error`
+    /// and `errors` types for `mapError` and `orElse`. Null when the first
+    /// argument is not a Result, or a field has no type. The type can be
+    /// `unknown` or raw JSON: the acceptance check compares against it as it
+    /// stands, and the binding skips those two (`bindableType`).
+    fn combinatorPassedType(self: *const TypeChecker, name: []const u8, call: Node.CallExpr) TypeIndex {
+        if (call.args_count < 2) return null_type_idx;
+        const parts = self.resultParts(self.inferType(self.ir_view.getListIndex(call.args_start, 0))) orelse return null_type_idx;
+        if (passesErrorPayload(name)) return self.joinTypes(parts.error_type, parts.errors_type);
+        return parts.value_type;
+    }
+
+    /// `type_idx` when a parameter can take it as its type, and null when the
+    /// type is `unknown`, raw JSON, or refused: a binding of those would not
+    /// describe the value, and would make an arithmetic check refuse code that
+    /// runs today.
+    fn bindableType(self: *const TypeChecker, type_idx: TypeIndex) TypeIndex {
+        const pool = self.env.pool;
+        if (type_idx == null_type_idx or type_idx == pool.idx_unknown or type_idx == pool.idx_json_value) return null_type_idx;
+        if (pool.mentionsError(type_idx)) return null_type_idx;
+        return type_idx;
+    }
+
+    /// The three field types of a Result type, or of a union of them. Null
+    /// when `type_idx` is not a Result type, when a field has no type, or when
+    /// a field mentions a refused expression.
+    const ResultParts = struct { value_type: TypeIndex, error_type: TypeIndex, errors_type: TypeIndex };
+
+    fn resultParts(self: *const TypeChecker, type_idx: TypeIndex) ?ResultParts {
+        if (!self.isResultType(type_idx, 0)) return null;
+        const pool = self.env.pool;
+        const parts = ResultParts{
+            .value_type = self.resultFieldType(type_idx, "value", 0),
+            .error_type = self.resultFieldType(type_idx, "error", 0),
+            .errors_type = self.resultFieldType(type_idx, "errors", 0),
+        };
+        if (parts.value_type == null_type_idx or parts.error_type == null_type_idx or parts.errors_type == null_type_idx) return null;
+        if (pool.mentionsError(parts.value_type) or pool.mentionsError(parts.error_type) or pool.mentionsError(parts.errors_type)) return null;
+        return parts;
+    }
+
+    /// The function type of a combinator callback: the type its body returns
+    /// for an inline function, read after the walk bound its parameters, and
+    /// the type of the name for any other argument. Null when the argument is
+    /// not a function or has no type.
+    fn combinatorCallbackType(self: *const TypeChecker, arg: NodeIndex) TypeIndex {
+        const tag = self.ir_view.getTag(arg) orelse return null_type_idx;
+        if (tag == .arrow_function or tag == .function_expr) return self.functionExprType(arg);
+        const resolved = self.resolvedType(self.inferType(arg));
+        if (resolved == null_type_idx or self.env.pool.getTag(resolved) != .t_function) return null_type_idx;
+        return resolved;
+    }
+
+    /// A marked Result that has the three field types of `type_idx`, which is
+    /// a Result type or a union of them. Null when `type_idx` is not one.
+    fn normalizedResultType(self: *const TypeChecker, type_idx: TypeIndex) TypeIndex {
+        const parts = self.resultParts(type_idx) orelse return null_type_idx;
+        return self.typedResultType(parts.value_type, parts.error_type, parts.errors_type);
+    }
+
+    /// The type of a call of `mapResult`, `mapError`, `andThen`, or `orElse`
+    /// from `zttp:result`. Each row needs the types of its first argument
+    /// and the return type of its callback; null keeps the table record.
+    ///
+    /// `mapError` stores the callback result under the field that the input
+    /// used, so `error` is the result and `errors` is the result when the
+    /// input's `errors` is not `never`.
+    fn combinatorCallType(self: *const TypeChecker, name: []const u8, call: Node.CallExpr) ?TypeIndex {
+        const mutable = @constCast(self);
+        const previous = mutable.report_inference_diagnostics;
+        mutable.report_inference_diagnostics = false;
+        defer mutable.report_inference_diagnostics = previous;
+
+        const pool = self.env.pool;
+        const parts = self.resultParts(self.inferType(self.ir_view.getListIndex(call.args_start, 0))) orelse return null;
+        const callback_type = self.combinatorCallbackType(self.ir_view.getListIndex(call.args_start, 1));
+        if (callback_type == null_type_idx) return null;
+        const callback_return = pool.getFunctionInfo(callback_type).ret;
+
+        if (std.mem.eql(u8, name, "mapResult")) {
+            const returned = self.callbackReturnType(callback_type);
+            if (returned == null_type_idx) return null;
+            return self.typedResultType(returned, parts.error_type, parts.errors_type);
+        }
+        if (std.mem.eql(u8, name, "mapError")) {
+            const returned = self.callbackReturnType(callback_type);
+            if (returned == null_type_idx) return null;
+            const errors_type = if (parts.errors_type == pool.idx_never) pool.idx_never else returned;
+            return self.typedResultType(parts.value_type, returned, errors_type);
+        }
+        if (std.mem.eql(u8, name, "andThen")) {
+            const next = self.normalizedResultType(callback_return);
+            if (next == null_type_idx) return null;
+            return self.joinTypes(next, self.typedResultType(pool.idx_never, parts.error_type, parts.errors_type));
+        }
+        if (std.mem.eql(u8, name, "orElse")) {
+            const next = self.normalizedResultType(callback_return);
+            if (next == null_type_idx) return null;
+            return self.joinTypes(self.typedResultType(parts.value_type, pool.idx_never, pool.idx_never), next);
+        }
+        return null;
+    }
+
+    /// The type of a call of `collectAll`: the array of the joined value types
+    /// of the elements, and the joined error types. Null for an argument that
+    /// is not an array or a tuple of Results, and for an array with no element
+    /// type or a `never` element (the empty array literal).
+    fn collectAllCallType(self: *const TypeChecker, call: Node.CallExpr) ?TypeIndex {
+        const mutable = @constCast(self);
+        const previous = mutable.report_inference_diagnostics;
+        mutable.report_inference_diagnostics = false;
+        defer mutable.report_inference_diagnostics = previous;
+
+        const pool = self.env.pool;
+        const list_type = self.inferType(self.ir_view.getListIndex(call.args_start, 0));
+        if (list_type == null_type_idx) return null;
+        const resolved = self.resolvedType(self.env.stripProofMarkers(list_type));
+        var joined: ?ResultParts = null;
+        switch (pool.getTag(resolved) orelse return null) {
+            .t_array => {
+                const element = pool.getArrayElement(resolved);
+                if (element == null_type_idx or element == pool.idx_never) return null;
+                joined = self.resultParts(element) orelse return null;
+            },
+            .t_tuple => {
+                const elements = pool.getTupleElements(resolved);
+                if (elements.len == 0) return null;
+                for (elements) |element| {
+                    const parts = self.resultParts(element) orelse return null;
+                    joined = if (joined) |so_far| .{
+                        .value_type = self.joinTypes(so_far.value_type, parts.value_type),
+                        .error_type = self.joinTypes(so_far.error_type, parts.error_type),
+                        .errors_type = self.joinTypes(so_far.errors_type, parts.errors_type),
+                    } else parts;
+                }
+            },
+            // exhaustive: any other argument type is not a list of Results.
+            else => return null,
+        }
+        const parts = joined orelse return null;
+        return self.typedResultType(pool.addArray(self.allocator, parts.value_type), parts.error_type, parts.errors_type);
+    }
+
+    /// Compare the parameters of the callback of a `zttp:result` combinator
+    /// with the one value that the runtime passes (T4), as the array methods
+    /// do: the passed type stands as it is, `unknown` and raw JSON included,
+    /// and only a position with no type at all accepts anything. A parameter
+    /// past the first must be optional or accept `undefined`. Returns true
+    /// after it reports a mismatch, so the call is reported once.
+    fn checkCombinatorCallbackParam(self: *TypeChecker, call: Node.CallExpr) bool {
+        const name = self.resultExportName(call) orelse return false;
+        if (!isCallbackCombinator(name) or call.args_count != 2) return false;
+        const pool = self.env.pool;
+
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+
+        const arg = self.ir_view.getListIndex(call.args_start, 1);
+        const arg_tag = self.ir_view.getTag(arg) orelse return false;
+        var callback_type: TypeIndex = null_type_idx;
+        var func: ?ir.Node.FunctionExpr = null;
+        if (arg_tag == .arrow_function or arg_tag == .function_expr) {
+            const parsed = self.ir_view.getFunction(arg) orelse return false;
+            func = parsed;
+            callback_type = self.functionTypeWithParams(parsed.params_count, self.sourceFunctionSignature(arg), null_type_idx);
+        } else {
+            callback_type = self.resolvedType(self.inferType(arg));
+        }
+        if (callback_type == null_type_idx or pool.getTag(callback_type) != .t_function) return false;
+
+        const passed = self.combinatorPassedType(name, call);
+        const refused = self.firstRefusedCallbackParam(callback_type, &.{passed}) orelse return false;
+        const passed_type = if (refused == 0) passed else pool.idx_undefined;
+        self.reportCallbackParam(arg, func, callback_type, refused, name, passed_type);
+        return true;
     }
 
     /// The Result arguments of a `zttp:*` export, checked by the kind that the
@@ -6173,6 +6430,7 @@ pub const TypeChecker = struct {
             self.checkModuleEncodableArgs(call);
             self.checkModuleBooleanPredicate(call);
             if (self.checkModuleResultArgs(call)) return;
+            if (self.checkCombinatorCallbackParam(call)) return;
         }
         if (callee_tag == .member_access) {
             self.checkResponseJsonPayload(call);
