@@ -4961,7 +4961,7 @@ test "dict callbacks: a named dictFilter callback that accepts what the runtime 
 test "dict callbacks: arithmetic on the value of a Dict from isDict is refused" {
     try expectArithCounts(dict_callback_setup ++
         \\function f(u: unknown): number { if (isDict(u)) { dictFold(u, (acc, value, key) => acc + value, 0); } return 0; }
-    , 0, 1);
+    , 0, 2);
 }
 
 test "dict callbacks: a callback over a union of Dict types keeps today's behavior" {

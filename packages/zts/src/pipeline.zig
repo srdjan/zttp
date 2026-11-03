@@ -346,6 +346,7 @@ pub fn resolve(
     var bool_checker = BoolChecker.init(allocator, parsed.ir_view, parsed.atoms);
     bool_checker.facts = opts.module_facts;
     bool_checker.authoritative_type_checker = if (type_checker_opt) |*tc| tc else null;
+    bool_checker.refuse_untyped_operands = opts.strict;
     errdefer bool_checker.deinit();
     const bool_errors = try bool_checker.check(parsed.root);
     // The pointer targets stack-local optional storage. Consumers use the

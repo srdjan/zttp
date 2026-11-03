@@ -22,6 +22,7 @@ const context = @import("zts-engine").context;
 const module_facts_mod = @import("module_facts.zig");
 const type_checker_mod = @import("type_checker.zig");
 const type_pool_mod = @import("type_pool.zig");
+const strict_checker_mod = @import("strict_checker.zig");
 const node_types = @import("zts-engine").node_types;
 
 const Node = ir.Node;
@@ -165,6 +166,17 @@ pub const BoolChecker = struct {
     /// drives opcode specialization, or the bytecode of every function with a
     /// typed parameter would change.
     declared_params: bool = false,
+    /// Strict paths only (`ResolveOptions.strict`): an arithmetic operand that
+    /// the type checker leaves without a type is refused. Off for the runtime
+    /// load and for direct checker tests, which pass such an operand.
+    refuse_untyped_operands: bool = false,
+    /// The function nodes that enclose the node under the walk, innermost
+    /// last, and the number of enclosing functions. The skip for a parameter
+    /// of a function that ZTS601 refuses reads the stack. A function nested
+    /// deeper than the stack is not recorded, so a parameter of it is not
+    /// skipped and its operand is refused: the overflow only adds a refusal.
+    function_stack: [max_function_stack]NodeIndex = undefined,
+    function_depth: usize = 0,
     /// Sticky failure for proof-relevant maps and diagnostic storage. The
     /// walkers are intentionally void-returning; `check` converts any failed
     /// state update into OutOfMemory before exposing counts. Formatting-only
@@ -178,6 +190,7 @@ pub const BoolChecker = struct {
     };
 
     const MAX_NARROWINGS = 4;
+    const max_function_stack = 64;
 
     pub fn init(allocator: std.mem.Allocator, ir_view: IrView, atoms: ?*context.AtomTable) BoolChecker {
         return .{
@@ -386,7 +399,7 @@ pub const BoolChecker = struct {
                 // Walk the body so `handler`, helpers, and the arrows inside
                 // them get the same boolean checks as module-scope code.
                 const func = self.ir_view.getFunctionOfDecl(node) orelse return;
-                self.walkStmt(func.body);
+                self.walkFunctionBody(decl.init, func);
             },
 
             .export_decl => {
@@ -396,7 +409,7 @@ pub const BoolChecker = struct {
 
             .function_expr, .arrow_function => {
                 const func = self.ir_view.getFunction(node) orelse return;
-                self.walkStmt(func.body);
+                self.walkFunctionBody(node, func);
             },
 
             // Expression-position tags that can appear as statements
@@ -591,7 +604,7 @@ pub const BoolChecker = struct {
             // Function expressions: walk body for boolean checks
             .function_expr, .arrow_function => {
                 const func = self.ir_view.getFunction(node) orelse return;
-                self.walkStmt(func.body);
+                self.walkFunctionBody(node, func);
             },
 
             // A member read evaluates its base, and a computed read its key too.
@@ -1066,8 +1079,127 @@ pub const BoolChecker = struct {
     }
 
     fn requireNumericFromTypeChecker(self: *BoolChecker, node: NodeIndex, op_name: []const u8) void {
+        if (self.refusesUntypedOperand(node)) {
+            self.emitUntypedOperandDiagnostic(node, .arithmetic_on_non_numeric, op_name, "arithmetic requires numbers");
+            return;
+        }
         const operand_type = self.operandTypeNotNumber(node) orelse return;
         self.emitOperandTypeDiagnostic(node, .arithmetic_on_non_numeric, operand_type, op_name, "arithmetic requires numbers");
+    }
+
+    /// Walk the body of the function `fn_node` with that function on the stack
+    /// of enclosing functions.
+    fn walkFunctionBody(self: *BoolChecker, fn_node: NodeIndex, func: Node.FunctionExpr) void {
+        if (self.function_depth < max_function_stack) self.function_stack[self.function_depth] = fn_node;
+        self.function_depth += 1;
+        self.walkStmt(func.body);
+        self.function_depth -= 1;
+    }
+
+    /// Whether strict code refuses `node` as an arithmetic operand because the
+    /// type checker holds no type for it. Three skips leave the operand to a
+    /// diagnostic that already names it. The IR holds no parentheses, so each
+    /// skip looks through them:
+    ///   - a read that the verifier reports as ZTS309, because a refusal here
+    ///     would hide it: the precompile run returns after a boolean or strict
+    ///     error, before the verifier runs;
+    ///   - a parameter of a function that ZTS601 refuses;
+    ///   - an arithmetic expression or a unary minus, whose own operands carry
+    ///     the diagnostic.
+    fn refusesUntypedOperand(self: *BoolChecker, node: NodeIndex) bool {
+        if (!self.refuse_untyped_operands) return false;
+        const checker = self.authoritative_type_checker orelse return false;
+        const inferred = checker.contextTypeOf(node) orelse checker.inferTypeWithoutDiagnostics(node);
+        if (inferred != type_pool_mod.null_type_idx) return false;
+        if (self.isArithmeticExpression(node)) return false;
+        if (checker.verifierReportsAbsentRead(node)) return false;
+        if (self.isParameterOfRefusedFunction(checker, node)) return false;
+        return true;
+    }
+
+    fn isArithmeticExpression(self: *const BoolChecker, node: NodeIndex) bool {
+        const tag = self.ir_view.getTag(node) orelse return false;
+        switch (tag) {
+            .binary_op => {
+                const bin = self.ir_view.getBinary(node) orelse return false;
+                return switch (bin.op) {
+                    .add, .sub, .mul, .div, .mod, .pow => true,
+                    // exhaustive: the other operators are not arithmetic, so their result is not skipped.
+                    else => false,
+                };
+            },
+            .unary_op => {
+                const un = self.ir_view.getUnary(node) orelse return false;
+                return un.op == .neg;
+            },
+            // exhaustive: only a binary or unary operator node is an arithmetic expression.
+            else => return false,
+        }
+    }
+
+    /// Whether `node` is an identifier bound to a parameter of an enclosing
+    /// function that ZTS601 refuses. A parameter read in its own function has
+    /// kind `argument` and matches the parameter by scope and slot. A read
+    /// from a nested function has kind `upvalue` and matches the nearest
+    /// enclosing function that declares a parameter of that name. A local of
+    /// an intermediate function that shares the name can make this skip a
+    /// read it need not skip; ZTS601 refuses the function either way.
+    fn isParameterOfRefusedFunction(
+        self: *const BoolChecker,
+        checker: *type_checker_mod.TypeChecker,
+        node: NodeIndex,
+    ) bool {
+        if ((self.ir_view.getTag(node) orelse return false) != .identifier) return false;
+        const binding = self.ir_view.getBinding(node) orelse return false;
+        if (binding.kind != .argument and binding.kind != .upvalue) return false;
+        var depth = @min(self.function_depth, max_function_stack);
+        while (depth > 0) {
+            depth -= 1;
+            const fn_node = self.function_stack[depth];
+            const func = self.ir_view.getFunction(fn_node) orelse continue;
+            var i: usize = 0;
+            while (i < func.params_count) : (i += 1) {
+                const param = self.ir_view.getListIndex(func.params_start, @intCast(i));
+                const param_binding = self.ir_view.paramBinding(param) orelse continue;
+                const same = switch (binding.kind) {
+                    .argument => param_binding.scope_id == binding.scope_id and param_binding.slot == binding.slot,
+                    .upvalue => param_binding.name_atom == binding.name_atom,
+                    // exhaustive: the guard above admits only argument and upvalue bindings.
+                    else => false,
+                };
+                if (!same) continue;
+                return strict_checker_mod.functionRefusedForAnnotation(checker.env, self.ir_view, fn_node, func);
+            }
+        }
+        return false;
+    }
+
+    fn emitUntypedOperandDiagnostic(
+        self: *BoolChecker,
+        node: NodeIndex,
+        kind: DiagnosticKind,
+        op_name: []const u8,
+        requirement: []const u8,
+    ) void {
+        const help = "give the value a type: annotate it or its source";
+        if (std.fmt.allocPrint(self.allocator, "operand has no known type in '{s}'; {s}", .{ op_name, requirement })) |message| {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = kind,
+                .node = node,
+                .message = message,
+                .help = help,
+                .allocated = true,
+            });
+        } else |_| {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = kind,
+                .node = node,
+                .message = "operand has no known type in arithmetic operator",
+                .help = help,
+            });
+        }
     }
 
     /// The type the type checker holds for an operand, when that type is not
@@ -1188,6 +1320,10 @@ pub const BoolChecker = struct {
                 // The type checker already refused this `+` with ZTS105; one mistake gets one message.
                 if (self.authoritative_type_checker) |checker| {
                     if (checker.isRefused(add_node)) return;
+                }
+                if (self.refusesUntypedOperand(node)) {
+                    self.emitUntypedOperandDiagnostic(node, .add_on_non_addable, "+", "addition requires numbers");
+                    return;
                 }
                 const operand_type = self.operandTypeNotNumber(node) orelse return;
                 self.emitOperandTypeDiagnostic(node, .add_on_non_addable, operand_type, "+", "addition requires numbers");

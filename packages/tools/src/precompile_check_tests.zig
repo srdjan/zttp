@@ -11601,7 +11601,7 @@ const absent_read_dict_callbacks = [_]AbsentReadCase{
     \\  return Response.text(String(total));
     \\}
     },
-    .{ .name = "k1b_fold_over_a_dict_from_isdict_adds_unknown_values", .expect = "ZTS106@6", .source =
+    .{ .name = "k1b_fold_over_a_dict_from_isdict_adds_unknown_values", .expect = "ZTS106@6,ZTS106@6", .source =
     \\import { dictFold } from "zttp:collections";
     \\function total(u: unknown): number {
     \\  if (!isDict(u)) {
@@ -11751,6 +11751,99 @@ const absent_read_result_value = [_]AbsentReadCase{
 
 test "result value: a read of a value that may be undefined after the ok check is refused once" {
     try expectAbsentReadCases(&absent_read_result_value);
+}
+
+const absent_read_untyped_operand = [_]AbsentReadCase{
+    .{ .name = "u3_member_read_on_unknown_in_multiplication", .expect = "ZTS104@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const u: unknown = JSON.parse("{}");
+    \\  const n = u.n * 2;
+    \\  return Response.text(String(n));
+    \\}
+    },
+    .{ .name = "u3_member_read_on_unknown_in_addition", .expect = "ZTS106@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const u: unknown = JSON.parse("{}");
+    \\  const n = u.n + 1;
+    \\  return Response.text(String(n));
+    \\}
+    },
+    .{ .name = "u3_index_then_member_read_keeps_zts309", .expect = "ZTS309@4", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const ps: P[] = [];
+    \\  return Response.text(String(ps[0].age + 1));
+    \\}
+    },
+    .{ .name = "u3_typed_operand_is_clean", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const s: string = req.url;
+    \\  return Response.text(String(s.length + 1));
+    \\}
+    },
+    .{ .name = "u3_published_let_example_is_clean", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  let total = 0;
+    \\  for (const n of [1, 2, 3]) {
+    \\    total = total + n;
+    \\  }
+    \\  return Response.text(String(total));
+    \\}
+    },
+    .{ .name = "u3_parenthesized_sum_of_an_optional_gets_one_diagnostic", .expect = "ZTS106@2", .source =
+    \\function f(x: number | undefined): number {
+    \\  return (x + 1) * 2;
+    \\}
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  return Response.text(String(f(1)));
+    \\}
+    },
+    .{ .name = "u3_error_of_validatejson_after_not_ok_keeps_zts309", .expect = "ZTS309@6", .source =
+    \\import { schemaCompile, validateJson } from "zttp:validate";
+    \\schemaCompile("todo", "{\"type\":\"object\",\"required\":[\"title\"]}");
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const r = validateJson("todo", "{}");
+    \\  if (!r.ok) {
+    \\    return Response.text(String(r.error.length + 1));
+    \\  }
+    \\  return Response.text("ok");
+    \\}
+    },
+    .{ .name = "u3_value_that_admits_undefined_after_ok_keeps_zts309", .expect = "ZTS309@6", .source =
+    \\import { ok } from "zttp:result";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const r = ok(req.headers.get("x-missing"));
+    \\  let n = 0;
+    \\  if (r.ok) {
+    \\    n = r.value.length + 1;
+    \\  }
+    \\  return Response.text(String(n));
+    \\}
+    },
+    .{ .name = "u3_parameters_of_a_named_function_get_zts601_only", .expect = "ZTS601@1,ZTS600@5", .source =
+    \\function add(a, b) {
+    \\  return a + b;
+    \\}
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  return Response.text(String(add(1, 2)));
+    \\}
+    },
+    .{ .name = "u3_captured_parameter_of_a_named_function_gets_zts601_only", .expect = "ZTS601@1", .source =
+    \\function mk(base) {
+    \\  const g = (v: number): number => v + base;
+    \\  return g;
+    \\}
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "u3_unannotated_anonymous_arrow_gets_the_untyped_operand_refusal", .expect = "ZTS106@1", .source =
+    \\const handler = (req) => Response.text(String(req.url.length + 1));
+    },
+};
+
+test "untyped operand: strict code refuses an arithmetic operand with no type and keeps the other diagnostics" {
+    try expectAbsentReadCases(&absent_read_untyped_operand);
 }
 
 const ObserverProbe = struct {

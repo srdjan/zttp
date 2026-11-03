@@ -175,6 +175,54 @@ fn functionSigCovers(sig: ?FunctionSig, params_count: u16) bool {
     return s.return_type != null_type_idx and s.param_count >= params_count;
 }
 
+/// Whether ZTS601 refuses the function `node`, whose data is `func`: it needs
+/// an annotation and the annotation is not complete. A named function needs
+/// one, and an anonymous function needs one when it annotates only some of its
+/// parameters. A caller that must agree with ZTS601, such as the arithmetic
+/// check that skips a parameter of a refused function, calls this function.
+pub fn functionRefusedForAnnotation(
+    env: ?*const TypeEnv,
+    view: IrView,
+    node: NodeIndex,
+    func: ir.Node.FunctionExpr,
+) bool {
+    return functionNeedsAnnotation(env, view, node, func) and
+        !hasCompleteFunctionAnnotation(env, view, node, func);
+}
+
+fn functionNeedsAnnotation(
+    env_opt: ?*const TypeEnv,
+    view: IrView,
+    node: NodeIndex,
+    func: ir.Node.FunctionExpr,
+) bool {
+    if (func.name_atom != 0) return true;
+
+    // Anonymous callbacks passed to proof-relevant helpers must also be
+    // annotated. v1 detects those at the call site via implicit_unknown.
+    //
+    // An anonymous function may carry no annotation at all, but one that
+    // annotates some of its parameters has made a claim about its
+    // signature, and the claim must be whole. `(a: number, b): number`
+    // reads as fully typed, while a call to it is checked against the one
+    // parameter that was annotated.
+    const env = env_opt orelse return false;
+    const reference = env.functionTypeRef(view, node) orelse return false;
+    const sig = env.getFunctionSignature(reference) orelse return false;
+    return sig.param_count < func.params_count;
+}
+
+fn hasCompleteFunctionAnnotation(
+    env_opt: ?*const TypeEnv,
+    view: IrView,
+    node: NodeIndex,
+    func: ir.Node.FunctionExpr,
+) bool {
+    const env = env_opt orelse return false;
+    const reference = env.functionTypeRef(view, node) orelse return false;
+    return functionSigCovers(env.getFunctionSignature(reference), func.params_count);
+}
+
 pub const StrictChecker = struct {
     allocator: std.mem.Allocator,
     ir_view: IrView,
@@ -1092,9 +1140,7 @@ pub const StrictChecker = struct {
 
     fn checkFunctionAnnotation(self: *StrictChecker, node: NodeIndex) void {
         const func = self.ir_view.getFunction(node) orelse return;
-        if (!self.functionNeedsAnnotation(node, func)) return;
-
-        if (!self.hasCompleteFunctionAnnotation(node, func)) {
+        if (functionRefusedForAnnotation(self.type_env, self.ir_view, node, func)) {
             self.addDiagnostic(.{
                 .severity = .err,
                 .kind = .missing_public_annotation,
@@ -1583,33 +1629,6 @@ pub const StrictChecker = struct {
         // that is not one, when a nested declaration reuses the name.
         if (binding.kind != .upvalue and target.kind != .upvalue) return false;
         return binding.name_atom == target.name_atom;
-    }
-
-    fn functionNeedsAnnotation(self: *StrictChecker, node: NodeIndex, func: ir.Node.FunctionExpr) bool {
-        if (func.name_atom != 0) return true;
-
-        // Anonymous callbacks passed to proof-relevant helpers must also be
-        // annotated. v1 detects those at the call site via implicit_unknown.
-        //
-        // An anonymous function may carry no annotation at all, but one that
-        // annotates some of its parameters has made a claim about its
-        // signature, and the claim must be whole. `(a: number, b): number`
-        // reads as fully typed, while a call to it is checked against the one
-        // parameter that was annotated.
-        const env = self.type_env orelse return false;
-        const reference = env.functionTypeRef(self.ir_view, node) orelse return false;
-        const sig = env.getFunctionSignature(reference) orelse return false;
-        return sig.param_count < func.params_count;
-    }
-
-    fn hasCompleteFunctionAnnotation(
-        self: *const StrictChecker,
-        node: NodeIndex,
-        func: ir.Node.FunctionExpr,
-    ) bool {
-        const env = self.type_env orelse return false;
-        const reference = env.functionTypeRef(self.ir_view, node) orelse return false;
-        return functionSigCovers(env.getFunctionSignature(reference), func.params_count);
     }
 
     fn checkCall(self: *StrictChecker, node: NodeIndex) void {

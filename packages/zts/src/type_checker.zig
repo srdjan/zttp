@@ -576,6 +576,57 @@ pub const TypeChecker = struct {
         return value_type != null_type_idx and self.admitsUndefined(value_type);
     }
 
+    /// Whether `read` is a recorded read (a key of `absent_receivers`) that
+    /// the handler verifier will report as ZTS309. It applies the rule of
+    /// `isTrackedResultFieldRead` in `handler_verifier.zig`, which leaves a
+    /// read to the Result check (ZTS303) when its object is a member read
+    /// (dotted, or computed with a string literal) of `unwrap` or `errors`;
+    /// of `error` on a Result for which `resultMayFillErrors` is false; or of
+    /// `value` on a Result for which `resultValueMayBeAbsent` is false.
+    ///
+    /// This function does not ask whether the receiver is a tracked Result
+    /// binding. The verifier reports a read on an untracked Result, so the
+    /// skip set here is a subset of what the verifier reports: no read is
+    /// skipped without a diagnostic. A read that the verifier gives to
+    /// ZTS309 on an untracked Result gets the caller's own diagnostic.
+    ///
+    /// A strict check that refuses a value with no type calls this to leave
+    /// such a read to ZTS309, because the precompile run returns after a
+    /// boolean, type, or strict error and before the verifier runs.
+    pub fn verifierReportsAbsentRead(self: *TypeChecker, read: NodeIndex) bool {
+        if (!self.absent_receivers.contains(read)) return false;
+        const read_tag = self.ir_view.getTag(read) orelse return true;
+        if (read_tag != .member_access and read_tag != .computed_access) return true;
+        const read_member = self.ir_view.getMember(read) orelse return true;
+        const object_tag = self.ir_view.getTag(read_member.object) orelse return true;
+        if (object_tag != .member_access and object_tag != .computed_access) return true;
+        const member = self.ir_view.getMember(read_member.object) orelse return true;
+        const FieldName = enum { value, unwrap, @"error", errors, other };
+        const field: FieldName = blk: {
+            if (member.computed != null_node) {
+                if (self.ir_view.getTag(member.computed) != .lit_string) break :blk .other;
+                const string_index = self.ir_view.getStringIdx(member.computed) orelse break :blk .other;
+                const name = self.ir_view.getString(string_index) orelse break :blk .other;
+                if (std.mem.eql(u8, name, "value")) break :blk .value;
+                if (std.mem.eql(u8, name, "unwrap")) break :blk .unwrap;
+                if (std.mem.eql(u8, name, "error")) break :blk .@"error";
+                if (std.mem.eql(u8, name, "errors")) break :blk .errors;
+                break :blk .other;
+            }
+            if (member.property == @backingInt(object.Atom.value)) break :blk .value;
+            if (member.property == @backingInt(object.Atom.unwrap)) break :blk .unwrap;
+            if (member.property == @backingInt(object.Atom.@"error")) break :blk .@"error";
+            if (member.property == @backingInt(object.Atom.errors)) break :blk .errors;
+            break :blk .other;
+        };
+        return switch (field) {
+            .other => true,
+            .unwrap, .errors => false,
+            .@"error" => self.resultMayFillErrors(member.object),
+            .value => self.resultValueMayBeAbsent(member.object),
+        };
+    }
+
     /// Every recorded read, in ascending node order.
     pub fn absentReceiverReads(self: *const TypeChecker, allocator: std.mem.Allocator) ![]NodeIndex {
         const out = try allocator.alloc(NodeIndex, self.absent_receivers.count());

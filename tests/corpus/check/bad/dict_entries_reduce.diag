@@ -1,3 +1,4 @@
 stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS106","severity":"error","message":"operand has no known type in '+'; addition requires numbers","file":"check/bad/dict_entries_reduce.ts","line":10,"column":53,"suggestion":"give the value a type: annotate it or its source","repair_intent":null}
 {"code":"ZTS106","severity":"error","message":"'unknown' operand in '+' operator; addition requires numbers","file":"check/bad/dict_entries_reduce.ts","line":10,"column":60,"suggestion":"narrow the value to number first, for example with typeof in an if","repair_intent":null}
 {"code":"ZTS628","severity":"advisory","message":"a reduce over `dictEntries` is `dictFold`","file":"check/bad/dict_entries_reduce.ts","line":10,"column":40,"suggestion":"fold the dictionary directly: `dictFold(d, (acc, value, key) => ..., init)`, which walks the entries without building the array first","repair_intent":null}
