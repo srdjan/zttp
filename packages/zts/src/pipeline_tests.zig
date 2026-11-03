@@ -4492,7 +4492,7 @@ test "result error type: the error of err(5) is not a string at a string paramet
         \\  }
         \\  return 0;
         \\}
-    , "argument type does not match parameter type: expected string, got unknown");
+    , "argument type does not match parameter type: expected string, got number");
 }
 
 test "result error type: the error of jwtVerify is a string at a string parameter" {
@@ -4532,6 +4532,193 @@ test "result error type: a Result with an unknown error is accepted as a Result 
         \\  return 0;
         \\}
     );
+}
+
+test "result shape: a record literal is not a Result at mapResult" {
+    try expectOneArgMismatch(
+        \\import { mapResult } from "zttp:result";
+        \\function f(): number {
+        \\  const r = mapResult({ ok: true, value: 21 }, (n: number) => String(n));
+        \\  return 0;
+        \\}
+    , "mapResult argument 1 must be a Result, got '{ ok: true; value: 21 }'");
+}
+
+test "result shape: collectAll of non-Results is ZTS203" {
+    try expectOneArgMismatch(
+        \\import { collectAll } from "zttp:result";
+        \\function f(): number {
+        \\  const r = collectAll([1, 2]);
+        \\  return 0;
+        \\}
+    , "collectAll argument 1 must be an array of Results, got '[1, 2]'");
+}
+
+test "result shape: an andThen callback that returns a number is ZTS203" {
+    try expectOneArgMismatch(
+        \\import { andThen, ok } from "zttp:result";
+        \\function f(): number {
+        \\  const r = andThen(ok(1), (n) => 5);
+        \\  return 0;
+        \\}
+    , "andThen callback must return a Result, got '5'");
+}
+
+test "result shape: a named andThen callback that adds to its parameter is ZTS203" {
+    try expectOneArgMismatch(
+        \\import { andThen, ok } from "zttp:result";
+        \\function inc(n: number): number { return n + 1; }
+        \\function f(): number {
+        \\  const r = andThen(ok(1), inc);
+        \\  return 0;
+        \\}
+    , "andThen callback must return a Result, got 'number'");
+}
+
+test "result shape: a named orElse callback that returns a string is ZTS203" {
+    try expectOneArgMismatch(
+        \\import { err, orElse } from "zttp:result";
+        \\function recover(e: unknown): string { return "x"; }
+        \\function f(): number {
+        \\  const r = orElse(err("x"), recover);
+        \\  return 0;
+        \\}
+    , "orElse callback must return a Result, got 'string'");
+}
+
+test "result shape: a number is not a Result at unwrapOr" {
+    try expectOneArgMismatch(
+        \\import { unwrapOr } from "zttp:result";
+        \\function f(): number {
+        \\  const r = unwrapOr(5, 0);
+        \\  return 0;
+        \\}
+    , "unwrapOr argument 1 must be a Result, got '5'");
+}
+
+test "result shape: collectAll of Results has no diagnostic" {
+    try expectNoTypeDiagnostic(
+        \\import { collectAll, ok } from "zttp:result";
+        \\function f(): number {
+        \\  const r = collectAll([ok(1), ok(2)]);
+        \\  return 0;
+        \\}
+    );
+}
+
+test "result shape: collectAll of mixed ok and err has no diagnostic" {
+    try expectNoTypeDiagnostic(
+        \\import { collectAll, err, ok } from "zttp:result";
+        \\function f(): number {
+        \\  const r = collectAll([ok(1), err("first"), err("second")]);
+        \\  return 0;
+        \\}
+    );
+}
+
+test "result shape: collectAll of an empty array has no diagnostic" {
+    try expectNoTypeDiagnostic(
+        \\import { collectAll } from "zttp:result";
+        \\function f(): number {
+        \\  const r = collectAll([]);
+        \\  return 0;
+        \\}
+    );
+}
+
+test "result shape: an andThen callback that returns a Result has no diagnostic" {
+    try expectNoTypeDiagnostic(
+        \\import { andThen, ok } from "zttp:result";
+        \\function f(): number {
+        \\  const r = andThen(ok(1), (n) => ok(2));
+        \\  return 0;
+        \\}
+    );
+}
+
+test "result shape: a Result from a module export is accepted at mapResult" {
+    try expectNoTypeDiagnostic(
+        \\import { mapResult } from "zttp:result";
+        \\import { parseJson } from "zttp:json";
+        \\function f(text: string): number {
+        \\  const r = mapResult(parseJson(text), (v) => v);
+        \\  return 0;
+        \\}
+    );
+}
+
+test "result type: ok(21) carries the number value and a never error" {
+    try expectOneMismatch(
+        \\import { ok } from "zttp:result";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = ok(21); return 0; }
+    , "type '{ ok: boolean; value?: number; error?: never; errors?: unknown }' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "result type: err(\"x\") carries the string error and a never value" {
+    try expectOneMismatch(
+        \\import { err } from "zttp:result";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = err("x"); return 0; }
+    , "type '{ ok: boolean; value?: never; error?: string; errors?: unknown }' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "result type: unwrapOr of ok(21) and 0 is number" {
+    try expectOneMismatch(
+        \\import { ok, unwrapOr } from "zttp:result";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = unwrapOr(ok(21), 0); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "result type: unwrapOr of err(\"x\") and -1 is number" {
+    try expectOneMismatch(
+        \\import { err, unwrapOr } from "zttp:result";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = unwrapOr(err("x"), -1); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "result type: unwrapOr of ok(21) and a string is a union" {
+    try expectOneMismatch(
+        \\import { ok, unwrapOr } from "zttp:result";
+        \\structural Nope = { zz: Bytes };
+        \\function f(): number { const p: Nope = unwrapOr(ok(21), "none"); return 0; }
+    , "type 'number | string' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "result type: a ternary of ok and err is one Result record" {
+    try expectOneMismatch(
+        \\import { err, ok } from "zttp:result";
+        \\structural Nope = { zz: Bytes };
+        \\function f(flag: boolean): number {
+        \\  const r = flag ? ok(1) : err("x");
+        \\  const p: Nope = r;
+        \\  return 0;
+        \\}
+    , "type '{ ok: boolean; value?: number; error?: string; errors?: unknown }' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "result type: the value of a joined Result reads as number after the ok guard" {
+    try expectOneMismatch(
+        \\import { err, ok } from "zttp:result";
+        \\structural Nope = { zz: Bytes };
+        \\function f(flag: boolean): number {
+        \\  const r = flag ? ok(1) : err("x");
+        \\  if (r.ok) {
+        \\    const p: Nope = r.value;
+        \\  }
+        \\  return 0;
+        \\}
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "result type: a local function named ok keeps its own type" {
+    try expectOneMismatch(
+        \\structural Nope = { zz: Bytes };
+        \\function ok(x: number): string { return "x"; }
+        \\function f(): number { const p: Nope = ok(21); return 0; }
+    , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: Object.keys of a record is a string array" {
@@ -4913,4 +5100,12 @@ test "callback acceptance: a named function passed to a record method that takes
         \\function g(n: number): number { return n; }
         \\function f(api: Api): number { return api.run(g); }
     , "argument type does not match parameter type: expected () => number, got (: number) => number");
+}
+
+test "result shape: an andThen callback declared to return unknown is ZTS203" {
+    try expectOneArgMismatch(
+        \\import { ok, andThen } from "zttp:result";
+        \\function g(n: number): unknown { return n; }
+        \\function f(): number { const r = andThen(ok(1), g); return 0; }
+    , "andThen callback must return a Result, got 'unknown'");
 }

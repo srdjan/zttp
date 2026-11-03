@@ -187,8 +187,10 @@ packages/zts/src/type_checker.zig addNominalConstructorCall catch-block
 packages/zts/src/type_checker.zig addReadonlyMutation catch-block
 packages/zts/src/type_checker.zig addTypeMismatch catch-block
 packages/zts/src/type_checker.zig checkModuleEncodableArgs catch-value
+packages/zts/src/type_checker.zig checkModuleResultArgs catch-value
 packages/zts/src/type_checker.zig reportIfNonContractive catch-block
 packages/zts/src/type_checker.zig reportIfUnencodable catch-value
+packages/zts/src/type_checker.zig reportResultShape catch-value
 
 # TypeEnv.ensureHealthy and TypePool.ensureHealthy reject their recorded
 # allocation failure before their types can support a verdict.

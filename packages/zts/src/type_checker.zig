@@ -27,6 +27,7 @@ const json_utils = @import("zts-base").json_utils;
 const undefined_source_help_text = "the value may be undefined: check it first, or use `?? fallback`";
 const mismatch_help_text = "Change the value or the declared type so that the two types match.";
 const arg_type_help_text = "Pass a value of the parameter type, or change the parameter type.";
+const result_shape_fallback = "a Result argument has the wrong type";
 const object = @import("zts-engine").object;
 const context = @import("zts-engine").context;
 const type_pool_mod = @import("type_pool.zig");
@@ -1829,6 +1830,26 @@ pub const TypeChecker = struct {
 
         // 2. Structurally identical.
         if (type_key.structurallyEqual(pool, self.allocator, when_true, when_false)) return when_true;
+
+        // Two Results join to one Result whose value and error are the joins
+        // of the two. A union of records would lose the marking, and with it
+        // the Result rules for a field read.
+        const true_resolved = self.resolvedType(when_true);
+        const false_resolved = self.resolvedType(when_false);
+        if (pool.isResultRecord(true_resolved) and pool.isResultRecord(false_resolved)) {
+            const true_value = self.resultFieldType(true_resolved, "value", 0);
+            const false_value = self.resultFieldType(false_resolved, "value", 0);
+            const true_error = self.resultFieldType(true_resolved, "error", 0);
+            const false_error = self.resultFieldType(false_resolved, "error", 0);
+            if (true_value != null_type_idx and false_value != null_type_idx and
+                true_error != null_type_idx and false_error != null_type_idx)
+            {
+                return self.typedResultType(
+                    self.joinTypes(true_value, false_value),
+                    self.joinTypes(true_error, false_error),
+                );
+            }
+        }
 
         const true_to_false = pool.isAssignableTo(when_true, when_false);
         const false_to_true = pool.isAssignableTo(when_false, when_true);
@@ -3979,6 +4000,7 @@ pub const TypeChecker = struct {
                 .signature => |sig| self.instantiatedReturnType(node, sig, call),
             };
         }
+        if (self.resultExportCallType(binding, call)) |typed| return typed;
         const name = self.resolveAtomName(binding.name_atom) orelse return null_type_idx;
         // `hole()` types as `never`, the bottom type, so it is assignable to
         // whatever the surrounding context expects and the rest of the program
@@ -5705,6 +5727,205 @@ pub const TypeChecker = struct {
         }
     }
 
+    /// Whether `type_idx` is a Result that the checker built (`isResultRecord`),
+    /// or a union whose every member is one. The test is the pool identity of
+    /// the record and never its shape, so a record literal and a record that a
+    /// handler declares are not Results.
+    fn isResultType(self: *const TypeChecker, type_idx: TypeIndex, depth: u8) bool {
+        if (type_idx == null_type_idx or depth >= 4) return false;
+        const pool = self.env.pool;
+        const resolved = self.resolvedType(self.env.stripProofMarkers(type_idx));
+        if (pool.isResultRecord(resolved)) return true;
+        if (pool.getTag(resolved) != .t_union) return false;
+        const members = pool.getUnionMembers(resolved);
+        if (members.len == 0) return false;
+        for (members) |member| {
+            if (!self.isResultType(member, depth + 1)) return false;
+        }
+        return true;
+    }
+
+    /// The declared type of the field `name` of a Result type: the field of a
+    /// marked record, or the join of the field over the members of a union of
+    /// them. Null when `type_idx` is not a Result type or lacks the field.
+    fn resultFieldType(self: *const TypeChecker, type_idx: TypeIndex, name: []const u8, depth: u8) TypeIndex {
+        if (!self.isResultType(type_idx, 0) or depth >= 4) return null_type_idx;
+        const pool = self.env.pool;
+        const resolved = self.resolvedType(self.env.stripProofMarkers(type_idx));
+        if (pool.isResultRecord(resolved)) {
+            for (pool.getRecordFields(resolved)) |field| {
+                if (std.mem.eql(u8, pool.getName(field.name_start, field.name_len), name)) return field.type_idx;
+            }
+            return null_type_idx;
+        }
+        var joined: TypeIndex = null_type_idx;
+        for (pool.getUnionMembers(resolved)) |member| {
+            const field = self.resultFieldType(member, name, depth + 1);
+            if (field == null_type_idx) return null_type_idx;
+            joined = if (joined == null_type_idx) field else self.joinTypes(joined, field);
+        }
+        return joined;
+    }
+
+    /// Whether `type_idx` is an array of Results, a tuple of Results, or a
+    /// union of those. An array whose element has no type, or is `never`
+    /// (the empty array literal), is accepted: nothing in it can be a
+    /// non-Result.
+    fn isResultListType(self: *const TypeChecker, type_idx: TypeIndex, depth: u8) bool {
+        if (depth >= 4) return false;
+        const pool = self.env.pool;
+        const resolved = self.resolvedType(self.env.stripProofMarkers(type_idx));
+        const tag = pool.getTag(resolved) orelse return false;
+        switch (tag) {
+            .t_array => {
+                const element = pool.getArrayElement(resolved);
+                if (element == null_type_idx or element == pool.idx_never) return true;
+                return self.isResultType(element, 0);
+            },
+            .t_tuple => {
+                for (pool.getTupleElements(resolved)) |element| {
+                    if (!self.isResultType(element, 0)) return false;
+                }
+                return true;
+            },
+            .t_union => {
+                const members = pool.getUnionMembers(resolved);
+                if (members.len == 0) return false;
+                for (members) |member| {
+                    if (!self.isResultListType(member, depth + 1)) return false;
+                }
+                return true;
+            },
+            // exhaustive: any other type is not a list of Results.
+            else => return false,
+        }
+    }
+
+    /// The type `ok(x)` and `err(e)` store: the widened type of the argument,
+    /// or `unknown` when the argument has no type.
+    fn resultPayloadType(self: *const TypeChecker, arg: NodeIndex) TypeIndex {
+        const pool = self.env.pool;
+        const arg_type = self.inferType(arg);
+        if (arg_type == null_type_idx or pool.mentionsError(arg_type)) return pool.idx_unknown;
+        return pool.widenLiteral(arg_type);
+    }
+
+    /// The type of a call of `ok`, `err`, or `unwrapOr` from `zttp:result`,
+    /// resolved through the import so that a local function of the same name
+    /// keeps its own type. Null for any other callee, and for an `unwrapOr`
+    /// whose operands carry no type.
+    fn resultExportCallType(self: *const TypeChecker, binding: ir.BindingRef, call: Node.CallExpr) ?TypeIndex {
+        const entry = self.resolveImportedExport(binding) orelse return null;
+        if (!std.mem.eql(u8, entry.module.specifier, "zttp:result")) return null;
+        const pool = self.env.pool;
+        const name = entry.function.name;
+        if (std.mem.eql(u8, name, "ok") and call.args_count == 1) {
+            const payload = self.resultPayloadType(self.ir_view.getListIndex(call.args_start, 0));
+            return self.typedResultType(payload, pool.idx_never);
+        }
+        if (std.mem.eql(u8, name, "err") and call.args_count == 1) {
+            const payload = self.resultPayloadType(self.ir_view.getListIndex(call.args_start, 0));
+            return self.typedResultType(pool.idx_never, payload);
+        }
+        if (std.mem.eql(u8, name, "unwrapOr") and call.args_count == 2) {
+            const result_type = self.inferType(self.ir_view.getListIndex(call.args_start, 0));
+            const value_type = self.resultFieldType(result_type, "value", 0);
+            if (value_type == null_type_idx or value_type == pool.idx_json_value or pool.mentionsError(value_type)) return null;
+            const fallback = self.inferType(self.ir_view.getListIndex(call.args_start, 1));
+            if (fallback == null_type_idx or pool.mentionsError(fallback)) return null;
+            return self.joinTypes(value_type, pool.widenLiteral(fallback));
+        }
+        return null;
+    }
+
+    /// The Result arguments of a `zttp:*` export, checked by the kind that the
+    /// export declares for each position. A `.result` position takes a
+    /// Result, a `.result_fn` position takes a function whose return is a
+    /// Result, and a `.result_list` position takes an array of Results. The
+    /// runtime hands any other value back unchanged, or turns it into
+    /// `undefined` or `err(undefined)`, so a Result type read from the call
+    /// would be false. An argument with no type is not refused. At most one
+    /// diagnostic is reported for the call, and the return value says so.
+    fn checkModuleResultArgs(self: *TypeChecker, call: Node.CallExpr) bool {
+        if (self.ir_view.getTag(call.callee) != .identifier) return false;
+        const binding = self.ir_view.getBinding(call.callee) orelse return false;
+        const entry = self.resolveImportedExport(binding) orelse return false;
+        if (call.args_count > entry.function.arg_count) return false;
+        const pool = self.env.pool;
+
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+
+        for (entry.function.param_types, 0..) |kind, position| {
+            if (position >= call.args_count) break;
+            const arg = self.ir_view.getListIndex(call.args_start, @intCast(position));
+            switch (kind) {
+                .result => {
+                    const arg_type = self.inferType(arg);
+                    if (arg_type == null_type_idx or self.isResultType(arg_type, 0)) continue;
+                    self.reportResultShape(arg, entry.function.name, position, "must be a Result", arg_type);
+                    return true;
+                },
+                .result_list => {
+                    const arg_type = self.inferType(arg);
+                    if (arg_type == null_type_idx or self.isResultListType(arg_type, 0)) continue;
+                    self.reportResultShape(arg, entry.function.name, position, "must be an array of Results", arg_type);
+                    return true;
+                },
+                .result_fn => {
+                    const arg_tag = self.ir_view.getTag(arg) orelse continue;
+                    const inline_callback = arg_tag == .arrow_function or arg_tag == .function_expr;
+                    const callback_type = if (inline_callback)
+                        self.functionExprType(arg)
+                    else
+                        self.resolvedType(self.inferType(arg));
+                    if (callback_type == null_type_idx or pool.getTag(callback_type) != .t_function) continue;
+                    const returned = pool.getFunctionInfo(callback_type).ret;
+                    // A return with no type keeps today's behavior. `unknown` and raw
+                    // JSON are types that may hold a value that is not a Result,
+                    // so they are refused, as at a `.result` position.
+                    if (returned == null_type_idx) continue;
+                    if (returned == pool.idx_never or pool.mentionsError(returned)) continue;
+                    if (self.isResultType(returned, 0)) continue;
+                    var buf: [1024]u8 = undefined;
+                    const got = pool.formatType(returned, &buf);
+                    const msg = self.allocator.print("{s} callback must return a Result, got '{s}'", .{ entry.function.name, got }) catch "a Result argument has the wrong type";
+                    self.addResultShapeDiagnostic(arg, msg);
+                    return true;
+                },
+                // exhaustive: no other kind of parameter holds a Result.
+                else => {},
+            }
+        }
+        return false;
+    }
+
+    fn reportResultShape(
+        self: *TypeChecker,
+        arg: NodeIndex,
+        export_name: []const u8,
+        position: usize,
+        requirement: []const u8,
+        got: TypeIndex,
+    ) void {
+        var buf: [1024]u8 = undefined;
+        const got_str = self.env.pool.formatType(got, &buf);
+        const msg = self.allocator.print("{s} argument {d} {s}, got '{s}'", .{ export_name, position + 1, requirement, got_str }) catch "a Result argument has the wrong type";
+        self.addResultShapeDiagnostic(arg, msg);
+    }
+
+    fn addResultShapeDiagnostic(self: *TypeChecker, arg: NodeIndex, msg: []const u8) void {
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .arg_type_mismatch,
+            .node = arg,
+            .message = msg,
+            .help = "pass a Result that ok, err, or a module export returns",
+            .allocated = !std.mem.eql(u8, msg, result_shape_fallback),
+        });
+    }
+
     /// How the runtime calls the callback of `name` on an array, as the
     /// values that `checkArrayCallbackParams` compares.
     const CallbackMethod = enum { element_methods, comparator, reduce };
@@ -5951,6 +6172,7 @@ pub const TypeChecker = struct {
         if (callee_tag == .identifier) {
             self.checkModuleEncodableArgs(call);
             self.checkModuleBooleanPredicate(call);
+            if (self.checkModuleResultArgs(call)) return;
         }
         if (callee_tag == .member_access) {
             self.checkResponseJsonPayload(call);
