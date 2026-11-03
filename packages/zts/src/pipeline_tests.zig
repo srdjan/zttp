@@ -4377,25 +4377,25 @@ test "builtin result: reduce with no initial value joins the element and the cal
     , "type 'number | string' is not assignable to type '{ zz: Bytes }'");
 }
 
-test "builtin result: map with a callback whose parameter does not accept the element stays untyped" {
-    try expectNoTypeDiagnostic(
+test "builtin result: map with a callback whose parameter does not accept the element is ZTS203 and adds no result type" {
+    try expectOneArgMismatch(
         \\structural Nope = { zz: Bytes };
         \\function f(xs: string[], cb: (n: number) => number): number { const p: Nope = xs.map(cb); return 0; }
-    );
+    , "callback parameter '#1' is 'number', but map passes 'string'");
 }
 
-test "builtin result: map with a callback that takes more parameters than the runtime passes stays untyped" {
-    try expectNoTypeDiagnostic(
+test "builtin result: map with a callback that takes more required parameters than the runtime passes is ZTS203 and adds no result type" {
+    try expectOneArgMismatch(
         \\structural Nope = { zz: Bytes };
         \\function f(xs: number[], cb: (n: number, i: number, a: number[], extra: number) => string): number { const p: Nope = xs.map(cb); return 0; }
-    );
+    , "callback parameter '#4' is 'number', but map passes 'undefined'");
 }
 
-test "builtin result: reduce with an accumulator that does not accept the callback return stays untyped" {
-    try expectNoTypeDiagnostic(
+test "builtin result: reduce with an accumulator that does not accept the callback return is ZTS203 and adds no result type" {
+    try expectOneArgMismatch(
         \\structural Nope = { zz: Bytes };
         \\function f(xs: number[], cb: (acc: string, n: number) => number): number { const p: Nope = xs.reduce(cb, ""); return 0; }
-    );
+    , "callback parameter '#1' is 'string', but reduce passes 'number'");
 }
 
 test "builtin result: an array method on a receiver that may be undefined stays untyped" {
@@ -4743,8 +4743,8 @@ test "callback parameter: a parameter named range keeps its own type in for...of
 test "callback parameter: an annotated index parameter keeps its annotation" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };
-        \\function f(xs: number[]): number { xs.map((v: number, i: string) => { const p: Nope = i; return v; }); return 0; }
-    , "type 'string' is not assignable to type '{ zz: Bytes }'");
+        \\function f(xs: number[]): number { xs.map((v: number, i: number | string) => { const p: Nope = i; return v; }); return 0; }
+    , "type 'number | string' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "callback parameter: a named function passed to map is unchanged" {
@@ -4753,4 +4753,106 @@ test "callback parameter: a named function passed to map is unchanged" {
         \\function g(v, i) { const p: Nope = i; return v; }
         \\function f(xs: number[]): number { xs.map(g); return 0; }
     );
+}
+
+/// `source` must report exactly one ZTS203 (`arg_type_mismatch`) with `message`.
+fn expectOneArgMismatch(source: []const u8, comptime message: []const u8) !void {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.typeDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqual(type_checker_mod.DiagnosticKind.arg_type_mismatch, diagnostics[0].kind);
+            try testing.expectEqualStrings(message, diagnostics[0].message);
+        }
+    };
+    try withSession(testing.allocator, source, Probe.run);
+}
+
+test "callback acceptance: an annotated map parameter that refuses the element is ZTS203" {
+    try expectOneArgMismatch(
+        \\function f(): number { [1, 2].map((s: string) => s.toUpperCase()); return 0; }
+    , "callback parameter 's' is 'string', but map passes 'number'");
+}
+
+test "callback acceptance: a named map callback that refuses the element is ZTS203" {
+    try expectOneArgMismatch(
+        \\function up(s: string): string { return s.toUpperCase(); }
+        \\function f(): number { [1, 2].map(up); return 0; }
+    , "callback parameter '#1' is 'string', but map passes 'number'");
+}
+
+test "callback acceptance: an annotated filter parameter that refuses the element is ZTS203" {
+    try expectOneArgMismatch(
+        \\function f(): number { [1, 2].filter((s: string) => s === "a"); return 0; }
+    , "callback parameter 's' is 'string', but filter passes 'number'");
+}
+
+test "callback acceptance: a named predicate whose parameter accepts the element is accepted" {
+    try expectNoTypeDiagnostic(
+        \\function big(n: number): boolean { return n > 1; }
+        \\function f(): number { [1, 2].filter(big); return 0; }
+    );
+}
+
+test "callback acceptance: a union receiver passes the union of the element types" {
+    try expectOneArgMismatch(
+        \\function f(xs: number[] | string[]): number { xs.map((s: string) => s); return 0; }
+    , "callback parameter 's' is 'string', but map passes 'number | string'");
+}
+
+test "callback acceptance: an annotated index parameter that refuses number is ZTS203" {
+    try expectOneArgMismatch(
+        \\function f(xs: number[]): number { xs.map((v: number, i: string) => v); return 0; }
+    , "callback parameter 'i' is 'string', but map passes 'number'");
+}
+
+test "callback acceptance: a forEach parameter past the passed values is ZTS203" {
+    try expectOneArgMismatch(
+        \\function f(xs: number[]): number { xs.forEach((v: number, i: number, a: number[], extra: number) => v); return 0; }
+    , "callback parameter 'extra' is 'number', but forEach passes 'undefined'");
+}
+
+test "callback acceptance: a forEach parameter past the passed values that admits undefined is accepted" {
+    try expectNoTypeDiagnostic(
+        \\function f(xs: number[]): number { xs.forEach((v: number, i: number, a: number[], extra: number | undefined) => v); return 0; }
+    );
+}
+
+test "callback acceptance: a reduce accumulator that refuses the seed is ZTS203" {
+    try expectOneArgMismatch(
+        \\function f(): number { [1, 2].reduce((acc: string, n: number) => acc, 0); return 0; }
+    , "callback parameter 'acc' is 'string', but reduce passes 'number'");
+}
+
+test "callback acceptance: a reduce accumulator that accepts the seed is accepted" {
+    try expectNoTypeDiagnostic(
+        \\function f(): number { return [1, 2].reduce((acc: number, n: number) => acc + n, 0); }
+    );
+}
+
+test "callback acceptance: a toSorted comparator parameter that refuses the element is ZTS203" {
+    try expectOneArgMismatch(
+        \\function f(): number { [1, 2].toSorted((a: string, b: string) => 0); return 0; }
+    , "callback parameter 'a' is 'string', but toSorted passes 'number'");
+}
+
+test "callback acceptance: an unannotated map callback is accepted" {
+    try expectNoTypeDiagnostic(
+        \\function f(): number { [1, 2].map((v) => v + 1); return 0; }
+    );
+}
+
+test "callback acceptance: a module export passed to map is checked against the element" {
+    try expectOneArgMismatch(
+        \\import { sha256 } from "zttp:crypto";
+        \\function f(): number { [1, 2].map(sha256); return 0; }
+    , "callback parameter '#1' is 'string', but map passes 'number'");
+}
+
+test "callback acceptance: a named function passed to a record method that takes a no-parameter callback keeps the arity refusal" {
+    try expectOneArgMismatch(
+        \\structural Api = { run: (cb: () => number) => number };
+        \\function g(n: number): number { return n; }
+        \\function f(api: Api): number { return api.run(g); }
+    , "argument type does not match parameter type: expected () => number, got (: number) => number");
 }

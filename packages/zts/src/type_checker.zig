@@ -5691,6 +5691,247 @@ pub const TypeChecker = struct {
         }
     }
 
+    /// How the runtime calls the callback of `name` on an array, as the
+    /// values that `checkArrayCallbackParams` compares.
+    const CallbackMethod = enum { element_methods, comparator, reduce };
+
+    fn callbackMethod(name: []const u8) ?CallbackMethod {
+        return switch (callbackShape(name) orelse return null) {
+            .element_index_array => .element_methods,
+            .comparator => .comparator,
+            .reduce => .reduce,
+            // exhaustive: `flatMap` is not installed, so no row types it.
+            .element_only => null,
+        };
+    }
+
+    /// The element type and the passed array type of an array-method
+    /// receiver: an array, a tuple (through `tupleToArrayType`), or a union
+    /// whose every member is one of those. Null elements mean the receiver is
+    /// any other type, or has no element type.
+    const CallbackReceiver = struct { element: TypeIndex, array: TypeIndex };
+
+    fn callbackReceiver(self: *const TypeChecker, receiver: TypeIndex) ?CallbackReceiver {
+        if (receiver == null_type_idx) return null;
+        const pool = self.env.pool;
+        const resolved = self.resolvedType(receiver);
+        if (pool.getTag(resolved) == .t_union) {
+            const members = pool.getUnionMembers(resolved);
+            if (members.len == 0 or members.len > MAX_UNION_MEMBERS) return null;
+            var elements: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+            for (members, 0..) |member, i| {
+                const member_array = self.arrayReceiverType(member);
+                if (member_array == null_type_idx) return null;
+                elements[i] = pool.getArrayElement(member_array);
+            }
+            const element = pool.addUnion(self.allocator, elements[0..members.len]);
+            if (element == null_type_idx) return null;
+            return .{ .element = element, .array = resolved };
+        }
+        const array = self.arrayReceiverType(resolved);
+        if (array == null_type_idx) return null;
+        const element = pool.getArrayElement(array);
+        if (element == null_type_idx) return null;
+        return .{ .element = element, .array = array };
+    }
+
+    /// `element` without `undefined`: the runtime sorts an `undefined`
+    /// element last and never passes it to a comparator.
+    fn withoutUndefined(self: *const TypeChecker, element: TypeIndex) TypeIndex {
+        const pool = self.env.pool;
+        const resolved = self.resolvedType(element);
+        return switch (pool.getTag(resolved) orelse return null_type_idx) {
+            .t_nullable => pool.getNullableInner(resolved),
+            .t_undefined => null_type_idx,
+            .t_union => pool.excludeUnionMember(self.allocator, resolved, pool.idx_undefined),
+            // exhaustive: any other element type cannot hold `undefined`, so it is passed as is.
+            else => element,
+        };
+    }
+
+    /// Whether the callback type `callback_type` accepts the value that the
+    /// runtime passes in each position, and `undefined` in each position
+    /// past `passed`. A `null_type_idx` in `passed` is a value with no known
+    /// type, and its position accepts anything. Returns the index of the
+    /// first parameter that fails, or null.
+    fn firstRefusedCallbackParam(self: *const TypeChecker, callback_type: TypeIndex, passed: []const TypeIndex) ?usize {
+        const pool = self.env.pool;
+        const params = pool.getFunctionInfo(callback_type).params;
+        for (params, 0..) |param, i| {
+            if (param.type_idx == null_type_idx or param.type_idx == pool.idx_unknown) continue;
+            if (i < passed.len) {
+                if (passed[i] == null_type_idx) continue;
+                if (!self.env.isAssignableTo(passed[i], param.type_idx)) return i;
+            } else {
+                if (param.optional) continue;
+                if (!self.env.isAssignableTo(pool.idx_undefined, param.type_idx)) return i;
+            }
+        }
+        return null;
+    }
+
+    /// Compare the parameters of the callback argument of an array method
+    /// with the values that the runtime passes (T1). Returns true after it
+    /// reports a mismatch, so the call is reported once.
+    fn checkArrayCallbackParams(self: *TypeChecker, call: Node.CallExpr) bool {
+        if (call.args_count == 0) return false;
+        const member = self.ir_view.getMember(call.callee) orelse return false;
+        if (member.computed != null_node) return false;
+        const name = self.resolveAtomName(member.property) orelse return false;
+        const method = callbackMethod(name) orelse return false;
+        const pool = self.env.pool;
+
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+
+        const receiver = self.callbackReceiver(self.inferType(member.object)) orelse return false;
+        const arg = self.ir_view.getListIndex(call.args_start, 0);
+        const arg_tag = self.ir_view.getTag(arg) orelse return false;
+        const inline_callback = arg_tag == .arrow_function or arg_tag == .function_expr;
+
+        var callback_type: TypeIndex = null_type_idx;
+        var func: ?ir.Node.FunctionExpr = null;
+        if (inline_callback) {
+            const parsed = self.ir_view.getFunction(arg) orelse return false;
+            func = parsed;
+            callback_type = self.functionTypeWithParams(parsed.params_count, self.sourceFunctionSignature(arg), null_type_idx);
+        } else {
+            callback_type = self.resolvedType(self.inferType(arg));
+        }
+        if (callback_type == null_type_idx or pool.getTag(callback_type) != .t_function) return false;
+
+        var passed: [4]TypeIndex = undefined;
+        var passed_count: usize = 0;
+        switch (method) {
+            .element_methods => {
+                passed = .{ receiver.element, pool.idx_number, receiver.array, null_type_idx };
+                passed_count = 3;
+            },
+            .comparator => {
+                const element = self.withoutUndefined(receiver.element);
+                if (element == null_type_idx) return false;
+                passed = .{ element, element, null_type_idx, null_type_idx };
+                passed_count = 2;
+            },
+            .reduce => {
+                var accumulator = receiver.element;
+                if (call.args_count >= 2) {
+                    const seed = self.inferType(self.ir_view.getListIndex(call.args_start, 1));
+                    accumulator = if (seed != null_type_idx and self.isDefiniteType(seed, 0)) pool.widenLiteral(seed) else null_type_idx;
+                }
+                passed = .{ accumulator, receiver.element, pool.idx_number, receiver.array };
+                passed_count = 4;
+            },
+        }
+
+        const refused = self.firstRefusedCallbackParam(callback_type, passed[0..passed_count]);
+        var param_position: usize = 0;
+        var passed_type: TypeIndex = pool.idx_undefined;
+        if (refused) |position| {
+            param_position = position;
+            if (position < passed_count) passed_type = passed[position];
+        } else if (method == .reduce) {
+            // An annotated accumulator must also accept each callback result.
+            // An inline callback's result is the type its body returns; a
+            // named function's is its declared return.
+            const params = pool.getFunctionInfo(callback_type).params;
+            if (params.len == 0) return false;
+            const accumulator_type = params[0].type_idx;
+            if (accumulator_type == null_type_idx or accumulator_type == pool.idx_unknown) return false;
+            const result_type = if (inline_callback) self.functionExprType(arg) else callback_type;
+            if (result_type == null_type_idx) return false;
+            const returned = self.callbackReturnType(result_type);
+            if (returned == null_type_idx) return false;
+            if (self.env.isAssignableTo(returned, accumulator_type)) return false;
+            passed_type = returned;
+        } else return false;
+
+        self.reportCallbackParam(arg, func, callback_type, param_position, name, passed_type);
+        return true;
+    }
+
+    /// Whether `call` is `filter`, `find`, `findIndex`, `some`, or `every` on
+    /// an array receiver: the calls whose callback parameters
+    /// `checkArrayCallbackParams` owns. Any other member call keeps the full
+    /// function type check, parameters included.
+    fn isArrayPredicateCall(self: *TypeChecker, call: Node.CallExpr) bool {
+        const member = self.ir_view.getMember(call.callee) orelse return false;
+        if (member.computed != null_node) return false;
+        const name = self.resolveAtomName(member.property) orelse return false;
+        const predicates = [_][]const u8{ "filter", "find", "findIndex", "some", "every" };
+        var known = false;
+        for (predicates) |predicate| {
+            if (std.mem.eql(u8, predicate, name)) known = true;
+        }
+        if (!known) return false;
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+        return self.callbackReceiver(self.inferType(member.object)) != null;
+    }
+
+    /// The argument type compared with the parameter type `param_type`. A
+    /// predicate parameter (`() => boolean`) constrains the callback's
+    /// return type only: `checkArrayCallbackParams` owns its parameters. So a
+    /// named function with parameters compares by its return type, as an
+    /// inline callback does.
+    fn predicateArgumentType(self: *const TypeChecker, arg: NodeIndex, param_type: TypeIndex) TypeIndex {
+        const arg_type = self.argumentTypeForChecking(arg);
+        const pool = self.env.pool;
+        if (arg_type == null_type_idx or param_type == null_type_idx) return arg_type;
+        if (pool.getTag(arg_type) != .t_function or pool.getTag(param_type) != .t_function) return arg_type;
+        if (pool.getFunctionInfo(param_type).params.len != 0) return arg_type;
+        const info = pool.getFunctionInfo(arg_type);
+        if (info.params.len == 0) return arg_type;
+        return pool.addFunctionWithReturn(self.allocator, &.{}, info.ret);
+    }
+
+    fn reportCallbackParam(
+        self: *TypeChecker,
+        arg: NodeIndex,
+        func: ?ir.Node.FunctionExpr,
+        callback_type: TypeIndex,
+        position: usize,
+        method: []const u8,
+        passed_type: TypeIndex,
+    ) void {
+        const pool = self.env.pool;
+        const param = pool.getFunctionInfo(callback_type).params[position];
+        // A named function type holds no parameter name, so the position
+        // stands in: `#1` is the first parameter.
+        var source_name: ?[]const u8 = null;
+        if (func) |parsed| {
+            if (position < parsed.params_count) {
+                const param_idx = self.ir_view.getListIndex(parsed.params_start, @intCast(position));
+                if (self.ir_view.paramBinding(param_idx)) |binding| source_name = self.resolveAtomName(binding.name_atom);
+            }
+        }
+        var buf: [2048]u8 = undefined;
+        const expected_str = pool.formatType(param.type_idx, buf[0..1024]);
+        const passed_str = pool.formatType(passed_type, buf[1024..2048]);
+        const printed = if (source_name) |label|
+            self.allocator.print(
+                "callback parameter '{s}' is '{s}', but {s} passes '{s}'",
+                .{ label, expected_str, method, passed_str },
+            )
+        else
+            self.allocator.print(
+                "callback parameter '#{d}' is '{s}', but {s} passes '{s}'",
+                .{ position + 1, expected_str, method, passed_str },
+            );
+        if (printed) |msg| {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .arg_type_mismatch,
+                .node = arg,
+                .message = msg,
+                .help = "annotate the parameter with the type that the method passes, or remove the annotation",
+                .allocated = true,
+            });
+        } else |_| self.markAllocationFailure();
+    }
+
     fn checkCallArgs(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
         const callee_tag = self.ir_view.getTag(call.callee) orelse return;
         if (callee_tag == .identifier) {
@@ -5699,6 +5940,7 @@ pub const TypeChecker = struct {
         }
         if (callee_tag == .member_access) {
             self.checkResponseJsonPayload(call);
+            if (self.checkArrayCallbackParams(call)) return;
             const callee_type = self.inferType(call.callee);
             const tag = self.env.pool.getTag(callee_type) orelse return;
             if (tag == .t_function) {
@@ -5713,10 +5955,14 @@ pub const TypeChecker = struct {
                     self.addArgCountMismatch(node, info.params.len, @intCast(call.args_count));
                     return;
                 }
+                const predicate_call = self.isArrayPredicateCall(call);
                 for (info.params, 0..) |param, i| {
                     if (i >= call.args_count) break;
                     const arg_idx = self.ir_view.getListIndex(call.args_start, @intCast(i));
-                    const arg_type = self.argumentTypeForChecking(arg_idx);
+                    const arg_type = if (i == 0 and predicate_call)
+                        self.predicateArgumentType(arg_idx, param.type_idx)
+                    else
+                        self.argumentTypeForChecking(arg_idx);
                     if (arg_type != null_type_idx and param.type_idx != null_type_idx and !self.env.isAssignableTo(arg_type, param.type_idx)) {
                         self.addArgTypeMismatch(arg_idx, param.type_idx, arg_type);
                     }
