@@ -710,6 +710,17 @@ pub const writeJsonString = json_utils.writeJsonString;
 /// explicitly registered extensions. Iterate it to register the module set.
 pub const builtinModules = builtin_modules.all;
 
+/// The type text of the `error` field that the runtime stores when the export
+/// `name` of `module` returns a Result: `string` or `unknown`. The checker reads
+/// the same row, so an emitted `.d.ts` and the checker agree.
+pub fn moduleResultErrorText(module: []const u8, name: []const u8) []const u8 {
+    const row = compiler.module_result_errors.find(module, name) orelse return "unknown";
+    return switch (row.error_type) {
+        .string => "string",
+        .unknown => "unknown",
+    };
+}
+
 /// Union the capabilities every named module requires, resolved through the
 /// registry linked into this build. The runtime compares the result against
 /// an embedded contract's stored matrix to detect drift.

@@ -813,7 +813,7 @@ pub fn generateTypeDefs(writer: anytype) void {
                 const optional_marker: []const u8 = if (i >= required_arg_count) "?" else "";
                 writer.print("arg{d}{s}: {s}", .{ i, optional_marker, paramTypeText(func, i, pt) }) catch return;
             }
-            writer.print("): {s};\n", .{returnTypeText(func)}) catch return;
+            writer.print("): {s};\n", .{returnTypeText(binding.specifier, func)}) catch return;
         }
         writer.print("}}\n\n", .{}) catch return;
     }
@@ -834,8 +834,13 @@ fn paramTypeText(
     return returnKindToTs(kind);
 }
 
-fn returnTypeText(func: @import("zts").module_binding.FunctionBinding) []const u8 {
+/// A Result return names the `error` type that the runtime stores for this
+/// export, as the checker does. A Result parameter accepts any error.
+fn returnTypeText(module: []const u8, func: @import("zts").module_binding.FunctionBinding) []const u8 {
     if (func.signature) |sig| return sig.returns;
+    if (func.returns == .result and std.mem.eql(u8, zts.moduleResultErrorText(module, func.name), "string")) {
+        return "{ ok: boolean; value?: unknown; error?: string; errors?: unknown }";
+    }
     return returnKindToTs(func.returns);
 }
 
@@ -850,7 +855,7 @@ fn returnKindToTs(kind: @import("zts").module_binding.ReturnKind) []const u8 {
         .optional_string => "string | undefined",
         .optional_object => "Record<string, unknown> | undefined",
         .optional_number => "number | undefined",
-        .result => "{ ok: boolean; value?: unknown; error?: string; errors?: unknown }",
+        .result => "{ ok: boolean; value?: unknown; error?: unknown; errors?: unknown }",
         .dict => "Dict<unknown, unknown>",
         .bytes => "Bytes",
     };
@@ -878,7 +883,7 @@ fn forEachSignatureType(
                 try visit(ctx, binding.specifier, func.name, i, paramTypeText(func, i, pt));
                 count += 1;
             }
-            try visit(ctx, binding.specifier, func.name, func.param_types.len, returnTypeText(func));
+            try visit(ctx, binding.specifier, func.name, func.param_types.len, returnTypeText(binding.specifier, func));
             count += 1;
         }
     }
@@ -988,7 +993,9 @@ fn signatureCorpusDigest(allocator: std.mem.Allocator, out_members: *usize) ![32
 /// Parameter names are not part of this digest, which covers arity and types.
 // Moved 2026-09-28 when A4 changed the fetch return signatures and A3 added sseEvents.
 // Measured twice from the retained Phase 3 signature surface.
-const frozen_signature_digest = "5b880ac021fa54f6b488a29f56b1f9dd9c8afb3d0251cfc0626183a84f952321";
+// Moved 2026-11-02 when a Result return took its error type from
+// `module_result_errors.zig` and a Result parameter took `error?: unknown`.
+const frozen_signature_digest = "c8ae92fec66875616c65ffffd720f1d7767f77769d800a3bbdc09a212ea41ce1";
 
 test "frozen signature corpus: the gate has an input before it has a verdict" {
     // The floor. A corpus that is empty, or an emitter that writes nothing,
@@ -1166,4 +1173,20 @@ test "a spec diagnostic names the spec it is about" {
         .kind = .effect_undeclared,
         .spec_name = "Effects",
     }) == null);
+}
+
+/// `true` when the emitted `.d.ts` holds `line` exactly.
+fn typeDefsContain(line: []const u8) !bool {
+    var aw: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer aw.deinit();
+    generateTypeDefs(&aw.writer);
+    return std.mem.indexOf(u8, aw.written(), line) != null;
+}
+
+test "type defs: a Result whose runtime error is a record declares an unknown error" {
+    try std.testing.expect(try typeDefsContain("  export function parseJson(arg0: string): { ok: boolean; value?: unknown; error?: unknown; errors?: unknown };\n"));
+}
+
+test "type defs: a Result whose runtime error is a string message declares a string error" {
+    try std.testing.expect(try typeDefsContain("export function jwtVerify(arg0: string, arg1: string, arg2?: string): { ok: boolean; value?: unknown; error?: string; errors?: unknown };\n"));
 }
