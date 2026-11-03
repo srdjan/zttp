@@ -1,6 +1,6 @@
 # Member access, string index, and Dict types, 2026-11-03
 
-Status: revision 1, 2026-11-03, validated. Approved 2026-11-03: the owner chose option (a) of Decision 1 and option (a) of Decision 2. The approval covers the units S1, P9, K1a, K1b, R3, the conditional U3, and D, with local commits. On 2026-11-03 the owner chose option (a) of D1, D2, and D3 at the end of the [callback parameters and Result types plan](2026-11-02-callback-and-result-types-plan.md). That approval covers writing and validating this plan. Execution needs a separate approval. No approval covers a push, a provider call, or a re-record.
+Status: complete 2026-11-03 on local `main`, units S1, P9, K1a, K1b, R3, and D. U3 stopped at its entry check; see the execution record. Revision 1, validated. Approved 2026-11-03: the owner chose option (a) of Decision 1 and option (a) of Decision 2. The approval covers the units S1, P9, K1a, K1b, R3, the conditional U3, and D, with local commits. On 2026-11-03 the owner chose option (a) of D1, D2, and D3 at the end of the [callback parameters and Result types plan](2026-11-02-callback-and-result-types-plan.md). That approval covers writing and validating this plan. Execution needs a separate approval. No approval covers a push, a provider call, or a re-record.
 
 D1 (a): give the `dictFold` callbacks and `ps[0].age` what U3 needs, then run the U3 entry check again. D2 (a): check a member call on a receiver that is not a record (P9). D3 (a): fix the false `dictFold` refusal in the same plan.
 
@@ -147,3 +147,49 @@ Revision 1, 2026-11-03. A Fable review attacked the design and ran probes. A Cod
 - Codex: `absent_receivers` is keyed by the read node, not by the receiver. Design item 6 says so.
 - Codex: a static `unknown` does not show that a program fails at runtime. The stop condition now separates a value with one runtime type from a value that can hold any JSON value.
 - Codex: D-012 freezes goldens and pins, so revision 0's rule needed reconciling. Fable judged the rule consistent with D-012's binds and gate. Decision 1 puts the choice to the owner.
+
+## Execution record
+
+Each unit ran its gates unfiltered, with a private cache and no provider key. Opus reviewed each diff and reran the gates: `zig build test`, `test-zruntime`, `test-examples`, `test-expert-app`, `test-diagnostic-corpus`, `test-bytecode-identity`, `test-residual-guards-drift`, `test-docs-drift`, `test-proof-ratchet-drift`, `test-precompile`, `test-modules`, `test-flow-census`, `test-standin`, and `zig fmt --check`. The offline replay in `test-expert-app` held at every unit. Each unit's tests failed before its fix, except the guard cases named below.
+
+| Unit | Commit | Result |
+|---|---|---|
+| S1 | `9a4f9368` | Q2 and Q7 refused |
+| P9 | `780e93d9` | Q1, Q3, Q8, and Q11 refused; a member read on `unknown` stays accepted |
+| K1a | `dd020b2a` | Q4 and Q5 accepted with the types of Design item 3 |
+| K1b | `8cefd021` | the `dictFold` target passes with `value: number` |
+| R3 | `2d4e9bcf` | Q9 refused with ZTS309 |
+| U3 | none | the entry check failed; see "U3 entry check" below |
+| D | this commit | docs, D-012 clarification, roadmap, website |
+
+### Deviations
+
+- S1: Opus added the `// exhaustive:` reason that the proof-swallow gate requires. The precompile case `r33_string_index` moved from accepted to `ZTS201@3`.
+- P9: the refusal of a member read on `unknown` refused `examples/` programs that run correctly: `parsed.error.kind` in `json-and-dict.ts`, a field of `upstream.json()` in the weather examples, and `bytes-boundary.ts`. So only a call on `unknown` is refused. A read on `unknown` passes and has no type. P9 also refuses a call through a member that one union member lacks (Q11: `x.f(2)` with `x: A | B` where only `A` has `f`). The union branch now resolves named records, so `v.n` on `A | B` where `B` has no `n` is `number | undefined`. That closes a roadmap item.
+- K1a: an unannotated `let d = dictEmpty();` widens to `Dict<unknown, unknown>`, as `let ys = [];` widens. Without the widening, `d = dictSet(d, "a", 1)` got ZTS200. `let d = dictSet(dictEmpty(), "a", 1); d = dictSet(d, "b", "x");` gets ZTS200, as an array does. No tracked file has that form. Q3 is refused by ZTS309, because `dictGet` is `V | undefined`.
+- K1a, under Decision 1 (a): the goldens `dict_entries_reduce.diag` (+ZTS106) and `dict_entry_round_trip.diag` (+ZTS104) gained a line, and the R7c census moved from 124 to 126. The stand-in drafts of `dict-entry-round-trip` and `dict-entries-reduce` were rewritten, and the stand-in `content_hash` in `packages/pi/src/standin/range.zig` moved. The stand-in pin is offline, and the replay does not read it. Decision 1 does not name that pin.
+- K1b: a named `dictFilter` predicate now compares by its return type. Before, `function big(v: number, k: string): boolean` got a false ZTS203. A callback over `Dict<never, never>` binds nothing, `dictMapValues` over it is the same Dict, and `dictFold` over it is the widened seed. An annotated callback over `Dict<unknown, unknown>` that names `v: number` gets ZTS203. An unannotated parameter past those that the runtime passes is not refused, as for the array methods. A fold callback whose return does not fit the seed leaves the result `unknown` with no report.
+- R3: when ZTS303 already refused the `r.error` node, the ZTS309 is not added. The executor reported that a `mapResult` Result was not covered. That was wrong for an unannotated callback: Opus measured ZTS309 and added the case. Opus also replaced two guard cases that did not read `r.value` or `r.errors`.
+
+- R3, a test fix after the U3 entry check: the guard case for `parseJson` read `r.error.length + 1`, and its name said the error is a string. The `parseJson` error is a `{ kind, ... }` record. The case now reads `r.error.kind` and is named for a record.
+
+### U3 entry check
+
+The entry check failed, so U3 was not built. The first prototype used a syntactic skip that Opus specified: an operand whose object is a member read of `value`, `unwrap`, `error`, or `errors` was refused. That skip refused `r.error.length` on a `validateJson` Result before the verifier could report the R3 ZTS309. Opus changed the skip to the rule of `isTrackedResultFieldRead`: an `error` read stays with ZTS309 when the Result can fill `errors`. The executor also judged that the refusal of `r.error.length + 1` on a `parseJson` Result was false. That was wrong: the read gives `undefined` on every input.
+
+With the corrected skip, `zts check` over the 264 tracked `.ts` files changed three files, and each was already refused: `examples/handler/feature-probes.ts` (ZTS601), and the corpus cases `dict_entries_reduce` and `missing_parameter_annotation`. The A3 fixture kept three ZTS309, and the R3 cases kept ZTS309. `test-zruntime` and `test-examples` exited 0. `zig build test` failed, and the run stopped there.
+
+The stop condition: the published `let` example in `packages/tools/src/example_registry.zig` got ZTS106. Its loop `for (const n of [1, 2, 3]) { total = total + n; }` runs correctly, and `n` is a number on every input. A `for...of` loop variable has a type only when the array has a declared type, such as a parameter `xs: number[]`. Over an array literal or an unannotated `const ys = [4, 5]`, it has none.
+
+The other failures of `zig build test` need these changes in a later attempt:
+
+- An operand that is itself a refused arithmetic expression got a second diagnostic: `(x + 1) * 2` with `x: number | undefined`. Skip an operand that is an arithmetic expression, because its own operands carry the diagnostic.
+- The stand-in seed `missing-annotations` named ZTS106 before its declared ZTS601.
+- The R7c census moved from 126 to 129, and three corpus golden lines were added. Decision 1 (a) permits both when the replay holds. The run stopped before `test-expert-app`.
+- The `isDict` fold case of K1b gained a second ZTS106 on `acc`.
+
+### Findings outside this plan
+
+- A member call on a receiver with no type passes. `Object.values(o)[0].f(1)`, `x.slice(1).trim()` with `x: string | string[]`, `[1, 2].reduce((acc, v) => acc.toFixed(2), "")`, and `s.toUpperCase()` in `for (const s of [1, 2])` each prove every property, and `zttp dev` answers 500 (`NotCallable`). `docs/roadmap.md` records it.
+- A `for...of` loop variable over an array literal or an unannotated array has no type.
+- Q10 still holds on the binary built from `2d4e9bcf`: `zttp dev` answers 500 with `error.OutOfMemory` from the native `json` function.

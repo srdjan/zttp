@@ -137,7 +137,7 @@ Each unit ran its gates unfiltered with a private cache and no provider key. The
 
 The entry check failed, so U3 was not built. The executor gated the change on `ResolveOptions.strict`, confirmed that every path that produces a proof or a user-visible verdict runs strict, and ran the built `zts check` on all 264 tracked `.ts` files. `examples/patterns/result-combinators.ts` and the runtime fixture no longer stop it. Three stop conditions held:
 
-- The R7c tool census in `test-expert-app` moves from 124 to 129 diagnostics, the five new diagnostics of the corpus `bad` cases. That is model-visible under D-012, and this approval does not cover a re-record.
+- The R7c tool census in `test-expert-app` moves from 124 to 129 diagnostics, the five new diagnostics of the corpus `bad` cases. This record first called that move model-visible under D-012. That was wrong: the offline replay held, and D-012 does not bind the census or the corpus goldens. The owner settled the rule with Decision 1 (a) of the [member access plan](2026-11-03-member-access-and-dict-types-plan.md) on 2026-11-03.
 - The change refuses `dictFold(d, (acc, value, key) => acc + value, 0)`, the form that the ZTS628 help recommends, because the `dictFold` callback parameters have no type.
 - In the A3 precompile fixture, `ps[0].age + ps[1].age` over `ps: P[]` loses its three ZTS309 diagnostics and gets two "no known type" diagnostics instead, because `ps[0].age` has no type.
 

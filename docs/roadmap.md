@@ -101,47 +101,54 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
 - Computed SQL resources remain refused. The configured SQL policy cannot
   distinguish read from write authority. Other residual-guard limits are in
   [Verification](verification.md#residual-runtime-guard-boundary).
-- Type checker gaps measured on 2026-11-02 with `zts check`. The second
-  and the sixth were also run with `zttp dev`. The
+- Type checker gaps measured with `zts check` on 2026-11-02 and 2026-11-03.
+  Each item that names a 500 was also run with `zttp dev`. The
   [arithmetic operand types plan](plans/2026-11-02-arithmetic-operand-types-plan.md)
   closed the arithmetic gap that this list used to name. The
   [builtin result types plan](plans/2026-11-02-builtin-result-types-plan.md)
   gave builtin calls, `.length`, and array callback parameters their types.
   The
   [callback parameters and Result types plan](plans/2026-11-02-callback-and-result-types-plan.md)
-  checked annotated callbacks and typed the Results of virtual modules.
+  checked annotated callbacks and typed the Results of virtual modules. The
+  [member access plan](plans/2026-11-03-member-access-and-dict-types-plan.md)
+  checked member access on a receiver that is not a record and typed the Dict
+  exports.
   - A value with no type still passes at every typed position and as an
     arithmetic operand. The remaining sources are a call of a function with
-    unannotated parameters outside strict mode, a `Dict` value from
-    `dictEntries`, a member read on `unknown` such as `JSON.parse(s).n`, an
-    index read followed by a member read such as `ps[0].age`, `Object.values`
-    and `Object.entries`, and the callback parameter of `mapError` or
-    `orElse` over a module Result. A record can hold a field that its type
-    does not name, so the declared field types do not bound `Object.values`.
-    Refusing an operand with no type in strict mode (step T4 of the
-    arithmetic plan) stopped at its entry check twice. The second check found
-    three blockers. It moves the R7c tool census from 124 to 129
-    diagnostics, a model-visible change that needs a re-record window. It
-    refuses `dictFold(d, (acc, value, key) => acc + value, 0)`, the form that
-    the ZTS628 help recommends. It also replaces the three ZTS309 diagnostics
-    of the A3 precompile fixture with a misleading "no known type".
-  - A call of a member that the receiver type does not have passes when the
-    receiver is not a record, a union, an array, or a tuple.
-    `const n: number = 5; n.toUpperCase()` passes with every property PROVEN,
-    and `zttp dev` answers 500 (`NotCallable`). The same holds for a value of
-    type `unknown`, such as the `unknown` error of a module Result. A precise
-    type closes only the paths that pass a value to a typed position.
-  - `dictFold(d, f, 0)` refuses a `Dict<string, number>` argument with ZTS203
-    (`expected Dict<unknown, unknown>`). This false refusal was measured with
-    `zts check` before and after the callback parameters and Result types
-    plan.
+    unannotated parameters outside strict mode, a member read on `unknown`
+    such as `JSON.parse(s).n`, a `for...of` loop variable over an array
+    literal or an unannotated array, an index read followed by a member read
+    such as `ps[0].age`, `Object.values` and `Object.entries`,
+    `dictFromEntries`, and the callback parameter of `mapError` or `orElse`
+    over a module Result. A record can hold a field that its type does not
+    name, so the declared field types do not bound `Object.values`. ZTS309
+    refuses an unchecked read of `ps[0].age`.
+  - Refusing an arithmetic operand with no type in strict code (U3) stopped
+    at its entry check a third time. It refuses the published `let` example
+    in `packages/tools/src/example_registry.zig`, whose `for (const n of [1,
+    2, 3])` loop variable has no type and is a number on every input. The
+    earlier blockers are closed. The
+    [member access plan](plans/2026-11-03-member-access-and-dict-types-plan.md#u3-entry-check)
+    lists what the prototype needs besides that type.
+  - A member call on a receiver with no type passes. The checker refuses such
+    a call only on `unknown`. Four forms pass with every property PROVEN, and
+    `zttp dev` answers 500 (`NotCallable`): `Object.values(o)[0].f(1)`,
+    `x.slice(1).trim()` with `x: string | string[]`,
+    `[1, 2].reduce((acc, v) => acc.toFixed(2), "")`, and `s.toUpperCase()`
+    in `for (const s of [1, 2])`. The accumulator of a `reduce` or `dictFold`
+    has no type when the callback return does not fit the seed type.
+  - `Response.json` of a Dict with a key that is not a string passes.
+    `Response.json(dictSet(dictSet(dictEmpty(), 2, "x"), "k", 1))` proves
+    `read_only`, and `zttp dev` answers 500 with `error.OutOfMemory` from the
+    native `json` function. `firstUnencodable` checks the value type of a Dict
+    and not its key type. The encoder path is not confirmed.
+  - A `dictFold` callback whose return type does not fit the seed type makes
+    the result `unknown`, with no report. A seeded `reduce` reports ZTS200 for
+    the same callback.
   - A partly annotated parameter list such as `(v, i: string)` binds the
     annotation to the first parameter, `v`. Strict mode refuses that form
     with ZTS601, so the effect is an extra, misleading ZTS200 and no false
     proof.
-  - A member read on a union of named records passes when one member has no
-    such field, for example `v.n` on `A | B` where `B` has no `n`. The same read
-    on inline records gets ZTS204.
   - A discriminant test treats a record without the field as a value where the
     test is false. A record with an extra field can reach a union member that
     omits that field, and the then-branch then reads a field that is absent.

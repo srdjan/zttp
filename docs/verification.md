@@ -182,7 +182,7 @@ A field read, index read, spread, or `for...of` on a value whose type may be `un
 verify error[ZTS309]: read on a value that may be undefined, without checking for undefined
 ```
 
-The type checker gives each such value its `undefined`. An index read `xs[0]` is `T | undefined`. So are an optional field, a `p?.q` result, an array callback parameter, and a union member that lacks the field. A read of `ps[0].age` on an empty array is refused until the code binds `ps[0]` to a `const` and checks it.
+The type checker gives each such value its `undefined`. An index read `xs[0]` is `T | undefined`. So are an optional field, a `p?.q` result, an array callback parameter, and a member that one union member lacks, such as `x.age` with `x: P | string`. So is the `error` of a `zttp:validate` or `zttp:decode` Result after `!r.ok`, because a schema failure leaves it absent. A read of `ps[0].age` on an empty array is refused until the code binds `ps[0]` to a `const` and checks it.
 
 At run time, a member read of `undefined` gives `undefined`, so the response drops or misreports the field. A call on `undefined` fails with NotCallable and HTTP 500.
 
@@ -200,7 +200,7 @@ At run time, a member read of `undefined` gives `undefined`, so the response dro
 - A read on `req.headers`, `req.query`, or `req.params`.
 - A value of type `T | null`.
 - A use that is not a read, call, index, spread, or iteration: arithmetic, a comparison, or a value placed in a response payload.
-- An expression that the type checker cannot type, such as a string index `s[5].length`.
+- A read on an expression that the type checker cannot type, such as `Object.values(o)[0].n`. A string index such as `s[5]` is refused as ZTS201.
 
 A Dict member or index read is refused as ZTS201: use `dictGet`. The `.value` of `requestJson`, `parseJson`, and `parseJsonBytes` is a JSON value. A field read on it is refused as ZTS201. Decode the value with `decodeJson` and a schema, or check `isDict(v)` and read with `dictGet(v, key)`.
 

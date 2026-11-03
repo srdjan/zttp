@@ -1,5 +1,5 @@
 // Proves: rebuilding a Dict from its entries with only the values changed is reported as dictMapValues (ZTS627).
-// The golden also pins ZTS500: this source does not discharge "deterministic" either.
+// The golden also pins ZTS104: a Dict from isDict holds unknown values, so `p[1] * 2` is refused.
 import { dictEntries, dictFromEntries } from "zttp:collections";
 
 function handler(req: Request): Proof<Response, "deterministic"> {

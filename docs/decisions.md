@@ -148,6 +148,8 @@ The reset removed second copies that could drift. `ModuleAnalysisSession.extract
 
 A change to a prompt, a seed, a tool output, or a wire byte moves the corpus identity and the recorded cassettes. It forces a paid DeepSeek re-record. The reset therefore stays offline: each phase proves that no golden, cassette, pin, or published evidence file moved. A change that would move one is recorded and held for one later re-record window, and no phase regenerates a golden to make a gate pass. This is Decision 2 of the reset plan, option (a), which the owner chose on 2026-10-25.
 
+Clarification, 2026-11-03: the gate of this decision is the offline replay in `test-expert-app`. A unit may update a `.diag` golden under `tests/corpus/check/bad` or an R7c census count in `packages/pi/src/tools/common.zig` when the replay holds and the new diagnostic is true. The unit's record lists each such change. A change that makes the replay diverge still waits for the re-record window. The owner chose option (a) of Decision 1 of the [member access plan](plans/2026-11-03-member-access-and-dict-types-plan.md) on 2026-11-03.
+
 ## Runtime isolation
 
 ### D-013 The rate-limit store is the one shared state between requests

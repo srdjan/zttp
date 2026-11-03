@@ -1,5 +1,5 @@
 // Proves: a reduce over dictEntries is reported as dictFold (ZTS628).
-// The golden also pins ZTS500: this source does not discharge "deterministic" either.
+// The golden also pins ZTS106: a Dict from isDict holds unknown values, so `acc + p[1]` is refused.
 import { dictEntries, dictFromEntries } from "zttp:collections";
 
 function handler(req: Request): Proof<Response, "deterministic"> {

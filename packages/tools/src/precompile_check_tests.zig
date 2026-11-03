@@ -11624,12 +11624,12 @@ const absent_read_result_error = [_]AbsentReadCase{
     \\  return Response.text("ok");
     \\}
     },
-    .{ .name = "q9_error_of_parsejson_after_not_ok_is_a_string", .expect = "clean", .source =
+    .{ .name = "q9_error_of_parsejson_after_not_ok_is_a_record", .expect = "clean", .source =
     \\import { parseJson } from "zttp:json";
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const r = parseJson("{}");
     \\  if (!r.ok) {
-    \\    return Response.text(String(r.error.length + 1));
+    \\    return Response.text(String(r.error.kind));
     \\  }
     \\  return Response.text("ok");
     \\}

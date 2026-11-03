@@ -449,7 +449,7 @@ A Result has the type `{ ok: boolean; value?: V; error?: E; errors?: S }`. The t
 | `validateJson`, `validateObject`, `coerceJson`, the four `zttp:decode` exports | `unknown`, or the schema type | `string \| undefined` | `unknown` |
 | every other module export that returns a Result | `unknown` (a JSON value for `parseJson` and `parseJsonBytes`) | `unknown` | `never` |
 
-`unwrapOr(r, d)` is the join of the `value` of `r` and the type of `d`. A schema failure of `zttp:validate` or `zttp:decode` fills `errors` and leaves `error` absent, so their `error` admits `undefined`. `packages/zts/src/module_result_errors.zig` holds one row for each module export, and a census test fails when an export has no row.
+`unwrapOr(r, d)` is the join of the `value` of `r` and the type of `d`. A schema failure of `zttp:validate` or `zttp:decode` fills `errors` and leaves `error` absent, so their `error` admits `undefined`. After `if (!r.ok)`, a read on that `error`, such as `r.error.length`, gets ZTS309 until the code checks it for `undefined`. The rule also holds for a Result that `mapResult` derives from such a Result. `packages/zts/src/module_result_errors.zig` holds one row for each module export, and a census test fails when an export has no row.
 
 An unannotated callback of `mapResult` or `andThen` takes the `value` type, and of `mapError` or `orElse` the error payload type, when that type is known and is not `unknown`. An annotated or named callback must accept that type (ZTS203).
 
@@ -462,6 +462,49 @@ andThen(ok(1), (n) => n + 1);            // ZTS203: andThen callback must return
 ```
 
 The runtime also accepts a record literal shaped like a Result as the return of an `andThen` or `orElse` callback and as a `collectAll` element. The checker refuses that form too. Return `ok(...)` or `err(...)`.
+
+### Member Access
+
+A member read or call must name a member that the runtime holds on the receiver. `number` and `boolean` have no members. A `string` and an array hold `length` and the methods that the engine installs. Another member gets ZTS201:
+
+```javascript
+const n = 3;
+n.toFixed(2);       // ZTS201: member does not exist on this type at runtime
+const s: string = "ab";
+const c = s[0];     // ZTS201: an index read on a string yields undefined
+```
+
+Use `String(n)` to convert a number. Use `s.charAt(i)` or `s.slice(i, i + 1)` to read one character.
+
+A call of a member on a value of type `unknown` gets ZTS201: "a member read on an unknown value; narrow it first". A read of a member on `unknown` passes and has no type. Narrow the value with `typeof` or `isDict` first.
+
+In a union, a member that one union member does not hold adds `undefined` to the read type. So `x.age` with `x: P | string` is `number | undefined`, and `x[0]` with `x: string | string[]` is `string | undefined`. An unchecked read on such a value gets ZTS309. A call through such a member gets ZTS201: narrow the union first.
+
+### Dict Types
+
+A `Dict<K, V>` is immutable, and a key that it does not hold reads `undefined`. When the first argument is one Dict type, the `zttp:collections` exports have these types:
+
+| Call | Type |
+|---|---|
+| `dictEmpty()` | `Dict<never, never>` |
+| `dictSet(d, k, v)` | `Dict<K \| k, V \| v>`, with the widened types of `k` and `v` |
+| `dictGet(d, k)` | `V \| undefined` |
+| `dictHas(d, k)` | `boolean` |
+| `dictRemove(d, k)`, `dictFilter(d, f)` | `Dict<K, V>` |
+| `dictEntries(d)` | `[K, V][]` |
+| `dictMapValues(d, f)` | `Dict<K, R>`, where `R` is the return type of `f` |
+| `dictFold(d, f, init)` | the widened type of `init` when `f` returns that type, else `unknown` |
+
+`Dict<never, never>` holds no entry, so it is assignable to every Dict type. A Dict is also assignable to a Dict whose key type is `unknown` when its values fit. For every other key type, the key types must be equal. An unannotated `let d = dictEmpty();` widens to `Dict<unknown, unknown>`. Annotate it instead: `let d: Dict<string, number> = dictEmpty();`.
+
+An unannotated callback of `dictFold` takes `(accumulator, value, key)`. An unannotated callback of `dictMapValues` or `dictFilter` takes `(value, key)`. The accumulator follows the rule of a seeded `reduce`. An annotated or named callback must accept these types (ZTS203):
+
+```javascript
+dictFold(d, (acc, value, key) => acc + value, 0);                    // number, with d: Dict<string, number>
+dictFold(d, (acc: number, v: string, k: string): number => acc, 0);  // ZTS203: callback parameter 'v' is 'string', but dictFold passes 'number'
+```
+
+The value of a `Dict<unknown, unknown>`, such as a Dict from `isDict`, is `unknown`, so arithmetic on it is refused.
 
 ---
 
@@ -620,7 +663,7 @@ predicate callbacks face the same rule at runtime.
 
 Arithmetic operators (`-`, `*`, `/`, `%`, `**`) and the unary `-` require numeric operands. An operand whose type is not assignable to `number` gets ZTS104. The compiler reads the type with the narrowing that reaches the operand, so a value that a guard proves to be a number is accepted.
 
-An operand that the type checker does not type passes. Builtin calls such as `xs.length`, `Math.floor(n)`, and `parseInt(s, 10)` now have types (see [Builtin Result Types](#builtin-result-types)), and so does the callback parameter of `mapResult` or `andThen` over a Result with a known value type (see [Result Types](#result-types)). The remaining untyped sources include a `Dict` value from `dictEntries` and an index read followed by a member read such as `ps[0].age`. [Roadmap](roadmap.md) lists them.
+An operand that the type checker does not type passes. Builtin calls such as `xs.length`, `Math.floor(n)`, and `parseInt(s, 10)` have types (see [Builtin Result Types](#builtin-result-types)). The callback parameter of `mapResult` or `andThen` over a Result with a known value type also has a type (see [Result Types](#result-types)). So does the callback of `dictFold` over a typed Dict (see [Dict Types](#dict-types)). The remaining untyped sources include a member read on `unknown`, a `for...of` loop variable over an array literal or an unannotated array, and an index read followed by a member read such as `ps[0].age`. [Roadmap](roadmap.md) lists them.
 
 #### Rejected arithmetic
 
