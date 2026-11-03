@@ -4804,6 +4804,176 @@ test "dict types: a union of two Dict types keeps the declared dictGet type" {
     , "type 'unknown' is not assignable to type '{ zz: Bytes }'");
 }
 
+// K1b: the callbacks of `dictFold`, `dictMapValues`, and `dictFilter` over a
+// typed Dict. The runtime passes `(accumulator, value, key)` to the fold and
+// `(value, key)` to the other two.
+
+const dict_callback_setup =
+    \\import { dictEmpty, dictSet, dictFold, dictMapValues, dictFilter } from "zttp:collections";
+    \\structural Nope = { zz: Bytes };
+    \\
+;
+
+test "dict callbacks: dictFold with a seeded accumulator is that type" {
+    try expectOneMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { const p: Nope = dictFold(d, (acc, value, key) => acc + value, 0); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict callbacks: the fold target returns a number" {
+    try expectNoTypeDiagnostic(dict_callback_setup ++
+        \\function f(): number {
+        \\  const d = dictSet(dictSet(dictEmpty(), "a", 1), "b", 2);
+        \\  return dictFold(d, (acc, value, key) => acc + value, 0);
+        \\}
+    );
+}
+
+test "dict callbacks: dictFold binds the value parameter to the value type" {
+    try expectOneMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { dictFold(d, (acc, value, key) => { const p: Nope = value; return acc; }, 0); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict callbacks: dictFold binds the key parameter to the key type" {
+    try expectOneMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { dictFold(d, (acc, value, key) => { const p: Nope = key; return acc; }, 0); return 0; }
+    , "type 'string' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict callbacks: dictFold binds the accumulator to the widened seed" {
+    try expectOneMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { dictFold(d, (acc, value, key) => { const p: Nope = acc; return acc; }, 0); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict callbacks: a fold callback that returns another type leaves the result unknown" {
+    try expectOneMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { const p: Nope = dictFold(d, (acc, value, key) => String(value), 0); return 0; }
+    , "type 'unknown' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict callbacks: an annotated fold parameter that refuses the value is ZTS203" {
+    try expectOneArgMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { dictFold(d, (acc: number, v: string, k: string): number => acc, 0); return 0; }
+    , "callback parameter 'v' is 'string', but dictFold passes 'number'");
+}
+
+test "dict callbacks: an annotated fold parameter that refuses the key is ZTS203" {
+    try expectOneArgMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { dictFold(d, (acc: number, v: number, k: number): number => acc, 0); return 0; }
+    , "callback parameter 'k' is 'number', but dictFold passes 'string'");
+}
+
+test "dict callbacks: an annotated fold accumulator that refuses the seed is ZTS203" {
+    try expectOneArgMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { dictFold(d, (acc: string, v: number, k: string): string => acc, 0); return 0; }
+    , "callback parameter 'acc' is 'string', but dictFold passes 'number'");
+}
+
+test "dict callbacks: an annotated fold accumulator that refuses the callback result is ZTS203" {
+    try expectOneArgMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { dictFold(d, (acc: number, v: number, k: string) => String(v), 0); return 0; }
+    , "callback parameter 'acc' is 'number', but dictFold passes 'string'");
+}
+
+test "dict callbacks: a named fold callback that accepts what the runtime passes is clean" {
+    try expectNoTypeDiagnostic(dict_callback_setup ++
+        \\function g(acc: number, v: number, k: string): number { return acc + v; }
+        \\function f(d: Dict<string, number>): number { return dictFold(d, g, 0); }
+    );
+}
+
+test "dict callbacks: a named fold callback that refuses the value is ZTS203" {
+    try expectOneArgMismatch(dict_callback_setup ++
+        \\function g(acc: number, v: string, k: string): number { return acc; }
+        \\function f(d: Dict<string, number>): number { dictFold(d, g, 0); return 0; }
+    , "callback parameter '#2' is 'string', but dictFold passes 'number'");
+}
+
+test "dict callbacks: a fold callback that requires four parameters is ZTS203" {
+    try expectOneArgMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { dictFold(d, (a: number, v: number, k: string, e: number): number => a, 0); return 0; }
+    , "callback parameter 'e' is 'number', but dictFold passes 'undefined'");
+}
+
+test "dict callbacks: dictMapValues is a Dict of the callback result" {
+    try expectOneMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { const p: Nope = dictMapValues(d, (v, k) => String(v)); return 0; }
+    , "type 'Dict<string, string>' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict callbacks: dictMapValues binds the key parameter to the key type" {
+    try expectOneMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { dictMapValues(d, (v, k) => { const p: Nope = k; return v; }); return 0; }
+    , "type 'string' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict callbacks: an annotated dictMapValues parameter that refuses the value is ZTS203" {
+    try expectOneArgMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { dictMapValues(d, (v: string, k: string) => v); return 0; }
+    , "callback parameter 'v' is 'string', but dictMapValues passes 'number'");
+}
+
+test "dict callbacks: dictMapValues over an empty Dict is the empty Dict" {
+    try expectOneMismatch(dict_callback_setup ++
+        \\function f(): number { const p: Nope = dictMapValues(dictEmpty(), (v, k) => 1); return 0; }
+    , "type 'Dict<never, never>' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict callbacks: dictFold over an empty Dict is the widened seed" {
+    try expectOneMismatch(dict_callback_setup ++
+        \\function f(): number { const p: Nope = dictFold(dictEmpty(), (acc, value, key) => acc + value, 0); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict callbacks: dictFilter keeps the Dict type" {
+    try expectOneMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { const p: Nope = dictFilter(d, (v, k) => v > 1); return 0; }
+    , "type 'Dict<string, number>' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict callbacks: dictFilter binds the value parameter to the value type" {
+    try expectOneMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { dictFilter(d, (v, k) => { const p: Nope = v; return true; }); return 0; }
+    , "type 'number' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "dict callbacks: a dictFilter callback that returns a number is ZTS203" {
+    try expectOneArgMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { dictFilter(d, (v, k) => v); return 0; }
+    , "argument type does not match parameter type: expected () => boolean, got () => number");
+}
+
+test "dict callbacks: an annotated dictFilter parameter that refuses the value is ZTS203" {
+    try expectOneArgMismatch(dict_callback_setup ++
+        \\function f(d: Dict<string, number>): number { dictFilter(d, (v: string, k: string) => true); return 0; }
+    , "callback parameter 'v' is 'string', but dictFilter passes 'number'");
+}
+
+test "dict callbacks: a named dictFilter callback that accepts what the runtime passes is clean" {
+    try expectNoTypeDiagnostic(dict_callback_setup ++
+        \\function big(v: number, k: string): boolean { return v > 1; }
+        \\function f(d: Dict<string, number>): number { dictFilter(d, big); return 0; }
+    );
+}
+
+test "dict callbacks: arithmetic on the value of a Dict from isDict is refused" {
+    try expectArithCounts(dict_callback_setup ++
+        \\function f(u: unknown): number { if (isDict(u)) { dictFold(u, (acc, value, key) => acc + value, 0); } return 0; }
+    , 0, 1);
+}
+
+test "dict callbacks: a callback over a union of Dict types keeps today's behavior" {
+    try expectNoTypeDiagnostic(dict_callback_setup ++
+        \\function f(c: boolean): number {
+        \\  const d = c ? dictSet(dictEmpty(), "a", 1) : dictSet(dictEmpty(), "a", "x");
+        \\  dictFold(d, (acc, value, key) => acc, 0);
+        \\  return 0;
+        \\}
+    );
+}
+
 test "builtin result: an array method on a receiver that may be undefined stays untyped" {
     try expectNoTypeDiagnostic(
         \\structural Nope = { zz: Bytes };

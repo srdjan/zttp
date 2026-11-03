@@ -11584,6 +11584,34 @@ test "dict types: a typed Dict reaches the exports and the unchecked read of its
     try expectAbsentReadCases(&absent_read_dict_types);
 }
 
+const absent_read_dict_callbacks = [_]AbsentReadCase{
+    .{ .name = "k1b_fold_over_a_typed_dict_adds_the_values", .expect = "clean", .source =
+    \\import { dictEmpty, dictSet, dictFold } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const d = dictSet(dictSet(dictEmpty(), "a", 1), "b", 2);
+    \\  const total = dictFold(d, (acc, value, key) => acc + value, 0);
+    \\  return Response.text(String(total));
+    \\}
+    },
+    .{ .name = "k1b_fold_over_a_dict_from_isdict_adds_unknown_values", .expect = "ZTS106@6", .source =
+    \\import { dictFold } from "zttp:collections";
+    \\function total(u: unknown): number {
+    \\  if (!isDict(u)) {
+    \\    return 0;
+    \\  }
+    \\  const sum = dictFold(u, (acc, value, key) => acc + value, 0);
+    \\  return 1;
+    \\}
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  return Response.text(String(total(req.url)));
+    \\}
+    },
+};
+
+test "dict callbacks: a fold over a typed Dict is clean and a fold over a Dict from isDict refuses an unknown value" {
+    try expectAbsentReadCases(&absent_read_dict_callbacks);
+}
+
 const ObserverProbe = struct {
     calls: u32 = 0,
     verifier_count: usize = 0,

@@ -4584,6 +4584,7 @@ pub const TypeChecker = struct {
         const callee_tag = self.ir_view.getTag(c.callee) orelse return;
         if (callee_tag == .identifier) {
             self.bindCombinatorCallback(c);
+            self.bindDictCallback(c);
             return;
         }
         if (callee_tag != .member_access) return;
@@ -4666,6 +4667,41 @@ pub const TypeChecker = struct {
         _ = self.bindCallbackParam(func, 0, passed);
     }
 
+    /// The callback of `dictFold`, `dictMapValues`, or `dictFilter` over one
+    /// Dict type `Dict<K, V>`. The runtime calls the fold with `(accumulator,
+    /// value, key)` and the other two with `(value, key)`. An unannotated
+    /// inline callback binds those parameters to `(acc, V, K)` and `(V, K)`,
+    /// where `acc` follows the rule of a seeded `reduce`
+    /// (`bindSeededAccumulator`) with the third argument as the seed. The
+    /// types stand as they are: over a `Dict<unknown, unknown>` the value and
+    /// the key are `unknown`, and arithmetic on the value is refused. A Dict
+    /// with no key holds no entry, so its callback never runs and binds
+    /// nothing. An annotation wins, as for the array methods.
+    fn bindDictCallback(self: *TypeChecker, c: Node.CallExpr) void {
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+        const info = self.dictCallbackCall(c) orelse return;
+        const arg = info.callback;
+        const arg_tag = self.ir_view.getTag(arg) orelse return;
+        if (arg_tag != .arrow_function and arg_tag != .function_expr) return;
+        const func = self.ir_view.getFunction(arg) orelse return;
+        if (func.params_count == 0) return;
+        if (self.bindAnnotatedCallbackParams(arg, func)) return;
+        const pool = self.env.pool;
+        if (info.parts.key == pool.idx_never) return;
+        if (std.mem.eql(u8, info.name, "dictFold")) {
+            _ = self.bindCallbackParam(func, 1, info.parts.value);
+            _ = self.bindCallbackParam(func, 2, info.parts.key);
+            const seed_source = self.inferType(self.ir_view.getListIndex(c.args_start, 2));
+            // A refused accumulator stays untyped and the fold result is unknown.
+            _ = self.bindSeededAccumulator(arg, func, seed_source);
+        } else {
+            _ = self.bindCallbackParam(func, 0, info.parts.value);
+            _ = self.bindCallbackParam(func, 1, info.parts.key);
+        }
+    }
+
     /// Bind parameter `position` of `func` to `type_idx`. Returns the binding,
     /// or null when the function has no such parameter.
     fn bindCallbackParam(self: *TypeChecker, func: ir.Node.FunctionExpr, position: u16, type_idx: TypeIndex) ?ir.BindingRef {
@@ -4682,6 +4718,17 @@ pub const TypeChecker = struct {
         self.env.unbindVarType(binding.scope_id, binding.name_atom);
     }
 
+    /// What `bindSeededAccumulator` did with the accumulator parameter.
+    const AccumulatorBinding = union(enum) {
+        /// The parameter is bound to the widened seed.
+        kept,
+        /// The parameter stays untyped: the seed or the callback return has no
+        /// definite type.
+        untyped,
+        /// The callback returns this type, which the seed type does not hold.
+        refused: struct { returned: TypeIndex, seed: TypeIndex },
+    };
+
     /// The runtime passes the accumulator of `reduce` as the initial value
     /// first, and as each callback result after that. The widened initial
     /// value type (the element type when there is no initial value) describes
@@ -4692,21 +4739,33 @@ pub const TypeChecker = struct {
     /// that is not assignable is reported (ZTS200). A return type that is not
     /// known leaves the accumulator untyped.
     fn bindReduceAccumulator(self: *TypeChecker, c: Node.CallExpr, arg: NodeIndex, func: ir.Node.FunctionExpr, elem: TypeIndex) void {
-        const pool = self.env.pool;
         const seed_source = if (c.args_count >= 2) self.inferType(self.ir_view.getListIndex(c.args_start, 1)) else elem;
-        if (seed_source == null_type_idx) return;
+        switch (self.bindSeededAccumulator(arg, func, seed_source)) {
+            .refused => |refusal| self.reportReduceAccumulator(arg, refusal.returned, refusal.seed),
+            // exhaustive: a kept or untyped accumulator reports nothing.
+            .kept, .untyped => {},
+        }
+    }
+
+    /// Bind the first parameter of the inline callback `func` to the widened
+    /// type of `seed_source`, read the callback's return type under the
+    /// binding, and keep the binding only when that return type is known and
+    /// assignable to it. The caller reports a refused return.
+    fn bindSeededAccumulator(self: *TypeChecker, arg: NodeIndex, func: ir.Node.FunctionExpr, seed_source: TypeIndex) AccumulatorBinding {
+        const pool = self.env.pool;
+        if (seed_source == null_type_idx) return .untyped;
         const seed = pool.widenLiteral(seed_source);
-        if (!self.isDefiniteType(seed, 0)) return;
-        const binding = self.bindCallbackParam(func, 0, seed) orelse return;
+        if (!self.isDefiniteType(seed, 0)) return .untyped;
+        const binding = self.bindCallbackParam(func, 0, seed) orelse return .untyped;
         const callback_type = self.functionExprType(arg);
         const returned = if (callback_type == null_type_idx) null_type_idx else self.callbackReturnType(callback_type);
         if (returned == null_type_idx) {
             self.unbindCallbackParam(binding);
-            return;
+            return .untyped;
         }
-        if (self.env.isAssignableTo(returned, seed)) return;
+        if (self.env.isAssignableTo(returned, seed)) return .kept;
         self.unbindCallbackParam(binding);
-        self.reportReduceAccumulator(arg, returned, seed);
+        return .{ .refused = .{ .returned = returned, .seed = seed } };
     }
 
     fn reportReduceAccumulator(self: *TypeChecker, callback: NodeIndex, returned: TypeIndex, accumulator: TypeIndex) void {
@@ -5948,6 +6007,15 @@ pub const TypeChecker = struct {
         }
     }
 
+    /// Whether `call` is a call of `dictFold`, `dictMapValues`, or `dictFilter`
+    /// whose first argument is one Dict type.
+    fn isSingleDictCall(self: *TypeChecker, call: Node.CallExpr) bool {
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+        return self.dictCallbackCall(call) != null;
+    }
+
     fn checkModuleBooleanPredicate(self: *TypeChecker, call: Node.CallExpr) void {
         if (self.ir_view.getTag(call.callee) != .identifier) return;
         const binding = self.ir_view.getBinding(call.callee) orelse return;
@@ -5960,8 +6028,14 @@ pub const TypeChecker = struct {
         }
 
         const callback = self.ir_view.getListIndex(call.args_start, 1);
-        const actual = self.argumentTypeForChecking(callback);
         const expected = self.env.pool.addFunctionWithReturn(self.allocator, &.{}, self.env.pool.idx_boolean);
+        // Over one Dict type, `checkDictCallbackParams` owns the parameters of
+        // the callback, so a named function compares by its return type, as a
+        // predicate of an array method does.
+        const actual = if (self.isSingleDictCall(call))
+            self.predicateArgumentType(callback, expected)
+        else
+            self.argumentTypeForChecking(callback);
         if (actual == null_type_idx or !self.env.isAssignableTo(actual, expected)) {
             self.addArgTypeMismatch(callback, expected, actual);
         }
@@ -6121,25 +6195,17 @@ pub const TypeChecker = struct {
         if (std.mem.eql(u8, name, "dictEmpty") and call.args_count == 0) {
             return pool.addDict(self.allocator, pool.idx_never, pool.idx_never);
         }
-        const arity: u32 = if (std.mem.eql(u8, name, "dictSet"))
-            3
-        else if (std.mem.eql(u8, name, "dictGet") or std.mem.eql(u8, name, "dictHas") or std.mem.eql(u8, name, "dictRemove"))
-            2
-        else if (std.mem.eql(u8, name, "dictEntries"))
-            1
-        else
-            return null;
+        const arity = collectionsDictArity(name) orelse return null;
         if (call.args_count != arity) return null;
 
-        const first = self.inferType(self.ir_view.getListIndex(call.args_start, 0));
-        if (first == null_type_idx) return null;
-        const source = self.resolvedType(self.env.stripProofMarkers(first));
-        if (pool.getTag(source) != .t_dict or pool.mentionsError(source)) return null;
-        const key_type = pool.getDictKey(source);
-        const value_type = pool.getDictValue(source);
-        const held_key = if (key_type == null_type_idx) pool.idx_unknown else key_type;
-        const held_value = if (value_type == null_type_idx) pool.idx_unknown else value_type;
+        const parts = self.dictParts(self.ir_view.getListIndex(call.args_start, 0)) orelse return null;
+        const source = parts.source;
+        const held_key = parts.key;
+        const held_value = parts.value;
 
+        if (std.mem.eql(u8, name, "dictFilter")) return source;
+        if (std.mem.eql(u8, name, "dictMapValues")) return self.dictMapValuesType(call, parts);
+        if (std.mem.eql(u8, name, "dictFold")) return self.dictFoldType(call, parts);
         if (std.mem.eql(u8, name, "dictSet")) {
             const stored_key = self.dictComponentType(self.ir_view.getListIndex(call.args_start, 1));
             const stored_value = self.dictComponentType(self.ir_view.getListIndex(call.args_start, 2));
@@ -6157,6 +6223,106 @@ pub const TypeChecker = struct {
         if (std.mem.eql(u8, name, "dictRemove")) return source;
         const pair = pool.addTuple(self.allocator, &.{ held_key, held_value });
         return pool.addArray(self.allocator, pair);
+    }
+
+    /// The argument count of the `zttp:collections` export `name` that reads a
+    /// Dict as its first argument, or null for any other export.
+    fn collectionsDictArity(name: []const u8) ?u32 {
+        if (std.mem.eql(u8, name, "dictSet") or std.mem.eql(u8, name, "dictFold")) return 3;
+        const two = [_][]const u8{ "dictGet", "dictHas", "dictRemove", "dictMapValues", "dictFilter" };
+        for (two) |known| {
+            if (std.mem.eql(u8, known, name)) return 2;
+        }
+        if (std.mem.eql(u8, name, "dictEntries")) return 1;
+        return null;
+    }
+
+    /// A Dict type and its key and value types, with `unknown` for a part that
+    /// the Dict type does not name.
+    const DictParts = struct { source: TypeIndex, key: TypeIndex, value: TypeIndex };
+
+    /// The Dict that the argument `arg` holds, read as one `Dict<K, V>`. Null
+    /// when the argument has no type, is not a Dict type, or is a union.
+    fn dictParts(self: *const TypeChecker, arg: NodeIndex) ?DictParts {
+        const pool = self.env.pool;
+        const first = self.inferType(arg);
+        if (first == null_type_idx) return null;
+        const source = self.resolvedType(self.env.stripProofMarkers(first));
+        if (pool.getTag(source) != .t_dict or pool.mentionsError(source)) return null;
+        const key_type = pool.getDictKey(source);
+        const value_type = pool.getDictValue(source);
+        return .{
+            .source = source,
+            .key = if (key_type == null_type_idx) pool.idx_unknown else key_type,
+            .value = if (value_type == null_type_idx) pool.idx_unknown else value_type,
+        };
+    }
+
+    /// A call of `dictFold`, `dictMapValues`, or `dictFilter` from
+    /// `zttp:collections` whose first argument is one Dict type.
+    const DictCallbackCall = struct { name: []const u8, parts: DictParts, callback: NodeIndex };
+
+    fn dictCallbackCall(self: *const TypeChecker, call: Node.CallExpr) ?DictCallbackCall {
+        if (self.ir_view.getTag(call.callee) != .identifier) return null;
+        const binding = self.ir_view.getBinding(call.callee) orelse return null;
+        const entry = self.resolveImportedExport(binding) orelse return null;
+        if (!std.mem.eql(u8, entry.module.specifier, "zttp:collections")) return null;
+        const name = entry.function.name;
+        const is_callback_export = std.mem.eql(u8, name, "dictFold") or
+            std.mem.eql(u8, name, "dictMapValues") or
+            std.mem.eql(u8, name, "dictFilter");
+        if (!is_callback_export) return null;
+        const arity = collectionsDictArity(name) orelse return null;
+        if (call.args_count != arity) return null;
+        const parts = self.dictParts(self.ir_view.getListIndex(call.args_start, 0)) orelse return null;
+        return .{ .name = name, .parts = parts, .callback = self.ir_view.getListIndex(call.args_start, 1) };
+    }
+
+    /// `dictMapValues(d, f)` over `Dict<K, V>` is `Dict<K, R>`, where `R` is
+    /// the widened type that `f` returns under the bound parameters. `R` is
+    /// `unknown` when that type is not known or the callback does not accept
+    /// `(V, K)`. A Dict with no key holds no entry, so the callback never runs
+    /// and the result is that Dict.
+    fn dictMapValuesType(self: *const TypeChecker, call: Node.CallExpr, parts: DictParts) TypeIndex {
+        const pool = self.env.pool;
+        if (parts.key == pool.idx_never) return parts.source;
+        const mutable = @constCast(self);
+        const previous = mutable.report_inference_diagnostics;
+        mutable.report_inference_diagnostics = false;
+        defer mutable.report_inference_diagnostics = previous;
+
+        var result = pool.idx_unknown;
+        const callback = self.callbackFunctionType(self.ir_view.getListIndex(call.args_start, 1));
+        if (callback != null_type_idx) {
+            const returned = self.callbackReturnType(callback);
+            if (returned != null_type_idx and self.callbackAccepts(callback, &.{ parts.value, parts.key })) result = returned;
+        }
+        return pool.addDict(self.allocator, parts.key, result);
+    }
+
+    /// `dictFold(d, f, init)` is the widened type of `init` when `f` returns a
+    /// value of that type and accepts `(accumulator, V, K)`, as the seeded
+    /// `reduce` does (`bindSeededAccumulator`). Otherwise it is `unknown`. The
+    /// fold over a Dict with no key is the seed, whatever `f` is.
+    fn dictFoldType(self: *const TypeChecker, call: Node.CallExpr, parts: DictParts) TypeIndex {
+        const pool = self.env.pool;
+        const mutable = @constCast(self);
+        const previous = mutable.report_inference_diagnostics;
+        mutable.report_inference_diagnostics = false;
+        defer mutable.report_inference_diagnostics = previous;
+
+        const seed_source = self.inferType(self.ir_view.getListIndex(call.args_start, 2));
+        if (seed_source == null_type_idx) return pool.idx_unknown;
+        const seed = pool.widenLiteral(seed_source);
+        if (!self.isDefiniteType(seed, 0)) return pool.idx_unknown;
+        // A Dict with no key holds no entry, so the fold returns its seed.
+        if (parts.key == pool.idx_never) return seed;
+        const callback = self.callbackFunctionType(self.ir_view.getListIndex(call.args_start, 1));
+        if (callback == null_type_idx) return pool.idx_unknown;
+        const returned = self.callbackReturnType(callback);
+        if (returned == null_type_idx or !self.env.isAssignableTo(returned, seed)) return pool.idx_unknown;
+        if (!self.callbackAccepts(callback, &.{ seed, parts.value, parts.key })) return pool.idx_unknown;
+        return seed;
     }
 
     /// The `zttp:result` export that `call` names, resolved through the
@@ -6362,6 +6528,76 @@ pub const TypeChecker = struct {
         const refused = self.firstRefusedCallbackParam(callback_type, &.{passed}) orelse return false;
         const passed_type = if (refused == 0) passed else pool.idx_undefined;
         self.reportCallbackParam(arg, func, callback_type, refused, name, passed_type);
+        return true;
+    }
+
+    /// Compare the parameters of the callback of `dictFold`, `dictMapValues`,
+    /// or `dictFilter` over one Dict type with the values that the runtime
+    /// passes: `(accumulator, value, key)` for the fold and `(value, key)` for
+    /// the others. The accumulator is the widened seed type, and the
+    /// callback's own return type must fit an annotated accumulator. A
+    /// position with no known type accepts anything, and a parameter past
+    /// those the runtime passes must be optional or accept `undefined`.
+    /// Returns true after it reports a mismatch, so the call is reported once.
+    /// A non-boolean result of the `dictFilter` callback is reported by
+    /// `checkModuleBooleanPredicate`.
+    fn checkDictCallbackParams(self: *TypeChecker, call: Node.CallExpr) bool {
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+
+        const info = self.dictCallbackCall(call) orelse return false;
+        const pool = self.env.pool;
+        const arg = info.callback;
+        const arg_tag = self.ir_view.getTag(arg) orelse return false;
+        const inline_callback = arg_tag == .arrow_function or arg_tag == .function_expr;
+
+        var callback_type: TypeIndex = null_type_idx;
+        var func: ?ir.Node.FunctionExpr = null;
+        if (inline_callback) {
+            const parsed = self.ir_view.getFunction(arg) orelse return false;
+            func = parsed;
+            callback_type = self.functionTypeWithParams(parsed.params_count, self.sourceFunctionSignature(arg), null_type_idx);
+        } else {
+            callback_type = self.resolvedType(self.inferType(arg));
+        }
+        if (callback_type == null_type_idx or pool.getTag(callback_type) != .t_function) return false;
+
+        const is_fold = std.mem.eql(u8, info.name, "dictFold");
+        var passed: [3]TypeIndex = undefined;
+        var passed_count: usize = 2;
+        if (is_fold) {
+            const seed = self.inferType(self.ir_view.getListIndex(call.args_start, 2));
+            const accumulator = if (seed != null_type_idx and self.isDefiniteType(pool.widenLiteral(seed), 0))
+                pool.widenLiteral(seed)
+            else
+                null_type_idx;
+            passed = .{ accumulator, info.parts.value, info.parts.key };
+            passed_count = 3;
+        } else {
+            passed = .{ info.parts.value, info.parts.key, null_type_idx };
+        }
+
+        var param_position: usize = 0;
+        var passed_type: TypeIndex = pool.idx_undefined;
+        if (self.firstRefusedCallbackParam(callback_type, passed[0..passed_count])) |position| {
+            param_position = position;
+            if (position < passed_count) passed_type = passed[position];
+        } else if (is_fold) {
+            // An annotated accumulator must also accept each callback result.
+            const params = pool.getFunctionInfo(callback_type).params;
+            if (params.len == 0) return false;
+            const accumulator_type = params[0].type_idx;
+            if (accumulator_type == null_type_idx or accumulator_type == pool.idx_unknown) return false;
+            const result_type = if (inline_callback) self.functionExprType(arg) else callback_type;
+            if (result_type == null_type_idx) return false;
+            const returned = self.callbackReturnType(result_type);
+            if (returned == null_type_idx) return false;
+            if (self.env.isAssignableTo(returned, accumulator_type)) return false;
+            passed_type = returned;
+        } else return false;
+
+        self.reportCallbackParam(arg, func, callback_type, param_position, info.name, passed_type);
         return true;
     }
 
@@ -6701,6 +6937,7 @@ pub const TypeChecker = struct {
             self.checkModuleBooleanPredicate(call);
             if (self.checkModuleResultArgs(call)) return;
             if (self.checkCombinatorCallbackParam(call)) return;
+            if (self.checkDictCallbackParams(call)) return;
         }
         if (callee_tag == .member_access) {
             self.checkResponseJsonPayload(call);
