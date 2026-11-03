@@ -11488,6 +11488,71 @@ test "string index: an index read on a string or on a string union is refused" {
     try expectAbsentReadCases(&absent_read_string_index);
 }
 
+const absent_read_member_access = [_]AbsentReadCase{
+    .{ .name = "q1_number_to_fixed", .expect = "ZTS201@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const n = 3;
+    \\  if (n.toFixed(2) === "3.00") {
+    \\    return Response.text("ok");
+    \\  }
+    \\  return Response.text("no");
+    \\}
+    },
+    .{ .name = "q1_number_to_string", .expect = "ZTS201@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const n = 3;
+    \\  return Response.text(n.toString());
+    \\}
+    },
+    .{ .name = "q3_unknown_from_dict_get", .expect = "ZTS201@5", .source =
+    \\import { dictEmpty, dictSet, dictGet } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const d = dictSet(dictEmpty(), "k", 5);
+    \\  const v = dictGet(d, "k");
+    \\  return Response.text(v.trim());
+    \\}
+    },
+    .{ .name = "q8_union_record_and_string", .expect = "ZTS309@4", .source =
+    \\structural P = { age: number };
+    \\function show(x: P | string): string {
+    \\  const a = x.age;
+    \\  return a.toFixed(1);
+    \\}
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  return Response.text("ok");
+    \\}
+    },
+    .{ .name = "q11_call_through_a_member_a_union_member_lacks", .expect = "ZTS201@4", .source =
+    \\structural A = { kind: "a"; f: (n: number) => number };
+    \\structural B = { kind: "b"; g: number };
+    \\function run(x: A | B): number {
+    \\  return x.f(2);
+    \\}
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const b: B = { kind: "b", g: 1 };
+    \\  return Response.text(String(run(b)));
+    \\}
+    },
+    .{ .name = "control_string_array_and_record_function_members", .expect = "clean", .source =
+    \\structural A = { f: (n: number) => number };
+    \\function double(n: number): number {
+    \\  return n * 2;
+    \\}
+    \\function run(r: A, xs: number[], s: string): string {
+    \\  const n = r.f(2) + xs.length + s.length;
+    \\  return s.toUpperCase();
+    \\}
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const a: A = { f: double };
+    \\  return Response.text(run(a, [1, 2], "abc"));
+    \\}
+    },
+};
+
+test "member access: a member read or call on a value that cannot hold it is refused" {
+    try expectAbsentReadCases(&absent_read_member_access);
+}
+
 const ObserverProbe = struct {
     calls: u32 = 0,
     verifier_count: usize = 0,

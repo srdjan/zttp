@@ -4451,6 +4451,150 @@ test "string index: an index read on a union of string and string array is strin
     , "type 'string | undefined' is not assignable to type '{ zz: Bytes }'");
 }
 
+const non_record_member_message = "member does not exist on this type at runtime";
+const non_record_member_help = "number and boolean values have no members; strings and arrays have only the methods that docs/typescript.md lists";
+const unknown_member_message = "a member read on an unknown value; narrow it first";
+const unknown_member_help = "check the value with typeof, isDict, or a match arm before you read a member";
+const union_call_message = "a member that some union member does not have is called; narrow the union first";
+const union_call_help = "check the discriminant or the type before you call the member";
+
+test "member access: toFixed on a number is ZTS201" {
+    try expectOneMissingField(
+        \\function f(n: number): number { const s = n.toFixed(2); return 0; }
+    , non_record_member_message, non_record_member_help);
+}
+
+test "member access: toString on a number literal binding is ZTS201" {
+    try expectOneMissingField(
+        \\function f(): number { const n = 3; const s = n.toString(); return 0; }
+    , non_record_member_message, non_record_member_help);
+}
+
+test "member access: a member read on a boolean is ZTS201" {
+    try expectOneMissingField(
+        \\function f(b: boolean): number { const x = b.foo; return 0; }
+    , non_record_member_message, non_record_member_help);
+}
+
+test "member access: a member call on a string that the runtime does not install is ZTS201" {
+    try expectOneMissingField(
+        \\function f(s: string): number { const x = s.foo(); return 0; }
+    , non_record_member_message, non_record_member_help);
+}
+
+test "member access: sort on an array is ZTS201 because the runtime does not install it" {
+    try expectOneMissingField(
+        \\function f(xs: number[]): number { const ys = xs.sort(); return 0; }
+    , non_record_member_message, non_record_member_help);
+}
+
+test "member access: reverse on an array is ZTS201 because the runtime does not install it" {
+    try expectOneMissingField(
+        \\function f(xs: number[]): number { const ys = xs.reverse(); return 0; }
+    , non_record_member_message, non_record_member_help);
+}
+
+test "member access: a member that a tuple does not have is ZTS201" {
+    try expectOneMissingField(
+        \\function f(t: [number, string]): number { const x = t.foo; return 0; }
+    , non_record_member_message, non_record_member_help);
+}
+
+test "member access: trim on a union of string and string array is ZTS201" {
+    try expectOneMissingField(
+        \\function f(x: string | string[]): number { const y = x.trim(); return 0; }
+    , non_record_member_message, non_record_member_help);
+}
+
+test "member access: slice on a union of string and string array is installed on both" {
+    try expectNoTypeDiagnostic(
+        \\function f(x: string | string[]): number { const y = x.slice(0, 1); return 0; }
+    );
+}
+
+test "member access: a member call on an unknown value is ZTS201" {
+    try expectOneMissingField(
+        \\function f(u: unknown): number { const y = u.trim(); return 0; }
+    , unknown_member_message, unknown_member_help);
+}
+
+test "member access: a member read on an unknown value reports nothing" {
+    try expectNoTypeDiagnostic(
+        \\function f(u: unknown): number { const y = u.foo; const z = u.foo.bar; return 0; }
+    );
+}
+
+test "member access: a read on a union of named records types the shared field" {
+    try expectOneMismatch(
+        \\structural A = { kind: "a"; n: number };
+        \\structural B = { kind: "b"; s: string };
+        \\structural Nope = { zz: Bytes };
+        \\function f(x: A | B): number { const p: Nope = x.kind; return 0; }
+    , "type '\"a\" | \"b\"' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "member access: trim on the unknown result of dictGet is ZTS201" {
+    try expectOneMissingField(
+        \\import { dictEmpty, dictSet, dictGet } from "zttp:collections";
+        \\function f(): number { const d = dictSet(dictEmpty(), "k", 5); const v = dictGet(d, "k"); const y = v.trim(); return 0; }
+    , unknown_member_message, unknown_member_help);
+}
+
+test "member access: a typeof guard gives an unknown value a member" {
+    try expectNoTypeDiagnostic(
+        \\function f(u: unknown): number { if (typeof u === "string") { const y = u.trim(); } return 0; }
+    );
+}
+
+test "member access: a member that a union of records lacks is ZTS201 when called" {
+    try expectOneMissingField(
+        \\structural A = { kind: "a"; f: (n: number) => number };
+        \\structural B = { kind: "b"; g: number };
+        \\function run(x: A | B): number { return x.f(2); }
+    , union_call_message, union_call_help);
+}
+
+test "member access: a member that a record and a string do not share is ZTS201 when called" {
+    try expectOneMissingField(
+        \\structural A = { f: (n: number) => number };
+        \\function run(x: A | string): number { return x.f(2); }
+    , union_call_message, union_call_help);
+}
+
+test "member access: a union member that lacks a read member makes the read optional" {
+    try expectOneMismatch(
+        \\structural P = { age: number };
+        \\structural Nope = { zz: Bytes };
+        \\function f(x: P | string): number { const a: Nope = x.age; return 0; }
+    , "type 'number | undefined' is not assignable to type '{ zz: Bytes }'");
+}
+
+test "member access: string members, length, array methods, and tuple length report nothing" {
+    try expectNoTypeDiagnostic(
+        \\function f(s: string, xs: number[], t: [number, string], g: (n: number) => number): number {
+        \\  const a = s.toUpperCase();
+        \\  const b = s.length;
+        \\  const c = xs.map(g);
+        \\  const d = xs.length;
+        \\  const e = t.length;
+        \\  return 0;
+        \\}
+    );
+}
+
+test "member access: a record field that holds a function is still callable" {
+    try expectNoTypeDiagnostic(
+        \\structural A = { f: (n: number) => number };
+        \\function run(r: A): number { return r.f(2); }
+    );
+}
+
+test "member access: a builtin constant reports nothing" {
+    try expectNoTypeDiagnostic(
+        \\function f(): number { return Math.PI; }
+    );
+}
+
 test "builtin result: an array method on a receiver that may be undefined stays untyped" {
     try expectNoTypeDiagnostic(
         \\structural Nope = { zz: Bytes };

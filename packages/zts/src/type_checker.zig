@@ -625,6 +625,147 @@ pub const TypeChecker = struct {
         });
     }
 
+    /// What a read of a member finds on a value of one type at run time.
+    const MemberPresence = enum {
+        /// The runtime installs the member, or the record declares it.
+        present,
+        /// The read yields `undefined`, and a call raises `NotCallable`.
+        absent,
+        /// The checker does not model the type's members.
+        unmodeled,
+    };
+
+    fn presenceOf(installed: bool) MemberPresence {
+        return if (installed) .present else .absent;
+    }
+
+    /// The members of a `number`, a `boolean`, a `string`, an array, or a
+    /// tuple. A `number` and a `boolean` have no prototype. A `string` and an
+    /// array have the members that `builtins/root.zig` installs, which
+    /// `builtin_results.installsMember` reads from the census-checked tables.
+    /// Every other type, a record included, is `unmodeled` here.
+    fn primitiveMemberPresence(self: *const TypeChecker, raw: TypeIndex, name: []const u8) MemberPresence {
+        const pool = self.env.pool;
+        const t = pool.unwrapNominal(self.env.resolveRef(raw));
+        const tag = pool.getTag(t) orelse return .unmodeled;
+        return switch (tag) {
+            .t_number, .t_literal_number, .t_boolean, .t_literal_bool => .absent,
+            .t_string, .t_literal_string, .t_template_literal => presenceOf(builtin_results.installsMember("String.prototype", name)),
+            .t_array, .t_tuple => presenceOf(builtin_results.installsMember("Array.prototype", name)),
+            // exhaustive: any other type is not one of the receivers whose
+            // runtime members the census-checked tables list.
+            else => .unmodeled,
+        };
+    }
+
+    /// `primitiveMemberPresence`, and a record's declared fields.
+    fn memberPresence(self: *const TypeChecker, raw: TypeIndex, name: []const u8) MemberPresence {
+        const pool = self.env.pool;
+        const t = pool.unwrapNominal(self.env.resolveRef(raw));
+        if (pool.getTag(t) == .t_record) return presenceOf(pool.lookupRecordField(t, name) != null);
+        return self.primitiveMemberPresence(raw, name);
+    }
+
+    /// The name of a member read or call that has a name, or null for an
+    /// index read or a member with no node of its own.
+    fn namedMember(self: *const TypeChecker, node: NodeIndex) ?struct { member: Node.MemberExpr, name: []const u8 } {
+        const tag = self.ir_view.getTag(node) orelse return null;
+        if (tag != .member_access and tag != .optional_chain) return null;
+        const member = self.ir_view.getMember(node) orelse return null;
+        if (member.computed != null_node) return null;
+        const name = self.resolveAtomName(member.property) orelse return null;
+        return .{ .member = member, .name = name };
+    }
+
+    /// Refuse a member read or call on a receiver that cannot hold it at run
+    /// time: a `number`, a `boolean`, a `string`, an array, a tuple, or a union
+    /// of these. Such a read yields `undefined`, and a call raises
+    /// `NotCallable`. A record, a Result record, a named builtin type, and a
+    /// receiver with no type are not read here, and a union that holds one of
+    /// them is read by `reportUnionMemberCall` and by `inferMemberAccessType`.
+    fn reportNonRecordMemberRead(self: *TypeChecker, read: NodeIndex) void {
+        const named = self.namedMember(read) orelse return;
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+        const operand_type = self.inferType(named.member.object);
+        if (operand_type == null_type_idx) return;
+        const pool = self.env.pool;
+        const t = pool.unwrapNominal(self.env.resolveRef(operand_type));
+        var absent = false;
+        if (pool.getTag(t) == .t_union) {
+            for (pool.getUnionMembers(t)) |m| {
+                switch (self.primitiveMemberPresence(m, named.name)) {
+                    .absent => absent = true,
+                    .present => {},
+                    .unmodeled => return,
+                }
+            }
+        } else {
+            absent = self.primitiveMemberPresence(t, named.name) == .absent;
+        }
+        if (!absent) return;
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .missing_field,
+            .node = read,
+            .message = "member does not exist on this type at runtime",
+            .help = "number and boolean values have no members; strings and arrays have only the methods that docs/typescript.md lists",
+        });
+    }
+
+    /// Refuse a call through a member that the receiver may lack. On an
+    /// `unknown` receiver, any member call is refused: the read yields
+    /// `undefined` and the call raises `NotCallable`. A member read on an
+    /// `unknown` value stays accepted. On a union, a call through a member
+    /// that some member lacks is refused. A union with a record is the case
+    /// here. A union of numbers, booleans, strings, and arrays alone is
+    /// reported by `reportNonRecordMemberRead`. A union with a member of
+    /// another kind is not modeled.
+    fn reportUnionMemberCall(self: *TypeChecker, callee: NodeIndex) void {
+        const named = self.namedMember(callee) orelse return;
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+        const operand_type = self.inferType(named.member.object);
+        if (operand_type == null_type_idx) return;
+        const pool = self.env.pool;
+        const t = pool.unwrapNominal(self.env.resolveRef(operand_type));
+        // A read on an `unknown` value yields `undefined` and does not fault,
+        // so it stays accepted. A call raises `NotCallable`. The parsed JSON
+        // and Dict receivers keep the message of `reportDictEntryRead`.
+        if (t == pool.idx_unknown) {
+            if (self.isJsonValueOperandType(operand_type, 0) or self.isDictOperandType(operand_type, 0)) return;
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .missing_field,
+                .node = callee,
+                .message = "a member read on an unknown value; narrow it first",
+                .help = "check the value with typeof, isDict, or a match arm before you read a member",
+            });
+            return;
+        }
+        if (pool.getTag(t) != .t_union) return;
+        var absent = false;
+        var has_record = false;
+        for (pool.getUnionMembers(t)) |m| {
+            if (self.unionMemberIsRecord(m)) has_record = true;
+            switch (self.memberPresence(m, named.name)) {
+                .absent => absent = true,
+                .present => {},
+                .unmodeled => return,
+            }
+        }
+        if (!absent or !has_record) return;
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .missing_field,
+            .node = callee,
+            .message = "a member that some union member does not have is called; narrow the union first",
+            .help = "check the discriminant or the type before you call the member",
+        });
+    }
+
     /// The type a function parameter was declared with, or `null_type_idx` for
     /// a binding that is not a parameter or whose parameter carries no
     /// annotation. Read after the walk: the table is filled as each function is
@@ -1375,6 +1516,7 @@ pub const TypeChecker = struct {
                 self.reportNominalConstructorCall(node, c);
                 self.reportReadonlyMutation(node, c);
                 self.walkExpr(c.callee);
+                self.reportUnionMemberCall(c.callee);
                 self.bindCallbackElement(c);
                 if (self.closure_writes_outer) {
                     self.walkCallArgsThenKill(node, c);
@@ -1547,6 +1689,7 @@ pub const TypeChecker = struct {
                 self.walkExpr(member.computed);
                 self.reportDictEntryRead(node, member.object);
                 if (tag == .computed_access) self.reportStringIndexRead(node, member.object);
+                self.reportNonRecordMemberRead(node);
                 if (tag != .optional_chain) self.recordAbsentReceiver(node, member.object);
             },
 
@@ -3339,12 +3482,19 @@ pub const TypeChecker = struct {
             var any_field = false;
             for (self.env.pool.getUnionMembers(obj_type)) |member_type| {
                 if (count >= field_types.len) return null_type_idx;
-                if (self.env.pool.lookupRecordField(member_type, prop_name)) |field| {
+                // A member that names a record (`structural P`) is a reference:
+                // resolve it, or its fields are not found.
+                const resolved_member = self.env.pool.unwrapNominal(self.env.resolveRef(member_type));
+                if (self.env.pool.lookupRecordField(resolved_member, prop_name)) |field| {
                     field_types[count] = self.fieldReadType(field);
                     any_field = true;
                 } else if (self.unionMemberIsRecord(member_type)) {
                     // A member of the union has no such field: reading it
                     // there yields `undefined`.
+                    field_types[count] = self.env.pool.idx_undefined;
+                } else if (self.primitiveMemberPresence(member_type, prop_name) == .absent) {
+                    // A number, a boolean, a string, an array, or a tuple that
+                    // the runtime gives no such member reads `undefined` too.
                     field_types[count] = self.env.pool.idx_undefined;
                 } else {
                     return null_type_idx;

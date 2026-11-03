@@ -290,6 +290,15 @@ pub fn find(kind: Kind, scope: []const u8, name: []const u8) ?Row {
     return null;
 }
 
+/// Whether the runtime installs `name` on the prototype or namespace `scope`:
+/// a row of any kind or a skip names it. The census below keeps both tables
+/// equal to the members that the engine installs, so this answers what a read
+/// of the member finds at run time. `length` has a row for `String.prototype`
+/// and for `Array.prototype`.
+pub fn installsMember(scope: []const u8, name: []const u8) bool {
+    return rowFor(&rows, scope, name) or skipFor(&skips, scope, name);
+}
+
 // ---------------------------------------------------------------------------
 // Census (T2)
 // ---------------------------------------------------------------------------
