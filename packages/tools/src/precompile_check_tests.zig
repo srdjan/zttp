@@ -11967,6 +11967,141 @@ test "untyped receiver: strict code refuses a member call on a value with no typ
     try expectAbsentReadCases(&absent_read_untyped_receiver);
 }
 
+const json_dict_key = [_]AbsentReadCase{
+    .{ .name = "j1_number_and_string_keys_q10", .expect = "ZTS213@3", .source =
+    \\import { dictEmpty, dictSet } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  return Response.json(dictSet(dictSet(dictEmpty(), 2, "x"), "k", 1));
+    \\}
+    },
+    .{ .name = "j1_number_key_in_a_record_field", .expect = "ZTS213@4", .source =
+    \\import { dictEmpty, dictSet } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const d: Dict<number, string> = dictSet(dictEmpty(), 1, "x");
+    \\  return Response.json({ m: d });
+    \\}
+    },
+    .{ .name = "j1_boolean_key_in_an_array", .expect = "ZTS213@4", .source =
+    \\import { dictEmpty } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const b: Dict<boolean, number> = dictEmpty();
+    \\  return Response.json([b]);
+    \\}
+    },
+    .{ .name = "j1_nominal_number_key", .expect = "ZTS213@5", .source =
+    \\import { dictEmpty } from "zttp:collections";
+    \\nominal Port = number;
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const p: Dict<Port, string> = dictEmpty();
+    \\  return Response.json(p);
+    \\}
+    },
+    .{ .name = "j1_named_union_key_with_a_number", .expect = "ZTS213@5", .source =
+    \\import { dictEmpty } from "zttp:collections";
+    \\structural Key = number | string;
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const k: Dict<Key, string> = dictEmpty();
+    \\  return Response.json(k);
+    \\}
+    },
+    .{ .name = "j1_null_key", .expect = "ZTS213@4", .source =
+    \\import { dictEmpty } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const d: Dict<null, number> = dictEmpty();
+    \\  return Response.json(d);
+    \\}
+    },
+    .{ .name = "j1_undefined_key", .expect = "ZTS213@4", .source =
+    \\import { dictEmpty } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const d: Dict<undefined, number> = dictEmpty();
+    \\  return Response.json(d);
+    \\}
+    },
+    .{ .name = "j1_number_literal_key", .expect = "ZTS213@4", .source =
+    \\import { dictEmpty } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const d: Dict<1, number> = dictEmpty();
+    \\  return Response.json(d);
+    \\}
+    },
+    .{ .name = "j1_boolean_literal_key", .expect = "ZTS213@4", .source =
+    \\import { dictEmpty } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const d: Dict<true, number> = dictEmpty();
+    \\  return Response.json(d);
+    \\}
+    },
+    .{ .name = "j1_array_key", .expect = "ZTS213@4", .source =
+    \\import { dictEmpty } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const d: Dict<string[], number> = dictEmpty();
+    \\  return Response.json(d);
+    \\}
+    },
+    .{ .name = "j1_tuple_key", .expect = "ZTS213@4", .source =
+    \\import { dictEmpty } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const d: Dict<[string], number> = dictEmpty();
+    \\  return Response.json(d);
+    \\}
+    },
+    .{ .name = "j1_bytes_key", .expect = "ZTS213@4", .source =
+    \\import { dictEmpty } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const d: Dict<Bytes, number> = dictEmpty();
+    \\  return Response.json(d);
+    \\}
+    },
+    .{ .name = "j1_dict_key", .expect = "ZTS213@4", .source =
+    \\import { dictEmpty } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const d: Dict<Dict<string, string>, number> = dictEmpty();
+    \\  return Response.json(d);
+    \\}
+    },
+    .{ .name = "j1_record_key", .expect = "ZTS213@4", .source =
+    \\import { dictEmpty } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const d: Dict<{ a: string }, number> = dictEmpty();
+    \\  return Response.json(d);
+    \\}
+    },
+    .{ .name = "j1_function_alias_key", .expect = "ZTS213@5", .source =
+    \\import { dictEmpty } from "zttp:collections";
+    \\structural Fn = (x: number) => number;
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const d: Dict<Fn, number> = dictEmpty();
+    \\  return Response.json(d);
+    \\}
+    },
+    .{ .name = "j1_string_or_undefined_key", .expect = "ZTS213@4", .source =
+    \\import { dictEmpty } from "zttp:collections";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const d: Dict<string | undefined, number> = dictEmpty();
+    \\  return Response.json(d);
+    \\}
+    },
+    .{ .name = "j1_string_literal_template_nominal_and_unknown_keys_are_clean", .expect = "clean", .source =
+    \\import { dictEmpty, dictSet } from "zttp:collections";
+    \\nominal UserId = string;
+    \\structural Name = "a" | "b";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const d: Dict<string, number> = dictSet(dictEmpty(), "a", 1);
+    \\  const e: Dict<"a" | "b", number> = dictEmpty();
+    \\  const n: Dict<Name, number> = dictEmpty();
+    \\  const i: Dict<UserId, number> = dictEmpty();
+    \\  const u: Dict<unknown, unknown> = dictEmpty();
+    \\  const t: Dict<`/a/${string}`, number> = dictEmpty();
+    \\  return Response.json({ d: d, e: e, n: n, i: i, u: u, t: t, z: dictEmpty() });
+    \\}
+    },
+};
+
+test "JSON payload: Response.json refuses a Dict whose key type admits a value that is not a string" {
+    try expectAbsentReadCases(&json_dict_key);
+}
+
 const ObserverProbe = struct {
     calls: u32 = 0,
     verifier_count: usize = 0,

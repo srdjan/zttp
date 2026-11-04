@@ -6167,7 +6167,12 @@ pub const TypeChecker = struct {
             .t_bytes => idx,
             .t_array => self.firstUnencodable(pool.getArrayElement(idx), depth + 1),
             .t_nullable => self.firstUnencodable(pool.getNullableInner(idx), depth + 1),
-            .t_dict => self.firstUnencodable(pool.getDictValue(idx), depth + 1),
+            // The encoder fails on a key that is not a string, so the Dict
+            // itself is what JSON cannot carry.
+            .t_dict => if (self.dictKeyAdmitsNonString(pool.getDictKey(idx), depth + 1))
+                idx
+            else
+                self.firstUnencodable(pool.getDictValue(idx), depth + 1),
             .t_record => blk: {
                 for (pool.getRecordFields(idx)) |field| {
                     if (self.firstUnencodable(field.type_idx, depth + 1)) |bad| break :blk bad;
@@ -6195,6 +6200,47 @@ pub const TypeChecker = struct {
             // unmodelled tag arriving here is admitted and reported by
             // whatever does know it.
             else => null,
+        };
+    }
+
+    /// Whether the Dict key type `key` has a member that is definitely not a
+    /// string. The JSON encoder fails the whole payload on such a key. A
+    /// string, a string literal, a template literal, `never`, and `unknown`
+    /// are accepted. A type the walk cannot resolve is accepted too: like
+    /// `firstUnencodable`, this refuses only what it knows is wrong.
+    fn dictKeyAdmitsNonString(self: *const TypeChecker, key: TypeIndex, depth: u8) bool {
+        if (key == null_type_idx or depth >= 16) return false;
+        const pool = self.env.pool;
+        const tag = pool.getTag(key) orelse return false;
+        return switch (tag) {
+            .t_string, .t_literal_string, .t_template_literal, .t_never, .t_unknown_type => false,
+            .t_boolean,
+            .t_number,
+            .t_null,
+            .t_undefined,
+            .t_void,
+            .t_dict,
+            .t_bytes,
+            .t_record,
+            .t_array,
+            .t_tuple,
+            .t_function,
+            .t_literal_number,
+            .t_literal_bool,
+            .t_nullable,
+            => true,
+            .t_union => blk: {
+                for (pool.getUnionMembers(key)) |member| {
+                    if (self.dictKeyAdmitsNonString(member, depth + 1)) break :blk true;
+                }
+                break :blk false;
+            },
+            .t_ref => blk: {
+                const resolved = self.env.resolveRef(key);
+                if (resolved == key) break :blk false;
+                break :blk self.dictKeyAdmitsNonString(resolved, depth + 1);
+            },
+            .t_intersection, .t_generic_param, .t_generic_app, .t_error => false,
         };
     }
 
