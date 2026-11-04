@@ -3,7 +3,7 @@ title: An untyped value passed every typed position
 date: 2026-11-02
 last_updated: 2026-11-03
 category: logic-errors
-module: ZigTS type checker and sound-mode checker, value inference, narrowing guards, arithmetic operands, builtin results, callback parameters, Result types, member access, Dict types
+module: ZigTS type checker and sound-mode checker, value inference, narrowing guards, arithmetic operands, builtin results, callback parameters, Result types, member access, Dict types, container writes
 problem_type: logic_error
 component: tooling
 severity: high
@@ -15,6 +15,7 @@ symptoms:
   - "`const token: string = req.headers.get(\"x\");` passed `zts check`, and `zttp dev` answered 500 with \"Possible soundness incident\" for a missing header."
   - "`strings.map(g)` with `g: (n: number) => number` passed `zts check`, and `r.error` read as a `string` after a `zttp:validate` schema failure that leaves `error` absent."
   - "`n.toFixed(2)` on a number and `s[0]` on a string passed `zts check`, and `zttp dev` answered 500; an entry check over the tracked `.ts` files missed a published example in a Zig file."
+  - "`p.name = 5` with `p: { name: string }` and `[1, 2].reduce((acc, v) => acc.toFixed(2), \"\")` passed CHECK, and `zttp dev` answered 500; the first fixes refused `[1, 2].pop()` and `const t = table; t.hits = 1;`."
 root_cause: logic_error
 resolution_type: code_fix
 related_components:
@@ -36,6 +37,8 @@ tags:
   - member-access
   - dict-types
   - entry-check
+  - container-writes
+  - literal-widening
 ---
 
 # An untyped value passed every typed position
@@ -90,7 +93,7 @@ A type at the source closes the fail-open only when the type is true. A builtin 
 - `s.split(x)` was `string[]` for any separator. The separator is now `string`.
 - `map` and `reduce` took the callback's declared return type and did not check the callback's parameters. `strings.map(g)` with `g: (n: number) => number` was `number[]`, but `g` gets strings and `n + 1` returns `"a1"`. A result that comes from a callback now needs each callback parameter to accept what the runtime passes: the element, the index, and the array. For `reduce`, the accumulator gets the seed first and each callback result after it.
 
-**What did not work: the declared fields as a bound.** The plan typed `Object.values` from the declared field types. A record can hold a field that its type does not name, so that type would be a new false proof. `Object.values` and `Object.entries` stay untyped.
+**What did not work: the declared fields as a bound.** The plan typed `Object.values` from the declared field types. A record can hold a field that its type does not name, so that type would be a new false proof. `Object.values` and `Object.entries` stayed untyped until the sixth instance typed them `unknown[]` and `[string, unknown][]`.
 
 **An entry check before a refusal.** The plan's last step would refuse an arithmetic operand with no type. Its entry check applied the change first and listed every operand that it refused in `examples/`, `tests/corpus/`, the fixtures, and the offline replay. The check refused `examples/patterns/result-combinators.ts`, a valid program whose `zttp:result` combinator callbacks have untyped parameters. So the step was not built, and `docs/roadmap.md` lists the remaining untyped sources.
 
@@ -109,7 +112,7 @@ A check that compares with `unknown` passes. Before you trust a check, give it a
 
 **What did not work: a test that no step runs.** The tests in `packages/tools/src/precompile_check.zig` ran in no build step, because no test block referenced the file. A `-Dtest-filter` run selected zero tests, which showed the gap. A gate list also left out `test-bytecode-identity` for a unit that changed a corpus case, and the golden stayed stale for two commits.
 
-**The entry check failed again.** After the combinators had types, `examples/patterns/result-combinators.ts` no longer stopped the refusal of an operand with no type. Three other stops held. The R7c tool census moves from 124 to 129. The plan record first called that move model-visible. That was wrong: the offline replay held, and D-012 now permits the move. `dictFold` callback parameters have no type. `ps[0].age` has no type. So that step stays open in `docs/roadmap.md`.
+**The entry check failed again.** After the combinators had types, `examples/patterns/result-combinators.ts` no longer stopped the refusal of an operand with no type. Three other stops held. The R7c tool census moves from 124 to 129. The plan record first called that move model-visible. That was wrong: the offline replay held, and D-012 now permits the move. `dictFold` callback parameters have no type. `ps[0].age` has no type. So that step stayed open until the sixth instance.
 
 ## Fifth instance: a refusal of `unknown` does not cover "no type"
 
@@ -117,11 +120,28 @@ The member access plan closed six measured false proofs (commits `9a4f9368` to `
 
 **What did not work: a refusal keyed on `unknown`.** P9 refuses a member call on a receiver of type `unknown`. A receiver with no type (`null_type_idx`) is a different case, and it still passes. Four forms prove every property, and `zttp dev` answers 500 (`NotCallable`): `Object.values(o)[0].f(1)`, `x.slice(1).trim()` with `x: string | string[]`, `s.toUpperCase()` in `for (const s of [1, 2])`, and a `reduce` accumulator whose callback return does not fit the seed. A check for `unknown` and a check for "no type" are two checks.
 
-**What did not work: an entry check over the `.ts` files only.** The third U3 entry check ran `zts check` on the 264 files from `git ls-files '*.ts'`. Only three programs changed, and each was already refused. Then `zig build test` failed. U3 refused the published `let` example in `packages/tools/src/example_registry.zig`, whose `for (const n of [1, 2, 3]) { total = total + n; }` is correct. A `for...of` loop variable has a type only when the array has a declared type, such as a parameter `xs: number[]`. Handler sources in Zig files, such as the example registry, the stand-in defect seeds, and the pipeline tests, are not `.ts` files. So the entry check did not see them.
+**What did not work: an entry check over the `.ts` files only.** The third U3 entry check ran `zts check` on the 264 files from `git ls-files '*.ts'`. Only three programs changed, and each was already refused. Then `zig build test` failed. U3 refused the published `let` example in `packages/tools/src/example_registry.zig`, whose `for (const n of [1, 2, 3]) { total = total + n; }` is correct. A `for...of` loop variable had a type only when the array had a declared type, such as a parameter `xs: number[]`. The sixth instance changed that. Handler sources in Zig files, such as the example registry, the stand-in defect seeds, and the pipeline tests, are not `.ts` files. So the entry check did not see them.
 
 **What did not work: a skip copied by hand from another stage.** U3 must skip an operand that the verifier will report as ZTS309. The bool stage runs before the verifier, and the precompile run stops at the first failing stage. So a U3 refusal there hides the ZTS309. The U3 brief copied the verifier's rule as a syntax test: a read on `r.value`, `r.error`, or `r.errors` belongs to ZTS303. One unit earlier, R3 had changed that rule in `HandlerVerifier`: an `error` read on a Result that can fill `errors` now gets ZTS309. The copy refused that read and hid the R3 diagnostic. The corrected skip asks `TypeChecker` the same question that the verifier asks (`resultMayFillErrors`).
 
 **What did not work: an executor's account of a runtime value.** Two executor claims about runtime values were wrong. The `parseJson` error is not a string: its row in `packages/zts/src/module_result_errors.zig` says a `{ kind, ... }` record, so `r.error.length` is `undefined`. R3 does cover a `mapResult` Result: a probe showed ZTS309. Each claim would have changed a decision.
+
+## Sixth instance: no type at a refusal, and literal types at a write
+
+The untyped values plan closed twelve measured false proofs (commits `28dc380f` to `376ab753` on local `main`, pending release). An array literal binding and a loop variable over a tuple now have types. `Object.values` is `unknown[]`. An arithmetic operand or a member-call receiver with no type is refused. `Response.json` refuses a Dict whose key type admits a value that is not a string. A write into a record, an array, or a tuple must fit its slot.
+
+**What did not work: an entry check with `zts check` only.** `zts check` runs the analyzer only. `zttp check` runs precompile CHECK, which also runs the verifier and reports ZTS309. The precompile run returns after a type error, so a new type-stage refusal can hide a later ZTS309. An entry check that compares only `zts check` codes cannot see that change. The W1 entry check compared both commands, and the gates covered the verifier stage in each unit.
+
+**What did not work: two rules for literal widening at a write.** An unannotated object literal keeps literal field types: `const o = { kind: "a", n: 1 }` is `{ kind: "a"; n: 1 }`. A write checked against that slot refused the counter idiom `o.n = 1`. Two rules failed:
+
+- Widen the slot for every unannotated root. Then `alias.kind = "c"` with `const alias = s` and a declared `s: { kind: "a" | "b" }` passed, and `s` then held `"c"`.
+- Widen only for an object or array literal initializer. Then `const t = table; t.hits = 1;` with `const table = { hits: 0 }` got ZTS200. The type error hid the state isolation verdict, and the test "state isolation across helper shapes" failed.
+
+The rule that held: widen when the initializer is a literal, or a name bound to a binding with literal types (`initializerHoldsLiteralTypes` in `packages/zts/src/type_checker.zig#TypeChecker`). A declared type nested under a literal root still widens: `const q = { a: s }; q.a.kind = "c";` proves `read_only`. The roadmap records it.
+
+**What did not work: a refusal that ignores a fresh literal.** An array literal in an expression position is a tuple of literal types: `[1, 2]` is `[1, 2]`. The tuple rule "push and pop change a fixed length" refused `[1, 2].pop()`. No binding holds that value, so the call breaks no type. The receiver refusal for a value with no type had the same fault: `[s].map(f)` with an untyped element and `[].pop()` are arrays on every input. `range(n)` is different: it has no array members, and `range(n).map(f)` answered 500. A refusal now skips a fresh array literal receiver when the runtime value cannot break a type.
+
+**A misleading error name.** A Dict key that is not a string makes `writeJsonDepth` in `packages/zts/src/http.zig` return `RenderError.OutOfMemory`. The 500 names memory, not the key. `let d = dictEmpty()` widens to `Dict<unknown, unknown>`, so the key check cannot see a number key there (Q22, open in the roadmap).
 
 ## Why This Works
 
@@ -142,6 +162,9 @@ The hole was at the source: one inference result that every consumer reads as "p
 - When a check skips what another stage will report, call the predicate that the other stage uses. Keep a case from the unit that last changed that predicate in the new unit's test table.
 - Treat "no type" and `unknown` as two cases. A refusal of one does not cover the other.
 - Before you accept a claim about the runtime shape of a value, read its row in `module_result_errors.zig` or `builtin_results.zig`, or run a probe.
+- An entry check for a refusal compares both `zts check` and `zttp check`, because only `zttp check` runs the verifier.
+- When a write check widens literal types, decide by where the binding's type came from, not by whether it has an annotation. Test an alias of a declared value and an alias of a literal binding.
+- Before a refusal keys on a tuple or on "no type", test a fresh array literal receiver, such as `[1, 2].pop()` and `[s].map(f)`.
 - `docs/roadmap.md` lists the type checker gaps that stay open. One of them is a discriminant test that meets a record with an extra field, for which `zttp dev` measured a wrong result.
 
 ## Related Issues
@@ -151,5 +174,6 @@ The hole was at the source: one inference result that every consumer reads as "p
 - [Builtin result types plan](../../plans/2026-11-02-builtin-result-types-plan.md): findings F1 and F2, the deviations that review found, and the failed entry check of U3.
 - [Callback parameters and Result types plan](../../plans/2026-11-02-callback-and-result-types-plan.md): probes P1 to P10, the deviations that review found, and the second failed entry check of U3.
 - [Member access plan](../../plans/2026-11-03-member-access-and-dict-types-plan.md): findings Q1 to Q11, the deviations, and the third failed entry check of U3.
+- [Untyped values plan](../../plans/2026-11-03-untyped-values-and-container-writes-plan.md): findings Q10 to Q22 and FR1 to FR4, the validation record, and the execution record with its deviations.
 - [testing-effect-instead-of-form-refused-the-canonical-predicate](testing-effect-instead-of-form-refused-the-canonical-predicate.md): the type predicate admission history, which the same plan changed.
 - [a-proxy-signal-carried-a-proof-it-never-claimed](a-proxy-signal-carried-a-proof-it-never-claimed.md): another false PROVEN from a value read as an answer it never gave.

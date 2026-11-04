@@ -18,6 +18,11 @@ A fact the compiler either proves about a Handler or declines to prove, such as 
 
 Some Properties are derived from others rather than observed directly, so a change to what decides one silently changes the derived one. Anything deriving a Property must be recomputed after the deciding answer lands, not before.
 
+### False proof
+A Property that the compiler reports as proven for a Handler that then violates it at run time. The check prints the Property PROVEN, and the served Handler faults on that proven path, which `zttp dev` reports as "Possible soundness incident".
+
+A passing check cannot show that a false proof is absent. A runtime probe can: a Handler with a narrow Proof capsule that checks clean, served, and sent one request. The opposite defect is a false refusal, a correct program that the compiler refuses. A fix for one is judged by whether it adds the other, so each new refusal first runs over every tracked Handler.
+
 ### Proof profile
 The set of Properties a Handler must discharge. A Handler that declares nothing is held to the full default profile; one that declares a Spec is held to exactly what it declared. Declaring a narrow Spec is how an author trades a proven guarantee for the freedom to do something the full profile forbids.
 
