@@ -199,6 +199,11 @@ pub const TypeChecker = struct {
 
     /// Inferred types for const/let bindings: packed(scope_id, slot) -> TypeIndex
     binding_types: std.AutoHashMapUnmanaged(u64, TypeIndex),
+    /// The `const` and `let` declarations with no type annotation whose
+    /// initializer holds literal types (`initializerHoldsLiteralTypes`), keyed
+    /// like `binding_types`.
+    /// A write into such a binding widens the literal types of the slot.
+    unannotated_decls: std.AutoHashMapUnmanaged(u64, void) = .empty,
     /// Callable metadata for declarations keyed by packed(scope_id, slot).
     /// An explicit `unavailable` entry is significant: it prevents a local
     /// binding from inheriting an unrelated module signature by bare name.
@@ -312,6 +317,7 @@ pub const TypeChecker = struct {
         }
         self.compiled_schemas.deinit(self.allocator);
         self.binding_types.deinit(self.allocator);
+        self.unannotated_decls.deinit(self.allocator);
         self.binding_callables.deinit(self.allocator);
         self.file_import_callables.deinit(self.allocator);
         self.file_import_untyped.deinit(self.allocator);
@@ -1436,6 +1442,9 @@ pub const TypeChecker = struct {
             .var_decl => {
                 const vd = self.ir_view.getVarDecl(node) orelse return;
                 const declared = self.bindVarDeclaration(node, vd.binding);
+                if (declared == null_type_idx and self.initializerHoldsLiteralTypes(vd.init)) {
+                    self.unannotated_decls.put(self.allocator, bindingKey(vd.binding), {}) catch self.markAllocationFailure();
+                }
                 self.reportIfNonContractive(declared, node);
                 self.bindCallableMetadata(vd.binding, .unavailable);
                 if (vd.init != null_node) {
@@ -1729,6 +1738,7 @@ pub const TypeChecker = struct {
                 self.collectSchemaCompileCall(c) catch self.markAllocationFailure();
                 self.reportNominalConstructorCall(node, c);
                 self.reportReadonlyMutation(node, c);
+                self.reportContainerMutation(node, c);
                 self.walkExpr(c.callee);
                 self.reportUnionMemberCall(c.callee);
                 self.bindCallbackElement(c);
@@ -1819,6 +1829,9 @@ pub const TypeChecker = struct {
                 self.walkExpr(asgn.value);
                 // Check assignment type matches target's declared type
                 const target_tag = self.ir_view.getTag(asgn.target) orelse return;
+                if (asgn.op == null and (target_tag == .member_access or target_tag == .computed_access)) {
+                    self.reportContainerWrite(node, asgn);
+                }
                 if (target_tag == .identifier) {
                     const binding = self.ir_view.getBinding(asgn.target) orelse return;
                     const key = bindingKey(binding);
@@ -7586,6 +7599,246 @@ pub const TypeChecker = struct {
             .message = msg,
             .help = "drop `readonly` from the declared type, or build a new array instead of writing to this one",
             .allocated = true,
+        });
+    }
+
+    /// Which slot of a container a write reaches.
+    const WriteSlot = union(enum) {
+        /// A record field named by `o.f` or `o["f"]`.
+        field: []const u8,
+        /// An element at an integer literal index.
+        index_at: usize,
+        /// An element at an index with no known value.
+        index_any,
+    };
+
+    /// The type of one slot of a non-union container type, or null when the
+    /// container has no such slot.
+    fn slotOfMember(self: *const TypeChecker, member_type: TypeIndex, slot: WriteSlot) ?TypeIndex {
+        const pool = self.env.pool;
+        const resolved = pool.unwrapNominal(self.env.resolveRef(member_type));
+        const tag = pool.getTag(resolved) orelse return null;
+        if (tag == .t_record) {
+            if (slot != .field) return null;
+            const field = pool.lookupRecordField(resolved, slot.field) orelse return null;
+            return self.fieldReadType(field);
+        }
+        if (tag == .t_array) {
+            if (slot == .field) return null;
+            const element = pool.getArrayElement(resolved);
+            return if (element == null_type_idx) null else element;
+        }
+        if (tag == .t_tuple) {
+            const elements = pool.getTupleElements(resolved);
+            if (elements.len == 0) return null;
+            switch (slot) {
+                .field => return null,
+                .index_at => |at| return if (at < elements.len) elements[at] else null,
+                .index_any => return pool.addUnion(self.allocator, elements),
+            }
+        }
+        return null;
+    }
+
+    /// Widen a slot type that an unannotated binding holds, to its base types.
+    /// A literal, a record field, and a union member widen.
+    /// An array and a tuple keep their types, because inference widens a literal array already.
+    /// A literal in a field or element keeps no meaning for a later write.
+    fn widenWriteSlot(self: *const TypeChecker, slot: TypeIndex, depth: u8) TypeIndex {
+        const pool = self.env.pool;
+        const tag = pool.getTag(slot) orelse return slot;
+        if (depth > 4) return slot;
+        switch (tag) {
+            .t_literal_string, .t_literal_number, .t_literal_bool => return pool.widenLiteral(slot),
+            .t_record => {
+                var widened: [32]type_pool_mod.RecordField = undefined;
+                const fields = pool.getRecordFields(slot);
+                if (fields.len > widened.len) return slot;
+                for (fields, 0..) |field, i| {
+                    widened[i] = field;
+                    widened[i].type_idx = self.widenWriteSlot(field.type_idx, depth + 1);
+                }
+                return pool.addRecord(self.allocator, widened[0..fields.len]);
+            },
+            .t_union => {
+                var widened: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+                const members = pool.getUnionMembers(slot);
+                if (members.len > widened.len) return slot;
+                for (members, 0..) |member, i| widened[i] = self.widenWriteSlot(member, depth + 1);
+                return pool.addUnion(self.allocator, widened[0..members.len]);
+            },
+            // exhaustive: any other tag holds no literal to widen, and keeps its type.
+            else => return slot,
+        }
+    }
+
+    /// Whether a binding initialized with `node` holds literal types that a
+    /// later write may widen: an object or array literal, or a name bound to
+    /// such a binding, such as `t` in `const t = table`. A binding from any
+    /// other value, such as `const alias = s` with `s: S` or `const r = mk()`,
+    /// holds a declared type that a write through it must keep.
+    fn initializerHoldsLiteralTypes(self: *const TypeChecker, node: NodeIndex) bool {
+        if (node == null_node) return false;
+        const tag = self.ir_view.getTag(node) orelse return false;
+        if (tag == .object_literal or tag == .array_literal) return true;
+        if (tag != .identifier) return false;
+        const binding = self.ir_view.getBinding(node) orelse return false;
+        const declaration = self.captureSource(binding) orelse return false;
+        return self.unannotated_decls.contains(bindingKey(declaration));
+    }
+
+    /// Whether the root of a write target is a `const` or `let` with no type
+    /// annotation and an initializer that holds literal types. The root is the
+    /// identifier at the start of the chain of member, computed, and index
+    /// reads.
+    fn writeRootIsUnannotated(self: *const TypeChecker, target: NodeIndex) bool {
+        var current = target;
+        var steps: u8 = 0;
+        while (steps < 64) : (steps += 1) {
+            const tag = self.ir_view.getTag(current) orelse return false;
+            if (tag == .identifier) {
+                const binding = self.ir_view.getBinding(current) orelse return false;
+                const declaration = self.captureSource(binding) orelse return false;
+                return self.unannotated_decls.contains(bindingKey(declaration));
+            }
+            if (tag != .member_access and tag != .optional_chain and tag != .computed_access) return false;
+            const member = self.ir_view.getMember(current) orelse return false;
+            current = member.object;
+        }
+        return false;
+    }
+
+    /// Collect the slot of each member of `receiver` that a write through
+    /// `slot` reaches. A union receiver gives one slot for each member that
+    /// has one. A tuple member sets `has_tuple`.
+    fn collectWriteSlots(
+        self: *const TypeChecker,
+        receiver: TypeIndex,
+        slot: WriteSlot,
+        out: *[MAX_UNION_MEMBERS]TypeIndex,
+        has_tuple: *bool,
+    ) usize {
+        const pool = self.env.pool;
+        const resolved = pool.unwrapNominal(self.env.resolveRef(receiver));
+        if (pool.getTag(resolved) == .t_union) {
+            var count: usize = 0;
+            for (pool.getUnionMembers(resolved)) |member| {
+                if (pool.getTag(pool.unwrapNominal(self.env.resolveRef(member))) == .t_tuple) has_tuple.* = true;
+                const found = self.slotOfMember(member, slot) orelse continue;
+                if (count >= out.len) return count;
+                out[count] = found;
+                count += 1;
+            }
+            return count;
+        }
+        if (pool.getTag(resolved) == .t_tuple) has_tuple.* = true;
+        const found = self.slotOfMember(resolved, slot) orelse return 0;
+        out[0] = found;
+        return 1;
+    }
+
+    /// The slot that a write through `member` reaches, or null when the
+    /// target is not a field with a string literal key, nor an index.
+    fn writeSlotOf(self: *const TypeChecker, tag: ir.NodeTag, member: Node.MemberExpr) ?WriteSlot {
+        if (tag == .member_access) {
+            const name = self.resolveAtomName(member.property) orelse return null;
+            return .{ .field = name };
+        }
+        if (tag != .computed_access or member.computed == null_node) return null;
+        if (self.ir_view.getTag(member.computed) == .lit_string) {
+            const key = self.getLiteralString(member.computed) orelse return .index_any;
+            return .{ .field = key };
+        }
+        if (self.ir_view.getTag(member.computed) == .lit_int) {
+            const at = self.ir_view.getIntValue(member.computed) orelse return .index_any;
+            return if (at >= 0) .{ .index_at = @intCast(at) } else .index_any;
+        }
+        return .index_any;
+    }
+
+    /// Refuse a write `o.f = v`, `o["f"] = v`, or `xs[i] = v` whose value does
+    /// not fit the slot, and a write to the length of a tuple.
+    fn reportContainerWrite(self: *TypeChecker, node: NodeIndex, asgn: Node.AssignExpr) void {
+        const target_tag = self.ir_view.getTag(asgn.target) orelse return;
+        const member = self.ir_view.getMember(asgn.target) orelse return;
+        // A fresh array literal has no other holder, so a write to it breaks no type.
+        if (self.ir_view.getTag(member.object) == .array_literal) return;
+        const slot = self.writeSlotOf(target_tag, member) orelse return;
+        const receiver = self.inferType(member.object);
+        if (receiver == null_type_idx) return;
+
+        var slots: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+        var has_tuple = false;
+        const count = self.collectWriteSlots(receiver, slot, &slots, &has_tuple);
+        if (has_tuple and slot == .field and std.mem.eql(u8, slot.field, "length")) {
+            self.addTupleLengthChange(node, true);
+            return;
+        }
+        if (count == 0) return;
+        const value_type = self.inferType(asgn.value);
+        if (value_type == null_type_idx) return;
+        const widen = self.writeRootIsUnannotated(member.object);
+        for (slots[0..count]) |found| {
+            const expected = if (widen) self.widenWriteSlot(found, 0) else found;
+            if (self.env.isAssignableTo(value_type, expected)) continue;
+            self.addTypeMismatch(node, expected, value_type);
+            return;
+        }
+    }
+
+    /// Refuse an element of a `push`, `unshift`, or `splice` call that does
+    /// not fit the element type, and any mutating call on a tuple.
+    fn reportContainerMutation(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return;
+        if (callee_tag != .member_access and callee_tag != .optional_chain) return;
+        const member = self.ir_view.getMember(call.callee) orelse return;
+        const method = self.resolveAtomName(member.property) orelse return;
+        var mutates = false;
+        for (mutating_array_methods) |name| {
+            if (std.mem.eql(u8, method, name)) mutates = true;
+        }
+        if (!mutates) return;
+
+        // A fresh array literal has no other holder, so a change to it breaks no type.
+        if (self.ir_view.getTag(member.object) == .array_literal) return;
+        const receiver = self.inferType(member.object);
+        if (receiver == null_type_idx) return;
+        const pool = self.env.pool;
+        if (pool.isReadonlyArray(receiver)) return;
+
+        var slots: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+        var has_tuple = false;
+        const count = self.collectWriteSlots(receiver, .index_any, &slots, &has_tuple);
+        if (has_tuple) {
+            self.addTupleLengthChange(node, false);
+            return;
+        }
+        const first_value: usize = if (std.mem.eql(u8, method, "push") or std.mem.eql(u8, method, "unshift")) 0 else if (std.mem.eql(u8, method, "splice")) 2 else return;
+        if (count == 0) return;
+        const widen = self.writeRootIsUnannotated(member.object);
+        var arg: usize = first_value;
+        while (arg < call.args_count) : (arg += 1) {
+            const value_type = self.inferType(self.ir_view.getListIndex(call.args_start, @intCast(arg)));
+            if (value_type == null_type_idx) continue;
+            for (slots[0..count]) |found| {
+                const expected = if (widen) self.widenWriteSlot(found, 0) else found;
+                if (self.env.isAssignableTo(value_type, expected)) continue;
+                self.addArgTypeMismatch(node, expected, value_type);
+                break;
+            }
+        }
+    }
+
+    fn addTupleLengthChange(self: *TypeChecker, node: NodeIndex, is_length_write: bool) void {
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .type_mismatch,
+            .node = node,
+            .message = if (is_length_write)
+                "a write to `length` changes the length of a tuple, and a tuple type names its length"
+            else
+                "this call changes the length of a tuple, and a tuple type names its length",
+            .help = "annotate the binding as an array, such as `string[]`, when the length must change",
         });
     }
 

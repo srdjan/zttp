@@ -11846,6 +11846,301 @@ test "untyped operand: strict code refuses an arithmetic operand with no type an
     try expectAbsentReadCases(&absent_read_untyped_operand);
 }
 
+const container_writes = [_]AbsentReadCase{
+    .{ .name = "w1_q17_record_field_write", .expect = "ZTS200@4", .source =
+    \\structural P = { name: string };
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const p: P = { name: "a" };
+    \\  p.name = 5;
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_q19_record_string_key_write", .expect = "ZTS200@4", .source =
+    \\structural P = { name: string };
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const p: P = { name: "a" };
+    \\  p["name"] = 5;
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_q20_nested_record_write", .expect = "ZTS200@5", .source =
+    \\structural P = { name: string };
+    \\structural Q = { a: P };
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const q: Q = { a: { name: "x" } };
+    \\  q.a.name = 7;
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_q16_array_push_wrong_element", .expect = "ZTS203@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const xs: number[] = [1];
+    \\  xs.push("a");
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_q16_array_index_write_wrong_element", .expect = "ZTS200@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const xs: number[] = [1];
+    \\  xs[0] = "a";
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_q14_array_literal_binding_index_write", .expect = "ZTS200@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const ys = ["a", "b"];
+    \\  ys[0] = 5;
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_tuple_literal_index_write", .expect = "ZTS200@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const u: [string, number] = ["a", 1];
+    \\  u[0] = 5;
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_tuple_dynamic_index_write", .expect = "ZTS200@4", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const t: [string, string] = ["a", "b"];
+    \\  const i: number = 1;
+    \\  t[i] = true;
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_tuple_length_write", .expect = "ZTS200@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const t: [string, string] = ["a", "b"];
+    \\  t.length = 0;
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_tuple_push", .expect = "ZTS200@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const t: [string, string] = ["a", "b"];
+    \\  t.push("c");
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_tuple_pop", .expect = "ZTS200@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const t: [string, string] = ["a", "b"];
+    \\  t.pop();
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_tuple_shift", .expect = "ZTS200@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const t: [string, string] = ["a", "b"];
+    \\  t.shift();
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_tuple_unshift", .expect = "ZTS200@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const t: [string, string] = ["a", "b"];
+    \\  t.unshift("c");
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_tuple_splice", .expect = "ZTS200@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const t: [string, string] = ["a", "b"];
+    \\  t.splice(0, 1);
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_array_unshift_wrong_element", .expect = "ZTS203@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const xs: number[] = [1];
+    \\  xs.unshift("a");
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_array_splice_wrong_inserted_element", .expect = "ZTS203@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const xs: number[] = [1];
+    \\  xs.splice(0, 1, "a");
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_union_receiver_member_refuses_the_value", .expect = "ZTS200@5", .source =
+    \\structural A = { v: number };
+    \\structural B = { v: string };
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const ab: A | B = { v: 1 };
+    \\  ab.v = 5;
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_declared_literal_field", .expect = "ZTS200@4", .source =
+    \\structural S = { kind: "a" | "b" };
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const s: S = { kind: "a" };
+    \\  s.kind = "c";
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_declared_literal_tuple_element", .expect = "ZTS200@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const g: ["GET", number] = ["GET", 1];
+    \\  g[0] = "POST";
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_unannotated_nested_array_write_wrong_type", .expect = "ZTS200@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const q = { a: { n: 0 }, xs: [1] };
+    \\  q.a.n = "x";
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_array_push_to_empty_typed_array_is_clean", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const xs: number[] = [];
+    \\  xs.push(1);
+    \\  return Response.text(String(xs.length));
+    \\}
+    },
+    .{ .name = "w1_record_field_write_of_matching_type_is_clean", .expect = "clean", .source =
+    \\structural P = { name: string };
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const p: P = { name: "a" };
+    \\  p.name = "b";
+    \\  return Response.text(p.name);
+    \\}
+    },
+    .{ .name = "w1_array_length_write_is_clean", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const xs: number[] = [1, 2];
+    \\  xs.length = 0;
+    \\  return Response.text(String(xs.length));
+    \\}
+    },
+    .{ .name = "w1_counter_idiom_on_unannotated_object_is_clean", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const o = { n: 0 };
+    \\  o.n = 1;
+    \\  return Response.text(String(o.n));
+    \\}
+    },
+    .{ .name = "w1_unannotated_nested_writes_are_clean", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const q = { a: { n: 0 }, xs: [1], t: ["x", 1] };
+    \\  q.a.n = 2;
+    \\  q.xs.push(3);
+    \\  q.a = { n: 5 };
+    \\  q.t[0] = "y";
+    \\  return Response.text(String(q.a.n));
+    \\}
+    },
+    .{ .name = "w1_collecting_into_empty_array_is_clean", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const out = [];
+    \\  for (const item of [1, 2]) {
+    \\    out.push(item);
+    \\  }
+    \\  return Response.text(String(out.length));
+    \\}
+    },
+    .{ .name = "w1_write_of_a_value_with_no_type_is_clean", .expect = "clean", .source =
+    \\structural P = { name: string };
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const p: P = { name: "a" };
+    \\  p.name = [1, 2].reduce((acc, v) => acc, "");
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_splice_start_and_count_are_not_checked_against_the_element", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const ws: string[] = ["a", "b"];
+    \\  ws.splice(0, 1);
+    \\  return Response.text(String(ws.length));
+    \\}
+    },
+    .{ .name = "w1_readonly_array_push_reports_only_the_readonly_mutation", .expect = "ZTS215@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const ro: readonly string[] = ["a"];
+    \\  ro.push(5);
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_push_into_declared_literal_union_array", .expect = "ZTS203@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const ms: ("a" | "b")[] = ["a"];
+    \\  ms.push("c");
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "w1_write_of_literal_union_field_in_unannotated_object_is_clean", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const o = { k: req.method === "GET" ? "a" : "b" };
+    \\  o.k = "c";
+    \\  return Response.text(o.k);
+    \\}
+    },
+    .{ .name = "w1_write_of_record_element_in_unannotated_object_array_is_clean", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const q = { xs: [{ n: 0 }] };
+    \\  q.xs[0] = { n: 5 };
+    \\  return Response.text(String(q.xs.length));
+    \\}
+    },
+    .{ .name = "w1_tuple_reads_are_clean", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const t: [string, string] = ["a", "b"];
+    \\  const m = t.map((x) => x);
+    \\  const s = t.slice(0, 1);
+    \\  return Response.text(String(t.length + m.length + s.length));
+    \\}
+    },
+    .{ .name = "w1_mutation_and_write_on_a_fresh_array_literal_are_clean", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const last = [1, 2].pop();
+    \\  const n = ["a", 1].push(2);
+    \\  [1, 2][0] = 5;
+    \\  return Response.json({ last: last, n: n });
+    \\}
+    },
+    .{ .name = "w1_write_into_an_unannotated_array_literal_binding_is_clean", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const ys = [{ n: 0 }];
+    \\  ys[0] = { n: 5 };
+    \\  return Response.text(String(ys.length));
+    \\}
+    },
+    .{ .name = "w1_write_through_an_alias_of_an_unannotated_literal_is_clean", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const table = { hits: 0 };
+    \\  const t = table;
+    \\  t.hits = 1;
+    \\  return Response.text(String(table.hits));
+    \\}
+    },
+    .{ .name = "w1_write_through_an_unannotated_alias_of_a_declared_record", .expect = "ZTS200@5", .source =
+    \\structural S = { kind: "a" | "b" };
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const s: S = { kind: "a" };
+    \\  const alias = s;
+    \\  alias.kind = "c";
+    \\  return Response.text(s.kind);
+    \\}
+    },
+    .{ .name = "w1_write_into_an_unannotated_function_result", .expect = "ZTS200@5", .source =
+    \\structural S = { kind: "a" | "b" };
+    \\function mk(): S { return { kind: "a" }; }
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const r = mk();
+    \\  r.kind = "c";
+    \\  return Response.text(r.kind);
+    \\}
+    },
+};
+
+test "container writes: a write must fit the slot type, and a tuple keeps its length" {
+    try expectAbsentReadCases(&container_writes);
+}
+
 const absent_read_untyped_receiver = [_]AbsentReadCase{
     .{ .name = "n1_accumulator_with_no_type_q12c", .expect = "ZTS201@2", .source =
     \\function handler(req: Request): Proof<Response, "read_only"> {

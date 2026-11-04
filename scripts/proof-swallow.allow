@@ -149,6 +149,10 @@ packages/zts/src/type_checker.zig schemaValueToType catch-block
 packages/zts/src/type_checker.zig schemaValueToType catch-poison
 packages/zts/src/type_checker.zig walkExpr catch-poison
 packages/zts/src/type_checker.zig walkStmt catch-poison
+# The `unannotated_decls` write in the `.var_decl` arm. A lost entry only turns off
+# literal widening for a write, which makes the write check stricter, not weaker.
+# The pool failure is reported through markAllocationFailure and ensureHealthy.
+packages/zts/src/type_checker.zig walkStmt catch-poison@2
 
 # The A3 records and bindings below follow the same rule: each catch sets the
 # checker's poison flag, which ensureHealthy reports before a build can use the
