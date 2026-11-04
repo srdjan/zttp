@@ -73,25 +73,25 @@ pub fn stringCharAt(ctx: *context.Context, this: value.JSValue, args: []const va
         } else if (args[0].toNumber()) |n| {
             if (std.math.isFinite(n)) i = std.math.lossyCast(i32, @trunc(n));
         }
-        if (i < 0) return value.JSValue.fromPtr(string.createString(ctx.allocator, "") catch return value.JSValue.undefined_val);
+        if (i < 0) return value.JSValue.fromPtr(ctx.createStringPtr("") catch return value.JSValue.undefined_val);
         idx = @intCast(i);
     }
     // ASCII fast path: byte index == UTF-16 code-unit index.
     if (stringIsAscii(this)) {
         if (idx < data.len) {
-            const result = string.createString(ctx.allocator, data[idx .. idx + 1]) catch return value.JSValue.undefined_val;
+            const result = ctx.createStringPtr(data[idx .. idx + 1]) catch return value.JSValue.undefined_val;
             return value.JSValue.fromPtr(result);
         }
-        return value.JSValue.fromPtr(string.createString(ctx.allocator, "") catch return value.JSValue.undefined_val);
+        return value.JSValue.fromPtr(ctx.createStringPtr("") catch return value.JSValue.undefined_val);
     }
     // Non-ASCII: index by UTF-16 code unit. JS returns a lone surrogate for an
     // astral half; this UTF-8 model cannot, so an astral codepoint is returned
     // whole for either of its two unit indices (documented limitation).
     if (string.charCodepointSliceAt(data, idx)) |slice| {
-        const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+        const result = ctx.createStringPtr(slice) catch return value.JSValue.undefined_val;
         return value.JSValue.fromPtr(result);
     }
-    return value.JSValue.fromPtr(string.createString(ctx.allocator, "") catch return value.JSValue.undefined_val);
+    return value.JSValue.fromPtr(ctx.createStringPtr("") catch return value.JSValue.undefined_val);
 }
 
 /// String.prototype.charCodeAt(index) - Get char code at index
@@ -431,7 +431,7 @@ pub fn stringToLowerCase(ctx: *context.Context, this: value.JSValue, args: []con
     const data = getStringDataCtx(this, ctx) orelse return this;
     if (data.len == 0) return this;
 
-    const result = string.createString(ctx.allocator, data) catch return this;
+    const result = ctx.createStringPtr(data) catch return this;
     const result_data = result.dataMut();
     for (result_data) |*c| {
         c.* = std.ascii.toLower(c.*);
@@ -445,7 +445,7 @@ pub fn stringToUpperCase(ctx: *context.Context, this: value.JSValue, args: []con
     const data = getStringDataCtx(this, ctx) orelse return this;
     if (data.len == 0) return this;
 
-    const result = string.createString(ctx.allocator, data) catch return this;
+    const result = ctx.createStringPtr(data) catch return this;
     const result_data = result.dataMut();
     for (result_data) |*c| {
         c.* = std.ascii.toUpper(c.*);
@@ -462,7 +462,7 @@ pub fn stringTrim(ctx: *context.Context, this: value.JSValue, args: []const valu
     while (start < end and std.ascii.isWhitespace(data[start])) : (start += 1) {}
     while (end > start and std.ascii.isWhitespace(data[end - 1])) : (end -= 1) {}
     const slice = data[start..end];
-    const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+    const result = ctx.createStringPtr(slice) catch return value.JSValue.undefined_val;
     return value.JSValue.fromPtr(result);
 }
 
@@ -473,7 +473,7 @@ pub fn stringTrimStart(ctx: *context.Context, this: value.JSValue, args: []const
     var start: usize = 0;
     while (start < data.len and std.ascii.isWhitespace(data[start])) : (start += 1) {}
     const slice = data[start..];
-    const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+    const result = ctx.createStringPtr(slice) catch return value.JSValue.undefined_val;
     return value.JSValue.fromPtr(result);
 }
 
@@ -484,7 +484,7 @@ pub fn stringTrimEnd(ctx: *context.Context, this: value.JSValue, args: []const v
     var end: usize = data.len;
     while (end > 0 and std.ascii.isWhitespace(data[end - 1])) : (end -= 1) {}
     const slice = data[0..end];
-    const result = string.createString(ctx.allocator, slice) catch return value.JSValue.undefined_val;
+    const result = ctx.createStringPtr(slice) catch return value.JSValue.undefined_val;
     return value.JSValue.fromPtr(result);
 }
 
@@ -506,7 +506,7 @@ pub fn stringSplit(ctx: *context.Context, this: value.JSValue, args: []const val
     }
 
     if (args.len == 0 or args[0].isUndefined()) {
-        const part_str = string.createString(ctx.allocator, data) catch return value.JSValue.undefined_val;
+        const part_str = ctx.createStringPtr(data) catch return value.JSValue.undefined_val;
         ctx.setIndexChecked(result, 0, value.JSValue.fromPtr(part_str)) catch return value.JSValue.undefined_val;
         result.setArrayLength(1);
         return result.toValue();
@@ -521,7 +521,7 @@ pub fn stringSplit(ctx: *context.Context, this: value.JSValue, args: []const val
             if (limit) |lim| if (count >= lim) break;
             const seq_len = std.unicode.utf8ByteSequenceLength(data[i]) catch 1;
             const end = @min(i + seq_len, data.len);
-            const ch_str = string.createString(ctx.allocator, data[i..end]) catch return value.JSValue.undefined_val;
+            const ch_str = ctx.createStringPtr(data[i..end]) catch return value.JSValue.undefined_val;
             ctx.setIndexChecked(result, count, value.JSValue.fromPtr(ch_str)) catch return value.JSValue.undefined_val;
             count += 1;
             i = end;
@@ -536,7 +536,7 @@ pub fn stringSplit(ctx: *context.Context, this: value.JSValue, args: []const val
         if (limit) |lim| {
             if (count >= lim) break;
         }
-        const part_str = string.createString(ctx.allocator, part) catch return value.JSValue.undefined_val;
+        const part_str = ctx.createStringPtr(part) catch return value.JSValue.undefined_val;
         ctx.setIndexChecked(result, count, value.JSValue.fromPtr(part_str)) catch return value.JSValue.undefined_val;
         count += 1;
     }
@@ -577,7 +577,7 @@ pub fn stringRepeat(ctx: *context.Context, this: value.JSValue, args: []const va
         }
     }
     if (count == 0 or data.len == 0) {
-        const empty = string.createString(ctx.allocator, "") catch return value.JSValue.undefined_val;
+        const empty = ctx.createStringPtr("") catch return value.JSValue.undefined_val;
         return value.JSValue.fromPtr(empty);
     }
     if (count == 1) return this;
@@ -585,14 +585,15 @@ pub fn stringRepeat(ctx: *context.Context, this: value.JSValue, args: []const va
     const total_len = @as(usize, data.len) * @as(usize, count);
     if (total_len > max_built_string_len) return value.JSValue.undefined_val;
 
-    const buf = ctx.allocator.alloc(u8, total_len) catch return value.JSValue.undefined_val;
-    defer ctx.allocator.free(buf);
+    const ra = ctx.requestAllocator();
+    const buf = ra.alloc(u8, total_len) catch return value.JSValue.undefined_val;
+    defer ra.free(buf);
     var pos: usize = 0;
     for (0..count) |_| {
         @memcpy(buf[pos..][0..data.len], data);
         pos += data.len;
     }
-    const result = string.createString(ctx.allocator, buf) catch return value.JSValue.undefined_val;
+    const result = ctx.createStringPtr(buf) catch return value.JSValue.undefined_val;
     return value.JSValue.fromPtr(result);
 }
 
@@ -617,8 +618,9 @@ pub fn stringPadStart(ctx: *context.Context, this: value.JSValue, args: []const 
     if (target_len > max_built_string_len) return throwInvalidStringLength(ctx);
 
     const pad_needed = target_len - data.len;
-    const buf = ctx.allocator.alloc(u8, target_len) catch return this;
-    defer ctx.allocator.free(buf);
+    const ra = ctx.requestAllocator();
+    const buf = ra.alloc(u8, target_len) catch return this;
+    defer ra.free(buf);
 
     // Fill padding
     var pos: usize = 0;
@@ -630,7 +632,7 @@ pub fn stringPadStart(ctx: *context.Context, this: value.JSValue, args: []const 
     // Copy original string
     @memcpy(buf[pad_needed..][0..data.len], data);
 
-    const result = string.createString(ctx.allocator, buf) catch return this;
+    const result = ctx.createStringPtr(buf) catch return this;
     return value.JSValue.fromPtr(result);
 }
 
@@ -654,8 +656,9 @@ pub fn stringPadEnd(ctx: *context.Context, this: value.JSValue, args: []const va
     if (pad_str.len == 0) return this;
     if (target_len > max_built_string_len) return throwInvalidStringLength(ctx);
 
-    const buf = ctx.allocator.alloc(u8, target_len) catch return this;
-    defer ctx.allocator.free(buf);
+    const ra = ctx.requestAllocator();
+    const buf = ra.alloc(u8, target_len) catch return this;
+    defer ra.free(buf);
 
     // Copy original string
     @memcpy(buf[0..data.len], data);
@@ -667,14 +670,14 @@ pub fn stringPadEnd(ctx: *context.Context, this: value.JSValue, args: []const va
         pos += copy_len;
     }
 
-    const result = string.createString(ctx.allocator, buf) catch return this;
+    const result = ctx.createStringPtr(buf) catch return this;
     return value.JSValue.fromPtr(result);
 }
 
 /// String.prototype.concat(...strings) - Concatenate strings
 /// Uses concatMany for efficient single-allocation concatenation
 pub fn stringConcat(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
+    const allocator = ctx.requestAllocator();
 
     // Fast path: no args, return this
     if (args.len == 0) return this;
@@ -712,7 +715,7 @@ pub fn stringConcat(ctx: *context.Context, this: value.JSValue, args: []const va
 
 /// String.prototype.replace(searchValue, replaceValue) - Replace first occurrence
 pub fn stringReplace(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
+    const allocator = ctx.requestAllocator();
 
     if (args.len < 2) return this;
     const input = getStringDataCtx(this, ctx) orelse return this;
@@ -725,7 +728,7 @@ pub fn stringReplace(ctx: *context.Context, this: value.JSValue, args: []const v
         result.appendSlice(allocator, input[0..idx]) catch return this;
         result.appendSlice(allocator, replacement) catch return this;
         result.appendSlice(allocator, input[idx + search.len ..]) catch return this;
-        const new_str = string.createString(allocator, result.items) catch return this;
+        const new_str = ctx.createStringPtr(result.items) catch return this;
         return value.JSValue.fromPtr(new_str);
     }
 
@@ -734,7 +737,7 @@ pub fn stringReplace(ctx: *context.Context, this: value.JSValue, args: []const v
 
 /// String.prototype.replaceAll(searchValue, replaceValue) - Replace all occurrences
 pub fn stringReplaceAll(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
-    const allocator = ctx.allocator;
+    const allocator = ctx.requestAllocator();
 
     if (args.len < 2) return this;
     const input = getStringDataCtx(this, ctx) orelse return this;
@@ -753,7 +756,7 @@ pub fn stringReplaceAll(ctx: *context.Context, this: value.JSValue, args: []cons
             pos = idx + search.len;
         }
         result.appendSlice(allocator, input[pos..]) catch return this;
-        const new_str = string.createString(allocator, result.items) catch return this;
+        const new_str = ctx.createStringPtr(result.items) catch return this;
         return value.JSValue.fromPtr(new_str);
     }
 
@@ -902,7 +905,7 @@ test "padStart pads a short string below the limit" {
 /// String.fromCharCode(...charCodes) - Create string from char codes
 pub fn stringFromCharCode(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
-    if (args.len == 0) return value.JSValue.fromPtr(string.createString(ctx.allocator, "") catch return value.JSValue.undefined_val);
+    if (args.len == 0) return value.JSValue.fromPtr(ctx.createStringPtr("") catch return value.JSValue.undefined_val);
 
     // Each code point needs at most 3 UTF-8 bytes (BMP range 0-0xFFFF)
     var buf: [64 * 3]u8 = undefined;
@@ -927,7 +930,7 @@ pub fn stringFromCharCode(ctx: *context.Context, this: value.JSValue, args: []co
         };
         out_len += enc_len;
     }
-    const result = string.createString(ctx.allocator, buf[0..out_len]) catch return value.JSValue.undefined_val;
+    const result = ctx.createStringPtr(buf[0..out_len]) catch return value.JSValue.undefined_val;
     return value.JSValue.fromPtr(result);
 }
 

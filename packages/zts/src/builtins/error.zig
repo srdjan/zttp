@@ -51,7 +51,7 @@ pub fn createErrorObject(ctx: *context.Context, this: value.JSValue, args: []con
         ctx.setPropertyChecked(obj, .message, args[0]) catch return value.JSValue.undefined_val;
     } else if (args.len > 0) {
         // Convert to string
-        const msg_str = valueToStringSimple(ctx.allocator, args[0]) catch {
+        const msg_str = valueToStringSimple(ctx.requestAllocator(), args[0]) catch {
             const empty_val = ctx.createString("") catch return value.JSValue.undefined_val;
             ctx.setPropertyChecked(obj, .message, empty_val) catch return value.JSValue.undefined_val;
             return obj.toValue();
@@ -99,11 +99,12 @@ pub fn errorToString(ctx: *context.Context, this: value.JSValue, args: []const v
     }
 
     // Concatenate: name + ": " + message
+    const ra = ctx.requestAllocator();
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(ctx.allocator);
-    buffer.appendSlice(ctx.allocator, name_text) catch return value.JSValue.undefined_val;
-    buffer.appendSlice(ctx.allocator, ": ") catch return value.JSValue.undefined_val;
-    buffer.appendSlice(ctx.allocator, msg_text) catch return value.JSValue.undefined_val;
+    defer buffer.deinit(ra);
+    buffer.appendSlice(ra, name_text) catch return value.JSValue.undefined_val;
+    buffer.appendSlice(ra, ": ") catch return value.JSValue.undefined_val;
+    buffer.appendSlice(ra, msg_text) catch return value.JSValue.undefined_val;
 
     return ctx.createString(buffer.items) catch return value.JSValue.undefined_val;
 }

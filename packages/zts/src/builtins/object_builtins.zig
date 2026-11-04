@@ -32,7 +32,7 @@ fn appendArrayIndexKey(ctx: *context.Context, index_keys: *std.ArrayList(Indexed
     var buf: [10]u8 = undefined;
     const name = try std.fmt.bufPrint(&buf, "{d}", .{index});
     const atom = try ctx.atoms.intern(name);
-    try index_keys.append(ctx.allocator, .{ .atom = atom, .index = index });
+    try index_keys.append(ctx.requestAllocator(), .{ .atom = atom, .index = index });
 }
 
 fn appendDenseArrayIndexKeys(ctx: *context.Context, obj: *object.JSObject, index_keys: *std.ArrayList(IndexedKey)) !void {
@@ -69,28 +69,29 @@ fn appendDenseArrayIndexKeys(ctx: *context.Context, obj: *object.JSObject, index
 }
 
 fn getOwnEnumerableKeysForBuiltins(ctx: *context.Context, obj: *object.JSObject, pool: *const object.HiddenClassPool) ![]object.Atom {
+    const ra = ctx.requestAllocator();
     var index_keys = std.ArrayList(IndexedKey).empty;
-    defer index_keys.deinit(ctx.allocator);
+    defer index_keys.deinit(ra);
     var string_keys = std.ArrayList(object.Atom).empty;
-    defer string_keys.deinit(ctx.allocator);
+    defer string_keys.deinit(ra);
 
     try appendDenseArrayIndexKeys(ctx, obj, &index_keys);
 
-    const own_keys = try obj.getOwnEnumerableKeys(ctx.allocator, pool);
-    defer ctx.allocator.free(own_keys);
+    const own_keys = try obj.getOwnEnumerableKeys(ra, pool);
+    defer ra.free(own_keys);
     for (own_keys) |key| {
         const name = atomName(key, ctx) orelse continue;
         if (canonicalArrayIndex(name)) |index| {
             if (obj.isArray() and obj.getIndex(index) != null) continue;
-            try index_keys.append(ctx.allocator, .{ .atom = key, .index = index });
+            try index_keys.append(ra, .{ .atom = key, .index = index });
         } else {
-            try string_keys.append(ctx.allocator, key);
+            try string_keys.append(ra, key);
         }
     }
 
     std.mem.sort(IndexedKey, index_keys.items, {}, indexedKeyLessThan);
 
-    const result = try ctx.allocator.alloc(object.Atom, index_keys.items.len + string_keys.items.len);
+    const result = try ra.alloc(object.Atom, index_keys.items.len + string_keys.items.len);
     var out_i: usize = 0;
     for (index_keys.items) |key| {
         result[out_i] = key.atom;
@@ -121,8 +122,9 @@ pub fn objectKeys(ctx: *context.Context, this: value.JSValue, args: []const valu
 
     const obj = getObject(args[0]) orelse return value.JSValue.undefined_val;
     const pool = ctx.hidden_class_pool orelse return value.JSValue.undefined_val;
+    const ra = ctx.requestAllocator();
     const keys = getOwnEnumerableKeysForBuiltins(ctx, obj, pool) catch return value.JSValue.undefined_val;
-    defer ctx.allocator.free(keys);
+    defer ra.free(keys);
 
     const result = createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val;
     for (keys) |key| {
@@ -140,8 +142,9 @@ pub fn objectValues(ctx: *context.Context, this: value.JSValue, args: []const va
 
     const obj = getObject(args[0]) orelse return value.JSValue.undefined_val;
     const pool = ctx.hidden_class_pool orelse return value.JSValue.undefined_val;
+    const ra = ctx.requestAllocator();
     const keys = getOwnEnumerableKeysForBuiltins(ctx, obj, pool) catch return value.JSValue.undefined_val;
-    defer ctx.allocator.free(keys);
+    defer ra.free(keys);
 
     const result = createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val;
     for (keys) |key| {
@@ -158,8 +161,9 @@ pub fn objectEntries(ctx: *context.Context, this: value.JSValue, args: []const v
 
     const obj = getObject(args[0]) orelse return value.JSValue.undefined_val;
     const pool = ctx.hidden_class_pool orelse return value.JSValue.undefined_val;
+    const ra = ctx.requestAllocator();
     const keys = getOwnEnumerableKeysForBuiltins(ctx, obj, pool) catch return value.JSValue.undefined_val;
-    defer ctx.allocator.free(keys);
+    defer ra.free(keys);
 
     const result = createArrayWithPrototype(ctx) orelse return value.JSValue.undefined_val;
     for (keys) |key| {

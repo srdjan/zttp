@@ -32,18 +32,18 @@ pub fn jsonParse(ctx: *context.Context, this: value.JSValue, args: []const value
 pub fn jsonTryParse(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     _ = this;
     if (args.len == 0) {
-        const err_msg = string.createString(ctx.allocator, "JSON.tryParse requires a string argument") catch return value.JSValue.undefined_val;
+        const err_msg = ctx.createStringPtr("JSON.tryParse requires a string argument") catch return value.JSValue.undefined_val;
         return createResultErr(ctx, value.JSValue.fromPtr(err_msg));
     }
 
     const str_val = args[0];
     const text = getStringDataCtx(str_val, ctx) orelse {
-        const err_msg = string.createString(ctx.allocator, "JSON.tryParse argument must be a string") catch return value.JSValue.undefined_val;
+        const err_msg = ctx.createStringPtr("JSON.tryParse argument must be a string") catch return value.JSValue.undefined_val;
         return createResultErr(ctx, value.JSValue.fromPtr(err_msg));
     };
 
     const parsed = parseJsonValue(ctx, text) catch {
-        const err_msg = string.createString(ctx.allocator, "Invalid JSON") catch return value.JSValue.undefined_val;
+        const err_msg = ctx.createStringPtr("Invalid JSON") catch return value.JSValue.undefined_val;
         return createResultErr(ctx, value.JSValue.fromPtr(err_msg));
     };
     return createResultOk(ctx, parsed);
@@ -356,10 +356,11 @@ fn parseJsonKey(ctx: *context.Context, text: []const u8, pos: *usize) JsonError!
 /// Slow path for JSON keys with escape sequences
 fn parseJsonKeyWithEscapes(ctx: *context.Context, text: []const u8, pos: *usize, start: usize) JsonError!object.Atom {
     // Build unescaped key string
+    const ra = ctx.requestAllocator();
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(ctx.allocator);
+    defer buffer.deinit(ra);
 
-    buffer.appendSlice(ctx.allocator, text[start..pos.*]) catch return error.OutOfMemory;
+    buffer.appendSlice(ra, text[start..pos.*]) catch return error.OutOfMemory;
 
     while (pos.* < text.len) {
         const c = text[pos.*];
@@ -373,20 +374,20 @@ fn parseJsonKeyWithEscapes(ctx: *context.Context, text: []const u8, pos: *usize,
             const escaped = text[pos.*];
             pos.* += 1;
             switch (escaped) {
-                '"' => buffer.append(ctx.allocator, '"') catch return error.OutOfMemory,
-                '\\' => buffer.append(ctx.allocator, '\\') catch return error.OutOfMemory,
-                '/' => buffer.append(ctx.allocator, '/') catch return error.OutOfMemory,
-                'n' => buffer.append(ctx.allocator, '\n') catch return error.OutOfMemory,
-                'r' => buffer.append(ctx.allocator, '\r') catch return error.OutOfMemory,
-                't' => buffer.append(ctx.allocator, '\t') catch return error.OutOfMemory,
-                'b' => buffer.append(ctx.allocator, 0x08) catch return error.OutOfMemory,
-                'f' => buffer.append(ctx.allocator, 0x0C) catch return error.OutOfMemory,
-                'u' => try appendJsonUnicodeEscape(ctx.allocator, &buffer, text, pos),
+                '"' => buffer.append(ra, '"') catch return error.OutOfMemory,
+                '\\' => buffer.append(ra, '\\') catch return error.OutOfMemory,
+                '/' => buffer.append(ra, '/') catch return error.OutOfMemory,
+                'n' => buffer.append(ra, '\n') catch return error.OutOfMemory,
+                'r' => buffer.append(ra, '\r') catch return error.OutOfMemory,
+                't' => buffer.append(ra, '\t') catch return error.OutOfMemory,
+                'b' => buffer.append(ra, 0x08) catch return error.OutOfMemory,
+                'f' => buffer.append(ra, 0x0C) catch return error.OutOfMemory,
+                'u' => try appendJsonUnicodeEscape(ra, &buffer, text, pos),
                 else => return error.InvalidJson,
             }
         } else {
             if (c < 0x20) return error.InvalidJson;
-            buffer.append(ctx.allocator, c) catch return error.OutOfMemory;
+            buffer.append(ra, c) catch return error.OutOfMemory;
             pos.* += 1;
         }
     }
@@ -422,10 +423,11 @@ fn parseJsonString(ctx: *context.Context, text: []const u8, pos: *usize) JsonErr
 /// Slow path for JSON strings with escape sequences
 fn parseJsonStringWithEscapes(ctx: *context.Context, text: []const u8, pos: *usize, start: usize) JsonError!value.JSValue {
     // Copy the part before the first escape
+    const ra = ctx.requestAllocator();
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(ctx.allocator);
+    defer buffer.deinit(ra);
 
-    try buffer.appendSlice(ctx.allocator, text[start..pos.*]);
+    try buffer.appendSlice(ra, text[start..pos.*]);
 
     while (pos.* < text.len) {
         const c = text[pos.*];
@@ -439,20 +441,20 @@ fn parseJsonStringWithEscapes(ctx: *context.Context, text: []const u8, pos: *usi
             const escaped = text[pos.*];
             pos.* += 1;
             switch (escaped) {
-                '"' => try buffer.append(ctx.allocator, '"'),
-                '\\' => try buffer.append(ctx.allocator, '\\'),
-                '/' => try buffer.append(ctx.allocator, '/'),
-                'n' => try buffer.append(ctx.allocator, '\n'),
-                'r' => try buffer.append(ctx.allocator, '\r'),
-                't' => try buffer.append(ctx.allocator, '\t'),
-                'b' => try buffer.append(ctx.allocator, 0x08),
-                'f' => try buffer.append(ctx.allocator, 0x0C),
-                'u' => try appendJsonUnicodeEscape(ctx.allocator, &buffer, text, pos),
+                '"' => try buffer.append(ra, '"'),
+                '\\' => try buffer.append(ra, '\\'),
+                '/' => try buffer.append(ra, '/'),
+                'n' => try buffer.append(ra, '\n'),
+                'r' => try buffer.append(ra, '\r'),
+                't' => try buffer.append(ra, '\t'),
+                'b' => try buffer.append(ra, 0x08),
+                'f' => try buffer.append(ra, 0x0C),
+                'u' => try appendJsonUnicodeEscape(ra, &buffer, text, pos),
                 else => return error.InvalidJson,
             }
         } else {
             if (c < 0x20) return error.InvalidJson;
-            try buffer.append(ctx.allocator, c);
+            try buffer.append(ra, c);
             pos.* += 1;
         }
     }

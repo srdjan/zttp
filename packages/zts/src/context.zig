@@ -428,6 +428,15 @@ pub const Context = struct {
     // Hybrid Allocation Helpers
     // ========================================================================
 
+    /// Allocator for memory that a request allocates and drops. Inside a
+    /// request it is the request arena, which frees nothing and cannot grow a
+    /// block in place; outside a request it is `allocator`. It reads `hybrid`
+    /// at each call, because handler load turns `hybrid` off directly.
+    pub fn requestAllocator(self: *Context) std.mem.Allocator {
+        if (self.hybrid) |h| return h.arena.allocator();
+        return self.allocator;
+    }
+
     /// Create a JS object, using arena when hybrid mode is enabled
     pub fn createObject(self: *Context, prototype: ?*object.JSObject) !*object.JSObject {
         if (self.hybrid) |h| {

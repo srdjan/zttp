@@ -71,7 +71,6 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
     if (args.len == 0) return value.JSValue.undefined_val;
 
     const source = args[0];
-    const allocator = ctx.allocator;
 
     const map_fn: ?*object.JSObject = if (args.len > 1 and args[1].isCallable())
         args[1].toPtr(object.JSObject)
@@ -93,7 +92,7 @@ pub fn arrayFrom(ctx: *context.Context, _: value.JSValue, args: []const value.JS
         while (i < data.len) {
             const char_len = std.unicode.utf8ByteSequenceLength(data[i]) catch 1;
             const char_slice = data[i..@min(i + char_len, data.len)];
-            const char_str = try string.createString(allocator, char_slice);
+            const char_str = try ctx.createStringPtr(char_slice);
             var elem = value.JSValue.fromPtr(char_str);
             if (map_fn) |mfn| if (call_fn) |cfn| {
                 const call_args = [2]value.JSValue{ elem, value.JSValue.fromInt(@intCast(idx)) };
@@ -402,12 +401,13 @@ pub fn arrayJoin(ctx: *context.Context, this: value.JSValue, args: []const value
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     if (obj.class_id != .array) return value.JSValue.undefined_val;
 
+    const ra = ctx.requestAllocator();
     const len = obj.getArrayLength();
     var separator: []const u8 = ",";
     var sep_str_owned: ?*string.JSString = null;
-    defer if (sep_str_owned) |s| string.freeString(ctx.allocator, s);
+    defer if (sep_str_owned) |s| string.freeString(ra, s);
     if (args.len > 0 and !args[0].isUndefined()) {
-        const sep_str = valueToStringSimple(ctx.allocator, args[0]) catch return value.JSValue.undefined_val;
+        const sep_str = valueToStringSimple(ra, args[0]) catch return value.JSValue.undefined_val;
         separator = sep_str.data();
         if (!args[0].isString()) sep_str_owned = sep_str;
     }
@@ -481,20 +481,20 @@ pub fn arrayJoin(ctx: *context.Context, this: value.JSValue, args: []const value
 
     // Slow path: use ArrayList with heap-allocated string conversions
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(ctx.allocator);
+    defer buffer.deinit(ra);
 
     i = 0;
     while (i < len) : (i += 1) {
         if (i > 0) {
-            buffer.appendSlice(ctx.allocator, separator) catch return value.JSValue.undefined_val;
+            buffer.appendSlice(ra, separator) catch return value.JSValue.undefined_val;
         }
         const val = obj.getIndexUnchecked(i);
         if (val.isUndefined() or val.isNull()) {
             continue;
         }
-        const elem_str = valueToStringSimple(ctx.allocator, val) catch return value.JSValue.undefined_val;
-        defer if (!val.isString()) string.freeString(ctx.allocator, elem_str);
-        buffer.appendSlice(ctx.allocator, elem_str.data()) catch return value.JSValue.undefined_val;
+        const elem_str = valueToStringSimple(ra, val) catch return value.JSValue.undefined_val;
+        defer if (!val.isString()) string.freeString(ra, elem_str);
+        buffer.appendSlice(ra, elem_str.data()) catch return value.JSValue.undefined_val;
     }
 
     const result = createStringForJoin(ctx, buffer.items) orelse return value.JSValue.undefined_val;
@@ -538,7 +538,7 @@ fn createStringForJoin(ctx: *context.Context, data: []const u8) ?*string.JSStrin
     if (ctx.hybrid) |hybrid| {
         return string.createStringWithArena(hybrid.arena, data);
     }
-    return string.createString(ctx.allocator, data) catch null;
+    return ctx.createStringPtr(data) catch null;
 }
 
 /// Array.prototype.toReversed() - Return new reversed array (non-mutating)
@@ -832,8 +832,9 @@ pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const v
     }
 
     // Copy elements to temporary buffer
-    const temp = try ctx.allocator.alloc(value.JSValue, len);
-    defer ctx.allocator.free(temp);
+    const ra = ctx.requestAllocator();
+    const temp = try ra.alloc(value.JSValue, len);
+    defer ra.free(temp);
 
     var i: u32 = 0;
     while (i < len) : (i += 1) {
@@ -904,7 +905,7 @@ pub fn arrayToSorted(ctx: *context.Context, this: value.JSValue, args: []const v
             }
         };
         var first_error: ?anyerror = null;
-        std.mem.sort(value.JSValue, temp, CompareCtx{ .allocator = ctx.allocator, .first_error = &first_error }, CompareCtx.lessThan);
+        std.mem.sort(value.JSValue, temp, CompareCtx{ .allocator = ra, .first_error = &first_error }, CompareCtx.lessThan);
         if (first_error) |err| return err;
     }
 

@@ -1536,6 +1536,8 @@ const LifetimeGuardCase = struct {
     method: []const u8,
     url: []const u8,
     expected_body: []const u8,
+    /// False when the case overflows its arena by design.
+    fits_arena: bool = true,
 };
 
 const lifetime_guard_cases = [_]LifetimeGuardCase{
@@ -1554,6 +1556,7 @@ const lifetime_guard_cases = [_]LifetimeGuardCase{
         .method = "GET",
         .url = "/",
         .expected_body = "done",
+        .fits_arena = false,
     },
     .{
         .name = "2000 objects fit a 4 MiB request arena",
@@ -1570,6 +1573,131 @@ const lifetime_guard_cases = [_]LifetimeGuardCase{
         .method = "GET",
         .url = "/",
         .expected_body = "done",
+    },
+    .{
+        .name = "join then toUpperCase in a loop",
+        .handler =
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  for (const i of range(2000)) {
+        \\    const k = ["k", String(i)].join("");
+        \\    const u = k.toUpperCase();
+        \\    n = n + u.length;
+        \\  }
+        \\  return Response.text(String(n));
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "8890",
+    },
+    .{
+        .name = "String.prototype.concat in a loop",
+        .handler =
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  for (const i of range(2000)) {
+        \\    const s = "ab".concat("cd", String(i));
+        \\    n = n + s.length;
+        \\  }
+        \\  return Response.text(String(n));
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "14890",
+    },
+    .{
+        .name = "split in a loop",
+        .handler =
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  for (const i of range(2000)) {
+        \\    const parts = "a,b,c,d".split(",");
+        \\    n = n + parts.length;
+        \\  }
+        \\  return Response.text(String(n));
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "8000",
+    },
+    .{
+        .name = "JSON.stringify and JSON.parse in a loop",
+        .handler =
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  for (const i of range(2000)) {
+        \\    const text = JSON.stringify({ a: i, b: "x" });
+        \\    const back = JSON.parse(text);
+        \\    n = n + text.length;
+        \\  }
+        \\  return Response.text(String(n));
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "34890",
+    },
+    .{
+        .name = "JSON.parse of an escaped string in a loop",
+        .handler =
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  for (const i of range(2000)) {
+        \\    const back = JSON.parse("{\"a\":\"x\\ny\"}");
+        \\    n = n + 1;
+        \\  }
+        \\  return Response.text(String(n));
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "2000",
+    },
+    .{
+        .name = "JSON.tryParse of invalid text in a loop",
+        .handler =
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  for (const i of range(2000)) {
+        \\    const r = JSON.tryParse("nope");
+        \\    if (r.isOk() === true) {
+        \\      n = n + 1000;
+        \\    }
+        \\    n = n + 1;
+        \\  }
+        \\  return Response.text(String(n));
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "2000",
+    },
+    .{
+        .name = "Object.keys in a loop",
+        .handler =
+        \\function handler(req) {
+        \\  const o = { a: 1, b: 2, c: 3 };
+        \\  let n = 0;
+        \\  for (const i of range(2000)) {
+        \\    const ks = Object.keys(o);
+        \\    n = n + ks.length;
+        \\  }
+        \\  return Response.text(String(n));
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "6000",
     },
 };
 
@@ -1622,6 +1750,113 @@ fn runLifetimeGuardCase(case: LifetimeGuardCase) !void {
 test "HandlerPool request memory does not reach the lifetime arena" {
     for (lifetime_guard_cases) |case| {
         try runLifetimeGuardCase(case);
+    }
+}
+
+fn runTwiceOnOneRuntime(case: LifetimeGuardCase) !void {
+    const allocator = std.testing.allocator;
+    var pool = try HandlerPool.init(allocator, .{ .arena_size = case.arena_size }, case.handler, "<handler>", 1, 0);
+    defer pool.deinit();
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, case.method),
+        .url = try allocator.dupe(u8, case.url),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var run: usize = 0;
+    while (run < 2) : (run += 1) {
+        var handle = try pool.executeHandlerBorrowed(request.asView());
+        defer handle.deinit();
+        try std.testing.expectEqualStrings(case.expected_body, handle.response.body);
+    }
+
+    var lease = try pool.acquireWorkerRuntime();
+    defer lease.deinit();
+    try std.testing.expectEqual(@as(u64, 0), lease.base_rt.getStats().overflow_count);
+}
+
+test "HandlerPool request results repeat on one runtime without arena overflow" {
+    for (lifetime_guard_cases) |case| {
+        if (!case.fits_arena) continue;
+        runTwiceOnOneRuntime(case) catch |err| {
+            std.debug.print("repeat-run case \"{s}\": {s}\n", .{ case.name, @errorName(err) });
+            return err;
+        };
+    }
+}
+
+const EscapeCase = struct {
+    name: []const u8,
+    handler: []const u8,
+};
+
+/// A request that stores a request-scoped string in module state must fail the
+/// same way whichever builtin made the string.
+const escape_cases = [_]EscapeCase{
+    .{
+        .name = "join result assigned to a module-level let",
+        .handler =
+        \\let x = "";
+        \\function handler(req) {
+        \\  x = ["a", "b"].join("");
+        \\  return Response.text(x);
+        \\}
+        ,
+    },
+    .{
+        .name = "toUpperCase result assigned to a module-level let",
+        .handler =
+        \\let x = "";
+        \\function handler(req) {
+        \\  const s = "ab";
+        \\  x = s.toUpperCase();
+        \\  return Response.text(x);
+        \\}
+        ,
+    },
+    .{
+        .name = "concat result assigned to a module-level let",
+        .handler =
+        \\let x = "";
+        \\function handler(req) {
+        \\  const s = "ab";
+        \\  x = s.concat("cd");
+        \\  return Response.text(x);
+        \\}
+        ,
+    },
+    .{
+        .name = "toUpperCase result stored in a module-level object",
+        .handler =
+        \\const store = { v: "" };
+        \\function handler(req) {
+        \\  const s = "ab";
+        \\  store.v = s.toUpperCase();
+        \\  return Response.text(store.v);
+        \\}
+        ,
+    },
+};
+
+test "HandlerPool refuses a request-scoped builtin result stored in module state" {
+    const allocator = std.testing.allocator;
+    for (escape_cases) |case| {
+        var pool = try HandlerPool.init(allocator, .{}, case.handler, "<handler>", 1, 0);
+        defer pool.deinit();
+        var request = HttpRequestOwned{
+            .method = try allocator.dupe(u8, "GET"),
+            .url = try allocator.dupe(u8, "/"),
+            .headers = .empty,
+            .body = null,
+        };
+        defer request.deinit(allocator);
+        std.testing.expectError(error.HandlerError, pool.executeHandlerBorrowed(request.asView())) catch |err| {
+            std.debug.print("escape case \"{s}\": expected HandlerError\n", .{case.name});
+            return err;
+        };
     }
 }
 

@@ -101,10 +101,13 @@ pub const Arena = struct {
     /// O(1) bump allocation with custom alignment
     /// Use for types requiring alignment > 8 bytes (e.g., SIMD, Float64Box)
     pub inline fn allocAligned(self: *Arena, size: usize, alignment: usize) ?*anyopaque {
+        // A byte-aligned request still advances the bump pointer in whole
+        // `config.alignment` steps, so the next `alloc` sees an aligned pointer.
+        const step = @max(alignment, self.config.alignment);
         const current = @intFromPtr(self.ptr);
         // Align the pointer first, then add size
         const aligned_ptr = std.mem.alignForward(usize, current, alignment);
-        const aligned_size = std.mem.alignForward(usize, size, alignment);
+        const aligned_size = std.mem.alignForward(usize, size, step);
         const new_ptr = aligned_ptr + aligned_size;
 
         if (new_ptr <= @intFromPtr(self.limit)) {
@@ -546,6 +549,17 @@ test "Arena typed allocation" {
 
     ptr.?.* = .{ .a = 42, .b = 100, .c = true };
     try std.testing.expectEqual(@as(u64, 42), ptr.?.a);
+}
+
+test "Arena allocator keeps later bump allocations 8-aligned after a byte allocation" {
+    var arena = try Arena.init(std.testing.allocator, .{ .size = 4096 });
+    defer arena.deinit();
+
+    const bytes = try arena.allocator().alloc(u8, 3);
+    try std.testing.expectEqual(@as(usize, 3), bytes.len);
+
+    const next = arena.create(u64) orelse return error.OutOfMemory;
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(next) % 8);
 }
 
 test "Arena slice allocation" {
