@@ -6420,6 +6420,10 @@ test "container mutation gives a tuple priority after seventeen array union memb
     , "this call changes the length of a tuple, and a tuple type names its length");
 }
 
+test "array literal binding: an inferred array of 400 distinct records is accepted" {
+    try expectNoTypeDiagnostic(@embedFile("fixtures/typecheck/wide_record_array_400.ts"));
+}
+
 test "array literal binding: a module scope const of numbers is a number array" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };

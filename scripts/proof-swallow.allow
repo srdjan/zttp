@@ -495,3 +495,9 @@ packages/zts/src/type_checker.zig collectWriteSlots catch-block
 # Write-slot widening allocates only an owned snapshot before recursion. Failure sets allocation_failed.
 # TypeChecker.ensureHealthy reports OutOfMemory before a partial type can support a verdict.
 packages/zts/src/type_checker.zig widenWriteSlot catch-block
+
+# The wide container union of an array binding copies its members into scratch
+# storage before one join. Failure sets allocation_failed and returns the unknown
+# type. TypeChecker.ensureHealthy reports OutOfMemory before a partial type can
+# support a verdict.
+packages/zts/src/type_checker.zig arrayLiteralBindingType catch-block

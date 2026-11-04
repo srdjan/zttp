@@ -6921,13 +6921,24 @@ pub const TypeChecker = struct {
                 const element = pool.getArrayElement(inferred);
                 if (pool.getTag(element) == .t_union) {
                     // A literal longer than the inference buffer is an array of
-                    // a union. Each add below can move the pool's member list,
-                    // so the member is read again on every step.
-                    var joined: TypeIndex = null_type_idx;
-                    for (0..pool.getUnionMembers(element).len) |i| {
+                    // a union. One join over the widened members keeps the
+                    // member storage linear; a join per member grew it
+                    // quadratically and exhausted the pool's u16 range. The
+                    // add can move the pool's member list, so the members are
+                    // copied into scratch storage first.
+                    const member_count = pool.getUnionMembers(element).len;
+                    var widened: std.ArrayListUnmanaged(TypeIndex) = .empty;
+                    defer widened.deinit(self.allocator);
+                    widened.ensureTotalCapacity(self.allocator, member_count) catch {
+                        self.markAllocationFailure();
+                        return null_type_idx;
+                    };
+                    for (0..member_count) |i| {
                         const member = pool.getUnionMembers(element)[i];
-                        joined = self.joinElementTypes(joined, pool.widenLiteral(member));
+                        widened.appendAssumeCapacity(pool.widenLiteral(member));
                     }
+                    const joined = pool.addUnion(self.allocator, widened.items);
+                    if (joined == null_type_idx) return null_type_idx;
                     return pool.addArray(self.allocator, joined);
                 }
                 return pool.addArray(self.allocator, pool.widenLiteral(element));
