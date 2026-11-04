@@ -24,6 +24,67 @@ pub const PoolConfig = struct {
     use_hybrid_allocation: bool = true,
 };
 
+/// The runtime-lifetime arena plus a count of what it hands out. The struct
+/// lives behind a pointer, so the allocator it returns keeps a stable address.
+/// One thread uses a runtime at a time, so the counters are plain integers.
+const LifetimeAllocator = struct {
+    arena: std.heap.ArenaAllocator,
+    /// Calls to alloc, plus resize and remap calls that grow a block.
+    allocs: u64 = 0,
+    /// Bytes handed out by those calls.
+    bytes: u64 = 0,
+
+    fn init(backing: std.mem.Allocator) LifetimeAllocator {
+        return .{ .arena = std.heap.ArenaAllocator.init(backing) };
+    }
+
+    fn deinit(self: *LifetimeAllocator) void {
+        self.arena.deinit();
+    }
+
+    fn allocator(self: *LifetimeAllocator) std.mem.Allocator {
+        return .{ .ptr = self, .vtable = &.{
+            .alloc = countingAlloc,
+            .resize = countingResize,
+            .remap = countingRemap,
+            .free = countingFree,
+        } };
+    }
+
+    fn countingAlloc(ctx: *anyopaque, len: usize, alignment: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
+        const self: *LifetimeAllocator = @ptrCast(@alignCast(ctx));
+        const result = self.arena.allocator().rawAlloc(len, alignment, ret_addr) orelse return null;
+        self.allocs += 1;
+        self.bytes += len;
+        return result;
+    }
+
+    fn countingResize(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
+        const self: *LifetimeAllocator = @ptrCast(@alignCast(ctx));
+        if (!self.arena.allocator().rawResize(memory, alignment, new_len, ret_addr)) return false;
+        self.countGrowth(memory.len, new_len);
+        return true;
+    }
+
+    fn countingRemap(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *LifetimeAllocator = @ptrCast(@alignCast(ctx));
+        const result = self.arena.allocator().rawRemap(memory, alignment, new_len, ret_addr) orelse return null;
+        self.countGrowth(memory.len, new_len);
+        return result;
+    }
+
+    fn countingFree(ctx: *anyopaque, memory: []u8, alignment: std.mem.Alignment, ret_addr: usize) void {
+        const self: *LifetimeAllocator = @ptrCast(@alignCast(ctx));
+        self.arena.allocator().rawFree(memory, alignment, ret_addr);
+    }
+
+    fn countGrowth(self: *LifetimeAllocator, old_len: usize, new_len: usize) void {
+        if (new_len <= old_len) return;
+        self.allocs += 1;
+        self.bytes += new_len - old_len;
+    }
+};
+
 /// Lock-free runtime pool
 pub const LockFreePool = struct {
     slots: []std.atomic.Value(?*Runtime),
@@ -56,7 +117,7 @@ pub const LockFreePool = struct {
         /// Nothing was leaked in the Zig sense; the memory sat in freelists.
         /// Routing runtime-lifetime allocations through one arena makes destroy
         /// an unmap. See pre-rebase:docs/archive/plans/2026-07-28-001-reset-simplification-plan.md.
-        lifetime_arena: *std.heap.ArenaAllocator,
+        lifetime_arena: *LifetimeAllocator,
         /// The allocator `lifetime_arena` draws from, and the one that owns the
         /// arena struct itself. Kept so `destroy` can release it last.
         backing: std.mem.Allocator,
@@ -90,9 +151,9 @@ pub const LockFreePool = struct {
             // released in a single unmap by `destroy`. The per-step errdefers
             // are kept because they release non-memory resources (JIT code
             // pages, file descriptors) that an arena does not know about.
-            const arena_owner = try backing.create(std.heap.ArenaAllocator);
+            const arena_owner = try backing.create(LifetimeAllocator);
             errdefer backing.destroy(arena_owner);
-            arena_owner.* = std.heap.ArenaAllocator.init(backing);
+            arena_owner.* = LifetimeAllocator.init(backing);
             errdefer arena_owner.deinit();
 
             const allocator = arena_owner.allocator();
@@ -132,7 +193,9 @@ pub const LockFreePool = struct {
             if (config.use_hybrid_allocation) {
                 const arena_ptr = try allocator.create(arena_mod.Arena);
                 errdefer allocator.destroy(arena_ptr);
-                arena_ptr.* = try arena_mod.Arena.init(allocator, config.arena_config);
+                arena_ptr.* = try arena_mod.Arena.init(backing, config.arena_config);
+                // The request arena draws from `backing`, not the lifetime arena:
+                // overflow nodes must really be freed at `reset`.
                 // From here on, ownership is transferred to `request_arena`
                 // and the function-scope errdefer above handles cleanup.
                 request_arena = arena_ptr;
@@ -271,6 +334,8 @@ pub const LockFreePool = struct {
                 .peak_arena_usage = self.peak_arena_usage,
                 .overflow_count = self.overflow_count,
                 .current_arena_stats = self.getArenaStats(),
+                .lifetime_allocs = self.lifetime_arena.allocs,
+                .lifetime_bytes = self.lifetime_arena.bytes,
             };
         }
 
@@ -297,6 +362,10 @@ pub const LockFreePool = struct {
         peak_arena_usage: usize,
         overflow_count: u64,
         current_arena_stats: ?arena_mod.ArenaStats,
+        /// Allocations the lifetime arena has served since the runtime was built.
+        lifetime_allocs: u64,
+        /// Bytes the lifetime arena has handed out since the runtime was built.
+        lifetime_bytes: u64,
     };
 
     pub fn init(allocator: std.mem.Allocator, config: PoolConfig) !LockFreePool {

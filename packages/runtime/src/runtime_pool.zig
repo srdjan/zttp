@@ -1528,6 +1528,103 @@ test "HandlerPool handler remains callable across resets" {
         try std.testing.expectEqualStrings("ok", response.body);
     }
 }
+
+const LifetimeGuardCase = struct {
+    name: []const u8,
+    handler: []const u8,
+    arena_size: usize,
+    method: []const u8,
+    url: []const u8,
+    expected_body: []const u8,
+};
+
+const lifetime_guard_cases = [_]LifetimeGuardCase{
+    .{
+        .name = "2000 objects overflow a 4 KiB request arena",
+        .handler =
+        \\function handler(req) {
+        \\  const arr = [];
+        \\  for (const i of range(2000)) {
+        \\    arr.push({ i: i });
+        \\  }
+        \\  return Response.text('done');
+        \\}
+        ,
+        .arena_size = 4096,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "done",
+    },
+    .{
+        .name = "2000 objects fit a 4 MiB request arena",
+        .handler =
+        \\function handler(req) {
+        \\  const arr = [];
+        \\  for (const i of range(2000)) {
+        \\    arr.push({ i: i });
+        \\  }
+        \\  return Response.text('done');
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "done",
+    },
+};
+
+/// Count of lifetime-arena allocations on the pool's only runtime. A runtime
+/// that serves requests must keep this count fixed once it has warmed up.
+fn lifetimeAllocs(pool: *HandlerPool) !u64 {
+    var lease = try pool.acquireWorkerRuntime();
+    defer lease.deinit();
+    return lease.base_rt.getStats().lifetime_allocs;
+}
+
+fn runLifetimeGuardCase(case: LifetimeGuardCase) !void {
+    const allocator = std.testing.allocator;
+    var pool = try HandlerPool.init(allocator, .{ .arena_size = case.arena_size }, case.handler, "<handler>", 1, 0);
+    defer pool.deinit();
+
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, case.method),
+        .url = try allocator.dupe(u8, case.url),
+        .headers = .empty,
+        .body = null,
+    };
+    defer request.deinit(allocator);
+
+    var warmup: usize = 0;
+    while (warmup < 4) : (warmup += 1) {
+        var handle = try pool.executeHandlerBorrowed(request.asView());
+        defer handle.deinit();
+        try std.testing.expectEqualStrings(case.expected_body, handle.response.body);
+    }
+    const after_warmup = try lifetimeAllocs(&pool);
+
+    var measured: usize = 0;
+    while (measured < 8) : (measured += 1) {
+        var handle = try pool.executeHandlerBorrowed(request.asView());
+        defer handle.deinit();
+        try std.testing.expectEqualStrings(case.expected_body, handle.response.body);
+    }
+    const after_measured = try lifetimeAllocs(&pool);
+
+    std.testing.expectEqual(after_warmup, after_measured) catch |err| {
+        std.debug.print(
+            "lifetime guard case \"{s}\": lifetime_allocs {d} -> {d} (delta {d})\n",
+            .{ case.name, after_warmup, after_measured, after_measured - after_warmup },
+        );
+        return err;
+    };
+}
+
+test "HandlerPool request memory does not reach the lifetime arena" {
+    for (lifetime_guard_cases) |case| {
+        try runLifetimeGuardCase(case);
+    }
+}
+
 test "HandlerPool exhaustion and recovery" {
     const allocator = std.heap.c_allocator;
 

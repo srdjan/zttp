@@ -135,6 +135,10 @@ const readFilePosixForGraph = zq.file_io.readFileForModuleGraph;
 
 pub const HandlerInstance = struct {
     allocator: std.mem.Allocator,
+    /// Owns every byte of a response this instance builds. On a pooled runtime
+    /// it is the pool runtime's `backing` allocator, which frees, because
+    /// `allocator` is the lifetime arena and a response is built per request.
+    response_allocator: std.mem.Allocator,
     ctx: *zq.Context,
     gc_state: *zq.GC,
     heap: *zq.Heap,
@@ -261,6 +265,7 @@ pub const HandlerInstance = struct {
 
         self.* = .{
             .allocator = allocator,
+            .response_allocator = allocator,
             .ctx = ctx,
             .gc_state = gc_state,
             .heap = heap_state,
@@ -333,6 +338,7 @@ pub const HandlerInstance = struct {
 
         self.* = .{
             .allocator = allocator,
+            .response_allocator = pool_rt.backing,
             .ctx = pool_rt.ctx,
             .gc_state = pool_rt.gc_state,
             .heap = pool_rt.heap_state,
@@ -1306,7 +1312,7 @@ pub const HandlerInstance = struct {
         if (self.ctx.hasException()) {
             const exc = self.ctx.exception;
             self.ctx.clearException();
-            var err_response = HttpResponse.init(self.allocator);
+            var err_response = HttpResponse.init(self.response_allocator);
             err_response.status = 500;
             const exc_msg: []const u8 = if (exc.isString())
                 exc.toPtr(zq.JSString).data()
@@ -1320,9 +1326,9 @@ pub const HandlerInstance = struct {
             // Append the source line when the trap resolved one (feature A). A
             // JS-thrown exception often has none, so this is best-effort.
             const body_owned = if (self.interpreter.last_error_location) |loc|
-                try self.allocator.print("{s} ({s}) at {d}:{d}", .{ explained, exc_msg, loc.line, loc.column })
+                try err_response.allocator.print("{s} ({s}) at {d}:{d}", .{ explained, exc_msg, loc.line, loc.column })
             else
-                try self.allocator.print("{s} ({s})", .{ explained, exc_msg });
+                try err_response.allocator.print("{s} ({s})", .{ explained, exc_msg });
             err_response.setBodyOwned(body_owned);
             try err_response.putHeader("Content-Type", "text/plain; charset=utf-8");
             if (diag.verdict == .soundness_incident) {
@@ -1392,7 +1398,7 @@ pub const HandlerInstance = struct {
         pattern: *const zq.HandlerPattern,
         borrow_body: bool,
     ) !HttpResponse {
-        var response = HttpResponse.init(self.allocator);
+        var response = HttpResponse.init(self.response_allocator);
         response.status = pattern.status;
 
         const content_type = switch (pattern.content_type_idx) {
@@ -1420,7 +1426,7 @@ pub const HandlerInstance = struct {
             response.body = pattern.static_body;
             response.body_owned = false;
         } else {
-            const body_copy = try self.allocator.dupe(u8, pattern.static_body);
+            const body_copy = try response.allocator.dupe(u8, pattern.static_body);
             response.body = body_copy;
             response.body_owned = true;
         }
@@ -1587,10 +1593,10 @@ pub const HandlerInstance = struct {
             if (borrow_body) {
                 response.setBodyBorrowed(str.data(), @ptrCast(str));
             } else {
-                response.setBodyOwned(try self.allocator.dupe(u8, str.data()));
+                response.setBodyOwned(try response.allocator.dupe(u8, str.data()));
             }
         } else if (getStringDataCtx(val, self.ctx)) |bytes| {
-            response.setBodyOwned(try self.allocator.dupe(u8, bytes));
+            response.setBodyOwned(try response.allocator.dupe(u8, bytes));
         }
     }
 
@@ -1610,7 +1616,7 @@ pub const HandlerInstance = struct {
     }
 
     pub fn extractResponseInternal(self: *Self, result: zq.JSValue, borrow_body: bool) !HttpResponse {
-        var response = HttpResponse.init(self.allocator);
+        var response = HttpResponse.init(self.response_allocator);
 
         if (!result.isObject()) {
             // If result is any string (flat or slice), use it as
@@ -1626,7 +1632,7 @@ pub const HandlerInstance = struct {
             response.status = 500;
             var fault_buf: [256]u8 = undefined;
             const diag = fault_explain.diagnose(self.config.handler_proof, .non_response_return);
-            const body_owned = try self.allocator.dupe(u8, fault_explain.formatMessage(&fault_buf, diag));
+            const body_owned = try response.allocator.dupe(u8, fault_explain.formatMessage(&fault_buf, diag));
             response.setBodyOwned(body_owned);
             try response.putHeader("Content-Type", "text/plain; charset=utf-8");
             return response;
