@@ -3,6 +3,17 @@
 The 2026-11-04 Zig review of `e5073153` reported 16 confirmed findings, F1 to F16.
 The full review report is outside the repository. The owner approved the recommended order on 2026-11-04: F1, then F7, then F2 and F3. Each fix starts with a failing test.
 
+## Status
+
+| Unit | Status |
+|---|---|
+| F1 | Complete: `a9ca3a9c` |
+| F7 | Complete: `d7a62413` |
+| F3 | Complete: `02659dfa` |
+| F2 | Decision 1 option (a) chosen; scope and units in [the F2 plan](2026-11-04-f2-request-memory-plan.md) |
+
+`bash scripts/verify.sh` passed on `main` at `02659dfa`.
+
 ## Units
 
 | Unit | Finding | Files | Acceptance check | Model |
@@ -10,7 +21,7 @@ The full review report is outside the repository. The owner approved the recomme
 | F1 | `zttp proofs verify` reads the literal file `binary`, not the `binary` component that the manifest hashed | `packages/runtime/src/proofs/bundle.zig#verifySemantics` | A bundle whose `binary` component is `renamed.bin` reaches the semantic check of `renamed.bin`; the new test fails before the fix with `error.InvalidManifest` | Sonnet |
 | F7 | An inferred array of 400 distinct literal records fails with `TypePoolCapacityExceeded`; regression from `1ea31118` | `arrayLiteralBindingType` in `packages/zts/src/type_checker.zig#TypeChecker` | The 400-record fixture checks without ZTS000; `zts check` exits 2 on 400 and 1000 records | Sonnet |
 | F3 | `padStart` and `padEnd` allocate the requested length with no cap, then panic above 512 MiB | `packages/zts/src/builtins/string_builtins.zig`, `packages/zts/src/string.zig#checkStringLength` | A 2 MiB pad throws `RangeError`; `checkStringLength` refuses a length above the block header limit | Sonnet |
-| F2 | Request-time allocations through `ctx.allocator` are not freed until the runtime is recycled | See Decision 1 | Waits for Decision 1 | Not started |
+| F2 | Request-time allocations through `ctx.allocator` are not freed until the runtime is recycled | See [the F2 plan](2026-11-04-f2-request-memory-plan.md) | See the F2 plan | Sonnet, units G1 to G6 |
 
 Each unit runs in its own worktree from local `main` with a private cache. Gates per unit: the named test step unfiltered, then `zig build test` and `zig build check-spine`. After all units, `bash scripts/verify.sh` runs on `main`.
 
