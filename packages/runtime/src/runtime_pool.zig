@@ -1839,6 +1839,27 @@ const escape_cases = [_]EscapeCase{
         \\}
         ,
     },
+    .{
+        .name = "join result pushed onto a module-level array",
+        .handler =
+        \\const store = [];
+        \\function handler(req) {
+        \\  store.push(["a", "b"].join(""));
+        \\  return Response.text(store[0]);
+        \\}
+        ,
+    },
+    .{
+        .name = "toUpperCase result pushed onto a module-level array",
+        .handler =
+        \\const store = [];
+        \\function handler(req) {
+        \\  const s = "ab";
+        \\  store.push(s.toUpperCase());
+        \\  return Response.text(store[0]);
+        \\}
+        ,
+    },
 };
 
 test "HandlerPool refuses a request-scoped builtin result stored in module state" {

@@ -463,7 +463,8 @@ pub const sdk_bridge = struct {
         const ctx = handleToContext(handle);
         if (!arr_val.isArray()) return false;
         const arr = arr_val.toPtr(object.JSObject);
-        arr.arrayPush(ctx.allocator, val) catch return false;
+        // The array can be module state; refuse a request-scoped value there.
+        ctx.setIndexChecked(arr, arr.getArrayLength(), val) catch return false;
         return true;
     }
 

@@ -152,8 +152,10 @@ pub fn arrayPush(ctx: *context.Context, this: value.JSValue, args: []const value
     const obj = getObject(this) orelse return value.JSValue.undefined_val;
     if (obj.class_id != .array) return value.JSValue.undefined_val;
 
+    // The receiver can be module state, so each store goes through the escape
+    // check: a request-scoped value must not outlive the request arena.
     for (args) |arg| {
-        obj.arrayPush(ctx.allocator, arg) catch return value.JSValue.undefined_val;
+        ctx.setIndexChecked(obj, obj.getArrayLength(), arg) catch return value.JSValue.undefined_val;
     }
     return value.JSValue.fromInt(@intCast(obj.getArrayLength()));
 }
