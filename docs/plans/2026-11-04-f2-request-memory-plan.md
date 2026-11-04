@@ -8,8 +8,9 @@ The owner chose Decision 1 option (a) on 2026-11-04: route request-time allocati
 
 | Unit | Status |
 |---|---|
-| G1 | In progress |
-| G2 to G7 | Not started |
+| G1 | Complete: `e1c01404`. Also moved response construction on the pooled path to `backing`, because the guard found one response header list per request |
+| G2 | In progress |
+| G3 to G7 | Not started |
 
 ## Cause
 
