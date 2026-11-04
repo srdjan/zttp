@@ -3545,21 +3545,13 @@ pub const TypeChecker = struct {
         if (arr.elements_count == 0) return null_type_idx;
 
         var element_types: [32]TypeIndex = undefined;
-        var count: usize = 0;
-        var truncated = false;
-
-        for (0..arr.elements_count) |i| {
-            // For arrays larger than the buffer, infer the element type from the
-            // first 32 elements rather than discarding the whole type as unknown.
-            if (count >= element_types.len) {
-                truncated = true;
-                break;
-            }
+        const element_count: usize = arr.elements_count;
+        const count = @min(element_count, element_types.len);
+        for (0..count) |i| {
             const elem_idx = self.ir_view.getListIndex(arr.elements_start, @intCast(i));
             const elem_type = self.inferType(elem_idx);
             if (elem_type == null_type_idx) return null_type_idx;
-            element_types[count] = elem_type;
-            count += 1;
+            element_types[i] = elem_type;
         }
 
         const first = element_types[0];
@@ -3571,16 +3563,43 @@ pub const TypeChecker = struct {
             }
         }
 
-        if (homogeneous) {
-            return self.env.pool.addArray(self.allocator, first);
+        if (element_count <= element_types.len) {
+            if (homogeneous) return self.env.pool.addArray(self.allocator, first);
+            return self.env.pool.addTuple(self.allocator, element_types[0..count]);
         }
-        // A truncated array must not be described as a fixed-length tuple of the
-        // first 32 elements (that would understate the real length). Widen to a
-        // homogeneous array over the seen element types instead.
-        if (truncated) {
-            return self.env.pool.addArray(self.allocator, self.env.pool.addUnion(self.allocator, element_types[0..count]));
+
+        // Keep homogeneous wide literals allocation-free. After the first
+        // different type, collect the remaining types and normalize once.
+        var wide_types: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        defer wide_types.deinit(self.allocator);
+
+        if (!homogeneous) {
+            wide_types.ensureTotalCapacity(self.allocator, element_count) catch {
+                @constCast(self).markAllocationFailure();
+                return null_type_idx;
+            };
+            wide_types.appendSliceAssumeCapacity(element_types[0..count]);
         }
-        return self.env.pool.addTuple(self.allocator, element_types[0..count]);
+
+        for (count..element_count) |i| {
+            const elem_idx = self.ir_view.getListIndex(arr.elements_start, @intCast(i));
+            const elem_type = self.inferType(elem_idx);
+            if (elem_type == null_type_idx) return null_type_idx;
+            if (wide_types.items.len == 0 and elem_type == first) continue;
+            if (wide_types.items.len == 0) {
+                wide_types.ensureTotalCapacity(self.allocator, element_count - count + 1) catch {
+                    @constCast(self).markAllocationFailure();
+                    return null_type_idx;
+                };
+                wide_types.appendAssumeCapacity(first);
+            }
+            wide_types.appendAssumeCapacity(elem_type);
+        }
+
+        if (wide_types.items.len == 0) return self.env.pool.addArray(self.allocator, first);
+        const element_type = self.env.pool.addUnion(self.allocator, wide_types.items);
+        if (element_type == null_type_idx) return null_type_idx;
+        return self.env.pool.addArray(self.allocator, element_type);
     }
 
     fn unionMemberIsRecord(self: *const TypeChecker, member_type: TypeIndex) bool {

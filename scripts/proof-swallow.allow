@@ -475,3 +475,9 @@ packages/zts/src/import_signatures.zig copyAt catch-return@2
 packages/zts/src/import_signatures.zig copyList catch-return
 packages/zts/src/import_signatures.zig copyRecord catch-return
 packages/zts/src/import_signatures.zig copyFunction catch-return
+
+# Array inference allocates scratch storage only after a wide literal proves
+# heterogeneous. Failure poisons TypeChecker, and pipeline ensureHealthy then
+# returns OutOfMemory before inferred types can support a verdict.
+packages/zts/src/type_checker.zig inferArrayLiteralType catch-block
+packages/zts/src/type_checker.zig inferArrayLiteralType catch-block@2

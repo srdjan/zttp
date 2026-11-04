@@ -5850,6 +5850,94 @@ test "array literal binding: a literal longer than the inference buffer is a num
     , "type 'number[]' is not assignable to type '{ zz: Bytes }'");
 }
 
+test "array literal binding: an incompatible first element in a wide annotated array is rejected" {
+    try expectOneMismatch(
+        \\function f(): number {
+        \\  const ys: number[] = [
+        \\    "bad", 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0,
+        \\  ];
+        \\  return ys.length;
+        \\}
+    , "type '\"bad\" | 0[]' is not assignable to type 'number[]'");
+}
+
+test "array literal binding: an incompatible element after the inference buffer is rejected" {
+    try expectOneMismatch(
+        \\function f(): number {
+        \\  const ys: number[] = [
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    "bad",
+        \\  ];
+        \\  return ys.length;
+        \\}
+    , "type '0 | \"bad\"[]' is not assignable to type 'number[]'");
+}
+
+test "array literal binding: wide heterogeneous inference propagates allocation failure" {
+    const allocator = testing.allocator;
+    const source =
+        \\function f(): number {
+        \\  const ys = [
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    "bad",
+        \\  ];
+        \\  return ys.length;
+        \\}
+    ;
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const parsed = ParsedModule.fromTypedExisting(view, root, &atoms, &parser.type_store);
+    const Run = struct {
+        fn analyze(run_allocator: std.mem.Allocator, module: ParsedModule) !void {
+            var analysis: ModuleAnalysisSession = .{};
+            try analysis.initSoundExtraction(run_allocator, module, .{
+                .source_types = .direct,
+                .strict = false,
+            });
+            defer analysis.deinit();
+            try analysis.complete();
+        }
+    };
+
+    try testing.checkAllAllocationFailures(allocator, Run.analyze, .{parsed});
+}
+
+test "array literal binding: valid annotated arrays at and after the inference buffer are accepted" {
+    try expectNoTypeDiagnostic(
+        \\function f(): number {
+        \\  const at_buffer: number[] = [
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\  ];
+        \\  const after_buffer: number[] = [
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0,
+        \\  ];
+        \\  return at_buffer.length + after_buffer.length;
+        \\}
+    );
+}
+
 test "array literal binding: a module scope const of numbers is a number array" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };
