@@ -8068,18 +8068,32 @@ pub const TypeChecker = struct {
                 var widened: [32]type_pool_mod.RecordField = undefined;
                 const fields = pool.getRecordFields(slot);
                 if (fields.len > widened.len) return slot;
-                for (fields, 0..) |field, i| {
-                    widened[i] = field;
-                    widened[i].type_idx = self.widenWriteSlot(field.type_idx, depth + 1);
+                @memcpy(widened[0..fields.len], fields);
+                for (widened[0..fields.len]) |*field| {
+                    field.type_idx = self.widenWriteSlot(field.type_idx, depth + 1);
                 }
                 return pool.addRecord(self.allocator, widened[0..fields.len]);
             },
             .t_union => {
-                var widened: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+                var stack: [MAX_UNION_MEMBERS]TypeIndex = undefined;
                 const members = pool.getUnionMembers(slot);
-                if (members.len > widened.len) return slot;
-                for (members, 0..) |member, i| widened[i] = self.widenWriteSlot(member, depth + 1);
-                return pool.addUnion(self.allocator, widened[0..members.len]);
+                var heap_storage: ?[]TypeIndex = null;
+                const snapshot = if (members.len <= stack.len)
+                    stack[0..members.len]
+                else blk: {
+                    const storage = self.allocator.alloc(TypeIndex, members.len) catch {
+                        @constCast(self).markAllocationFailure();
+                        return null_type_idx;
+                    };
+                    heap_storage = storage;
+                    break :blk storage;
+                };
+                defer if (heap_storage) |storage| self.allocator.free(storage);
+                @memcpy(snapshot, members);
+                for (snapshot) |*member| {
+                    member.* = self.widenWriteSlot(member.*, depth + 1);
+                }
+                return pool.addUnion(self.allocator, snapshot);
             },
             // exhaustive: any other tag holds no literal to widen, and keeps its type.
             else => return slot,

@@ -6146,6 +6146,168 @@ test "array literal binding: valid annotated arrays at and after the inference b
     );
 }
 
+test "container mutation widens every member of a wide inferred numeric union" {
+    try expectNoTypeDiagnostic(
+        \\function f(n: number): number {
+        \\  const box = { ys: [
+        \\    0, 1, 2, 3, 4, 5, 6, 7,
+        \\    8, 9, 10, 11, 12, 13, 14, 15,
+        \\    0, 1, 2, 3, 4, 5, 6, 7,
+        \\    8, 9, 10, 11, 12, 13, 14, 15,
+        \\    16,
+        \\  ] };
+        \\  box.ys.push(n);
+        \\  return box.ys.length;
+        \\}
+    );
+}
+
+test "container write widens every member of a wide inferred numeric union" {
+    try expectNoTypeDiagnostic(
+        \\function f(n: number): number {
+        \\  const box = { ys: [
+        \\    0, 1, 2, 3, 4, 5, 6, 7,
+        \\    8, 9, 10, 11, 12, 13, 14, 15,
+        \\    0, 1, 2, 3, 4, 5, 6, 7,
+        \\    8, 9, 10, 11, 12, 13, 14, 15,
+        \\    16,
+        \\  ] };
+        \\  box.ys[0] = n;
+        \\  return box.ys.length;
+        \\}
+    );
+}
+
+test "container mutation refuses a string after widening a wide inferred numeric union" {
+    try expectOneArgMismatch(
+        \\function f(s: string): number {
+        \\  const box = { ys: [
+        \\    0, 1, 2, 3, 4, 5, 6, 7,
+        \\    8, 9, 10, 11, 12, 13, 14, 15,
+        \\    0, 1, 2, 3, 4, 5, 6, 7,
+        \\    8, 9, 10, 11, 12, 13, 14, 15,
+        \\    16,
+        \\  ] };
+        \\  box.ys.push(s);
+        \\  return box.ys.length;
+        \\}
+    , "argument type does not match parameter type: expected number, got string");
+}
+
+test "container mutation keeps an explicit wide literal union strict" {
+    try expectOneArgMismatch(
+        \\function f(n: number): number {
+        \\  const box: { ys: (0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16)[] } = { ys: [
+        \\    0, 1, 2, 3, 4, 5, 6, 7,
+        \\    8, 9, 10, 11, 12, 13, 14, 15,
+        \\    0, 1, 2, 3, 4, 5, 6, 7,
+        \\    8, 9, 10, 11, 12, 13, 14, 15,
+        \\    16,
+        \\  ] };
+        \\  box.ys.push(n);
+        \\  return box.ys.length;
+        \\}
+    , "argument type does not match parameter type: expected 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16, got number");
+}
+
+test "container mutation keeps inferred numeric widening at sixteen union members" {
+    try expectNoTypeDiagnostic(
+        \\function f(n: number): number {
+        \\  const box = { ys: [
+        \\    0, 1, 2, 3, 4, 5, 6, 7,
+        \\    8, 9, 10, 11, 12, 13, 14, 15,
+        \\    0, 1, 2, 3, 4, 5, 6, 7,
+        \\    8, 9, 10, 11, 12, 13, 14, 15,
+        \\    15,
+        \\  ] };
+        \\  box.ys.push(n);
+        \\  return box.ys.length;
+        \\}
+    );
+}
+
+const wide_nested_record_union_mutation_source =
+    \\structural Nested = { a: 0 } | { b: 0 };
+    \\structural Item = {
+    \\  kind: number;
+    \\  nested: { a: number } | { b: number };
+    \\  after: number;
+    \\};
+    \\function f(u: Nested, item: Item): number {
+    \\  const box = { ys: [
+    \\    { kind: 0, nested: u, after: 0 },
+    \\    { kind: 1, nested: u, after: 1 },
+    \\    { kind: 2, nested: u, after: 2 },
+    \\    { kind: 3, nested: u, after: 3 },
+    \\    { kind: 4, nested: u, after: 4 },
+    \\    { kind: 5, nested: u, after: 5 },
+    \\    { kind: 6, nested: u, after: 6 },
+    \\    { kind: 7, nested: u, after: 7 },
+    \\    { kind: 8, nested: u, after: 8 },
+    \\    { kind: 9, nested: u, after: 9 },
+    \\    { kind: 10, nested: u, after: 10 },
+    \\    { kind: 11, nested: u, after: 11 },
+    \\    { kind: 12, nested: u, after: 12 },
+    \\    { kind: 13, nested: u, after: 13 },
+    \\    { kind: 14, nested: u, after: 14 },
+    \\    { kind: 15, nested: u, after: 15 },
+    \\    { kind: 0, nested: u, after: 0 },
+    \\    { kind: 1, nested: u, after: 1 },
+    \\    { kind: 2, nested: u, after: 2 },
+    \\    { kind: 3, nested: u, after: 3 },
+    \\    { kind: 4, nested: u, after: 4 },
+    \\    { kind: 5, nested: u, after: 5 },
+    \\    { kind: 6, nested: u, after: 6 },
+    \\    { kind: 7, nested: u, after: 7 },
+    \\    { kind: 8, nested: u, after: 8 },
+    \\    { kind: 9, nested: u, after: 9 },
+    \\    { kind: 10, nested: u, after: 10 },
+    \\    { kind: 11, nested: u, after: 11 },
+    \\    { kind: 12, nested: u, after: 12 },
+    \\    { kind: 13, nested: u, after: 13 },
+    \\    { kind: 14, nested: u, after: 14 },
+    \\    { kind: 15, nested: u, after: 15 },
+    \\    { kind: 16, nested: u, after: 16 },
+    \\  ] };
+    \\  box.ys.push(item);
+    \\  return box.ys.length;
+    \\}
+;
+
+test "container mutation snapshots wide unions and record fields before recursive widening" {
+    try expectNoTypeDiagnostic(wide_nested_record_union_mutation_source);
+}
+
+test "wide recursive write-slot widening propagates allocation failure" {
+    const allocator = testing.allocator;
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(
+        allocator,
+        allocator,
+        wide_nested_record_union_mutation_source,
+        .compile,
+    );
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const parsed = ParsedModule.fromTypedExisting(view, root, &atoms, &parser.type_store);
+    const Run = struct {
+        fn analyze(run_allocator: std.mem.Allocator, module: ParsedModule) !void {
+            var analysis: ModuleAnalysisSession = .{};
+            try analysis.initSoundExtraction(run_allocator, module, .{
+                .source_types = .direct,
+                .strict = false,
+            });
+            defer analysis.deinit();
+            try analysis.complete();
+        }
+    };
+
+    try testing.checkAllAllocationFailures(allocator, Run.analyze, .{parsed});
+}
+
 const wide_container_record_prefix =
     \\structural A01 = { kind: "01"; v: number };
     \\structural A02 = { kind: "02"; v: number };

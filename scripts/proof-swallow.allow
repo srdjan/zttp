@@ -491,3 +491,7 @@ packages/zts/src/type_checker.zig inferSpreadArrayLiteralType catch-return
 # copy cannot allocate. TypeChecker.ensureHealthy reports OutOfMemory before
 # any partial slot set can support a verdict.
 packages/zts/src/type_checker.zig collectWriteSlots catch-block
+
+# Write-slot widening allocates only an owned snapshot before recursion. Failure sets allocation_failed.
+# TypeChecker.ensureHealthy reports OutOfMemory before a partial type can support a verdict.
+packages/zts/src/type_checker.zig widenWriteSlot catch-block
