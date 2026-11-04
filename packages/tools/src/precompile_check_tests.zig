@@ -7873,7 +7873,7 @@ test "CHECK refuses termination claims when a function value recurses without en
         \\function down(n: number): Proof<number, "total"> {
         \\  const fs: Fn[] = [down];
         \\  for (const f of fs) {
-        \\    return range(1).map(f)[0] ?? n;
+        \\    return [1].map(f)[0] ?? n;
         \\  }
         \\  return n;
         \\}
@@ -7887,7 +7887,7 @@ test "CHECK refuses termination claims when a function value recurses without en
         \\function down(n: number): Proof<number, "total"> {
         \\  const o: Ops = { a: down };
         \\  return match (o) {
-        \\    when { a: g }: range(1).map(g)[0] ?? n
+        \\    when { a: g }: [1].map(g)[0] ?? n
         \\    default: n
         \\  };
         \\}
@@ -11844,6 +11844,127 @@ const absent_read_untyped_operand = [_]AbsentReadCase{
 
 test "untyped operand: strict code refuses an arithmetic operand with no type and keeps the other diagnostics" {
     try expectAbsentReadCases(&absent_read_untyped_operand);
+}
+
+const absent_read_untyped_receiver = [_]AbsentReadCase{
+    .{ .name = "n1_accumulator_with_no_type_q12c", .expect = "ZTS201@2", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const s = [1, 2].reduce((acc, v) => acc.toFixed(2), "");
+    \\  return Response.text(String(s));
+    \\}
+    },
+    .{ .name = "n1_loop_variable_over_numbers_keeps_its_zts201_q12d", .expect = "ZTS201@4", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  let out = "";
+    \\  for (const s of [1, 2]) {
+    \\    out = s.toUpperCase();
+    \\  }
+    \\  return Response.text(out);
+    \\}
+    },
+    .{ .name = "n1_builtin_namespaces_and_request_headers_are_clean", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const o = { a: 1 };
+    \\  const m = Math.max(1, 2);
+    \\  const j = JSON.stringify({ a: 1 });
+    \\  const k = Object.keys(o).length;
+    \\  const h = req.headers.get("x");
+    \\  return Response.json({ m: m, j: j, k: k, h: h });
+    \\}
+    },
+    .{ .name = "n1_empty_array_collecting_with_push_is_clean_fr1", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const out = [];
+    \\  for (const item of [1, 2]) {
+    \\    out.push(item);
+    \\  }
+    \\  return Response.text(String(out.length));
+    \\}
+    },
+    .{ .name = "n1_index_then_member_call_keeps_zts309", .expect = "ZTS309@4,ZTS401@4", .source =
+    \\structural P = { age: number };
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const ps: P[] = [];
+    \\  return Response.text(String(ps[0].age.toFixed(2)));
+    \\}
+    },
+    .{ .name = "n1_error_of_validatejson_after_not_ok_keeps_zts309", .expect = "ZTS309@6,ZTS401@6", .source =
+    \\import { schemaCompile, validateJson } from "zttp:validate";
+    \\schemaCompile("todo", "{\"type\":\"object\",\"required\":[\"title\"]}");
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const r = validateJson("todo", "{}");
+    \\  if (!r.ok) {
+    \\    return Response.text(String(r.error.length.toFixed(2)));
+    \\  }
+    \\  return Response.text("ok");
+    \\}
+    },
+    .{ .name = "n1_value_that_admits_undefined_after_ok_keeps_zts309", .expect = "ZTS309@6,ZTS401@8", .source =
+    \\import { ok } from "zttp:result";
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const r = ok(req.headers.get("x-missing"));
+    \\  let n = "";
+    \\  if (r.ok) {
+    \\    n = String(r.value.length.toFixed(2));
+    \\  }
+    \\  return Response.text(n);
+    \\}
+    },
+    .{ .name = "n1_parameter_of_a_named_function_gets_zts601_only", .expect = "ZTS601@1", .source =
+    \\function f(a) {
+    \\  return a.trim();
+    \\}
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  return Response.text(req.url);
+    \\}
+    },
+    .{ .name = "n1_captured_parameter_of_a_named_function_gets_zts601_only", .expect = "ZTS601@1", .source =
+    \\function mk(base) {
+    \\  const g = (v: string): string => base.trim();
+    \\  return g;
+    \\}
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "n1_unannotated_anonymous_arrow_gets_the_untyped_receiver_refusal_fr4", .expect = "ZTS201@1", .source =
+    \\const handler = (req) => Response.text(req.url.trim());
+    },
+    .{ .name = "n1_member_of_parsed_json_is_refused", .expect = "ZTS201@2", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const s = JSON.parse(req.url).name.trim();
+    \\  return Response.text(s);
+    \\}
+    },
+    .{ .name = "n1_array_literal_with_an_untyped_element_keeps_array_members", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const s = req.headers["x-tag"] ?? "";
+    \\  const ns = [s].map((x: string): number => x.length);
+    \\  return Response.json({ n: ns.length });
+    \\}
+    },
+    .{ .name = "n1_array_literal_with_an_untyped_element_refuses_a_member_arrays_lack", .expect = "ZTS201@3", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const s = req.headers["x-tag"] ?? "";
+    \\  const ns = [s].foo();
+    \\  return Response.text("x");
+    \\}
+    },
+    .{ .name = "n1_member_call_on_an_empty_array_literal_is_clean", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  return Response.text(String([].pop()));
+    \\}
+    },
+    .{ .name = "n1_range_has_no_array_members", .expect = "ZTS201@2", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const ns = range(3).map((x: number): number => x);
+    \\  return Response.text("x");
+    \\}
+    },
+};
+
+test "untyped receiver: strict code refuses a member call on a value with no type and keeps the other diagnostics" {
+    try expectAbsentReadCases(&absent_read_untyped_receiver);
 }
 
 const ObserverProbe = struct {

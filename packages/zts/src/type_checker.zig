@@ -31,6 +31,7 @@ const result_shape_fallback = "a Result argument has the wrong type";
 const object = @import("zts-engine").object;
 const context = @import("zts-engine").context;
 const type_pool_mod = @import("type_pool.zig");
+const strict_checker_mod = @import("strict_checker.zig");
 const type_key = @import("type_key.zig");
 const type_env_mod = @import("type_env.zig");
 const abi_types = @import("abi_types.zig");
@@ -56,6 +57,7 @@ const TypeEnv = type_env_mod.TypeEnv;
 /// before a join. It is not a limit on how wide a union may be: `addUnion`
 /// normalizes on the heap and a schema enum is routinely wider than this.
 const MAX_UNION_MEMBERS = 16;
+const max_function_stack = 64;
 
 pub const TypeCheckerError = type_pool_mod.TypePoolError || error{UnresolvedTypeBinding};
 
@@ -263,6 +265,13 @@ pub const TypeChecker = struct {
     /// depth assigns a captured or module-level binding. A call may then run
     /// that closure, so each call kills every narrowing.
     closure_writes_outer: bool = false,
+    /// The function nodes that enclose the node under the walk, innermost last,
+    /// and the number of enclosing functions. The skip for a parameter of a
+    /// function that ZTS601 refuses reads the stack. A function nested deeper
+    /// than the stack is not recorded, so a parameter of it is not skipped and
+    /// its member call is refused: the overflow only adds a refusal.
+    function_stack: [max_function_stack]NodeIndex = undefined,
+    function_depth: usize = 0,
 
     pub fn init(
         allocator: std.mem.Allocator,
@@ -798,13 +807,27 @@ pub const TypeChecker = struct {
     /// here. A union of numbers, booleans, strings, and arrays alone is
     /// reported by `reportNonRecordMemberRead`. A union with a member of
     /// another kind is not modeled.
+    ///
+    /// On strict paths (`strict_checker_follows`), a call on a receiver with no
+    /// type is refused too: the value may lack the member, and the call then
+    /// raises `NotCallable`. `refusesUntypedReceiver` names the four receivers
+    /// that it leaves alone.
     fn reportUnionMemberCall(self: *TypeChecker, callee: NodeIndex) void {
         const named = self.namedMember(callee) orelse return;
         const previous = self.report_inference_diagnostics;
         self.report_inference_diagnostics = false;
         defer self.report_inference_diagnostics = previous;
         const operand_type = self.inferType(named.member.object);
-        if (operand_type == null_type_idx) return;
+        if (operand_type == null_type_idx) {
+            if (self.refusesUntypedReceiver(named.member.object, named.name)) self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .missing_field,
+                .node = callee,
+                .message = "a member call on a value with no known type; give it a type or narrow it first",
+                .help = "annotate the value or its source, or check it with typeof, isDict, or a match arm first",
+            });
+            return;
+        }
         const pool = self.env.pool;
         const t = pool.unwrapNominal(self.env.resolveRef(operand_type));
         // A read on an `unknown` value yields `undefined` and does not fault,
@@ -840,6 +863,70 @@ pub const TypeChecker = struct {
             .message = "a member that some union member does not have is called; narrow the union first",
             .help = "check the discriminant or the type before you call the member",
         });
+    }
+
+    /// Whether strict code refuses a member call whose receiver `receiver` has
+    /// no type. Such a call raises `NotCallable` when the value lacks the
+    /// member. Four skips leave the receiver alone:
+    ///   - a builtin namespace such as `Math` or `JSON`, which has no type by
+    ///     design;
+    ///   - a read that the verifier reports as ZTS309, because a refusal here
+    ///     would hide it: the precompile run returns after a type error and
+    ///     before the verifier runs;
+    ///   - a parameter of a function that ZTS601 refuses;
+    ///   - an array literal, when every array has the member.
+    fn refusesUntypedReceiver(self: *TypeChecker, receiver: NodeIndex, member_name: []const u8) bool {
+        if (!self.strict_checker_follows) return false;
+        if (self.builtinGlobalName(receiver) != null) return false;
+        if (self.verifierReportsAbsentRead(receiver)) return false;
+        if (self.isParameterOfRefusedFunction(receiver)) return false;
+        if (self.isArrayLiteralWithMember(receiver, member_name)) return false;
+        return true;
+    }
+
+    /// Whether `node` is an array literal and every array has the member
+    /// `name`. The literal has no type when an element has none, but it is an
+    /// array at run time. A member that arrays lack is still refused. The
+    /// presence rule is the one that `reportNonRecordMemberRead` applies to an
+    /// array type.
+    fn isArrayLiteralWithMember(self: *TypeChecker, node: NodeIndex, name: []const u8) bool {
+        if (self.ir_view.getTag(node) != .array_literal) return false;
+        const pool = self.env.pool;
+        const array = pool.addArray(self.allocator, pool.idx_unknown);
+        return self.primitiveMemberPresence(array, name) == .present;
+    }
+
+    /// Whether `node` is an identifier bound to a parameter of an enclosing
+    /// function that ZTS601 refuses. A parameter read in its own function has
+    /// kind `argument` and matches the parameter by scope and slot. A read
+    /// from a nested function has kind `upvalue` and matches the nearest
+    /// enclosing function that declares a parameter of that name. A local of
+    /// an intermediate function that shares the name can make this skip a
+    /// read it need not skip; ZTS601 refuses the function either way.
+    fn isParameterOfRefusedFunction(self: *const TypeChecker, node: NodeIndex) bool {
+        if ((self.ir_view.getTag(node) orelse return false) != .identifier) return false;
+        const binding = self.ir_view.getBinding(node) orelse return false;
+        if (binding.kind != .argument and binding.kind != .upvalue) return false;
+        var depth = @min(self.function_depth, max_function_stack);
+        while (depth > 0) {
+            depth -= 1;
+            const fn_node = self.function_stack[depth];
+            const func = self.ir_view.getFunction(fn_node) orelse continue;
+            var i: usize = 0;
+            while (i < func.params_count) : (i += 1) {
+                const param = self.ir_view.getListIndex(func.params_start, @intCast(i));
+                const param_binding = self.ir_view.paramBinding(param) orelse continue;
+                const same = switch (binding.kind) {
+                    .argument => param_binding.scope_id == binding.scope_id and param_binding.slot == binding.slot,
+                    .upvalue => param_binding.name_atom == binding.name_atom,
+                    // exhaustive: the guard above admits only argument and upvalue bindings.
+                    else => false,
+                };
+                if (!same) continue;
+                return strict_checker_mod.functionRefusedForAnnotation(self.env, self.ir_view, fn_node, func);
+            }
+        }
+        return false;
     }
 
     /// The type a function parameter was declared with, or `null_type_idx` for
@@ -1301,8 +1388,12 @@ pub const TypeChecker = struct {
     /// the scope killed. The body has not run where the function is declared,
     /// so its kills do not describe the code after the declaration. The scope
     /// also keeps what the body installs from leaking out. A call that runs the
-    /// body is a separate question that this walk does not answer.
-    fn walkFunctionBody(self: *TypeChecker, body: NodeIndex) void {
+    /// body is a separate question that this walk does not answer. The function
+    /// is on the stack of enclosing functions while its body is walked.
+    fn walkFunctionBody(self: *TypeChecker, fn_node: NodeIndex, body: NodeIndex) void {
+        if (self.function_depth < max_function_stack) self.function_stack[self.function_depth] = fn_node;
+        self.function_depth += 1;
+        defer self.function_depth -= 1;
         const mark = self.beginNarrowScope();
         self.walkStmt(body);
         _ = self.endNarrowScope(mark);
@@ -1577,7 +1668,7 @@ pub const TypeChecker = struct {
                 else
                     null_type_idx;
                 self.registerParamTypes(func, sig orelse .{});
-                self.walkFunctionBody(func.body);
+                self.walkFunctionBody(decl.init, func.body);
                 self.current_return_type = saved_return;
             },
 
@@ -1594,7 +1685,7 @@ pub const TypeChecker = struct {
                 else
                     null_type_idx;
                 self.registerParamTypes(func, sig orelse .{});
-                self.walkFunctionBody(func.body);
+                self.walkFunctionBody(node, func.body);
                 self.current_return_type = saved_return;
             },
 
@@ -1844,7 +1935,7 @@ pub const TypeChecker = struct {
                 else
                     null_type_idx;
                 self.registerParamTypes(func, sig orelse .{});
-                self.walkFunctionBody(func.body);
+                self.walkFunctionBody(node, func.body);
                 self.current_return_type = saved_return;
             },
 
