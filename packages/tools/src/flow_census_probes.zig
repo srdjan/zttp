@@ -443,7 +443,7 @@ const t_nested_arrow_capture =
 const t_hof_callback =
     \\@PRE@
     \\function handler(req: Request): Claim<Response> {
-    \\  const s = @SRC@;
+    \\  const s: string = @SRC@;
     \\  const ns = [s].map((x: string): @RT@ => {
     \\    @BODY@
     \\  });

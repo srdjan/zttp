@@ -5880,10 +5880,215 @@ test "array literal binding: an incompatible element after the inference buffer 
     , "type '0 | \"bad\"[]' is not assignable to type 'number[]'");
 }
 
+test "array literal binding: a late empty array does not hide an incompatible prefix" {
+    try expectOneMismatch(
+        \\function f(): number {
+        \\  const ys: number[] = [
+        \\    "bad", 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    [],
+        \\  ];
+        \\  return ys.length;
+        \\}
+    , "type '\"bad\" | 0 | never[][]' is not assignable to type 'number[]'");
+}
+
+test "array literal binding: a late empty object does not hide an incompatible prefix" {
+    try expectOneMismatch(
+        \\function f(): number {
+        \\  const ys: number[] = [
+        \\    "bad", 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    {},
+        \\  ];
+        \\  return ys.length;
+        \\}
+    , "type '\"bad\" | 0 | {  }[]' is not assignable to type 'number[]'");
+}
+
+test "array literal binding: an empty array does not stop a later incompatible element" {
+    try expectOneMismatch(
+        \\function f(): number {
+        \\  const ys: number[] = [
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    [], "bad",
+        \\  ];
+        \\  return ys.length;
+        \\}
+    , "type '0 | never[] | \"bad\"[]' is not assignable to type 'number[]'");
+}
+
+test "array literal binding: a late spread does not hide an incompatible prefix" {
+    try expectOneMismatch(
+        \\function f(): number {
+        \\  const tail: number[] = [1, 2];
+        \\  const ys: number[] = [
+        \\    "bad", 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    ...tail,
+        \\  ];
+        \\  return ys.length;
+        \\}
+    , "type '\"bad\" | number[]' is not assignable to type 'number[]'");
+}
+
+test "array literal binding: an unresolved element does not stop a later incompatible element" {
+    try expectOneMismatch(
+        \\function g(x) { return x; }
+        \\function f(): number {
+        \\  const ys: number[] = [
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    g(1), "bad",
+        \\  ];
+        \\  return ys.length;
+        \\}
+    , "type 'unknown[]' is not assignable to type 'number[]'");
+}
+
+test "array literal binding: a fixed tuple spread preserves tuple shape" {
+    try expectNoTypeDiagnostic(
+        \\function f(t: [number, boolean]): number {
+        \\  const out: [string, number, boolean] = ["a", ...t];
+        \\  return out.length;
+        \\}
+    );
+}
+
+test "array literal binding: a wide fixed tuple spread preserves every position" {
+    try expectNoTypeDiagnostic(
+        \\function f(xs: [
+        \\  number, number, number, number, number, number, number, number,
+        \\  number, number, number, number, number, number, number, number,
+        \\  number, number, number, number, number, number, number, number,
+        \\  number, number, number, number, number, number, number, number,
+        \\  boolean
+        \\]): number {
+        \\  const out: [
+        \\    number, number, number, number, number, number, number, number,
+        \\    number, number, number, number, number, number, number, number,
+        \\    number, number, number, number, number, number, number, number,
+        \\    number, number, number, number, number, number, number, number,
+        \\    boolean
+        \\  ] = [...xs];
+        \\  return out.length;
+        \\}
+    );
+}
+
+test "array literal binding: a fixed tuple union spread preserves prefix and suffix positions" {
+    try expectNoTypeDiagnostic(
+        \\function f(xs: [number, boolean] | [string, number]): number {
+        \\  const out: [string, number | string, boolean | number, null] = ["prefix", ...xs, null];
+        \\  return out.length;
+        \\}
+    );
+}
+
+test "array literal binding: a fixed tuple union spread preserves correlated alternatives" {
+    try expectNoTypeDiagnostic(
+        \\function f(xs: [number, boolean] | [string, number]): number {
+        \\  const out: [number, boolean] | [string, number] = [...xs];
+        \\  return out.length;
+        \\}
+    );
+}
+
+test "array literal binding: multiple fixed tuple union spreads preserve their product" {
+    try expectNoTypeDiagnostic(
+        \\function f(
+        \\  left: [number, boolean] | [string, number],
+        \\  right: ["x"] | ["y"],
+        \\): number {
+        \\  const out:
+        \\    [number, boolean, "x"] |
+        \\    [number, boolean, "y"] |
+        \\    [string, number, "x"] |
+        \\    [string, number, "y"] = [...left, ...right];
+        \\  return out.length;
+        \\}
+    );
+}
+
+test "array literal binding: duplicate fixed spread paths keep one alternative" {
+    try expectNoTypeDiagnostic(
+        \\function f(
+        \\  a1: [0] | [0, 1], b1: [1, 2] | [2],
+        \\  a2: [0] | [0, 1], b2: [1, 2] | [2],
+        \\  a3: [0] | [0, 1], b3: [1, 2] | [2],
+        \\  a4: [0] | [0, 1], b4: [1, 2] | [2],
+        \\  a5: [0] | [0, 1], b5: [1, 2] | [2],
+        \\  a6: [0] | [0, 1], b6: [1, 2] | [2],
+        \\): number {
+        \\  const out: unknown[] = [
+        \\    ...a1, ...b1, ...a2, ...b2, ...a3, ...b3,
+        \\    ...a4, ...b4, ...a5, ...b5, ...a6, ...b6,
+        \\  ];
+        \\  return out.length;
+        \\}
+    );
+}
+
+test "array literal binding: a fixed tuple union spread refuses an excluded alternative" {
+    try expectOneMismatch(
+        \\function f(xs: [number, boolean] | [string, number]): number {
+        \\  const out: [number, boolean] = [...xs];
+        \\  return out.length;
+        \\}
+    , "type '[number, boolean] | [string, number]' is not assignable to type '[number, boolean]'");
+}
+
+test "array literal binding: a variable array spread does not claim fixed tuple length" {
+    try expectOneMismatch(
+        \\function f(xs: number[]): number {
+        \\  const out: [string, number, boolean] = ["a", ...xs];
+        \\  return out.length;
+        \\}
+    , "type '\"a\" | number[]' is not assignable to type '[string, number, boolean]'");
+}
+
+test "array literal binding: empty containers, known spread, and unknown target remain accepted" {
+    try expectNoTypeDiagnostic(
+        \\structural Box = { value?: number };
+        \\function f(): number {
+        \\  const tail: number[] = [1, 2];
+        \\  const literal_tail: ("a" | "b")[] = ["a", "b"];
+        \\  const sequence_union: number[] | [number, number] = tail;
+        \\  const nested_arrays: number[][] = [[], [1, 2]];
+        \\  const nested_objects: Box[] = [{}, { value: 1 }];
+        \\  const spread: number[] = [
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    0, 0, 0, 0, 0, 0, 0, 0,
+        \\    ...tail,
+        \\  ];
+        \\  const literal_spread: ("a" | "b")[] = [...literal_tail];
+        \\  const union_spread: number[] = [...sequence_union];
+        \\  const unknowns: unknown[] = ["ok", {}, [], ...tail];
+        \\  return nested_arrays.length + nested_objects.length + spread.length + literal_spread.length + union_spread.length + unknowns.length;
+        \\}
+    );
+}
+
 test "array literal binding: wide heterogeneous inference propagates allocation failure" {
     const allocator = testing.allocator;
     const source =
         \\function f(): number {
+        \\  const spread_tail: [string, number] = ["bad", 0];
+        \\  const union_tail: number[] | [number, number] = [1, 2];
+        \\  const alternative_tail: [number, boolean] | [string, number] = [1, true];
         \\  const ys = [
         \\    0, 0, 0, 0, 0, 0, 0, 0,
         \\    0, 0, 0, 0, 0, 0, 0, 0,
@@ -5891,7 +6096,10 @@ test "array literal binding: wide heterogeneous inference propagates allocation 
         \\    0, 0, 0, 0, 0, 0, 0, 0,
         \\    "bad",
         \\  ];
-        \\  return ys.length;
+        \\  const spread = [0, ...spread_tail];
+        \\  const union_spread = [...union_tail];
+        \\  const alternative_spread = ["prefix", ...alternative_tail, null];
+        \\  return ys.length + spread.length + union_spread.length + alternative_spread.length;
         \\}
     ;
     var atoms = AtomTable.init(allocator);

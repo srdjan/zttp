@@ -257,6 +257,13 @@ pub const TypeChecker = struct {
     /// and diagnostic state. Message-only formatting may retain a static
     /// fallback because the core diagnostic is still stored.
     allocation_failed: bool = false,
+    /// One canonical `unknown[]` for unresolved array elements. Deep repeated
+    /// inference must not consume one pool node for the same type each time.
+    unknown_array_type: TypeIndex = null_type_idx,
+    /// Cached types retain absence diagnostics for unknown values and bound
+    /// repeated inference for arrays and index reads.
+    nullable_unknown_type: TypeIndex = null_type_idx,
+    nullable_unknown_array_type: TypeIndex = null_type_idx,
     /// Secondary analyzers may ask for a type outside the statement walk's
     /// live narrowing context. Those queries must not create compiler
     /// diagnostics, although allocation failures remain sticky.
@@ -3540,16 +3547,389 @@ pub const TypeChecker = struct {
         return self.env.pool.addRecord(self.allocator, fields_buf.items);
     }
 
+    /// One stable `unknown[]` node for every inference in this checker.
+    fn unknownArrayType(self: *const TypeChecker) TypeIndex {
+        const mutable = @constCast(self);
+        if (mutable.unknown_array_type != null_type_idx) return mutable.unknown_array_type;
+        const array_type = self.env.pool.addArray(self.allocator, self.env.pool.idx_unknown);
+        if (array_type != null_type_idx) mutable.unknown_array_type = array_type;
+        return array_type;
+    }
+
+    fn nullableUnknownType(self: *const TypeChecker) TypeIndex {
+        const mutable = @constCast(self);
+        if (mutable.nullable_unknown_type != null_type_idx) return mutable.nullable_unknown_type;
+        const nullable_type = self.env.pool.addNullable(self.allocator, self.env.pool.idx_unknown);
+        if (nullable_type != null_type_idx) mutable.nullable_unknown_type = nullable_type;
+        return nullable_type;
+    }
+
+    fn arrayTypeForElement(self: *const TypeChecker, element: TypeIndex) TypeIndex {
+        if (element == self.env.pool.idx_unknown) return self.unknownArrayType();
+        const mutable = @constCast(self);
+        if (mutable.nullable_unknown_type != null_type_idx and element == mutable.nullable_unknown_type) {
+            if (mutable.nullable_unknown_array_type != null_type_idx) return mutable.nullable_unknown_array_type;
+            const array_type = self.env.pool.addArray(self.allocator, element);
+            if (array_type != null_type_idx) mutable.nullable_unknown_array_type = array_type;
+            return array_type;
+        }
+        return self.env.pool.addArray(self.allocator, element);
+    }
+
+    /// The type of one non-spread array element. Empty containers have precise
+    /// bottom shapes. Another expression with no inferred type is `unknown`.
+    fn inferArrayElementType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
+        const inferred = self.inferType(node);
+        if (inferred != null_type_idx) return inferred;
+        self.ensureHealthy() catch return null_type_idx;
+
+        const pool = self.env.pool;
+        switch (self.ir_view.getTag(node) orelse return pool.idx_unknown) {
+            .array_literal => {
+                const array = self.ir_view.getArray(node) orelse return pool.idx_unknown;
+                if (array.elements_count == 0) return pool.addArray(self.allocator, pool.idx_never);
+            },
+            .object_literal => {
+                const literal_object = self.ir_view.getObject(node) orelse return pool.idx_unknown;
+                if (literal_object.properties_count == 0) return pool.addRecord(self.allocator, &.{});
+            },
+            // exhaustive: another expression with no inferred type contributes unknown below.
+            else => {},
+        }
+        return pool.idx_unknown;
+    }
+
+    /// Append stable type indices to scratch storage. Allocation failure is
+    /// sticky, so the pipeline refuses before it can use a partial type.
+    fn appendArrayInferenceTypes(
+        self: *const TypeChecker,
+        types: *std.ArrayListUnmanaged(TypeIndex),
+        additions: []const TypeIndex,
+    ) bool {
+        types.appendSlice(self.allocator, additions) catch {
+            @constCast(self).markAllocationFailure();
+            return false;
+        };
+        return true;
+    }
+
+    const ArrayTupleAlternative = struct { start: usize, len: usize };
+
+    fn appendArrayTupleAlternative(
+        self: *const TypeChecker,
+        alternatives: *std.ArrayListUnmanaged(ArrayTupleAlternative),
+        alternative: ArrayTupleAlternative,
+    ) bool {
+        alternatives.append(self.allocator, alternative) catch {
+            @constCast(self).markAllocationFailure();
+            return false;
+        };
+        return true;
+    }
+
+    /// Materialize each `base + common + choice` tuple as the product forms.
+    /// Pool capacity therefore bounds the product before scratch can outrun it.
+    fn materializeArrayTupleProduct(
+        self: *const TypeChecker,
+        alternatives: *std.ArrayListUnmanaged(TypeIndex),
+        common: *std.ArrayListUnmanaged(TypeIndex),
+        choice_types: []const TypeIndex,
+        choices: []const ArrayTupleAlternative,
+    ) bool {
+        var next_alternatives: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        var scratch: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        var transferred = false;
+        defer if (!transferred) {
+            next_alternatives.deinit(self.allocator);
+            scratch.deinit(self.allocator);
+        };
+
+        const base_count: usize = if (alternatives.items.len == 0) 1 else alternatives.items.len;
+        for (0..base_count) |base_index| {
+            for (choices) |choice| {
+                scratch.clearRetainingCapacity();
+                if (alternatives.items.len != 0) {
+                    const base = alternatives.items[base_index];
+                    const base_elements = self.env.pool.getTupleElements(base);
+                    if (!self.appendArrayInferenceTypes(&scratch, base_elements)) return false;
+                }
+                if (!self.appendArrayInferenceTypes(&scratch, common.items)) return false;
+                const addition = choice_types[choice.start..][0..choice.len];
+                if (!self.appendArrayInferenceTypes(&scratch, addition)) return false;
+                const tuple_type = self.env.pool.addTuple(self.allocator, scratch.items);
+                if (tuple_type == null_type_idx) return false;
+                if (!self.appendArrayInferenceTypes(&next_alternatives, &.{tuple_type})) return false;
+            }
+        }
+
+        const normalized = self.env.pool.addUnion(self.allocator, next_alternatives.items);
+        if (normalized == null_type_idx) return false;
+        next_alternatives.clearRetainingCapacity();
+        if (self.env.pool.getTag(normalized) == .t_union) {
+            const members = self.env.pool.getUnionMembers(normalized);
+            if (!self.appendArrayInferenceTypes(&next_alternatives, members)) return false;
+        } else if (!self.appendArrayInferenceTypes(&next_alternatives, &.{normalized})) return false;
+
+        alternatives.deinit(self.allocator);
+        alternatives.* = next_alternatives;
+        common.clearRetainingCapacity();
+        scratch.deinit(self.allocator);
+        transferred = true;
+        return true;
+    }
+
+    /// Add every fixed alternative and its shared suffix to variable element
+    /// inference. Pool slices are copied before another pool operation occurs.
+    fn appendFixedAlternativesAsElements(
+        self: *const TypeChecker,
+        alternatives: *const std.ArrayListUnmanaged(TypeIndex),
+        common: *const std.ArrayListUnmanaged(TypeIndex),
+        variable_types: *std.ArrayListUnmanaged(TypeIndex),
+    ) bool {
+        if (alternatives.items.len == 0) {
+            return self.appendArrayInferenceTypes(variable_types, common.items);
+        }
+        for (alternatives.items) |alternative| {
+            const elements = self.env.pool.getTupleElements(alternative);
+            if (!self.appendArrayInferenceTypes(variable_types, elements)) return false;
+        }
+        return self.appendArrayInferenceTypes(variable_types, common.items);
+    }
+
+    const SpreadSequenceStatus = enum { known, invalid, failed };
+    const FixedSpreadStatus = enum { fixed, variable, invalid, failed };
+
+    /// Collect each correlated tuple alternative of a union. One array member
+    /// makes the spread variable-length. The queue preserves union order.
+    fn collectFixedSpreadAlternatives(
+        self: *const TypeChecker,
+        sequence_type: TypeIndex,
+        types: *std.ArrayListUnmanaged(TypeIndex),
+        alternatives: *std.ArrayListUnmanaged(ArrayTupleAlternative),
+    ) FixedSpreadStatus {
+        var pending: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        defer pending.deinit(self.allocator);
+        var visited: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        defer visited.deinit(self.allocator);
+        if (!self.appendArrayInferenceTypes(&pending, &.{sequence_type})) return .failed;
+
+        const pool = self.env.pool;
+        var next: usize = 0;
+        while (next < pending.items.len) : (next += 1) {
+            const pending_type = pending.items[next];
+            if (std.mem.indexOfScalar(TypeIndex, visited.items, pending_type) != null) continue;
+            if (!self.appendArrayInferenceTypes(&visited, &.{pending_type})) return .failed;
+            const shape = self.resolvedType(pending_type);
+            switch (pool.getTag(shape) orelse return .invalid) {
+                .t_tuple => {
+                    const elements = pool.getTupleElements(shape);
+                    const start = types.items.len;
+                    if (!self.appendArrayInferenceTypes(types, elements)) return .failed;
+                    if (!self.appendArrayTupleAlternative(alternatives, .{
+                        .start = start,
+                        .len = elements.len,
+                    })) return .failed;
+                },
+                .t_array => return .variable,
+                .t_union => {
+                    const members = pool.getUnionMembers(shape);
+                    if (!self.appendArrayInferenceTypes(&pending, members)) return .failed;
+                },
+                // exhaustive: no other type has fixed spread positions.
+                else => return .invalid,
+            }
+        }
+        return if (alternatives.items.len == 0) .invalid else .fixed;
+    }
+
+    /// Append every possible element type of an array, tuple, or union of
+    /// those shapes. The worklist snapshots pool slices before pool growth.
+    fn collectSpreadSequenceTypes(
+        self: *const TypeChecker,
+        sequence_type: TypeIndex,
+        types: *std.ArrayListUnmanaged(TypeIndex),
+    ) SpreadSequenceStatus {
+        var pending: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        defer pending.deinit(self.allocator);
+        var visited: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        defer visited.deinit(self.allocator);
+        if (!self.appendArrayInferenceTypes(&pending, &.{sequence_type})) return .failed;
+
+        const pool = self.env.pool;
+        while (pending.pop()) |pending_type| {
+            if (std.mem.indexOfScalar(TypeIndex, visited.items, pending_type) != null) continue;
+            if (!self.appendArrayInferenceTypes(&visited, &.{pending_type})) return .failed;
+            std.debug.assert(visited.items.len <= std.math.maxInt(TypeIndex));
+            const shape = self.resolvedType(pending_type);
+            switch (pool.getTag(shape) orelse return .invalid) {
+                .t_array => {
+                    const element = pool.getArrayElement(shape);
+                    const stable = if (element == null_type_idx) pool.idx_unknown else element;
+                    if (!self.appendArrayInferenceTypes(types, &.{stable})) return .failed;
+                },
+                .t_tuple => {
+                    const elements = pool.getTupleElements(shape);
+                    if (!self.appendArrayInferenceTypes(types, elements)) return .failed;
+                },
+                .t_union => {
+                    const members = pool.getUnionMembers(shape);
+                    if (!self.appendArrayInferenceTypes(&pending, members)) return .failed;
+                },
+                // exhaustive: no other type is a sequence that spread can expand.
+                else => return .invalid,
+            }
+        }
+        return .known;
+    }
+
+    /// Infer a literal that contains a spread. Fixed tuple unions retain each
+    /// correlated alternative. Any array member forces an array result.
+    fn inferSpreadArrayLiteralType(self: *const TypeChecker, arr: Node.ArrayExpr) TypeIndex {
+        var fixed_alternatives: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        defer fixed_alternatives.deinit(self.allocator);
+        var common_fixed_types: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        defer common_fixed_types.deinit(self.allocator);
+
+        var variable_types: std.ArrayListUnmanaged(TypeIndex) = .empty;
+        defer variable_types.deinit(self.allocator);
+        var variable_length = false;
+        const pool = self.env.pool;
+
+        for (0..arr.elements_count) |i| {
+            const element_node = self.ir_view.getListIndex(arr.elements_start, @intCast(i));
+            if (self.ir_view.getTag(element_node) != .spread) {
+                const element_type = self.inferArrayElementType(element_node);
+                if (element_type == null_type_idx) return null_type_idx;
+                if (variable_length) {
+                    if (!self.appendArrayInferenceTypes(&variable_types, &.{element_type})) return null_type_idx;
+                } else {
+                    if (!self.appendArrayInferenceTypes(&common_fixed_types, &.{element_type})) return null_type_idx;
+                }
+                continue;
+            }
+
+            const operand = self.ir_view.getOptValue(element_node) orelse {
+                if (!variable_length) {
+                    if (!self.appendFixedAlternativesAsElements(
+                        &fixed_alternatives,
+                        &common_fixed_types,
+                        &variable_types,
+                    )) return null_type_idx;
+                    variable_length = true;
+                }
+                if (!self.appendArrayInferenceTypes(&variable_types, &.{pool.idx_unknown})) return null_type_idx;
+                continue;
+            };
+            const operand_type = self.inferType(operand);
+            if (operand_type == null_type_idx) {
+                self.ensureHealthy() catch return null_type_idx;
+                if (self.ir_view.getTag(operand) == .array_literal) {
+                    const literal = self.ir_view.getArray(operand) orelse return null_type_idx;
+                    if (literal.elements_count == 0) continue;
+                }
+                if (!variable_length) {
+                    if (!self.appendFixedAlternativesAsElements(
+                        &fixed_alternatives,
+                        &common_fixed_types,
+                        &variable_types,
+                    )) return null_type_idx;
+                    variable_length = true;
+                }
+                if (!self.appendArrayInferenceTypes(&variable_types, &.{pool.idx_unknown})) return null_type_idx;
+                continue;
+            }
+
+            const shape = self.resolvedType(operand_type);
+            if (variable_length) {
+                switch (self.collectSpreadSequenceTypes(shape, &variable_types)) {
+                    .known => {},
+                    .invalid => if (!self.appendArrayInferenceTypes(&variable_types, &.{pool.idx_unknown})) return null_type_idx,
+                    .failed => return null_type_idx,
+                }
+                continue;
+            }
+
+            var choice_types: std.ArrayListUnmanaged(TypeIndex) = .empty;
+            defer choice_types.deinit(self.allocator);
+            var choices: std.ArrayListUnmanaged(ArrayTupleAlternative) = .empty;
+            defer choices.deinit(self.allocator);
+            switch (self.collectFixedSpreadAlternatives(shape, &choice_types, &choices)) {
+                .fixed => {
+                    if (choices.items.len == 1) {
+                        const choice = choices.items[0];
+                        const additions = choice_types.items[choice.start..][0..choice.len];
+                        if (!self.appendArrayInferenceTypes(&common_fixed_types, additions)) return null_type_idx;
+                    } else if (!self.materializeArrayTupleProduct(
+                        &fixed_alternatives,
+                        &common_fixed_types,
+                        choice_types.items,
+                        choices.items,
+                    )) return null_type_idx;
+                },
+                .variable => {
+                    if (!self.appendFixedAlternativesAsElements(
+                        &fixed_alternatives,
+                        &common_fixed_types,
+                        &variable_types,
+                    )) return null_type_idx;
+                    variable_length = true;
+                    switch (self.collectSpreadSequenceTypes(shape, &variable_types)) {
+                        .known => {},
+                        .invalid => if (!self.appendArrayInferenceTypes(&variable_types, &.{pool.idx_unknown})) return null_type_idx,
+                        .failed => return null_type_idx,
+                    }
+                },
+                .invalid => {
+                    if (!self.appendFixedAlternativesAsElements(
+                        &fixed_alternatives,
+                        &common_fixed_types,
+                        &variable_types,
+                    )) return null_type_idx;
+                    if (!self.appendArrayInferenceTypes(&variable_types, &.{pool.idx_unknown})) return null_type_idx;
+                    variable_length = true;
+                },
+                .failed => return null_type_idx,
+            }
+        }
+
+        if (!variable_length) {
+            if (fixed_alternatives.items.len == 0) {
+                return pool.addTuple(self.allocator, common_fixed_types.items);
+            }
+            if (common_fixed_types.items.len == 0) {
+                return pool.addUnion(self.allocator, fixed_alternatives.items);
+            }
+            var tuple_types: std.ArrayListUnmanaged(TypeIndex) = .empty;
+            defer tuple_types.deinit(self.allocator);
+            for (fixed_alternatives.items) |alternative| {
+                var elements: std.ArrayListUnmanaged(TypeIndex) = .empty;
+                defer elements.deinit(self.allocator);
+                const base_elements = pool.getTupleElements(alternative);
+                if (!self.appendArrayInferenceTypes(&elements, base_elements)) return null_type_idx;
+                if (!self.appendArrayInferenceTypes(&elements, common_fixed_types.items)) return null_type_idx;
+                const tuple_type = pool.addTuple(self.allocator, elements.items);
+                if (tuple_type == null_type_idx) return null_type_idx;
+                if (!self.appendArrayInferenceTypes(&tuple_types, &.{tuple_type})) return null_type_idx;
+            }
+            return pool.addUnion(self.allocator, tuple_types.items);
+        }
+        if (variable_types.items.len == 0) return pool.addArray(self.allocator, pool.idx_never);
+        const element_type = pool.addUnion(self.allocator, variable_types.items);
+        if (element_type == null_type_idx) return null_type_idx;
+        return self.arrayTypeForElement(element_type);
+    }
+
     fn inferArrayLiteralType(self: *const TypeChecker, node: NodeIndex) TypeIndex {
         const arr = self.ir_view.getArray(node) orelse return null_type_idx;
         if (arr.elements_count == 0) return null_type_idx;
+        if (arr.has_spread) return self.inferSpreadArrayLiteralType(arr);
 
         var element_types: [32]TypeIndex = undefined;
         const element_count: usize = arr.elements_count;
         const count = @min(element_count, element_types.len);
         for (0..count) |i| {
             const elem_idx = self.ir_view.getListIndex(arr.elements_start, @intCast(i));
-            const elem_type = self.inferType(elem_idx);
+            const elem_type = self.inferArrayElementType(elem_idx);
             if (elem_type == null_type_idx) return null_type_idx;
             element_types[i] = elem_type;
         }
@@ -3564,7 +3944,9 @@ pub const TypeChecker = struct {
         }
 
         if (element_count <= element_types.len) {
-            if (homogeneous) return self.env.pool.addArray(self.allocator, first);
+            if (homogeneous) {
+                return self.arrayTypeForElement(first);
+            }
             return self.env.pool.addTuple(self.allocator, element_types[0..count]);
         }
 
@@ -3583,7 +3965,7 @@ pub const TypeChecker = struct {
 
         for (count..element_count) |i| {
             const elem_idx = self.ir_view.getListIndex(arr.elements_start, @intCast(i));
-            const elem_type = self.inferType(elem_idx);
+            const elem_type = self.inferArrayElementType(elem_idx);
             if (elem_type == null_type_idx) return null_type_idx;
             if (wide_types.items.len == 0 and elem_type == first) continue;
             if (wide_types.items.len == 0) {
@@ -3596,10 +3978,12 @@ pub const TypeChecker = struct {
             wide_types.appendAssumeCapacity(elem_type);
         }
 
-        if (wide_types.items.len == 0) return self.env.pool.addArray(self.allocator, first);
+        if (wide_types.items.len == 0) {
+            return self.arrayTypeForElement(first);
+        }
         const element_type = self.env.pool.addUnion(self.allocator, wide_types.items);
         if (element_type == null_type_idx) return null_type_idx;
-        return self.env.pool.addArray(self.allocator, element_type);
+        return self.arrayTypeForElement(element_type);
     }
 
     fn unionMemberIsRecord(self: *const TypeChecker, member_type: TypeIndex) bool {
@@ -3667,6 +4051,7 @@ pub const TypeChecker = struct {
         if (tag == .t_tuple) obj = self.tupleToArrayType(obj) else if (tag != .t_array) return null_type_idx;
         const elem = pool.getArrayElement(obj);
         if (elem == null_type_idx) return null_type_idx;
+        if (elem == pool.idx_unknown) return self.nullableUnknownType();
         if (pool.getTag(elem) == .t_nullable) return elem;
         return pool.addNullable(self.allocator, elem);
     }
@@ -6510,15 +6895,14 @@ pub const TypeChecker = struct {
     /// binding is an array when the widened element types are equal and a tuple
     /// otherwise, and `[]` is `unknown[]`. A literal that is not bound keeps its
     /// inferred type, so only the `.var_decl` arm calls this. An initializer that
-    /// is not an array literal, or whose elements have no type, is returned
-    /// unchanged.
+    /// is not an array literal is returned unchanged.
     fn arrayLiteralBindingType(self: *TypeChecker, initializer: NodeIndex, inferred: TypeIndex) TypeIndex {
         if (self.ir_view.getTag(initializer) != .array_literal) return inferred;
         const pool = self.env.pool;
         if (inferred == null_type_idx) {
             const arr = self.ir_view.getArray(initializer) orelse return inferred;
             if (arr.elements_count != 0) return inferred;
-            return pool.addArray(self.allocator, pool.idx_unknown);
+            return self.unknownArrayType();
         }
         switch (pool.getTag(inferred) orelse return inferred) {
             .t_tuple => {

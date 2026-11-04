@@ -477,11 +477,15 @@ packages/zts/src/import_signatures.zig copyList catch-return
 packages/zts/src/import_signatures.zig copyRecord catch-return
 packages/zts/src/import_signatures.zig copyFunction catch-return
 
-# Array inference allocates scratch storage only after a wide literal proves
-# heterogeneous. Failure poisons TypeChecker, and pipeline ensureHealthy then
-# returns OutOfMemory before inferred types can support a verdict.
+# Array inference allocates scratch storage for wide heterogeneous literals and
+# spread shapes. Allocation and capacity failures stay sticky. The pipeline
+# reports the failure before a partial type can support a verdict.
 packages/zts/src/type_checker.zig inferArrayLiteralType catch-block
 packages/zts/src/type_checker.zig inferArrayLiteralType catch-block@2
+packages/zts/src/type_checker.zig appendArrayInferenceTypes catch-block
+packages/zts/src/type_checker.zig appendArrayTupleAlternative catch-block
+packages/zts/src/type_checker.zig inferArrayElementType catch-return
+packages/zts/src/type_checker.zig inferSpreadArrayLiteralType catch-return
 
 # A wide container union snapshot sets allocation_failed when its owned member
 # copy cannot allocate. TypeChecker.ensureHealthy reports OutOfMemory before

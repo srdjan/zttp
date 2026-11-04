@@ -10497,10 +10497,17 @@ const absent_read_refused = [_]AbsentReadCase{
     \\  return Response.json({ a: out });
     \\}
     },
-    .{ .name = "r09_array_spread", .expect = "ZTS309@3,ZTS500@1", .source =
+    .{ .name = "r09_array_spread", .expect = "ZTS200@3", .source =
     \\function handler(req: Request): Response {
     \\  const xs: number[] | undefined = undefined;
     \\  const ys: number[] = [...xs];
+    \\  return Response.json({ a: ys });
+    \\}
+    },
+    .{ .name = "r09_array_spread_without_annotation_reaches_flow", .expect = "ZTS309@3,ZTS500@1", .source =
+    \\function handler(req: Request): Response {
+    \\  const xs: number[] | undefined = undefined;
+    \\  const ys = [...xs];
     \\  return Response.json({ a: ys });
     \\}
     },
@@ -12232,6 +12239,13 @@ const absent_read_untyped_receiver = [_]AbsentReadCase{
     \\}
     },
     .{ .name = "n1_array_literal_with_an_untyped_element_keeps_array_members", .expect = "clean", .source =
+    \\function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const s = req.headers["x-tag"] ?? "";
+    \\  const ns = [s].map((x: unknown): number => String(x).length);
+    \\  return Response.json({ n: ns.length });
+    \\}
+    },
+    .{ .name = "n1_array_literal_with_an_untyped_element_refuses_a_string_callback", .expect = "ZTS203@3", .source =
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const s = req.headers["x-tag"] ?? "";
     \\  const ns = [s].map((x: string): number => x.length);
