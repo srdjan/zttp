@@ -5,6 +5,7 @@ const context = h.context;
 const string = h.string;
 const object = h.object;
 const arena_mod = @import("../arena.zig");
+const err_builtin = @import("error.zig");
 
 const getStringData = h.getStringData;
 const getStringDataCtx = h.getStringDataCtx;
@@ -543,6 +544,24 @@ pub fn stringSplit(ctx: *context.Context, this: value.JSValue, args: []const val
     return result.toValue();
 }
 
+/// Longest string that repeat, padStart, and padEnd build: 1 MiB.
+const max_built_string_len: usize = 1024 * 1024;
+
+fn throwInvalidStringLength(ctx: *context.Context) value.JSValue {
+    const message_val = ctx.createString("Invalid string length") catch {
+        ctx.throwException(value.JSValue.exception_val);
+        return value.JSValue.exception_val;
+    };
+    const args = [_]value.JSValue{message_val};
+    const err_obj = err_builtin.rangeErrorConstructor(ctx, value.JSValue.undefined_val, &args);
+    if (err_obj.isUndefined()) {
+        ctx.throwException(value.JSValue.exception_val);
+    } else {
+        ctx.throwException(err_obj);
+    }
+    return value.JSValue.exception_val;
+}
+
 /// String.prototype.repeat(count) - Repeat string
 pub fn stringRepeat(ctx: *context.Context, this: value.JSValue, args: []const value.JSValue) value.JSValue {
     const data = getStringDataCtx(this, ctx) orelse return value.JSValue.undefined_val;
@@ -564,7 +583,7 @@ pub fn stringRepeat(ctx: *context.Context, this: value.JSValue, args: []const va
     if (count == 1) return this;
 
     const total_len = @as(usize, data.len) * @as(usize, count);
-    if (total_len > 1024 * 1024) return value.JSValue.undefined_val; // 1MB safety limit
+    if (total_len > max_built_string_len) return value.JSValue.undefined_val;
 
     const buf = ctx.allocator.alloc(u8, total_len) catch return value.JSValue.undefined_val;
     defer ctx.allocator.free(buf);
@@ -595,6 +614,7 @@ pub fn stringPadStart(ctx: *context.Context, this: value.JSValue, args: []const 
 
     const pad_str = if (args.len > 1) (getStringDataCtx(args[1], ctx) orelse " ") else " ";
     if (pad_str.len == 0) return this;
+    if (target_len > max_built_string_len) return throwInvalidStringLength(ctx);
 
     const pad_needed = target_len - data.len;
     const buf = ctx.allocator.alloc(u8, target_len) catch return this;
@@ -632,6 +652,7 @@ pub fn stringPadEnd(ctx: *context.Context, this: value.JSValue, args: []const va
 
     const pad_str = if (args.len > 1) (getStringDataCtx(args[1], ctx) orelse " ") else " ";
     if (pad_str.len == 0) return this;
+    if (target_len > max_built_string_len) return throwInvalidStringLength(ctx);
 
     const buf = ctx.allocator.alloc(u8, target_len) catch return this;
     defer ctx.allocator.free(buf);
@@ -801,6 +822,81 @@ test "String conversion uses the request arena" {
     try std.testing.expect(converted.isString());
     try std.testing.expectEqualStrings("42", getStringDataCtx(converted, ctx).?);
     try std.testing.expect(request_arena.alloc_count > before);
+}
+
+test "padStart refuses a target length above the string limit" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var request_arena = try arena_mod.Arena.init(allocator, .{ .size = 65536 });
+    defer request_arena.deinit();
+    var hybrid = arena_mod.HybridAllocator{
+        .persistent = allocator,
+        .arena = &request_arena,
+    };
+    ctx.setHybridAllocator(&hybrid);
+
+    const subject = value.JSValue.fromPtr(try string.createString(allocator, "a"));
+    defer string.freeString(allocator, subject.toPtr(string.JSString));
+    const pad = value.JSValue.fromPtr(try string.createString(allocator, "xy"));
+    defer string.freeString(allocator, pad.toPtr(string.JSString));
+
+    const result = stringPadStart(ctx, subject, &.{ value.JSValue.fromInt(2097152), pad });
+    try std.testing.expect(result.isException());
+    try std.testing.expect(ctx.hasException());
+}
+
+test "padEnd refuses a target length above the string limit" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    var request_arena = try arena_mod.Arena.init(allocator, .{ .size = 65536 });
+    defer request_arena.deinit();
+    var hybrid = arena_mod.HybridAllocator{
+        .persistent = allocator,
+        .arena = &request_arena,
+    };
+    ctx.setHybridAllocator(&hybrid);
+
+    const subject = value.JSValue.fromPtr(try string.createString(allocator, "a"));
+    defer string.freeString(allocator, subject.toPtr(string.JSString));
+    const pad = value.JSValue.fromPtr(try string.createString(allocator, "xy"));
+    defer string.freeString(allocator, pad.toPtr(string.JSString));
+
+    const result = stringPadEnd(ctx, subject, &.{ value.JSValue.fromInt(2097152), pad });
+    try std.testing.expect(result.isException());
+    try std.testing.expect(ctx.hasException());
+}
+
+test "padStart pads a short string below the limit" {
+    const allocator = std.testing.allocator;
+    const gc_mod = @import("../gc.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 4096 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+
+    const subject = value.JSValue.fromPtr(try string.createString(allocator, "5"));
+    defer string.freeString(allocator, subject.toPtr(string.JSString));
+    const pad = value.JSValue.fromPtr(try string.createString(allocator, "0"));
+    defer string.freeString(allocator, pad.toPtr(string.JSString));
+
+    const result = stringPadStart(ctx, subject, &.{ value.JSValue.fromInt(3), pad });
+    defer string.freeString(allocator, result.toPtr(string.JSString));
+    try std.testing.expect(result.isString());
+    try std.testing.expectEqualStrings("005", getStringDataCtx(result, ctx).?);
+    try std.testing.expect(!ctx.hasException());
 }
 
 /// String.fromCharCode(...charCodes) - Create string from char codes

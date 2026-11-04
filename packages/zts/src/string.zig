@@ -6,14 +6,21 @@ const std = @import("std");
 const heap = @import("heap.zig");
 const arena_mod = @import("arena.zig");
 
+/// Largest block that `MemBlockHeader` can describe: its size field is u26 words of 8 bytes.
+const max_block_bytes: usize = @as(usize, std.math.maxInt(u26)) * 8;
+
+/// Largest string length whose block (JSString header plus data) fits `max_block_bytes`.
+const max_string_len: usize = max_block_bytes - @sizeOf(JSString);
+
 fn checkStringLength(len: usize) error{OutOfMemory}!void {
-    // Handler-visible lengths use signed i32 values, including for ASCII input.
-    if (len > std.math.maxInt(i32)) return error.OutOfMemory;
+    // The block limit is below maxInt(i32), so it also keeps handler lengths in signed i32 range.
+    if (len > max_string_len) return error.OutOfMemory;
 }
 
 test "string length fits both storage and handler length" {
     try checkStringLength(0);
-    try checkStringLength(std.math.maxInt(i32));
+    try checkStringLength(536870880);
+    try std.testing.expectError(error.OutOfMemory, checkStringLength(536870881));
     try std.testing.expectError(error.OutOfMemory, checkStringLength(@as(usize, std.math.maxInt(i32)) + 1));
     try std.testing.expectError(error.OutOfMemory, checkStringLength(std.math.maxInt(u32)));
     try std.testing.expectError(error.OutOfMemory, checkStringLength(std.math.maxInt(usize)));
