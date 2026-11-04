@@ -287,14 +287,14 @@ pub fn verify(
     }
 
     var any_failed = false;
-    var has_binary = false;
+    var binary_path: ?[]const u8 = null;
     var certificate_path: ?[]const u8 = null;
     var contract_path: ?[]const u8 = null;
     for (verdicts.items) |v| {
         const label: []const u8 = if (v.pass) "OK  " else "FAIL";
         try stdout.print("  {s}  {s}\n", .{ label, v.name });
         if (std.mem.eql(u8, v.name, "contract")) contract_path = v.path;
-        if (std.mem.eql(u8, v.name, "binary")) has_binary = true;
+        if (std.mem.eql(u8, v.name, "binary")) binary_path = v.path;
         if (std.mem.eql(u8, v.name, "certificate")) certificate_path = v.path;
         if (!v.pass) {
             any_failed = true;
@@ -320,7 +320,7 @@ pub fn verify(
     // Integrity is one state. What the artifact does is another, and a bundle
     // that only matched hashes has established nothing about it. Say which one
     // was reached rather than printing a single word that reads as both.
-    if (!has_binary or certificate_path == null) {
+    if (binary_path == null or certificate_path == null) {
         try stdout.writeAll(
             "Proof:     not checked - this bundle carries no artifact and certificate to check\n",
         );
@@ -328,7 +328,7 @@ pub fn verify(
         return;
     }
 
-    verifySemantics(allocator, io, bundle_dir, certificate_path.?, contract_bytes, stdout, stderr) catch |err| switch (err) {
+    verifySemantics(allocator, io, bundle_dir, binary_path.?, certificate_path.?, contract_bytes, stdout, stderr) catch |err| switch (err) {
         // Nothing to check is not the same as checked and refused. A caller
         // that needs the stronger state says so; one that does not gets the
         // line and a zero exit.
@@ -352,12 +352,13 @@ fn verifySemantics(
     allocator: std.mem.Allocator,
     io: std.Io,
     bundle_dir: std.Io.Dir,
+    bundle_binary_path: []const u8,
     bundle_certificate_path: []const u8,
     bundle_contract: []const u8,
     stdout: *std.Io.Writer,
     stderr: *std.Io.Writer,
 ) !void {
-    const binary_bytes = readBundleFile(allocator, io, bundle_dir, "binary", 256 * 1024 * 1024) catch {
+    const binary_bytes = readBundleFile(allocator, io, bundle_dir, bundle_binary_path, 256 * 1024 * 1024) catch {
         try stderr.writeAll("zttp proofs verify: cannot read the bundled artifact\n");
         return error.InvalidManifest;
     };
@@ -1101,6 +1102,43 @@ test "verify refuses a predecessor artifact after integrity succeeds" {
     );
     try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "Integrity: verified") != null);
     try std.testing.expect(std.mem.indexOf(u8, err.writer.buffered(), "Rebuild") != null);
+}
+
+test "verify checks the binary at its manifest path" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const old_cwd = try test_chdir(&tmp);
+    defer std.testing.allocator.free(old_cwd);
+    defer std.Io.Threaded.chdir(old_cwd) catch {};
+
+    const contract = "{}";
+    const certificate = "certificate";
+    const artifact = try predecessorArtifact(std.testing.allocator);
+    defer std.testing.allocator.free(artifact);
+    try ensureDir(std.testing.allocator, "bundle");
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/handler.contract.json", contract);
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/renamed.bin", artifact);
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/certificate", certificate);
+
+    const manifest = try std.testing.allocator.print(
+        "{{\"toolVersion\":\"{s}\",\"components\":{{" ++
+            "\"contract\":{{\"path\":\"handler.contract.json\",\"sha256\":\"{s}\"}}," ++
+            "\"binary\":{{\"path\":\"renamed.bin\",\"sha256\":\"{s}\"}}," ++
+            "\"certificate\":{{\"path\":\"certificate\",\"sha256\":\"{s}\"}}}}}}",
+        .{ tool_version, sha256Hex(contract), sha256Hex(artifact), sha256Hex(certificate) },
+    );
+    defer std.testing.allocator.free(manifest);
+    try zts.file_io.writeFile(std.testing.allocator, "bundle/bundle.json", manifest);
+
+    var out = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer out.deinit();
+    var err = std.Io.Writer.Allocating.init(std.testing.allocator);
+    defer err.deinit();
+    try std.testing.expectError(
+        error.UnsupportedArtifactFormat,
+        verify(std.testing.allocator, "bundle", false, &out.writer, &err.writer),
+    );
+    try std.testing.expect(std.mem.indexOf(u8, out.writer.buffered(), "Integrity: verified") != null);
 }
 
 test "verify rejects a manifest component path with parent traversal" {
