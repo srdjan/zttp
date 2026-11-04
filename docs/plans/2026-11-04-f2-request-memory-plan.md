@@ -9,8 +9,9 @@ The owner chose Decision 1 option (a) on 2026-11-04: route request-time allocati
 | Unit | Status |
 |---|---|
 | G1 | Complete: `e1c01404`. Also moved response construction on the pooled path to `backing`, because the guard found one response header list per request |
-| G2 | In progress |
-| G3 to G7 | Not started |
+| G2 | Complete: `a33a9c81`. Also fixed in `0a70385a`: `push` and the SDK array push now refuse a request value stored into module state (finding F17) |
+| G3 | In progress. Also adds the escape check on `put_upvalue` (finding F17) |
+| G4 to G7 | Not started |
 
 ## Cause
 

@@ -53,5 +53,7 @@ These findings stay open. Each was reproduced or traced at `e5073153`.
 | F14 | Low | `parseIso` accepts `+` signs, unknown suffixes, and an out-of-range offset | `packages/modules/src/platform/time.zig#parseIsoString` |
 | F15 | Low | `cacheStats()` without a namespace sums denied namespaces | `packages/modules/src/data/cache.zig#cacheStatsImpl` |
 | F16 | Low | The plain runtime leaks four allocations on its no-handler error exit | not located |
+| F17 | High | A request value stored into module state through a path with no escape check leaves a dangling pointer, and a later request reads another request's data. Found during F2 on 2026-11-04. `push` and the SDK array push are fixed in `0a70385a`; a store into a captured variable (`put_upvalue`) is in F2 unit G3 | `arrayPush` in `packages/zts/src/builtins/array.zig`, `put_upvalue` in `packages/zts/src/interpreter.zig` |
+| F18 | High | `zts check` reports `deterministic`, `idempotent`, `retry_safe`, `read_only`, and `state_isolated` PROVEN for a handler that pushes onto a module-level array and returns its length; five identical requests returned 2 to 6. Observed at `e5073153`. Not checked: whether the deploy or certificate path refuses it | the property proofs for module-level mutable state |
 
 `stringRepeat` returns `undefined` above 1 MiB, although its declared result is `string`. Unit F3 does not change it.
