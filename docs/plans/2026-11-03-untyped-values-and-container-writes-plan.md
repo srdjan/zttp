@@ -1,6 +1,6 @@
 # Untyped operands, untyped receivers, Dict keys, and container writes, 2026-11-03
 
-Status: revision 1, 2026-11-03, validated, in execution. On 2026-11-03 the owner chose option (a) of D1, D2, and D3 at the end of the [member access plan](2026-11-03-member-access-and-dict-types-plan.md). Approved 2026-11-03: the owner chose option (a) of Decisions 1, 2, and 3, and approved execution of the units F1, A1, T1, R4, U3, N1, J1, W1, and D on local `main`. No approval covers a push, a provider call, or a re-record.
+Status: revision 1, 2026-11-03, validated, executed. See the execution record. On 2026-11-03 the owner chose option (a) of D1, D2, and D3 at the end of the [member access plan](2026-11-03-member-access-and-dict-types-plan.md). Approved 2026-11-03: the owner chose option (a) of Decisions 1, 2, and 3, and approved execution of the units F1, A1, T1, R4, U3, N1, J1, W1, and D on local `main`. No approval covers a push, a provider call, or a re-record.
 
 D1 (a): give the `for...of` loop variable over an array literal a type, apply the other U3 prototype fixes, and run the U3 entry check again with `zig build test`. D2 (a): refuse a member call on a receiver with no type in strict code, with its own entry check. D3 (a): confirm the encoder path, then refuse a Dict key that is not a string with ZTS213.
 
@@ -198,3 +198,28 @@ Fable attacked the design with probes on the `02bda09d` binaries. Codex astra ch
 Opus rejected two findings. Codex said that W1 does not need A1's widening, because the tuple rule already widens. That holds for a tuple. A homogeneous literal is an array of a literal type, such as `4[]`, so `ys[0] = 6` needs the widening. Codex also said that the shared skip claims to predict ZTS309 exactly. Revision 0 already stated that the skip omits the tracked-binding test. Fable confirmed that the skip set is a subset of what the verifier reports.
 
 Codex marked the recorded results of Q12 to Q17 and of the prototype as not checkable from the source. Those results come from Opus probes at the builds that the Findings name. Opus ran the probes of Q18 to Q22 again for this revision.
+
+## Execution record
+
+Each unit ran its gates unfiltered, with a private cache and no provider key. Opus reviewed each diff and reran the gates on the final tree: `zig build test` (which runs the layering and spine checks), `test-zruntime`, `test-examples`, `test-expert-app`, `test-diagnostic-corpus`, `test-bytecode-identity`, `test-residual-guards-drift`, `test-docs-drift`, `test-proof-ratchet-drift`, `test-precompile`, `test-modules`, `test-flow-census`, `test-standin`, `scripts/check-proof-swallow.sh`, and `zig fmt --check`. Every step exited 0 for each commit below. Each refusal row failed before its unit and passed after it.
+
+| Unit | Commit | Result |
+|---|---|---|
+| F1 | `28dc380f` | the loop variable over `[1, 2, 3]` is `number`; Q12d refused with ZTS201 |
+| A1 | `c33629aa` | `const ys = [4, 5]` is `number[]`; FR1 passes |
+| T1 | `87703069` | Q12a refused with ZTS309, Q12b with ZTS201; FR2 passes |
+| R4 | `31d3d6c1` | Q18 refused with ZTS309 |
+| U3 | `53434861` | arithmetic on a value with no type refused; Q13 and FR3 pass |
+| N1 | `da8c747d` | Q12c and `range(n).map(f)` refused with ZTS201 |
+| J1 | `72763d24` | Q10 refused with ZTS213 |
+| W1 | `75d42eed` | Q14, Q16, Q17, Q19, and Q20 refused with ZTS200 or ZTS203; Q21 refused (the array form by ZTS309 since A1, the tuple form by W1) |
+| D | this commit | docs, roadmap, changelog, website |
+
+Deviations from the plan:
+
+- R4 and U3: the Sonnet executor reached its turn budget. Opus finished the tests, the gates, and the mutants.
+- T1 put the Q12a row in `packages/tools/src/precompile_check_tests.zig`, because its ZTS309 comes from the verifier, which the pipeline tests do not run.
+- N1: the first prototype refused `[].pop()` and `[s].map(f)` with an untyped element. Each value is an array on every input. Opus added a skip for an array literal when every array has the member. `range(n)` has no array members, so the termination probes `g3b` and `g3c` map over `[1]` instead of `range(1)`. The request-headers skip of the brief was dropped, because a typed `Request` gives `req.headers` a type and the skip could not fire.
+- J1: Opus implemented the unit, because it is one function. The mutant that moves `void` to the accepted keys survives: CHECK refuses `void` as a type argument (ZTS060) before the type stage.
+- W1: design item 10 widened only a tuple slot. An unannotated object literal keeps literal field types, so that rule refused `const o = { n: 0 }; o.n = 1;`. W1 widens a slot when the root binding has no annotation and an object or array literal initializer, and it widens record fields and union members inside the slot. A declared tuple slot keeps its literal types, so `g[0] = "POST"` with `g: ["GET", number]` is refused. Opus fixed two defects of the executor's version: it refused a mutating call on a fresh array literal (`[1, 2].pop()`), and it widened a write through an unannotated alias of a declared record. The first alias fix then refused `const t = table; t.hits = 1;` with `const table = { hits: 0 }`, which the state isolation test caught. A name bound to a binding with literal types now widens too. The row `walkStmt catch-poison@2` in `scripts/proof-swallow.allow` covers the new table write. A nested declared type under a literal root still widens; the roadmap records it.
+- Entry checks: up to J1, the entry check compared `zts check`, which does not run the verifier. The W1 entry check compared `zts check` and `zttp check`. In each unit, `test-precompile` and `test-diagnostic-corpus` covered the verifier stage.

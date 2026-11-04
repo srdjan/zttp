@@ -392,7 +392,7 @@ A result has a type only when each argument has the type that the runtime reads.
 
 | Form | Type |
 |---|---|
-| `xs.length`, `s.length`, `Math.PI`, the 8 `Number` constants | `number` |
+| `xs.length`, `s.length`, `u.length` with `u: string \| string[]`, `Math.PI`, the 8 `Number` constants | `number` |
 | `Math.floor(n)` and the other `Math` methods, with number arguments | `number` |
 | `parseInt(s, 10)`, `Number(x)`, `Date.now()` | `number` |
 | `String(x)`, `s.toUpperCase()`, `s.slice(1)`, `xs.join(",")` | `string` |
@@ -405,9 +405,12 @@ A result has a type only when each argument has the type that the runtime reads.
 | `JSON.tryParse(s)` | a Result with an `unknown` value and a `string` error |
 | `JSON.stringify(v)` | `string`; `string \| undefined` for a recursive type; no type when a part is `unknown` |
 | `Object.keys(o)` | `string[]` |
-| `Object.values(o)`, `Object.entries(o)` | no type: a record can hold a field that its type does not name |
+| `Object.values(o)` | `unknown[]`: a record can hold a field that its type does not name |
+| `Object.entries(o)` | `[string, unknown][]` |
 
 An unannotated parameter of an inline array callback takes the type of the value in its position: the element, the index (`number`), and the array. A `toSorted` comparator gets two elements. The loop variable of `for (const i of range(n))` is a `number`.
+
+An unannotated `const` or `let` binding of an array literal widens each element type. `const ys = [4, 5]` is `number[]`, `const t = ["a", 1]` is `[string, number]`, and `const out = []` is `unknown[]`. The loop variable of `for...of` over a tuple is the union of the widened element types: over `[1, 2, 3]` it is a `number`, and over `["a", 1]` it is `string | number`. Over a union of arrays and tuples, it is the union of the element types of each member.
 
 An annotated or named callback of `map`, `filter`, `find`, `findIndex`, `forEach`, `some`, `every`, `toSorted`, or `reduce` must accept the value that the method passes in each position. A parameter past those values must accept `undefined`. Otherwise the call gets ZTS203:
 
@@ -449,7 +452,7 @@ A Result has the type `{ ok: boolean; value?: V; error?: E; errors?: S }`. The t
 | `validateJson`, `validateObject`, `coerceJson`, the four `zttp:decode` exports | `unknown`, or the schema type | `string \| undefined` | `unknown` |
 | every other module export that returns a Result | `unknown` (a JSON value for `parseJson` and `parseJsonBytes`) | `unknown` | `never` |
 
-`unwrapOr(r, d)` is the join of the `value` of `r` and the type of `d`. A schema failure of `zttp:validate` or `zttp:decode` fills `errors` and leaves `error` absent, so their `error` admits `undefined`. After `if (!r.ok)`, a read on that `error`, such as `r.error.length`, gets ZTS309 until the code checks it for `undefined`. The rule also holds for a Result that `mapResult` derives from such a Result. `packages/zts/src/module_result_errors.zig` holds one row for each module export, and a census test fails when an export has no row.
+`unwrapOr(r, d)` is the join of the `value` of `r` and the type of `d`. A schema failure of `zttp:validate` or `zttp:decode` fills `errors` and leaves `error` absent, so their `error` admits `undefined`. After `if (!r.ok)`, a read on that `error`, such as `r.error.length`, gets ZTS309 until the code checks it for `undefined`. The rule also holds for a Result that `mapResult` derives from such a Result. After `if (r.ok)`, a read on a `value` whose type admits `undefined` also gets ZTS309, such as `r.value.length` with `r = ok(req.headers.get("x"))`. `packages/zts/src/module_result_errors.zig` holds one row for each module export, and a census test fails when an export has no row.
 
 An unannotated callback of `mapResult` or `andThen` takes the `value` type, and of `mapError` or `orElse` the error payload type, when that type is known and is not `unknown`. An annotated or named callback must accept that type (ZTS203).
 
@@ -478,7 +481,17 @@ Use `String(n)` to convert a number. Use `s.charAt(i)` or `s.slice(i, i + 1)` to
 
 A call of a member on a value of type `unknown` gets ZTS201: "a member read on an unknown value; narrow it first". A read of a member on `unknown` passes and has no type. Narrow the value with `typeof` or `isDict` first.
 
+A call of a member on a value with no type gets ZTS201 too: "a member call on a value with no known type; give it a type or narrow it first". A member read on `unknown` and a reduce accumulator whose callback return does not fit the seed have no type. `range(n)` has no array members, so `range(n).map(f)` is refused: write `for (const i of range(n))`. Four receivers are left alone: a builtin namespace such as `Math`, a read that gets ZTS309, a parameter of a function that ZTS601 refuses, and an array literal when every array has the member.
+
 In a union, a member that one union member does not hold adds `undefined` to the read type. So `x.age` with `x: P | string` is `number | undefined`, and `x[0]` with `x: string | string[]` is `string | undefined`. An unchecked read on such a value gets ZTS309. A call through such a member gets ZTS201: narrow the union first.
+
+### Writes Into Containers
+
+A write into a record field, an array element, or a tuple element must fit the type of that slot. `p.name = 5` and `p["name"] = 5` with `p: { name: string }`, and `xs[0] = "a"` with `xs: number[]`, get ZTS200. Each argument of `push` and `unshift`, and each argument of `splice` after the second, must fit the element type (ZTS203). On a union receiver, the value must fit the slot of each member that has one.
+
+A tuple type names its length. So `push`, `pop`, `shift`, `unshift`, `splice`, and a write to `length` on a tuple get ZTS200. Annotate the binding as an array, such as `string[]`, when the length must change.
+
+A `const` or `let` with no annotation widens the literal types of the slot when its initializer is an object or array literal, or a name bound to one. So `const o = { n: 0 }; o.n = 1;` is accepted. A write through any other binding keeps the declared type. `alias.kind = "c"` with `const alias = s` and `s: { kind: "a" | "b" }` gets ZTS200. A write of a value with no type passes, and a fresh array literal such as `[1, 2].pop()` is not checked.
 
 ### Dict Types
 
@@ -496,6 +509,8 @@ A `Dict<K, V>` is immutable, and a key that it does not hold reads `undefined`. 
 | `dictFold(d, f, init)` | the widened type of `init` when `f` returns that type, else `unknown` |
 
 `Dict<never, never>` holds no entry, so it is assignable to every Dict type. A Dict is also assignable to a Dict whose key type is `unknown` when its values fit. For every other key type, the key types must be equal. An unannotated `let d = dictEmpty();` widens to `Dict<unknown, unknown>`. Annotate it instead: `let d: Dict<string, number> = dictEmpty();`.
+
+`Response.json` refuses a Dict whose key type admits a value that is not a string, such as `Dict<number, string>` or the `Dict<number | string, string | number>` of `dictSet(dictSet(dictEmpty(), 2, "x"), "k", 1)`. It reports ZTS213, because the JSON encoder fails on such a key. A key type of `string`, a string literal, a template literal, `never`, or `unknown` is accepted. So the widened `Dict<unknown, unknown>` passes with a number key: annotate the key type.
 
 An unannotated callback of `dictFold` takes `(accumulator, value, key)`. An unannotated callback of `dictMapValues` or `dictFilter` takes `(value, key)`. The accumulator follows the rule of a seeded `reduce`. An annotated or named callback must accept these types (ZTS203):
 
@@ -663,7 +678,9 @@ predicate callbacks face the same rule at runtime.
 
 Arithmetic operators (`-`, `*`, `/`, `%`, `**`) and the unary `-` require numeric operands. An operand whose type is not assignable to `number` gets ZTS104. The compiler reads the type with the narrowing that reaches the operand, so a value that a guard proves to be a number is accepted.
 
-An operand that the type checker does not type passes. Builtin calls such as `xs.length`, `Math.floor(n)`, and `parseInt(s, 10)` have types (see [Builtin Result Types](#builtin-result-types)). The callback parameter of `mapResult` or `andThen` over a Result with a known value type also has a type (see [Result Types](#result-types)). So does the callback of `dictFold` over a typed Dict (see [Dict Types](#dict-types)). The remaining untyped sources include a member read on `unknown`, a `for...of` loop variable over an array literal or an unannotated array, and an index read followed by a member read such as `ps[0].age`. [Roadmap](roadmap.md) lists them.
+An operand that the type checker does not type is refused too: ZTS104, or ZTS106 in `+`, says "operand has no known type". A member read on `unknown`, such as `u.n` with `u: unknown`, has no type. Annotate the value or its source, or narrow it with `typeof` first. Two operands are left to another rule: a read that gets ZTS309, such as `ps[0].age` on an empty array, and a parameter of a function that ZTS601 refuses.
+
+Builtin calls such as `xs.length`, `Math.floor(n)`, and `parseInt(s, 10)` have types (see [Builtin Result Types](#builtin-result-types)). The callback parameter of `mapResult` or `andThen` over a Result with a known value type also has a type (see [Result Types](#result-types)). So does the callback of `dictFold` over a typed Dict (see [Dict Types](#dict-types)). A value with no type still passes at an assignment, a container write, an argument, and a `return`. [Roadmap](roadmap.md) lists the remaining sources.
 
 #### Rejected arithmetic
 

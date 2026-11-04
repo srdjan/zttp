@@ -112,36 +112,40 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
   checked annotated callbacks and typed the Results of virtual modules. The
   [member access plan](plans/2026-11-03-member-access-and-dict-types-plan.md)
   checked member access on a receiver that is not a record and typed the Dict
-  exports.
-  - A value with no type still passes at every typed position and as an
-    arithmetic operand. The remaining sources are a call of a function with
-    unannotated parameters outside strict mode, a member read on `unknown`
-    such as `JSON.parse(s).n`, a `for...of` loop variable over an array
-    literal or an unannotated array, an index read followed by a member read
-    such as `ps[0].age`, `Object.values` and `Object.entries`,
-    `dictFromEntries`, and the callback parameter of `mapError` or `orElse`
-    over a module Result. A record can hold a field that its type does not
-    name, so the declared field types do not bound `Object.values`. ZTS309
-    refuses an unchecked read of `ps[0].age`.
-  - Refusing an arithmetic operand with no type in strict code (U3) stopped
-    at its entry check a third time. It refuses the published `let` example
-    in `packages/tools/src/example_registry.zig`, whose `for (const n of [1,
-    2, 3])` loop variable has no type and is a number on every input. The
-    earlier blockers are closed. The
-    [member access plan](plans/2026-11-03-member-access-and-dict-types-plan.md#u3-entry-check)
-    lists what the prototype needs besides that type.
-  - A member call on a receiver with no type passes. The checker refuses such
-    a call only on `unknown`. Four forms pass with every property PROVEN, and
-    `zttp dev` answers 500 (`NotCallable`): `Object.values(o)[0].f(1)`,
-    `x.slice(1).trim()` with `x: string | string[]`,
-    `[1, 2].reduce((acc, v) => acc.toFixed(2), "")`, and `s.toUpperCase()`
-    in `for (const s of [1, 2])`. The accumulator of a `reduce` or `dictFold`
-    has no type when the callback return does not fit the seed type.
-  - `Response.json` of a Dict with a key that is not a string passes.
-    `Response.json(dictSet(dictSet(dictEmpty(), 2, "x"), "k", 1))` proves
-    `read_only`, and `zttp dev` answers 500 with `error.OutOfMemory` from the
-    native `json` function. `firstUnencodable` checks the value type of a Dict
-    and not its key type. The encoder path is not confirmed.
+  exports. The
+  [untyped values plan](plans/2026-11-03-untyped-values-and-container-writes-plan.md)
+  typed array literal bindings, loop variables over tuples, and
+  `Object.values`, and refused arithmetic and member calls on a value with no
+  type.
+  - A value with no type still passes at an assignment, a container write,
+    an argument, and a `return`. The remaining sources are a call of a function with unannotated
+    parameters outside strict mode, a member read on `unknown` such as
+    `JSON.parse(s).n`, `dictFromEntries`, the callback parameter of
+    `mapError` or `orElse` over a module Result, and the accumulator of a
+    `reduce` or `dictFold` whose callback return does not fit the seed type.
+    ZTS309 refuses an unchecked read of `ps[0].age`.
+  - An array type is assignable to an array type with a wider element type,
+    and a record type to a record type with a wider field type. A write
+    through the wider alias changes the value that the narrower type
+    describes. `const xs: string[] = ["a"]; const ys: (string | number)[] =
+    xs; ys.push(5);` passes, and `x.toUpperCase()` for each `x` of `xs`
+    answers 500. Since the loop variable over a tuple has a type, the same
+    path reaches a typed loop variable: pass a tuple to a wider array
+    parameter, push a value of another type, then iterate the tuple. A fix
+    makes mutable array and record types invariant, which changes
+    assignability for every such type and needs its own measurement.
+  - `Response.json` of a Dict from `let d = dictEmpty();` passes with a
+    number key, because the binding widens to `Dict<unknown, unknown>`.
+    `let d = dictEmpty(); d = dictSet(d, 2, "x"); return Response.json(d);`
+    proves `read_only`, and `zttp dev` answers 500. `writeJsonDepth` in
+    `packages/zts/src/http.zig` reports the key as
+    `RenderError.OutOfMemory`, which names the wrong cause.
+  - A write into a container widens the literal types of the slot when the
+    root binding has no annotation and a literal initializer. A declared
+    type held in a field of that literal widens too. With `s: { kind: "a" |
+    "b" }`, `const q = { a: s }; q.a.kind = "c";` passes, and `s.kind` then
+    holds `"c"`. A fix widens only the literal types that the initializer
+    itself wrote.
   - A `dictFold` callback whose return type does not fit the seed type makes
     the result `unknown`, with no report. A seeded `reduce` reports ZTS200 for
     the same callback.
