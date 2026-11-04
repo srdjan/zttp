@@ -5938,6 +5938,118 @@ test "array literal binding: valid annotated arrays at and after the inference b
     );
 }
 
+const wide_container_record_prefix =
+    \\structural A01 = { kind: "01"; v: number };
+    \\structural A02 = { kind: "02"; v: number };
+    \\structural A03 = { kind: "03"; v: number };
+    \\structural A04 = { kind: "04"; v: number };
+    \\structural A05 = { kind: "05"; v: number };
+    \\structural A06 = { kind: "06"; v: number };
+    \\structural A07 = { kind: "07"; v: number };
+    \\structural A08 = { kind: "08"; v: number };
+    \\structural A09 = { kind: "09"; v: number };
+    \\structural A10 = { kind: "10"; v: number };
+    \\structural A11 = { kind: "11"; v: number };
+    \\structural A12 = { kind: "12"; v: number };
+    \\structural A13 = { kind: "13"; v: number };
+    \\structural A14 = { kind: "14"; v: number };
+    \\structural A15 = { kind: "15"; v: number };
+    \\structural A16 = { kind: "16"; v: number };
+;
+
+const wide_container_array_members =
+    \\structural K01 = { kind: "01" };
+    \\structural K02 = { kind: "02" };
+    \\structural K03 = { kind: "03" };
+    \\structural K04 = { kind: "04" };
+    \\structural K05 = { kind: "05" };
+    \\structural K06 = { kind: "06" };
+    \\structural K07 = { kind: "07" };
+    \\structural K08 = { kind: "08" };
+    \\structural K09 = { kind: "09" };
+    \\structural K10 = { kind: "10" };
+    \\structural K11 = { kind: "11" };
+    \\structural K12 = { kind: "12" };
+    \\structural K13 = { kind: "13" };
+    \\structural K14 = { kind: "14" };
+    \\structural K15 = { kind: "15" };
+    \\structural K16 = { kind: "16" };
+    \\structural K17 = { kind: "17" };
+;
+
+test "container write checks the seventeenth record union member" {
+    try expectOneMismatch(wide_container_record_prefix ++ "\n" ++
+        \\structural A17 = { kind: "17"; v: string };
+        \\structural U = A01 | A02 | A03 | A04 | A05 | A06 | A07 | A08 |
+        \\  A09 | A10 | A11 | A12 | A13 | A14 | A15 | A16 | A17;
+        \\function f(x: U, n: number): number { x.v = n; return 0; }
+    , "type 'number' is not assignable to type 'string'");
+}
+
+test "container mutation checks the seventeenth array union member" {
+    try expectOneArgMismatch(wide_container_array_members ++ "\n" ++
+        \\structural U = (number | K01)[] | (number | K02)[] |
+        \\  (number | K03)[] | (number | K04)[] | (number | K05)[] |
+        \\  (number | K06)[] | (number | K07)[] | (number | K08)[] |
+        \\  (number | K09)[] | (number | K10)[] | (number | K11)[] |
+        \\  (number | K12)[] | (number | K13)[] | (number | K14)[] |
+        \\  (number | K15)[] | (number | K16)[] | string[];
+        \\function f(xs: U, n: number): number { xs.push(n); return 0; }
+    , "argument type does not match parameter type: expected string, got number");
+}
+
+test "container write accepts every compatible member of a wide union" {
+    try expectNoTypeDiagnostic(wide_container_record_prefix ++ "\n" ++
+        \\structural A17 = { kind: "17"; v: number };
+        \\structural U = A01 | A02 | A03 | A04 | A05 | A06 | A07 | A08 |
+        \\  A09 | A10 | A11 | A12 | A13 | A14 | A15 | A16 | A17;
+        \\function f(x: U, n: number): number { x.v = n; return 0; }
+    );
+}
+
+test "wide container write propagates allocation failure" {
+    const allocator = testing.allocator;
+    const source = wide_container_record_prefix ++ "\n" ++
+        \\structural A17 = { kind: "17"; v: number };
+        \\structural U = A01 | A02 | A03 | A04 | A05 | A06 | A07 | A08 |
+        \\  A09 | A10 | A11 | A12 | A13 | A14 | A15 | A16 | A17;
+        \\function f(x: U, n: number): number { x.v = n; return 0; }
+    ;
+    var atoms = AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const parsed = ParsedModule.fromTypedExisting(view, root, &atoms, &parser.type_store);
+    const Run = struct {
+        fn analyze(run_allocator: std.mem.Allocator, module: ParsedModule) !void {
+            var analysis: ModuleAnalysisSession = .{};
+            try analysis.initSoundExtraction(run_allocator, module, .{
+                .source_types = .direct,
+                .strict = false,
+            });
+            defer analysis.deinit();
+            try analysis.complete();
+        }
+    };
+
+    try testing.checkAllAllocationFailures(allocator, Run.analyze, .{parsed});
+}
+
+test "container mutation gives a tuple priority after seventeen array union members" {
+    try expectOneMismatch(wide_container_array_members ++ "\n" ++
+        \\structural U = (number | K01)[] | (number | K02)[] |
+        \\  (number | K03)[] | (number | K04)[] | (number | K05)[] |
+        \\  (number | K06)[] | (number | K07)[] | (number | K08)[] |
+        \\  (number | K09)[] | (number | K10)[] | (number | K11)[] |
+        \\  (number | K12)[] | (number | K13)[] | (number | K14)[] |
+        \\  (number | K15)[] | (number | K16)[] | (number | K17)[] | [string];
+        \\function f(xs: U, n: number): number { xs.push(n); return 0; }
+    , "this call changes the length of a tuple, and a tuple type names its length");
+}
+
 test "array literal binding: a module scope const of numbers is a number array" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };

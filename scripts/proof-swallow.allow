@@ -149,6 +149,7 @@ packages/zts/src/type_checker.zig schemaValueToType catch-block
 packages/zts/src/type_checker.zig schemaValueToType catch-poison
 packages/zts/src/type_checker.zig walkExpr catch-poison
 packages/zts/src/type_checker.zig walkStmt catch-poison
+
 # The `unannotated_decls` write in the `.var_decl` arm. A lost entry only turns off
 # literal widening for a write, which makes the write check stricter, not weaker.
 # The pool failure is reported through markAllocationFailure and ensureHealthy.
@@ -481,3 +482,8 @@ packages/zts/src/import_signatures.zig copyFunction catch-return
 # returns OutOfMemory before inferred types can support a verdict.
 packages/zts/src/type_checker.zig inferArrayLiteralType catch-block
 packages/zts/src/type_checker.zig inferArrayLiteralType catch-block@2
+
+# A wide container union snapshot sets allocation_failed when its owned member
+# copy cannot allocate. TypeChecker.ensureHealthy reports OutOfMemory before
+# any partial slot set can support a verdict.
+packages/zts/src/type_checker.zig collectWriteSlots catch-block

@@ -7631,6 +7631,17 @@ pub const TypeChecker = struct {
         index_any,
     };
 
+    const WriteSlots = struct {
+        items: []TypeIndex,
+        /// The full allocation, before `items` is compacted to found slots.
+        heap_storage: ?[]TypeIndex,
+        has_tuple: bool,
+
+        fn deinit(self: WriteSlots, allocator: std.mem.Allocator) void {
+            if (self.heap_storage) |storage| allocator.free(storage);
+        }
+    };
+
     /// The type of one slot of a non-union container type, or null when the
     /// container has no such slot.
     fn slotOfMember(self: *const TypeChecker, member_type: TypeIndex, slot: WriteSlot) ?TypeIndex {
@@ -7730,30 +7741,58 @@ pub const TypeChecker = struct {
     /// Collect the slot of each member of `receiver` that a write through
     /// `slot` reaches. A union receiver gives one slot for each member that
     /// has one. A tuple member sets `has_tuple`.
+    ///
+    /// Copy every union member before a slot lookup. A lookup can grow the
+    /// pool and invalidate a slice borrowed from `pool.members`.
     fn collectWriteSlots(
-        self: *const TypeChecker,
+        self: *TypeChecker,
         receiver: TypeIndex,
         slot: WriteSlot,
-        out: *[MAX_UNION_MEMBERS]TypeIndex,
-        has_tuple: *bool,
-    ) usize {
+        stack: *[MAX_UNION_MEMBERS]TypeIndex,
+    ) ?WriteSlots {
         const pool = self.env.pool;
         const resolved = pool.unwrapNominal(self.env.resolveRef(receiver));
         if (pool.getTag(resolved) == .t_union) {
+            const members = pool.getUnionMembers(resolved);
+            var heap_storage: ?[]TypeIndex = null;
+            const copied = if (members.len <= stack.len)
+                stack[0..members.len]
+            else blk: {
+                const storage = self.allocator.alloc(TypeIndex, members.len) catch {
+                    self.markAllocationFailure();
+                    return null;
+                };
+                heap_storage = storage;
+                break :blk storage;
+            };
+            @memcpy(copied, members);
+
             var count: usize = 0;
-            for (pool.getUnionMembers(resolved)) |member| {
-                if (pool.getTag(pool.unwrapNominal(self.env.resolveRef(member))) == .t_tuple) has_tuple.* = true;
+            var has_tuple = false;
+            for (copied) |member| {
+                if (pool.getTag(pool.unwrapNominal(self.env.resolveRef(member))) == .t_tuple) has_tuple = true;
                 const found = self.slotOfMember(member, slot) orelse continue;
-                if (count >= out.len) return count;
-                out[count] = found;
+                copied[count] = found;
                 count += 1;
             }
-            return count;
+            return .{
+                .items = copied[0..count],
+                .heap_storage = heap_storage,
+                .has_tuple = has_tuple,
+            };
         }
-        if (pool.getTag(resolved) == .t_tuple) has_tuple.* = true;
-        const found = self.slotOfMember(resolved, slot) orelse return 0;
-        out[0] = found;
-        return 1;
+        const has_tuple = pool.getTag(resolved) == .t_tuple;
+        const found = self.slotOfMember(resolved, slot) orelse return .{
+            .items = stack[0..0],
+            .heap_storage = null,
+            .has_tuple = has_tuple,
+        };
+        stack[0] = found;
+        return .{
+            .items = stack[0..1],
+            .heap_storage = null,
+            .has_tuple = has_tuple,
+        };
     }
 
     /// The slot that a write through `member` reaches, or null when the
@@ -7786,18 +7825,18 @@ pub const TypeChecker = struct {
         const receiver = self.inferType(member.object);
         if (receiver == null_type_idx) return;
 
-        var slots: [MAX_UNION_MEMBERS]TypeIndex = undefined;
-        var has_tuple = false;
-        const count = self.collectWriteSlots(receiver, slot, &slots, &has_tuple);
-        if (has_tuple and slot == .field and std.mem.eql(u8, slot.field, "length")) {
+        var stack: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+        const slots = self.collectWriteSlots(receiver, slot, &stack) orelse return;
+        defer slots.deinit(self.allocator);
+        if (slots.has_tuple and slot == .field and std.mem.eql(u8, slot.field, "length")) {
             self.addTupleLengthChange(node, true);
             return;
         }
-        if (count == 0) return;
+        if (slots.items.len == 0) return;
         const value_type = self.inferType(asgn.value);
         if (value_type == null_type_idx) return;
         const widen = self.writeRootIsUnannotated(member.object);
-        for (slots[0..count]) |found| {
+        for (slots.items) |found| {
             const expected = if (widen) self.widenWriteSlot(found, 0) else found;
             if (self.env.isAssignableTo(value_type, expected)) continue;
             self.addTypeMismatch(node, expected, value_type);
@@ -7825,21 +7864,21 @@ pub const TypeChecker = struct {
         const pool = self.env.pool;
         if (pool.isReadonlyArray(receiver)) return;
 
-        var slots: [MAX_UNION_MEMBERS]TypeIndex = undefined;
-        var has_tuple = false;
-        const count = self.collectWriteSlots(receiver, .index_any, &slots, &has_tuple);
-        if (has_tuple) {
+        var stack: [MAX_UNION_MEMBERS]TypeIndex = undefined;
+        const slots = self.collectWriteSlots(receiver, .index_any, &stack) orelse return;
+        defer slots.deinit(self.allocator);
+        if (slots.has_tuple) {
             self.addTupleLengthChange(node, false);
             return;
         }
         const first_value: usize = if (std.mem.eql(u8, method, "push") or std.mem.eql(u8, method, "unshift")) 0 else if (std.mem.eql(u8, method, "splice")) 2 else return;
-        if (count == 0) return;
+        if (slots.items.len == 0) return;
         const widen = self.writeRootIsUnannotated(member.object);
         var arg: usize = first_value;
         while (arg < call.args_count) : (arg += 1) {
             const value_type = self.inferType(self.ir_view.getListIndex(call.args_start, @intCast(arg)));
             if (value_type == null_type_idx) continue;
-            for (slots[0..count]) |found| {
+            for (slots.items) |found| {
                 const expected = if (widen) self.widenWriteSlot(found, 0) else found;
                 if (self.env.isAssignableTo(value_type, expected)) continue;
                 self.addArgTypeMismatch(node, expected, value_type);
