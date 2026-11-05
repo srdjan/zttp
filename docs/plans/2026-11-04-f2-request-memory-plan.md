@@ -12,8 +12,26 @@ The owner chose Decision 1 option (a) on 2026-11-04: route request-time allocati
 | G2 | Complete: `a33a9c81`. Also fixed in `0a70385a`: `push` and the SDK array push now refuse a request value stored into module state (finding F17) |
 | G3 | Complete: `927fa36a`. Request-time closures, upvalue arrays, and upvalue boxes live in the request arena; `put_upvalue` refuses a request value in a box outside the arena (finding F17). `Context.request_scope` marks a running request, because a non-pooled runtime keeps `hybrid` set while it loads the handler |
 | G4 | Complete: `54529e10`. Also moved `OutboundIo` on a pooled runtime to `backing`, because the fetch guard found a task record per lookup and connect. Open: trace replay (`jsonToJSValue` in `packages/zts/src/trace.zig`) builds objects on the lifetime allocator for each replayed result; replay only, no unit covers it |
-| G5 | In progress |
-| G6 and G7 | Not started |
+| G5 | Complete: `4069d81e` |
+| G6 | Complete: `09179721` and `fe8ad11c`. The census found that object spread built its key list on the lifetime arena (`09179721`). Three example handlers are not run, each with a reason in `packages/runtime/src/example_census_test.zig` |
+| G7 | Complete. Results are in the section "G7 results". The headline shape (`cacheSet` of a joined string) is bounded but not flat: finding F19 |
+| G8 | Complete: `04de59d5`. G7 found `stringConcat` 14.7% slower; `join` now builds long text in a freeing scratch buffer |
+
+## G7 results
+
+Measured on 2026-11-04 in ReleaseFast on one runtime (`zttp serve -n 1`), with 50,000 iterations per request.
+
+| Shape | `02659dfa` | `04de59d5` |
+|---|---|---|
+| `join` then `toUpperCase` (t16), RSS | 31.7 MiB at request 1, 219.4 MiB at request 62 | 28.4 MiB at request 1, 28.8 MiB at request 62, 30.3 MiB at request 72 |
+| `join` and `slugify` (t17), RSS | 44.9 MiB at request 1, 691.5 MiB at request 62 | 40.6 MiB at request 1, 41.2 MiB at request 62, 42.2 MiB at request 72 |
+| `cacheSet` of a joined string (t7), physical footprint | 26 MB at request 1, 424 MB at request 40, 394 MB at request 100 | 37 MB at request 1, 418 MB at request 30, 417 MB at request 100 |
+
+The baseline drops after request 64 because the pool recycles the runtime. An earlier t7 run at `4069d81e` stayed at 25 to 27 MiB RSS; the same binary later reached 418 MB. The cause of that difference is not known.
+
+Benchmarks: 101 interleaved rounds of `zttp-bench`, with the median of each. The A/A control differs by at most 1.0%. Against `02659dfa`, `04de59d5` is 3.5% slower on `objectCreate` and 0.3% slower on `arrayOps`, and equal or faster on the other 11. Bisection puts the `objectCreate` cost on `0a70385a`: `push` now runs the GC write barrier, which the old `push` skipped. `zig build bench-check` passes: 9 benchmarks, geomean 0.98597.
+
+A 10-minute sustained run (`hey -c 32`) of a light handler grew RSS from 22.5 MiB at 30 seconds to 73.2 MiB at 600 seconds at `02659dfa`, and from 27.8 to 69.5 MiB at `4069d81e`. Neither run reached a plateau, so the result does not settle the freelist risk.
 
 ## Cause
 

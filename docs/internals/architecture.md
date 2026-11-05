@@ -79,9 +79,27 @@ re-exports every public name, so a caller imports the same file as before.
 5. The server validates response headers, writes the response, and releases the
    runtime slot.
 
-Each request runs with isolated runtime state. Request isolation is
-arena-based: request-scoped allocations are bulk-reset between requests. The
-engine includes a garbage collector, but the default serving configuration
+Each request runs with isolated runtime state. A pooled runtime has three
+allocators, and each allocation uses the one that matches its lifetime:
+
+- The lifetime arena (`ctx.allocator`) holds runtime-lifetime data: the
+  installed builtins, the loaded handler, atoms, and hidden classes. It frees
+  nothing until the pool destroys the runtime.
+- The request arena holds the values and temporaries of one request
+  (`Context.requestAllocator`, `ctx.createString`, `ctx.createObject`). The
+  runtime resets it after each request. Its overflow memory comes from the
+  backing allocator, so the reset frees that memory too.
+- The backing allocator frees memory. It holds responses, outbound HTTP
+  exchange buffers, and module state that lives across requests
+  (`Context.state_allocator`, `sdk.getStateAllocator`). A builtin also uses it
+  for a buffer that it frees before it returns (`Context.scratchAllocator`).
+
+A request that stores a request-arena value into longer-lived state fails with
+`ArenaObjectEscape`. `RuntimeStats.lifetime_allocs` counts lifetime-arena
+allocations. The guard tests in `packages/runtime/src/runtime_pool.zig` and the
+example census require that count to stay fixed during steady-state requests.
+
+The engine includes a garbage collector, but the default serving configuration
 uses the hybrid arena allocator, which disables collection on the serving path
 (`Context.setHybridAllocator` in `packages/zts/src/context.zig`).
 
