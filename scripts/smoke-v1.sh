@@ -338,7 +338,7 @@ import_untyped_out=$(cd "$TMP_DIR/import-type-app" && "$ZTTP" compile h.ts -o im
 [ ! -e "$TMP_DIR/import-type-app/import-untyped-bin" ] || fail "refused compile of a generic function imported from a file wrote a binary"
 grep -qF -- "$import_untyped_want" <<<"$import_untyped_out" || fail "compile of a generic function imported from a file did not print '$import_untyped_want': $import_untyped_out"
 
-step "negative: a helper mutation stops only a capsule that demands state_isolated"
+step "negative: a helper mutation stops a capsule that demands state_isolated or deterministic, and not one that demands neither"
 mkdir -p "$TMP_DIR/helper-state-app"
 cat > "$TMP_DIR/helper-state-app/demanded.ts" <<'TS'
 let count = 0;
@@ -350,7 +350,7 @@ export function handler(req: Request): Proof<Response, "state_isolated"> {
   return Response.text(String(bump()));
 }
 TS
-cat > "$TMP_DIR/helper-state-app/narrow.ts" <<'TS'
+cat > "$TMP_DIR/helper-state-app/counted.ts" <<'TS'
 let count = 0;
 function bump(): number {
   count = count + 1;
@@ -360,10 +360,25 @@ export function handler(req: Request): Proof<Response, "deterministic"> {
   return Response.text(String(bump()));
 }
 TS
+cat > "$TMP_DIR/helper-state-app/narrow.ts" <<'TS'
+let count = 0;
+function bump(): number {
+  count = count + 1;
+  return count;
+}
+export function handler(req: Request): Proof<Response, "injection_safe"> {
+  return Response.text(String(bump()));
+}
+TS
 helper_status=0
 helper_out=$(cd "$TMP_DIR/helper-state-app" && "$ZTTP" compile demanded.ts -o demanded-bin --no-attest 2>&1 </dev/null) || helper_status=$?
 [ "$helper_status" -eq 1 ] || fail "compile of a demanded state_isolated with a mutating helper exited $helper_status, expected 1: $helper_out"
 [ ! -e "$TMP_DIR/helper-state-app/demanded-bin" ] || fail "refused compile of a demanded state_isolated wrote a binary"
+helper_status=0
+helper_out=$(cd "$TMP_DIR/helper-state-app" && "$ZTTP" compile counted.ts -o counted-bin --no-attest 2>&1 </dev/null) || helper_status=$?
+[ "$helper_status" -eq 1 ] || fail "compile of a deterministic capsule over a mutating helper exited $helper_status, expected 1: $helper_out"
+grep -qF -- "ZTS500" <<<"$helper_out" || fail "refused compile of a deterministic capsule over a mutating helper did not name ZTS500: $helper_out"
+[ ! -e "$TMP_DIR/helper-state-app/counted-bin" ] || fail "refused compile of a deterministic capsule wrote a binary"
 helper_status=0
 helper_out=$(cd "$TMP_DIR/helper-state-app" && "$ZTTP" compile narrow.ts -o narrow-bin --no-attest 2>&1 </dev/null) || helper_status=$?
 [ "$helper_status" -eq 0 ] || fail "compile of a capsule without state_isolated exited $helper_status, expected 0: $helper_out"
