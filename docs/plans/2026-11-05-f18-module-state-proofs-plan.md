@@ -6,7 +6,8 @@ Finding F18 (2026-11-04 review): `zts check` reports five properties PROVEN for 
 
 | Unit | Status |
 |---|---|
-| H1 to H3 | Waiting for Decision 5 |
+| H1 | In progress |
+| H2 and H3 | Not started |
 
 ## Reproduction
 
