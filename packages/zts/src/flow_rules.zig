@@ -118,6 +118,23 @@ pub const FunctionResult = struct {
     /// cleared, and `returned` and `exit` carry no guarantee.
     cleared: bool,
     unresolved: []const Unresolved,
+    /// Every write that a request pass made to state that outlives the
+    /// request, as the union over all passes. Empty unless the result comes
+    /// from `analyzeHandler`.
+    persistent_writes: []const PersistentWrite = &.{},
+};
+
+/// One write that a request makes to state that outlives the request: a
+/// module binding, a shared runtime object, a capture cell, or an object that
+/// one of them reaches.
+pub const PersistentWrite = struct {
+    /// The assignment or the call that wrote, in the IR of `module`.
+    node: NodeIndex,
+    /// The module that holds `node`.
+    module: ModuleId,
+    /// The function handles on the activation stack at the write, outermost
+    /// first. The handler body itself is not on the stack.
+    stack: []const NodeIndex,
 };
 
 pub const SinkEvent = struct {

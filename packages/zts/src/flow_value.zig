@@ -70,6 +70,14 @@ pub const SiteKind = enum(u8) {
 /// Atom 0 is `null`, which no property read reaches by name.
 pub const any_builtin: u16 = 0;
 
+/// Which part of the run made an allocation site. Module initialization runs
+/// once, before any request. A request pass runs for each request, so an object
+/// that a request makes never aliases one that initialization made.
+pub const Phase = enum(u8) {
+    initialization,
+    request,
+};
+
 /// An allocation site. `context` is 0 until a later phase separates the
 /// callers of one function.
 pub const SiteKey = struct {
@@ -79,6 +87,9 @@ pub const SiteKey = struct {
     /// One syntactic caller separates allocations returned by two calls of
     /// the same helper. Module globals, captures and shared builtins use 0.
     call: NodeIndex = 0,
+    /// The part of the run that made the site. Module globals, captures and
+    /// shared builtins keep the default, because no request makes them.
+    phase: Phase = .initialization,
 
     fn order(a: SiteKey, b: SiteKey) std.math.Order {
         const by_kind = std.math.order(@backingInt(a.kind), @backingInt(b.kind));
@@ -87,7 +98,9 @@ pub const SiteKey = struct {
         if (by_node != .eq) return by_node;
         const by_context = std.math.order(a.context, b.context);
         if (by_context != .eq) return by_context;
-        return std.math.order(a.call, b.call);
+        const by_call = std.math.order(a.call, b.call);
+        if (by_call != .eq) return by_call;
+        return std.math.order(@backingInt(a.phase), @backingInt(b.phase));
     }
 };
 

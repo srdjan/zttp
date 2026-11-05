@@ -5595,3 +5595,24 @@ test "FlowChecker reports every property unproven before check runs" {
         try std.testing.expect(!@field(properties, field));
     }
 }
+
+test "FlowChecker exposes the persistent writes and the cleared flag of the last check" {
+    const allocator = std.testing.allocator;
+    var atoms = engine.atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try engine.parser.JsParser.initAdmission(allocator, allocator, "const seen = [];\nfunction addTo(xs) { xs.push(1); return undefined; }\nfunction handler(req) { addTo(seen); return Response.text(\"ok\"); }", .compile);
+    defer parser.deinit();
+    parser.setAtomTable(&atoms);
+    const root = try parser.parse();
+    const view = ir.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    const handler = handler_function_mod.findHandlerFunction(view, root) orelse return error.HandlerNotFound;
+    var checker = FlowChecker.init(allocator, view, &atoms);
+    defer checker.deinit();
+    checker.scopes = &parser.scopes;
+    try std.testing.expectEqual(@as(usize, 0), checker.persistentWrites().len);
+    try std.testing.expectEqual(@as(u32, 0), try checker.check(handler));
+    try std.testing.expect(!checker.cleared());
+    try std.testing.expectEqual(@as(usize, 1), checker.persistentWrites().len);
+    try std.testing.expectEqual(@as(u32, 2), view.getLoc(checker.persistentWrites()[0].node).?.line);
+    try std.testing.expectEqual(@as(usize, 1), checker.persistentWrites()[0].stack.len);
+}

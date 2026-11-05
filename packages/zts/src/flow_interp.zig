@@ -34,6 +34,7 @@ const report_types = @import("flow_report.zig");
 const flow_evidence = @import("flow_evidence.zig");
 const counterexample = @import("counterexample.zig");
 const ok_record_mod = @import("ok_record.zig");
+const isMutatingArrayMethod = @import("mutating_methods.zig").isMutatingArrayMethod;
 
 const NodeIndex = ir.NodeIndex;
 const NodeTag = ir.NodeTag;
@@ -67,6 +68,7 @@ const Error = flow_value.Error;
 const SiteKind = flow_value.SiteKind;
 const any_builtin = flow_value.any_builtin;
 const SiteKey = flow_value.SiteKey;
+const Phase = flow_value.Phase;
 const watched_top = flow_value.watched_top;
 const SiteVersion = flow_value.SiteVersion;
 const SchemaView = flow_value.SchemaView;
@@ -220,6 +222,8 @@ pub const CaptureTable = struct {
 };
 
 pub const ModuleId = flow_value.ModuleId;
+/// One write that a request makes to state that outlives the request.
+pub const PersistentWrite = flow_rules.PersistentWrite;
 
 pub const FunctionRef = struct {
     module: ModuleId,
@@ -280,6 +284,17 @@ pub const FlowInterp = struct {
     completions: std.ArrayList(Completion) = .empty,
     unresolved_list: std.ArrayList(Unresolved) = .empty,
     sink_events: std.ArrayList(SinkEvent) = .empty,
+    /// Writes to state that outlives the request, as the union over every
+    /// handler pass of the last `analyzeHandler`. Each is unique by node,
+    /// module, and stack.
+    persistent_writes: std.ArrayList(PersistentWrite) = .empty,
+    /// The entry state of the handler pass that runs now. It is set only
+    /// while `analyzePersistentHandler` runs a request pass, and nothing is
+    /// recorded while it is null: module initialization and the other roots
+    /// run with it null.
+    pass_entry: ?*const State = null,
+    /// The part of the run that allocates now.
+    phase: Phase = .initialization,
     /// The enclosing loops, innermost last. A `break` or `continue` acts on the
     /// last one. The parser clears the loop flag at each function boundary, so
     /// neither crosses into a nested function. A call gives the callee an empty
@@ -555,6 +570,9 @@ pub const FlowInterp = struct {
         self.root_entry_node = func;
         self.completions = .empty;
         self.unresolved_list = .empty;
+        self.persistent_writes = .empty;
+        self.pass_entry = null;
+        self.phase = .initialization;
         self.sink_events = .empty;
         self.loop_frames = .empty;
         self.activations = .empty;
@@ -588,9 +606,18 @@ pub const FlowInterp = struct {
         var all_completions: std.ArrayList(Completion) = .empty;
         var all_exit = State.bottom;
         var all_returned: ?Value = null;
+        // Only the passes below record writes, and every object they allocate
+        // is a request object. The entry state of a pass is `persistent` as it
+        // stands when the pass starts; the loop replaces it after the pass.
+        defer {
+            self.pass_entry = null;
+            self.phase = .initialization;
+        }
+        self.phase = .request;
         var pass: u32 = 0;
         while (true) : (pass += 1) {
             var entry = try cloneState(self.mem(), persistent);
+            self.pass_entry = &persistent;
             entry.path = if (pass == 0) initial_path else .{ .complete = false };
             // HandlerInstance refreshes a named handler from the shared
             // global cell. A replaced or ambiguous entry is not this body.
@@ -625,7 +652,7 @@ pub const FlowInterp = struct {
         }
         self.completions = .empty;
         const unresolved = try self.unresolved_list.toOwnedSlice(self.mem());
-        return .{ .returned = all_returned, .exit = all_exit, .completions = try all_completions.toOwnedSlice(self.mem()), .cleared = unresolved.len != 0, .unresolved = unresolved };
+        return .{ .returned = all_returned, .exit = all_exit, .completions = try all_completions.toOwnedSlice(self.mem()), .cleared = unresolved.len != 0, .unresolved = unresolved, .persistent_writes = self.persistent_writes.items };
     }
 
     fn initializeModule(self: *FlowInterp, root: NodeIndex, st: *State) Error!void {
@@ -814,12 +841,15 @@ pub const FlowInterp = struct {
             .completions = &.{},
             .cleared = true,
             .unresolved = unresolved,
+            .persistent_writes = self.persistent_writes.items,
         };
     }
 
     fn analyzeRoot(self: *FlowInterp, func: NodeIndex, params: []const Value, entry: State) Error!FunctionResult {
         self.completions = .empty;
         self.unresolved_list = .empty;
+        self.persistent_writes = .empty;
+        self.pass_entry = null;
         self.sink_events = .empty;
         self.loop_frames = .empty;
         self.activations = .empty;
@@ -908,6 +938,7 @@ pub const FlowInterp = struct {
             .completions = completions,
             .cleared = unresolved.len > 0,
             .unresolved = unresolved,
+            .persistent_writes = self.persistent_writes.items,
         };
     }
 
@@ -941,8 +972,8 @@ pub const FlowInterp = struct {
     }
 
     fn makeResponse(self: *FlowInterp, st: *State, node: NodeIndex, row: OperationRow, args: []const Value) Error!Value {
-        const site: SiteKey = .{ .kind = .response, .node = node, .context = self.active_module, .call = self.allocation_context };
-        const header_site: SiteKey = .{ .kind = .response_headers, .node = node, .context = self.active_module, .call = self.allocation_context };
+        const site: SiteKey = .{ .kind = .response, .node = node, .context = self.active_module, .call = self.allocation_context, .phase = self.phase };
+        const header_site: SiteKey = .{ .kind = .response_headers, .node = node, .context = self.active_module, .call = self.allocation_context, .phase = self.phase };
         const response = try self.siteValue(site, null);
         const headers = try self.siteValue(header_site, null);
         var cells = st.heap.get(site) orelse Cells{};
@@ -979,8 +1010,8 @@ pub const FlowInterp = struct {
     /// crossed their egress sinks; the result's source is the declared host
     /// read, not the caller's request object or its credential-bearing cells.
     fn makeFetchResponse(self: *FlowInterp, st: *State, node: NodeIndex, resolved: ModuleExport) Error!Value {
-        const site: SiteKey = .{ .kind = .response, .node = node, .context = self.active_module, .call = self.allocation_context };
-        const header_site: SiteKey = .{ .kind = .response_headers, .node = node, .context = self.active_module, .call = self.allocation_context };
+        const site: SiteKey = .{ .kind = .response, .node = node, .context = self.active_module, .call = self.allocation_context, .phase = self.phase };
+        const header_site: SiteKey = .{ .kind = .response_headers, .node = node, .context = self.active_module, .call = self.allocation_context, .phase = self.phase };
         const response = try self.siteValue(site, null);
         const headers = try self.siteValue(header_site, null);
         // A response from the network differs between runs of the same
@@ -1819,7 +1850,7 @@ pub const FlowInterp = struct {
     /// location and a write to it lands in the site. The result is the self
     /// value with `flow`.
     fn allocate(self: *FlowInterp, st: *State, kind: SiteKind, node: NodeIndex, contents: []const Value, flow: Flow) Error!Value {
-        const site: SiteKey = .{ .kind = kind, .node = node, .context = self.active_module, .call = self.allocation_context };
+        const site: SiteKey = .{ .kind = kind, .node = node, .context = self.active_module, .call = self.allocation_context, .phase = self.phase };
         const self_value = try self.siteValue(site, null);
         for (contents) |content| try self.weakWriteSite(st, site, null, content);
         try self.weakWriteSite(st, site, null, self_value);
@@ -1843,6 +1874,11 @@ pub const FlowInterp = struct {
         const reached = try self.deepFlow(st, args);
         const arg_flow = row.defense.apply(reached);
         const flow = row.defense.apply(combineFlows(r.flow(), reached));
+        // `pop` and `shift` write nothing in the abstract heap, and they are
+        // program writes all the same.
+        if ((row.rule == .array_push or row.rule == .array_pop or row.rule == .array_splice) and isMutatingArrayMethod(row.name)) {
+            try self.notePersistentWrite(node, r);
+        }
         switch (row.rule) {
             .string_scalar => return Value.flowing(flow),
             .string_split => return self.allocate(st, .allocated_array, node, &.{Value.flowing(flow)}, flow),
@@ -1984,6 +2020,7 @@ pub const FlowInterp = struct {
             },
             .header_get, .header_has, .header_delete => {
                 const header_key = try self.prototypeKey(node, argAt(args, 0));
+                if (row.rule == .header_delete) try self.notePersistentWrite(node, r);
                 const read = try self.readHeader(st, r, header_key);
                 if (row.rule == .header_get) return read;
                 // has/delete return a boolean derived from the selected field.
@@ -1992,6 +2029,7 @@ pub const FlowInterp = struct {
             },
             .header_write => {
                 const header_key = try self.prototypeKey(node, argAt(args, 0));
+                try self.notePersistentWrite(node, r);
                 try self.writeHeader(st, r, header_key, argAt(args, 1));
                 // Both set and append return undefined, independently of input.
                 return Value.clean;
@@ -2010,6 +2048,59 @@ pub const FlowInterp = struct {
     /// is shared by every request, so a write into one is module state.
     fn recordSharedWrite(self: *FlowInterp, node: NodeIndex, r: Value) Error!void {
         if (hasBuiltinSite(r) and !self.persistent_globals) try self.record(node, .call, .module_state_unmodeled);
+    }
+
+    // --- persistent-write events ---
+
+    /// Whether a write to `site` changes state that outlives the request. A
+    /// module binding and a shared runtime object always do. A function made
+    /// by module initialization does too, because a module-level name resolves
+    /// to it without a stored cell. Any other site does when the entry state of
+    /// the pass holds it: it is then reachable from a module binding, a
+    /// builtin, or a capture cell that a stored closure reads.
+    fn sitePersists(entry: *const State, site: SiteKey) bool {
+        return switch (site.kind) {
+            .module_binding, .builtin => true,
+            .function => site.phase == .initialization or entry.heap.contains(site),
+            .literal, .request, .headers, .query, .response, .response_headers, .router_result, .router_params, .capture, .allocated_array, .allocated_any, .native => entry.heap.contains(site),
+        };
+    }
+
+    /// Record a program write through `target`, the receiver of an assignment
+    /// or of a mutating method, when it reaches persistent state. A target with
+    /// an unknown origin lands in `top_cell`, which any receiver may be.
+    fn notePersistentWrite(self: *FlowInterp, node: NodeIndex, target: Value) Error!void {
+        const entry = self.pass_entry orelse return;
+        var persists = target.origins_top;
+        for (target.origins) |site| persists = persists or sitePersists(entry, site);
+        if (persists) try self.appendPersistentWrite(node);
+    }
+
+    /// Record a program write to the single site `site`, such as a capture cell.
+    fn notePersistentSiteWrite(self: *FlowInterp, node: NodeIndex, site: SiteKey) Error!void {
+        const entry = self.pass_entry orelse return;
+        if (sitePersists(entry, site)) try self.appendPersistentWrite(node);
+    }
+
+    /// Record a program write to a module binding during a request pass.
+    fn notePersistentGlobalWrite(self: *FlowInterp, node: NodeIndex) Error!void {
+        if (self.pass_entry == null) return;
+        try self.appendPersistentWrite(node);
+    }
+
+    /// Append the event unless an equal one exists. Passes and candidate
+    /// dispatch visit one write many times.
+    fn appendPersistentWrite(self: *FlowInterp, node: NodeIndex) Error!void {
+        const depth = self.activations.items.len;
+        for (self.persistent_writes.items) |known| {
+            if (known.node != node or known.module != self.active_module or known.stack.len != depth) continue;
+            var same = true;
+            for (known.stack, self.activations.items) |handle, activation| same = same and handle == activation.func;
+            if (same) return;
+        }
+        const stack = try self.mem().alloc(NodeIndex, depth);
+        for (stack, self.activations.items) |*slot, activation| slot.* = activation.func;
+        try self.persistent_writes.append(self.mem(), .{ .node = node, .module = self.active_module, .stack = stack });
     }
 
     // --- virtual-module exports (P5b) ---
@@ -2147,8 +2238,8 @@ pub const FlowInterp = struct {
             }
             if (std.mem.eql(u8, resolved.func.name, "dictFromEntries")) {
                 const read = withoutDefenses(try self.reach(st, values));
-                const dict_site: SiteKey = .{ .kind = .literal, .node = node, .context = self.active_module, .call = self.allocation_context };
-                const result_site: SiteKey = .{ .kind = .allocated_any, .node = node, .context = self.active_module, .call = self.allocation_context };
+                const dict_site: SiteKey = .{ .kind = .literal, .node = node, .context = self.active_module, .call = self.allocation_context, .phase = self.phase };
+                const result_site: SiteKey = .{ .kind = .allocated_any, .node = node, .context = self.active_module, .call = self.allocation_context, .phase = self.phase };
                 try self.weakWriteSite(st, dict_site, null, read);
                 const dict = try self.siteValue(dict_site, null);
                 try self.weakWriteSite(st, result_site, @backingInt(object.Atom.value), dict);
@@ -2162,7 +2253,7 @@ pub const FlowInterp = struct {
             var payload = argAt(values, 1);
             payload.schema_view = try self.watchSchema(st, payload);
             if (payload.schema_view) |*view| view.guard = .{ .module = self.active_module, .node = node, .func = resolved.func.name };
-            const site: SiteKey = .{ .kind = .allocated_any, .node = node, .context = self.active_module, .call = self.allocation_context };
+            const site: SiteKey = .{ .kind = .allocated_any, .node = node, .context = self.active_module, .call = self.allocation_context, .phase = self.phase };
             try self.weakWriteSite(st, site, @backingInt(object.Atom.value), payload);
             const flow = try self.deepFlow(st, &.{argAt(values, 1)});
             try self.weakWriteSite(st, site, @backingInt(object.Atom.ok), Value.flowing(.{ .labels = flow.labels }));
@@ -2174,8 +2265,8 @@ pub const FlowInterp = struct {
             const routes = argAt(values, 0);
             const handler = try self.storedRead(st, routes, .index);
             if (handler.callables_top or routes.origins_top) try self.record(node, .call, .unknown_callee);
-            const match_site: SiteKey = .{ .kind = .router_result, .node = node, .context = self.active_module, .call = self.allocation_context };
-            const params_site: SiteKey = .{ .kind = .router_params, .node = node, .context = self.active_module, .call = self.allocation_context };
+            const match_site: SiteKey = .{ .kind = .router_result, .node = node, .context = self.active_module, .call = self.allocation_context, .phase = self.phase };
+            const params_site: SiteKey = .{ .kind = .router_params, .node = node, .context = self.active_module, .call = self.allocation_context, .phase = self.phase };
             const params = try self.siteValue(params_site, null);
             try self.weakWriteSite(st, params_site, null, Value.labelled(.{ .user_input = true }));
             try self.weakWriteSite(st, match_site, try self.atomOf("handler", 0), handler);
@@ -3165,17 +3256,17 @@ pub const FlowInterp = struct {
                     .array_literal => {
                         const array = self.ir_view.getArray(current) orelse return self.missing(current);
                         const pending = try self.mem().create(PendingArray);
-                        pending.* = .{ .node = current, .site = .{ .kind = .literal, .node = current, .context = self.active_module, .call = self.allocation_context }, .start = array.elements_start, .count = array.elements_count };
+                        pending.* = .{ .node = current, .site = .{ .kind = .literal, .node = current, .context = self.active_module, .call = self.allocation_context, .phase = self.phase }, .start = array.elements_start, .count = array.elements_count };
                         if (!try self.scheduleArrayItem(pending, &frames, &current)) result = try self.siteValue(pending.site, null);
                     },
                     .object_literal => {
                         const object_expr = self.ir_view.getObject(current) orelse return self.missing(current);
                         const pending = try self.mem().create(PendingObject);
-                        pending.* = .{ .node = current, .site = .{ .kind = .literal, .node = current, .context = self.active_module, .call = self.allocation_context }, .start = object_expr.properties_start, .count = object_expr.properties_count };
+                        pending.* = .{ .node = current, .site = .{ .kind = .literal, .node = current, .context = self.active_module, .call = self.allocation_context, .phase = self.phase }, .start = object_expr.properties_start, .count = object_expr.properties_count };
                         if (!try self.scheduleObjectItem(pending, &frames, &current)) result = try self.siteValue(pending.site, null);
                     },
                     .function_expr, .arrow_function => {
-                        const site: SiteKey = .{ .kind = .function, .node = current, .context = self.active_module, .call = self.allocation_context };
+                        const site: SiteKey = .{ .kind = .function, .node = current, .context = self.active_module, .call = self.allocation_context, .phase = self.phase };
                         result = try self.siteValue(site, current);
                     },
                     .call => try self.scheduleCall(current, state, &frames, &current, &result),
@@ -3513,7 +3604,8 @@ pub const FlowInterp = struct {
                     if (try self.moduleExport(binding.name_atom)) |resolved| return self.exportValue(resolved);
                 }
                 if (try self.moduleFunction(binding.name_atom)) |func_node| {
-                    const site: SiteKey = .{ .kind = .function, .node = func_node, .context = self.active_module, .call = self.allocation_context };
+                    // Module initialization makes every module-level function.
+                    const site: SiteKey = .{ .kind = .function, .node = func_node, .context = self.active_module, .call = self.allocation_context, .phase = .initialization };
                     return self.siteValue(site, func_node);
                 }
                 if (binding.kind == .undeclared_global and !try self.moduleBinds(binding.name_atom)) {
@@ -3587,6 +3679,7 @@ pub const FlowInterp = struct {
                             try self.compoundValue(op, self.captureValue(st, key), asg.value, st)
                         else
                             try self.eval(asg.value, st);
+                        try self.notePersistentSiteWrite(node, self.captureSite(key));
                         try self.weakWriteCapture(st, key, assigned);
                         return assigned;
                     },
@@ -3596,7 +3689,10 @@ pub const FlowInterp = struct {
                             try self.compoundValue(op, (try self.loadGlobal(st, binding.name_atom)) orelse Value.top, asg.value, st)
                         else
                             try self.eval(asg.value, st);
-                        if (self.persistent_globals) try self.storeGlobal(st, binding.name_atom, assigned) else try self.record(node, .assignment, .module_state_unmodeled);
+                        if (self.persistent_globals) {
+                            try self.notePersistentGlobalWrite(node);
+                            try self.storeGlobal(st, binding.name_atom, assigned);
+                        } else try self.record(node, .assignment, .module_state_unmodeled);
                         return assigned;
                     },
                 }
@@ -3630,6 +3726,7 @@ pub const FlowInterp = struct {
             const old = try self.readValue(st, o, key);
             break :blk try self.compoundValue(op, old, asg.value, st);
         } else try self.eval(asg.value, st);
+        try self.notePersistentWrite(node, o);
         try self.writeValue(st, o, key, assigned);
         // A shared runtime object is shared by every request.
         if (hasBuiltinSite(o) and !self.persistent_globals) try self.record(node, .assignment, .module_state_unmodeled);
@@ -3939,7 +4036,10 @@ pub const FlowInterp = struct {
     ) Error!void {
         switch (binding.kind) {
             .local, .argument => try self.storeLocal(st, packBindingKey(binding.scope_id, binding.slot), v),
-            .global, .undeclared_global => if (self.persistent_globals) try self.storeGlobal(st, binding.name_atom, v) else try self.record(node, tag, .module_state_unmodeled),
+            .global, .undeclared_global => if (self.persistent_globals) {
+                try self.notePersistentGlobalWrite(node);
+                try self.storeGlobal(st, binding.name_atom, v);
+            } else try self.record(node, tag, .module_state_unmodeled),
             .upvalue => try self.record(node, tag, .module_state_unmodeled),
         }
     }
@@ -7625,6 +7725,48 @@ fn sourceIndex(rows: []const DefenseSource, name: []const u8) usize {
     return rows.len;
 }
 
+// A source row that establishes a defense builds its `held` value with no
+// origin. A write through a value with no origin reaches no site, so no
+// persistent-write event can name it. The census checks that no such value is
+// an object a write could reach: the declared return is a primitive, or the
+// call wraps `held` in a container whose site is an origin of every read.
+test "census: a defense source row that builds an origin-free value returns a primitive or a container" {
+    var primitive_rows: usize = 0;
+    var container_rows: usize = 0;
+    for (defense_sources) |row| {
+        if (row.establishes.isEmpty()) continue;
+        const found = engine.builtin_modules.findExport(row.specifier, row.name) orelse return error.RowWithoutExport;
+        const primitive = switch (found.func.returns) {
+            .boolean, .number, .string, .undefined, .optional_string, .optional_number => true,
+            .object, .unknown, .optional_object, .result, .result_list, .result_fn, .dict, .bytes => false,
+        };
+        var args: std.ArrayList(u8) = .empty;
+        defer args.deinit(testing.allocator);
+        for (found.func.param_types, 0..) |_, i| {
+            if (i > 0) try args.appendSlice(testing.allocator, ", ");
+            try args.appendSlice(testing.allocator, "\"x\"");
+        }
+        const source = try std.fmt.allocPrint(
+            testing.allocator,
+            "import {{ {s} }} from \"{s}\"; function handler(req) {{ return {s}({s}); }}",
+            .{ row.name, row.specifier, row.name, args.items },
+        );
+        defer testing.allocator.free(source);
+        const result = try probeHandler(source);
+        try testing.expect(!result.cleared);
+        if (primitive) {
+            primitive_rows += 1;
+            try testing.expectEqual(@as(usize, 0), result.origins);
+        } else {
+            container_rows += 1;
+            try testing.expect(result.origins > 0);
+        }
+    }
+    // A floor on the input, and the split as found.
+    try testing.expectEqual(@as(usize, 1), primitive_rows);
+    try testing.expectEqual(@as(usize, 5), container_rows);
+}
+
 // --- the tag census ---
 
 /// What a corpus run saw: which tags reached an evaluator, and which tags
@@ -8275,6 +8417,420 @@ test "initializer assertion return preserves heap but discards its response valu
     const discarded = try probeReport("import { env } from \"zttp:env\"; function handler(req) { return \"public\"; } assert false, env(\"SECRET_KEY\");");
     try testing.expect(!discarded.cleared);
     try testing.expect(discarded.properties.no_secret_leakage);
+}
+
+/// The source lines of the persistent writes that `analyzeHandler` reports for
+/// `handler`, in report order, and whether the evaluation was cleared.
+const WriteLines = struct {
+    lines: []u32,
+    stack_depths: []usize,
+    cleared: bool,
+
+    fn deinit(self: WriteLines) void {
+        testing.allocator.free(self.lines);
+        testing.allocator.free(self.stack_depths);
+    }
+};
+
+fn persistentWriteLines(source: []const u8) !WriteLines {
+    const h = try Harness.create(testing.allocator, source);
+    defer h.destroy();
+    const result = try h.interp.analyzeHandler(try h.find("handler"));
+    const lines = try testing.allocator.alloc(u32, result.persistent_writes.len);
+    errdefer testing.allocator.free(lines);
+    const depths = try testing.allocator.alloc(usize, result.persistent_writes.len);
+    errdefer testing.allocator.free(depths);
+    for (result.persistent_writes, lines, depths) |write, *line, *depth| {
+        line.* = (h.interp.ir_view.getLoc(write.node) orelse return error.WriteWithoutLocation).line;
+        depth.* = write.stack.len;
+    }
+    return .{ .lines = lines, .stack_depths = depths, .cleared = result.cleared };
+}
+
+test "a helper that pushes onto a module array parameter is a persistent write at the push" {
+    const found = try persistentWriteLines(
+        \\const seen = [];
+        \\function addTo(xs) {
+        \\  xs.push(1);
+        \\  return undefined;
+        \\}
+        \\function handler(req) {
+        \\  addTo(seen);
+        \\  return Response.text(String(seen.length));
+        \\}
+    );
+    defer found.deinit();
+    try testing.expect(!found.cleared);
+    try testing.expectEqualSlices(u32, &.{3}, found.lines);
+    try testing.expectEqualSlices(usize, &.{1}, found.stack_depths);
+}
+
+test "a write through two helpers carries the whole activation stack" {
+    const found = try persistentWriteLines(
+        \\const seen = [];
+        \\function addTo(xs) {
+        \\  xs.push(1);
+        \\  return undefined;
+        \\}
+        \\function viaHelper() {
+        \\  addTo(seen);
+        \\  return undefined;
+        \\}
+        \\function handler(req) {
+        \\  viaHelper();
+        \\  return Response.text(String(seen.length));
+        \\}
+    );
+    defer found.deinit();
+    try testing.expect(!found.cleared);
+    try testing.expectEqualSlices(u32, &.{3}, found.lines);
+    try testing.expectEqualSlices(usize, &.{2}, found.stack_depths);
+}
+
+test "a push onto a module record read through a call is a persistent write" {
+    const direct = try persistentWriteLines(
+        \\const store = { items: [] };
+        \\function getStore() {
+        \\  return store;
+        \\}
+        \\function handler(req) {
+        \\  getStore().items.push(1);
+        \\  return Response.text(String(store.items.length));
+        \\}
+    );
+    defer direct.deinit();
+    try testing.expect(!direct.cleared);
+    try testing.expectEqualSlices(u32, &.{6}, direct.lines);
+
+    const bound = try persistentWriteLines(
+        \\const store = { items: [] };
+        \\function getStore() {
+        \\  return store;
+        \\}
+        \\function handler(req) {
+        \\  const s = getStore();
+        \\  s.items.push(1);
+        \\  return Response.text(String(store.items.length));
+        \\}
+    );
+    defer bound.deinit();
+    try testing.expect(!bound.cleared);
+    try testing.expectEqualSlices(u32, &.{7}, bound.lines);
+}
+
+test "an assignment to a field of a module array element is a persistent write" {
+    const found = try persistentWriteLines(
+        \\const rows = [{ n: 0 }];
+        \\function handler(req) {
+        \\  const r = rows[0];
+        \\  r.n = r.n + 1;
+        \\  return Response.text(String(r.n));
+        \\}
+    );
+    defer found.deinit();
+    try testing.expect(!found.cleared);
+    try testing.expectEqualSlices(u32, &.{4}, found.lines);
+}
+
+test "a closure counter made during initialization is a persistent write" {
+    const found = try persistentWriteLines(
+        \\function makeCounter() {
+        \\  let n = 0;
+        \\  const inc = () => {
+        \\    n = n + 1;
+        \\    return n;
+        \\  };
+        \\  return inc;
+        \\}
+        \\const counter = makeCounter();
+        \\function handler(req) {
+        \\  return Response.text(String(counter()));
+        \\}
+    );
+    defer found.deinit();
+    try testing.expect(!found.cleared);
+    try testing.expectEqualSlices(u32, &.{4}, found.lines);
+}
+
+test "pop and shift on a module array are persistent writes though they write no cell" {
+    const popped = try persistentWriteLines(
+        \\const seen = [1, 2];
+        \\function handler(req) {
+        \\  const last = seen.pop();
+        \\  return Response.text(String(last));
+        \\}
+    );
+    defer popped.deinit();
+    try testing.expect(!popped.cleared);
+    try testing.expectEqualSlices(u32, &.{3}, popped.lines);
+
+    const shifted = try persistentWriteLines(
+        \\const seen = [1, 2];
+        \\function handler(req) {
+        \\  const first = seen.shift();
+        \\  return Response.text(String(first));
+        \\}
+    );
+    defer shifted.deinit();
+    try testing.expect(!shifted.cleared);
+    try testing.expectEqualSlices(u32, &.{3}, shifted.lines);
+}
+
+test "unshift, splice, field assignment, and module binding assignment are persistent writes" {
+    const unshifted = try persistentWriteLines(
+        \\const seen = [1];
+        \\function handler(req) {
+        \\  seen.unshift(0);
+        \\  return Response.text("ok");
+        \\}
+    );
+    defer unshifted.deinit();
+    try testing.expect(!unshifted.cleared);
+    try testing.expectEqualSlices(u32, &.{3}, unshifted.lines);
+
+    const spliced = try persistentWriteLines(
+        \\const seen = [1, 2];
+        \\function handler(req) {
+        \\  seen.splice(0, 1);
+        \\  return Response.text("ok");
+        \\}
+    );
+    defer spliced.deinit();
+    try testing.expect(!spliced.cleared);
+    try testing.expectEqualSlices(u32, &.{3}, spliced.lines);
+
+    const field = try persistentWriteLines(
+        \\const store = { n: 0 };
+        \\function handler(req) {
+        \\  store.n = 1;
+        \\  return Response.text("ok");
+        \\}
+    );
+    defer field.deinit();
+    try testing.expect(!field.cleared);
+    try testing.expectEqualSlices(u32, &.{3}, field.lines);
+
+    const binding = try persistentWriteLines(
+        \\let count = 0;
+        \\function handler(req) {
+        \\  count = count + 1;
+        \\  return Response.text(String(count));
+        \\}
+    );
+    defer binding.deinit();
+    try testing.expect(!binding.cleared);
+    try testing.expectEqualSlices(u32, &.{3}, binding.lines);
+}
+
+test "a write that only a later pass reaches joins the events of the first pass" {
+    // Pass one writes `box.slot`, which stores the request array in module
+    // state. Pass two starts with that array persistent, so the push on line 4
+    // is an event too, and the union holds both lines in the order seen.
+    const found = try persistentWriteLines(
+        \\const box = { slot: [] };
+        \\function handler(req) {
+        \\  const mine = [];
+        \\  mine.push(1);
+        \\  box.slot = mine;
+        \\  return Response.text("ok");
+        \\}
+    );
+    defer found.deinit();
+    try testing.expect(!found.cleared);
+    try testing.expectEqualSlices(u32, &.{ 5, 4 }, found.lines);
+}
+
+test "writes to request-local state are no persistent write" {
+    const pushed = try persistentWriteLines(
+        \\const seen = [];
+        \\function handler(req) {
+        \\  const mine = [];
+        \\  mine.push(1);
+        \\  return Response.text(String(mine.length + seen.length));
+        \\}
+    );
+    defer pushed.deinit();
+    try testing.expect(!pushed.cleared);
+    try testing.expectEqualSlices(u32, &.{}, pushed.lines);
+
+    const copied = try persistentWriteLines(
+        \\const seen = [1];
+        \\function handler(req) {
+        \\  const copy = seen.slice();
+        \\  copy.push(2);
+        \\  return Response.text(String(copy.length));
+        \\}
+    );
+    defer copied.deinit();
+    try testing.expect(!copied.cleared);
+    try testing.expectEqualSlices(u32, &.{}, copied.lines);
+
+    const read = try persistentWriteLines(
+        \\const limit = 10;
+        \\const names = ["a", "b"];
+        \\function handler(req) {
+        \\  return Response.text(String(limit + names.length));
+        \\}
+    );
+    defer read.deinit();
+    try testing.expect(!read.cleared);
+    try testing.expectEqualSlices(u32, &.{}, read.lines);
+
+    const local_binding = try persistentWriteLines(
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  n = n + 1;
+        \\  return Response.text(String(n));
+        \\}
+    );
+    defer local_binding.deinit();
+    try testing.expect(!local_binding.cleared);
+    try testing.expectEqualSlices(u32, &.{}, local_binding.lines);
+}
+
+test "a push during module initialization is no persistent write" {
+    const found = try persistentWriteLines(
+        \\const seen = [];
+        \\seen.push(1);
+        \\function handler(req) {
+        \\  return Response.text(String(seen.length));
+        \\}
+    );
+    defer found.deinit();
+    try testing.expect(!found.cleared);
+    try testing.expectEqualSlices(u32, &.{}, found.lines);
+}
+
+test "a closure that each request makes writes only its own binding" {
+    const found = try persistentWriteLines(
+        \\const hooks = [];
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  const inc = () => {
+        \\    n = n + 1;
+        \\    return n;
+        \\  };
+        \\  const local = hooks.slice();
+        \\  local.push(inc);
+        \\  return Response.text(String(inc()));
+        \\}
+    );
+    defer found.deinit();
+    try testing.expect(!found.cleared);
+    try testing.expectEqualSlices(u32, &.{}, found.lines);
+}
+
+test "a fresh array that a helper makes is persistent only when initialization made it" {
+    // The two chains `fresh -> make` share their allocation sites. Only the
+    // phase tells the initialization array from the request array.
+    const found = try persistentWriteLines(
+        \\function fresh() {
+        \\  return [];
+        \\}
+        \\function make() {
+        \\  return fresh();
+        \\}
+        \\const table = make();
+        \\function handler(req) {
+        \\  const local = make();
+        \\  local.push(1);
+        \\  return Response.text(String(local.length + table.length));
+        \\}
+    );
+    defer found.deinit();
+    try testing.expect(!found.cleared);
+    try testing.expectEqualSlices(u32, &.{}, found.lines);
+}
+
+test "a record that a helper makes during initialization and again in a request stays apart" {
+    const found = try persistentWriteLines(
+        \\function makeRow() {
+        \\  return { n: 0 };
+        \\}
+        \\function build() {
+        \\  return makeRow();
+        \\}
+        \\const shared = build();
+        \\function handler(req) {
+        \\  const mine = build();
+        \\  mine.n = mine.n + 1;
+        \\  return Response.text(String(shared.n + mine.n));
+        \\}
+    );
+    defer found.deinit();
+    try testing.expect(!found.cleared);
+    try testing.expectEqualSlices(u32, &.{}, found.lines);
+}
+
+test "dictGet on a module table is a read and no persistent write" {
+    const found = try persistentWriteLines(
+        \\import { dictGet } from "zttp:collections";
+        \\const TABLE = { a: "x" };
+        \\function handler(req) {
+        \\  const v = dictGet(TABLE, "a");
+        \\  return Response.text(String(v));
+        \\}
+    );
+    defer found.deinit();
+    try testing.expect(!found.cleared);
+    try testing.expectEqualSlices(u32, &.{}, found.lines);
+}
+
+test "a write through the value of a defense source result that initialization stored is a persistent write" {
+    // The source row builds `held` with no origin, but the call wraps it in a
+    // container whose site is the origin of every field read.
+    const found = try persistentWriteLines(
+        \\import { decodeJson } from "zttp:decode";
+        \\const cfg = decodeJson("c", "{}");
+        \\function handler(req) {
+        \\  cfg.value.n = 1;
+        \\  return Response.text("ok");
+        \\}
+    );
+    defer found.deinit();
+    try testing.expect(!found.cleared);
+    try testing.expectEqualSlices(u32, &.{4}, found.lines);
+}
+
+test "an initializer that never returns ends the analysis with no completion" {
+    // Pinned as found: the result is not cleared, no handler pass runs, and the
+    // handler body would otherwise write module state. The runtime does not
+    // serve such a program: initialization overflows the stack.
+    const h = try Harness.create(testing.allocator,
+        \\const seen = [];
+        \\function loop() {
+        \\  return loop();
+        \\}
+        \\const x = loop();
+        \\function handler(req) {
+        \\  seen.push(1);
+        \\  return Response.text("ok");
+        \\}
+    );
+    defer h.destroy();
+    const result = try h.interp.analyzeHandler(try h.find("handler"));
+    try testing.expect(!result.cleared);
+    try testing.expectEqual(@as(usize, 0), result.completions.len);
+    try testing.expectEqual(@as(usize, 0), result.persistent_writes.len);
+    try testing.expect(result.returned == null);
+    try testing.expect(!result.exit.reachable);
+}
+
+test "every mutating array method has a row whose rule makes a persistent write" {
+    const methods = @import("mutating_methods.zig").mutating_array_methods;
+    try testing.expect(methods.len >= 5);
+    for (methods) |name| {
+        const row = findRow(&operation_rows, "Array.prototype", name) orelse return error.MutatingMethodWithoutRow;
+        try testing.expect(row.rule == .array_push or row.rule == .array_pop or row.rule == .array_splice);
+    }
+    var rows_with_write_rule: usize = 0;
+    for (operation_rows) |row| {
+        if (!std.mem.eql(u8, row.scope, "Array.prototype")) continue;
+        if (row.rule != .array_push and row.rule != .array_pop and row.rule != .array_splice) continue;
+        rows_with_write_rule += 1;
+        try testing.expect(isMutatingArrayMethod(row.name));
+    }
+    try testing.expectEqual(methods.len, rows_with_write_rule);
 }
 
 fn moduleRoot(view: IrView) !NodeIndex {

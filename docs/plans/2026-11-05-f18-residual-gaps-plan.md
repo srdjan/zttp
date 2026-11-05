@@ -7,7 +7,7 @@ The F18 plan (`2026-11-05-f18-module-state-proofs-plan.md`) recorded five residu
 | Unit | Status |
 |---|---|
 | U0 | Complete: baseline below |
-| U1 | Not started |
+| U1 | Complete: persistent-write events, phase split, union over passes; 18 evaluator tests and 1 facade test |
 | U2 | Not started |
 | U3 | Not started |
 | U4 | Not started |
@@ -111,3 +111,10 @@ Measured at `bf6ad1c3` with `zts check --json` over 82 files: the 33 tracked `.t
 - Six files report no `state_isolated` because they fail before verification or are not handlers: `examples/handler/feature-probes.ts`, `examples/handler/utils.ts`, `examples/sql/sql-crud.ts`, the two `lib/settings.ts` files of the flow-precision corpus, and its `sql-users/handler.ts`.
 - Cleared evaluations: `zts check` does not print the count of unresolved constructs. The 48 handlers of the flow-precision corpus have none, because the test "the frozen corpus leaves no construct unresolved and has no source error" asserts it. The count for the 30 files of `tests/corpus/check/good/` is not measured.
 - The p9 factory shape is measured after U2: each verdict that differs from this baseline is listed with its cause.
+
+## Findings during execution
+
+- U1: when module initialization never returns (for example `const x = loop()` where `loop` calls itself), the evaluator ends with no completion, no event, and `cleared` false. `zts check` then reports every property PROVEN. `zttp serve` aborts with a stack overflow at load, so no request runs. A module-level `assert false` is different: the evaluator continues, and the runtime refuses the program with `error.PrewarmFailed`. Neither case is in scope for this plan.
+- U1 over-reports, which can only remove a property: a capture cell is one cell for each binding; a request object whose site a request stored in module state; a stored `req`; a property write on a function that module initialization made; and writes in code that the evaluator marks unreachable.
+- U1: the handler body is not on an event's activation stack. U3 adds the handler itself.
+- U1: the `defense_sources` census found 1 row that returns a primitive and 5 that return a container whose site is an origin of every field read. The census covers these rows only, not every value with no origin.

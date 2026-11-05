@@ -59,6 +59,8 @@ pub const FlowChecker = struct {
     diagnostics: []const Diagnostic = &.{},
     defended_paths: []const DefendedPath = &.{},
     unresolved_count: usize = 0,
+    evaluation_cleared: bool = false,
+    persistent_writes: []const evaluator.PersistentWrite = &.{},
 
     pub fn init(allocator: std.mem.Allocator, ir_view: ir.IrView, atoms: ?*engine.atom_table.AtomTable) FlowChecker {
         return .{ .allocator = allocator, .ir_view = ir_view, .atoms = atoms };
@@ -89,6 +91,8 @@ pub const FlowChecker = struct {
         self.diagnostics = result.diagnostics;
         self.defended_paths = result.defended_paths;
         self.unresolved_count = result.evaluation.unresolved.len;
+        self.evaluation_cleared = result.evaluation.cleared;
+        self.persistent_writes = result.evaluation.persistent_writes;
         // Report storage lives in the evaluator arena, while the temporary
         // capture table is needed only during this analysis.
         analysis.captures = null;
@@ -114,6 +118,20 @@ pub const FlowChecker = struct {
         return self.unresolved_count;
     }
 
+    /// Whether the last `check` could not follow the handler. A cleared
+    /// evaluation proves no flow property, so a caller that joins the fact
+    /// below must treat it as a write as well.
+    pub fn cleared(self: *const FlowChecker) bool {
+        return self.evaluation_cleared;
+    }
+
+    /// The writes that a request makes to state that outlives the request, as
+    /// the union over every handler pass of the last `check`. The slice lives
+    /// until the next `check` or `deinit`.
+    pub fn persistentWrites(self: *const FlowChecker) []const evaluator.PersistentWrite {
+        return self.persistent_writes;
+    }
+
     pub fn setTypeChecker(self: *FlowChecker, checker: *type_checker.TypeChecker) void {
         self.type_checker = checker;
     }
@@ -128,7 +146,9 @@ pub const FlowChecker = struct {
         self.properties = unproven;
         self.diagnostics = &.{};
         self.unresolved_count = 0;
+        self.evaluation_cleared = false;
         self.defended_paths = &.{};
+        self.persistent_writes = &.{};
     }
 
     fn newEvaluator(self: *const FlowChecker) evaluator.FlowInterp {
