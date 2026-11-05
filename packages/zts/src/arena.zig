@@ -5,7 +5,7 @@
 //!
 //! Architecture:
 //! - Primary: 4MB bump-allocated region (configurable)
-//! - Overflow: Linked list of heap allocations for large/excess requests
+//! - Overflow: Linked list of blocks from the backing allocator, bump-allocated
 //! - Reset: Pointer reset + overflow cleanup
 //!
 //! Thread safety: Not thread-safe. Each Runtime owns one arena.
@@ -20,13 +20,17 @@ pub const ArenaConfig = struct {
     alignment: usize = 8,
     /// Track high watermark for diagnostics
     track_watermark: bool = true,
+    /// Bytes in each overflow block, header included. `std.heap.smp_allocator`
+    /// maps an allocation above 32 KiB (half its 64 KiB slab) directly, so a
+    /// reset returns each block to the system. Small freed blocks went to a
+    /// per-thread free list instead, and the server kept them (finding F19).
+    overflow_block_size: usize = 256 * 1024,
 };
 
-/// Overflow allocation node for when arena is exhausted
+/// Header of one overflow block. Overflow allocations follow it.
 const OverflowNode = struct {
     next: ?*OverflowNode,
     size: usize,
-    // Data follows immediately after this header
 };
 
 /// Request-scoped arena allocator
@@ -43,11 +47,14 @@ pub const Arena = struct {
     high_watermark: usize,
     /// Allocation count for diagnostics
     alloc_count: u64,
-    /// Overflow allocations linked list
+    /// Overflow blocks, newest first
     overflow_head: ?*OverflowNode,
-    /// Total bytes in overflow
+    /// Next free byte and end of the current overflow block; 0 when none
+    overflow_ptr: usize,
+    overflow_end: usize,
+    /// Bytes that the overflow blocks hold from the backing allocator
     overflow_bytes: usize,
-    /// Overflow allocation count
+    /// Allocations served from overflow
     overflow_count: u64,
     /// Backing allocator for arena memory and overflow
     backing: std.mem.Allocator,
@@ -65,6 +72,8 @@ pub const Arena = struct {
             .high_watermark = 0,
             .alloc_count = 0,
             .overflow_head = null,
+            .overflow_ptr = 0,
+            .overflow_end = 0,
             .overflow_bytes = 0,
             .overflow_count = 0,
             .backing = backing,
@@ -249,58 +258,55 @@ pub const Arena = struct {
         };
     }
 
-    /// Allocate from overflow heap when arena is exhausted
+    /// Allocate from overflow when the main region is full.
     fn allocOverflow(self: *Arena, size: usize) ?*anyopaque {
-        const node_size = @sizeOf(OverflowNode);
-        const total_size = node_size + size;
-
-        const mem = self.backing.alignedAlloc(u8, .@"8", total_size) catch return null;
-
-        const node: *OverflowNode = @ptrCast(@alignCast(mem.ptr));
-        node.* = .{
-            .next = self.overflow_head,
-            .size = total_size,
-        };
-        self.overflow_head = node;
-        self.overflow_bytes += total_size;
-        self.overflow_count += 1;
-        self.alloc_count += 1;
-
-        // Return pointer after header
-        return mem.ptr + node_size;
+        return self.allocOverflowAligned(size, self.config.alignment);
     }
 
-    /// Allocate from overflow heap honoring an arbitrary alignment. The node
-    /// header always sits at the allocation base (so freeOverflow can free the
-    /// whole slice from the node), and the returned data pointer is aligned up
-    /// to `alignment` within an over-allocated slice.
+    /// Allocate from overflow honoring an arbitrary alignment. Small
+    /// allocations bump through the current overflow block. An allocation
+    /// that does not fit gets a new block; one larger than a block gets a
+    /// block of its own, and the current block keeps serving small ones.
     fn allocOverflowAligned(self: *Arena, size: usize, alignment: usize) ?*anyopaque {
-        if (alignment <= 8) return self.allocOverflow(size);
+        if (self.overflow_ptr != 0) {
+            const start = std.mem.alignForward(usize, self.overflow_ptr, alignment);
+            if (start + size <= self.overflow_end) {
+                self.overflow_ptr = start + size;
+                self.overflow_count += 1;
+                self.alloc_count += 1;
+                return @ptrFromInt(start);
+            }
+        }
 
         const node_size = @sizeOf(OverflowNode);
-        // Worst-case padding: the base is 8-aligned, so the aligned data slot
-        // can be up to (alignment - 1) bytes past (base + node_size).
-        const total_size = node_size + (alignment - 1) + size;
+        // The block base is 8-aligned, so a wider alignment can need up to
+        // (alignment - 1) bytes of padding after the header.
+        const padding = if (alignment > 8) alignment - 1 else 0;
+        const needed = node_size + padding + size;
+        const own_block = needed > self.config.overflow_block_size;
+        const block_size = if (own_block) needed else self.config.overflow_block_size;
 
-        const mem = self.backing.alignedAlloc(u8, .@"8", total_size) catch return null;
-
+        const mem = self.backing.alignedAlloc(u8, .@"8", block_size) catch return null;
         const base = @intFromPtr(mem.ptr);
-        const data_ptr = std.mem.alignForward(usize, base + node_size, alignment);
-
         const node: *OverflowNode = @ptrCast(@alignCast(mem.ptr));
         node.* = .{
             .next = self.overflow_head,
-            .size = total_size,
+            .size = block_size,
         };
         self.overflow_head = node;
-        self.overflow_bytes += total_size;
+        self.overflow_bytes += block_size;
         self.overflow_count += 1;
         self.alloc_count += 1;
 
+        const data_ptr = std.mem.alignForward(usize, base + node_size, alignment);
+        if (!own_block) {
+            self.overflow_ptr = data_ptr + size;
+            self.overflow_end = base + block_size;
+        }
         return @ptrFromInt(data_ptr);
     }
 
-    /// Free all overflow allocations
+    /// Free all overflow blocks
     fn freeOverflow(self: *Arena) void {
         var node = self.overflow_head;
         while (node) |n| {
@@ -310,6 +316,8 @@ pub const Arena = struct {
             node = next;
         }
         self.overflow_head = null;
+        self.overflow_ptr = 0;
+        self.overflow_end = 0;
         self.overflow_bytes = 0;
         self.overflow_count = 0;
     }
@@ -500,16 +508,58 @@ test "Arena overflow handling" {
     try std.testing.expect(overflow_ptr != null);
 
     const stats = arena.getStats();
-    try std.testing.expect(stats.overflow_bytes > 0);
-    // The overflow node header plus the 100 requested bytes, which the arena
-    // rounds up to its 8-byte alignment.
-    try std.testing.expectEqual(@sizeOf(OverflowNode) + std.mem.alignForward(usize, 100, 8), stats.overflow_bytes);
+    // One overflow block of the default size.
+    try std.testing.expectEqual(@as(usize, 256 * 1024), stats.overflow_bytes);
     try std.testing.expectEqual(@as(u64, 1), stats.overflow_count);
 
     // Reset should free overflow
     arena.reset();
     const after = arena.getStats();
     try std.testing.expectEqual(@as(usize, 0), after.overflow_bytes);
+}
+
+test "Arena serves small overflow allocations from one block that reset frees" {
+    var arena = try Arena.init(std.testing.allocator, .{ .size = 256 });
+    defer arena.deinit();
+
+    try std.testing.expect(arena.alloc(256) != null);
+    try std.testing.expect(arena.alloc(64) != null);
+    try std.testing.expect(arena.alloc(64) != null);
+    try std.testing.expect(arena.alloc(64) != null);
+
+    const stats = arena.getStats();
+    try std.testing.expectEqual(@as(usize, 256 * 1024), stats.overflow_bytes);
+    try std.testing.expectEqual(@as(u64, 3), stats.overflow_count);
+
+    arena.reset();
+    try std.testing.expectEqual(@as(usize, 0), arena.getStats().overflow_bytes);
+}
+
+test "Arena gives a large overflow allocation its own block and keeps filling the current one" {
+    var arena = try Arena.init(std.testing.allocator, .{ .size = 256, .overflow_block_size = 4096 });
+    defer arena.deinit();
+
+    try std.testing.expect(arena.alloc(256) != null);
+    try std.testing.expect(arena.alloc(64) != null);
+    try std.testing.expect(arena.alloc(8000) != null);
+    try std.testing.expect(arena.alloc(64) != null);
+
+    const stats = arena.getStats();
+    try std.testing.expectEqual(@as(usize, 12112), stats.overflow_bytes);
+    try std.testing.expectEqual(@as(u64, 3), stats.overflow_count);
+}
+
+test "Arena aligns an overflow allocation that needs more than 8 bytes" {
+    var arena = try Arena.init(std.testing.allocator, .{ .size = 256 });
+    defer arena.deinit();
+
+    try std.testing.expect(arena.alloc(248) != null);
+    const small = arena.alloc(24) orelse return error.OutOfMemory;
+    const wide = arena.allocAligned(48, 32) orelse return error.OutOfMemory;
+    try std.testing.expectEqual(@as(usize, 0), @intFromPtr(wide) % 32);
+    try std.testing.expect(arena.contains(small));
+    try std.testing.expect(arena.contains(wide));
+    try std.testing.expectEqual(@as(u64, 2), arena.getStats().overflow_count);
 }
 
 test "Arena overflow returns null and stays consistent when backing OOMs" {
@@ -628,9 +678,8 @@ test "Arena resetWithAudit returns pre-reset snapshot and zeros state" {
 
     const snapshot = try arena.resetWithAudit();
     try std.testing.expect(snapshot.bump_used >= 128);
-    try std.testing.expect(snapshot.overflow_bytes > 0);
-    // The overflow node header plus the 1024 requested bytes.
-    try std.testing.expectEqual(@sizeOf(OverflowNode) + 1024, snapshot.overflow_bytes);
+    // One overflow block of the default size.
+    try std.testing.expectEqual(@as(usize, 256 * 1024), snapshot.overflow_bytes);
     try std.testing.expectEqual(@as(u64, 1), snapshot.overflow_count);
     try std.testing.expect(snapshot.alloc_count >= 3);
 
