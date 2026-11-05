@@ -396,6 +396,7 @@ pub fn compileHandler(
     // Run handler verification if requested
     var verify_info: ?VerificationInfo = null;
     var state_isolated: bool = false;
+    var shares_state: bool = false;
     // result_safe and optional_safe default false (unproven) until verification runs and passes.
     var result_safe: bool = false;
     var optional_safe: bool = false;
@@ -487,7 +488,8 @@ pub fn compileHandler(
                 .unreachable_code = has_unreachable,
                 .bytecode_verified = true, // will be set after bytecode gen
             };
-            state_isolated = !verifier.has_module_mutation and !verifier.unresolved_route_dispatch;
+            shares_state = verifier.has_module_mutation or verifier.unresolved_route_dispatch;
+            state_isolated = !shares_state;
 
             // unchecked_result_value and unchecked_optional_* are .err severity,
             // so reaching here (error_count == 0) guarantees both properties hold.
@@ -623,6 +625,7 @@ pub fn compileHandler(
         // Inject verification-derived properties (Checks 2, 6, 7)
         applyContractFacts(allocator, &contract.?, .{ .verifier = .{
             .state_isolated = state_isolated,
+            .shares_state = shares_state,
             .result_safe = result_safe,
             .optional_safe = optional_safe,
         } });
@@ -896,7 +899,7 @@ fn compileMultiModule(
     // Check every module, dependencies first and the entry last. Code
     // generation above already ran on the kept parsers, so no bytecode moves.
     // The module state facts fold over the whole graph for the contract.
-    var state_isolated = true;
+    var shares_state = false;
     var evidences: std.ArrayList(zts.ProofEvidence) = .empty;
     defer {
         for (evidences.items) |*evidence| evidence.deinit();
@@ -911,7 +914,7 @@ fn compileMultiModule(
             };
         }
         if (checks.verify_failed) return .{ .verify_failed = true };
-        if (checks.has_module_mutation or checks.unresolved_route_dispatch) state_isolated = false;
+        if (checks.has_module_mutation or checks.unresolved_route_dispatch) shares_state = true;
     }
 
     // The evidence of each module folds into one program. A graph that the fold
@@ -994,7 +997,7 @@ fn compileMultiModule(
         .policy = policy,
         .sql_schema_path = sql_schema_path,
         .manifest_registry = manifest_registry,
-        .state_isolated = state_isolated,
+        .shares_state = shares_state,
     });
 
     return .{
@@ -3398,6 +3401,29 @@ test "compileHandler claims state isolation only when the verifier ran and found
     var verified = try compileHandler(allocator, source, "handler.ts", .{ .emit_contract = true, .emit_verify = true });
     defer verified.deinit(allocator);
     try std.testing.expect(verified.verify_failed);
+}
+
+test "compileHandler without verification keeps the read-only family over a module write" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\let counter: number = 0;
+        \\function handler(req: Request): Response {
+        \\  counter = counter + 1;
+        \\  return Response.text("ok");
+        \\}
+    ;
+    // No pass checked the write, so the contract discloses no claim about it
+    // beyond the unproven state isolation.
+    var unverified = try compileHandler(allocator, source, "handler.ts", .{ .emit_contract = true });
+    defer unverified.deinit(allocator);
+    const props = (unverified.contract orelse return error.MissingContract).properties orelse return error.MissingProperties;
+    try std.testing.expect(!props.state_isolated);
+    try std.testing.expect(props.read_only);
+    try std.testing.expect(props.retry_safe);
+    try std.testing.expect(props.deterministic);
+    try std.testing.expect(props.idempotent);
+    try std.testing.expect(props.pure);
+    try std.testing.expect(props.stateless);
 }
 
 test "compileHandler refuses a declared no_secret_leakage over a leak in the contract" {

@@ -80,9 +80,9 @@ pub const GraphCheck = struct {
     /// Owns the rows and strings of the file import signatures of the entry.
     link_arena: std.heap.ArenaAllocator,
     entry_imports: ?zts.FileImportSignatures = null,
-    /// No module of the dependencies mutates module state or dispatches an
+    /// A module of the dependencies mutates module state or dispatches an
     /// unresolved route.
-    state_isolated: bool = true,
+    shares_state: bool = false,
     deps: ?contract_mod.DependencyContracts = null,
     dependency_facts: ?contract_mod.DependencyFacts = null,
     reader_adapter: ReaderAdapter = undefined,
@@ -191,7 +191,7 @@ pub const GraphCheck = struct {
                 };
             }
             if (checks.verify_failed) return .refused;
-            if (checks.has_module_mutation or checks.unresolved_route_dispatch) self.state_isolated = false;
+            if (checks.has_module_mutation or checks.unresolved_route_dispatch) self.shares_state = true;
         }
         return .passed;
     }
@@ -333,7 +333,7 @@ pub const GraphCheck = struct {
                 .policy = opts.policy,
                 .sql_schema_path = opts.sql_schema_path,
                 .manifest_registry = null,
-                .state_isolated = self.state_isolated,
+                .shares_state = self.shares_state,
                 // A check reports a policy violation on the merged contract. It
                 // does not stop at the first dependency.
                 .enforce_policy = false,

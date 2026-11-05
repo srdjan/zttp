@@ -177,9 +177,9 @@ pub const MultiModuleBuild = struct {
     policy: ?HandlerPolicy,
     sql_schema_path: ?[]const u8,
     manifest_registry: ?*const zts.ManifestRegistry,
-    /// True when no module of the graph mutates module state or dispatches an
+    /// True when a module of the graph mutates module state or dispatches an
     /// unresolved route. Read only when `emit_verify` is set.
-    state_isolated: bool,
+    shares_state: bool,
     /// Abort on a policy violation in a dependency. A check clears this, because
     /// it reports a violation on the merged contract and does not abort.
     enforce_policy: bool = true,
@@ -484,7 +484,8 @@ pub fn buildMultiModuleContract(
 
     const verified = inputs.emit_verify and handler_fn != null;
     applyContractFacts(allocator, &contract, .{ .verifier = .{
-        .state_isolated = verified and inputs.state_isolated,
+        .state_isolated = verified and !inputs.shares_state,
+        .shares_state = verified and inputs.shares_state,
         .result_safe = verified,
         .optional_safe = verified,
     } });

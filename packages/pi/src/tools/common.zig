@@ -1275,6 +1275,6 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
     try testing.expectEqual(@as(usize, 90), error_codes.count());
     try testing.expectEqual(@as(usize, 1), tier_result);
     try testing.expectEqual(@as(usize, 18), tier_intent);
-    try testing.expectEqual(@as(usize, 128), tier_help);
+    try testing.expectEqual(@as(usize, 130), tier_help);
     try testing.expectEqual(@as(usize, 15), tier_other);
 }

@@ -167,6 +167,10 @@ pub const PathAnalysis = struct {
 /// driver fills every field from its own verifier run; `false` means unproven.
 pub const VerifierFacts = struct {
     state_isolated: bool,
+    /// The verifier ran and found a write to state that later requests read.
+    /// False when verification did not run, so an unverified build keeps its
+    /// properties.
+    shares_state: bool,
     result_safe: bool,
     optional_safe: bool,
 };
@@ -182,6 +186,19 @@ pub const ContractFacts = struct {
     paths: ?*PathAnalysis = null,
 };
 
+/// A handler whose response can depend on state that earlier requests wrote is
+/// not deterministic, and one that writes shared state is not read-only,
+/// retry-safe, pure, or stateless. The virtual-module effect row does not see a
+/// write to module state, so the verifier fact clears these here.
+fn clearSharedStateProperties(props: *handler_contract.HandlerProperties) void {
+    props.pure = false;
+    props.stateless = false;
+    props.read_only = false;
+    props.retry_safe = false;
+    props.deterministic = false;
+    props.idempotent = false;
+}
+
 /// The one writer of the verifier, path, and fault facts on a contract. Both
 /// drivers (`compileHandler` and `runCheckOnParsedSource`) fill a
 /// `ContractFacts` from their own analysis and call this, so a new contract
@@ -194,6 +211,7 @@ pub fn applyContractFacts(
     if (facts.verifier) |verifier| {
         if (contract.properties) |*props| {
             props.state_isolated = verifier.state_isolated;
+            if (verifier.shares_state) clearSharedStateProperties(props);
             props.result_safe = verifier.result_safe;
             props.optional_safe = verifier.optional_safe;
         }
@@ -781,6 +799,8 @@ fn runCheckOnParsedSource(
     var imported_graph: ?FlowModuleGraph = null;
     defer if (imported_graph) |*graph| graph.deinit();
     var verify_info: ?VerificationInfo = null;
+    // True only when the verifier ran and found a shared-state write.
+    var shares_state = false;
     if (handler_fn) |hf| {
         // A graph supplies the flow modules from the parsers that it compiled.
         // The fault scan below performs its own independent traversal and reads.
@@ -835,8 +855,9 @@ fn runCheckOnParsedSource(
             }
         }
 
-        result.state_isolated = !checked.verifier.has_module_mutation and !checked.verifier.unresolved_route_dispatch;
-        if (graph_check) |gc| result.state_isolated = result.state_isolated and gc.state_isolated;
+        shares_state = checked.verifier.has_module_mutation or checked.verifier.unresolved_route_dispatch;
+        if (graph_check) |gc| shares_state = shares_state or gc.shares_state;
+        result.state_isolated = !shares_state;
         if (result.verify_errors == 0) {
             result.exhaustive_returns = true;
             result.results_safe = true;
@@ -952,6 +973,7 @@ fn runCheckOnParsedSource(
     if (result.contract) |*c| {
         applyContractFacts(allocator, c, .{ .verifier = .{
             .state_isolated = result.state_isolated,
+            .shares_state = shares_state,
             .result_safe = result.results_safe,
             .optional_safe = result.optionals_safe,
         } });

@@ -3257,9 +3257,11 @@ test "router public checks prove clean routes and fail closed on unresolved disp
     try std.testing.expectEqual(@as(u32, 0), unresolved.type_errors);
     try std.testing.expect(!unresolved.exhaustive_returns);
     const unresolved_properties = unresolved.contract.?.properties.?;
-    // The structural verifier still has no exhaustive route facts. Flow can
-    // prove the six properties from the actual clean replacement function.
-    const flow_fields = .{ "deterministic", "no_secret_leakage", "no_credential_leakage", "input_validated", "pii_contained", "injection_safe" };
+    // The structural verifier still has no exhaustive route facts, and an
+    // unresolved dispatch shares state with later requests, so the read-only
+    // family is cleared with `deterministic`. Flow can prove the five other
+    // properties from the actual clean replacement function.
+    const flow_fields = .{ "no_secret_leakage", "no_credential_leakage", "input_validated", "pii_contained", "injection_safe" };
     inline for (checked_fields) |field| {
         const is_flow = comptime blk: {
             for (flow_fields) |flow_field| if (std.mem.eql(u8, field, flow_field)) break :blk true;
@@ -12694,7 +12696,7 @@ test "a direct handler mutation is still the ZTS310 error" {
     const allocator = std.testing.allocator;
     const source =
         \\let count = 0;
-        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\export function handler(req: Request): Proof<Response, "injection_safe"> {
         \\  count = count + 1;
         \\  return Response.text(String(count));
         \\}
@@ -12717,7 +12719,7 @@ test "a helper mutation is a ZTS310 warning that names a helper and adds no erro
         \\  count = count + 1;
         \\  return count;
         \\}
-        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\export function handler(req: Request): Proof<Response, "injection_safe"> {
         \\  return Response.text(String(bump()));
         \\}
     ;
@@ -12771,7 +12773,7 @@ test "check refuses a helper mutation only when the capsule demands state_isolat
         \\  count = count + 1;
         \\  return count;
         \\}
-        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\export function handler(req: Request): Proof<Response, "injection_safe"> {
         \\  return Response.text(String(bump()));
         \\}
     ;
@@ -12781,4 +12783,111 @@ test "check refuses a helper mutation only when the capsule demands state_isolat
     try std.testing.expectEqual(@as(u32, 0), narrow.totalErrors());
     try std.testing.expectEqual(@as(usize, 1), narrow.json_diagnostics.items.len);
     try std.testing.expectEqualStrings("ZTS310", narrow.json_diagnostics.items[0].code);
+}
+
+const shared_state_default_help =
+    "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, " ++
+    "but it does not hold: deterministic, idempotent, optional_safe, pure, read_only, result_safe, retry_safe, state_isolated, stateless. " ++
+    "Return a narrow Proof capsule with only the properties it holds, e.g. " ++
+    "`function handler(req: Request): Proof<Response, \"fault_covered\" | \"no_secret_leakage\" | \"no_credential_leakage\" | " ++
+    "\"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`.";
+
+fn expectSharedStateClearsProperties(result: *const CheckResult) !void {
+    const props = result.properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!props.state_isolated);
+    try std.testing.expect(!props.read_only);
+    try std.testing.expect(!props.retry_safe);
+    try std.testing.expect(!props.deterministic);
+    try std.testing.expect(!props.idempotent);
+    try std.testing.expect(!props.pure);
+    try std.testing.expect(!props.stateless);
+}
+
+test "a helper module write unproves a narrow capsule that claims the read-only family" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const state: { n: number } = { n: 0 };
+        \\function bump(): number {
+        \\  state.n = state.n + 1;
+        \\  return state.n;
+        \\}
+        \\function handler(req: Request): Proof<Response, "deterministic" | "read_only" | "retry_safe" | "idempotent"> {
+        \\  return Response.text(String(bump()));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "narrow-helper.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try expectSharedStateClearsProperties(&result);
+    try std.testing.expectEqual(@as(u32, 4), result.totalErrors());
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 5), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
+    try std.testing.expectEqualStrings("warning", diagnostics[0].severity);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: deterministic)", diagnostics[1].message);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[2].code);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: idempotent)", diagnostics[2].message);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[3].code);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: read_only)", diagnostics[3].message);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[4].code);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: retry_safe)", diagnostics[4].message);
+}
+
+test "a module let reassignment unproves the read-only family and the default help names none of it" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\let count: number = 0;
+        \\function handler(req: Request): Response {
+        \\  count = count + 1;
+        \\  return Response.text(String(count));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "let-reassign.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try expectSharedStateClearsProperties(&result);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqualStrings(shared_state_default_help, diagnostics[1].suggestion orelse return error.TestUnexpectedResult);
+}
+
+test "a module array push unproves the read-only family and the default help names none of it" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const seen: number[] = [];
+        \\function handler(req: Request): Response {
+        \\  seen.push(1);
+        \\  return Response.text(String(seen.length));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "push.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try expectSharedStateClearsProperties(&result);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqualStrings(shared_state_default_help, diagnostics[1].suggestion orelse return error.TestUnexpectedResult);
+}
+
+test "a read of a module array keeps the read-only family proven" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const table: number[] = [1, 2];
+        \\function handler(req: Request): Response {
+        \\  return Response.text(String(table.length));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "read-table.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const props = result.properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(props.state_isolated);
+    try std.testing.expect(props.read_only);
+    try std.testing.expect(props.retry_safe);
+    try std.testing.expect(props.deterministic);
+    try std.testing.expect(props.idempotent);
+    try std.testing.expect(props.pure);
+    try std.testing.expect(props.stateless);
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
 }
