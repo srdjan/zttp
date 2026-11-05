@@ -481,14 +481,16 @@ pub fn arrayJoin(ctx: *context.Context, this: value.JSValue, args: []const value
         return value.JSValue.fromPtr(result);
     }
 
-    // Slow path: use ArrayList with heap-allocated string conversions
+    // Slow path: build the text in a scratch buffer, then copy it into the
+    // result string. The buffer is freed here, not at request reset.
+    const scratch = ctx.scratchAllocator();
     var buffer = std.ArrayList(u8).empty;
-    defer buffer.deinit(ra);
+    defer buffer.deinit(scratch);
 
     i = 0;
     while (i < len) : (i += 1) {
         if (i > 0) {
-            buffer.appendSlice(ra, separator) catch return value.JSValue.undefined_val;
+            buffer.appendSlice(scratch, separator) catch return value.JSValue.undefined_val;
         }
         const val = obj.getIndexUnchecked(i);
         if (val.isUndefined() or val.isNull()) {
@@ -496,7 +498,7 @@ pub fn arrayJoin(ctx: *context.Context, this: value.JSValue, args: []const value
         }
         const elem_str = valueToStringSimple(ra, val) catch return value.JSValue.undefined_val;
         defer if (!val.isString()) string.freeString(ra, elem_str);
-        buffer.appendSlice(ra, elem_str.data()) catch return value.JSValue.undefined_val;
+        buffer.appendSlice(scratch, elem_str.data()) catch return value.JSValue.undefined_val;
     }
 
     const result = createStringForJoin(ctx, buffer.items) orelse return value.JSValue.undefined_val;

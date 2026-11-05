@@ -450,6 +450,14 @@ pub const Context = struct {
         return self.allocator;
     }
 
+    /// Allocator for a buffer that the caller frees before it returns. It
+    /// frees memory, so a dead buffer does not stay in the request arena until
+    /// reset. A builtin that builds text and then copies it into a result
+    /// value uses it for the text.
+    pub fn scratchAllocator(self: *Context) std.mem.Allocator {
+        return self.state_allocator;
+    }
+
     /// Create a JS object, using arena when hybrid mode is enabled
     pub fn createObject(self: *Context, prototype: ?*object.JSObject) !*object.JSObject {
         if (self.hybrid) |h| {

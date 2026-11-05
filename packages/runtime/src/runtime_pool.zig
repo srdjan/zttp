@@ -1623,6 +1623,30 @@ const lifetime_guard_cases = [_]LifetimeGuardCase{
         .expected_body = "8890",
     },
     .{
+        // Each join result is longer than the 512-byte stack buffer, so join
+        // builds it in a temporary buffer. The 100 results fit the 192 KiB
+        // arena; 100 dead temporary buffers on top of them do not.
+        .name = "join longer than 512 bytes in a loop",
+        .handler =
+        \\function handler(req) {
+        \\  let big = "xxxxxxxx";
+        \\  for (const i of range(7)) {
+        \\    big = [big, big].join("");
+        \\  }
+        \\  let n = 0;
+        \\  for (const i of range(100)) {
+        \\    const joined = [big, "y"].join("");
+        \\    n = n + joined.length;
+        \\  }
+        \\  return Response.text(String(n));
+        \\}
+        ,
+        .arena_size = 192 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "102500",
+    },
+    .{
         .name = "String.prototype.concat in a loop",
         .handler =
         \\function handler(req) {
