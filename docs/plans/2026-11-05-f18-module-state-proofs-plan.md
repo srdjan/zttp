@@ -6,8 +6,9 @@ Finding F18 (2026-11-04 review): `zts check` reports five properties PROVEN for 
 
 | Unit | Status |
 |---|---|
-| H1 | In progress |
-| H2 and H3 | Not started |
+| H1 | Complete: `4584ecca`. A mutating array method on a module binding, an alias, or a member chain raises ZTS310, in the handler, nested arrow functions, and helpers. The list of mutating methods is shared in `packages/zts/src/mutating_methods.zig` |
+| H2 | In progress |
+| H3 | Not started |
 
 ## Reproduction
 
