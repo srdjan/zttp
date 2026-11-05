@@ -1,12 +1,12 @@
 # F18 residual gaps: module-state writes the verifier cannot name
 
-The F18 plan (`2026-11-05-f18-module-state-proofs-plan.md`) recorded five residual gaps after H1 to H3. The owner asked for a plan for them on 2026-11-05. This document is that plan. It is not approved.
+The F18 plan (`2026-11-05-f18-module-state-proofs-plan.md`) recorded five residual gaps after H1 to H3. The owner asked for a plan for them on 2026-11-05. This document is that plan. The owner accepted Decision 1 (a), Decision 2 (c), and Decision 3 (a) on 2026-11-05: run U0 to U6, commit each unit on local `main`, and do not push.
 
 ## Status
 
 | Unit | Status |
 |---|---|
-| U0 | Not started |
+| U0 | Complete: baseline below |
 | U1 | Not started |
 | U2 | Not started |
 | U3 | Not started |
@@ -102,3 +102,12 @@ Gates for each unit, unfiltered, with a private `ZIG_LOCAL_CACHE_DIR` and `DEEPS
 - A recorded corpus handler whose verdict or diagnostic text changes fails the offline replay. The corpus then needs a DeepSeek re-record, which the owner runs. U2 runs the offline replay before it commits.
 - The evaluator has its own limits (`docs/plans/2026-10-18-flow-checker-sound-redesign-plan.md`). Decision 1 (a) is as sound as the evaluator's heap model. A known evaluator gap becomes a known state gap.
 - Compile time can grow by one set lookup for each abstract heap write. This needs to be measured: U2 compares the wall time of the flow-precision corpus step before and after.
+
+## U0 baseline
+
+Measured at `bf6ad1c3` with `zts check --json` over 82 files: the 33 tracked `.ts` files under `examples/`, the 17 files of the flow-precision corpus, and the 30 files of `tests/corpus/check/good/`. The table is `/tmp/zttp-f18g/u0-baseline.tsv`, and `/tmp/zttp-f18g/u0.sh` regenerates it.
+
+- `state_isolated` is true for every handler that reaches the verifier. No file has a ZTS310 finding.
+- Six files report no `state_isolated` because they fail before verification or are not handlers: `examples/handler/feature-probes.ts`, `examples/handler/utils.ts`, `examples/sql/sql-crud.ts`, the two `lib/settings.ts` files of the flow-precision corpus, and its `sql-users/handler.ts`.
+- Cleared evaluations: `zts check` does not print the count of unresolved constructs. The 48 handlers of the flow-precision corpus have none, because the test "the frozen corpus leaves no construct unresolved and has no source error" asserts it. The count for the 30 files of `tests/corpus/check/good/` is not measured.
+- The p9 factory shape is measured after U2: each verdict that differs from this baseline is listed with its cause.
