@@ -150,6 +150,14 @@ The package suites: `test-zts`, `test-sdk`, `test-modules`,
 `test-proof-checker`, `test-release-check`, `test-server`,
 `test-compile-bench`, `test-bench-diff`.
 
+`test-server` also runs the example census in
+`packages/runtime/src/example_census_test.zig`. It serves one request per example
+handler through a pooled runtime and requires `lifetime_allocs` to stay fixed
+after warm-up. A `.ts` file under `examples/` with no row in `runnable` or
+`not_run` fails the census, and so does a row for a missing file or a `not_run`
+row whose reason no longer holds. The step declares every file under `examples/`
+as an input, so a new example reruns the census.
+
 `test-sdk` also runs a separate standard-library-only descriptor root. Its tests
 check field-coverage classification and the absence of runtime callback fields;
 the SDK root checks declaration projection. Engine tests compare every builtin

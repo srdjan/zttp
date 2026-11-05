@@ -79,6 +79,7 @@ pub fn addIntegration(ctx: Context, bins: artifacts.Binaries, test_step: *std.Bu
     });
     Context.attachEmbeddedHandlerStub(server_tests, runtime_dep, ctx.zts_mod);
     const run_server_tests = ctx.addRunTest(server_tests);
+    addExampleInputs(b, run_server_tests);
     const server_test_step = b.step("test-server", "Run server/runtime facade integration tests");
     server_test_step.dependOn(&run_server_tests.step);
     test_step.dependOn(&run_server_tests.step);
@@ -118,4 +119,25 @@ pub fn addIntegration(ctx: Context, bins: artifacts.Binaries, test_step: *std.Bu
     const cli_abuse_step = b.step("test-cli-abuse", "Run the built zts against hostile input: exit status, deadline, JSON completeness");
     cli_abuse_step.dependOn(&cli_abuse_cmd.step);
     test_step.dependOn(&cli_abuse_cmd.step);
+}
+
+/// The example census in `example_census_test.zig` reads `examples/` while it
+/// runs, so the run step cannot see those files as inputs. Without this a new or
+/// edited example reuses the cached run and the census never sees it. Declare
+/// every file under `examples/` as an input of the run step.
+fn addExampleInputs(b: *std.Build, run: *std.Build.Step.Run) void {
+    const io = b.graph.io;
+    b.dependOnDirectoryContents(b.path("examples"));
+    var dir = b.root.openDir(io, "examples", .{ .iterate = true }) catch |err| {
+        std.debug.panic("test-server: cannot open the examples directory: {s}", .{@errorName(err)});
+    };
+    defer dir.close(io);
+    var walker = dir.walk(b.allocator) catch @panic("OOM");
+    defer walker.deinit();
+    while (walker.next(io) catch |err| {
+        std.debug.panic("test-server: cannot walk the examples directory: {s}", .{@errorName(err)});
+    }) |entry| {
+        if (entry.kind != .file) continue;
+        run.addFileInput(b.path(b.fmt("examples/{s}", .{entry.path})));
+    }
 }

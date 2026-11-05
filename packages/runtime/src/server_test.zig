@@ -607,3 +607,7 @@ test "a second server on a busy port fails with AddressInUse and the port reopen
     try third.start();
     third.shutdown(100);
 }
+
+test {
+    _ = @import("example_census_test.zig");
+}

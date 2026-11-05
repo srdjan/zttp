@@ -1529,20 +1529,28 @@ test "HandlerPool handler remains callable across resets" {
     }
 }
 
-const LifetimeGuardCase = struct {
+pub const LifetimeGuardCase = struct {
     name: []const u8,
     handler: []const u8,
     arena_size: usize,
     method: []const u8,
     url: []const u8,
     expected_body: []const u8,
+    /// Source name the pool compiles under. A relative import resolves from it.
+    filename: []const u8 = "<handler>",
+    /// Request body, when the handler reads one.
+    body: ?[]const u8 = null,
+    /// Status that every response must carry.
+    expected_status: u16 = 200,
+    /// True when `expected_body` need only occur in the response body.
+    body_contains: bool = false,
     /// False when the case overflows its arena by design.
     fits_arena: bool = true,
     /// Request headers as name and value pairs.
     headers: []const [2][]const u8 = &.{},
 };
 
-fn guardRequest(allocator: std.mem.Allocator, case: LifetimeGuardCase) !HttpRequestOwned {
+pub fn guardRequest(allocator: std.mem.Allocator, case: LifetimeGuardCase) !HttpRequestOwned {
     var request = HttpRequestOwned{
         .method = try allocator.dupe(u8, case.method),
         .url = try allocator.dupe(u8, case.url),
@@ -1550,6 +1558,8 @@ fn guardRequest(allocator: std.mem.Allocator, case: LifetimeGuardCase) !HttpRequ
         .body = null,
     };
     errdefer request.deinit(allocator);
+    request.path = request.url[0 .. std.mem.indexOfScalar(u8, request.url, '?') orelse request.url.len];
+    if (case.body) |body| request.body = try allocator.dupe(u8, body);
     for (case.headers) |pair| {
         const key = try allocator.dupe(u8, pair[0]);
         errdefer allocator.free(key);
@@ -2151,9 +2161,19 @@ fn runLifetimeGuardCase(case: LifetimeGuardCase) !void {
     return runLifetimeGuardCaseWith(case, .{ .arena_size = case.arena_size });
 }
 
-fn runLifetimeGuardCaseWith(case: LifetimeGuardCase, config: runtime_config_mod.RuntimeConfig) !void {
+/// Fail unless `response` carries the status and body that `case` expects.
+fn expectGuardResponse(case: LifetimeGuardCase, response: *const HttpResponse) !void {
+    try std.testing.expectEqual(case.expected_status, response.status);
+    if (case.body_contains) {
+        try std.testing.expect(std.mem.indexOf(u8, response.body, case.expected_body) != null);
+    } else {
+        try std.testing.expectEqualStrings(case.expected_body, response.body);
+    }
+}
+
+pub fn runLifetimeGuardCaseWith(case: LifetimeGuardCase, config: runtime_config_mod.RuntimeConfig) !void {
     const allocator = std.testing.allocator;
-    var pool = try HandlerPool.init(allocator, config, case.handler, "<handler>", 1, 0);
+    var pool = try HandlerPool.init(allocator, config, case.handler, case.filename, 1, 0);
     defer pool.deinit();
 
     var request = try guardRequest(allocator, case);
@@ -2163,7 +2183,7 @@ fn runLifetimeGuardCaseWith(case: LifetimeGuardCase, config: runtime_config_mod.
     while (warmup < 4) : (warmup += 1) {
         var handle = try pool.executeHandlerBorrowed(request.asView());
         defer handle.deinit();
-        try std.testing.expectEqualStrings(case.expected_body, handle.response.body);
+        try expectGuardResponse(case, &handle.response);
     }
     const after_warmup = try lifetimeAllocs(&pool);
 
@@ -2171,7 +2191,7 @@ fn runLifetimeGuardCaseWith(case: LifetimeGuardCase, config: runtime_config_mod.
     while (measured < 8) : (measured += 1) {
         var handle = try pool.executeHandlerBorrowed(request.asView());
         defer handle.deinit();
-        try std.testing.expectEqualStrings(case.expected_body, handle.response.body);
+        try expectGuardResponse(case, &handle.response);
     }
     const after_measured = try lifetimeAllocs(&pool);
 
