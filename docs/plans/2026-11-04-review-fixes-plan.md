@@ -11,6 +11,8 @@ The full review report is outside the repository. The owner approved the recomme
 | F7 | Complete: `d7a62413` |
 | F3 | Complete: `02659dfa` |
 | F2 | Complete: units G1 to G8, `e1c01404` to `04de59d5`. Results are in [the F2 plan](2026-11-04-f2-request-memory-plan.md). The headline `cacheSet` shape is bounded but not flat: finding F19 |
+| F18 | Owner chose Decision 3 option (a) on 2026-11-05: read-only research, then a fix plan for approval |
+| F19 | Owner chose Decision 4 option (a) on 2026-11-05: a failing test, then request-arena overflow in large blocks that reset returns to the system; then measure t7 again |
 
 `bash scripts/verify.sh` passed on `main` at `02659dfa` and at `4a4274b9`.
 
