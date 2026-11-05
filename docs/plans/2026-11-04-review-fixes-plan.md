@@ -14,7 +14,7 @@ The full review report is outside the repository. The owner approved the recomme
 | F18 | Owner chose Decision 3 option (a) on 2026-11-05. Research complete; [the F18 plan](2026-11-05-f18-module-state-proofs-plan.md) waits for Decision 5 |
 | F19 | Complete: `2b45957e` (owner chose Decision 4 option (a) on 2026-11-05). Request-arena overflow comes from 256 KiB blocks that reset unmaps. t7 stays at 5.7 to 7.3 MB footprint over 100 requests |
 
-`bash scripts/verify.sh` passed on `main` at `02659dfa` and at `4a4274b9`.
+`bash scripts/verify.sh` passed on `main` at `02659dfa`, `4a4274b9`, and `b2b0106b`.
 
 ## Units
 
