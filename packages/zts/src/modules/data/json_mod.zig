@@ -101,6 +101,9 @@ const ParseError = error{ Failed, OutOfMemory };
 
 const Parser = struct {
     ctx: *context.Context,
+    /// Decoded text buffers, which the parse frees before it returns. Request
+    /// arena inside a request, the context allocator otherwise.
+    temp: std.mem.Allocator,
     text: []const u8,
     pos: usize = 0,
     failure: Failure = .{ .kind = .invalid_syntax },
@@ -183,17 +186,17 @@ const Parser = struct {
         self.pos += 1;
 
         var out: std.ArrayListUnmanaged(u8) = .empty;
-        errdefer out.deinit(self.ctx.allocator);
+        errdefer out.deinit(self.temp);
 
         while (self.pos < self.text.len) {
             const c = self.text[self.pos];
             if (c == '"') {
                 self.pos += 1;
-                return out.toOwnedSlice(self.ctx.allocator) catch return error.OutOfMemory;
+                return out.toOwnedSlice(self.temp) catch return error.OutOfMemory;
             }
             if (c < 0x20) return self.fail(.invalid_syntax, self.pos);
             if (c != '\\') {
-                out.append(self.ctx.allocator, c) catch return error.OutOfMemory;
+                out.append(self.temp, c) catch return error.OutOfMemory;
                 self.pos += 1;
                 continue;
             }
@@ -235,19 +238,19 @@ const Parser = struct {
                     }
                     var buf: [4]u8 = undefined;
                     const len = std.unicode.utf8Encode(code, &buf) catch return self.fail(.invalid_syntax, open);
-                    out.appendSlice(self.ctx.allocator, buf[0..len]) catch return error.OutOfMemory;
+                    out.appendSlice(self.temp, buf[0..len]) catch return error.OutOfMemory;
                     continue;
                 },
                 else => return self.fail(.invalid_syntax, self.pos - 1),
             };
-            out.append(self.ctx.allocator, decoded) catch return error.OutOfMemory;
+            out.append(self.temp, decoded) catch return error.OutOfMemory;
         }
         return self.fail(.invalid_syntax, open);
     }
 
     fn parseString(self: *Parser) ParseError!JSValue {
         const bytes = try self.readString();
-        defer self.ctx.allocator.free(bytes);
+        defer self.temp.free(bytes);
         return self.ctx.createString(bytes) catch return error.OutOfMemory;
     }
 
@@ -299,18 +302,18 @@ const Parser = struct {
             const key_offset = self.pos;
             const key_bytes = try self.readString();
             const key_val = self.ctx.createString(key_bytes) catch {
-                self.ctx.allocator.free(key_bytes);
+                self.temp.free(key_bytes);
                 return error.OutOfMemory;
             };
 
             if (dict.has(out, key_val)) {
                 const n = @min(key_bytes.len, self.dup_key_buf.len);
                 @memcpy(self.dup_key_buf[0..n], key_bytes[0..n]);
-                self.ctx.allocator.free(key_bytes);
+                self.temp.free(key_bytes);
                 self.failure = .{ .kind = .duplicate_key, .offset = key_offset, .key = self.dup_key_buf[0..n] };
                 return error.Failed;
             }
-            defer self.ctx.allocator.free(key_bytes);
+            defer self.temp.free(key_bytes);
 
             self.skipWs();
             if (self.pos >= self.text.len or self.text[self.pos] != ':') return self.fail(.invalid_syntax, self.pos);
@@ -355,7 +358,7 @@ fn parseText(ctx: *context.Context, text: []const u8) anyerror!JSValue {
         return failure(ctx, .{ .kind = .size_limit, .limit = limits.max_input_bytes });
     }
 
-    var parser = Parser{ .ctx = ctx, .text = text };
+    var parser = Parser{ .ctx = ctx, .temp = ctx.requestAllocator(), .text = text };
     const parsed = parser.parseValue(0) catch |err| switch (err) {
         error.Failed => return failure(ctx, parser.failure),
         error.OutOfMemory => return error.OutOfMemory,
@@ -431,8 +434,9 @@ fn stringifyJsonNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) a
     const ctx = util.castContext(ctx_ptr);
     const input = if (args.len > 0) args[0] else JSValue.undefined_val;
 
+    const ra = ctx.requestAllocator();
     var buf: std.ArrayListUnmanaged(u8) = .empty;
-    defer buf.deinit(ctx.allocator);
+    defer buf.deinit(ra);
 
     encode(ctx, input, &buf, 0) catch |err| return switch (err) {
         error.NonFinite => failure(ctx, .{ .kind = .non_finite_number }),
@@ -452,7 +456,7 @@ fn stringifyJsonNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) a
 /// accepted. Reporting that as `cycle` names the shape the caller has.
 fn encode(ctx: *context.Context, val: JSValue, buf: *std.ArrayListUnmanaged(u8), depth: u16) EncodeError!void {
     if (depth > limits.max_depth) return error.Cycle;
-    const allocator = ctx.allocator;
+    const allocator = ctx.requestAllocator();
 
     if (val.isNull()) return buf.appendSlice(allocator, "null") catch error.OutOfMemory;
     if (val.isTrue()) return buf.appendSlice(allocator, "true") catch error.OutOfMemory;
@@ -598,12 +602,12 @@ fn releaseHarness(h: *Harness) void {
 }
 
 fn parse(h: *Harness, text: []const u8) !JSValue {
-    var parser = Parser{ .ctx = h.ctx, .text = text };
+    var parser = Parser{ .ctx = h.ctx, .temp = h.ctx.allocator, .text = text };
     return parser.parseValue(0);
 }
 
 fn parseFailure(h: *Harness, text: []const u8, lim: Limits) !Failure {
-    var parser = Parser{ .ctx = h.ctx, .text = text, .limits = lim };
+    var parser = Parser{ .ctx = h.ctx, .temp = h.ctx.allocator, .text = text, .limits = lim };
     _ = parser.parseValue(0) catch |err| switch (err) {
         error.Failed => return parser.failure,
         error.OutOfMemory => return error.OutOfMemory,

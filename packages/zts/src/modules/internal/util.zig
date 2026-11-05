@@ -117,19 +117,20 @@ pub fn throwCapabilityPolicyError(
     category: []const u8,
     subject: []const u8,
 ) value.JSValue {
+    const ra = ctx.requestAllocator();
     var message = std.ArrayList(u8).empty;
-    defer message.deinit(ctx.allocator);
+    defer message.deinit(ra);
 
-    message.appendSlice(ctx.allocator, category) catch {
+    message.appendSlice(ra, category) catch {
         return throwError(ctx, "CapabilityPolicyError", "capability denied by policy");
     };
-    message.appendSlice(ctx.allocator, " '") catch {
+    message.appendSlice(ra, " '") catch {
         return throwError(ctx, "CapabilityPolicyError", "capability denied by policy");
     };
-    message.appendSlice(ctx.allocator, subject) catch {
+    message.appendSlice(ra, subject) catch {
         return throwError(ctx, "CapabilityPolicyError", "capability denied by policy");
     };
-    message.appendSlice(ctx.allocator, "' is not allowed by capability policy") catch {
+    message.appendSlice(ra, "' is not allowed by capability policy") catch {
         return throwError(ctx, "CapabilityPolicyError", "capability denied by policy");
     };
 

@@ -743,8 +743,9 @@ fn argsDrifted(recorded_args_json: []const u8, live_args_json: []const u8) bool 
 fn replayRecordedEntry(state: *ReplayState, ctx: *context.Context, entry: IoEntry, args: []const value.JSValue) value.JSValue {
     // Count a divergence so replay verification fails closed on an argument
     // change at the matched path.
-    if (serializeArgsJson(ctx.allocator, ctx, args)) |live| {
-        defer ctx.allocator.free(live);
+    const ra = ctx.requestAllocator();
+    if (serializeArgsJson(ra, ctx, args)) |live| {
+        defer ra.free(live);
         if (argsDrifted(entry.args_json, live)) state.divergences += 1;
     } else {
         state.divergences += 1;
@@ -885,8 +886,9 @@ fn parseString(ctx: *context.Context, json: []const u8, start: usize) DecodeErro
                 return .{ .val = js_str, .end = pos + 1 };
             }
             // Slow path: unescape
-            const unescaped = try unescapeJson(ctx.allocator, json[content_start..pos]);
-            defer ctx.allocator.free(unescaped);
+            const ra = ctx.requestAllocator();
+            const unescaped = try unescapeJson(ra, json[content_start..pos]);
+            defer ra.free(unescaped);
             const js_str = try ctx.createString(unescaped);
             return .{ .val = js_str, .end = pos + 1 };
         }

@@ -53,7 +53,14 @@ pub const Config = struct {
 /// Borrowed for one synchronous operation. The backend remains at its stable
 /// owner address because its Io vtable and userdata point into that storage.
 pub const View = struct {
+    /// Temporaries that the current request creates and drops. In a pooled
+    /// runtime this is the request arena, which frees nothing before the
+    /// reset at the end of the request.
     allocator: std.mem.Allocator,
+    /// An allocator that frees. The outbound client, its TLS and decompression
+    /// buffers, and the exchange bytes use it, because they resize and free
+    /// often. Each caller releases them before the native call returns.
+    transport_allocator: std.mem.Allocator,
     ctx: *zq.Context,
     state: *HttpState,
     config: Config,
@@ -276,8 +283,9 @@ pub fn headersDeleteNative(ctx_ptr: *anyopaque, this: zq.JSValue, args: []const 
     const wanted = getStringDataCtx(args[0], ctx) orelse return zq.JSValue.undefined_val;
     const pool = ctx.hidden_class_pool orelse return zq.JSValue.undefined_val;
     const headers_obj = this.toPtr(zq.JSObject);
-    const keys = headers_obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return zq.JSValue.undefined_val;
-    defer ctx.allocator.free(keys);
+    const ra = ctx.requestAllocator();
+    const keys = headers_obj.getOwnEnumerableKeys(ra, pool) catch return zq.JSValue.undefined_val;
+    defer ra.free(keys);
 
     for (keys) |key_atom| {
         const key_name = ctx.atoms.getName(key_atom) orelse continue;
@@ -336,9 +344,10 @@ pub fn requestConstructorNative(ctx_ptr: *anyopaque, _: zq.JSValue, args: []cons
     }
 
     const split = splitPathAndQuery(url.?);
-    const parsed_query = try http_parser.parseQueryString(ctx.allocator, split.query_string, http_parser.DEFAULT_MAX_QUERY_LENGTH);
-    defer if (parsed_query.storage) |storage| ctx.allocator.free(storage);
-    defer if (parsed_query.decoded_storage) |storage| ctx.allocator.free(storage);
+    const ra = ctx.requestAllocator();
+    const parsed_query = try http_parser.parseQueryString(ra, split.query_string, http_parser.DEFAULT_MAX_QUERY_LENGTH);
+    defer if (parsed_query.storage) |storage| ra.free(storage);
+    defer if (parsed_query.decoded_storage) |storage| ra.free(storage);
 
     const req_obj = try ctx.createObject(getNamedGlobalPrototype(ctx, "Request"));
     const url_val = try ctx.createString(url.?);
@@ -1017,7 +1026,7 @@ const OwnedExchange = struct {
 };
 
 fn outboundExchange(rt: View, input: ExchangeInput, failure: *ExchangeFailure) !OwnedExchange {
-    const allocator = rt.allocator;
+    const allocator = rt.transport_allocator;
     const backend = rt.backend.?;
     var client = std.http.Client{
         .allocator = allocator,
@@ -1159,7 +1168,7 @@ fn fetchSyncResult(rt: View, args: []const zq.JSValue) !zq.JSValue {
         error.OutboundExchangeFailed => return createFetchErrorResponse(rt, failure.code, failure.details),
         else => return err,
     };
-    defer exchange.deinit(rt.allocator);
+    defer exchange.deinit(rt.transport_allocator);
 
     const created = try createFetchResponse(rt, exchange.status, exchange.head.reason, exchange.body, exchange.head.contentType());
     for (exchange.head.headers.items) |header| {
@@ -1358,16 +1367,16 @@ fn isUrlUnreserved(byte: u8) bool {
 
 pub fn httpRequest(rt: View, args: []const zq.JSValue) !zq.JSValue {
     const out = httpRequestResultJsonAlloc(rt, args) catch |err| {
-        const fallback = try httpRequestErrorJsonAlloc(rt.allocator, "InternalError", @errorName(err));
-        defer rt.allocator.free(fallback);
+        const fallback = try httpRequestErrorJsonAlloc(rt.transport_allocator, "InternalError", @errorName(err));
+        defer rt.transport_allocator.free(fallback);
         return rt.ctx.createString(fallback);
     };
-    defer rt.allocator.free(out);
+    defer rt.transport_allocator.free(out);
     return rt.ctx.createString(out);
 }
 
 fn httpRequestResultJsonAlloc(rt: View, args: []const zq.JSValue) ![]u8 {
-    const a = rt.allocator;
+    const a = rt.transport_allocator;
     if (!rt.config.enabled) {
         return try httpRequestErrorJsonAlloc(a, "OutboundHttpDisabled", "set runtime outbound_http_enabled=true");
     }
@@ -1539,13 +1548,14 @@ test "JSON HTTP header refusal releases parsed headers under allocation failure"
     defer ctx.deinit();
     var state: HttpState = .{};
     defer state.deinit(fixture_allocator);
-    const rt = View{ .allocator = fixture_allocator, .ctx = ctx, .state = &state, .config = .{ .enabled = true }, .backend = null };
+    const rt = View{ .allocator = fixture_allocator, .transport_allocator = fixture_allocator, .ctx = ctx, .state = &state, .config = .{ .enabled = true }, .backend = null };
     rt.ctx.capability_policy = .{ .egress = .{ .enabled = true, .values = &.{"http://127.0.0.1:1"} } };
 
     const Probe = struct {
         fn run(allocator: std.mem.Allocator, runtime: View, input: zq.JSValue, expected: []const u8) !void {
             var view = runtime;
             view.allocator = allocator;
+            view.transport_allocator = allocator;
             const result = httpRequestResultJsonAlloc(view, &.{input}) catch |err| switch (err) {
                 // JSON serialization exposes allocator exhaustion as a writer
                 // failure; keep the allocation-failure harness informed.
@@ -1642,7 +1652,7 @@ test "the egress allowlist rejects a host it does not name" {
     defer ctx.deinit();
     var state: HttpState = .{};
     defer state.deinit(allocator);
-    const rt = View{ .allocator = allocator, .ctx = ctx, .state = &state, .config = .{ .allow_host = "api.example.com" }, .backend = null };
+    const rt = View{ .allocator = allocator, .transport_allocator = allocator, .ctx = ctx, .state = &state, .config = .{ .allow_host = "api.example.com" }, .backend = null };
 
     // Exact match passes the allowlist check. Whether the capability policy also
     // allows it is a separate gate, so only assert the allowlist verdict here.
@@ -1665,7 +1675,7 @@ test "the egress allowlist is case-insensitive on the host" {
     defer ctx.deinit();
     var state: HttpState = .{};
     defer state.deinit(allocator);
-    const rt = View{ .allocator = allocator, .ctx = ctx, .state = &state, .config = .{ .allow_host = "api.example.com" }, .backend = null };
+    const rt = View{ .allocator = allocator, .transport_allocator = allocator, .ctx = ctx, .state = &state, .config = .{ .allow_host = "api.example.com" }, .backend = null };
 
     // Not the allowlist's complaint: any violation here comes from the
     // capability policy, never from a case difference.
@@ -1685,7 +1695,7 @@ test "the endpoint decides, not the host" {
     defer ctx.deinit();
     var state: HttpState = .{};
     defer state.deinit(allocator);
-    const rt = View{ .allocator = allocator, .ctx = ctx, .state = &state, .config = .{}, .backend = null };
+    const rt = View{ .allocator = allocator, .transport_allocator = allocator, .ctx = ctx, .state = &state, .config = .{}, .backend = null };
 
     const allowed = [_][]const u8{"https://api.example.com:443"};
     rt.ctx.capability_policy = .{ .egress = .{ .enabled = true, .values = &allowed } };

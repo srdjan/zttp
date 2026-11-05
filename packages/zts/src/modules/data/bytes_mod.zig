@@ -186,8 +186,9 @@ fn bytesFromOctetsNative(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue)
         return failure(ctx, .{ .kind = .size_limit, .limit = bytes.MAX_LENGTH });
     }
 
-    const elements = try ctx.allocator.alloc(JSValue, len);
-    defer ctx.allocator.free(elements);
+    const ra = ctx.requestAllocator();
+    const elements = try ra.alloc(JSValue, len);
+    defer ra.free(elements);
     for (elements, 0..) |*slot, i| slot.* = list.getSlot(@intCast(i + 1));
 
     return switch (try bytes.fromOctets(ctx, elements)) {
@@ -359,8 +360,9 @@ fn encodeBase64Native(ctx_ptr: *anyopaque, _: JSValue, args: []const JSValue) an
 
     const octets = bytes.data(b);
     const encoder = std.base64.standard.Encoder;
-    const buf = try ctx.allocator.alloc(u8, encoder.calcSize(octets.len));
-    defer ctx.allocator.free(buf);
+    const ra = ctx.requestAllocator();
+    const buf = try ra.alloc(u8, encoder.calcSize(octets.len));
+    defer ra.free(buf);
     return try ctx.createString(encoder.encode(buf, octets));
 }
 

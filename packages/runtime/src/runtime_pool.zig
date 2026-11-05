@@ -1538,7 +1538,27 @@ const LifetimeGuardCase = struct {
     expected_body: []const u8,
     /// False when the case overflows its arena by design.
     fits_arena: bool = true,
+    /// Request headers as name and value pairs.
+    headers: []const [2][]const u8 = &.{},
 };
+
+fn guardRequest(allocator: std.mem.Allocator, case: LifetimeGuardCase) !HttpRequestOwned {
+    var request = HttpRequestOwned{
+        .method = try allocator.dupe(u8, case.method),
+        .url = try allocator.dupe(u8, case.url),
+        .headers = .empty,
+        .body = null,
+    };
+    errdefer request.deinit(allocator);
+    for (case.headers) |pair| {
+        const key = try allocator.dupe(u8, pair[0]);
+        errdefer allocator.free(key);
+        const val = try allocator.dupe(u8, pair[1]);
+        errdefer allocator.free(val);
+        try request.headers.append(allocator, .{ .key = key, .value = val });
+    }
+    return request;
+}
 
 const lifetime_guard_cases = [_]LifetimeGuardCase{
     .{
@@ -1755,6 +1775,142 @@ const lifetime_guard_cases = [_]LifetimeGuardCase{
         .url = "/",
         .expected_body = "/2",
     },
+    .{
+        .name = "Request constructor parses a query string in a loop",
+        .handler =
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  for (const i of range(200)) {
+        \\    const r = Request("/x?a=1&b=two&c=three%20four");
+        \\    n = n + r.query.a;
+        \\  }
+        \\  return Response.text(String(n));
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "200",
+    },
+    .{
+        .name = "request header lookup by an unknown name in a loop",
+        .handler =
+        \\function handler(req) {
+        \\  let last = "";
+        \\  for (const i of range(200)) {
+        \\    last = String(req.headers.get("X-Trace-Id"));
+        \\  }
+        \\  return Response.text(last);
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "abc123",
+        .headers = &.{ .{ "x-other", "1" }, .{ "x-trace-id", "abc123" } },
+    },
+    .{
+        .name = "Response with a custom header object in a loop",
+        .handler =
+        \\function handler(req) {
+        \\  let last = Response.text("none");
+        \\  for (const i of range(200)) {
+        \\    last = Response("ok", { status: 200, headers: { "x-a": "b", "x-c": "d" } });
+        \\  }
+        \\  return last;
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "ok",
+    },
+    .{
+        .name = "Headers append combines two values in a loop",
+        .handler =
+        \\function handler(req) {
+        \\  let last = "";
+        \\  for (const i of range(200)) {
+        \\    const h = Headers({ "x-a": "1" });
+        \\    h.append("X-A", "2");
+        \\    last = String(h.get("x-a"));
+        \\  }
+        \\  return Response.text(last);
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "1, 2",
+    },
+    .{
+        .name = "Headers delete in a loop",
+        .handler =
+        \\function handler(req) {
+        \\  let last = "";
+        \\  for (const i of range(200)) {
+        \\    const h = Headers({ "x-a": "1", "x-b": "2" });
+        \\    h.delete("X-A");
+        \\    last = String(h.has("x-a"));
+        \\  }
+        \\  return Response.text(last);
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "false",
+    },
+    .{
+        .name = "zttp:json parseJson and stringifyJson in a loop",
+        .handler =
+        \\import { parseJson, stringifyJson } from "zttp:json";
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  for (const i of range(200)) {
+        \\    const parsed = parseJson('{"a":"b\\u0041","c":[1,2,3]}');
+        \\    const text = stringifyJson({ k: "v", i: i });
+        \\    n = n + 1;
+        \\  }
+        \\  return Response.text(String(n));
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "200",
+    },
+    .{
+        .name = "zttp:bytes encodeBase64 and bytesFromOctets in a loop",
+        .handler =
+        \\import { bytesFromOctets, encodeBase64, encodeUtf8 } from "zttp:bytes";
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  for (const i of range(200)) {
+        \\    const b = encodeUtf8("hello");
+        \\    const o = bytesFromOctets([1, 2, 3]);
+        \\    n = n + encodeBase64(b).length;
+        \\  }
+        \\  return Response.text(String(n));
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "1600",
+    },
+    .{
+        .name = "returned Response with a custom header object",
+        .handler =
+        \\function handler(req) {
+        \\  return Response("ok", { status: 200, headers: { "x-a": "b", "x-c": "d" } });
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "ok",
+    },
 };
 
 /// Count of lifetime-arena allocations on the pool's only runtime. A runtime
@@ -1766,16 +1922,15 @@ fn lifetimeAllocs(pool: *HandlerPool) !u64 {
 }
 
 fn runLifetimeGuardCase(case: LifetimeGuardCase) !void {
+    return runLifetimeGuardCaseWith(case, .{ .arena_size = case.arena_size });
+}
+
+fn runLifetimeGuardCaseWith(case: LifetimeGuardCase, config: runtime_config_mod.RuntimeConfig) !void {
     const allocator = std.testing.allocator;
-    var pool = try HandlerPool.init(allocator, .{ .arena_size = case.arena_size }, case.handler, "<handler>", 1, 0);
+    var pool = try HandlerPool.init(allocator, config, case.handler, "<handler>", 1, 0);
     defer pool.deinit();
 
-    var request = HttpRequestOwned{
-        .method = try allocator.dupe(u8, case.method),
-        .url = try allocator.dupe(u8, case.url),
-        .headers = .empty,
-        .body = null,
-    };
+    var request = try guardRequest(allocator, case);
     defer request.deinit(allocator);
 
     var warmup: usize = 0;
@@ -1803,6 +1958,103 @@ fn runLifetimeGuardCase(case: LifetimeGuardCase) !void {
     };
 }
 
+/// A loopback HTTP server that answers a fixed number of GET requests with a
+/// fixed response, so the guard can drive `fetchSync` from a handler.
+const FetchUpstream = struct {
+    allocator: std.mem.Allocator,
+    io_backend: std.Io.Threaded,
+    listener: std.Io.net.Server,
+    port: u16,
+    connections: usize,
+    stopping: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    thread: ?std.Thread = null,
+
+    fn create(allocator: std.mem.Allocator, connections: usize) !*FetchUpstream {
+        const self = try allocator.create(FetchUpstream);
+        errdefer allocator.destroy(self);
+        self.* = .{
+            .allocator = allocator,
+            .io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty }),
+            .listener = undefined,
+            .port = 0,
+            .connections = connections,
+        };
+        errdefer self.io_backend.deinit();
+        const io = self.io_backend.io();
+        const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+        self.listener = try address.listen(io, .{ .reuse_address = true });
+        self.port = self.listener.socket.address.getPort();
+        self.thread = try std.Thread.spawn(.{}, serve, .{self});
+        return self;
+    }
+
+    fn destroy(self: *FetchUpstream) void {
+        self.stopping.store(true, .release);
+        const io = self.io_backend.io();
+        if (std.Io.net.IpAddress.parseIp4("127.0.0.1", self.port)) |address| {
+            if (address.connect(io, .{ .mode = .stream })) |wake| {
+                var stream = wake;
+                stream.close(io);
+            } else |_| {}
+        } else |_| {}
+        if (self.thread) |thread| thread.join();
+        self.listener.deinit(io);
+        self.io_backend.deinit();
+        self.allocator.destroy(self);
+    }
+
+    fn serve(self: *FetchUpstream) void {
+        const io = self.io_backend.io();
+        var served: usize = 0;
+        while (served < self.connections and !self.stopping.load(.acquire)) : (served += 1) {
+            var stream = self.listener.accept(io) catch return;
+            defer stream.close(io);
+            if (self.stopping.load(.acquire)) return;
+            var seen: std.ArrayList(u8) = .empty;
+            defer seen.deinit(self.allocator);
+            while (std.mem.indexOf(u8, seen.items, "\r\n\r\n") == null) {
+                var chunk: [1024]u8 = undefined;
+                var vecs: [1][]u8 = .{chunk[0..]};
+                const result = stream.readWithControl(io, &vecs, &.{}) catch return;
+                if (result.data_len == 0) return;
+                seen.appendSlice(self.allocator, chunk[0..result.data_len]) catch return;
+            }
+            var out_buf: [512]u8 = undefined;
+            var writer = stream.writer(io, &out_buf);
+            writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-Up: yes\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello") catch return;
+            writer.interface.flush() catch return;
+        }
+    }
+};
+
+test "HandlerPool outbound fetchSync does not reach the lifetime arena" {
+    const upstream = try FetchUpstream.create(std.testing.allocator, 12);
+    defer upstream.destroy();
+
+    const handler = try std.fmt.allocPrint(std.testing.allocator,
+        \\function handler(req) {{
+        \\  const r = fetchSync("http://127.0.0.1:{d}/data", {{ method: "GET" }});
+        \\  return Response.text([String(r.status), r.body, String(r.headers.get("x-up"))].join(""));
+        \\}}
+    , .{upstream.port});
+    defer std.testing.allocator.free(handler);
+
+    try runLifetimeGuardCaseWith(.{
+        .name = "fetchSync to a loopback server",
+        .handler = handler,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "200helloyes",
+    }, .{
+        .arena_size = 4 * 1024 * 1024,
+        .outbound_http_enabled = true,
+        .outbound_allow_host = "127.0.0.1",
+        .outbound_timeout_ms = 5_000,
+        .dev_capability_policy = .{ .egress_scopes = (zq.endpoint.ScopeSet{}).with(.loopback) },
+    });
+}
+
 test "HandlerPool request memory does not reach the lifetime arena" {
     for (lifetime_guard_cases) |case| {
         try runLifetimeGuardCase(case);
@@ -1814,12 +2066,7 @@ fn runTwiceOnOneRuntime(case: LifetimeGuardCase) !void {
     var pool = try HandlerPool.init(allocator, .{ .arena_size = case.arena_size }, case.handler, "<handler>", 1, 0);
     defer pool.deinit();
 
-    var request = HttpRequestOwned{
-        .method = try allocator.dupe(u8, case.method),
-        .url = try allocator.dupe(u8, case.url),
-        .headers = .empty,
-        .body = null,
-    };
+    var request = try guardRequest(allocator, case);
     defer request.deinit(allocator);
 
     var run: usize = 0;

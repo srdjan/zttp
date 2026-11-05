@@ -135,9 +135,10 @@ const readFilePosixForGraph = zq.file_io.readFileForModuleGraph;
 
 pub const HandlerInstance = struct {
     allocator: std.mem.Allocator,
-    /// Owns every byte of a response this instance builds. On a pooled runtime
-    /// it is the pool runtime's `backing` allocator, which frees, because
-    /// `allocator` is the lifetime arena and a response is built per request.
+    /// Owns every byte of a response this instance builds and the outbound HTTP
+    /// exchange buffers. On a pooled runtime it is the pool runtime's
+    /// `backing` allocator, which frees, because `allocator` is the lifetime
+    /// arena and a request builds a response and may run an exchange.
     response_allocator: std.mem.Allocator,
     ctx: *zq.Context,
     gc_state: *zq.GC,
@@ -189,10 +190,18 @@ pub const HandlerInstance = struct {
         return @ptrCast(@alignCast(host));
     }
 
+    /// Allocator for temporaries that one request creates and drops: the
+    /// request arena while hybrid allocation is on, otherwise `allocator`.
+    fn requestAllocator(self: *Self) std.mem.Allocator {
+        if (self.ctx.hybrid != null) return self.ctx.requestAllocator();
+        return self.allocator;
+    }
+
     /// Borrow the HTTP dependencies without moving state or the Io backend.
     pub fn httpView(self: *Self) http.View {
         return .{
-            .allocator = self.allocator,
+            .allocator = self.requestAllocator(),
+            .transport_allocator = self.response_allocator,
             .ctx = self.ctx,
             .state = &self.http_state,
             .config = .{
@@ -351,8 +360,10 @@ pub const HandlerInstance = struct {
             .cached_dispatch = null,
             .config = config,
             .policy_generation = retained_policy,
+            // The backend allocates and frees a task record per name lookup and
+            // connect. The lifetime arena would keep each one until recycle.
             .outbound_io_backend = if (config.outbound_http_enabled)
-                OutboundIo.init(allocator)
+                OutboundIo.init(pool_rt.backing)
             else
                 null,
             .owns_resources = false,
@@ -1151,7 +1162,7 @@ pub const HandlerInstance = struct {
             std.log.err("SOUNDNESS INCIDENT: {s} {s} faulted on a proven path ({s})", .{ method, path, full_detail });
         }
         if (self.config.incident_log_fd) |fd| {
-            incident_log.write(self.allocator, fd, method, path, chips, full_detail);
+            incident_log.write(self.requestAllocator(), fd, method, path, chips, full_detail);
         }
     }
 
@@ -1669,8 +1680,9 @@ pub const HandlerInstance = struct {
                         try self.putResponseHeader(&response, "Content-Length", headers_obj.getSlot(shapes.response_headers.content_length_slot), borrow_body);
                         try self.putResponseHeader(&response, "Cache-Control", headers_obj.getSlot(shapes.response_headers.cache_control_slot), borrow_body);
                     } else {
-                        const keys = try headers_obj.getOwnEnumerableKeys(self.allocator, pool);
-                        defer self.allocator.free(keys);
+                        const ra = self.requestAllocator();
+                        const keys = try headers_obj.getOwnEnumerableKeys(ra, pool);
+                        defer ra.free(keys);
                         for (keys) |key_atom| {
                             const key_name = self.ctx.atoms.getName(key_atom) orelse continue;
                             const header_val = headers_obj.getOwnProperty(pool, key_atom) orelse continue;
@@ -1698,8 +1710,9 @@ pub const HandlerInstance = struct {
         if (result_obj.getOwnProperty(pool, zq.Atom.headers)) |headers_val| {
             if (headers_val.isObject()) {
                 const headers_obj = headers_val.toPtr(zq.JSObject);
-                const keys = try headers_obj.getOwnEnumerableKeys(self.allocator, pool);
-                defer self.allocator.free(keys);
+                const ra = self.requestAllocator();
+                const keys = try headers_obj.getOwnEnumerableKeys(ra, pool);
+                defer ra.free(keys);
                 for (keys) |key_atom| {
                     const key_name = self.ctx.atoms.getName(key_atom) orelse continue;
                     const header_val = headers_obj.getOwnProperty(pool, key_atom) orelse continue;

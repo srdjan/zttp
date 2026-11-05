@@ -79,8 +79,9 @@ pub fn getObjectProperty(ctx: *zq.Context, obj: *zq.JSObject, pool: *const zq.Hi
     if (obj.getProperty(pool, atom)) |value| return value;
     if (getDynamicProperty(ctx, obj, pool, name)) |value| return value;
 
-    const keys = obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return null;
-    defer ctx.allocator.free(keys);
+    const ra = ctx.requestAllocator();
+    const keys = obj.getOwnEnumerableKeys(ra, pool) catch return null;
+    defer ra.free(keys);
     for (keys) |key_atom| {
         const key_name = ctx.atoms.getName(key_atom) orelse continue;
         if (!std.mem.eql(u8, key_name, name)) continue;
@@ -151,8 +152,9 @@ pub fn findHeaderPropertyAtom(
         const ct_atom = ctx.atoms.intern("Content-Type") catch return null;
         if (headers_obj.getOwnProperty(pool, ct_atom) != null) return ct_atom;
     }
-    const keys = headers_obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return null;
-    defer ctx.allocator.free(keys);
+    const ra = ctx.requestAllocator();
+    const keys = headers_obj.getOwnEnumerableKeys(ra, pool) catch return null;
+    defer ra.free(keys);
     for (keys) |key_atom| {
         const key_name = ctx.atoms.getName(key_atom) orelse continue;
         if (ascii.eqlIgnoreCase(key_name, wanted)) return key_atom;
@@ -194,8 +196,9 @@ pub fn setHeaderValue(
         .append => blk: {
             if (getHeaderValueCaseInsensitive(ctx, headers_obj, pool, name)) |existing_val| {
                 if (getStringDataCtx(existing_val, ctx)) |existing_str| {
-                    const combined = try ctx.allocator.print("{s}, {s}", .{ existing_str, value });
-                    defer ctx.allocator.free(combined);
+                    const ra = ctx.requestAllocator();
+                    const combined = try ra.print("{s}, {s}", .{ existing_str, value });
+                    defer ra.free(combined);
                     break :blk try ctx.createString(combined);
                 }
             }
@@ -214,8 +217,9 @@ pub fn copyHeadersIntoObject(ctx: *zq.Context, src_val: zq.JSValue, dst_obj: *zq
 
     const pool = ctx.hidden_class_pool orelse return error.NoHiddenClassPool;
     const src_obj = src_val.toPtr(zq.JSObject);
-    const keys = try src_obj.getOwnEnumerableKeys(ctx.allocator, pool);
-    defer ctx.allocator.free(keys);
+    const ra = ctx.requestAllocator();
+    const keys = try src_obj.getOwnEnumerableKeys(ra, pool);
+    defer ra.free(keys);
 
     for (keys) |key_atom| {
         const key_name = ctx.atoms.getName(key_atom) orelse continue;
