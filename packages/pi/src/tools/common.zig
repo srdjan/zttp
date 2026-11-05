@@ -1126,7 +1126,7 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
         }
     }.lessThan);
 
-    const floor: usize = 183;
+    const floor: usize = 184;
     if (cases.items.len < floor) {
         std.debug.print("R7c census: found {d} corpus cases, the floor is {d}\n", .{ cases.items.len, floor });
         return error.CorpusBelowFloor;
@@ -1267,14 +1267,14 @@ test "R7c census: tool diagnostics equal production over tests/corpus" {
         std.debug.print("{s}", .{differences.items});
         return error.CensusDifference;
     }
-    // Every case reaches the comparison, and 146 of them carry a diagnostic, so
+    // Every case reaches the comparison, and 147 of them carry a diagnostic, so
     // the equality is not over empty lists. A corpus change moves these counts.
     try testing.expectEqual(cases.items.len, compared);
-    try testing.expectEqual(@as(usize, 146), with_diagnostics);
+    try testing.expectEqual(@as(usize, 147), with_diagnostics);
     // Every error carries a plan, and the tiers show where plans come from.
     try testing.expectEqual(@as(usize, 90), error_codes.count());
     try testing.expectEqual(@as(usize, 1), tier_result);
     try testing.expectEqual(@as(usize, 18), tier_intent);
-    try testing.expectEqual(@as(usize, 127), tier_help);
+    try testing.expectEqual(@as(usize, 128), tier_help);
     try testing.expectEqual(@as(usize, 15), tier_other);
 }

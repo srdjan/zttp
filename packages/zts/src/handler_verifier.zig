@@ -401,6 +401,7 @@ fn lookupTrackedFunction(module_specifier: []const u8, name: []const u8) ?Functi
 
 const bindingKey = @import("binding_key.zig").packBindingKey;
 const findHandlerFunction = @import("handler_function.zig").findHandlerFunction;
+const isMutatingArrayMethod = @import("mutating_methods.zig").isMutatingArrayMethod;
 
 /// One change to a checked flag, kept so the enclosing block can restore the
 /// value the flag had before the change.
@@ -1217,6 +1218,8 @@ pub const HandlerVerifier = struct {
             .call => {
                 const call = self.ir_view.getCall(node) orelse return;
                 self.walkExprForRefs(call.callee);
+                // Check 7: a mutating array method writes through its receiver
+                self.checkModuleScopeMutationCall(node);
                 var i: u8 = 0;
                 while (i < call.args_count) : (i += 1) {
                     const arg_idx = self.ir_view.getListIndex(call.args_start, i);
@@ -2419,14 +2422,63 @@ pub const HandlerVerifier = struct {
             else => return false,
         };
 
-        const binding = self.bindingOf(base) orelse return false;
         // Module-scope bindings have a scope_id lower than the handler's. A builtin
         // such as Math is an undeclared global: a write to the name itself is not
         // state, a write through it changes an object every request shares.
-        return if (base == target)
-            binding.scope_id < handler_scope and binding.kind != .undeclared_global
-        else
-            binding.scope_id < handler_scope or binding.kind == .undeclared_global or self.isSharedAlias(binding);
+        if (base == target) {
+            const binding = self.bindingOf(base) orelse return false;
+            return binding.scope_id < handler_scope and binding.kind != .undeclared_global;
+        }
+        return self.objectIsShared(base);
+    }
+
+    /// True when the object that `base` names is shared between requests: a
+    /// module-scope binding, an undeclared global, or an alias of one.
+    fn objectIsShared(self: *const HandlerVerifier, base: NodeIndex) bool {
+        const handler_scope = self.handler_scope_id orelse return false;
+        const binding = self.bindingOf(base) orelse return false;
+        return binding.scope_id < handler_scope or binding.kind == .undeclared_global or self.isSharedAlias(binding);
+    }
+
+    /// True when `call_node` calls a mutating array method on a shared object:
+    /// `seen.push(1)`, `store.items.push(1)`, or `alias.push(1)`. The call
+    /// writes through its receiver exactly as `seen[0] = 1` does, so the
+    /// receiver's root binding decides, by the same rule as a member write.
+    /// A receiver that is not a chain of accesses on a binding, such as
+    /// `getStore().items.push(1)` or an array literal, names nothing to test.
+    fn callMutatesSharedState(self: *const HandlerVerifier, call_node: NodeIndex) bool {
+        const call = self.ir_view.getCall(call_node) orelse return false;
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return false;
+        if (callee_tag != .member_access and callee_tag != .optional_chain) return false;
+        const member = self.ir_view.getMember(call.callee) orelse return false;
+        const method = self.resolveAtomName(member.property) orelse return false;
+        if (!isMutatingArrayMethod(method)) return false;
+        const base = self.memberBase(member.object) orelse return false;
+        return self.objectIsShared(base);
+    }
+
+    fn checkModuleScopeMutationCall(self: *HandlerVerifier, call_node: NodeIndex) void {
+        if (!self.callMutatesSharedState(call_node)) return;
+        self.has_module_mutation = true;
+        self.addDiagnostic(.{
+            .severity = .err,
+            .kind = .module_scope_mutation,
+            .node = call_node,
+            .message = "handler mutates module-scope variable (breaks cross-request isolation)",
+            .help = "copy the array into a local before the call, or move state to zttp:cache",
+        });
+    }
+
+    fn checkHelperCall(self: *HandlerVerifier, call_node: NodeIndex) void {
+        if (!self.callMutatesSharedState(call_node)) return;
+        self.has_module_mutation = true;
+        self.addDiagnostic(.{
+            .severity = .warning,
+            .kind = .module_scope_mutation,
+            .node = call_node,
+            .message = "helper function mutates module-scope variable (breaks cross-request isolation)",
+            .help = "copy the array into a local before the call, or move the state to zttp:cache",
+        });
     }
 
     /// The deepest node the helper sweep reads before it gives up. A program
@@ -2508,6 +2560,10 @@ pub const HandlerVerifier = struct {
                 if (self.ir_view.getVarDecl(node)) |decl| {
                     if (decl.init != null_node) self.recordSharedAlias(decl);
                 }
+                self.sweepHelperChildren(node, depth);
+            },
+            .call => {
+                self.checkHelperCall(node);
                 self.sweepHelperChildren(node, depth);
             },
             // exhaustive: every other node tests nothing itself and descends
@@ -2829,6 +2885,20 @@ test "a member or index write through a builtin or module-scope binding breaks s
         .{ .source = "function handler(req) { const o = { a: \"\" }; o.a = \"x\"; return Response.text(\"ok\"); }", .mutations = 0 },
         .{ .source = "function handler(req) { req.x = 1; return Response.text(\"ok\"); }", .mutations = 0 },
         .{ .source = "const store = { a: \"\" };\nfunction handler(req) { const s = { a: store.a }; s.a = \"x\"; return Response.text(\"ok\"); }", .mutations = 0 },
+        .{ .source = "const seen = [];\nfunction handler(req) { seen.push(1); return Response.text(\"ok\"); }", .mutations = 1 },
+        .{ .source = "const seen = [];\nfunction handler(req) { seen.unshift(1); return Response.text(\"ok\"); }", .mutations = 1 },
+        .{ .source = "const seen = [];\nfunction handler(req) { seen.pop(); return Response.text(\"ok\"); }", .mutations = 1 },
+        .{ .source = "const seen = [];\nfunction handler(req) { seen.shift(); return Response.text(\"ok\"); }", .mutations = 1 },
+        .{ .source = "const seen = [];\nfunction handler(req) { seen.splice(0, 1); return Response.text(\"ok\"); }", .mutations = 1 },
+        .{ .source = "const seen = [];\nfunction handler(req) { const a = seen; a.push(1); return Response.text(\"ok\"); }", .mutations = 1 },
+        .{ .source = "const store = { items: [] };\nfunction handler(req) { store.items.push(1); return Response.text(\"ok\"); }", .mutations = 1 },
+        .{ .source = "const seen = [];\nfunction add() { seen.push(1); return seen.length; }\nfunction handler(req) { return Response.text(String(add())); }", .mutations = 1 },
+        .{ .source = "const seen = [];\nfunction handler(req) { const f = () => { seen.push(1); }; f(); return Response.text(\"ok\"); }", .mutations = 1 },
+        .{ .source = "function handler(req) { const xs = []; xs.push(1); return Response.text(\"ok\"); }", .mutations = 0 },
+        .{ .source = "function handler(req) { const xs = [1]; const ys = xs; ys.push(2); return Response.text(\"ok\"); }", .mutations = 0 },
+        .{ .source = "const seen = [1];\nfunction handler(req) { const xs = [...seen]; xs.push(2); return Response.text(\"ok\"); }", .mutations = 0 },
+        .{ .source = "const seen = [1];\nfunction handler(req) { return Response.text(String(seen.length)); }", .mutations = 0 },
+        .{ .source = "const seen = [];\nseen.push(1);\nfunction handler(req) { return Response.text(String(seen.length)); }", .mutations = 0 },
     };
     for (cases) |case| {
         const counts = try routeVerifierCounts(case.source);

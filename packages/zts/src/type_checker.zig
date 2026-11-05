@@ -22,6 +22,7 @@ const diagnostic_projection = @import("diagnostic_projection.zig");
 const ir = @import("zts-engine").parser.ir;
 const ScopeAnalyzer = @import("zts-engine").parser.ScopeAnalyzer;
 const json_utils = @import("zts-base").json_utils;
+const isMutatingArrayMethod = @import("mutating_methods.zig").isMutatingArrayMethod;
 
 /// Help for a ZTS200 or ZTS203 whose source type has an absent case (A3, Decision 40).
 const undefined_source_help_text = "the value may be undefined: check it first, or use `?? fallback`";
@@ -7957,15 +7958,6 @@ pub const TypeChecker = struct {
         });
     }
 
-    /// The array methods that write through their receiver.
-    ///
-    /// Closed against what the engine implements rather than against the
-    /// JavaScript surface: `sort`, `reverse`, `fill`, and `copyWithin` mutate
-    /// too and are not admitted, so listing them here would describe a call
-    /// that cannot be written. `concat` and `slice` return a new array and are
-    /// deliberately absent.
-    const mutating_array_methods = [_][]const u8{ "push", "pop", "shift", "unshift", "splice" };
-
     /// Refuse a mutating method call on a `readonly` array.
     ///
     /// `readonly` was enforced only through assignability, which decides what
@@ -7982,11 +7974,7 @@ pub const TypeChecker = struct {
         const member = self.ir_view.getMember(call.callee) orelse return;
         const method = self.resolveAtomName(member.property) orelse return;
 
-        var mutates = false;
-        for (mutating_array_methods) |name| {
-            if (std.mem.eql(u8, method, name)) mutates = true;
-        }
-        if (!mutates) return;
+        if (!isMutatingArrayMethod(method)) return;
 
         const receiver = self.inferType(member.object);
         if (receiver == null_type_idx) return;
@@ -8260,11 +8248,7 @@ pub const TypeChecker = struct {
         if (callee_tag != .member_access and callee_tag != .optional_chain) return;
         const member = self.ir_view.getMember(call.callee) orelse return;
         const method = self.resolveAtomName(member.property) orelse return;
-        var mutates = false;
-        for (mutating_array_methods) |name| {
-            if (std.mem.eql(u8, method, name)) mutates = true;
-        }
-        if (!mutates) return;
+        if (!isMutatingArrayMethod(method)) return;
 
         // A fresh array literal has no other holder, so a change to it breaks no type.
         if (self.ir_view.getTag(member.object) == .array_literal) return;
