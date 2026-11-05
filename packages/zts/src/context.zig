@@ -174,6 +174,10 @@ pub const Context = struct {
     /// Whether to enforce arena escape checking (default true for HTTP handlers)
     /// Set to false for scripts/benchmarks where arena lifetime matches script lifetime
     enforce_arena_escape: bool = true,
+    /// True while the handler runtime executes one request. A runtime that
+    /// keeps `hybrid` set at handler load must not put load-time function
+    /// objects in the request arena, so `inRequest` needs both signals.
+    request_scope: bool = false,
     /// Set when `hole()` runs. An unfilled expression is not a fault in the
     /// program, it is an unfinished program being executed, so the runtime maps
     /// it to 501 Not Implemented rather than the 500 a real fault produces.
@@ -537,6 +541,27 @@ pub const Context = struct {
             return h.arena.contains(ptr);
         }
         return false;
+    }
+
+    /// True while a request runs on a hybrid runtime. Request-time function
+    /// objects and upvalues live in the request arena only in this state.
+    pub fn inRequest(self: *const Context) bool {
+        return self.request_scope and self.hybrid != null;
+    }
+
+    /// Write `val` into a captured variable. Inside a request, a request-arena
+    /// value must not reach an upvalue box outside the arena: the box outlives
+    /// the reset and would hold a dangling pointer. Fails closed like
+    /// `setPropertyChecked`.
+    pub fn setUpvalueChecked(self: *Context, uv: *object.Upvalue, val: value.JSValue) !void {
+        if (self.enforce_arena_escape and self.inRequest() and self.isEphemeralValue(val)) {
+            const h = self.hybrid orelse return error.ArenaObjectEscape;
+            if (!h.arena.contains(@ptrCast(uv))) {
+                self.throwException(value.JSValue.exception_val);
+                return error.ArenaObjectEscape;
+            }
+        }
+        uv.set(val);
     }
 
     /// Set property with arena escape protection (reject-on-escape)

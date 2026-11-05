@@ -1599,6 +1599,9 @@ pub const JSObject = extern struct {
     }
 
     fn destroyFunctionData(self: *JSObject, allocator: std.mem.Allocator, seen: ?*FunctionBytecodeSeen) void {
+        // A request-arena function keeps its data and upvalue array in the
+        // arena, and its bytecode belongs to an enclosing constant pool.
+        if (self.flags.is_arena or self.arena_ptr != null) return;
         // Free function data if this is a function
         if (self.class_id == .function and self.flags.is_callable) {
             const is_bytecode_val = self.inline_slots[Slots.FUNC_IS_BYTECODE];
@@ -1753,6 +1756,36 @@ pub const JSObject = extern struct {
         return obj;
     }
 
+    /// Create a bytecode function object in the request arena. The function
+    /// data lives in the arena too, so the object is dead after the arena
+    /// resets and `destroyFunctionData` leaves it alone.
+    pub fn createBytecodeFunctionWithArena(arena: *arena_mod.Arena, class_idx: HiddenClassIndex, bytecode_ptr: *const @import("bytecode.zig").FunctionBytecode, name: Atom) ?*JSObject {
+        const data = arena.create(BytecodeFunctionData) orelse return null;
+        data.* = .{
+            .bytecode = bytecode_ptr,
+            .name = name,
+        };
+        const obj = arena.create(JSObject) orelse return null;
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
+            .hidden_class_idx = class_idx,
+            .prototype = null,
+            .class_id = .function,
+            .flags = .{
+                .is_callable = true,
+                .is_generator = bytecode_ptr.flags.is_generator,
+                .is_arena = true,
+            },
+            .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
+            .overflow_slots = null,
+            .overflow_capacity = 0,
+            .arena_ptr = arena,
+        };
+        obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromExternPtr(data);
+        obj.inline_slots[Slots.FUNC_IS_BYTECODE] = value.JSValue.true_val;
+        return obj;
+    }
+
     /// Get bytecode function data (if this is a bytecode function)
     pub fn getBytecodeFunctionData(self: *const JSObject) ?*BytecodeFunctionData {
         if (self.class_id != .function or !self.flags.is_callable) {
@@ -1807,6 +1840,44 @@ pub const JSObject = extern struct {
             .arena_ptr = null,
         };
         // Store closure data and markers
+        obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromExternPtr(data);
+        obj.inline_slots[Slots.FUNC_IS_BYTECODE] = value.JSValue.true_val;
+        obj.inline_slots[Slots.FUNC_IS_CLOSURE] = value.JSValue.true_val;
+        return obj;
+    }
+
+    /// Create a closure object in the request arena. `upvalues` must come
+    /// from the same arena. The object, its data, and its upvalue array die
+    /// at the arena reset, and `destroyFunctionData` leaves them alone.
+    pub fn createClosureWithArena(
+        arena: *arena_mod.Arena,
+        class_idx: HiddenClassIndex,
+        bytecode_ptr: *const @import("bytecode.zig").FunctionBytecode,
+        name: Atom,
+        upvalues: []*Upvalue,
+    ) ?*JSObject {
+        const data = arena.create(ClosureData) orelse return null;
+        data.* = .{
+            .bytecode = bytecode_ptr,
+            .name = name,
+            .upvalues = upvalues,
+        };
+        const obj = arena.create(JSObject) orelse return null;
+        obj.* = .{
+            .header = heap.MemBlockHeader.init(.object, @sizeOf(JSObject)),
+            .hidden_class_idx = class_idx,
+            .prototype = null,
+            .class_id = .function,
+            .flags = .{
+                .is_callable = true,
+                .is_generator = bytecode_ptr.flags.is_generator,
+                .is_arena = true,
+            },
+            .inline_slots = @as([INLINE_SLOT_COUNT]value.JSValue, @splat(value.JSValue.undefined_val)),
+            .overflow_slots = null,
+            .overflow_capacity = 0,
+            .arena_ptr = arena,
+        };
         obj.inline_slots[Slots.FUNC_DATA] = value.JSValue.fromExternPtr(data);
         obj.inline_slots[Slots.FUNC_IS_BYTECODE] = value.JSValue.true_val;
         obj.inline_slots[Slots.FUNC_IS_CLOSURE] = value.JSValue.true_val;

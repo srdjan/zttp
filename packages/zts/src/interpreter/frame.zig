@@ -40,6 +40,17 @@ pub fn popState(self: *Interpreter) void {
     self.ctx.exception = state.exception;
 }
 
+/// An upvalue box for a closure that this call creates. Inside a request the
+/// box lives in the request arena, like the closure that owns it. Elsewhere it
+/// comes from the lifetime pool.
+pub fn acquireUpvalue(self: *Interpreter) !*object.Upvalue {
+    if (self.ctx.inRequest()) {
+        const h = self.ctx.hybrid orelse return error.OutOfMemory;
+        return h.arena.create(object.Upvalue) orelse error.OutOfMemory;
+    }
+    return self.ctx.gc_state.acquireUpvalue();
+}
+
 pub fn captureUpvalue(self: *Interpreter, local_idx: u8) !*object.Upvalue {
     const local_ptr = self.ctx.getLocalPtr(local_idx);
 
@@ -64,7 +75,7 @@ pub fn captureUpvalue(self: *Interpreter, local_idx: u8) !*object.Upvalue {
         current = uv.next;
     }
 
-    const new_uv = try self.ctx.gc_state.acquireUpvalue();
+    const new_uv = try acquireUpvalue(self);
     new_uv.* = object.Upvalue.init(local_ptr);
 
     if (prev) |p| {

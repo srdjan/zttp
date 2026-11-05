@@ -1223,6 +1223,11 @@ pub const HandlerInstance = struct {
 
     fn executeHandlerFrame(self: *Self, request: HttpRequestView, request_id: u64, borrow_body: bool) !HttpResponse {
         self.last_request_body_len = if (request.body) |b| b.len else 0;
+        // A request starts with no open upvalue. A box that an earlier request
+        // left in the list lived in that request's arena and is gone.
+        self.interpreter.open_upvalues = null;
+        self.ctx.request_scope = true;
+        defer self.ctx.request_scope = false;
         if (self.cached_handler_obj == null) {
             try self.refreshHandlerCache();
         }

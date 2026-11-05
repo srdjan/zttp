@@ -1699,6 +1699,62 @@ const lifetime_guard_cases = [_]LifetimeGuardCase{
         .url = "/",
         .expected_body = "6000",
     },
+    .{
+        .name = "map with an arrow callback in a loop",
+        .handler =
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  for (const i of range(2000)) {
+        \\    const r = [1, 2, 3].map((x) => x + 1);
+        \\    n = n + r.length;
+        \\  }
+        \\  return Response.text(String(n));
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "6000",
+    },
+    .{
+        .name = "map with a callback that captures a request value in a loop",
+        .handler =
+        \\function handler(req) {
+        \\  const base = req.url;
+        \\  let n = 0;
+        \\  let last = "";
+        \\  for (const i of range(2000)) {
+        \\    const r = [1, 2].map((x) => [base, String(x)].join(""));
+        \\    n = n + r.length;
+        \\    last = r[1];
+        \\  }
+        \\  return Response.text([last, String(n)].join(""));
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "/24000",
+    },
+    .{
+        .name = "callback writes a request string to a captured request variable in a loop",
+        .handler =
+        \\function handler(req) {
+        \\  const base = req.url;
+        \\  let last = "";
+        \\  for (const i of range(2000)) {
+        \\    [1, 2].forEach((x) => {
+        \\      last = [base, String(x)].join("");
+        \\    });
+        \\  }
+        \\  return Response.text(last);
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "/2",
+    },
 };
 
 /// Count of lifetime-arena allocations on the pool's only runtime. A runtime
@@ -1857,6 +1913,33 @@ const escape_cases = [_]EscapeCase{
         \\  const s = "ab";
         \\  store.push(s.toUpperCase());
         \\  return Response.text(store[0]);
+        \\}
+        ,
+    },
+    .{
+        .name = "request-time arrow stored in a module-level object",
+        .handler =
+        \\const store = { f: null };
+        \\function handler(req) {
+        \\  store.f = (x) => x + 1;
+        \\  return Response.text("ok");
+        \\}
+        ,
+    },
+    .{
+        .name = "request string written to a variable captured by a load-time closure",
+        .handler =
+        \\function makeStore() {
+        \\  let last = "start";
+        \\  return (v) => {
+        \\    const prev = last;
+        \\    last = v;
+        \\    return prev;
+        \\  };
+        \\}
+        \\const remember = makeStore();
+        \\function handler(req) {
+        \\  return Response.text(remember(["k", req.url].join("")));
         \\}
         ,
     },

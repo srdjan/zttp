@@ -1266,6 +1266,19 @@ pub const Interpreter = struct {
                 if (!bc_val.isExternPtr()) return error.TypeError;
                 const bc_ptr = bc_val.toExternPtr(bytecode.FunctionBytecode);
                 const root_class_idx = self.ctx.root_class_idx;
+                if (self.ctx.inRequest()) {
+                    // A request-time function is an arena object. It is not
+                    // tracked: context teardown must not free arena memory.
+                    const h = self.ctx.hybrid orelse return error.OutOfMemory;
+                    const func_obj = object.JSObject.createBytecodeFunctionWithArena(
+                        h.arena,
+                        root_class_idx,
+                        bc_ptr,
+                        @fromBackingInt(@intCast(bc_ptr.name_atom)),
+                    ) orelse return error.OutOfMemory;
+                    try self.ctx.push(func_obj.toValue());
+                    continue :sw @fromBackingInt(@intCast(self.pc[0]));
+                }
                 const func_obj = try object.JSObject.createBytecodeFunction(
                     self.ctx.allocator,
                     root_class_idx,
@@ -1292,8 +1305,14 @@ pub const Interpreter = struct {
                     std.debug.assert(upvalue_count == bc_ptr.upvalue_info.len);
                 }
 
-                const upvalues = try self.ctx.allocator.alloc(*object.Upvalue, upvalue_count);
-                errdefer self.ctx.allocator.free(upvalues);
+                // Inside a request the closure, its upvalue array, and the
+                // upvalue boxes it creates all live in the request arena.
+                const in_request = self.ctx.inRequest();
+                const upvalues: []*object.Upvalue = if (in_request) blk: {
+                    const h = self.ctx.hybrid orelse return error.OutOfMemory;
+                    break :blk h.arena.allocSlice(*object.Upvalue, upvalue_count) orelse return error.OutOfMemory;
+                } else try self.ctx.allocator.alloc(*object.Upvalue, upvalue_count);
+                errdefer if (!in_request) self.ctx.allocator.free(upvalues);
 
                 for (0..upvalue_count) |i| {
                     const info = bc_ptr.upvalue_info[i];
@@ -1309,7 +1328,7 @@ pub const Interpreter = struct {
                             }
                             upvalues[i] = closure.upvalues[info.index];
                         } else {
-                            const uv = try self.ctx.gc_state.acquireUpvalue();
+                            const uv = try frame.acquireUpvalue(self);
                             uv.* = .{
                                 .location = .{ .closed = value.JSValue.undefined_val },
                                 .next = null,
@@ -1320,6 +1339,18 @@ pub const Interpreter = struct {
                 }
 
                 const root_class_idx = self.ctx.root_class_idx;
+                if (in_request) {
+                    const h = self.ctx.hybrid orelse return error.OutOfMemory;
+                    const closure_obj = object.JSObject.createClosureWithArena(
+                        h.arena,
+                        root_class_idx,
+                        bc_ptr,
+                        @fromBackingInt(@intCast(bc_ptr.name_atom)),
+                        upvalues,
+                    ) orelse return error.OutOfMemory;
+                    try self.ctx.push(closure_obj.toValue());
+                    continue :sw @fromBackingInt(@intCast(self.pc[0]));
+                }
                 const closure_obj = try object.JSObject.createClosure(
                     self.ctx.allocator,
                     root_class_idx,
@@ -1354,7 +1385,7 @@ pub const Interpreter = struct {
                 const val = self.ctx.pop();
                 if (self.current_closure) |closure| {
                     if (idx < closure.upvalues.len) {
-                        closure.upvalues[idx].set(val);
+                        try self.ctx.setUpvalueChecked(closure.upvalues[idx], val);
                     }
                 }
                 continue :sw @fromBackingInt(@intCast(self.pc[0]));
