@@ -15,6 +15,7 @@ The owner chose Decision 1 option (a) on 2026-11-04: route request-time allocati
 | G5 | Complete: `4069d81e` |
 | G6 | Complete: `09179721` and `fe8ad11c`. The census found that object spread built its key list on the lifetime arena (`09179721`). Three example handlers are not run, each with a reason in `packages/runtime/src/example_census_test.zig` |
 | G7 | Complete. Results are in the section "G7 results". The headline shape (`cacheSet` of a joined string) is bounded but not flat: finding F19 |
+| F19 | Complete: `2b45957e`. Overflow now comes from 256 KiB blocks that reset unmaps; the headline shape stays at 5.7 to 7.3 MB footprint over 100 requests |
 | G8 | Complete: `04de59d5`. G7 found `stringConcat` 14.7% slower; `join` now builds long text in a freeing scratch buffer |
 
 ## G7 results
