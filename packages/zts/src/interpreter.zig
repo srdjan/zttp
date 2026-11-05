@@ -1466,8 +1466,9 @@ pub const Interpreter = struct {
                     const target = object.JSObject.fromValue(target_val);
                     const source = object.JSObject.fromValue(source_val);
                     const pool = self.ctx.hidden_class_pool orelse continue :sw @fromBackingInt(@intCast(self.pc[0]));
-                    const keys = try source.getOwnEnumerableKeys(self.ctx.allocator, pool);
-                    defer self.ctx.allocator.free(keys);
+                    const ra = self.ctx.requestAllocator();
+                    const keys = try source.getOwnEnumerableKeys(ra, pool);
+                    defer ra.free(keys);
 
                     for (keys) |key| {
                         const prop_val = source.getProperty(pool, key) orelse value.JSValue.undefined_val;

@@ -2123,6 +2123,20 @@ const lifetime_guard_cases = [_]LifetimeGuardCase{
         .url = "/",
         .expected_body = "ok",
     },
+    .{
+        .name = "object spread of a literal into a new object",
+        .handler =
+        \\function handler(req) {
+        \\  const base = { a: 1, b: 2 };
+        \\  const merged = { ...base, c: 3 };
+        \\  return Response.json({ merged: merged });
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "{\"merged\":{\"a\":1,\"b\":2,\"c\":3}}",
+    },
 };
 
 /// Count of lifetime-arena allocations on the pool's only runtime. A runtime
