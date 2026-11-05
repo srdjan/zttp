@@ -7,8 +7,8 @@ Finding F18 (2026-11-04 review): `zts check` reports five properties PROVEN for 
 | Unit | Status |
 |---|---|
 | H1 | Complete: `4584ecca`. A mutating array method on a module binding, an alias, or a member chain raises ZTS310, in the handler, nested arrow functions, and helpers. The list of mutating methods is shared in `packages/zts/src/mutating_methods.zig` |
-| H2 | In progress |
-| H3 | Not started |
+| H2 | Complete: `62ebb7cd`. When the verifier ran and found a shared-state write, `pure`, `stateless`, `read_only`, `retry_safe`, `deterministic`, and `idempotent` are not proven (`clearSharedStateProperties` in `packages/tools/src/precompile_check_run.zig`). A build without verification keeps them |
+| H3 | Complete: `docs/verification.md` section 7 and the residual gaps below. The website makes no claim about module state |
 
 ## Reproduction
 
@@ -70,3 +70,13 @@ Gates for each unit, unfiltered: `zig build test-zts`, `test-zts-cli`, `test-con
 ## Decision 5
 
 Option (a), recommended: run H1 to H3, commit each on local `main`, and do not push. Option (b): H1 only, which closes the method shapes but leaves the other four properties PROVEN beside a ZTS310 finding. Option (c): make module bindings readonly in function bodies instead. This also closes the parameter case, but it can refuse existing handlers and move the convergence numbers.
+
+## Residual gaps
+
+Each gap was observed on `main` after H2 on 2026-11-05.
+
+1. A module array passed to a helper that changes its parameter (`addTo(seen)` with `xs.push(1)` inside) is not detected. `state_isolated` and the other properties stay PROVEN. Closing it needs a per-function summary of changed parameters, or readonly module bindings in function bodies (Decision 5 option (c)).
+2. A receiver that is a call result, such as `getStore().items.push(1)`, is not tested. The member-write rule has the same limit.
+3. A helper capsule is discharged from the effect row only. A helper `Proof<number, "pure" | "read_only">` that pushes onto a module array still passes: `zts check` exits 2 with one ZTS310 warning. Closing it needs a per-function shared-state fact in the capsule facts (`CapsuleFacts` in `packages/zts/src/spec_discharge.zig`).
+4. When a shared-state write removes `deterministic`, `read_only`, or `retry_safe`, the ZTS500 suggestion still names the effect-row causes: "remove Date.now(), Math.random(), and performance.now()" or cache and SQL writes. The spec diagnostic carries no shared-state cause.
+5. The multi-module compile path with verification has no test of its own for the new rule. The existing graph tests and the full gate cover it.

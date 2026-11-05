@@ -11,7 +11,7 @@ The full review report is outside the repository. The owner approved the recomme
 | F7 | Complete: `d7a62413` |
 | F3 | Complete: `02659dfa` |
 | F2 | Complete: units G1 to G8, `e1c01404` to `04de59d5`. Results are in [the F2 plan](2026-11-04-f2-request-memory-plan.md). The headline `cacheSet` shape is bounded but not flat: finding F19 |
-| F18 | Owner chose Decision 3 option (a) on 2026-11-05. Research complete; owner chose Decision 5 option (a): [the F18 plan](2026-11-05-f18-module-state-proofs-plan.md), H1 to H3 |
+| F18 | Owner chose Decision 3 option (a) on 2026-11-05. Complete: H1 `4584ecca`, H2 `62ebb7cd`, H3 documentation. Five residual gaps are in [the F18 plan](2026-11-05-f18-module-state-proofs-plan.md) |
 | F19 | Complete: `2b45957e` (owner chose Decision 4 option (a) on 2026-11-05). Request-arena overflow comes from 256 KiB blocks that reset unmaps. t7 stays at 5.7 to 7.3 MB footprint over 100 requests |
 
 `bash scripts/verify.sh` passed on `main` at `02659dfa`, `4a4274b9`, and `b2b0106b`.
@@ -56,7 +56,7 @@ These findings stay open. Each was reproduced or traced at `e5073153`.
 | F15 | Low | `cacheStats()` without a namespace sums denied namespaces | `packages/modules/src/data/cache.zig#cacheStatsImpl` |
 | F16 | Low | The plain runtime leaks four allocations on its no-handler error exit | not located |
 | F17 | High | A request value stored into module state through a path with no escape check leaves a dangling pointer, and a later request reads another request's data. Found during F2 on 2026-11-04. `push` and the SDK array push are fixed in `0a70385a`; a store into a captured variable (`put_upvalue`) is fixed in `927fa36a` | `arrayPush` in `packages/zts/src/builtins/array.zig`, `put_upvalue` in `packages/zts/src/interpreter.zig` |
-| F18 | High | `zts check` reports `deterministic`, `idempotent`, `retry_safe`, `read_only`, and `state_isolated` PROVEN for a handler that pushes onto a module-level array and returns its length; five identical requests returned 2 to 6. Observed at `e5073153`. Not checked: whether the deploy or certificate path refuses it | the property proofs for module-level mutable state |
+| F18 | High | Fixed in `4584ecca` and `62ebb7cd`, with five residual gaps in the F18 plan. Before the fix: `zts check` reported `deterministic`, `idempotent`, `retry_safe`, `read_only`, and `state_isolated` PROVEN for a handler that pushes onto a module-level array and returns its length; five identical requests returned 2 to 6. Observed at `e5073153`. Not checked: whether the deploy or certificate path refuses it | the property proofs for module-level mutable state |
 | F19 | Medium | Fixed in `2b45957e`. Before the fix: a request that calls `cacheSet` 50,000 times with a joined string grows the server's physical footprint by about 15 MB per request for about 27 requests. The footprint then holds at 418 MB through request 100 (`04de59d5`, ReleaseFast, one runtime). The same loop without `cacheSet`, and `cacheSet` of a constant without `join`, each stay flat. Of the 418 MB, 413 MB is in anonymous mappings and the malloc zone holds 8 MB. Probable cause: freed request-arena overflow blocks stay on `std.heap.smp_allocator` free lists that later requests do not reuse. Check: allocate overflow in chunks above the largest `smp_allocator` size class, so that reset unmaps them, and measure again | `packages/zts/src/arena.zig#Arena` |
 
 `stringRepeat` returns `undefined` above 1 MiB, although its declared result is `string`. Unit F3 does not change it.

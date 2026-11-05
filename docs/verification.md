@@ -208,7 +208,7 @@ A Dict member or index read is refused as ZTS201: use `dictGet`. The `.value` of
 
 The verifier detects module-scope variable mutations inside the handler body. Since handlers are re-invoked per request with fresh scope, mutating a module-level `let` binding would leak state between requests.
 
-The check walks all assignment nodes in the handler body. If the target is an identifier whose binding has a scope_id less than the handler's scope_id (meaning it's declared at module level), the verifier emits a `module_scope_mutation` error.
+The check walks all assignment nodes in the handler body, and all calls to a mutating array method: `push`, `pop`, `shift`, `unshift`, and `splice`. If the target is an identifier whose binding has a scope_id less than the handler's scope_id (meaning it's declared at module level), the verifier emits a `module_scope_mutation` error.
 
 ```typescript
 // ERROR: handler mutates module-scope variable
@@ -224,13 +224,17 @@ Fix: use `const` for module-level declarations, or move mutable state to `zttp:c
 
 A member or index write gets the same error when its base is a builtin such as `Math` or `parseInt`, a module-scope binding, or a local initialized from one of them. The check follows one level of alias. It does not follow an alias through a call or a member chain.
 
-The verifier also visits every other function of the program: a helper declared before or after the handler, a top-level arrow, a function in an object literal, and a function nested in any of them. A write in such a function to a module-scope binding, a builtin object, or an alias of one sets `state_isolated` to false. The write is a `module_scope_mutation` warning that names a helper. It is not an error, so a capsule that does not demand `state_isolated` still compiles. A capsule that demands it, and a handler with no capsule, stop at ZTS500.
+A mutating array method writes through its receiver, so the same rule applies to the receiver: `seen.push(1)`, `store.items.push(1)`, and `const a = seen; a.push(1)` all get the error. A copy such as `const xs = [...seen]; xs.push(1)` does not. A receiver that is a call result, such as `getStore().items.push(1)`, is not tested.
 
-The helper sweep does not follow calls. A helper that only module initialization calls therefore also clears `state_isolated`. That result is conservative. Code at the top level outside a function is module initialization and is not tested. A write through a function parameter, such as `p.hits = 1` where `p` is an argument, is not modeled.
+The verifier also visits every other function of the program: a helper declared before or after the handler, a top-level arrow, a function in an object literal, and a function nested in any of them. A write or a mutating array method call in such a function, on a module-scope binding, a builtin object, or an alias of one, sets `state_isolated` to false. The write is a `module_scope_mutation` warning that names a helper. It is not an error, so a capsule that does not demand `state_isolated` still compiles. A capsule that demands it, and a handler with no capsule, stop at ZTS500.
+
+The helper sweep does not follow calls. A helper that only module initialization calls therefore also clears `state_isolated`. That result is conservative. Code at the top level outside a function is module initialization and is not tested. A write through a function parameter, such as `p.hits = 1` or `p.push(1)` where `p` is an argument, is not modeled. So a module array that a handler passes to such a helper is not detected.
 
 The runtime does not freeze builtin objects. A handler with no accepted certificate runs on `.reuse_bounded_by_count`: one runtime serves up to a fixed count of requests. State that such a handler writes, in a module-scope binding or in a builtin object, can cross requests within that count. The check above keeps that handler from proving `state_isolated`, which is the property that allows wider reuse.
 
 The result feeds into `HandlerProperties.state_isolated`. When no module-scope mutations are detected, `state_isolated` is proven true, enabling safe multi-tenant handler sharing. A contract built without `precompile --verify` leaves `state_isolated` false. `false` on any property means unproven, not violated.
+
+A write to shared state also removes six other properties. When the verifier ran and found a module-scope mutation or an unresolved route dispatch, `pure`, `stateless`, `read_only`, `retry_safe`, `deterministic`, and `idempotent` are not proven. A response can then depend on state that earlier requests wrote. The virtual-module effect row does not see a write to module state, so `clearSharedStateProperties` in `packages/tools/src/precompile_check_run.zig` applies the verifier fact. A contract built without verification keeps these properties. A helper capsule, such as `Proof<number, "read_only">` on a helper that pushes onto a module array, is still discharged from the effect row alone.
 
 ### 8. Author-Declared Proof Discharge
 
