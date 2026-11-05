@@ -11,8 +11,9 @@ The owner chose Decision 1 option (a) on 2026-11-04: route request-time allocati
 | G1 | Complete: `e1c01404`. Also moved response construction on the pooled path to `backing`, because the guard found one response header list per request |
 | G2 | Complete: `a33a9c81`. Also fixed in `0a70385a`: `push` and the SDK array push now refuse a request value stored into module state (finding F17) |
 | G3 | Complete: `927fa36a`. Request-time closures, upvalue arrays, and upvalue boxes live in the request arena; `put_upvalue` refuses a request value in a box outside the arena (finding F17). `Context.request_scope` marks a running request, because a non-pooled runtime keeps `hybrid` set while it loads the handler |
-| G4 | In progress |
-| G5 to G7 | Not started |
+| G4 | Complete: `54529e10`. Also moved `OutboundIo` on a pooled runtime to `backing`, because the fetch guard found a task record per lookup and connect. Open: trace replay (`jsonToJSValue` in `packages/zts/src/trace.zig`) builds objects on the lifetime allocator for each replayed result; replay only, no unit covers it |
+| G5 | In progress |
+| G6 and G7 | Not started |
 
 ## Cause
 
