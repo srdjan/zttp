@@ -83,6 +83,9 @@ pub const GraphCheck = struct {
     /// A module of the dependencies mutates module state or dispatches an
     /// unresolved route.
     shares_state: bool = false,
+    /// Each ZTS310 finding that the verifier made in a dependency, by flow module
+    /// id, so a flow finding at the same node is not reported twice.
+    reported_writes: std.ArrayList(check_run_mod.WriteSite) = .empty,
     deps: ?contract_mod.DependencyContracts = null,
     dependency_facts: ?contract_mod.DependencyFacts = null,
     reader_adapter: ReaderAdapter = undefined,
@@ -102,6 +105,7 @@ pub const GraphCheck = struct {
 
     pub fn destroy(self: *GraphCheck) void {
         const allocator = self.allocator;
+        self.reported_writes.deinit(allocator);
         if (self.deps) |*deps| deps.deinit(allocator);
         for (self.evidences.items) |*evidence| evidence.deinit();
         self.evidences.deinit(allocator);
@@ -184,6 +188,7 @@ pub const GraphCheck = struct {
                 if (sink.errorTotal() > errors_before) return .refused;
                 return err;
             };
+            defer checks.deinit(allocator);
             if (checks.evidence) |*evidence| {
                 self.evidences.append(allocator, evidence.*) catch |err| {
                     evidence.deinit();
@@ -191,6 +196,9 @@ pub const GraphCheck = struct {
                 };
             }
             if (checks.verify_failed) return .refused;
+            for (checks.mutation_nodes) |node| {
+                try self.reported_writes.append(allocator, .{ .module = @intCast(position + 1), .node = node });
+            }
             if (checks.has_module_mutation or checks.unresolved_route_dispatch) self.shares_state = true;
         }
         return .passed;
@@ -206,6 +214,40 @@ pub const GraphCheck = struct {
         result.verify_errors += sink.verify_errors;
         result.verify_warnings += sink.verify_warnings;
         result.link_errors += sink.link_errors;
+    }
+
+    /// Report a persistent write in a dependency as a ZTS310 warning at the
+    /// write, in the file of the dependency. `site.module` is a flow module id:
+    /// the position of the dependency in execution order plus one.
+    pub fn appendDependencyWrite(self: *GraphCheck, result: *CheckResult, json_mode: bool, site: check_run_mod.WriteSite) !void {
+        const compile_result = &(self.compile_result orelse return error.AnalysisPassIncomplete);
+        if (site.module == 0 or site.module > self.entryIndex()) return error.AnalysisPassIncomplete;
+        const position: usize = site.module - 1;
+        const module = &self.graph.module_list.items[self.graph.execution_order[position]];
+        const parser = &compile_result.parsers[position];
+        const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
+        if (view.getLoc(site.node) == null) return;
+        const diagnostic = check_run_mod.flowWriteDiagnostic(site);
+        result.verify_warnings += 1;
+        if (json_mode) {
+            var sink: precompile.GraphSink = .{
+                .allocator = self.allocator,
+                .diagnostics = &result.json_diagnostics,
+                .json_mode = true,
+            };
+            try sink.appendChecker(.verifier, diagnostic, view, module.path, module.source);
+        } else if (!builtin.is_test) {
+            var diag_view = zts.SourceView.of(module.source);
+            diag_view.name = module.path;
+            diag_view.normalize_positions = true;
+            var output: std.ArrayList(u8) = .empty;
+            defer output.deinit(self.allocator);
+            var output_writer: std.Io.Writer.Allocating = .fromArrayList(self.allocator, &output);
+            const single = [_]zts.VerifierDiagnostic{diagnostic};
+            zts.DiagnosticProjection.writeAll(.verifier, diag_view, &single, view, &output_writer.writer) catch {};
+            output = output_writer.toArrayList();
+            if (output.items.len > 0) debugPrint("{s}", .{output.items});
+        }
     }
 
     /// Append the finding for a graph that failed to build.

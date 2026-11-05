@@ -1,6 +1,6 @@
 # F18 residual gaps: module-state writes the verifier cannot name
 
-The F18 plan (`2026-11-05-f18-module-state-proofs-plan.md`) recorded five residual gaps after H1 to H3. The owner asked for a plan for them on 2026-11-05. This document is that plan. The owner accepted Decision 1 (a), Decision 2 (c), and Decision 3 (a) on 2026-11-05: run U0 to U6, commit each unit on local `main`, and do not push.
+The F18 plan (`2026-11-05-f18-module-state-proofs-plan.md`) recorded five residual gaps after H1 to H3. The owner asked for a plan for them on 2026-11-05. This document is that plan. The owner accepted Decision 1 (a), Decision 2 (c), and Decision 3 (a) on 2026-11-05: run U0 to U6, commit each unit on local `main`, and do not push. The owner accepted Decision 4 (b) on 2026-11-05: U2b runs before the U2 commit, and U2 and U2b commit together.
 
 ## Status
 
@@ -8,7 +8,8 @@ The F18 plan (`2026-11-05-f18-module-state-proofs-plan.md`) recorded five residu
 |---|---|
 | U0 | Complete: baseline below |
 | U1 | Complete: persistent-write events, phase split, union over passes; 18 evaluator tests and 1 facade test |
-| U2 | Not started |
+| U2 | Implemented; commits with U2b after the gates |
+| U2b | Implemented; commits with U2 after the gates |
 | U3 | Not started |
 | U4 | Not started |
 | U5 | Not started |
@@ -70,6 +71,16 @@ Option (a): add a shared-state bit to the effect row. The bit is set when a func
 
 Option (b): evaluate each capsule function with the flow evaluator, with module state persistent and parameters unknown. This closes every alias shape. A `pure` capsule that writes its own parameter is then refused, which changes what `pure` means. It costs one evaluation per capsule.
 
+## Decision 4: data imports (found during U2)
+
+The flow evaluator follows an import only when the export is a function. `flowExportedFunctionNode` in `packages/zts/src/pipeline.zig` returns no node for `export const LIMIT = 5`, so `flowModulesForGraph` sets `complete` false, and the evaluation records `module_graph_gap`. At bf6ad1c3 such a handler already loses every flow property and `deterministic`, and gets a false ZTS401. Under the U2 rule a cleared evaluation also removes `state_isolated`, `read_only`, `retry_safe`, and `idempotent`, so a handler that compiles today with `Proof<Response, "state_isolated">` fails ZTS500.
+
+Option (b), accepted: U2b follows an `export const` declaration that has an initializer. The evaluator already copies an imported `var_decl` value after the exporting module initializes. A `const` binding never changes, so one copy is exact. The copied value keeps its origins, so a write through it reaches the exporting module's site, and its labels follow it. An `export let` stays a gap, because an import is a live view of a binding that the exporting module can reassign later. A re-export and an export list without a declaration stay gaps.
+
+Option (a): keep the rule. Handlers that import data lose the four extra properties too.
+
+Option (c): ignore `module_graph_gap` for data imports only. The evaluator records the same reason when the module graph could not load at all, so the exception is not sound without new reason codes.
+
 ## Decision 3: execution
 
 Option (a), recommended: run U0 to U6 in order and commit each unit on local `main`. Do not push. Stop after U0 when a corpus handler would lose `state_isolated` without a real write to module state, and report the list.
@@ -83,6 +94,7 @@ Option (b): run U0 only and return the measurements for review.
 | U0 | Measurement, no code change. Record each corpus handler's verdicts for `state_isolated` and the six H2 properties. Count the handlers whose evaluation is `cleared` today, and the factory shape of p9 | `/tmp` only; answers go into this plan | Opus | not applicable |
 | U1 | Persistent-write events in the flow evaluator: the phase split, the union over passes, and a written over-approximation argument for each heap write path. Each event carries the write node, its module, and the activation stack | `packages/zts/src/flow_interp.zig`, `flow_value.zig`, `flow_report.zig`, `flow_checker.zig` | Sonnet | 60 |
 | U2 | The evaluator fact joins `shares_state` on every writer. A finding that the verifier did not make is a ZTS310 warning at the write node in the module that holds it, not at the handler's call | `packages/tools/src/precompile_check_run.zig`, `precompile.zig`, `precompile_graph_check.zig` | Sonnet | 50 |
+| U2b | Decision 4 (b): the flow evaluator follows `export const` data imports; an `export let` stays a gap | `packages/zts/src/pipeline.zig`, `packages/tools/src/precompile_imports.zig`, graph tests in `packages/tools/src/precompile.zig` | Sonnet | 40 |
 | U3 | Decision 2, after U2 | `packages/zts/src/function_specs.zig`, `spec_discharge.zig`, the CHECK pass order | Sonnet | 50 |
 | U4 | The ZTS500 hint names the write to module state and its line when that write removed the property | `packages/zts/src/spec_discharge.zig` and its caller | Sonnet | 40 |
 | U5 | Multi-module tests: a dependency that writes its own module array, a handler that pushes onto an imported array, and a handler that passes an imported array to an imported helper that writes its parameter | graph tests in `packages/tools/src/precompile.zig`, `scripts/smoke-v1.sh` if a CLI case is needed | Sonnet | 30 |
@@ -118,3 +130,9 @@ Measured at `bf6ad1c3` with `zts check --json` over 82 files: the 33 tracked `.t
 - U1 over-reports, which can only remove a property: a capture cell is one cell for each binding; a request object whose site a request stored in module state; a stored `req`; a property write on a function that module initialization made; and writes in code that the evaluator marks unreachable.
 - U1: the handler body is not on an event's activation stack. U3 adds the handler itself.
 - U1: the `defense_sources` census found 1 row that returns a primitive and 5 that return a container whose site is an origin of every field read. The census covers these rows only, not every value with no origin.
+- U2: three handlers that strict code already refuses (`n1_*_keeps_zts309` in `precompile_check_tests.zig`) gain a ZTS500. Each evaluation is cleared with `no_operation_rule` on a `toFixed` call. No case records a write event.
+- U2: the expert diagnostics tool (`packages/pi/src/tools/pi_repair_plan.zig`) reads verifier diagnostics from the CHECK observer, and the observer ran before the flow writes were found. The tool then omitted the flow-sourced ZTS310 warning that `zts check` reports. The R7c census in `packages/pi/src/tools/common.zig` found 6 differences, one for each new corpus case. The fix finds the writes before the observer runs and passes the observer the same warnings.
+- U2: the ZTS500 hint for a capsule that a module-state write broke still names `Date.now()`, `Math.random()`, and `performance.now()`. U4 replaces it.
+- U2b: admission refuses `export let` and `export var` (`error.MutableExport`), and the parser refuses export lists and re-exports (ZTS002). No live-binding export reaches the evaluator, so the `const` test in `flowExportedBindingNode` is a defense only.
+- U2b: a graph compile without `-Dverify` now extracts the flow facts, as a single-module compile already did. Before U2b, the graph path lost them because it did not follow `export const saveAlias = save`.
+- U2b: a direct `seen.push(1)` on an imported array is a verifier ZTS310 error already, so the U2b write tests use an alias through a helper.

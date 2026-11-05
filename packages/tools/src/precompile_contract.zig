@@ -473,8 +473,13 @@ pub fn buildMultiModuleContract(
         .imported_effects = entry_imported_effects,
     });
     errdefer contract.deinit(allocator);
+    // The flow evaluation joins the shared-state fact: the verifier names the
+    // writes that it can read, and the evaluator follows the rest.
+    var shares_state = inputs.shares_state;
     if (handler_fn != null) {
-        try reportCompletedFlow(allocator, try analysis.completedFlow(), analysis.flowErrorCount(), true, null, entry_view);
+        const completed = try analysis.completedFlow();
+        try reportCompletedFlow(allocator, completed, analysis.flowErrorCount(), true, null, entry_view);
+        if (check_run_mod.flowSharesState(completed)) shares_state = true;
     }
     try validateContractPolicyInputs(allocator, inputs.filename, &contract, inputs.sql_schema_path, inputs.policy);
     if (inputs.policy != null) policy_checked = true;
@@ -484,8 +489,8 @@ pub fn buildMultiModuleContract(
 
     const verified = inputs.emit_verify and handler_fn != null;
     applyContractFacts(allocator, &contract, .{ .verifier = .{
-        .state_isolated = verified and !inputs.shares_state,
-        .shares_state = verified and inputs.shares_state,
+        .state_isolated = verified and !shares_state,
+        .shares_state = verified and shares_state,
         .result_safe = verified,
         .optional_safe = verified,
     } });

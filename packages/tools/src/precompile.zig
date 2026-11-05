@@ -610,14 +610,35 @@ pub fn compileHandler(
         );
         // `extractContract` ran the flow pass and applied it to the contract.
         if (handler_fn != null) {
+            const completed = try analysis.completedFlow();
             try reportCompletedFlow(
                 allocator,
-                try analysis.completedFlow(),
+                completed,
                 analysis.flowErrorCount(),
                 true,
                 &all_violations,
                 ir_view_check,
             );
+            // The verifier names the writes that it can read. The flow
+            // evaluation joins the ones that it follows through a parameter, a
+            // call result, or an element read, and a handler it cannot follow.
+            if (emit_verify and precompile_check_run_mod.flowSharesState(completed)) {
+                shares_state = true;
+                state_isolated = false;
+                const checked = analysis.checkedModule() orelse return error.AnalysisPassIncomplete;
+                const unreported = try precompile_check_run_mod.unreportedWrites(allocator, completed, checked.verifierDiagnostics(), &.{});
+                defer allocator.free(unreported);
+                for (unreported) |site| {
+                    if (builtin.is_test) continue;
+                    var output: std.ArrayList(u8) = .empty;
+                    defer output.deinit(allocator);
+                    var output_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+                    const flow_write = [_]zts.VerifierDiagnostic{precompile_check_run_mod.flowWriteDiagnostic(site)};
+                    zts.DiagnosticProjection.writeAll(.verifier, diag_view, &flow_write, ir_view_check, &output_writer.writer) catch {};
+                    output = output_writer.toArrayList();
+                    if (output.items.len > 0) debugPrint("{s}", .{output.items});
+                }
+            }
         }
         try validateContractPolicyInputs(allocator, filename, &contract.?, sql_schema_path, policy);
         try precompile_contract_mod.disclosePublicEnv(allocator, &contract.?, env_public);
@@ -907,6 +928,7 @@ fn compileMultiModule(
     }
     for (0..compile_result.modules.len) |module_index| {
         var checks = try checkGraphModule(allocator, &graph, &compile_result, module_index, atoms, &exports, opts, null);
+        defer checks.deinit(allocator);
         if (checks.evidence) |*evidence| {
             evidences.append(allocator, evidence.*) catch |err| {
                 evidence.deinit();
@@ -1017,6 +1039,15 @@ pub const GraphModuleChecks = struct {
     /// The proof evidence of this module, when the caller asked for it. The
     /// caller owns it.
     evidence: ?zts.ProofEvidence = null,
+    /// The node of each ZTS310 finding that the verifier made in this module, so
+    /// a flow finding at the same node is not reported a second time. The caller
+    /// frees it with `deinit`.
+    mutation_nodes: []const ir.NodeIndex = &.{},
+
+    pub fn deinit(self: *GraphModuleChecks, allocator: std.mem.Allocator) void {
+        allocator.free(self.mutation_nodes);
+        self.mutation_nodes = &.{};
+    }
 };
 
 const max_assert_walk_depth: u16 = 1024;
@@ -1320,6 +1351,7 @@ pub fn checkGraphModule(
     }
 
     var checks: GraphModuleChecks = .{};
+    errdefer checks.deinit(allocator);
     if (opts.emit_verify) {
         const handler_fn = if (is_entry) findHandlerFunction(view, root) else null;
         const facts = try analysis.facts();
@@ -1353,6 +1385,12 @@ pub fn checkGraphModule(
                 printGraphDiagnostics(allocator, &checked.verifier, zts.HandlerVerifier.formatDiagnostics, diag_view);
                 debugPrint("{d} error(s), {d} warning(s)\n", .{ error_count, diags.len - error_count });
             }
+            var mutation_nodes: std.ArrayList(ir.NodeIndex) = .empty;
+            errdefer mutation_nodes.deinit(allocator);
+            for (diags) |diag| {
+                if (diag.kind == .module_scope_mutation) try mutation_nodes.append(allocator, diag.node);
+            }
+            checks.mutation_nodes = try mutation_nodes.toOwnedSlice(allocator);
             checks.has_module_mutation = checked.verifier.has_module_mutation;
             checks.unresolved_route_dispatch = checked.verifier.unresolved_route_dispatch;
             if (error_count > 0) {
@@ -1607,7 +1645,7 @@ test "compileHandler carries loaded graph effects into the merged properties" {
     try std.testing.expect(!props.retry_safe);
 }
 
-test "multi-module compile extracts no proven fact without verification" {
+test "multi-module compile without verification extracts the flow facts and no isolation fact" {
     const deploy_manifest = @import("deploy_manifest.zig");
     const entry_source =
         \\import { saveAlias } from "./dep.ts";
@@ -1636,18 +1674,15 @@ test "multi-module compile extracts no proven fact without verification" {
     const extracted = try deploy_manifest.extractProvenFacts(allocator, &merged);
     defer allocator.free(extracted.routes_buf);
 
-    const names = [_][]const u8{
-        "injection_safe",
-        "state_isolated",
-        "deterministic",
-        "no_secret_leakage",
-        "no_credential_leakage",
-        "input_validated",
-        "pii_contained",
-    };
-    inline for (names) |name| {
-        try std.testing.expect(!@field(extracted.facts, name));
-    }
+    // No verifier ran, so state isolation is unproven. The flow evaluation
+    // follows the whole graph without verification, as for a single module.
+    try std.testing.expect(!extracted.facts.state_isolated);
+    try std.testing.expect(extracted.facts.injection_safe);
+    try std.testing.expect(extracted.facts.deterministic);
+    try std.testing.expect(extracted.facts.no_secret_leakage);
+    try std.testing.expect(extracted.facts.no_credential_leakage);
+    try std.testing.expect(extracted.facts.input_validated);
+    try std.testing.expect(extracted.facts.pii_contained);
 }
 
 test "multi-module compile extracts the proven facts of a verified graph" {
@@ -1757,14 +1792,16 @@ test "compileHandler graph clears no_secret_leakage when a dependency secret rea
     try std.testing.expect(!props.no_secret_leakage);
 }
 
-test "compileHandler graph clears no_secret_leakage for an incomplete graph with a data export" {
-    var fixture = try importFixture(
-        \\import { label } from "./dep.ts";
-        \\export function handler(req: Request): Proof<Response, "result_safe"> {
-        \\  return Response.text(label);
-        \\}
-        \\
-    ,
+const label_entry =
+    \\import { label } from "./dep.ts";
+    \\export function handler(req: Request): Proof<Response, "result_safe"> {
+    \\  return Response.text(label);
+    \\}
+    \\
+;
+
+test "compileHandler graph keeps the flow properties for a const data export" {
+    var fixture = try importFixture(label_entry,
         \\export const label: string = "x";
         \\
     );
@@ -1772,9 +1809,62 @@ test "compileHandler graph clears no_secret_leakage for an incomplete graph with
     var compiled = try fixture.compile(graph_verified);
     defer compiled.deinit(std.testing.allocator);
     const props = try graphProperties(&compiled);
+    try std.testing.expect(props.no_secret_leakage);
+    try std.testing.expect(props.no_credential_leakage);
+    try std.testing.expect(props.injection_safe);
+    try std.testing.expect(props.deterministic);
+    try std.testing.expect(props.state_isolated);
+}
+
+test "compileHandler graph refuses a let data export before the evaluator sees it" {
+    var fixture = try importFixture(label_entry,
+        \\export let label: string = "x";
+        \\
+    );
+    defer fixture.deinit();
+    try std.testing.expectError(error.MutableExport, fixture.compile(graph_verified));
+}
+
+test "compileHandler graph carries the secret label through a const data export" {
+    var fixture = try importFixture(
+        \\import { key } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  return Response.text(key);
+        \\}
+        \\
+    ,
+        \\import { env } from "zttp:env";
+        \\export const key: string = env("SECRET_KEY") ?? "";
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const props = try graphProperties(&compiled);
     try std.testing.expect(!props.no_secret_leakage);
-    try std.testing.expect(!props.no_credential_leakage);
-    try std.testing.expect(!props.injection_safe);
+}
+
+test "compileHandler graph clears state_isolated for a write through an imported const array" {
+    var fixture = try importFixture(
+        \\import { seen } from "./dep.ts";
+        \\function pick(): number[] {
+        \\  return seen;
+        \\}
+        \\export function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  const alias = pick();
+        \\  alias.push(1);
+        \\  return Response.text("ok");
+        \\}
+        \\
+    ,
+        \\export const seen: number[] = [];
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const props = try graphProperties(&compiled);
+    try std.testing.expect(!props.state_isolated);
 }
 
 const LoadedFlowGraph = struct {
@@ -1809,14 +1899,8 @@ const LoadedFlowGraph = struct {
     }
 };
 
-test "flow modules of a graph with a data export are incomplete" {
-    var fixture = try importFixture(
-        \\import { label } from "./dep.ts";
-        \\export function handler(req: Request): Response {
-        \\  return Response.text(label);
-        \\}
-        \\
-    ,
+test "flow modules of a graph with a const data export are complete" {
+    var fixture = try importFixture(label_entry,
         \\export const label: string = "x";
         \\
     );
@@ -1824,7 +1908,7 @@ test "flow modules of a graph with a data export are incomplete" {
     var loaded: LoadedFlowGraph = undefined;
     try loaded.load(&fixture);
     defer loaded.deinit();
-    try std.testing.expect(!loaded.flow.complete);
+    try std.testing.expect(loaded.flow.complete);
 }
 
 test "flow modules of a graph with function exports are complete" {

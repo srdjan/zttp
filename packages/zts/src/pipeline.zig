@@ -524,7 +524,17 @@ pub fn flowImportBindingKey(view: IrView, slot: u16) ?u32 {
     return null;
 }
 
-pub fn flowExportedFunctionNode(view: IrView, atoms: *AtomTable, name: []const u8) ?ir_mod.NodeIndex {
+/// The node the flow evaluator copies for the export called `name`, or null.
+///
+/// A function export gives its function node. An `export const` with an
+/// initializer gives the initializer: a `const` binding never changes, so one
+/// copy made after the exporting module initializes is exact. A write through
+/// the copy still reaches the exporting module, because the copy keeps its
+/// origins. Null is a gap, and the caller marks the module graph incomplete.
+/// An `export let` or `export var` gives null, because an import is a live
+/// view and a copy would miss a later reassignment; admission refuses both
+/// today. A re-export and an export list without a declaration give null too.
+pub fn flowExportedBindingNode(view: IrView, atoms: *AtomTable, name: []const u8) ?ir_mod.NodeIndex {
     for (0..view.nodeCount()) |index| {
         const node: ir_mod.NodeIndex = @intCast(index);
         if ((view.getTag(node) orelse continue) != .export_decl) continue;
@@ -538,6 +548,7 @@ pub fn flowExportedFunctionNode(view: IrView, atoms: *AtomTable, name: []const u
         if (!std.mem.eql(u8, declared_name, name)) continue;
         const function_tag = view.getTag(declaration.init) orelse continue;
         if (function_tag == .function_expr or function_tag == .arrow_function) return declaration.init;
+        if (tag == .var_decl and declaration.kind == .@"const" and declaration.init != ir_mod.null_node) return declaration.init;
     }
     return null;
 }

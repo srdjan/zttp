@@ -199,6 +199,130 @@ fn clearSharedStateProperties(props: *handler_contract.HandlerProperties) void {
     props.idempotent = false;
 }
 
+/// A write that a request makes to state that outlives it, named by the flow
+/// module that holds it and the node of the assignment or call.
+pub const WriteSite = struct {
+    module: zts.pipeline.FlowModuleId,
+    node: ir.NodeIndex,
+};
+
+/// The flow half of the shared-state fact. The evaluator followed the handler
+/// and a request wrote persistent state, or it could not follow the handler,
+/// which proves nothing about state. Every writer of `shares_state` joins this
+/// with the verifier fact, so there is one rule and no copy of it.
+pub fn flowSharesState(flow: *const zts.FlowChecker) bool {
+    return flow.cleared() or flow.persistentWrites().len > 0;
+}
+
+const flow_write_message = "a request writes state that outlives it (breaks cross-request isolation)";
+const flow_write_help = "copy the value into a local before the write, or move the state to zttp:cache";
+
+/// The ZTS310 warning for a write that the flow evaluator found and the
+/// verifier did not name. It points at the write, in the module that holds it.
+pub fn flowWriteDiagnostic(site: WriteSite) zts.VerifierDiagnostic {
+    return .{
+        .severity = .warning,
+        .kind = .module_scope_mutation,
+        .node = site.node,
+        .message = flow_write_message,
+        .help = flow_write_help,
+    };
+}
+
+/// The persistent writes of `flow` that no ZTS310 finding of the verifier names,
+/// each site once. `entry_verifier` is the verifier output of the entry module
+/// (flow module 0), and `dependency_reported` lists the verifier findings of
+/// the dependency modules. The caller frees the slice.
+pub fn unreportedWrites(
+    allocator: std.mem.Allocator,
+    flow: *const zts.FlowChecker,
+    entry_verifier: []const zts.VerifierDiagnostic,
+    dependency_reported: []const WriteSite,
+) ![]WriteSite {
+    var sites: std.ArrayList(WriteSite) = .empty;
+    errdefer sites.deinit(allocator);
+    next_write: for (flow.persistentWrites()) |write| {
+        if (write.module == 0) {
+            for (entry_verifier) |diagnostic| {
+                if (diagnostic.kind == .module_scope_mutation and diagnostic.node == write.node) continue :next_write;
+            }
+        }
+        for (dependency_reported) |reported| {
+            if (reported.module == write.module and reported.node == write.node) continue :next_write;
+        }
+        for (sites.items) |seen| {
+            if (seen.module == write.module and seen.node == write.node) continue :next_write;
+        }
+        try sites.append(allocator, .{ .module = write.module, .node = write.node });
+    }
+    return sites.toOwnedSlice(allocator);
+}
+
+/// The verifier diagnostics of the entry module followed by the ZTS310 warning
+/// of each entry write in `sites`. An observer reads this list, so it sees the
+/// same verifier-coded diagnostics that `zts check` reports. Returns
+/// `verifier_diags` itself when no entry write adds a warning; otherwise the
+/// caller frees the slice.
+fn withEntryWriteDiagnostics(
+    allocator: std.mem.Allocator,
+    verifier_diags: []const zts.VerifierDiagnostic,
+    sites: []const WriteSite,
+    ir_view: zts.IrView,
+) ![]const zts.VerifierDiagnostic {
+    var added: usize = 0;
+    for (sites) |site| {
+        if (site.module == 0 and ir_view.getLoc(site.node) != null) added += 1;
+    }
+    if (added == 0) return verifier_diags;
+    const combined = try allocator.alloc(zts.VerifierDiagnostic, verifier_diags.len + added);
+    @memcpy(combined[0..verifier_diags.len], verifier_diags);
+    var next = verifier_diags.len;
+    for (sites) |site| {
+        if (site.module != 0 or ir_view.getLoc(site.node) == null) continue;
+        combined[next] = flowWriteDiagnostic(site);
+        next += 1;
+    }
+    return combined;
+}
+
+/// Report each persistent write that the flow evaluator found and the verifier
+/// did not name (`sites`, from `unreportedWrites`), as a ZTS310 warning at the
+/// write, in the file of the module that holds it.
+fn appendFlowWriteFindings(
+    allocator: std.mem.Allocator,
+    result: *CheckResult,
+    json_mode: bool,
+    sites: []const WriteSite,
+    graph_check: ?*GraphCheck,
+    ir_view: zts.IrView,
+    diag_view: zts.SourceView,
+    handler_path: []const u8,
+) !void {
+    for (sites) |site| {
+        if (site.module != 0) {
+            const gc = graph_check orelse return error.AnalysisPassIncomplete;
+            try gc.appendDependencyWrite(result, json_mode, site);
+            continue;
+        }
+        if (ir_view.getLoc(site.node) == null) continue;
+        result.verify_warnings += 1;
+        const diagnostic = flowWriteDiagnostic(site);
+        if (json_mode) {
+            var projected = json_diag.fromCheckerDiagnostic(allocator, .verifier, diagnostic, ir_view, handler_path) orelse continue;
+            errdefer projected.deinit(allocator);
+            try result.json_diagnostics.append(allocator, projected);
+        } else if (!builtin.is_test) {
+            var output: std.ArrayList(u8) = .empty;
+            defer output.deinit(allocator);
+            var output_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+            const single = [_]zts.VerifierDiagnostic{diagnostic};
+            zts.DiagnosticProjection.writeAll(.verifier, diag_view, &single, ir_view, &output_writer.writer) catch {};
+            output = output_writer.toArrayList();
+            if (output.items.len > 0) debugPrint("{s}", .{output.items});
+        }
+    }
+}
+
 /// The one writer of the verifier, path, and fault facts on a contract. Both
 /// drivers (`compileHandler` and `runCheckOnParsedSource`) fill a
 /// `ContractFacts` from their own analysis and call this, so a new contract
@@ -821,18 +945,35 @@ fn runCheckOnParsedSource(
         _ = try analysis.runVerifier(hf);
         _ = try analysis.runFlow(hf);
         const checked = analysis.checkedModule() orelse return error.AnalysisPassIncomplete;
-        if (opts.observer) |obs| try obs.on_checked(obs.context, .{
-            .ir_view = ir_view,
-            .atoms = atoms,
-            .handler_fn = hf,
-            .verifier_diagnostics = checked.verifierDiagnostics(),
-            .flow_diagnostics = checked.flowDiagnostics(),
-        });
+        const verifier_diags = checked.verifierDiagnostics();
+        // The writes are found before the observer runs, so the observer sees
+        // each flow-sourced ZTS310 warning that `zts check` reports.
+        const flow_shares_state = flowSharesState(&checked.flow_checker);
+        const write_sites: []const WriteSite = if (flow_shares_state)
+            try unreportedWrites(
+                allocator,
+                &checked.flow_checker,
+                verifier_diags,
+                if (graph_check) |gc| gc.reported_writes.items else &.{},
+            )
+        else
+            &.{};
+        defer allocator.free(write_sites);
+        if (opts.observer) |obs| {
+            const observed_diags = try withEntryWriteDiagnostics(allocator, verifier_diags, write_sites, ir_view);
+            defer if (observed_diags.ptr != verifier_diags.ptr) allocator.free(observed_diags);
+            try obs.on_checked(obs.context, .{
+                .ir_view = ir_view,
+                .atoms = atoms,
+                .handler_fn = hf,
+                .verifier_diagnostics = observed_diags,
+                .flow_diagnostics = checked.flowDiagnostics(),
+            });
+        }
         result.verify_ran = true;
         result.stages_run.insert(.verifier);
         result.stages_run.insert(.flow);
         result.verify_errors += @intCast(checked.verifier_error_count);
-        const verifier_diags = checked.verifierDiagnostics();
         result.verify_warnings += @intCast(verifier_diags.len -| checked.verifier_error_count);
 
         if (verifier_diags.len > 0) {
@@ -857,6 +998,10 @@ fn runCheckOnParsedSource(
 
         shares_state = checked.verifier.has_module_mutation or checked.verifier.unresolved_route_dispatch;
         if (graph_check) |gc| shares_state = shares_state or gc.shares_state;
+        if (flow_shares_state) {
+            shares_state = true;
+            try appendFlowWriteFindings(allocator, &result, json_mode, write_sites, graph_check, ir_view, diag_view, handler_path);
+        }
         result.state_isolated = !shares_state;
         if (result.verify_errors == 0) {
             result.exhaustive_returns = true;

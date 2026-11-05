@@ -444,6 +444,12 @@ packages/tools/src/precompile_check_run.zig runCheckOnParsedSource catch-block@1
 packages/tools/src/precompile_contract.zig appendPolicyDiagnostics catch-block
 packages/tools/src/precompile_contract.zig reportCompletedFlow catch-block
 
+# Reviewed 2026-11-05 (F18 U2). appendFlowWriteFindings counts the warning
+# before it renders the text, and the join into shares_state happens in
+# flowSharesState, not here. A failed render drops the printed text of a
+# ZTS310 warning in the non-JSON mode and cannot restore a removed property.
+packages/tools/src/precompile_check_run.zig appendFlowWriteFindings catch-block
+
 # Each of these converts an error into a counted refusal (parse_errors = 1 or
 # policy_errors += 1) or propagates it: an unreadable handler, a strip
 # allocation failure, a parse failure, a virtual-import failure, an analyzer

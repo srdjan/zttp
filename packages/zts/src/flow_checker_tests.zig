@@ -1855,7 +1855,7 @@ fn runWithImportedFunctionPublic(
     defer imported_captures.deinit();
     var facts = try pipeline.buildModuleFacts(allocator, pipeline.ParsedModule.fromExisting(ir_view, root, &atoms), null);
     defer facts.deinit();
-    const target = pipeline.flowExportedFunctionNode(imported_view, &imported_atoms, name) orelse return error.ExportNotFound;
+    const target = pipeline.flowExportedBindingNode(imported_view, &imported_atoms, name) orelse return error.ExportNotFound;
     var targets: std.ArrayList(evaluator.ImportTarget) = .empty;
     defer targets.deinit(allocator);
     for (facts.imports.items) |record| {

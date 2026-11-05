@@ -217,8 +217,9 @@ pub const FlowModuleGraph = struct {
 /// The entry is module 0 and each dependency takes the id of its position in
 /// `execution_order` plus one. The views borrow the parsers of `compile_result`,
 /// so no file is read again. The initialization order follows `execution_order`,
-/// which lists a shared dependency once. A target that the flow evaluator cannot
-/// follow (a data export, a bare specifier) leaves `complete` false, the same
+/// which lists a shared dependency once. The evaluator follows a function export
+/// and an `export const` with an initializer. A target that it cannot follow (a
+/// re-export, an export list, a bare specifier) leaves `complete` false, the same
 /// rule that `flowModulesForSingleModule` applies.
 pub fn flowModulesForGraph(
     allocator: std.mem.Allocator,
@@ -298,7 +299,7 @@ pub fn flowModulesForGraph(
                 continue;
             };
             const target_id = flowIdAtPosition(target_position, entry_position);
-            const function_node = importedFunctionNode(
+            const binding_node = importedBindingNode(
                 flow.views.items[target_id].ir_view,
                 atoms,
                 rec.imported_name,
@@ -310,7 +311,7 @@ pub fn flowModulesForGraph(
                 flow.complete = false;
                 continue;
             };
-            try targets.append(allocator, .{ .binding_key = key, .target = .{ .module = target_id, .node = function_node } });
+            try targets.append(allocator, .{ .binding_key = key, .target = .{ .module = target_id, .node = binding_node } });
         }
         try flow.finishModule(id, targets.items);
     }
@@ -357,7 +358,7 @@ pub fn flowModulesForSingleModule(
 }
 
 const importBindingKey = zts.pipeline.flowImportBindingKey;
-const importedFunctionNode = zts.pipeline.flowExportedFunctionNode;
+const importedBindingNode = zts.pipeline.flowExportedBindingNode;
 
 /// What the scan of the handler's imported files answered, one entry per
 /// non-builtin import record, keyed by the record's local slot. The entries

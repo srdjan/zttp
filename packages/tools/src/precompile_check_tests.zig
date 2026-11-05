@@ -2765,6 +2765,34 @@ test "CHECK keeps pure and data sibling controls clean" {
     try std.testing.expect(!properties.has_egress);
 }
 
+test "CHECK reports a ZTS310 warning for a push onto an imported const array" {
+    var fixture = try SiblingFixture.init(
+        \\import { seen } from "./dep.ts";
+        \\function pick(): number[] {
+        \\  return seen;
+        \\}
+        \\function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  const alias = pick();
+        \\  alias.push(1);
+        \\  return Response.text("ok");
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export const seen: number[] = [];
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expect(!result.state_isolated);
+    const diagnostic = diagnosticWithCode(&result, "ZTS310") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("warning", diagnostic.severity);
+    try std.testing.expectEqual(@as(u32, 7), diagnostic.line);
+}
+
 test "CHECK does not classify a factory-produced callable as data" {
     var fixture = try SiblingFixture.init(
         \\import { save } from "./dep.ts";
@@ -12185,14 +12213,14 @@ const absent_read_untyped_receiver = [_]AbsentReadCase{
     \\  return Response.text(String(out.length));
     \\}
     },
-    .{ .name = "n1_index_then_member_call_keeps_zts309", .expect = "ZTS309@4,ZTS401@4", .source =
+    .{ .name = "n1_index_then_member_call_keeps_zts309", .expect = "ZTS309@4,ZTS401@4,ZTS500@2", .source =
     \\structural P = { age: number };
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const ps: P[] = [];
     \\  return Response.text(String(ps[0].age.toFixed(2)));
     \\}
     },
-    .{ .name = "n1_error_of_validatejson_after_not_ok_keeps_zts309", .expect = "ZTS309@6,ZTS401@6", .source =
+    .{ .name = "n1_error_of_validatejson_after_not_ok_keeps_zts309", .expect = "ZTS309@6,ZTS401@6,ZTS500@3", .source =
     \\import { schemaCompile, validateJson } from "zttp:validate";
     \\schemaCompile("todo", "{\"type\":\"object\",\"required\":[\"title\"]}");
     \\function handler(req: Request): Proof<Response, "read_only"> {
@@ -12203,7 +12231,7 @@ const absent_read_untyped_receiver = [_]AbsentReadCase{
     \\  return Response.text("ok");
     \\}
     },
-    .{ .name = "n1_value_that_admits_undefined_after_ok_keeps_zts309", .expect = "ZTS309@6,ZTS401@8", .source =
+    .{ .name = "n1_value_that_admits_undefined_after_ok_keeps_zts309", .expect = "ZTS309@6,ZTS401@8,ZTS500@2", .source =
     \\import { ok } from "zttp:result";
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const r = ok(req.headers.get("x-missing"));
@@ -12443,6 +12471,27 @@ test "observer sees the verifier and flow diagnostics of a leaking handler once"
     try std.testing.expectEqual(@as(usize, 0), probe.verifier_count);
     try std.testing.expectEqual(@as(usize, 1), probe.flow_count);
     try std.testing.expectEqual(@as(u32, 1), result.flow_errors + result.flow_warnings);
+}
+
+test "observer sees the ZTS310 warning of a write that only the flow evaluator found" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const seen: number[] = [];
+        \\function addTo(xs: number[]): undefined { xs.push(1); return undefined; }
+        \\function handler(req: Request): Proof<Response, "result_safe"> { addTo(seen); return Response.text("ok"); }
+    ;
+    var probe: ObserverProbe = .{};
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "write.ts", .{
+        .json_mode = true,
+        .observer = .{ .context = &probe, .on_checked = ObserverProbe.onChecked },
+    });
+    defer result.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 1), probe.calls);
+    try std.testing.expectEqual(@as(usize, 1), probe.verifier_count);
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try std.testing.expectEqualStrings("ZTS310", result.json_diagnostics.items[0].code);
+    try std.testing.expectEqual(@as(u32, 2), result.json_diagnostics.items[0].line);
 }
 
 test "observer is not called for a file with no handler" {
@@ -12889,5 +12938,116 @@ test "a read of a module array keeps the read-only family proven" {
     try std.testing.expect(props.idempotent);
     try std.testing.expect(props.pure);
     try std.testing.expect(props.stateless);
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+}
+
+fn expectReadOnlyFamilyUnproven(result: *const CheckResult) !void {
+    const props = result.properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!props.state_isolated);
+    try std.testing.expect(!props.read_only);
+    try std.testing.expect(!props.retry_safe);
+    try std.testing.expect(!props.deterministic);
+    try std.testing.expect(!props.idempotent);
+    try std.testing.expect(!props.pure);
+    try std.testing.expect(!props.stateless);
+}
+
+fn expectReadOnlyFamilyProven(result: *const CheckResult) !void {
+    const props = result.properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(props.state_isolated);
+    try std.testing.expect(props.read_only);
+    try std.testing.expect(props.retry_safe);
+    try std.testing.expect(props.deterministic);
+    try std.testing.expect(props.idempotent);
+    try std.testing.expect(props.pure);
+    try std.testing.expect(props.stateless);
+}
+
+test "a helper that pushes onto its parameter, called with a module array, unproves the read-only family" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const seen: number[] = [];
+        \\function addTo(xs: number[]): undefined {
+        \\  xs.push(1);
+        \\  return undefined;
+        \\}
+        \\function handler(req: Request): Response {
+        \\  addTo(seen);
+        \\  return Response.text(String(seen.length));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "g1.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try expectReadOnlyFamilyUnproven(&result);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
+    try std.testing.expectEqualStrings("warning", diagnostics[0].severity);
+    try std.testing.expectEqualStrings("a request writes state that outlives it (breaks cross-request isolation)", diagnostics[0].message);
+    try std.testing.expectEqualStrings("copy the value into a local before the write, or move the state to zttp:cache", diagnostics[0].suggestion orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
+    try std.testing.expectEqualStrings("g1.ts", diagnostics[0].file);
+    try std.testing.expectEqual(@as(u32, 1), result.verify_warnings);
+}
+
+test "a fresh factory array and a same-site factory row written by a request keep the read-only family proven" {
+    const allocator = std.testing.allocator;
+    const fresh =
+        \\function fresh(): number[] {
+        \\  return [];
+        \\}
+        \\function make(): number[] {
+        \\  return fresh();
+        \\}
+        \\const table: number[] = make();
+        \\function handler(req: Request): Response {
+        \\  const local: number[] = make();
+        \\  local.push(1);
+        \\  return Response.text(String(local.length + table.length));
+        \\}
+    ;
+    var p3 = try runCheckOnlyFromSourceWithOptions(allocator, fresh, "p3.ts", .{ .json_mode = true });
+    defer p3.deinit(allocator);
+    try expectReadOnlyFamilyProven(&p3);
+    try std.testing.expectEqual(@as(usize, 0), p3.json_diagnostics.items.len);
+
+    const same_site =
+        \\structural Row = { n: number };
+        \\function makeRow(): Row {
+        \\  return { n: 0 };
+        \\}
+        \\function build(): Row {
+        \\  return makeRow();
+        \\}
+        \\const shared: Row = build();
+        \\function handler(req: Request): Response {
+        \\  const mine: Row = build();
+        \\  mine.n = mine.n + 1;
+        \\  return Response.text(String(shared.n + mine.n));
+        \\}
+    ;
+    var p9 = try runCheckOnlyFromSourceWithOptions(allocator, same_site, "p9.ts", .{ .json_mode = true });
+    defer p9.deinit(allocator);
+    try expectReadOnlyFamilyProven(&p9);
+    try std.testing.expectEqual(@as(usize, 0), p9.json_diagnostics.items.len);
+}
+
+test "a dictGet on a module table keeps the read-only family proven" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { dictEmpty, dictSet, dictGet } from "zttp:collections";
+        \\const TABLE = dictSet(dictEmpty(), "a", 1);
+        \\function handler(req: Request): Proof<Response, "state_isolated" | "read_only" | "retry_safe"> {
+        \\  return Response.json({ value: dictGet(TABLE, "a") });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "dict-table.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const props = result.properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(props.state_isolated);
+    try std.testing.expect(props.read_only);
+    try std.testing.expect(props.retry_safe);
+    try std.testing.expect(props.deterministic);
+    try std.testing.expect(props.idempotent);
     try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
 }
