@@ -132,9 +132,15 @@ pub const PersistentWrite = struct {
     node: NodeIndex,
     /// The module that holds `node`.
     module: ModuleId,
-    /// The function handles on the activation stack at the write, outermost
-    /// first. The handler body itself is not on the stack.
-    stack: []const NodeIndex,
+    /// The functions on the activation stack at the write, outermost first.
+    /// The handler function itself is the first entry.
+    stack: []const FunctionRef,
+};
+
+/// A function node and the module that holds it.
+pub const FunctionRef = struct {
+    module: ModuleId,
+    node: NodeIndex,
 };
 
 pub const SinkEvent = struct {

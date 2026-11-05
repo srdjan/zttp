@@ -5614,5 +5614,5 @@ test "FlowChecker exposes the persistent writes and the cleared flag of the last
     try std.testing.expect(!checker.cleared());
     try std.testing.expectEqual(@as(usize, 1), checker.persistentWrites().len);
     try std.testing.expectEqual(@as(u32, 2), view.getLoc(checker.persistentWrites()[0].node).?.line);
-    try std.testing.expectEqual(@as(usize, 1), checker.persistentWrites()[0].stack.len);
+    try std.testing.expectEqual(@as(usize, 2), checker.persistentWrites()[0].stack.len);
 }

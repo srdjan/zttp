@@ -131,6 +131,8 @@ pub const ContractBuilder = struct {
     /// Completed immutable facts borrowed through `build`.
     module_facts: ?*const module_facts_mod.ModuleFacts = null,
     effect_facts: ?*const effect_inference.EffectFacts = null,
+    /// Writes to persistent state that earlier passes found. Borrowed through `build`.
+    state_writers: function_specs.StateWriters = .{},
 
     // Collected data (all strings are duped/owned)
     env_literals: std.ArrayList([]const u8),
@@ -666,11 +668,12 @@ pub const ContractBuilder = struct {
         effects: *const effect_inference.EffectFacts,
         contract_effects: *const effect_inference.ContractEffectFacts,
     ) !void {
-        var table = try function_specs.dischargeWithTypeSource(
+        var table = try function_specs.dischargeWithStateWriters(
             self.allocator,
             effects,
             self.source_types.?,
             self.ir_view,
+            self.state_writers,
         );
         defer table.deinit(self.allocator);
 

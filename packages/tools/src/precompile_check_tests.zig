@@ -12810,10 +12810,14 @@ test "check refuses a helper mutation only when the capsule demands state_isolat
     var bare = try runCheckOnlyFromSourceWithOptions(allocator, bare_source, "helper-bare.ts", .{ .json_mode = true });
     defer bare.deinit(allocator);
     try std.testing.expect(!bare.state_isolated);
-    try std.testing.expectEqual(@as(u32, 1), bare.totalErrors());
-    try std.testing.expectEqual(@as(usize, 2), bare.json_diagnostics.items.len);
+    try std.testing.expectEqual(@as(u32, 4), bare.totalErrors());
+    try std.testing.expectEqual(@as(usize, 5), bare.json_diagnostics.items.len);
     try std.testing.expectEqualStrings("ZTS310", bare.json_diagnostics.items[0].code);
     try std.testing.expectEqualStrings("ZTS500", bare.json_diagnostics.items[1].code);
+    try std.testing.expectEqualStrings("ZTS606", bare.json_diagnostics.items[2].code);
+    try std.testing.expectEqualStrings("helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: pure)", bare.json_diagnostics.items[2].message);
+    try std.testing.expectEqualStrings("helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: read_only)", bare.json_diagnostics.items[3].message);
+    try std.testing.expectEqualStrings("helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: deterministic)", bare.json_diagnostics.items[4].message);
 
     // A capsule that leaves the property out: the check passes with the warning only.
     const narrow_source =
@@ -12867,9 +12871,9 @@ test "a helper module write unproves a narrow capsule that claims the read-only 
     var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "narrow-helper.ts", .{ .json_mode = true });
     defer result.deinit(allocator);
     try expectSharedStateClearsProperties(&result);
-    try std.testing.expectEqual(@as(u32, 4), result.totalErrors());
+    try std.testing.expectEqual(@as(u32, 6), result.totalErrors());
     const diagnostics = result.json_diagnostics.items;
-    try std.testing.expectEqual(@as(usize, 5), diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 7), diagnostics.len);
     try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
     try std.testing.expectEqualStrings("warning", diagnostics[0].severity);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
@@ -12880,6 +12884,10 @@ test "a helper module write unproves a narrow capsule that claims the read-only 
     try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: read_only)", diagnostics[3].message);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[4].code);
     try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: retry_safe)", diagnostics[4].message);
+    try std.testing.expectEqualStrings("ZTS606", diagnostics[5].code);
+    try std.testing.expectEqualStrings("helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: read_only)", diagnostics[5].message);
+    try std.testing.expectEqualStrings("ZTS606", diagnostics[6].code);
+    try std.testing.expectEqualStrings("helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: deterministic)", diagnostics[6].message);
 }
 
 test "a module let reassignment unproves the read-only family and the default help names none of it" {
@@ -12980,13 +12988,18 @@ test "a helper that pushes onto its parameter, called with a module array, unpro
     defer result.deinit(allocator);
     try expectReadOnlyFamilyUnproven(&result);
     const diagnostics = result.json_diagnostics.items;
-    try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
+    try std.testing.expectEqual(@as(usize, 5), diagnostics.len);
     try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
     try std.testing.expectEqualStrings("warning", diagnostics[0].severity);
     try std.testing.expectEqualStrings("a request writes state that outlives it (breaks cross-request isolation)", diagnostics[0].message);
     try std.testing.expectEqualStrings("copy the value into a local before the write, or move the state to zttp:cache", diagnostics[0].suggestion orelse return error.TestUnexpectedResult);
     try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
     try std.testing.expectEqualStrings("g1.ts", diagnostics[0].file);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqualStrings("ZTS606", diagnostics[2].code);
+    try std.testing.expectEqualStrings("helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: pure)", diagnostics[2].message);
+    try std.testing.expectEqualStrings("helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: read_only)", diagnostics[3].message);
+    try std.testing.expectEqualStrings("helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: deterministic)", diagnostics[4].message);
     try std.testing.expectEqual(@as(u32, 1), result.verify_warnings);
 }
 
@@ -13050,4 +13063,253 @@ test "a dictGet on a module table keeps the read-only family proven" {
     try std.testing.expect(props.deterministic);
     try std.testing.expect(props.idempotent);
     try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+}
+
+const capsule_failure_pure = "declared Proof capsule was not discharged by handler proof (failing spec: pure)";
+const capsule_failure_read_only = "declared Proof capsule was not discharged by handler proof (failing spec: read_only)";
+
+test "a Proof capsule on a helper that pushes onto its parameter, called with a module array, fails ZTS500" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const seen: number[] = [];
+        \\function bump(xs: number[]): Proof<number, "pure" | "read_only"> {
+        \\  xs.push(1);
+        \\  return xs.length;
+        \\}
+        \\function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  return Response.text(String(bump(seen)));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "capsule-param.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 3), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
+    try std.testing.expectEqualStrings("warning", diagnostics[0].severity);
+    try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqualStrings("error", diagnostics[1].severity);
+    try std.testing.expectEqual(@as(u32, 6), diagnostics[1].line);
+    try std.testing.expectEqualStrings(capsule_failure_pure, diagnostics[1].message);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[2].code);
+    try std.testing.expectEqual(@as(u32, 6), diagnostics[2].line);
+    try std.testing.expectEqualStrings(capsule_failure_read_only, diagnostics[2].message);
+}
+
+test "a Proof capsule on a helper that pushes onto a module array fails ZTS500 when the handler calls it" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const seen: number[] = [];
+        \\function bump(): Proof<number, "pure" | "read_only"> {
+        \\  seen.push(1);
+        \\  return seen.length;
+        \\}
+        \\function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  return Response.text(String(bump()));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "capsule-direct.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 3), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
+    try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqualStrings("error", diagnostics[1].severity);
+    try std.testing.expectEqual(@as(u32, 6), diagnostics[1].line);
+    try std.testing.expectEqualStrings(capsule_failure_pure, diagnostics[1].message);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[2].code);
+    try std.testing.expectEqual(@as(u32, 6), diagnostics[2].line);
+    try std.testing.expectEqualStrings(capsule_failure_read_only, diagnostics[2].message);
+}
+
+test "a Proof capsule on a helper that pushes onto a module array fails ZTS500 when no handler calls it" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const seen: number[] = [];
+        \\function bump(): Proof<number, "pure" | "read_only"> {
+        \\  seen.push(1);
+        \\  return seen.length;
+        \\}
+        \\function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "capsule-unreached.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 3), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
+    try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqualStrings("error", diagnostics[1].severity);
+    try std.testing.expectEqual(@as(u32, 6), diagnostics[1].line);
+    try std.testing.expectEqualStrings(capsule_failure_pure, diagnostics[1].message);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[2].code);
+    try std.testing.expectEqual(@as(u32, 6), diagnostics[2].line);
+    try std.testing.expectEqualStrings(capsule_failure_read_only, diagnostics[2].message);
+}
+
+test "a Proof capsule on a helper that pushes onto a request-local array stays discharged" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function bump(xs: number[]): Proof<number, "pure" | "read_only"> {
+        \\  xs.push(1);
+        \\  return xs.length;
+        \\}
+        \\function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  const local: number[] = [];
+        \\  return Response.text(String(bump(local)));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "capsule-local.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+}
+
+test "a deterministic capsule on a helper that writes through a module array parameter fails ZTS500" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const seen: number[] = [];
+        \\function bump(xs: number[]): Proof<number, "deterministic"> {
+        \\  xs.push(1);
+        \\  return xs.length;
+        \\}
+        \\function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  return Response.text(String(bump(seen)));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "capsule-deterministic.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqualStrings("error", diagnostics[1].severity);
+    try std.testing.expectEqual(@as(u32, 6), diagnostics[1].line);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: deterministic)", diagnostics[1].message);
+}
+
+test "a capsule that calls a plain writer with a module array fails ZTS500" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const seen: number[] = [];
+        \\function bump(xs: number[]): number {
+        \\  xs.push(1);
+        \\  return xs.length;
+        \\}
+        \\function outer(xs: number[]): Proof<number, "pure"> {
+        \\  return bump(xs);
+        \\}
+        \\function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  return Response.text(String(outer(seen)));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "capsule-outer.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
+    try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqual(@as(u32, 9), diagnostics[1].line);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: pure)", diagnostics[1].message);
+}
+
+test "a capsule called once with a local and once with a module array fails ZTS500" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const seen: number[] = [];
+        \\function bump(xs: number[]): Proof<number, "pure" | "read_only"> {
+        \\  xs.push(1);
+        \\  return xs.length;
+        \\}
+        \\function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  const local: number[] = [];
+        \\  return Response.text(String(bump(local) + bump(seen)));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "capsule-union.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 3), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqual(@as(u32, 6), diagnostics[1].line);
+    try std.testing.expectEqualStrings(capsule_failure_pure, diagnostics[1].message);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[2].code);
+    try std.testing.expectEqual(@as(u32, 6), diagnostics[2].line);
+    try std.testing.expectEqualStrings(capsule_failure_read_only, diagnostics[2].message);
+}
+
+test "a pure capsule on a factory helper keeps the factory shapes proven" {
+    const allocator = std.testing.allocator;
+    const fresh =
+        \\function fresh(): Proof<number[], "pure"> {
+        \\  return [];
+        \\}
+        \\function make(): Proof<number[], "pure"> {
+        \\  return fresh();
+        \\}
+        \\const table: number[] = make();
+        \\function handler(req: Request): Response {
+        \\  const local: number[] = make();
+        \\  local.push(1);
+        \\  return Response.text(String(local.length + table.length));
+        \\}
+    ;
+    var p3 = try runCheckOnlyFromSourceWithOptions(allocator, fresh, "capsule-p3.ts", .{ .json_mode = true });
+    defer p3.deinit(allocator);
+    try expectReadOnlyFamilyProven(&p3);
+    try std.testing.expectEqual(@as(usize, 0), p3.json_diagnostics.items.len);
+
+    const same_site =
+        \\structural Row = { n: number };
+        \\function makeRow(): Row {
+        \\  return { n: 0 };
+        \\}
+        \\function build(): Row {
+        \\  return makeRow();
+        \\}
+        \\function inc(r: Row): Proof<number, "pure"> {
+        \\  r.n = r.n + 1;
+        \\  return r.n;
+        \\}
+        \\const shared: Row = build();
+        \\function handler(req: Request): Response {
+        \\  const mine: Row = build();
+        \\  return Response.text(String(shared.n + inc(mine)));
+        \\}
+    ;
+    var p9 = try runCheckOnlyFromSourceWithOptions(allocator, same_site, "capsule-p9.ts", .{ .json_mode = true });
+    defer p9.deinit(allocator);
+    try expectReadOnlyFamilyProven(&p9);
+    try std.testing.expectEqual(@as(usize, 0), p9.json_diagnostics.items.len);
+}
+
+test "a capsule that calls a plain module writer fails ZTS500 when no handler calls either" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const seen: number[] = [];
+        \\function bump(): number {
+        \\  seen.push(1);
+        \\  return seen.length;
+        \\}
+        \\function outer(): Proof<number, "pure"> {
+        \\  return bump();
+        \\}
+        \\function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "capsule-unreached-outer.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
+    try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqual(@as(u32, 9), diagnostics[1].line);
+    try std.testing.expectEqualStrings(capsule_failure_pure, diagnostics[1].message);
 }

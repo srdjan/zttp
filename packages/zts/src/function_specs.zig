@@ -104,27 +104,115 @@ pub const CapsuleTable = struct {
     }
 };
 
+/// Writes to state that outlives a request, as the entry module's flow
+/// evaluation and verifier found them. A capsule that one of them reaches
+/// cannot prove `pure`, `read_only`, or `deterministic`: the effect row sees
+/// virtual-module calls only, not a write to module state.
+pub const StateWriters = struct {
+    /// Function nodes (the function expression or arrow function) of the entry
+    /// module that stood on the activation stack of a persistent write. A
+    /// function that a write happened inside, or inside a callee of, is here.
+    flow_functions: []const ir.NodeIndex = &.{},
+    /// Nodes of the module-state writes that the verifier named in the entry
+    /// module. A function whose body, or a callee's body, holds one is a
+    /// writer even when no handler reaches it.
+    verifier_writes: []const ir.NodeIndex = &.{},
+};
+
 pub fn dischargeWithTypeSource(
     allocator: std.mem.Allocator,
     effects: *const EffectFacts,
     source: TypeSource,
     ir_view: IrView,
 ) !CapsuleTable {
+    return dischargeWithStateWriters(allocator, effects, source, ir_view, .{});
+}
+
+/// The function expression or arrow function that `declaration` names, or null.
+fn functionOwnerNode(ir_view: IrView, declaration: ir.NodeIndex) ?ir.NodeIndex {
+    const tag = ir_view.getTag(declaration) orelse return null;
+    const owner = switch (tag) {
+        .function_expr, .arrow_function => declaration,
+        .function_decl, .var_decl => (ir_view.getVarDecl(declaration) orelse return null).init,
+        // exhaustive: effect inference records a helper only from a `function_decl` or a `var_decl` (`collectFunctionsIn`), so no helper's `decl_node` reaches this arm.
+        else => return null,
+    };
+    const owner_tag = ir_view.getTag(owner) orelse return null;
+    if (owner_tag != .function_expr and owner_tag != .arrow_function) return null;
+    return owner;
+}
+
+/// For each function of `effects`, whether it or a function that it calls
+/// holds a write that the verifier named. The caller frees the slice.
+fn staticWriterFlags(
+    allocator: std.mem.Allocator,
+    effects: *const EffectFacts,
+    ir_view: IrView,
+    writes: []const ir.NodeIndex,
+) ![]bool {
+    const functions = effects.all();
+    const flags = try allocator.alloc(bool, functions.len);
+    errdefer allocator.free(flags);
+    @memset(flags, false);
+    if (writes.len == 0) return flags;
+    for (functions, flags) |fe, *flag| {
+        for (writes) |write| {
+            if (ir_view.subtreeContains(fe.body_node, write)) {
+                flag.* = true;
+                break;
+            }
+        }
+    }
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (flags, 0..) |*flag, index| {
+            if (flag.*) continue;
+            for (effects.calleesOf(index)) |callee| {
+                if (callee < flags.len and flags[callee]) {
+                    flag.* = true;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+    }
+    return flags;
+}
+
+/// Discharge every helper capsule. A helper that `writers` names loses `pure`,
+/// `read_only`, and `deterministic` before the discharge.
+pub fn dischargeWithStateWriters(
+    allocator: std.mem.Allocator,
+    effects: *const EffectFacts,
+    source: TypeSource,
+    ir_view: IrView,
+    writers: StateWriters,
+) !CapsuleTable {
     const env = try source.validate();
     var table: CapsuleTable = .{};
     errdefer table.deinit(allocator);
 
-    for (effects.all()) |fe| {
+    const static_writers = try staticWriterFlags(allocator, effects, ir_view, writers.verifier_writes);
+    defer allocator.free(static_writers);
+
+    for (effects.all(), static_writers) |fe, static_writer| {
         if (std.mem.eql(u8, fe.name, handler_fn_name)) continue;
 
         const line: u32 = if (ir_view.getLoc(fe.decl_node)) |loc| loc.line else 0;
         const signature = try functionSignature(source, ir_view, fe.decl_node);
 
+        const flow_writer = if (functionOwnerNode(ir_view, fe.decl_node)) |owner|
+            std.mem.indexOfScalar(ir.NodeIndex, writers.flow_functions, owner) != null
+        else
+            false;
+        const writes_state = static_writer or flow_writer;
+
         const facts: CapsuleFacts = .{
             .total = handler_verifier.functionAlwaysReturns(ir_view, fe.body_node),
-            .pure = fe.row.pure,
-            .read_only = fe.row.readOnly(),
-            .deterministic = fe.row.deterministic,
+            .pure = fe.row.pure and !writes_state,
+            .read_only = fe.row.readOnly() and !writes_state,
+            .deterministic = fe.row.deterministic and !writes_state,
             .recursive = fe.row.recursive,
             .lower_bound = fe.row.lower_bound,
             .function_value_escape = fe.row.function_value_escape,

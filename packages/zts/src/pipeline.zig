@@ -53,6 +53,7 @@ const abi_types_mod = @import("abi_types.zig");
 const ir_mod = @import("zts-engine").parser.ir;
 const handler_contract_mod = @import("zts-contracts").handler_contract;
 const contract_builder_mod = @import("contract_builder.zig");
+const function_specs_mod = @import("function_specs.zig");
 const manifest_registry_mod = @import("manifest_registry.zig");
 const bytecode_mod = @import("zts-engine").bytecode;
 const source_diagnostics = @import("zts-base").source_diagnostics;
@@ -719,6 +720,24 @@ pub const ContractExtraction = struct {
     }
 };
 
+/// The owned lists behind a `function_specs.StateWriters` view.
+const StateWriterList = struct {
+    flow_functions: std.ArrayList(NodeIndex) = .empty,
+    verifier_writes: std.ArrayList(NodeIndex) = .empty,
+
+    fn deinit(self: *StateWriterList, allocator: std.mem.Allocator) void {
+        self.flow_functions.deinit(allocator);
+        self.verifier_writes.deinit(allocator);
+    }
+
+    fn view(self: *const StateWriterList) function_specs_mod.StateWriters {
+        return .{
+            .flow_functions = self.flow_functions.items,
+            .verifier_writes = self.verifier_writes.items,
+        };
+    }
+};
+
 /// Owns the selected analysis passes for one parsed module.
 /// Initialize this value in final caller storage before calling complete.
 pub const ModuleAnalysisSession = struct {
@@ -1114,6 +1133,10 @@ pub const ModuleAnalysisSession = struct {
                 try self.finishSoundTypeSession();
             }
         }
+        // The capsule discharge reads the writes that the flow pass found. A
+        // module with type errors stops after extraction, as before.
+        const type_errors = if (self.resolved) |*resolved| resolved.typeErrorCount() > 0 else false;
+        if (!type_errors) try self.runSelectedFlow();
         var extraction = try self.extractDefaultResult(filename);
         errdefer extraction.deinit(self.allocator);
 
@@ -1127,9 +1150,37 @@ pub const ModuleAnalysisSession = struct {
         return extraction.contract;
     }
 
-    /// Apply the selected flow pass to the contract, running it first when it has not run.
-    /// A module with no handler function keeps the builder defaults.
-    fn applyFlow(self: *ModuleAnalysisSession, contract: *HandlerContract) !void {
+    /// The entry-module writes to persistent state that the finished passes
+    /// found, for the capsule discharge. The flow pass names the functions
+    /// that stood on the stack of a write. The verifier names the write nodes
+    /// of module-state mutation, which covers a helper that no handler reaches.
+    fn collectStateWriters(self: *ModuleAnalysisSession) !StateWriterList {
+        var list: StateWriterList = .{};
+        errdefer list.deinit(self.allocator);
+        if (self.flow_state == .completed) {
+            const flow = try self.completedFlow();
+            for (flow.persistentWrites()) |write| {
+                for (write.stack) |entry| {
+                    if (entry.module != 0) continue;
+                    if (std.mem.indexOfScalar(NodeIndex, list.flow_functions.items, entry.node) != null) continue;
+                    try list.flow_functions.append(self.allocator, entry.node);
+                }
+            }
+        }
+        if (self.checked) |*checked| {
+            if (checked.verifierCompleted()) {
+                for (checked.verifierDiagnostics()) |diagnostic| {
+                    if (diagnostic.kind != .module_scope_mutation) continue;
+                    try list.verifier_writes.append(self.allocator, diagnostic.node);
+                }
+            }
+        }
+        return list;
+    }
+
+    /// Run the selected flow pass when it has not run. A module with no handler
+    /// function runs none.
+    fn runSelectedFlow(self: *ModuleAnalysisSession) !void {
         switch (self.flow_state) {
             .skipped => return,
             .ready, .completed => {},
@@ -1140,6 +1191,20 @@ pub const ModuleAnalysisSession = struct {
             self.parsed.root,
         ) orelse return;
         if (self.flow_state == .ready) _ = try self.runFlow(handler);
+    }
+
+    /// Apply the completed flow pass to the contract. A module with no handler
+    /// function keeps the builder defaults.
+    fn applyFlow(self: *ModuleAnalysisSession, contract: *HandlerContract) !void {
+        switch (self.flow_state) {
+            .skipped => return,
+            .ready, .completed => {},
+            .attempted, .refused => return error.AnalysisPassIncomplete,
+        }
+        _ = handler_function_mod.findHandlerFunction(
+            self.parsed.ir_view,
+            self.parsed.root,
+        ) orelse return;
         projectFlowProperties(contract, (try self.completedFlow()).getProperties());
     }
 
@@ -1355,6 +1420,8 @@ pub const ModuleAnalysisSession = struct {
         );
         const handler_loc = if (handler_fn) |handler| self.parsed.ir_view.getLoc(handler) else null;
         const effects = try self.prepareContractEffectFacts(opts, checker.env, handler_fn);
+        var writers = try self.collectStateWriters();
+        defer writers.deinit(self.allocator);
         var extraction = try buildContractResultOn(
             self.allocator,
             self.parsed,
@@ -1367,6 +1434,7 @@ pub const ModuleAnalysisSession = struct {
             handler_loc,
             self.completedContractFacts(),
             effects,
+            writers.view(),
         );
         errdefer extraction.deinit(self.allocator);
         try checker.ensureHealthy();
@@ -1396,6 +1464,7 @@ fn buildContractResultOn(
     handler_loc: ?ir_mod.SourceLocation,
     module_facts: *const ModuleFacts,
     effect_facts: *const EffectFacts,
+    state_writers: function_specs_mod.StateWriters,
 ) !ContractExtraction {
     var builder = ContractBuilder.initForBuildWithTypeSource(
         allocator,
@@ -1410,6 +1479,7 @@ fn buildContractResultOn(
     builder.manifest_registry = opts.manifest_registry;
     builder.capture_export_effects = opts.capture_export_effects;
     builder.strict_passed = opts.strict;
+    builder.state_writers = state_writers;
     defer builder.deinit();
 
     var contract = try builder.build(

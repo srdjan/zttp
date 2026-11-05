@@ -225,10 +225,7 @@ pub const ModuleId = flow_value.ModuleId;
 /// One write that a request makes to state that outlives the request.
 pub const PersistentWrite = flow_rules.PersistentWrite;
 
-pub const FunctionRef = struct {
-    module: ModuleId,
-    node: NodeIndex,
-};
+pub const FunctionRef = flow_rules.FunctionRef;
 
 pub const ImportTarget = struct {
     binding_key: u32,
@@ -2088,18 +2085,39 @@ pub const FlowInterp = struct {
         try self.appendPersistentWrite(node);
     }
 
+    /// The function node of the handler that the run analyzes: the function
+    /// expression, not the declaration that names it.
+    fn handlerFunctionRef(self: *const FlowInterp) FunctionRef {
+        const tag = self.ir_view.getTag(self.root_entry_node) orelse unknown_tag;
+        if (tag == .function_decl or tag == .var_decl) {
+            if (self.ir_view.getVarDecl(self.root_entry_node)) |declaration| {
+                if (declaration.init != null_node) return .{ .module = 0, .node = declaration.init };
+            }
+        }
+        return .{ .module = 0, .node = self.root_entry_node };
+    }
+
     /// Append the event unless an equal one exists. Passes and candidate
     /// dispatch visit one write many times.
     fn appendPersistentWrite(self: *FlowInterp, node: NodeIndex) Error!void {
-        const depth = self.activations.items.len;
+        const depth = self.activations.items.len + 1;
+        const handler = self.handlerFunctionRef();
         for (self.persistent_writes.items) |known| {
             if (known.node != node or known.module != self.active_module or known.stack.len != depth) continue;
-            var same = true;
-            for (known.stack, self.activations.items) |handle, activation| same = same and handle == activation.func;
+            var same = known.stack[0].module == handler.module and known.stack[0].node == handler.node;
+            for (known.stack[1..], self.activations.items) |entry, activation| {
+                const ref = self.functionRef(activation.func) orelse unreachable;
+                same = same and entry.module == ref.module and entry.node == ref.node;
+            }
             if (same) return;
         }
-        const stack = try self.mem().alloc(NodeIndex, depth);
-        for (stack, self.activations.items) |*slot, activation| slot.* = activation.func;
+        const stack = try self.mem().alloc(FunctionRef, depth);
+        stack[0] = handler;
+        for (stack[1..], self.activations.items) |*slot, activation| {
+            // `invoke` refused any function without a reference before it
+            // pushed this activation.
+            slot.* = self.functionRef(activation.func) orelse unreachable;
+        }
         try self.persistent_writes.append(self.mem(), .{ .node = node, .module = self.active_module, .stack = stack });
     }
 
@@ -8462,7 +8480,7 @@ test "a helper that pushes onto a module array parameter is a persistent write a
     defer found.deinit();
     try testing.expect(!found.cleared);
     try testing.expectEqualSlices(u32, &.{3}, found.lines);
-    try testing.expectEqualSlices(usize, &.{1}, found.stack_depths);
+    try testing.expectEqualSlices(usize, &.{2}, found.stack_depths);
 }
 
 test "a write through two helpers carries the whole activation stack" {
@@ -8484,7 +8502,35 @@ test "a write through two helpers carries the whole activation stack" {
     defer found.deinit();
     try testing.expect(!found.cleared);
     try testing.expectEqualSlices(u32, &.{3}, found.lines);
-    try testing.expectEqualSlices(usize, &.{2}, found.stack_depths);
+    try testing.expectEqualSlices(usize, &.{3}, found.stack_depths);
+}
+
+test "a persistent write carries the handler and each helper on its stack, by line" {
+    const h = try Harness.create(testing.allocator,
+        \\const seen = [];
+        \\function addTo(xs) {
+        \\  xs.push(1);
+        \\  return undefined;
+        \\}
+        \\function viaHelper() {
+        \\  addTo(seen);
+        \\  return undefined;
+        \\}
+        \\function handler(req) {
+        \\  viaHelper();
+        \\  return Response.text(String(seen.length));
+        \\}
+    );
+    defer h.destroy();
+    const result = try h.interp.analyzeHandler(try h.find("handler"));
+    try testing.expectEqual(@as(usize, 1), result.persistent_writes.len);
+    const stack = result.persistent_writes[0].stack;
+    try testing.expectEqual(@as(usize, 3), stack.len);
+    try testing.expectEqual(@as(u32, 10), h.interp.ir_view.getLoc(stack[0].node).?.line);
+    try testing.expectEqual(@as(u32, 6), h.interp.ir_view.getLoc(stack[1].node).?.line);
+    try testing.expectEqual(@as(u32, 2), h.interp.ir_view.getLoc(stack[2].node).?.line);
+    try testing.expectEqual(@as(u16, 0), stack[0].module);
+    try testing.expectEqual(@as(u16, 0), stack[2].module);
 }
 
 test "a push onto a module record read through a call is a persistent write" {

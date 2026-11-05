@@ -8,9 +8,9 @@ The F18 plan (`2026-11-05-f18-module-state-proofs-plan.md`) recorded five residu
 |---|---|
 | U0 | Complete: baseline below |
 | U1 | Complete: persistent-write events, phase split, union over passes; 18 evaluator tests and 1 facade test |
-| U2 | Implemented; commits with U2b after the gates |
-| U2b | Implemented; commits with U2 after the gates |
-| U3 | Not started |
+| U2 | Complete: edcdd08f; verify.sh passed |
+| U2b | Complete: edcdd08f, with U2 |
+| U3 | Complete: the helper capsule discharge reads the write events and the verifier write sites |
 | U4 | Not started |
 | U5 | Not started |
 | U6 | Not started |
@@ -136,3 +136,7 @@ Measured at `bf6ad1c3` with `zts check --json` over 82 files: the 33 tracked `.t
 - U2b: admission refuses `export let` and `export var` (`error.MutableExport`), and the parser refuses export lists and re-exports (ZTS002). No live-binding export reaches the evaluator, so the `const` test in `flowExportedBindingNode` is a defense only.
 - U2b: a graph compile without `-Dverify` now extracts the flow facts, as a single-module compile already did. Before U2b, the graph path lost them because it did not follow `export const saveAlias = save`.
 - U2b: a direct `seen.push(1)` on an imported array is a verifier ZTS310 error already, so the U2b write tests use an alias through a helper.
+- U2 cost: no measurable compile-time change. Debug builds on an idle host, `zts check` over the 146 corpus files: 0.67 to 0.76 s at bf6ad1c3 and 0.68 to 0.72 s at edcdd08f (rounds 2 and 3 of 3). `examples/fetch/weather-app.ts`, 30 checks a round: 7.6 to 9.1 ms and 7.3 to 7.9 ms for each check.
+- U3: every helper, with or without a `Proof` capsule, appears in the contract's `function_capsules` with its proven facts, so U3 clears the facts of each writer helper. A helper without a capsule then gets ZTS606 when the handler demands `pure`, `read_only`, or `deterministic`. Its hint ("annotate ... or inline the helper") does not fit a write to module state. U4 covers that hint too.
+- U3 does not involve these and they were already present at edcdd08f: the ZTS500 for a helper's own capsule points at the handler's line, and its message says "not discharged by handler proof". CHECK does not discharge a capsule in a dependency module at all, even one that calls `Date.now()`. Probes are in `/tmp/zttp-f18g/u3/`.
+- U3: `extractContract` now runs the flow pass before contract extraction, so the capsule discharge can read the events. A module with type errors still stops before the flow pass.
