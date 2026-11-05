@@ -151,7 +151,7 @@ pub const SchemaRegistry = struct {
 
 pub fn getOrCreateRegistry(handle: *sdk.ModuleHandle) !*SchemaRegistry {
     if (sdk.getModuleState(handle, SchemaRegistry, MODULE_STATE_SLOT)) |reg| return reg;
-    const allocator = sdk.getAllocator(handle);
+    const allocator = sdk.getStateAllocator(handle);
     const reg = try allocator.create(SchemaRegistry);
     reg.* = SchemaRegistry.init(allocator);
     try sdk.setModuleState(handle, MODULE_STATE_SLOT, @ptrCast(reg), SchemaRegistry.sdkDeinit);
@@ -164,28 +164,36 @@ fn schemaCompileImpl(handle: *sdk.ModuleHandle, _: sdk.JSValue, args: []const sd
     const reg = getOrCreateRegistry(handle) catch return sdk.JSValue.false_val;
     const allocator = reg.allocator;
 
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, schema_json, .{}) catch
+    const parsed = std.json.parseFromSlice(std.json.Value, sdk.getAllocator(handle), schema_json, .{}) catch
         return sdk.JSValue.false_val;
     defer parsed.deinit();
 
     const schema = compileSchemaFromJson(allocator, parsed.value) catch return sdk.JSValue.false_val;
 
-    const name_owned = allocator.dupe(u8, name) catch {
+    // A replacement keeps the key that is already in the map and frees only the
+    // old schema. (`fetchPut` also keeps the old key, so freeing that key left
+    // the map holding freed memory.) A new entry dupes its name below.
+    const slot = reg.schemas.getOrPut(name) catch {
         schema.deinit(allocator);
         allocator.destroy(schema);
         return sdk.JSValue.false_val;
     };
-
-    if (reg.schemas.fetchPut(name_owned, schema) catch {
-        allocator.free(name_owned);
+    if (slot.found_existing) {
+        const old = slot.value_ptr.*;
+        slot.value_ptr.* = schema;
+        old.deinit(allocator);
+        allocator.destroy(old);
+        return sdk.JSValue.true_val;
+    }
+    // `name` borrows request memory until the owned copy replaces it.
+    const name_owned = allocator.dupe(u8, name) catch {
+        reg.schemas.removeByPtr(slot.key_ptr);
         schema.deinit(allocator);
         allocator.destroy(schema);
         return sdk.JSValue.false_val;
-    }) |old| {
-        old.value.deinit(allocator);
-        allocator.destroy(old.value);
-        allocator.free(old.key);
-    }
+    };
+    slot.key_ptr.* = name_owned;
+    slot.value_ptr.* = schema;
 
     return sdk.JSValue.true_val;
 }

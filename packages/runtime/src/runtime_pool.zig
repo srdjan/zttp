@@ -1900,6 +1900,218 @@ const lifetime_guard_cases = [_]LifetimeGuardCase{
         .expected_body = "1600",
     },
     .{
+        .name = "zttp:text slugify in a loop",
+        .handler =
+        \\import { slugify } from "zttp:text";
+        \\function handler(req) {
+        \\  let out = "";
+        \\  for (const i of range(2000)) {
+        \\    out = slugify("Hello, Wide World of Zig");
+        \\  }
+        \\  return Response.text(out);
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "hello-wide-world-of-zig",
+    },
+    .{
+        .name = "zttp:text escapeHtml, unescapeHtml, truncate, and mask in a loop",
+        .handler =
+        \\import { escapeHtml, mask, truncate, unescapeHtml } from "zttp:text";
+        \\function handler(req) {
+        \\  let out = "";
+        \\  for (const i of range(200)) {
+        \\    const e = escapeHtml("<a & b>");
+        \\    const u = unescapeHtml(e);
+        \\    const t = truncate("abcdefghij", 5, "...");
+        \\    const m = mask("1234567890", 2);
+        \\    out = [e, u, t, m].join("|");
+        \\  }
+        \\  return Response.text(out);
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "&lt;a &amp; b&gt;|<a & b>|ab...|********90",
+    },
+    .{
+        .name = "zttp:cache cacheSet of a joined value in a loop",
+        .handler =
+        \\import { cacheSet } from "zttp:cache";
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  for (const i of range(200)) {
+        \\    const v = ["value-", String(i), "-", "padding-padding-padding"].join("");
+        \\    if (cacheSet("ns", "k", v)) {
+        \\      n = n + 1;
+        \\    }
+        \\  }
+        \\  return Response.text(String(n));
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "200",
+    },
+    .{
+        .name = "zttp:cache cacheSet of many keys, cacheGet, and cacheDelete in a loop",
+        .handler =
+        \\import { cacheDelete, cacheGet, cacheIncr, cacheSet } from "zttp:cache";
+        \\function handler(req) {
+        \\  let last = "";
+        \\  for (const i of range(100)) {
+        \\    const key = ["key-", String(i)].join("");
+        \\    cacheSet("ns", key, "v");
+        \\    last = String(cacheGet("ns", key));
+        \\    cacheIncr("ns", "counter", 1);
+        \\    cacheDelete("ns", key);
+        \\  }
+        \\  return Response.text(last);
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "v",
+    },
+    .{
+        .name = "zttp:crypto base64Encode and base64Decode in a loop",
+        .handler =
+        \\import { base64Decode, base64Encode } from "zttp:crypto";
+        \\function handler(req) {
+        \\  let out = "";
+        \\  for (const i of range(200)) {
+        \\    out = base64Decode(base64Encode("hello world"));
+        \\  }
+        \\  return Response.text(out);
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "hello world",
+    },
+    .{
+        .name = "zttp:auth jwtSign and jwtVerify in a loop",
+        .handler =
+        \\import { jwtSign, jwtVerify } from "zttp:auth";
+        \\function handler(req) {
+        \\  let ok = "";
+        \\  for (const i of range(100)) {
+        \\    const token = jwtSign('{"sub":"u"}', "secret");
+        \\    const r = jwtVerify(token, "secret");
+        \\    ok = String(r.ok);
+        \\  }
+        \\  return Response.text(ok);
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "true",
+    },
+    .{
+        .name = "zttp:url urlParse, urlSearchParams, urlEncode, and urlDecode in a loop",
+        .handler =
+        \\import { urlDecode, urlEncode, urlParse, urlSearchParams } from "zttp:url";
+        \\function handler(req) {
+        \\  let out = "";
+        \\  for (const i of range(200)) {
+        \\    const p = urlParse("https://example.com/a?x=1&y=two#f");
+        \\    const q = urlSearchParams("x=1&y=two");
+        \\    out = [urlEncode("a b&c"), urlDecode("a%20b"), String(p.host), String(q.y)].join("|");
+        \\  }
+        \\  return Response.text(out);
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "a%20b%26c|a b|example.com|two",
+    },
+    .{
+        .name = "zttp:http setCookie in a loop",
+        .handler =
+        \\import { setCookie } from "zttp:http";
+        \\function handler(req) {
+        \\  let out = "";
+        \\  for (const i of range(200)) {
+        \\    out = setCookie("sid", "abc", { path: "/", maxAge: 60 });
+        \\  }
+        \\  return Response.text(out);
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "sid=abc; Path=/; Max-Age=60",
+    },
+    .{
+        .name = "zttp:sse sseEvents in a loop",
+        .handler =
+        \\import { sseEvents } from "zttp:sse";
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  for (const i of range(200)) {
+        \\    const r = sseEvents("data: one\n\ndata: two\n\n", { maxBodyBytes: 1024, maxBlockBytes: 256, maxEvents: 8 });
+        \\    n = r.value.length;
+        \\  }
+        \\  return Response.text(String(n));
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "2",
+    },
+    .{
+        .name = "zttp:validate schemaCompile, validateJson, and decodeForm in a loop",
+        .handler =
+        \\import { decodeForm } from "zttp:decode";
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\function handler(req) {
+        \\  let out = "";
+        \\  for (const i of range(100)) {
+        \\    schemaCompile("p", '{"type":"object","required":["a"],"properties":{"a":{"type":"string"}}}');
+        \\    const r = validateJson("p", '{"a":"x"}');
+        \\    const bad = validateJson("p", '{"a":1}');
+        \\    const f = decodeForm("p", "a=hello+world");
+        \\    out = [String(r.ok), String(bad.ok), String(f.ok)].join(",");
+        \\  }
+        \\  return Response.text(out);
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "true,false,true",
+    },
+    .{
+        .name = "zttp:ratelimit rateReset then rateCheck in a loop",
+        .handler =
+        \\import { rateCheck, rateReset } from "zttp:ratelimit";
+        \\function handler(req) {
+        \\  let n = 0;
+        \\  for (const i of range(100)) {
+        \\    rateReset("client-key");
+        \\    const r = rateCheck("client-key", 5, 60);
+        \\    if (r.ok) {
+        \\      n = n + 1;
+        \\    }
+        \\  }
+        \\  return Response.text(String(n));
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "100",
+    },
+    .{
         .name = "returned Response with a custom header object",
         .handler =
         \\function handler(req) {
@@ -2089,6 +2301,162 @@ test "HandlerPool request results repeat on one runtime without arena overflow" 
             return err;
         };
     }
+}
+
+const CrossResetCase = struct {
+    name: []const u8,
+    handler: []const u8,
+    first_body: []const u8,
+    second_body: []const u8,
+};
+
+/// A request reads what the previous request wrote into module state, then
+/// writes a new value. The reset between the two requests frees the request
+/// arena, so a store that kept request memory would return garbage.
+const cross_reset_cases = [_]CrossResetCase{
+    .{
+        .name = "cacheGet then cacheSet",
+        .handler =
+        \\import { cacheGet, cacheSet } from "zttp:cache";
+        \\function handler(req) {
+        \\  const prev = cacheGet("ns", "k");
+        \\  cacheSet("ns", "k", ["fresh", "-", "value"].join(""));
+        \\  return Response.text(String(prev));
+        \\}
+        ,
+        .first_body = "undefined",
+        .second_body = "fresh-value",
+    },
+    .{
+        .name = "validateJson then schemaCompile",
+        .handler =
+        \\import { schemaCompile, validateJson } from "zttp:validate";
+        \\function handler(req) {
+        \\  const prev = validateJson("p", '{"a":"x"}');
+        \\  schemaCompile("p", '{"type":"object","required":["a"],"properties":{"a":{"type":"string"}}}');
+        \\  return Response.text(String(prev.ok));
+        \\}
+        ,
+        .first_body = "false",
+        .second_body = "true",
+    },
+    .{
+        .name = "rateCheck remaining counts down across a reset",
+        .handler =
+        \\import { rateCheck } from "zttp:ratelimit";
+        \\function handler(req) {
+        \\  const r = rateCheck("client-key", 5, 60);
+        \\  return Response.text(String(r.value.remaining));
+        \\}
+        ,
+        .first_body = "4",
+        .second_body = "3",
+    },
+};
+
+test "HandlerPool module state written by one request is read by the next after a reset" {
+    const allocator = std.testing.allocator;
+    for (cross_reset_cases) |case| {
+        var pool = try HandlerPool.init(allocator, .{ .arena_size = 4 * 1024 * 1024 }, case.handler, "<handler>", 1, 0);
+        defer pool.deinit();
+
+        var request = try guardRequest(allocator, .{
+            .name = case.name,
+            .handler = case.handler,
+            .arena_size = 4 * 1024 * 1024,
+            .method = "GET",
+            .url = "/",
+            .expected_body = case.second_body,
+        });
+        defer request.deinit(allocator);
+
+        {
+            var handle = try pool.executeHandlerBorrowed(request.asView());
+            defer handle.deinit();
+            std.testing.expectEqualStrings(case.first_body, handle.response.body) catch |err| {
+                std.debug.print("cross-reset case \"{s}\": first run\n", .{case.name});
+                return err;
+            };
+        }
+        {
+            var handle = try pool.executeHandlerBorrowed(request.asView());
+            defer handle.deinit();
+            std.testing.expectEqualStrings(case.second_body, handle.response.body) catch |err| {
+                std.debug.print("cross-reset case \"{s}\": second run\n", .{case.name});
+                return err;
+            };
+        }
+
+        var lease = try pool.acquireWorkerRuntime();
+        defer lease.deinit();
+        try std.testing.expectEqual(@as(u64, 0), lease.base_rt.getStats().overflow_count);
+    }
+}
+
+test "HandlerPool frees module state at teardown after cacheSet" {
+    // std.testing.allocator reports a store that the pool leaves behind.
+    const allocator = std.testing.allocator;
+    const handler =
+        \\import { cacheSet } from "zttp:cache";
+        \\function handler(req) {
+        \\  cacheSet("ns", "k", ["a", "b"].join(""));
+        \\  cacheSet("ns", "k", ["c", "d"].join(""));
+        \\  return Response.text("done");
+        \\}
+    ;
+    var pool = try HandlerPool.init(allocator, .{ .arena_size = 4 * 1024 * 1024 }, handler, "<handler>", 1, 0);
+    defer pool.deinit();
+
+    var request = try guardRequest(allocator, .{
+        .name = "teardown after cacheSet",
+        .handler = handler,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "done",
+    });
+    defer request.deinit(allocator);
+
+    var handle = try pool.executeHandlerBorrowed(request.asView());
+    defer handle.deinit();
+    try std.testing.expectEqualStrings("done", handle.response.body);
+}
+
+test "HandlerPool sql queries with parameters do not reach the lifetime arena" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const db_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/guard.db", .{tmp.sub_path});
+    defer allocator.free(db_path);
+
+    try runLifetimeGuardCaseWith(.{
+        .name = "sqlOne with parameters in a loop",
+        .handler =
+        \\import { sql, sqlOne } from "zttp:sql";
+        \\function handler(req) {
+        \\  sql("pick", "SELECT :n AS n");
+        \\  let out = "";
+        \\  for (const i of range(50)) {
+        \\    const r = sqlOne("pick", { n: 7 });
+        \\    out = String(r.n);
+        \\  }
+        \\  return Response.text(out);
+        \\}
+        ,
+        .arena_size = 4 * 1024 * 1024,
+        .method = "GET",
+        .url = "/",
+        .expected_body = "7",
+    }, .{
+        .arena_size = 4 * 1024 * 1024,
+        .sqlite_path = db_path,
+        .dev_capability_policy = .{
+            .sql = .{
+                .enabled = true,
+                .queries = &.{zq.handler_policy.normalizedSqlQuery("pick", true)},
+            },
+        },
+    });
 }
 
 const EscapeCase = struct {

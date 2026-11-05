@@ -217,7 +217,7 @@ pub const RateStore = struct {
 
 fn getOrCreateStore(handle: *sdk.ModuleHandle) !*RateStore {
     if (sdk.getModuleState(handle, RateStore, MODULE_STATE_SLOT)) |store| return store;
-    const allocator = sdk.getAllocator(handle);
+    const allocator = sdk.getStateAllocator(handle);
     const store = try allocator.create(RateStore);
     errdefer allocator.destroy(store);
     store.* = RateStore.init(allocator);

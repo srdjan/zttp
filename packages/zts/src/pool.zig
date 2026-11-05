@@ -208,6 +208,9 @@ pub const LockFreePool = struct {
 
             const ctx = try context.Context.init(allocator, gc_state, config.ctx_config);
             errdefer ctx.deinit();
+            // Module stores outlive requests. They free through `backing`, because
+            // a free into the lifetime arena returns nothing until teardown.
+            ctx.state_allocator = backing;
 
             // Install builtins before hybrid allocator is attached so they persist across arena resets.
             try builtins.initBuiltins(ctx);

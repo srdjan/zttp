@@ -11,6 +11,9 @@ The area imports the SDK contract. No import boundary applies because no current
 - **A persistent-read export declares unknown provenance in its return labels.**
   Cache and SQL reads return data from separate writes. Proved by `zig build test-zts`.
 
+- **Module state allocates through `sdk.getStateAllocator`.**
+  `sdk.getAllocator` memory lives until the request ends, and a pooled runtime frees none of it before then. A store, a registry, or a cache that lives across requests, and every value it owns, must use the state allocator or the allocator that the store captured from it. Proved by `zig build test-server`.
+
 ## Decisions that bind here
 
 D-007

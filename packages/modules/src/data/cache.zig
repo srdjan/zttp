@@ -356,7 +356,7 @@ fn cacheEntryByteSize(ns: []const u8, key: []const u8, val: []const u8) !usize {
 
 fn getOrCreateStore(handle: *sdk.ModuleHandle) !*CacheStore {
     if (sdk.getModuleState(handle, CacheStore, MODULE_STATE_SLOT)) |store| return store;
-    const allocator = sdk.getAllocator(handle);
+    const allocator = sdk.getStateAllocator(handle);
     const store = try allocator.create(CacheStore);
     errdefer allocator.destroy(store);
     store.* = CacheStore.init(allocator);

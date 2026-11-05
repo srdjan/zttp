@@ -91,10 +91,16 @@ pub fn throwError(handle: *ModuleHandle, name: []const u8, message: []const u8) 
     return util.throwError(ctx, name, message);
 }
 
-/// Get the runtime allocator for persistent allocations.
+/// Get the allocator for memory that lives until the request ends.
 pub fn getAllocator(handle: *ModuleHandle) std.mem.Allocator {
     const ctx = handleToContext(handle);
-    return ctx.allocator;
+    return ctx.requestAllocator();
+}
+
+/// Get the allocator for module state that lives across requests.
+pub fn getStateAllocator(handle: *ModuleHandle) std.mem.Allocator {
+    const ctx = handleToContext(handle);
+    return ctx.state_allocator;
 }
 
 /// SDK C-ABI bridge. These `export` functions are the runtime half of the
@@ -232,7 +238,15 @@ pub const sdk_bridge = struct {
 
     pub export fn zttpSdkGetAllocator(handle: *ModuleHandle) *const std.mem.Allocator {
         const ctx = handleToContext(handle);
-        return &ctx.allocator;
+        // The request allocator depends on `hybrid` at each call, so the slot
+        // holds the current value and the caller dereferences it at once.
+        ctx.sdk_request_allocator = ctx.requestAllocator();
+        return &ctx.sdk_request_allocator;
+    }
+
+    pub export fn zttpSdkGetStateAllocator(handle: *ModuleHandle) *const std.mem.Allocator {
+        const ctx = handleToContext(handle);
+        return &ctx.state_allocator;
     }
 
     pub export fn zttpSdkSha256WithHandle(
@@ -388,8 +402,9 @@ pub const sdk_bridge = struct {
         const obj = obj_val.toPtr(object.JSObject);
         const pool = ctx.hidden_class_pool orelse return false;
 
-        const atoms = obj.getOwnEnumerableKeys(ctx.allocator, pool) catch return false;
-        defer ctx.allocator.free(atoms);
+        const request_allocator = ctx.requestAllocator();
+        const atoms = obj.getOwnEnumerableKeys(request_allocator, pool) catch return false;
+        defer request_allocator.free(atoms);
 
         const arr = ctx.createArray() catch return false;
         for (atoms, 0..) |atom, i| {

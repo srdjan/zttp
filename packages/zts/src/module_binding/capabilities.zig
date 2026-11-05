@@ -281,8 +281,9 @@ fn canonicalizeCreatablePath(allocator: std.mem.Allocator, path: []const u8) ![]
 }
 
 pub fn allowSdkSqlitePath(ctx: *context.Context, path: []const u8) !void {
-    const canonical = try canonicalizeCreatablePath(ctx.allocator, path);
-    defer ctx.allocator.free(canonical);
+    const request_allocator = ctx.requestAllocator();
+    const canonical = try canonicalizeCreatablePath(request_allocator, path);
+    defer request_allocator.free(canonical);
     try ctx.allowSdkSqlitePathCanonical(canonical);
 }
 
@@ -322,10 +323,12 @@ pub fn openSqliteDbChecked(
     path: []const u8,
 ) !sqlite_runtime.Db {
     try sqliteCapabilityChecked(ctx);
-    const canonical = try canonicalizeCreatablePath(ctx.allocator, path);
-    defer ctx.allocator.free(canonical);
+    const request_allocator = ctx.requestAllocator();
+    const canonical = try canonicalizeCreatablePath(request_allocator, path);
+    defer request_allocator.free(canonical);
     if (!ctx.allowsSdkSqlitePathCanonical(canonical)) return error.SqlitePathNotAllowed;
-    return sqlite_runtime.Db.openReadWriteCreate(ctx.allocator, canonical);
+    // The database handle lives in the module store across requests.
+    return sqlite_runtime.Db.openReadWriteCreate(ctx.state_allocator, canonical);
 }
 
 pub fn hmacSha256ForActiveModule(

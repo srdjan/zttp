@@ -204,7 +204,7 @@ test "SqlStore configure preserves its path after allocation failure" {
 
 fn getOrCreateStore(handle: *sdk.ModuleHandle) !*SqlStore {
     if (sdk.getModuleState(handle, SqlStore, MODULE_STATE_SLOT)) |store| return store;
-    const allocator = sdk.getAllocator(handle);
+    const allocator = sdk.getStateAllocator(handle);
     const store = try allocator.create(SqlStore);
     errdefer allocator.destroy(store);
     store.* = try SqlStore.init(allocator, null);

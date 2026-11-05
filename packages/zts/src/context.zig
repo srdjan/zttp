@@ -168,6 +168,13 @@ pub const Context = struct {
     exception: value.JSValue,
     /// Configuration
     config: ContextConfig,
+    /// Allocator that frees memory. Module state that lives across requests
+    /// allocates through it. It is `allocator` unless a pooled runtime sets it
+    /// to the freeing allocator that backs the lifetime arena.
+    state_allocator: std.mem.Allocator,
+    /// Holds the request allocator that `zttpSdkGetAllocator` hands out by
+    /// pointer. The slot outlives the call; the pointee is read at once.
+    sdk_request_allocator: std.mem.Allocator,
     /// Optional hybrid allocator for request-scoped allocation
     /// When set, ephemeral allocations use arena, persistent use standard allocator
     hybrid: ?*arena_mod.HybridAllocator,
@@ -269,6 +276,8 @@ pub const Context = struct {
 
         ctx.* = .{
             .allocator = allocator,
+            .state_allocator = allocator,
+            .sdk_request_allocator = allocator,
             .gc_state = gc_state,
             .stack = stack,
             .sp = 0,

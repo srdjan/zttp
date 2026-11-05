@@ -53,6 +53,7 @@ pub const writeStderr = capability.writeStderr;
 
 pub const StateDeinitFn = context.StateDeinitFn;
 pub const getAllocator = context.getAllocator;
+pub const getStateAllocator = context.getStateAllocator;
 pub const getModuleState = context.getModuleState;
 pub const setModuleState = context.setModuleState;
 

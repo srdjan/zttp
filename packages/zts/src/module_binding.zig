@@ -83,6 +83,7 @@ pub const resultErrValue = bridge.resultErrValue;
 pub const resultErrs = bridge.resultErrs;
 pub const throwError = bridge.throwError;
 pub const getAllocator = bridge.getAllocator;
+pub const getStateAllocator = bridge.getStateAllocator;
 
 // The SDK bridge is part of the binary ABI. Referencing the module alone does
 // not force analysis of its contents, so the export family needs this anchor

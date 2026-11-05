@@ -20,9 +20,9 @@ pub fn installStore(ctx: *context.Context, db_path: ?[]const u8) !void {
         try existing.configure(db_path);
         return;
     }
-    const store = try ctx.allocator.create(sql_module.SqlStore);
-    errdefer ctx.allocator.destroy(store);
-    store.* = try sql_module.SqlStore.init(ctx.allocator, db_path);
+    const store = try ctx.state_allocator.create(sql_module.SqlStore);
+    errdefer ctx.state_allocator.destroy(store);
+    store.* = try sql_module.SqlStore.init(ctx.state_allocator, db_path);
     try module_binding.sdk_bridge.installSdkModuleState(
         ctx,
         MODULE_STATE_SLOT,

@@ -7,13 +7,24 @@ const RuntimeError = handles.RuntimeError;
 pub const StateDeinitFn = *const fn (*anyopaque) callconv(.c) void;
 
 extern fn zttpSdkGetAllocator(handle: *ModuleHandle) *const std.mem.Allocator;
+extern fn zttpSdkGetStateAllocator(handle: *ModuleHandle) *const std.mem.Allocator;
 extern fn zttpSdkGetModuleState(handle: *ModuleHandle, slot: usize) ?*anyopaque;
 extern fn zttpSdkSetModuleState(handle: *ModuleHandle, slot: usize, ptr: *anyopaque, deinit_fn: StateDeinitFn) bool;
 
-/// Borrow the runtime's general-purpose allocator. Valid for the module
-/// call's lifetime.
+/// Borrow the request allocator. Memory from it lives until the request ends
+/// and in a pooled runtime a free returns nothing, so use it for temporaries and for results that
+/// the call copies into a JS value. Module state that lives across requests
+/// must use `getStateAllocator`.
 pub fn getAllocator(handle: *ModuleHandle) std.mem.Allocator {
     return zttpSdkGetAllocator(handle).*;
+}
+
+/// Borrow the allocator for module state that lives across requests, such as
+/// a cache, a registry, or a store. Memory from it frees on `free`, so a
+/// replaced or evicted value returns its bytes. Never keep a pointer from
+/// `getAllocator` in state: the request that made it ends and the memory goes.
+pub fn getStateAllocator(handle: *ModuleHandle) std.mem.Allocator {
+    return zttpSdkGetStateAllocator(handle).*;
 }
 
 /// Get typed module state from a slot owned by the current active module.
