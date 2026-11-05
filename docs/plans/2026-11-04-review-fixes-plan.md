@@ -12,7 +12,7 @@ The full review report is outside the repository. The owner approved the recomme
 | F3 | Complete: `02659dfa` |
 | F2 | Complete: units G1 to G8, `e1c01404` to `04de59d5`. Results are in [the F2 plan](2026-11-04-f2-request-memory-plan.md). The headline `cacheSet` shape is bounded but not flat: finding F19 |
 
-`bash scripts/verify.sh` passed on `main` at `02659dfa`.
+`bash scripts/verify.sh` passed on `main` at `02659dfa` and at `4a4274b9`.
 
 ## Units
 
