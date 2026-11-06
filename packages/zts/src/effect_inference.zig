@@ -79,6 +79,14 @@ pub const EffectRow = struct {
     /// and nothing else. It is a field of its own and not `lower_bound`, which
     /// would also refuse the `Effects` ceiling (ZTS512).
     function_value_escape: bool = false,
+    /// True when a function this row describes reaches an assignment or
+    /// mutation of module state that the verifier named, in this module or in
+    /// a module it imports. No `EffectRow` field sees such a write otherwise:
+    /// the assignment visitor reads the operands only. It stays clear on a
+    /// function's own row for a write in its own module; the export rows and
+    /// the imported rows carry it across a file boundary. `read_only` capsule
+    /// discharge reads it as a state writer.
+    writes_module_state: bool = false,
 
     pub const empty: EffectRow = .{};
 
@@ -93,6 +101,7 @@ pub const EffectRow = struct {
             .writes = a.writes or b.writes,
             .lower_bound = a.lower_bound or b.lower_bound,
             .function_value_escape = a.function_value_escape or b.function_value_escape,
+            .writes_module_state = a.writes_module_state or b.writes_module_state,
         };
     }
 
@@ -105,7 +114,8 @@ pub const EffectRow = struct {
             a.cache_reads == b.cache_reads and
             a.writes == b.writes and
             a.lower_bound == b.lower_bound and
-            a.function_value_escape == b.function_value_escape;
+            a.function_value_escape == b.function_value_escape and
+            a.writes_module_state == b.writes_module_state;
     }
 
     /// `read_only` capsule property: the function performs no external writes
@@ -200,6 +210,14 @@ pub const ExportEffects = struct {
     }
 };
 
+/// The import through which a function first reached a writer of module state
+/// in another file. Borrowed from the module facts while an `Analyzer` holds
+/// it, and owned by an `EffectFacts` once projected.
+pub const ImportedWriter = struct {
+    module: []const u8,
+    name: []const u8,
+};
+
 pub const FunctionEffect = struct {
     name: []const u8,
     binding_key: u32,
@@ -215,6 +233,11 @@ pub const FunctionEffect = struct {
     /// True when the function declaration sits under an `export`. The
     /// opt-in docs mode asks exported helpers to carry explicit capsules.
     exported: bool = false,
+    /// The first import, in walk order, whose supplied row carried
+    /// `writes_module_state`. A function that reaches a writer only through a
+    /// local function leaves it null. A repair message reads it; no verdict
+    /// does.
+    imported_writer: ?ImportedWriter = null,
 };
 
 /// Configuration for one immutable effect-fact projection.
@@ -233,6 +256,12 @@ pub const EffectFactsOptions = struct {
     module_facts: ?*const module_facts_mod.ModuleFacts = null,
     type_source: ?type_env_mod.ConsumerTypeSource = null,
     imported_effects: []const ImportedEffect = &.{},
+    /// Nodes of the module-state writes that the verifier named in this
+    /// module. A function export whose body, or a callee's or referenced
+    /// function's body, holds one gets `writes_module_state` on its export row;
+    /// so does a holder export whose initializer holds one. Empty when no
+    /// verifier ran. Borrowed only while `buildEffectFacts` runs.
+    state_write_nodes: []const NodeIndex = &.{},
     contract_projection: ContractProjection = .unrequested,
 };
 
@@ -297,7 +326,13 @@ pub const EffectFacts = struct {
     contract: ContractEffectProjection = .unrequested,
 
     pub fn deinit(self: *EffectFacts, allocator: std.mem.Allocator) void {
-        for (self.functions) |function| allocator.free(function.name);
+        for (self.functions) |function| {
+            allocator.free(function.name);
+            if (function.imported_writer) |writer| {
+                allocator.free(writer.module);
+                allocator.free(writer.name);
+            }
+        }
         if (self.functions.len > 0) allocator.free(self.functions);
         if (self.callee_starts.len > 0) allocator.free(self.callee_starts);
         if (self.callee_storage.len > 0) allocator.free(self.callee_storage);
@@ -583,14 +618,22 @@ pub const Analyzer = struct {
     pub fn exportEffects(self: *const Analyzer) !ExportEffects {
         const reaches_recursion = try self.recursionReachability();
         defer self.allocator.free(reaches_recursion);
-        return self.exportEffectsWithReachability(reaches_recursion);
+        return self.exportEffectsWithReachability(reaches_recursion, &.{}, &.{});
     }
 
+    /// `writes_state` is empty, or holds one entry per function: whether that
+    /// function reaches one of `write_nodes`. `write_nodes` are the verifier's
+    /// module-state writes. An export row of a function that reaches one, and a
+    /// holder export that reaches one or whose initializer holds one, carries
+    /// `writes_module_state`.
     fn exportEffectsWithReachability(
         self: *const Analyzer,
         reaches_recursion: []const bool,
+        writes_state: []const bool,
+        write_nodes: []const NodeIndex,
     ) !ExportEffects {
         std.debug.assert(reaches_recursion.len == self.functions.items.len);
+        std.debug.assert(writes_state.len == 0 or writes_state.len == self.functions.items.len);
         var count: usize = 0;
         for (self.functions.items) |fe| {
             if (fe.exported) count += 1;
@@ -599,6 +642,13 @@ pub const Analyzer = struct {
             if (mb.exported and mb.name != null) count += 1;
         }
         if (count == 0) return .{};
+
+        // No verifier write: nothing to compute and nothing to allocate.
+        const holder_writes: []const bool = if (write_nodes.len == 0)
+            &.{}
+        else
+            try self.holderWritesState(writes_state, write_nodes);
+        defer if (holder_writes.len > 0) self.allocator.free(holder_writes);
 
         const entries = try self.allocator.alloc(ExportEffectEntry, count);
         var filled: usize = 0;
@@ -613,16 +663,23 @@ pub const Analyzer = struct {
             // function row of an escaping module.
             var row = fe.row;
             row.recursive = reaches_recursion[function_index];
+            if (writes_state.len > 0 and writes_state[function_index]) row.writes_module_state = true;
             entries[filled] = .{
                 .name = try self.allocator.dupe(u8, fe.name),
                 .effect = .{ .callable = row },
             };
             filled += 1;
         }
-        for (self.module_bindings.items) |mb| {
+        for (self.module_bindings.items, 0..) |mb, binding_index| {
             if (!mb.exported) continue;
             const name = mb.name orelse continue;
-            const effect = self.moduleExportEffect(&mb, reaches_recursion);
+            var effect = self.moduleExportEffect(&mb, reaches_recursion);
+            if (binding_index < holder_writes.len and holder_writes[binding_index]) {
+                switch (effect) {
+                    .callable, .data => |*row| row.writes_module_state = true,
+                    .blocked => {},
+                }
+            }
             entries[filled] = .{
                 .name = try self.allocator.dupe(u8, name),
                 .effect = effect,
@@ -631,6 +688,52 @@ pub const Analyzer = struct {
         }
         std.debug.assert(filled == entries.len);
         return .{ .entries = entries };
+    }
+
+    /// For each module binding, whether it holds a module-state write: one of
+    /// `write_nodes` sits inside its initializer, or a function it holds
+    /// reaches one (`writes_state`), or a binding it mentions (an alias) does.
+    /// The inline arrow in `{ bump: () => { count = count + 1; } }` is no
+    /// recorded function, so the initializer test is the only one that sees
+    /// it. The caller frees the slice.
+    fn holderWritesState(
+        self: *const Analyzer,
+        writes_state: []const bool,
+        write_nodes: []const NodeIndex,
+    ) ![]bool {
+        const found = try self.allocator.alloc(bool, self.module_bindings.items.len);
+        errdefer self.allocator.free(found);
+        @memset(found, false);
+        if (write_nodes.len == 0) return found;
+        for (self.module_bindings.items, found) |mb, *entry| {
+            for (write_nodes) |write| {
+                if (self.ir_view.subtreeContains(mb.init_node, write)) {
+                    entry.* = true;
+                    break;
+                }
+            }
+            if (entry.*) continue;
+            for (mb.users.keys()) |user_idx| {
+                if (user_idx < writes_state.len and writes_state[user_idx]) {
+                    entry.* = true;
+                    break;
+                }
+            }
+        }
+        var changed = true;
+        while (changed) {
+            changed = false;
+            for (self.module_bindings.items, found) |mb, *entry| {
+                if (entry.*) continue;
+                for (mb.refs.keys()) |ref_idx| {
+                    if (!found[ref_idx]) continue;
+                    entry.* = true;
+                    changed = true;
+                    break;
+                }
+            }
+        }
+        return found;
     }
 
     fn moduleExportEffect(
@@ -1367,7 +1470,7 @@ pub const Analyzer = struct {
             }
             if (isRelativeModule(imported.module)) {
                 const supplied = self.importedEffect(imported.slot) orelse .blocked;
-                self.mergeImportedEffect(supplied, true, row);
+                if (self.mergeImportedEffect(supplied, true, row)) self.recordImportedWriter(owner, imported);
             }
             return;
         }
@@ -1619,7 +1722,7 @@ pub const Analyzer = struct {
             } else {
                 self.fn_value_count += 1;
             }
-            self.chargeImportValue(imported, row);
+            self.chargeImportValue(imported, owner, row);
             return;
         }
         if (self.userFnOf(binding)) |callee_idx| {
@@ -1653,7 +1756,7 @@ pub const Analyzer = struct {
     /// capabilities, clock or randomness, write, and egress it reaches. The
     /// determinism test reads the export's own set, not the row's delta, for
     /// the reason the doc note on `reachesVaryingSource` gives.
-    fn chargeImportValue(self: *const Analyzer, imported: ImportedFunction, row: *EffectRow) void {
+    fn chargeImportValue(self: *Analyzer, imported: ImportedFunction, owner: usize, row: *EffectRow) void {
         var reached: EffectRow = .{};
         self.insertModuleCapabilities(imported.module, imported.name, &reached);
         row.capabilities.setUnion(reached.capabilities);
@@ -1684,7 +1787,7 @@ pub const Analyzer = struct {
         }
         if (isRelativeModule(imported.module)) {
             const supplied = self.importedEffect(imported.slot) orelse .blocked;
-            self.mergeImportedEffect(supplied, false, row);
+            if (self.mergeImportedEffect(supplied, false, row)) self.recordImportedWriter(owner, imported);
         }
     }
 
@@ -1697,13 +1800,16 @@ pub const Analyzer = struct {
 
     /// Merge a supplied sibling result after the relative-import
     /// charge. The charge stays intact, so a clean sibling does not
-    /// establish new purity, capability, or determinism claims.
+    /// establish new purity, capability, or determinism claims. Answers true
+    /// when a supplied row, and not the blocked fallback, carried
+    /// `writes_module_state`: the caller then records the import as the
+    /// function's writer cause.
     fn mergeImportedEffect(
         self: *const Analyzer,
         effect: ExportEffect,
         called: bool,
         row: *EffectRow,
-    ) void {
+    ) bool {
         _ = self;
         const incomplete = EffectRow{
             .capabilities = CapabilitySet.full,
@@ -1712,6 +1818,7 @@ pub const Analyzer = struct {
             .writes = true,
             .has_egress = true,
             .lower_bound = true,
+            .writes_module_state = true,
         };
         const imported_row = switch (effect) {
             .callable, .data => |supplied| supplied,
@@ -1725,6 +1832,20 @@ pub const Analyzer = struct {
                 .callable, .blocked => {},
             }
         }
+        return switch (effect) {
+            .callable, .data => |supplied| supplied.writes_module_state,
+            .blocked => false,
+        };
+    }
+
+    /// Record `imported` as the first import through which the function at
+    /// `owner` reached a writer of module state. A module initializer has no
+    /// function to record it on, and a second writer keeps the first.
+    fn recordImportedWriter(self: *Analyzer, owner: usize, imported: ImportedFunction) void {
+        if (owner >= self.functions.items.len) return;
+        const function = &self.functions.items[owner];
+        if (function.imported_writer != null) return;
+        function.imported_writer = .{ .module = imported.module, .name = imported.name };
     }
 
     /// Whether some registry answers for `module`'s effect classes. A relative
@@ -2804,6 +2925,69 @@ const ContractProjectionBuilder = struct {
     }
 };
 
+/// The earlier of two write nodes in source order. A node with no line loses
+/// to a node with one.
+pub fn earlierWrite(ir_view: IrView, a: ?NodeIndex, b: ?NodeIndex) ?NodeIndex {
+    const first = a orelse return b;
+    const second = b orelse return a;
+    const first_loc = ir_view.getLoc(first) orelse return if (ir_view.getLoc(second) != null) second else first;
+    const second_loc = ir_view.getLoc(second) orelse return first;
+    if (second_loc.line < first_loc.line) return second;
+    if (second_loc.line == first_loc.line and second_loc.column < first_loc.column) return second;
+    return first;
+}
+
+/// Whether a function reaches a write, and the earliest write that it reaches.
+pub const WriteReach = struct {
+    reaches: bool = false,
+    node: ?NodeIndex = null,
+};
+
+/// For each function of `effects`, whether its body, or the body of a function
+/// that it calls or references as a value, holds one of `writes`, and the
+/// earliest such write. A referenced function counts because holding a
+/// function is taken as calling it. This is the one closure over the call
+/// graph that module-state writers use: the capsule discharge and the export
+/// rows both read it. The caller frees the slice.
+pub fn writeReach(
+    allocator: std.mem.Allocator,
+    effects: *const EffectFacts,
+    ir_view: IrView,
+    writes: []const NodeIndex,
+) ![]WriteReach {
+    const functions = effects.all();
+    const found = try allocator.alloc(WriteReach, functions.len);
+    errdefer allocator.free(found);
+    @memset(found, .{});
+    if (writes.len == 0) return found;
+    for (functions, found) |fe, *entry| {
+        for (writes) |write| {
+            if (ir_view.subtreeContains(fe.body_node, write)) {
+                entry.reaches = true;
+                entry.node = earlierWrite(ir_view, entry.node, write);
+            }
+        }
+    }
+    var changed = true;
+    while (changed) {
+        changed = false;
+        for (found, 0..) |*entry, index| {
+            for ([_][]const usize{ effects.calleesOf(index), effects.valueRefsOf(index) }) |edges| {
+                for (edges) |callee| {
+                    if (callee >= found.len or !found[callee].reaches) continue;
+                    const earliest = earlierWrite(ir_view, entry.node, found[callee].node);
+                    if (!entry.reaches or earliest != entry.node) {
+                        entry.reaches = true;
+                        entry.node = earliest;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    return found;
+}
+
 fn findFunctionIndex(functions: []const FunctionEffect, name: []const u8) ?usize {
     for (functions, 0..) |function, index| {
         if (std.mem.eql(u8, function.name, name)) return index;
@@ -2854,7 +3038,20 @@ fn projectEffectFacts(
     result.value_starts = try allocator.dupe(u32, analyzer.value_starts.items);
     result.value_storage = try allocator.dupe(usize, analyzer.value_storage.items);
     result.reaches_recursion = try analyzer.recursionReachability();
-    result.export_effects = try analyzer.exportEffectsWithReachability(result.reaches_recursion);
+    // With no verifier write there is nothing to reach, so no table is built.
+    var writes_state: []bool = &.{};
+    defer if (writes_state.len > 0) allocator.free(writes_state);
+    if (options.state_write_nodes.len > 0) {
+        const write_reach = try writeReach(allocator, &result, ir_view, options.state_write_nodes);
+        defer allocator.free(write_reach);
+        writes_state = try allocator.alloc(bool, write_reach.len);
+        for (write_reach, writes_state) |reach, *flag| flag.* = reach.reaches;
+    }
+    result.export_effects = try analyzer.exportEffectsWithReachability(
+        result.reaches_recursion,
+        writes_state,
+        options.state_write_nodes,
+    );
     if (analyzer.function_value_escape) |site| {
         result.function_value_escape = .{
             .line = site.line,
@@ -2892,12 +3089,26 @@ fn cloneFunctionEffects(
     const functions = try allocator.alloc(FunctionEffect, source.len);
     var copied: usize = 0;
     errdefer {
-        for (functions[0..copied]) |function| allocator.free(function.name);
+        for (functions[0..copied]) |function| {
+            allocator.free(function.name);
+            if (function.imported_writer) |writer| {
+                allocator.free(writer.module);
+                allocator.free(writer.name);
+            }
+        }
         allocator.free(functions);
     }
     for (source, 0..) |function, index| {
         functions[index] = function;
+        functions[index].imported_writer = null;
         functions[index].name = try allocator.dupe(u8, function.name);
+        errdefer allocator.free(functions[index].name);
+        if (function.imported_writer) |writer| {
+            const module = try allocator.dupe(u8, writer.module);
+            errdefer allocator.free(module);
+            const name = try allocator.dupe(u8, writer.name);
+            functions[index].imported_writer = .{ .module = module, .name = name };
+        }
         copied += 1;
     }
     return functions;
@@ -3082,6 +3293,146 @@ test "supplied sibling outcomes preserve relative-import charges and add complet
     try testing.expect(!pure.pure);
     try testing.expect(!pure.deterministic);
     try testing.expectEqual(CapabilitySet.full.count(), pure.capabilities.count());
+}
+
+test "effect rows merge and compare writes_module_state" {
+    const left = EffectRow{ .writes_module_state = true };
+    const right = EffectRow{};
+
+    try testing.expect(left.merge(right).writes_module_state);
+    try testing.expect(right.merge(left).writes_module_state);
+    try testing.expect(!right.merge(right).writes_module_state);
+    try testing.expect(!left.eql(right));
+    try testing.expect(left.eql(.{ .writes_module_state = true }));
+}
+
+test "a blocked sibling import sets writes_module_state and records no import" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(allocator, allocator,
+        \\import { run } from "./helper.ts";
+        \\function handler() { return run(); }
+    , .compile);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var facts = try buildEffectFacts(allocator, view, &atoms, root, .{});
+    defer facts.deinit(allocator);
+
+    const row = facts.lookup("handler") orelse return error.FunctionNotFound;
+    try testing.expect(row.writes_module_state);
+    try testing.expect(facts.all()[0].imported_writer == null);
+}
+
+test "writeReach follows call edges and value edges to a write node" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(allocator, allocator,
+        \\function writer() { return 1; }
+        \\function caller() { return writer(); }
+        \\function holder() { const f = writer; return 2; }
+        \\function bystander() { return 3; }
+    , .compile);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var facts = try buildEffectFacts(allocator, view, &atoms, root, .{});
+    defer facts.deinit(allocator);
+
+    const writer_index = findFunctionIndex(facts.all(), "writer") orelse return error.FunctionNotFound;
+    const reach = try writeReach(allocator, &facts, view, &.{facts.all()[writer_index].body_node});
+    defer allocator.free(reach);
+
+    try testing.expect(reach[writer_index].reaches);
+    try testing.expect(reach[findFunctionIndex(facts.all(), "caller") orelse return error.FunctionNotFound].reaches);
+    try testing.expect(reach[findFunctionIndex(facts.all(), "holder") orelse return error.FunctionNotFound].reaches);
+    try testing.expect(!reach[findFunctionIndex(facts.all(), "bystander") orelse return error.FunctionNotFound].reaches);
+}
+
+test "export rows carry writes_module_state only for the exports that reach a write node" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(allocator, allocator,
+        \\export function writer() { return 1; }
+        \\export function relay() { return writer(); }
+        \\export function bystander() { return 3; }
+        \\export const api = { go: writer };
+        \\export const idle = { go: bystander };
+    , .compile);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var unmarked = try buildEffectFacts(allocator, view, &atoms, root, .{});
+    defer unmarked.deinit(allocator);
+    const writer_index = findFunctionIndex(unmarked.all(), "writer") orelse return error.FunctionNotFound;
+    const nodes = [_]NodeIndex{unmarked.all()[writer_index].body_node};
+    var marked = try buildEffectFacts(allocator, view, &atoms, root, .{ .state_write_nodes = &nodes });
+    defer marked.deinit(allocator);
+
+    const names = [_][]const u8{ "writer", "relay", "bystander", "api", "idle" };
+    for (names) |name| {
+        switch (unmarked.export_effects.lookup(name)) {
+            .callable => |row| try testing.expect(!row.writes_module_state),
+            .data, .blocked => return error.CallableExportExpected,
+        }
+    }
+    const expected = [_]bool{ true, true, false, true, false };
+    for (names, expected) |name, flag| {
+        switch (marked.export_effects.lookup(name)) {
+            .callable => |row| try testing.expectEqual(flag, row.writes_module_state),
+            .data, .blocked => return error.CallableExportExpected,
+        }
+    }
+}
+
+test "the first import that carries writes_module_state is recorded on the function" {
+    const allocator = testing.allocator;
+    var atoms = atom_table.AtomTable.init(allocator);
+    defer atoms.deinit();
+    var parser = try JsParser.initAdmission(allocator, allocator,
+        \\import { first, second, quiet } from "./helper.ts";
+        \\function direct() { return quiet() + first() + second(); }
+        \\function relay() { return direct(); }
+        \\function valued() { const f = second; return 1; }
+    , .compile);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var module_facts = try module_facts_mod.ModuleFacts.build(allocator, view, &atoms, null);
+    defer module_facts.deinit();
+    var supplied: [3]ImportedEffect = undefined;
+    for (module_facts.imports.items, 0..) |record, index| {
+        const flagged = !std.mem.eql(u8, record.imported_name, "quiet");
+        supplied[index] = .{ .slot = record.slot, .effect = .{ .callable = .{ .writes_module_state = flagged } } };
+    }
+    try testing.expectEqual(@as(usize, 3), module_facts.imports.items.len);
+
+    var facts = try buildEffectFacts(allocator, view, &atoms, root, .{
+        .module_facts = &module_facts,
+        .imported_effects = &supplied,
+    });
+    defer facts.deinit(allocator);
+
+    const direct = facts.all()[findFunctionIndex(facts.all(), "direct") orelse return error.FunctionNotFound];
+    const writer = direct.imported_writer orelse return error.ImportedWriterMissing;
+    try testing.expectEqualStrings("./helper.ts", writer.module);
+    try testing.expectEqualStrings("first", writer.name);
+    try testing.expect(direct.row.writes_module_state);
+
+    const relay = facts.all()[findFunctionIndex(facts.all(), "relay") orelse return error.FunctionNotFound];
+    try testing.expect(relay.row.writes_module_state);
+    try testing.expect(relay.imported_writer == null);
+
+    const valued = facts.all()[findFunctionIndex(facts.all(), "valued") orelse return error.FunctionNotFound];
+    const valued_writer = valued.imported_writer orelse return error.ImportedWriterMissing;
+    try testing.expectEqualStrings("second", valued_writer.name);
 }
 
 test "incomplete sibling rows include possible writes and egress" {

@@ -149,54 +149,7 @@ fn functionOwnerNode(ir_view: IrView, declaration: ir.NodeIndex) ?ir.NodeIndex {
     return owner;
 }
 
-/// Whether a function reaches a write that the verifier named, and the
-/// earliest such write that has a source line.
-const StaticWriter = struct {
-    reaches: bool = false,
-    node: ?ir.NodeIndex = null,
-};
-
 pub const earlierWrite = spec_discharge.earlierWrite;
-
-/// For each function of `effects`, whether it or a function that it calls
-/// holds a write that the verifier named, and the earliest such write. The
-/// caller frees the slice.
-fn staticWriters(
-    allocator: std.mem.Allocator,
-    effects: *const EffectFacts,
-    ir_view: IrView,
-    writes: []const ir.NodeIndex,
-) ![]StaticWriter {
-    const functions = effects.all();
-    const found = try allocator.alloc(StaticWriter, functions.len);
-    errdefer allocator.free(found);
-    @memset(found, .{});
-    if (writes.len == 0) return found;
-    for (functions, found) |fe, *entry| {
-        for (writes) |write| {
-            if (ir_view.subtreeContains(fe.body_node, write)) {
-                entry.reaches = true;
-                entry.node = earlierWrite(ir_view, entry.node, write);
-            }
-        }
-    }
-    var changed = true;
-    while (changed) {
-        changed = false;
-        for (found, 0..) |*entry, index| {
-            for (effects.calleesOf(index)) |callee| {
-                if (callee >= found.len or !found[callee].reaches) continue;
-                const earliest = earlierWrite(ir_view, entry.node, found[callee].node);
-                if (!entry.reaches or earliest != entry.node) {
-                    entry.reaches = true;
-                    entry.node = earliest;
-                    changed = true;
-                }
-            }
-        }
-    }
-    return found;
-}
 
 /// The cause of a write node: its line and column in the entry module.
 /// Null when the node has no location.
@@ -218,7 +171,7 @@ pub fn dischargeWithStateWriters(
     var table: CapsuleTable = .{};
     errdefer table.deinit(allocator);
 
-    const static_writers = try staticWriters(allocator, effects, ir_view, writers.verifier_writes);
+    const static_writers = try effect_inference.writeReach(allocator, effects, ir_view, writers.verifier_writes);
     defer allocator.free(static_writers);
 
     for (effects.all(), static_writers) |fe, static_writer| {
@@ -238,7 +191,7 @@ pub fn dischargeWithStateWriters(
             (if (index < writers.flow_function_writes.len) writers.flow_function_writes[index] else null)
         else
             null;
-        const writes_state = static_writer.reaches or flow_writer;
+        const writes_state = static_writer.reaches or flow_writer or fe.row.writes_module_state;
         const write_node = earlierWrite(ir_view, static_writer.node, flow_write);
 
         var write_removed = std.EnumSet(spec_discharge.CapsuleProperty).empty;
@@ -259,6 +212,7 @@ pub fn dischargeWithStateWriters(
             .escape_site = effects.functionValueEscape(),
             .state_write = if (writes_state) writeCause(ir_view, write_node) else null,
             .state_write_removed = write_removed,
+            .imported_state_writer = if (fe.row.writes_module_state) .{ .function = fe.name, .import = fe.imported_writer } else null,
         };
 
         var declared: std.ArrayList([]const u8) = .empty;
@@ -308,6 +262,7 @@ pub fn dischargeWithStateWriters(
         // outlive. The discharge above has already read it.
         var proven = facts;
         proven.escape_site = null;
+        proven.imported_state_writer = null;
 
         try table.capsules.append(allocator, .{
             .name = owned_name,
@@ -522,4 +477,44 @@ test "total holds for helpers when no function value escapes" {
     try std.testing.expect(try totalHolds(source, "norm"));
     try std.testing.expect(try totalHolds(source, "all"));
     try std.testing.expect(try totalHolds(source, "pick"));
+}
+
+test "an imported row that writes module state removes read_only, pure, and deterministic from a helper" {
+    const allocator = std.testing.allocator;
+    var atoms = context.AtomTable.init(allocator);
+    defer atoms.deinit();
+    const source =
+        \\import { bump, peek } from "./b.ts";
+        \\function tally() { return bump(); }
+        \\function quiet() { return peek(); }
+        \\function local() { return 1; }
+    ;
+    var parser = try JsParser.initAdmission(allocator, allocator, source, .compile);
+    parser.setAtomTable(&atoms);
+    defer parser.deinit();
+    const root = try parser.parse();
+    const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
+    var module_facts = try @import("module_facts.zig").ModuleFacts.build(allocator, view, &atoms, null);
+    defer module_facts.deinit();
+    var supplied: [2]effect_inference.ImportedEffect = undefined;
+    for (module_facts.imports.items, 0..) |record, index| {
+        const writes_state = std.mem.eql(u8, record.imported_name, "bump");
+        supplied[index] = .{ .slot = record.slot, .effect = .{ .callable = .{ .writes_module_state = writes_state } } };
+    }
+    try std.testing.expectEqual(@as(usize, 2), module_facts.imports.items.len);
+    var effects = try effect_inference.buildEffectFacts(allocator, view, &atoms, root, .{
+        .module_facts = &module_facts,
+        .imported_effects = &supplied,
+    });
+    defer effects.deinit(allocator);
+
+    var table = try dischargeWithTypeSource(allocator, &effects, .omitted, view);
+    defer table.deinit(allocator);
+
+    const tally = table.byName("tally") orelse return error.MissingCapsule;
+    try std.testing.expect(!tally.proven.read_only);
+    const quiet = table.byName("quiet") orelse return error.MissingCapsule;
+    try std.testing.expect(quiet.proven.read_only);
+    const local = table.byName("local") orelse return error.MissingCapsule;
+    try std.testing.expect(local.proven.read_only);
 }

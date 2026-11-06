@@ -859,6 +859,9 @@ pub const ModuleAnalysisSession = struct {
     resolution_facts: ?ModuleFacts = null,
     contract_facts: ?ModuleFacts = null,
     contract_effect_facts: ?EffectFacts = null,
+    /// Verifier writes of this module for the export rows. Borrowed from the
+    /// caller until extraction ends; see `setStateWriteNodes`.
+    state_write_nodes: []const NodeIndex = &.{},
     exported_effects: ?ExportEffects = null,
     path_effect_state: PathEffectState = .unattempted,
     resolution_state: PassState = .skipped,
@@ -1135,6 +1138,21 @@ pub const ModuleAnalysisSession = struct {
         if (self.extraction_state != .ready) return error.ContractExtractionAlreadyAttempted;
         try self.requireUnchangedPublishedEffects(imported_effects);
         self.contract_context.imported_effects = imported_effects;
+    }
+
+    /// Give the session the nodes of the module-state writes that the verifier
+    /// named in this module. The export rows of a function that reaches one,
+    /// and of a holder that holds one, then carry `writes_module_state`, so a
+    /// module that imports them cannot prove `read_only` over them. Call it
+    /// before contract extraction or `dischargeHelperCapsules`, which prepare
+    /// the effect facts once. The slice is borrowed until extraction ends.
+    pub fn setStateWriteNodes(
+        self: *ModuleAnalysisSession,
+        nodes: []const NodeIndex,
+    ) !void {
+        if (self.state != .completed) return error.AnalysisNotCompleted;
+        if (self.extraction_state != .ready) return error.ContractExtractionAlreadyAttempted;
+        self.state_write_nodes = nodes;
     }
 
     fn requireUnchangedPublishedEffects(
@@ -1453,6 +1471,7 @@ pub const ModuleAnalysisSession = struct {
                 .module_facts = self.completedContractFacts(),
                 .type_source = consumerTypeSource(self.source_types, type_env),
                 .imported_effects = opts.imported_effects,
+                .state_write_nodes = self.state_write_nodes,
                 .contract_projection = .{ .complete = .{ .selected_handler = handler_fn } },
             },
         );

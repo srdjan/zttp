@@ -155,16 +155,8 @@ pub fn suggestionFor(name: []const u8) ?[]const u8 {
 }
 
 /// The earlier of two write nodes in source order. A node with no line loses
-/// to a node with one.
-pub fn earlierWrite(ir_view: ir.IrView, a: ?ir.NodeIndex, b: ?ir.NodeIndex) ?ir.NodeIndex {
-    const first = a orelse return b;
-    const second = b orelse return a;
-    const first_loc = ir_view.getLoc(first) orelse return if (ir_view.getLoc(second) != null) second else first;
-    const second_loc = ir_view.getLoc(second) orelse return first;
-    if (second_loc.line < first_loc.line) return second;
-    if (second_loc.line == first_loc.line and second_loc.column < first_loc.column) return second;
-    return first;
-}
+/// to a node with one. The one definition lives with the write-reach closure.
+pub const earlierWrite = effect_inference.earlierWrite;
 
 /// The remedy for a property that a write to module state removed.
 pub const state_write_remedy = "copy the value into a local before the write, or move the state to zttp:cache";
@@ -179,6 +171,29 @@ pub fn stateWriteSuggestion(allocator: std.mem.Allocator, line: u32) ![]u8 {
 /// Caller frees.
 pub fn stateWriteHelperSuggestion(allocator: std.mem.Allocator, function: []const u8, line: u32) ![]u8 {
     return allocator.print("`{s}` reaches a write to module state at line {d}: " ++ state_write_remedy ++ ".", .{ function, line });
+}
+
+/// The helper whose row carries a writer of module state from another file.
+/// Both fields are borrowed; only `dischargeCapsule` reads them.
+pub const ImportedWriterCause = struct {
+    /// The helper that cannot prove `read_only`.
+    function: []const u8,
+    /// The first import through which the helper reached the writer. Null when
+    /// the helper reached it through a local function.
+    import: ?effect_inference.ImportedWriter = null,
+};
+
+/// The ZTS500 suggestion for a `read_only` capsule that a writer of module
+/// state in another file removed. Caller frees.
+pub fn importedWriterSuggestion(allocator: std.mem.Allocator, cause: ImportedWriterCause) ![]u8 {
+    const writer = cause.import orelse return allocator.print(
+        "`{s}` reaches a function in another file that writes module state, so it cannot prove `read_only`: remove `read_only` from the capsule, or stop reaching the writer.",
+        .{cause.function},
+    );
+    return allocator.print(
+        "`{s}` reaches `{s}` from `{s}`, which writes module state, so it cannot prove `read_only`: remove `read_only` from the capsule, or stop reaching `{s}`.",
+        .{ cause.function, writer.name, writer.module, writer.name },
+    );
 }
 
 /// ZTS501 suggestion: actionable copy for `read_only` colliding with a
@@ -593,6 +608,10 @@ pub const CapsuleFacts = struct {
     /// The properties above that the write cleared: each was proven by the
     /// effect row and the write removed it.
     state_write_removed: std.EnumSet(CapsuleProperty) = .empty,
+    /// Set when the effect row carries `writes_module_state`: the helper reaches
+    /// a writer of module state in another file. Borrowed, like `escape_site`,
+    /// so a stored capsule holds null.
+    imported_state_writer: ?ImportedWriterCause = null,
 
     /// The write that removed `prop`, or null when another cause refused it.
     /// A lower-bound row refuses every property for its own reason.
@@ -665,6 +684,15 @@ fn suggestionForUnknownCapsule(allocator: std.mem.Allocator, name: []const u8) !
     return nearestSuggestion(allocator, name, &capsule_property_names, "Name one of the supported handler properties.");
 }
 
+/// The imported-writer cause when it is the only reason `prop` fails: the
+/// effect row proved `read_only` and the imported writer removed it, with no
+/// lower bound. A lower-bound row refuses every property for its own reason.
+fn importedWriterRemoved(facts: CapsuleFacts, prop: CapsuleProperty) ?ImportedWriterCause {
+    if (prop != .read_only or facts.lower_bound) return null;
+    if (!facts.state_write_removed.contains(prop)) return null;
+    return facts.imported_state_writer;
+}
+
 /// Discharge a helper's declared capsule properties against the facts the
 /// compiler proved about it. Emits ZTS500 (not discharged) and ZTS502
 /// (unknown name). The caller owns the returned list and must call
@@ -707,6 +735,8 @@ pub fn dischargeCapsule(
             try stateWriteSuggestion(allocator, cause.line)
         else if (facts.function_value_escape and prop == .total and !facts.recursive)
             try escapeSuggestion(allocator, facts.escape_site)
+        else if (importedWriterRemoved(facts, prop)) |cause|
+            try importedWriterSuggestion(allocator, cause)
         else blk: {
             const text = if (facts.recursive and prop == .total)
                 recursive_capsule_suggestion

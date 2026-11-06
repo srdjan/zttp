@@ -6659,3 +6659,427 @@ test "result shape: an andThen callback declared to return unknown is ZTS203" {
         \\function f(): number { const r = andThen(ok(1), g); return 0; }
     , "andThen callback must return a Result, got 'unknown'");
 }
+
+// ---------------------------------------------------------------------------
+// Module-state writers across a file import
+// ---------------------------------------------------------------------------
+
+/// How the importing module of `analyzeAcrossFile` learns about its dependency.
+const DependencyView = enum {
+    /// The dependency's export rows carry the verifier writes of its module.
+    with_writes,
+    /// The dependency's export rows are built without any verifier write.
+    without_writes,
+    /// The importing module gets a blocked result for every file import.
+    blocked,
+};
+
+/// One diagnostic row of a helper capsule, owned.
+const HelperRow = struct {
+    function: []const u8,
+    spec: []const u8,
+    suggestion: []const u8,
+};
+
+fn freeHelperRows(allocator: std.mem.Allocator, rows: []HelperRow) void {
+    for (rows) |row| {
+        allocator.free(row.function);
+        allocator.free(row.spec);
+        allocator.free(row.suggestion);
+    }
+    allocator.free(rows);
+}
+
+/// Analyze `dependency` as `./b.ts` with the verifier on, take its export
+/// rows, and discharge the helper capsules of `entry`, which imports it.
+/// Returns the failing-capsule rows of the entry helpers in source order.
+fn analyzeAcrossFile(
+    allocator: std.mem.Allocator,
+    dependency: []const u8,
+    entry: []const u8,
+    view: DependencyView,
+) ![]HelperRow {
+    var dep_frontend: source_frontend_mod.DirectCheckSource = undefined;
+    try dep_frontend.initCompileInPlace(allocator, allocator, dependency, "b.ts");
+    defer dep_frontend.deinit();
+    const dep_accepted = dep_frontend.acceptedCapabilities() orelse return error.TestUnexpectedResult;
+    var dep: ModuleAnalysisSession = .{};
+    try dep.initFull(allocator, ParsedModule.fromTypedExisting(
+        dep_accepted.ir_view,
+        dep_accepted.root,
+        dep_accepted.atoms,
+        dep_accepted.type_store,
+    ), .{
+        .source_types = .direct,
+        .strict = false,
+        .select_verifier = true,
+        .allow_raw_exported_boundary = true,
+    });
+    defer dep.deinit();
+    try dep.complete();
+    _ = try dep.runModuleVerifier(.{});
+    var write_nodes: std.ArrayList(NodeIndex) = .empty;
+    defer write_nodes.deinit(allocator);
+    const checked = dep.checkedModule() orelse return error.TestUnexpectedResult;
+    for (checked.verifierDiagnostics()) |diagnostic| {
+        if (diagnostic.kind != .module_scope_mutation) continue;
+        try write_nodes.append(allocator, diagnostic.node);
+    }
+    if (view == .with_writes) try dep.setStateWriteNodes(write_nodes.items);
+    dep.extraction_opts.capture_export_effects = true;
+    var dep_contract = try dep.extractContract("b.ts");
+    defer dep_contract.deinit(allocator);
+    var exports = dep.takeExportEffects() orelse return error.ExportEffectsMissing;
+    defer exports.deinit(allocator);
+
+    var entry_frontend: source_frontend_mod.DirectCheckSource = undefined;
+    try entry_frontend.initCompileInPlace(allocator, allocator, entry, "handler.ts");
+    defer entry_frontend.deinit();
+    const entry_accepted = entry_frontend.acceptedCapabilities() orelse return error.TestUnexpectedResult;
+    var session: ModuleAnalysisSession = .{};
+    try session.initFull(allocator, ParsedModule.fromTypedExisting(
+        entry_accepted.ir_view,
+        entry_accepted.root,
+        entry_accepted.atoms,
+        entry_accepted.type_store,
+    ), .{
+        .source_types = .direct,
+        .strict = false,
+        .allow_raw_exported_boundary = true,
+    });
+    defer session.deinit();
+    try session.complete();
+    var imported: std.ArrayList(ImportedEffect) = .empty;
+    defer imported.deinit(allocator);
+    for ((try session.facts()).imports.items) |record| {
+        const effect: ExportEffect = if (view == .blocked) .blocked else exports.lookup(record.imported_name);
+        try imported.append(allocator, .{ .slot = record.slot, .effect = effect });
+    }
+    try session.setImportedEffects(imported.items);
+    var table = try session.dischargeHelperCapsules(.{});
+    defer table.deinit(allocator);
+
+    var rows: std.ArrayList(HelperRow) = .empty;
+    errdefer {
+        for (rows.items) |row| {
+            allocator.free(row.function);
+            allocator.free(row.spec);
+            allocator.free(row.suggestion);
+        }
+        rows.deinit(allocator);
+    }
+    for (table.capsules.items) |capsule| {
+        for (capsule.diagnostics.items) |diagnostic| {
+            const function = try allocator.dupe(u8, capsule.name);
+            errdefer allocator.free(function);
+            const spec = try allocator.dupe(u8, diagnostic.spec_name);
+            errdefer allocator.free(spec);
+            const suggestion = try allocator.dupe(u8, diagnostic.suggestion orelse "");
+            errdefer allocator.free(suggestion);
+            try rows.append(allocator, .{ .function = function, .spec = spec, .suggestion = suggestion });
+        }
+    }
+    return rows.toOwnedSlice(allocator);
+}
+
+/// The export row that `source` gives the export `name`, with the verifier
+/// writes of the module, or an error when it is not a callable.
+fn exportRowForTest(allocator: std.mem.Allocator, source: []const u8, name: []const u8) !effect_inference.EffectRow {
+    var frontend: source_frontend_mod.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(allocator, allocator, source, "b.ts");
+    defer frontend.deinit();
+    const accepted = frontend.acceptedCapabilities() orelse return error.TestUnexpectedResult;
+    var dep: ModuleAnalysisSession = .{};
+    try dep.initFull(allocator, ParsedModule.fromTypedExisting(
+        accepted.ir_view,
+        accepted.root,
+        accepted.atoms,
+        accepted.type_store,
+    ), .{
+        .source_types = .direct,
+        .strict = false,
+        .select_verifier = true,
+        .allow_raw_exported_boundary = true,
+    });
+    defer dep.deinit();
+    try dep.complete();
+    _ = try dep.runModuleVerifier(.{});
+    var write_nodes: std.ArrayList(NodeIndex) = .empty;
+    defer write_nodes.deinit(allocator);
+    const checked = dep.checkedModule() orelse return error.TestUnexpectedResult;
+    for (checked.verifierDiagnostics()) |diagnostic| {
+        if (diagnostic.kind != .module_scope_mutation) continue;
+        try write_nodes.append(allocator, diagnostic.node);
+    }
+    try dep.setStateWriteNodes(write_nodes.items);
+    dep.extraction_opts.capture_export_effects = true;
+    var contract = try dep.extractContract("b.ts");
+    defer contract.deinit(allocator);
+    var exports = dep.takeExportEffects() orelse return error.ExportEffectsMissing;
+    defer exports.deinit(allocator);
+    return switch (exports.lookup(name)) {
+        .callable => |row| row,
+        .data, .blocked => error.CallableExportExpected,
+    };
+}
+
+const counter_dependency =
+    \\let count = 0;
+    \\
+    \\export function bump(): number {
+    \\  count = count + 1;
+    \\  return count;
+    \\}
+    \\
+    \\export function peek(): number {
+    \\  return 1;
+    \\}
+    \\
+    \\export function relay(): number {
+    \\  return bump();
+    \\}
+;
+
+test "an export row carries writes_module_state for a function that reaches a module write" {
+    const allocator = testing.allocator;
+    try testing.expect((try exportRowForTest(allocator, counter_dependency, "bump")).writes_module_state);
+    try testing.expect((try exportRowForTest(allocator, counter_dependency, "relay")).writes_module_state);
+    try testing.expect(!(try exportRowForTest(allocator, counter_dependency, "peek")).writes_module_state);
+}
+
+test "an export row carries writes_module_state for a holder whose user writes" {
+    const allocator = testing.allocator;
+    const holder =
+        \\let count = 0;
+        \\
+        \\function bump(): number {
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\
+        \\export const api = { bump: bump };
+    ;
+    try testing.expect((try exportRowForTest(allocator, holder, "api")).writes_module_state);
+}
+
+test "an export row carries writes_module_state for a holder with an inline arrow that writes" {
+    const allocator = testing.allocator;
+    const holder =
+        \\let count = 0;
+        \\
+        \\export const api = { bump: (): number => { count = count + 1; return count; } };
+    ;
+    try testing.expect((try exportRowForTest(allocator, holder, "api")).writes_module_state);
+}
+
+test "an export row of a holder with no write keeps writes_module_state clear" {
+    const allocator = testing.allocator;
+    const holder =
+        \\let count = 0;
+        \\
+        \\function peek(): number {
+        \\  return count;
+        \\}
+        \\
+        \\export const api = { peek: peek };
+    ;
+    try testing.expect(!(try exportRowForTest(allocator, holder, "api")).writes_module_state);
+}
+
+const read_only_tally_prefix =
+    \\import { bump, peek, relay } from "./b.ts";
+    \\
+;
+
+test "a read_only helper that calls an imported module writer fails with the import named" {
+    const allocator = testing.allocator;
+    const rows = try analyzeAcrossFile(allocator, counter_dependency, read_only_tally_prefix ++
+        \\function tally(): Proof<number, "read_only"> {
+        \\  return bump();
+        \\}
+    , .with_writes);
+    defer freeHelperRows(allocator, rows);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("tally", rows[0].function);
+    try testing.expectEqualStrings("read_only", rows[0].spec);
+    try testing.expectEqualStrings(
+        "`tally` reaches `bump` from `./b.ts`, which writes module state, so it cannot prove `read_only`: remove `read_only` from the capsule, or stop reaching `bump`.",
+        rows[0].suggestion,
+    );
+}
+
+test "a read_only helper that reaches an imported writer through a local relay fails with the fixed text" {
+    const allocator = testing.allocator;
+    const rows = try analyzeAcrossFile(allocator, counter_dependency, read_only_tally_prefix ++
+        \\function inner(): number {
+        \\  return 1;
+        \\}
+        \\
+        \\function outer(): number {
+        \\  return inner() + bump();
+        \\}
+        \\
+        \\function tally(): Proof<number, "read_only"> {
+        \\  return outer();
+        \\}
+    , .with_writes);
+    defer freeHelperRows(allocator, rows);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("tally", rows[0].function);
+    try testing.expectEqualStrings(
+        "`tally` reaches a function in another file that writes module state, so it cannot prove `read_only`: remove `read_only` from the capsule, or stop reaching the writer.",
+        rows[0].suggestion,
+    );
+}
+
+test "a read_only helper over a clean export of a module that holds a writer passes" {
+    const allocator = testing.allocator;
+    const rows = try analyzeAcrossFile(allocator, counter_dependency, read_only_tally_prefix ++
+        \\function tally(): Proof<number, "read_only"> {
+        \\  return peek();
+        \\}
+    , .with_writes);
+    defer freeHelperRows(allocator, rows);
+    try testing.expectEqual(@as(usize, 0), rows.len);
+}
+
+test "a read_only helper that holds an imported module writer as a value fails" {
+    const allocator = testing.allocator;
+    const rows = try analyzeAcrossFile(allocator, counter_dependency, read_only_tally_prefix ++
+        \\function mapped(): Proof<number, "read_only"> {
+        \\  return [1].map(bump)[0];
+        \\}
+        \\
+        \\function held(): Proof<number, "read_only"> {
+        \\  const f = bump;
+        \\  return 1;
+        \\}
+    , .with_writes);
+    defer freeHelperRows(allocator, rows);
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expectEqualStrings("mapped", rows[0].function);
+    try testing.expectEqualStrings("read_only", rows[0].spec);
+    try testing.expectEqualStrings(
+        "`mapped` reaches `bump` from `./b.ts`, which writes module state, so it cannot prove `read_only`: remove `read_only` from the capsule, or stop reaching `bump`.",
+        rows[0].suggestion,
+    );
+    try testing.expectEqualStrings("held", rows[1].function);
+    try testing.expectEqualStrings("read_only", rows[1].spec);
+    try testing.expectEqualStrings(
+        "`held` reaches `bump` from `./b.ts`, which writes module state, so it cannot prove `read_only`: remove `read_only` from the capsule, or stop reaching `bump`.",
+        rows[1].suggestion,
+    );
+}
+
+test "a read_only helper over a blocked import keeps the lower-bound text" {
+    const allocator = testing.allocator;
+    const rows = try analyzeAcrossFile(allocator, counter_dependency, read_only_tally_prefix ++
+        \\function tally(): Proof<number, "read_only"> {
+        \\  return bump();
+        \\}
+    , .blocked);
+    defer freeHelperRows(allocator, rows);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("read_only", rows[0].spec);
+    try testing.expectEqualStrings(
+        "this function calls through a value whose body the compiler cannot see, so no property can be proved about it; call the helper by name instead.",
+        rows[0].suggestion,
+    );
+}
+
+test "pure and deterministic rows over an imported writer keep their generic text" {
+    const allocator = testing.allocator;
+    const rows = try analyzeAcrossFile(allocator, counter_dependency, read_only_tally_prefix ++
+        \\function tally(): Proof<number, "pure" | "deterministic"> {
+        \\  return bump();
+        \\}
+    , .with_writes);
+    defer freeHelperRows(allocator, rows);
+    try testing.expectEqual(@as(usize, 2), rows.len);
+    try testing.expectEqualStrings("pure", rows[0].spec);
+    try testing.expectEqualStrings(
+        "remove module calls and clock or RNG reads so the helper stays pure.",
+        rows[0].suggestion,
+    );
+    try testing.expectEqualStrings("deterministic", rows[1].spec);
+    try testing.expectEqualStrings(
+        "remove the clock or RNG read (Date.now, Math.random, performance.now) from the helper.",
+        rows[1].suggestion,
+    );
+}
+
+test "a chain of ten local functions to an imported writer fails read_only and is no lower bound" {
+    const allocator = testing.allocator;
+    const rows = try analyzeAcrossFile(allocator, counter_dependency, read_only_tally_prefix ++
+        \\function f0(): number { return bump(); }
+        \\function f1(): number { return f0(); }
+        \\function f2(): number { return f1(); }
+        \\function f3(): number { return f2(); }
+        \\function f4(): number { return f3(); }
+        \\function f5(): number { return f4(); }
+        \\function f6(): number { return f5(); }
+        \\function f7(): number { return f6(); }
+        \\function f8(): number { return f7(); }
+        \\function f9(): number { return f8(); }
+        \\function tally(): Proof<number, "read_only"> {
+        \\  return f9();
+        \\}
+    , .with_writes);
+    defer freeHelperRows(allocator, rows);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("tally", rows[0].function);
+    try testing.expectEqualStrings(
+        "`tally` reaches a function in another file that writes module state, so it cannot prove `read_only`: remove `read_only` from the capsule, or stop reaching the writer.",
+        rows[0].suggestion,
+    );
+}
+
+test "a read_only helper over an imported holder with an inline writer fails" {
+    const allocator = testing.allocator;
+    const holder =
+        \\let count = 0;
+        \\
+        \\export const api = { bump: (): number => { count = count + 1; return count; } };
+    ;
+    const rows = try analyzeAcrossFile(allocator, holder,
+        \\import { api } from "./b.ts";
+        \\
+        \\function tally(): Proof<number, "read_only"> {
+        \\  return api.bump();
+        \\}
+    , .with_writes);
+    defer freeHelperRows(allocator, rows);
+    try testing.expectEqual(@as(usize, 1), rows.len);
+    try testing.expectEqualStrings("tally", rows[0].function);
+    try testing.expectEqualStrings("read_only", rows[0].spec);
+}
+
+test "a read_only helper passes when the dependency export rows were built with no verifier write" {
+    const allocator = testing.allocator;
+    const rows = try analyzeAcrossFile(allocator, counter_dependency, read_only_tally_prefix ++
+        \\function tally(): Proof<number, "read_only"> {
+        \\  return bump();
+        \\}
+    , .without_writes);
+    defer freeHelperRows(allocator, rows);
+    try testing.expectEqual(@as(usize, 0), rows.len);
+}
+
+test "ModuleAnalysisSession freezes writes_module_state in imported effects" {
+    const allocator = testing.allocator;
+    var parsed_state = try parseSourceForTest(allocator, "function handler(req) { return Response.text('ok'); }");
+    defer parsed_state.js_parser.deinit();
+    const view = IrView.fromIRStore(&parsed_state.js_parser.nodes, &parsed_state.js_parser.constants);
+    const parsed = ParsedModule.fromExisting(view, parsed_state.root, null);
+    var analysis: ModuleAnalysisSession = .{};
+    try analysis.initContractOnly(allocator, parsed, .{});
+    defer analysis.deinit();
+    try analysis.complete();
+    const selected = [_]ImportedEffect{.{ .slot = 0, .effect = .{ .callable = .{ .writes_module_state = true } } }};
+    const changed = [_]ImportedEffect{.{ .slot = 0, .effect = .{ .callable = .{} } }};
+    try analysis.setImportedEffects(&selected);
+    _ = try analysis.pathEffectFacts();
+    const equivalent = selected;
+    try analysis.setImportedEffects(&equivalent);
+    try testing.expectError(error.ImportedEffectsFrozen, analysis.setImportedEffects(&changed));
+}
