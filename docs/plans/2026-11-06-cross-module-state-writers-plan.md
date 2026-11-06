@@ -8,7 +8,7 @@ The dependency helper capsules plan (`2026-11-06-dependency-helper-capsules-plan
 |---|---|
 | U0 | Complete: results in "U0 results"; no stop condition applies |
 | U1 | Complete: the flag, the export rows, the import record, and the helper text in `packages/zts`; 18 gates passed |
-| U2 | Not started |
+| U2 | Complete: CHECK and the graph compile give each dependency its verifier writes; 18 gates passed from an empty cache |
 | U3 | Not started |
 
 ## Reproduction

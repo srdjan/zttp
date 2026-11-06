@@ -373,6 +373,7 @@ pub const GraphCheck = struct {
             .sql_schema_path = opts.sql_schema_path,
             .manifest_registry = null,
             .shares_state = self.shares_state,
+            .reported_writes = self.reported_writes.items,
             // A check reports a policy violation on the merged contract. It
             // does not stop at the first dependency.
             .enforce_policy = false,

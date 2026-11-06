@@ -277,6 +277,17 @@ pub fn collectDependencyContracts(
         defer allocator.free(imported_effects);
         try module_analysis.setImportedEffects(imported_effects);
 
+        // The verifier writes of this module, by exact flow module id: the
+        // graph compile also stores the entry's writes, under `entry_index + 1`.
+        // The nodes are nodes of this module's parser, which the session reads.
+        const module_id: zts.pipeline.FlowModuleId = @intCast(idx + 1);
+        var verifier_writes: std.ArrayList(ir.NodeIndex) = .empty;
+        defer verifier_writes.deinit(allocator);
+        for (inputs.reported_writes) |site| {
+            if (site.module == module_id) try verifier_writes.append(allocator, site.node);
+        }
+        try module_analysis.setStateWriteNodes(verifier_writes.items);
+
         var module_contract = try module_analysis.extractContract(module.path);
         errdefer module_contract.deinit(allocator);
         var pending_export_effects = module_analysis.takeExportEffects();

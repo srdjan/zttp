@@ -189,6 +189,36 @@ dep_capsule_out=$(cd "$TMP_DIR/dep-capsule-app" && "$ZTTP" build -o "$TMP_DIR/de
 grep -qF -- "dep.ts" <<<"$dep_capsule_out" || fail "build of a dependency helper with a false capsule did not name dep.ts: $dep_capsule_out"
 [ ! -e "$TMP_DIR/dep-capsule-app/capsule-bin" ] || fail "refused build of a dependency helper with a false capsule wrote a binary"
 
+step "negative: build refuses a read_only helper that calls a module-state writer of another file"
+mkdir -p "$TMP_DIR/writer-capsule-app"
+cat > "$TMP_DIR/writer-capsule-app/b.ts" <<'EOF'
+let count = 0;
+
+export function bump(): number {
+  count = count + 1;
+  return count;
+}
+EOF
+cat > "$TMP_DIR/writer-capsule-app/handler.ts" <<'EOF'
+import { bump } from "./b.ts";
+
+function tally(): Proof<number, "read_only"> {
+  return bump();
+}
+
+export function handler(req: Request): Proof<Response, "injection_safe"> {
+  return Response.text("ok");
+}
+EOF
+cat > "$TMP_DIR/writer-capsule-app/zttp.json" <<'EOF'
+{ "entry": "handler.ts", "port": 3000 }
+EOF
+writer_capsule_status=0
+writer_capsule_out=$(cd "$TMP_DIR/writer-capsule-app" && "$ZTTP" build -o "$TMP_DIR/writer-capsule-app/writer-bin" --no-attest 2>&1 </dev/null) || writer_capsule_status=$?
+[ "$writer_capsule_status" -eq 1 ] || fail "build of a read_only helper over an imported writer exited $writer_capsule_status, expected 1: $writer_capsule_out"
+grep -qF -- "handler.ts" <<<"$writer_capsule_out" || fail "build of a read_only helper over an imported writer did not name handler.ts: $writer_capsule_out"
+[ ! -e "$TMP_DIR/writer-capsule-app/writer-bin" ] || fail "refused build of a read_only helper over an imported writer wrote a binary"
+
 step "a capability read with a computed name in a dependency obeys the project policy"
 mkdir -p "$TMP_DIR/guard-app/src"
 cat > "$TMP_DIR/guard-app/src/dep.ts" <<'EOF'

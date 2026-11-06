@@ -14075,6 +14075,280 @@ test "CHECK refuses deterministic on a dependency helper that calls a clock read
     try std.testing.expectEqual(@as(u32, 3), row.line);
 }
 
+// ---------------------------------------------------------------------------
+// A helper capsule over a module-state writer in another file (writers U2).
+// ---------------------------------------------------------------------------
+
+const cross_writer_b =
+    \\let count = 0;
+    \\
+    \\export function bump(): number {
+    \\  count = count + 1;
+    \\  return count;
+    \\}
+    \\
+;
+
+const cross_writer_handler =
+    \\import { bump } from "./b.ts";
+    \\
+    \\function tally(): Proof<number, "read_only"> {
+    \\  return bump();
+    \\}
+    \\
+    \\export function handler(req: Request): Proof<Response, "injection_safe"> {
+    \\  return Response.text("ok");
+    \\}
+    \\
+;
+
+const cross_writer_unused_import_handler =
+    \\import { tally } from "./a.ts";
+    \\
+    \\export function handler(req: Request): Proof<Response, "injection_safe"> {
+    \\  return Response.text("ok");
+    \\}
+    \\
+;
+
+const cross_writer_suggestion =
+    "`tally` reaches `bump` from `./b.ts`, which writes module state, so it cannot prove `read_only`: remove `read_only` from the capsule, or stop reaching `bump`.";
+
+/// The finding at `index` has `code`, a file that ends with `file_suffix`, and
+/// the position `line:column`.
+fn expectFindingAt(result: *const CheckResult, index: usize, code: []const u8, file_suffix: []const u8, line: u32, column: u32) !void {
+    try std.testing.expect(index < result.json_diagnostics.items.len);
+    const row = result.json_diagnostics.items[index];
+    try std.testing.expectEqualStrings(code, row.code);
+    try std.testing.expect(std.mem.endsWith(u8, row.file, file_suffix));
+    try std.testing.expectEqual(line, row.line);
+    try std.testing.expectEqual(column, row.column);
+}
+
+test "CHECK refuses read_only on a helper that calls a module-state writer of an imported file" {
+    var fixture = try SiblingFixture.init(cross_writer_handler);
+    defer fixture.deinit();
+    try fixture.add("b.ts", cross_writer_b);
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), result.json_diagnostics.items.len);
+    try std.testing.expectEqual(@as(usize, 1), countDiagnosticsWithCode(&result, "ZTS310"));
+    const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("error", row.severity);
+    try std.testing.expectEqual(@as(u32, 3), row.line);
+    try std.testing.expectEqual(@as(u32, 1), row.column);
+    try std.testing.expectEqualStrings(
+        "helper's declared Proof capsule does not hold (failing spec: read_only)",
+        row.message,
+    );
+    try std.testing.expectEqualStrings(cross_writer_suggestion, row.suggestion orelse return error.TestUnexpectedResult);
+}
+
+test "CHECK keeps the handler verdicts when a helper over a module-state writer fails read_only" {
+    var fixture = try SiblingFixture.init(cross_writer_handler);
+    defer fixture.deinit();
+    try fixture.add("b.ts", cross_writer_b);
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    try std.testing.expect(contract.properties.?.injection_safe);
+    try std.testing.expectEqual(@as(usize, 1), contract.spec_diagnostics.items.len);
+    try std.testing.expectEqualStrings("tally", contract.spec_diagnostics.items[0].function orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("read_only", contract.spec_diagnostics.items[0].spec_name);
+}
+
+test "CHECK refuses read_only on a dependency helper that calls a module-state writer of a third file" {
+    var fixture = try SiblingFixture.init(cross_writer_unused_import_handler);
+    defer fixture.deinit();
+    try fixture.add("b.ts", cross_writer_b);
+    try fixture.add("a.ts",
+        \\import { bump } from "./b.ts";
+        \\
+        \\export function tally(): Proof<number, "read_only"> {
+        \\  return bump();
+        \\}
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const row = findingInFile(&result, "ZTS500", "/a.ts") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 3), row.line);
+    try std.testing.expectEqual(@as(u32, 8), row.column);
+    try std.testing.expectEqualStrings(cross_writer_suggestion, row.suggestion orelse return error.TestUnexpectedResult);
+}
+
+test "CHECK refuses read_only on a helper that calls an inline arrow writer held by an imported object" {
+    var fixture = try SiblingFixture.init(
+        \\import { api } from "./b.ts";
+        \\
+        \\function tally(): Proof<number, "read_only"> {
+        \\  return api.bump();
+        \\}
+        \\
+        \\export function handler(req: Request): Proof<Response, "injection_safe"> {
+        \\  return Response.text("ok");
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("b.ts",
+        \\let count = 0;
+        \\
+        \\export const api = { bump: (): number => { count = count + 1; return count; } };
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 3), row.line);
+    try std.testing.expectEqual(@as(u32, 1), row.column);
+}
+
+test "CHECK refuses read_only on a helper that calls a named writer through an imported holder" {
+    var fixture = try SiblingFixture.init(
+        \\import { api } from "./b.ts";
+        \\
+        \\function tally(): Proof<number, "read_only"> {
+        \\  return api.bump();
+        \\}
+        \\
+        \\export function handler(req: Request): Proof<Response, "injection_safe"> {
+        \\  return Response.text("ok");
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("b.ts",
+        \\let count = 0;
+        \\
+        \\function bump(): number {
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\
+        \\export const api = { bump: bump };
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 3), row.line);
+    try std.testing.expectEqual(@as(u32, 1), row.column);
+}
+
+test "CHECK refuses read_only on a helper over a relay export over a writer of a third file" {
+    var fixture = try SiblingFixture.init(cross_writer_unused_import_handler);
+    defer fixture.deinit();
+    try fixture.add("c.ts", cross_writer_b);
+    try fixture.add("b.ts",
+        \\import { bump } from "./c.ts";
+        \\
+        \\export function relay(): number {
+        \\  return bump();
+        \\}
+        \\
+    );
+    try fixture.add("a.ts",
+        \\import { relay } from "./b.ts";
+        \\
+        \\export function tally(): Proof<number, "read_only"> {
+        \\  return relay();
+        \\}
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const row = findingInFile(&result, "ZTS500", "/a.ts") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 3), row.line);
+    try std.testing.expectEqual(@as(u32, 8), row.column);
+}
+
+test "CHECK keeps read_only on a helper over a clean export of a module that also holds a writer" {
+    var fixture = try SiblingFixture.init(
+        \\import { peek } from "./b.ts";
+        \\
+        \\function tally(): Proof<number, "read_only"> {
+        \\  return peek();
+        \\}
+        \\
+        \\export function handler(req: Request): Proof<Response, "injection_safe"> {
+        \\  return Response.text(String(tally()));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("b.ts",
+        \\let count = 0;
+        \\
+        \\export function bump(): number {
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\
+        \\export function peek(): number {
+        \\  return 1;
+        \\}
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), countDiagnosticsWithCode(&result, "ZTS500"));
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    try std.testing.expectEqual(@as(usize, 0), result.contract.?.spec_diagnostics.items.len);
+}
+
+test "CHECK pins the findings of an uncapsuled helper over an imported writer under a read_only handler" {
+    var called = try SiblingFixture.init(
+        \\import { bump } from "./b.ts";
+        \\
+        \\function tally(): number {
+        \\  return bump();
+        \\}
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  const n = tally();
+        \\  return Response.text(String(n));
+        \\}
+        \\
+    );
+    defer called.deinit();
+    try called.add("b.ts", cross_writer_b);
+    var called_result = try called.check();
+    defer called_result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 3), called_result.json_diagnostics.items.len);
+    try expectFindingAt(&called_result, 0, "ZTS310", "/b.ts", 4, 9);
+    try expectFindingAt(&called_result, 1, "ZTS500", "/handler.ts", 7, 24);
+    try expectFindingAt(&called_result, 2, "ZTS606", "/handler.ts", 3, 1);
+
+    var uncalled = try SiblingFixture.init(
+        \\import { bump } from "./b.ts";
+        \\
+        \\function tally(): number {
+        \\  return bump();
+        \\}
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text("ok");
+        \\}
+        \\
+    );
+    defer uncalled.deinit();
+    try uncalled.add("b.ts", cross_writer_b);
+    var uncalled_result = try uncalled.check();
+    defer uncalled_result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 2), uncalled_result.json_diagnostics.items.len);
+    try expectFindingAt(&uncalled_result, 0, "ZTS310", "/b.ts", 4, 9);
+    try expectFindingAt(&uncalled_result, 1, "ZTS500", "/handler.ts", 7, 24);
+}
+
 test "CHECK warns on an Effects capability that a dependency helper never reaches" {
     var fixture = try SiblingFixture.init(
         \\import { label } from "./dep.ts";

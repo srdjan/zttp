@@ -4083,6 +4083,166 @@ test "compileHandler graph refuses a false Proof capsule on a dependency helper"
     try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
 }
 
+const cross_writer_dep =
+    \\let count = 0;
+    \\
+    \\export function bump(): number {
+    \\  count = count + 1;
+    \\  return count;
+    \\}
+    \\
+;
+
+const cross_writer_entry =
+    \\import { bump } from "./dep.ts";
+    \\
+    \\function tally(): Proof<number, "read_only"> {
+    \\  return bump();
+    \\}
+    \\
+    \\export function handler(req: Request): Proof<Response, "injection_safe"> {
+    \\  return Response.text("ok");
+    \\}
+    \\
+;
+
+test "compileHandler graph refuses read_only on a helper that calls a module-state writer of a dependency" {
+    var fixture = try importFixture(cross_writer_entry, cross_writer_dep);
+    defer fixture.deinit();
+    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+}
+
+test "compileHandler graph refuses read_only on a dependency helper that calls a module-state writer of a third file" {
+    var fixture = try importFixture(
+        \\import { tally } from "./a.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "injection_safe"> {
+        \\  return Response.text("ok");
+        \\}
+        \\
+    , cross_writer_dep);
+    defer fixture.deinit();
+    try fixture.add("a.ts",
+        \\import { bump } from "./dep.ts";
+        \\
+        \\export function tally(): Proof<number, "read_only"> {
+        \\  return bump();
+        \\}
+        \\
+    );
+    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+}
+
+test "compileHandler graph refuses read_only on a helper that calls an inline arrow writer held by a dependency object" {
+    var fixture = try importFixture(
+        \\import { api } from "./dep.ts";
+        \\
+        \\function tally(): Proof<number, "read_only"> {
+        \\  return api.bump();
+        \\}
+        \\
+        \\export function handler(req: Request): Proof<Response, "injection_safe"> {
+        \\  return Response.text("ok");
+        \\}
+        \\
+    ,
+        \\let count = 0;
+        \\
+        \\export const api = { bump: (): number => { count = count + 1; return count; } };
+        \\
+    );
+    defer fixture.deinit();
+    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+}
+
+test "compileHandler graph refuses read_only on a helper that calls a named writer through a dependency holder" {
+    var fixture = try importFixture(
+        \\import { api } from "./dep.ts";
+        \\
+        \\function tally(): Proof<number, "read_only"> {
+        \\  return api.bump();
+        \\}
+        \\
+        \\export function handler(req: Request): Proof<Response, "injection_safe"> {
+        \\  return Response.text("ok");
+        \\}
+        \\
+    ,
+        \\let count = 0;
+        \\
+        \\function bump(): number {
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\
+        \\export const api = { bump: bump };
+        \\
+    );
+    defer fixture.deinit();
+    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+}
+
+test "compileHandler graph refuses read_only on a helper over a relay export over a writer of a third file" {
+    var fixture = try importFixture(
+        \\import { tally } from "./a.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "injection_safe"> {
+        \\  return Response.text("ok");
+        \\}
+        \\
+    , cross_writer_dep);
+    defer fixture.deinit();
+    try fixture.add("b.ts",
+        \\import { bump } from "./dep.ts";
+        \\
+        \\export function relay(): number {
+        \\  return bump();
+        \\}
+        \\
+    );
+    try fixture.add("a.ts",
+        \\import { relay } from "./b.ts";
+        \\
+        \\export function tally(): Proof<number, "read_only"> {
+        \\  return relay();
+        \\}
+        \\
+    );
+    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+}
+
+test "compileHandler graph keeps read_only on a helper over a clean export of a module that also holds a writer" {
+    var fixture = try importFixture(
+        \\import { peek } from "./dep.ts";
+        \\
+        \\function tally(): Proof<number, "read_only"> {
+        \\  return peek();
+        \\}
+        \\
+        \\export function handler(req: Request): Proof<Response, "injection_safe"> {
+        \\  return Response.text(String(tally()));
+        \\}
+        \\
+    ,
+        \\let count = 0;
+        \\
+        \\export function bump(): number {
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\
+        \\export function peek(): number {
+        \\  return 1;
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const contract = compiled.contract orelse return error.MissingContract;
+    try std.testing.expectEqual(@as(usize, 0), contract.spec_diagnostics.items.len);
+}
+
 test "compileHandler graph refuses an Effects ceiling that a dependency helper breaks" {
     var fixture = try importFixture(
         \\import { digest } from "./dep.ts";
