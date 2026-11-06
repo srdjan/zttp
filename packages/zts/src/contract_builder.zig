@@ -720,7 +720,7 @@ pub const ContractBuilder = struct {
                         !cap.proven.holds(prop) and
                         !containsString(cap.declared.items, pname))
                     {
-                        var missing = try makeMissingCapsule(self.allocator, pname, cap.name);
+                        var missing = try makeMissingCapsule(self.allocator, pname, cap.name, cap.proven.writeCauseFor(prop));
                         errdefer missing.deinit(self.allocator);
                         try contract.spec_diagnostics.append(self.allocator, missing);
                     }
@@ -1093,12 +1093,18 @@ pub const ContractBuilder = struct {
         allocator: std.mem.Allocator,
         property: []const u8,
         func: []const u8,
+        /// The write to module state that removed `property` from the helper.
+        /// A write is not fixed by a capsule, so it gets its own remedy.
+        write_cause: ?contract_types.PropertyCause,
     ) !contract_types.SpecDiagnostic {
         const spec_name = try allocator.dupe(u8, property);
         errdefer allocator.free(spec_name);
         const owned_func = try allocator.dupe(u8, func);
         errdefer allocator.free(owned_func);
-        const suggestion = try allocator.print("annotate `{s}` with `Proof<T, \"{s}\">` and satisfy it, or inline the helper into the handler.", .{ func, property });
+        const suggestion = if (write_cause) |cause|
+            try spec_discharge.stateWriteHelperSuggestion(allocator, func, cause.line)
+        else
+            try allocator.print("annotate `{s}` with `Proof<T, \"{s}\">` and satisfy it, or inline the helper into the handler.", .{ func, property });
         return .{
             .kind = .missing_capsule,
             .spec_name = spec_name,

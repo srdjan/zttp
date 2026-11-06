@@ -12845,6 +12845,10 @@ const shared_state_default_help =
     "`function handler(req: Request): Proof<Response, \"fault_covered\" | \"no_secret_leakage\" | \"no_credential_leakage\" | " ++
     "\"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`.";
 
+const shared_state_default_help_line3 = shared_state_default_help ++
+    " The write to module state at line 3 removes deterministic, idempotent, pure, read_only, retry_safe, state_isolated, stateless. " ++
+    "To keep them, copy the value into a local before the write, or move the state to zttp:cache.";
+
 fn expectSharedStateClearsProperties(result: *const CheckResult) !void {
     const props = result.properties orelse return error.TestUnexpectedResult;
     try std.testing.expect(!props.state_isolated);
@@ -12877,13 +12881,13 @@ test "a helper module write unproves a narrow capsule that claims the read-only 
     try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
     try std.testing.expectEqualStrings("warning", diagnostics[0].severity);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
-    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: deterministic)", diagnostics[1].message);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:11 by `a write to module state`)", diagnostics[1].message);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[2].code);
-    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: idempotent)", diagnostics[2].message);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: idempotent; demoted at line 3:11 by `a write to module state`)", diagnostics[2].message);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[3].code);
-    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: read_only)", diagnostics[3].message);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: read_only; demoted at line 3:11 by `a write to module state`)", diagnostics[3].message);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[4].code);
-    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: retry_safe)", diagnostics[4].message);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: retry_safe; demoted at line 3:11 by `a write to module state`)", diagnostics[4].message);
     try std.testing.expectEqualStrings("ZTS606", diagnostics[5].code);
     try std.testing.expectEqualStrings("helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: read_only)", diagnostics[5].message);
     try std.testing.expectEqualStrings("ZTS606", diagnostics[6].code);
@@ -12906,7 +12910,7 @@ test "a module let reassignment unproves the read-only family and the default he
     try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
     try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
-    try std.testing.expectEqualStrings(shared_state_default_help, diagnostics[1].suggestion orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings(shared_state_default_help_line3, diagnostics[1].suggestion orelse return error.TestUnexpectedResult);
 }
 
 test "a module array push unproves the read-only family and the default help names none of it" {
@@ -12925,7 +12929,7 @@ test "a module array push unproves the read-only family and the default help nam
     try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
     try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
-    try std.testing.expectEqualStrings(shared_state_default_help, diagnostics[1].suggestion orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings(shared_state_default_help_line3, diagnostics[1].suggestion orelse return error.TestUnexpectedResult);
 }
 
 test "a read of a module array keeps the read-only family proven" {
@@ -13065,8 +13069,12 @@ test "a dictGet on a module table keeps the read-only family proven" {
     try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
 }
 
-const capsule_failure_pure = "declared Proof capsule was not discharged by handler proof (failing spec: pure)";
-const capsule_failure_read_only = "declared Proof capsule was not discharged by handler proof (failing spec: read_only)";
+// The write is `xs.push(1)` on line 3, whose call paren is at column 10.
+const capsule_failure_pure = "declared Proof capsule was not discharged by handler proof (failing spec: pure; demoted at line 3:10 by `a write to module state`)";
+const capsule_failure_read_only = "declared Proof capsule was not discharged by handler proof (failing spec: read_only; demoted at line 3:10 by `a write to module state`)";
+// The write is `seen.push(1)` on line 3, whose call paren is at column 12.
+const capsule_failure_pure_direct = "declared Proof capsule was not discharged by handler proof (failing spec: pure; demoted at line 3:12 by `a write to module state`)";
+const capsule_failure_read_only_direct = "declared Proof capsule was not discharged by handler proof (failing spec: read_only; demoted at line 3:12 by `a write to module state`)";
 
 test "a Proof capsule on a helper that pushes onto its parameter, called with a module array, fails ZTS500" {
     const allocator = std.testing.allocator;
@@ -13117,10 +13125,10 @@ test "a Proof capsule on a helper that pushes onto a module array fails ZTS500 w
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
     try std.testing.expectEqualStrings("error", diagnostics[1].severity);
     try std.testing.expectEqual(@as(u32, 6), diagnostics[1].line);
-    try std.testing.expectEqualStrings(capsule_failure_pure, diagnostics[1].message);
+    try std.testing.expectEqualStrings(capsule_failure_pure_direct, diagnostics[1].message);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[2].code);
     try std.testing.expectEqual(@as(u32, 6), diagnostics[2].line);
-    try std.testing.expectEqualStrings(capsule_failure_read_only, diagnostics[2].message);
+    try std.testing.expectEqualStrings(capsule_failure_read_only_direct, diagnostics[2].message);
 }
 
 test "a Proof capsule on a helper that pushes onto a module array fails ZTS500 when no handler calls it" {
@@ -13144,10 +13152,10 @@ test "a Proof capsule on a helper that pushes onto a module array fails ZTS500 w
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
     try std.testing.expectEqualStrings("error", diagnostics[1].severity);
     try std.testing.expectEqual(@as(u32, 6), diagnostics[1].line);
-    try std.testing.expectEqualStrings(capsule_failure_pure, diagnostics[1].message);
+    try std.testing.expectEqualStrings(capsule_failure_pure_direct, diagnostics[1].message);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[2].code);
     try std.testing.expectEqual(@as(u32, 6), diagnostics[2].line);
-    try std.testing.expectEqualStrings(capsule_failure_read_only, diagnostics[2].message);
+    try std.testing.expectEqualStrings(capsule_failure_read_only_direct, diagnostics[2].message);
 }
 
 test "a Proof capsule on a helper that pushes onto a request-local array stays discharged" {
@@ -13188,7 +13196,7 @@ test "a deterministic capsule on a helper that writes through a module array par
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
     try std.testing.expectEqualStrings("error", diagnostics[1].severity);
     try std.testing.expectEqual(@as(u32, 6), diagnostics[1].line);
-    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: deterministic)", diagnostics[1].message);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:10 by `a write to module state`)", diagnostics[1].message);
 }
 
 test "a capsule that calls a plain writer with a module array fails ZTS500" {
@@ -13214,7 +13222,7 @@ test "a capsule that calls a plain writer with a module array fails ZTS500" {
     try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
     try std.testing.expectEqual(@as(u32, 9), diagnostics[1].line);
-    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: pure)", diagnostics[1].message);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: pure; demoted at line 3:10 by `a write to module state`)", diagnostics[1].message);
 }
 
 test "a capsule called once with a local and once with a module array fails ZTS500" {
@@ -13311,5 +13319,96 @@ test "a capsule that calls a plain module writer fails ZTS500 when no handler ca
     try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
     try std.testing.expectEqual(@as(u32, 9), diagnostics[1].line);
-    try std.testing.expectEqualStrings(capsule_failure_pure, diagnostics[1].message);
+    try std.testing.expectEqualStrings(capsule_failure_pure_direct, diagnostics[1].message);
+}
+
+const write_remedy_line3 = "line 3 writes module state: copy the value into a local before the write, or move the state to zttp:cache.";
+
+test "the deterministic ZTS500 of a helper write names the write line and the write remedy" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const seen: number[] = [];
+        \\function addTo(xs: number[]): undefined {
+        \\  xs.push(1);
+        \\  return undefined;
+        \\}
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  addTo(seen);
+        \\  return Response.text(String(seen.length));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "write-hint.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 3), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:10 by `a write to module state`)", diagnostics[1].message);
+    try std.testing.expectEqualStrings(write_remedy_line3, diagnostics[1].suggestion orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("ZTS606", diagnostics[2].code);
+    try std.testing.expectEqualStrings("`addTo` reaches a write to module state at line 3: copy the value into a local before the write, or move the state to zttp:cache.", diagnostics[2].suggestion orelse return error.TestUnexpectedResult);
+}
+
+test "the deterministic ZTS500 keeps the Date.now() cause when a write also removed the property" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const seen: number[] = [];
+        \\function addTo(xs: number[]): undefined {
+        \\  xs.push(1);
+        \\  return undefined;
+        \\}
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  addTo(seen);
+        \\  return Response.text(String(seen.length + Date.now()));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "write-and-clock.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 3), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 8:49 by `Date.now()`)", diagnostics[1].message);
+    try std.testing.expectEqualStrings("remove Date.now(), Math.random(), and performance.now() from the response path.", diagnostics[1].suggestion orelse return error.TestUnexpectedResult);
+}
+
+test "the pure ZTS500 of a capsule helper names the write line and the write remedy" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const seen: number[] = [];
+        \\function bump(xs: number[]): Proof<number, "pure"> {
+        \\  xs.push(1);
+        \\  return xs.length;
+        \\}
+        \\function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  return Response.text(String(bump(seen)));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "capsule-write-hint.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: pure; demoted at line 3:10 by `a write to module state`)", diagnostics[1].message);
+    try std.testing.expectEqualStrings(write_remedy_line3, diagnostics[1].suggestion orelse return error.TestUnexpectedResult);
+}
+
+test "the state_isolated ZTS500 of a direct handler write names the write line and the write remedy" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\let counter: number = 0;
+        \\function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  counter = counter + 1;
+        \\  return Response.text(String(counter));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "direct-write-hint.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    var found = false;
+    for (result.json_diagnostics.items) |diagnostic| {
+        if (!std.mem.eql(u8, diagnostic.code, "ZTS500")) continue;
+        found = true;
+        try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: state_isolated; demoted at line 3:11 by `a write to module state`)", diagnostic.message);
+        try std.testing.expectEqualStrings(write_remedy_line3, diagnostic.suggestion orelse return error.TestUnexpectedResult);
+    }
+    try std.testing.expect(found);
 }

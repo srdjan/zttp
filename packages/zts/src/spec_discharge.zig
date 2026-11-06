@@ -11,6 +11,7 @@
 const std = @import("std");
 const contract_types = @import("zts-contracts").contract_types;
 const module_binding = @import("zts-engine").module_binding;
+const ir = @import("zts-engine").parser.ir;
 const effect_inference = @import("effect_inference.zig");
 
 const HandlerProperties = contract_types.HandlerProperties;
@@ -151,6 +152,33 @@ pub fn suggestionFor(name: []const u8) ?[]const u8 {
         if (std.mem.eql(u8, name, row.name)) return row.text;
     }
     return null;
+}
+
+/// The earlier of two write nodes in source order. A node with no line loses
+/// to a node with one.
+pub fn earlierWrite(ir_view: ir.IrView, a: ?ir.NodeIndex, b: ?ir.NodeIndex) ?ir.NodeIndex {
+    const first = a orelse return b;
+    const second = b orelse return a;
+    const first_loc = ir_view.getLoc(first) orelse return if (ir_view.getLoc(second) != null) second else first;
+    const second_loc = ir_view.getLoc(second) orelse return first;
+    if (second_loc.line < first_loc.line) return second;
+    if (second_loc.line == first_loc.line and second_loc.column < first_loc.column) return second;
+    return first;
+}
+
+/// The remedy for a property that a write to module state removed.
+pub const state_write_remedy = "copy the value into a local before the write, or move the state to zttp:cache";
+
+/// The ZTS500 suggestion for a property that the write at `line` removed.
+/// Caller frees.
+pub fn stateWriteSuggestion(allocator: std.mem.Allocator, line: u32) ![]u8 {
+    return allocator.print("line {d} writes module state: " ++ state_write_remedy ++ ".", .{line});
+}
+
+/// The ZTS606 suggestion for a helper that reaches the write at `line`.
+/// Caller frees.
+pub fn stateWriteHelperSuggestion(allocator: std.mem.Allocator, function: []const u8, line: u32) ![]u8 {
+    return allocator.print("`{s}` reaches a write to module state at line {d}: " ++ state_write_remedy ++ ".", .{ function, line });
 }
 
 /// ZTS501 suggestion: actionable copy for `read_only` colliding with a
@@ -367,7 +395,7 @@ pub fn dischargeSpecs(
     if (implicit_default and undischarged.items.len > 0) {
         const spec_name = try std.mem.join(allocator, ", ", undischarged.items);
         errdefer allocator.free(spec_name);
-        const suggestion = try implicitDefaultSuggestion(allocator, properties, modules, undischarged.items);
+        const suggestion = try implicitDefaultSuggestion(allocator, properties, modules, undischarged.items, provenance);
         errdefer allocator.free(suggestion);
         try out.append(allocator, .{
             .kind = .not_discharged,
@@ -391,7 +419,12 @@ fn appendNotDischarged(
 ) !void {
     const spec_name = try allocator.dupe(u8, name);
     errdefer allocator.free(spec_name);
-    const suggestion = if (suggestionFor(name)) |s|
+    // A write to module state that removed this property replaces the
+    // generic text. A recorded cause of another kind keeps its own text.
+    const write_cause = if (provenance) |p| p.stateWriteCauseFor(name) else null;
+    const suggestion = if (write_cause) |cause|
+        try stateWriteSuggestion(allocator, cause.line)
+    else if (suggestionFor(name)) |s|
         try allocator.dupe(u8, s)
     else
         null;
@@ -404,7 +437,7 @@ fn appendNotDischarged(
         // one. `SpecDiagnostic.cause` has existed since the type was written
         // and nothing ever set it, so the exact line that broke a proof was
         // computed and then dropped one struct short of every reader.
-        .cause = if (provenance) |p| p.causeFor(name) else null,
+        .cause = if (provenance) |p| p.causeFor(name) orelse write_cause else null,
         .implicit_default = false,
     });
 }
@@ -420,6 +453,7 @@ fn implicitDefaultSuggestion(
     properties: ?HandlerProperties,
     modules: []const []const u8,
     undischarged: []const []const u8,
+    provenance: ?contract_types.PropertyProvenance,
 ) ![]u8 {
     // The properties the handler still holds form the minimal proof set the author
     // can declare and have pass immediately. Read them straight off the
@@ -455,10 +489,28 @@ fn implicitDefaultSuggestion(
     const missing = try std.mem.join(allocator, ", ", undischarged);
     defer allocator.free(missing);
 
-    return allocator.print("this handler returns no Proof<T, P> capsule, so the compiler must prove the full " ++
+    const base = try allocator.print("this handler returns no Proof<T, P> capsule, so the compiler must prove the full " ++
         "default profile, but it does not hold: {s}. Return a narrow Proof capsule " ++
         "with only the properties it holds, e.g. " ++
         "`function handler(req: Request): Proof<Response, {s}>`.", .{ missing, holds.items });
+    errdefer allocator.free(base);
+
+    // The names that a write to module state removed. Their remedy is not to
+    // drop them from the proof set but to remove the write.
+    const p = provenance orelse return base;
+    var write_line: u32 = 0;
+    var removed: std.ArrayList(u8) = .empty;
+    defer removed.deinit(allocator);
+    for (undischarged) |name| {
+        const cause = p.stateWriteCauseFor(name) orelse continue;
+        write_line = cause.line;
+        if (removed.items.len > 0) try removed.appendSlice(allocator, ", ");
+        try removed.appendSlice(allocator, name);
+    }
+    if (removed.items.len == 0) return base;
+    const joined = try allocator.print("{s} The write to module state at line {d} removes {s}. To keep them, " ++ state_write_remedy ++ ".", .{ base, write_line, removed.items });
+    allocator.free(base);
+    return joined;
 }
 
 fn lookupV1(name: []const u8) ?V1Spec {
@@ -534,6 +586,21 @@ pub const CapsuleFacts = struct {
     /// escape comes from a sibling module. Borrowed from the effect facts, so
     /// only `dischargeCapsule` reads it; a stored capsule holds null.
     escape_site: ?effect_inference.FunctionValueEscape = null,
+    /// The first write to module state in the entry module that this function
+    /// reaches, directly or through a callee. Null when no such write has a
+    /// line there. The snippet is a static string.
+    state_write: ?PropertyCause = null,
+    /// The properties above that the write cleared: each was proven by the
+    /// effect row and the write removed it.
+    state_write_removed: std.EnumSet(CapsuleProperty) = .empty,
+
+    /// The write that removed `prop`, or null when another cause refused it.
+    /// A lower-bound row refuses every property for its own reason.
+    pub fn writeCauseFor(self: CapsuleFacts, prop: CapsuleProperty) ?PropertyCause {
+        if (self.lower_bound) return null;
+        if (!self.state_write_removed.contains(prop)) return null;
+        return self.state_write;
+    }
 
     pub fn holds(self: CapsuleFacts, prop: CapsuleProperty) bool {
         // A lower-bound row under-reports every field it carries, so no
@@ -635,7 +702,10 @@ pub fn dischargeCapsule(
         // `pure` refusal would tell an author to remove recursion when the
         // real cause is a module call, which is a wrong repair, not just a
         // vague one.
-        const suggestion = if (facts.function_value_escape and prop == .total and !facts.recursive)
+        const write_cause = facts.writeCauseFor(prop);
+        const suggestion = if (write_cause) |cause|
+            try stateWriteSuggestion(allocator, cause.line)
+        else if (facts.function_value_escape and prop == .total and !facts.recursive)
             try escapeSuggestion(allocator, facts.escape_site)
         else blk: {
             const text = if (facts.recursive and prop == .total)
@@ -651,6 +721,7 @@ pub fn dischargeCapsule(
             .kind = .not_discharged,
             .spec_name = spec_name,
             .suggestion = suggestion,
+            .cause = write_cause,
         });
     }
 

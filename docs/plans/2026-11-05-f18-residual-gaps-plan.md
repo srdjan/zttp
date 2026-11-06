@@ -10,8 +10,8 @@ The F18 plan (`2026-11-05-f18-module-state-proofs-plan.md`) recorded five residu
 | U1 | Complete: persistent-write events, phase split, union over passes; 18 evaluator tests and 1 facade test |
 | U2 | Complete: edcdd08f; verify.sh passed |
 | U2b | Complete: edcdd08f, with U2 |
-| U3 | Complete: the helper capsule discharge reads the write events and the verifier write sites |
-| U4 | Not started |
+| U3 | Complete: 7708ce03 |
+| U4 | Complete: ZTS500, helper ZTS500, ZTS606, and the default-profile hint name the write line |
 | U5 | Not started |
 | U6 | Not started |
 
@@ -140,3 +140,5 @@ Measured at `bf6ad1c3` with `zts check --json` over 82 files: the 33 tracked `.t
 - U3: every helper, with or without a `Proof` capsule, appears in the contract's `function_capsules` with its proven facts, so U3 clears the facts of each writer helper. A helper without a capsule then gets ZTS606 when the handler demands `pure`, `read_only`, or `deterministic`. Its hint ("annotate ... or inline the helper") does not fit a write to module state. U4 covers that hint too.
 - U3 does not involve these and they were already present at edcdd08f: the ZTS500 for a helper's own capsule points at the handler's line, and its message says "not discharged by handler proof". CHECK does not discharge a capsule in a dependency module at all, even one that calls `Date.now()`. Probes are in `/tmp/zttp-f18g/u3/`.
 - U3: `extractContract` now runs the flow pass before contract extraction, so the capsule discharge can read the events. A module with type errors still stops before the flow pass.
+- U4: the cause of a property that a write removed is the first write of the entry module, by line and column. A property counts as removed by the write only when it was proven before the shared-state fact cleared it, so a `zttp:cache` write or a `Date.now()` keeps its own cause and hint. The cause snippet is the fixed text "a write to module state", because the contract builder holds no source text.
+- U4: `causeFor` is unchanged. The live-reload HUD and the counterexample pipeline read `causeFor` only, so they do not show a write cause. A write in a dependency module gives no line, and the graph compile path does not record the cause yet. U5 covers the graph path.

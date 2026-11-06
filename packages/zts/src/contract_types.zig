@@ -775,16 +775,74 @@ pub const PropertyProvenance = struct {
     /// The first failable call the path walk never recorded. The snippet is the
     /// export name, a static string from the module binding.
     fault_covered: ?PropertyCause = null,
+    /// The first write to module state in the entry module, in source order.
+    /// Null when no write has a line in the entry module (a write in a
+    /// dependency module has none). The snippet is a static string.
+    state_write: ?PropertyCause = null,
+    /// The shared-state properties that the write removed: each one was
+    /// proven before the shared-state fact cleared it. A property that
+    /// another cause already removed is not in this set.
+    state_write_removed: std.EnumSet(SharedStateProperty) = .empty,
 
     /// Single dispatch over the field set so the live HUD and the
     /// counterexample pipeline never drift on which provenance fields exist.
     /// Returns null for fields the verifier does not yet record causes for.
+    /// A write to module state is not returned here: its cause is not a clock
+    /// or RNG read, and a reader of this function states that. See
+    /// `stateWriteCauseFor`.
     pub fn causeFor(self: *const PropertyProvenance, field: []const u8) ?PropertyCause {
         if (std.mem.eql(u8, field, "deterministic")) return self.deterministic;
         if (std.mem.eql(u8, field, "fault_covered")) return self.fault_covered;
         return null;
     }
+
+    /// The write to module state that removed `field`, or null when the field
+    /// is not a shared-state property, the write did not remove it, or
+    /// `causeFor` already names another cause for it.
+    pub fn stateWriteCauseFor(self: *const PropertyProvenance, field: []const u8) ?PropertyCause {
+        if (self.causeFor(field) != null) return null;
+        const property = std.meta.stringToEnum(SharedStateProperty, field) orelse return null;
+        if (!self.state_write_removed.contains(property)) return null;
+        return self.state_write;
+    }
 };
+
+/// The handler properties that a write to module state removes.
+pub const SharedStateProperty = enum {
+    state_isolated,
+    pure,
+    stateless,
+    read_only,
+    retry_safe,
+    deterministic,
+    idempotent,
+};
+
+/// The snippet of a state-write cause. The cause names the write by its line;
+/// the text is a fixed string because the contract builder holds no source.
+pub const state_write_snippet = "a write to module state";
+
+test "PropertyProvenance.stateWriteCauseFor returns the write only for a property it removed" {
+    const write = PropertyCause{ .line = 5, .column = 12, .snippet = state_write_snippet };
+    const p = PropertyProvenance{
+        .state_write = write,
+        .state_write_removed = .initMany(&.{ .pure, .read_only }),
+    };
+    try std.testing.expectEqual(@as(u32, 5), p.stateWriteCauseFor("pure").?.line);
+    try std.testing.expect(p.stateWriteCauseFor("stateless") == null);
+    try std.testing.expect(p.stateWriteCauseFor("result_safe") == null);
+    try std.testing.expect(p.causeFor("pure") == null);
+}
+
+test "PropertyProvenance.stateWriteCauseFor yields to a recorded cause" {
+    const p = PropertyProvenance{
+        .deterministic = .{ .line = 8, .column = 44, .snippet = "Date.now()" },
+        .state_write = .{ .line = 3, .column = 10, .snippet = state_write_snippet },
+        .state_write_removed = .initMany(&.{.deterministic}),
+    };
+    try std.testing.expect(p.stateWriteCauseFor("deterministic") == null);
+    try std.testing.expectEqualStrings("Date.now()", p.causeFor("deterministic").?.snippet);
+}
 
 test "PropertyProvenance.causeFor round-trips deterministic" {
     const p = PropertyProvenance{

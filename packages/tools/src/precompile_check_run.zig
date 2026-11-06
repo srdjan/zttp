@@ -173,6 +173,10 @@ pub const VerifierFacts = struct {
     shares_state: bool,
     result_safe: bool,
     optional_safe: bool,
+    /// The first write to module state in the entry module, when a driver
+    /// found one with a line. It names the cause of each property that
+    /// `shares_state` removes.
+    state_write: ?handler_contract.PropertyCause = null,
 };
 
 /// The facts a driver applies to a contract after its own analysis. A null
@@ -197,6 +201,53 @@ fn clearSharedStateProperties(props: *handler_contract.HandlerProperties) void {
     props.retry_safe = false;
     props.deterministic = false;
     props.idempotent = false;
+}
+
+/// Record the write that removed each shared-state property, so a ZTS500 can
+/// name it. A property that was already false before the shared-state fact, or
+/// that this fact left alone, is not recorded: another cause owns it.
+fn recordStateWrite(
+    provenance: *handler_contract.PropertyProvenance,
+    before: handler_contract.HandlerProperties,
+    after: handler_contract.HandlerProperties,
+    verifier: VerifierFacts,
+) void {
+    provenance.state_write = null;
+    provenance.state_write_removed = .empty;
+    if (!verifier.shares_state) return;
+    const write = verifier.state_write orelse return;
+    provenance.state_write = write;
+    // The verifier fact alone sets `state_isolated`, so the write is its cause
+    // whatever the contract held before.
+    if (!after.state_isolated) provenance.state_write_removed.insert(.state_isolated);
+    if (before.pure and !after.pure) provenance.state_write_removed.insert(.pure);
+    if (before.stateless and !after.stateless) provenance.state_write_removed.insert(.stateless);
+    if (before.read_only and !after.read_only) provenance.state_write_removed.insert(.read_only);
+    if (before.retry_safe and !after.retry_safe) provenance.state_write_removed.insert(.retry_safe);
+    if (before.deterministic and !after.deterministic) provenance.state_write_removed.insert(.deterministic);
+    if (before.idempotent and !after.idempotent) provenance.state_write_removed.insert(.idempotent);
+}
+
+/// The first write to module state in the entry module, in source order, as a
+/// cause. `verifier_diagnostics` are the entry module's verifier findings and
+/// `sites` the flow writes that the verifier did not name. A write in a
+/// dependency module has no line in the entry file, so it gives no cause.
+pub fn firstEntryWriteCause(
+    ir_view: zts.IrView,
+    verifier_diagnostics: []const zts.VerifierDiagnostic,
+    sites: []const WriteSite,
+) ?handler_contract.PropertyCause {
+    var first: ?ir.NodeIndex = null;
+    for (verifier_diagnostics) |diagnostic| {
+        if (diagnostic.kind != .module_scope_mutation) continue;
+        first = zts.spec_discharge.earlierWrite(ir_view, first, diagnostic.node);
+    }
+    for (sites) |site| {
+        if (site.module != 0) continue;
+        first = zts.spec_discharge.earlierWrite(ir_view, first, site.node);
+    }
+    const loc = ir_view.getLoc(first orelse return null) orelse return null;
+    return .{ .line = loc.line, .column = loc.column, .snippet = handler_contract.state_write_snippet };
 }
 
 /// A write that a request makes to state that outlives it, named by the flow
@@ -334,10 +385,12 @@ pub fn applyContractFacts(
 ) void {
     if (facts.verifier) |verifier| {
         if (contract.properties) |*props| {
+            const before = props.*;
             props.state_isolated = verifier.state_isolated;
             if (verifier.shares_state) clearSharedStateProperties(props);
             props.result_safe = verifier.result_safe;
             props.optional_safe = verifier.optional_safe;
+            recordStateWrite(&contract.property_provenance, before, props.*, verifier);
         }
     }
     if (facts.paths) |paths| {
@@ -925,6 +978,7 @@ fn runCheckOnParsedSource(
     var verify_info: ?VerificationInfo = null;
     // True only when the verifier ran and found a shared-state write.
     var shares_state = false;
+    var state_write: ?handler_contract.PropertyCause = null;
     if (handler_fn) |hf| {
         // A graph supplies the flow modules from the parsers that it compiled.
         // The fault scan below performs its own independent traversal and reads.
@@ -1003,6 +1057,7 @@ fn runCheckOnParsedSource(
             try appendFlowWriteFindings(allocator, &result, json_mode, write_sites, graph_check, ir_view, diag_view, handler_path);
         }
         result.state_isolated = !shares_state;
+        if (shares_state) state_write = firstEntryWriteCause(ir_view, verifier_diags, write_sites);
         if (result.verify_errors == 0) {
             result.exhaustive_returns = true;
             result.results_safe = true;
@@ -1121,6 +1176,7 @@ fn runCheckOnParsedSource(
             .shares_state = shares_state,
             .result_safe = result.results_safe,
             .optional_safe = result.optionals_safe,
+            .state_write = state_write,
         } });
     }
     syncCheckResultProperties(&result);

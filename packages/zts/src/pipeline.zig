@@ -723,16 +723,19 @@ pub const ContractExtraction = struct {
 /// The owned lists behind a `function_specs.StateWriters` view.
 const StateWriterList = struct {
     flow_functions: std.ArrayList(NodeIndex) = .empty,
+    flow_function_writes: std.ArrayList(?NodeIndex) = .empty,
     verifier_writes: std.ArrayList(NodeIndex) = .empty,
 
     fn deinit(self: *StateWriterList, allocator: std.mem.Allocator) void {
         self.flow_functions.deinit(allocator);
+        self.flow_function_writes.deinit(allocator);
         self.verifier_writes.deinit(allocator);
     }
 
     fn view(self: *const StateWriterList) function_specs_mod.StateWriters {
         return .{
             .flow_functions = self.flow_functions.items,
+            .flow_function_writes = self.flow_function_writes.items,
             .verifier_writes = self.verifier_writes.items,
         };
     }
@@ -1160,10 +1163,22 @@ pub const ModuleAnalysisSession = struct {
         if (self.flow_state == .completed) {
             const flow = try self.completedFlow();
             for (flow.persistentWrites()) |write| {
+                // A write in a dependency module has no line in this module.
+                const entry_write: ?NodeIndex = if (write.module == 0) write.node else null;
                 for (write.stack) |entry| {
                     if (entry.module != 0) continue;
-                    if (std.mem.indexOfScalar(NodeIndex, list.flow_functions.items, entry.node) != null) continue;
+                    if (std.mem.indexOfScalar(NodeIndex, list.flow_functions.items, entry.node)) |index| {
+                        list.flow_function_writes.items[index] = function_specs_mod.earlierWrite(
+                            self.parsed.ir_view,
+                            list.flow_function_writes.items[index],
+                            entry_write,
+                        );
+                        continue;
+                    }
+                    // A failure between the two appends leaves the write list
+                    // one short, which `StateWriters` reads as no write.
                     try list.flow_functions.append(self.allocator, entry.node);
+                    try list.flow_function_writes.append(self.allocator, entry_write);
                 }
             }
         }

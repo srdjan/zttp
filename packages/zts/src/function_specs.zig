@@ -113,6 +113,11 @@ pub const StateWriters = struct {
     /// module that stood on the activation stack of a persistent write. A
     /// function that a write happened inside, or inside a callee of, is here.
     flow_functions: []const ir.NodeIndex = &.{},
+    /// For each entry of `flow_functions`, in step with it, the earliest write
+    /// in the entry module that stood on a stack through that function. Null
+    /// when every write through the function sits in a dependency module. A
+    /// shorter slice reads as null past its end.
+    flow_function_writes: []const ?ir.NodeIndex = &.{},
     /// Nodes of the module-state writes that the verifier named in the entry
     /// module. A function whose body, or a callee's body, holds one is a
     /// writer even when no handler reaches it.
@@ -142,42 +147,60 @@ fn functionOwnerNode(ir_view: IrView, declaration: ir.NodeIndex) ?ir.NodeIndex {
     return owner;
 }
 
+/// Whether a function reaches a write that the verifier named, and the
+/// earliest such write that has a source line.
+const StaticWriter = struct {
+    reaches: bool = false,
+    node: ?ir.NodeIndex = null,
+};
+
+pub const earlierWrite = spec_discharge.earlierWrite;
+
 /// For each function of `effects`, whether it or a function that it calls
-/// holds a write that the verifier named. The caller frees the slice.
-fn staticWriterFlags(
+/// holds a write that the verifier named, and the earliest such write. The
+/// caller frees the slice.
+fn staticWriters(
     allocator: std.mem.Allocator,
     effects: *const EffectFacts,
     ir_view: IrView,
     writes: []const ir.NodeIndex,
-) ![]bool {
+) ![]StaticWriter {
     const functions = effects.all();
-    const flags = try allocator.alloc(bool, functions.len);
-    errdefer allocator.free(flags);
-    @memset(flags, false);
-    if (writes.len == 0) return flags;
-    for (functions, flags) |fe, *flag| {
+    const found = try allocator.alloc(StaticWriter, functions.len);
+    errdefer allocator.free(found);
+    @memset(found, .{});
+    if (writes.len == 0) return found;
+    for (functions, found) |fe, *entry| {
         for (writes) |write| {
             if (ir_view.subtreeContains(fe.body_node, write)) {
-                flag.* = true;
-                break;
+                entry.reaches = true;
+                entry.node = earlierWrite(ir_view, entry.node, write);
             }
         }
     }
     var changed = true;
     while (changed) {
         changed = false;
-        for (flags, 0..) |*flag, index| {
-            if (flag.*) continue;
+        for (found, 0..) |*entry, index| {
             for (effects.calleesOf(index)) |callee| {
-                if (callee < flags.len and flags[callee]) {
-                    flag.* = true;
+                if (callee >= found.len or !found[callee].reaches) continue;
+                const earliest = earlierWrite(ir_view, entry.node, found[callee].node);
+                if (!entry.reaches or earliest != entry.node) {
+                    entry.reaches = true;
+                    entry.node = earliest;
                     changed = true;
-                    break;
                 }
             }
         }
     }
-    return flags;
+    return found;
+}
+
+/// The cause of a write node: its line and column in the entry module.
+/// Null when the node has no location.
+fn writeCause(ir_view: IrView, node: ?ir.NodeIndex) ?contract_types.PropertyCause {
+    const loc = ir_view.getLoc(node orelse return null) orelse return null;
+    return .{ .line = loc.line, .column = loc.column, .snippet = contract_types.state_write_snippet };
 }
 
 /// Discharge every helper capsule. A helper that `writers` names loses `pure`,
@@ -193,7 +216,7 @@ pub fn dischargeWithStateWriters(
     var table: CapsuleTable = .{};
     errdefer table.deinit(allocator);
 
-    const static_writers = try staticWriterFlags(allocator, effects, ir_view, writers.verifier_writes);
+    const static_writers = try staticWriters(allocator, effects, ir_view, writers.verifier_writes);
     defer allocator.free(static_writers);
 
     for (effects.all(), static_writers) |fe, static_writer| {
@@ -202,11 +225,24 @@ pub fn dischargeWithStateWriters(
         const line: u32 = if (ir_view.getLoc(fe.decl_node)) |loc| loc.line else 0;
         const signature = try functionSignature(source, ir_view, fe.decl_node);
 
-        const flow_writer = if (functionOwnerNode(ir_view, fe.decl_node)) |owner|
-            std.mem.indexOfScalar(ir.NodeIndex, writers.flow_functions, owner) != null
+        const flow_index: ?usize = if (functionOwnerNode(ir_view, fe.decl_node)) |owner|
+            std.mem.indexOfScalar(ir.NodeIndex, writers.flow_functions, owner)
         else
-            false;
-        const writes_state = static_writer or flow_writer;
+            null;
+        const flow_writer = flow_index != null;
+        const flow_write: ?ir.NodeIndex = if (flow_index) |index|
+            (if (index < writers.flow_function_writes.len) writers.flow_function_writes[index] else null)
+        else
+            null;
+        const writes_state = static_writer.reaches or flow_writer;
+        const write_node = earlierWrite(ir_view, static_writer.node, flow_write);
+
+        var write_removed = std.EnumSet(spec_discharge.CapsuleProperty).empty;
+        if (writes_state) {
+            if (fe.row.pure) write_removed.insert(.pure);
+            if (fe.row.readOnly()) write_removed.insert(.read_only);
+            if (fe.row.deterministic) write_removed.insert(.deterministic);
+        }
 
         const facts: CapsuleFacts = .{
             .total = handler_verifier.functionAlwaysReturns(ir_view, fe.body_node),
@@ -217,6 +253,8 @@ pub fn dischargeWithStateWriters(
             .lower_bound = fe.row.lower_bound,
             .function_value_escape = fe.row.function_value_escape,
             .escape_site = effects.functionValueEscape(),
+            .state_write = if (writes_state) writeCause(ir_view, write_node) else null,
+            .state_write_removed = write_removed,
         };
 
         var declared: std.ArrayList([]const u8) = .empty;

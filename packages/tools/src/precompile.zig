@@ -397,6 +397,7 @@ pub fn compileHandler(
     var verify_info: ?VerificationInfo = null;
     var state_isolated: bool = false;
     var shares_state: bool = false;
+    var state_write: ?handler_contract.PropertyCause = null;
     // result_safe and optional_safe default false (unproven) until verification runs and passes.
     var result_safe: bool = false;
     var optional_safe: bool = false;
@@ -628,6 +629,7 @@ pub fn compileHandler(
                 const checked = analysis.checkedModule() orelse return error.AnalysisPassIncomplete;
                 const unreported = try precompile_check_run_mod.unreportedWrites(allocator, completed, checked.verifierDiagnostics(), &.{});
                 defer allocator.free(unreported);
+                state_write = precompile_check_run_mod.firstEntryWriteCause(ir_view_check, checked.verifierDiagnostics(), unreported);
                 for (unreported) |site| {
                     if (builtin.is_test) continue;
                     var output: std.ArrayList(u8) = .empty;
@@ -649,6 +651,7 @@ pub fn compileHandler(
             .shares_state = shares_state,
             .result_safe = result_safe,
             .optional_safe = optional_safe,
+            .state_write = state_write,
         } });
         try refreshContractSpecDiagnostics(allocator, &contract.?);
     }
