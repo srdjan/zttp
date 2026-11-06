@@ -140,7 +140,7 @@ Gates for each code unit, unfiltered, with a private `ZIG_LOCAL_CACHE_DIR` and `
 ## Gaps that remain after this plan
 
 - Under Decision 3 (a): ZTS606, ZTS610, ZTS611, and ZTS508 do not run on a dependency helper, and `proofCapsules` and `effectCapsules` list entry helpers only.
-- A static writer across modules, as in the last risk.
+- Closed 2026-11-06 by [the cross-module state writers plan](2026-11-06-cross-module-state-writers-plan.md): a static writer across modules, as in the last risk. A write that only the flow evaluator finds still marks no export.
 - Without `--verify`, `zts compile --contract` has no verifier writes. A writer helper that no request runs then keeps its capsule, in the entry and in a dependency. CHECK and `zttp build` verify.
 - `specStateFor` in `packages/runtime/src/proofs/spec_diagnostic.zig` matches a row by `spec_name` only. A helper ZTS500 on `pure` therefore marks the handler's `pure` as not discharged in the live-reload HUD. This fails closed. Dependency helper rows make it occur more often.
 - The other F18 gaps: a ZTS606 from the implicit default profile is not marked `implicit_default`, a dependency write cause has no file in the property hint, the HUD and the counterexample pipeline do not show a write cause, the over-reports, and a module initialization that never returns.

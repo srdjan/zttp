@@ -9,7 +9,7 @@ The dependency helper capsules plan (`2026-11-06-dependency-helper-capsules-plan
 | U0 | Complete: results in "U0 results"; no stop condition applies |
 | U1 | Complete: the flag, the export rows, the import record, and the helper text in `packages/zts`; 18 gates passed |
 | U2 | Complete: CHECK and the graph compile give each dependency its verifier writes; 18 gates passed from an empty cache |
-| U3 | Not started |
+| U3 | Complete: results in "U3 results"; docs updated; `verify.sh` passed before the commit |
 
 ## Reproduction
 
@@ -240,6 +240,25 @@ The U2 test 8 shape, before the change (probes `/tmp/zttp-g2/probes/pG` and `pG2
 | pG2 | no | exit 1 | ZTS310 at `b.ts` 4:9; ZTS500 at `handler.ts` 7:24 (`read_only`) |
 
 The handler's `read_only` fails in pG2 too, so pG2 is the shape where the change can add a ZTS606. U2 test 8 covers both probes.
+
+## U3 results
+
+Measured on 2026-11-06 at `bdacc75f` with the Debug build in `/tmp/zttp-g2/out-u3/bin/`, by the U0 script with only the binary and the output directory changed. The raw files are in `/tmp/zttp-g2/u3/`.
+
+Census: `graphs.tsv` is identical to U0 for all five graphs.
+
+Timing, against "U0 results":
+
+| Command | Graph | Instructions at U0 | At U3 | Change | Wall at U3 |
+|---|---|---|---|---|---|
+| check | `handler-with-imports.ts` | 75,593,659 | 75,570,465 | -0.03% | 5.89 ms |
+| compile | `handler-with-imports.ts` | 80,827,221 | 80,478,936 | -0.43% | 6.38 ms |
+| check | `sibling-helper-holes` | 77,436,212 | 77,513,667 | +0.10% | 6.06 ms |
+| compile | `sibling-helper-holes` | 81,206,654 | 81,434,892 | +0.28% | 6.30 ms |
+
+The run SD is 108,000 to 141,000 instructions. Each change is within about 3 SD, and the four changes have no common direction, so U1 and U2 add no measurable cost on these graphs. The load average was about 7 when the build started.
+
+The website (`../ZTTP-WEBSITE`) has one ZTS500 example, a handler row, so it needs no change.
 
 ## Findings during execution
 

@@ -314,7 +314,15 @@ The same discharge runs on each helper of a dependency module, for its
 the whole graph. CHECK, the graph compile, and `zttp build` refuse a
 helper capsule that does not hold, whether a module calls the helper or
 not. A call to a file import clears `pure` and `deterministic`, so only
-`read_only` composes across files. ZTS606, the public-helper rules
+`read_only` composes across files. A helper that calls or holds a
+function of another file that writes module state does not prove
+`read_only` either, whether a request runs the helper or not: each module
+marks each export that reaches a write the verifier named, including an
+object that holds a writer, and the mark crosses each import. The
+finding names the import when the helper reaches it directly. A write
+that only the flow evaluator finds, such as a push through a parameter,
+marks no export, and without `--verify` no write marks one.
+ZTS606, the public-helper rules
 ZTS610 and ZTS611, and the `proofCapsules` and `effectCapsules` arrays
 cover the entry module only.
 Each helper finding (ZTS500, ZTS502, ZTS503 to ZTS505, ZTS606, ZTS607)
