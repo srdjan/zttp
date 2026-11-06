@@ -12,7 +12,7 @@ A Fable review and a Codex astra fact-check ran on the first draft on 2026-11-06
 | U1 | Complete: each spec row that carries a `function` prints at the helper's declaration; 17 gates passed |
 | U2 | Complete: an arrow or function-expression helper bound by `const` is held to its capsule; 17 gates passed |
 | U3 | Complete: each dependency helper is held to its declared `Proof` and `Effects` capsule in CHECK, the graph compile, and `zttp build`; 17 gates passed |
-| U4 | Not started |
+| U4 | Complete: results in "U4 results"; the owner accepted the instruction cost on 2026-11-06; `verify.sh` passed before the commit |
 
 ## Reproduction
 
@@ -200,6 +200,23 @@ Arrow or function-expression helpers with a capsule in tracked `.ts` files: 0. T
 Recorded DeepSeek data: 4 files under `packages/pi/src/simulator/testdata` contain ZTS500. Each is model reasoning about the handler's own `no_secret_leakage` ZTS500. No file holds a helper capsule row.
 
 The ZTS500 message is defined once, in `specDiagnosticMessage` in `packages/tools/src/precompile_check.zig`. Test expectations in `precompile_check_tests.zig` and `flow_census_gate.zig` repeat it; the `flow_census_gate.zig` rows are handler rows. `packages/runtime/src/proofs/spec_diagnostic.zig` has its own `specDiagnosticMessage`, which prints the suggestion and not this text.
+
+## U4 results
+
+Measured on 2026-11-06 at `9444e0cb` with the Debug build. The raw files are in `/tmp/zttp-g1/u4/`.
+
+Census: each of the five graphs in "U0 results" gives the same exit status for `zts check` and `zts compile --verify --contract`, and the same codes and counts. No existing graph gains or loses a diagnostic.
+
+Timing, with the same hyperfine method as U0. The U2 column comes from a build of `18cd940e` in a temporary worktree, so it isolates U3:
+
+| Command | Graph | Instructions at U0 | At U2 | At U3 | U3 over U2 | Wall at U0 | Wall at U3 |
+|---|---|---|---|---|---|---|---|
+| check | `handler-with-imports.ts` | 71,132,622 | 70,860,138 | 75,366,769 | +6.4% | 6.36 ms | 6.24 ms |
+| compile | `handler-with-imports.ts` | 75,703,652 | 76,183,407 | 80,581,756 | +5.8% | 7.25 ms | 6.38 ms |
+| check | `sibling-helper-holes` | 73,531,242 | 73,563,619 | 77,638,579 | +5.5% | 6.72 ms | 6.01 ms |
+| compile | `sibling-helper-holes` | 76,962,390 | 76,929,565 | 80,986,930 | +5.3% | 6.84 ms | 6.23 ms |
+
+The second type check of each dependency adds about 4.1 to 4.5 million retired instructions, which is about 30 times the spread between runs (SD 0.09 to 0.27 million). U1 and U2 add no measurable cost. The wall medians do not show the growth, because they vary with the host load more than they change. By the rule in Decision 1, U4 reported these numbers to the owner before the commit. On 2026-11-06 the owner accepted the cost and kept option (a); option (d) is not needed.
 
 ## Findings during execution
 

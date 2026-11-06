@@ -6,6 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Dependency helper capsules, 2026-11-06](2026-11-06-dependency-helper-capsules-plan.md) | Complete 2026-11-06: U0 to U4; CHECK, the graph compile, and `zttp build` discharge each declared capsule of a dependency helper; arrow helpers are held to their capsules; helper findings print at the helper; the remaining gaps are listed in the plan | Owner accepted Decisions 1 to 5, option (a) each, on 2026-11-06: run U0 to U4, commit on local main, no push |
 | [F18 residual gaps, 2026-11-05](2026-11-05-f18-residual-gaps-plan.md) | Complete 2026-11-05: U0 to U6 and U2b; module-state writes through parameters, call results, elements, and closures now remove `state_isolated`; four gaps that were already present are listed in the plan | Owner accepted Decisions 1 (a), 2 (c), 3 (a), and 4 (b) on 2026-11-05: run U0 to U6 and U2b, commit on local main, no push |
 | [F18 module-state proofs, 2026-11-05](2026-11-05-f18-module-state-proofs-plan.md) | Complete 2026-11-05: H1 to H3; five residual gaps recorded | Owner chose Decision 3 (a) and Decision 5 (a) on 2026-11-05: run H1 to H3, commit on local main, no push |
 | [F2 request memory reset, 2026-11-04](2026-11-04-f2-request-memory-plan.md) | Complete 2026-11-05: G1 to G8, then F19 (`2b45957e`); the headline shape stays at 5.7 to 7.3 MB | Owner chose Decision 1 (a) and Decision 2 (a) on 2026-11-04: run G1 to G7, commit on local main, no push |

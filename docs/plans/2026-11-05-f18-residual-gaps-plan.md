@@ -19,8 +19,8 @@ The F18 plan (`2026-11-05-f18-module-state-proofs-plan.md`) recorded five residu
 
 Each of these is outside this plan. Each was present before it, except the over-reports, which can only remove a property.
 
-- CHECK does not discharge a `Proof` capsule on a helper in a dependency module. A dependency helper `stamp(): Proof<number, "pure">` that returns `Date.now()` passes `zts check` with no diagnostic.
-- The ZTS500 of a helper's own capsule points at the handler's line, and its message says "not discharged by handler proof". U4 puts the write line in the message and the hint only.
+- Closed 2026-11-06 by [the dependency helper capsules plan](2026-11-06-dependency-helper-capsules-plan.md) (U3): CHECK did not discharge a `Proof` capsule on a helper in a dependency module. A dependency helper `stamp(): Proof<number, "pure">` that returns `Date.now()` passed `zts check` with no diagnostic.
+- Closed 2026-11-06 by the same plan (U1): the ZTS500 of a helper's own capsule pointed at the handler's line, and its message said "not discharged by handler proof".
 - A ZTS606 that the implicit default profile causes is not marked `implicit_default`.
 - A write in a dependency module gets the generic hint, because `PropertyCause` has no file. The live-reload HUD and the counterexample pipeline do not show a write cause.
 - Over-reports: one allocation site for two request allocations behind the same call, one cell for each closure capture, and a verifier ZTS310 on a helper that only module initialization calls.

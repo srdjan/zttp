@@ -306,8 +306,20 @@ A helper that writes state that outlives a request does not prove `pure`,
 evaluator decides this for a helper that a request runs, from the
 helpers on the stack of each write (section 7). For a helper that no
 handler runs, the verifier decides it from a ZTS310 write in its body or
-in a function that it calls. CHECK does not discharge a capsule of a
-helper in a dependency module.
+in a function that it calls. A helper that a `const` binds to an arrow
+function or a function expression is held to its capsule as a `function`
+declaration is.
+The same discharge runs on each helper of a dependency module, for its
+`Proof<...>` and its `Effects<...>` ceiling, after the flow evaluation of
+the whole graph. CHECK, the graph compile, and `zttp build` refuse a
+helper capsule that does not hold, whether a module calls the helper or
+not. A call to a file import clears `pure` and `deterministic`, so only
+`read_only` composes across files. ZTS606, the public-helper rules
+ZTS610 and ZTS611, and the `proofCapsules` and `effectCapsules` arrays
+cover the entry module only.
+Each helper finding (ZTS500, ZTS502, ZTS503 to ZTS505, ZTS606, ZTS607)
+names its location as the file, line, and column of the helper's
+declaration. A handler-level finding names the handler's location.
 `computeProperties` intersects the handler's classified properties with
 its call-graph-composed effect row, so a property the handler claims
 also accounts for every helper it transitively calls. `zts check
@@ -766,7 +778,7 @@ The verifier does not model parameter aliasing across modules. Two nominal types
 
 The analysis walks a helper in the same file. It does not walk a call across files. A chain of pure helpers keeps `cost_bounded` true and `max_io_depth` at 0.
 
-The `behaviors` and `fault_coverage` records describe the entry paths only. The `fault_covered` field fails closed across import levels. Dependency helper capsules stay hidden, because dependency extraction reads the contract only.
+The `behaviors` and `fault_coverage` records describe the entry paths only. The `fault_covered` field fails closed across import levels. The build discharges each declared capsule of a dependency helper (section 9). The `proofCapsules` and `effectCapsules` arrays list the entry's helpers only.
 
 ### What the build refuses
 
@@ -781,7 +793,8 @@ Each refusal exits 1 and writes no binary.
 | A dependency holds a top-level `assert` | `DependencyTopLevelAssert`, because a failed `assert` leaves the later exports undefined |
 | A file import has no type that can cross modules | `FileImportUntyped`. Export a non-generic function or a value with a declared type |
 | Two modules register one `api.schemas` name with different JSON | The build refuses the graph |
-| A dependency breaks a capsule property | ZTS500 |
+| A dependency breaks a property of the entry's capsule | ZTS500 |
+| A dependency helper does not hold its own `Proof` or `Effects` capsule | ZTS500, ZTS502, ZTS503, or ZTS504 at the helper in the dependency file |
 | The proof evidence does not fold | `ModuleNotClassified`, `GraphResultLimit`, or `GraphResultsNotProved` |
 
 The ZTS061 exemption lets `examples/handler/utils.ts` and the corpus seeds compile. A handler with no capsule answers for every module under the default profile on the merged contract. A capsule that does not demand the broken property still compiles.
