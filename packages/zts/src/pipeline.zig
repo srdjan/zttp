@@ -720,24 +720,64 @@ pub const ContractExtraction = struct {
     }
 };
 
+/// One write to state that outlives a request, as the flow pass found it.
+pub const PersistentWrite = @import("flow_interp.zig").PersistentWrite;
+
 /// The owned lists behind a `function_specs.StateWriters` view.
-const StateWriterList = struct {
+pub const StateWriterList = struct {
     flow_functions: std.ArrayList(NodeIndex) = .empty,
     flow_function_writes: std.ArrayList(?NodeIndex) = .empty,
     verifier_writes: std.ArrayList(NodeIndex) = .empty,
 
-    fn deinit(self: *StateWriterList, allocator: std.mem.Allocator) void {
+    pub fn deinit(self: *StateWriterList, allocator: std.mem.Allocator) void {
         self.flow_functions.deinit(allocator);
         self.flow_function_writes.deinit(allocator);
         self.verifier_writes.deinit(allocator);
     }
 
-    fn view(self: *const StateWriterList) function_specs_mod.StateWriters {
+    pub fn view(self: *const StateWriterList) function_specs_mod.StateWriters {
         return .{
             .flow_functions = self.flow_functions.items,
             .flow_function_writes = self.flow_function_writes.items,
             .verifier_writes = self.verifier_writes.items,
         };
+    }
+
+    /// The writers of one flow module. A stack frame counts when its module is
+    /// `module_id`, and a write node counts as a line of `ir_view` only when the
+    /// write sits in `module_id`. `verifier_writes` are copied as given: the
+    /// caller names the module-state writes that the verifier found in that
+    /// module.
+    pub fn forModule(
+        allocator: std.mem.Allocator,
+        ir_view: IrView,
+        module_id: FlowModuleId,
+        persistent_writes: []const PersistentWrite,
+        verifier_writes: []const NodeIndex,
+    ) !StateWriterList {
+        var list: StateWriterList = .{};
+        errdefer list.deinit(allocator);
+        for (persistent_writes) |write| {
+            // A write in another module has no line in this module.
+            const own_write: ?NodeIndex = if (write.module == module_id) write.node else null;
+            for (write.stack) |entry| {
+                if (entry.module != module_id) continue;
+                if (std.mem.indexOfScalar(NodeIndex, list.flow_functions.items, entry.node)) |index| {
+                    list.flow_function_writes.items[index] = function_specs_mod.earlierWrite(
+                        ir_view,
+                        list.flow_function_writes.items[index],
+                        own_write,
+                    );
+                    continue;
+                }
+                // A failure between the two appends leaves the write list
+                // one short, which `StateWriters` reads as no write.
+                try list.flow_functions.append(allocator, entry.node);
+                try list.flow_function_writes.append(allocator, own_write);
+            }
+        }
+        try list.verifier_writes.appendSlice(allocator, verifier_writes);
+        return list;
     }
 };
 
@@ -1158,39 +1198,52 @@ pub const ModuleAnalysisSession = struct {
     /// that stood on the stack of a write. The verifier names the write nodes
     /// of module-state mutation, which covers a helper that no handler reaches.
     fn collectStateWriters(self: *ModuleAnalysisSession) !StateWriterList {
-        var list: StateWriterList = .{};
-        errdefer list.deinit(self.allocator);
-        if (self.flow_state == .completed) {
-            const flow = try self.completedFlow();
-            for (flow.persistentWrites()) |write| {
-                // A write in a dependency module has no line in this module.
-                const entry_write: ?NodeIndex = if (write.module == 0) write.node else null;
-                for (write.stack) |entry| {
-                    if (entry.module != 0) continue;
-                    if (std.mem.indexOfScalar(NodeIndex, list.flow_functions.items, entry.node)) |index| {
-                        list.flow_function_writes.items[index] = function_specs_mod.earlierWrite(
-                            self.parsed.ir_view,
-                            list.flow_function_writes.items[index],
-                            entry_write,
-                        );
-                        continue;
-                    }
-                    // A failure between the two appends leaves the write list
-                    // one short, which `StateWriters` reads as no write.
-                    try list.flow_functions.append(self.allocator, entry.node);
-                    try list.flow_function_writes.append(self.allocator, entry_write);
-                }
-            }
-        }
+        const persistent: []const PersistentWrite = if (self.flow_state == .completed)
+            (try self.completedFlow()).persistentWrites()
+        else
+            &.{};
+        var verifier_writes: std.ArrayList(NodeIndex) = .empty;
+        defer verifier_writes.deinit(self.allocator);
         if (self.checked) |*checked| {
             if (checked.verifierCompleted()) {
                 for (checked.verifierDiagnostics()) |diagnostic| {
                     if (diagnostic.kind != .module_scope_mutation) continue;
-                    try list.verifier_writes.append(self.allocator, diagnostic.node);
+                    try verifier_writes.append(self.allocator, diagnostic.node);
                 }
             }
         }
-        return list;
+        return StateWriterList.forModule(self.allocator, self.parsed.ir_view, 0, persistent, verifier_writes.items);
+    }
+
+    /// Discharge the `Proof<...>` and `Effects<...>` capsule of every helper of
+    /// this module against `writers`, and return the capsule table. The module
+    /// needs a completed full session with direct source types. Set the imported
+    /// effects with `setImportedEffects` first. This builds no contract, so it
+    /// makes no handler-level row, and it ends the session for contract
+    /// extraction: the effect facts are prepared once.
+    pub fn dischargeHelperCapsules(
+        self: *ModuleAnalysisSession,
+        writers: function_specs_mod.StateWriters,
+    ) !function_specs_mod.CapsuleTable {
+        if (self.state != .completed) return error.AnalysisNotCompleted;
+        if (self.profile != .full or self.source_types != .direct) return error.AnalysisPassUnavailable;
+        if (self.resolution_state != .completed) return error.AnalysisNotResolved;
+        if (self.extraction_state != .ready) return error.ContractExtractionAlreadyAttempted;
+        const checker = try self.completedTypeChecker();
+        try checker.ensureHealthy();
+        var opts = self.extraction_opts;
+        opts.source_types = self.source_types;
+        opts.module_facts = self.completedContractFacts();
+        opts.imported_effects = self.contract_context.imported_effects;
+        const effects = try self.prepareContractEffectFacts(opts, checker.env, null);
+        self.extraction_state = .attempted;
+        return function_specs_mod.dischargeWithStateWriters(
+            self.allocator,
+            effects,
+            consumerTypeSource(self.source_types, checker.env),
+            self.parsed.ir_view,
+            writers,
+        );
     }
 
     /// Run the selected flow pass when it has not run. A module with no handler

@@ -87,6 +87,8 @@ pub const GraphCheck = struct {
     /// id, so a flow finding at the same node is not reported twice.
     reported_writes: std.ArrayList(check_run_mod.WriteSite) = .empty,
     deps: ?contract_mod.DependencyContracts = null,
+    /// The inputs that `collectDependencies` used, kept for the capsule discharge.
+    dependency_inputs: ?contract_mod.MultiModuleBuild = null,
     dependency_facts: ?contract_mod.DependencyFacts = null,
     reader_adapter: ReaderAdapter = undefined,
 
@@ -362,24 +364,26 @@ pub const GraphCheck = struct {
 
     /// Extract the contract of each dependency, and keep them for the merge.
     pub fn collectDependencies(self: *GraphCheck, opts: RunOptions) !void {
+        const inputs: contract_mod.MultiModuleBuild = .{
+            .filename = opts.handler_path,
+            .emit_contract = false,
+            .emit_verify = !opts.skip_contract,
+            .strict = true,
+            .policy = opts.policy,
+            .sql_schema_path = opts.sql_schema_path,
+            .manifest_registry = null,
+            .shares_state = self.shares_state,
+            // A check reports a policy violation on the merged contract. It
+            // does not stop at the first dependency.
+            .enforce_policy = false,
+        };
+        self.dependency_inputs = inputs;
         self.deps = try contract_mod.collectDependencyContracts(
             self.allocator,
             &self.graph,
             &self.compile_result.?,
             &self.atoms,
-            .{
-                .filename = opts.handler_path,
-                .emit_contract = false,
-                .emit_verify = !opts.skip_contract,
-                .strict = true,
-                .policy = opts.policy,
-                .sql_schema_path = opts.sql_schema_path,
-                .manifest_registry = null,
-                .shares_state = self.shares_state,
-                // A check reports a policy violation on the merged contract. It
-                // does not stop at the first dependency.
-                .enforce_policy = false,
-            },
+            inputs,
         );
     }
 
@@ -423,6 +427,30 @@ pub const GraphCheck = struct {
             else => return err,
         };
         return .merged;
+    }
+
+    /// Discharge the helper capsules of each dependency and append the failing
+    /// rows to the merged contract. Call it after `mergeInto`, with the flow
+    /// writes of the whole graph.
+    pub fn dischargeCapsules(
+        self: *GraphCheck,
+        contract: *HandlerContract,
+        persistent_writes: []const zts.pipeline.PersistentWrite,
+    ) !void {
+        const deps = &(self.deps orelse return error.AnalysisPassIncomplete);
+        const inputs = self.dependency_inputs orelse return error.AnalysisPassIncomplete;
+        try contract_mod.dischargeDependencyCapsules(
+            self.allocator,
+            &self.graph,
+            &self.compile_result.?,
+            &self.atoms,
+            &self.exports,
+            deps.loaded_effects.items,
+            persistent_writes,
+            self.reported_writes.items,
+            inputs,
+            contract,
+        );
     }
 
     /// Hold each structural property only when the dependencies hold it too.

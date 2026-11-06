@@ -2290,14 +2290,14 @@ const lib_importer =
 ;
 
 const lib_pure_upper =
-    \\export function enrich(): Proof<string, "injection_safe"> {
+    \\export function enrich(): Proof<string, "total"> {
     \\  return "pure".toUpperCase();
     \\}
     \\
 ;
 
 const lib_pure_literal =
-    \\export function enrich(): Proof<string, "injection_safe"> {
+    \\export function enrich(): Proof<string, "total"> {
     \\  return "PURE";
     \\}
     \\
@@ -2305,7 +2305,7 @@ const lib_pure_literal =
 
 const lib_cache_write =
     \\import { cacheSet } from "zttp:cache";
-    \\export function enrich(): Proof<string, "injection_safe"> {
+    \\export function enrich(): Proof<string, "total"> {
     \\  cacheSet("ns", "k", "v", 60);
     \\  return "PURE";
     \\}

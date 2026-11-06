@@ -165,6 +165,30 @@ default_out=$(cd "$TMP_DIR/default-profile-app" && "$ZTTP" compile h.ts -o defau
 grep -qF -- "ZTS500" <<<"$default_out" || fail "compile of a dependency that breaks the default profile named no ZTS500: $default_out"
 grep -qF -- "No binary was written." <<<"$default_out" || fail "compile of a dependency that breaks the default profile did not say that no binary exists: $default_out"
 
+step "negative: build refuses a dependency helper whose declared Proof capsule does not hold"
+mkdir -p "$TMP_DIR/dep-capsule-app"
+cat > "$TMP_DIR/dep-capsule-app/dep.ts" <<'EOF'
+export function stamp(): Proof<number, "pure"> {
+  return Date.now();
+}
+EOF
+cat > "$TMP_DIR/dep-capsule-app/handler.ts" <<'EOF'
+import { stamp } from "./dep.ts";
+
+export function handler(req: Request): Proof<Response, "read_only"> {
+  const t = stamp();
+  return Response.text(String(t));
+}
+EOF
+cat > "$TMP_DIR/dep-capsule-app/zttp.json" <<'EOF'
+{ "entry": "handler.ts", "port": 3000 }
+EOF
+dep_capsule_status=0
+dep_capsule_out=$(cd "$TMP_DIR/dep-capsule-app" && "$ZTTP" build -o "$TMP_DIR/dep-capsule-app/capsule-bin" --no-attest 2>&1 </dev/null) || dep_capsule_status=$?
+[ "$dep_capsule_status" -eq 1 ] || fail "build of a dependency helper with a false capsule exited $dep_capsule_status, expected 1: $dep_capsule_out"
+grep -qF -- "dep.ts" <<<"$dep_capsule_out" || fail "build of a dependency helper with a false capsule did not name dep.ts: $dep_capsule_out"
+[ ! -e "$TMP_DIR/dep-capsule-app/capsule-bin" ] || fail "refused build of a dependency helper with a false capsule wrote a binary"
+
 step "a capability read with a computed name in a dependency obeys the project policy"
 mkdir -p "$TMP_DIR/guard-app/src"
 cat > "$TMP_DIR/guard-app/src/dep.ts" <<'EOF'

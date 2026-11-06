@@ -2843,6 +2843,33 @@ test "CHECK reports a ZTS310 warning at the push of a dependency onto its own mo
     try expectOneStateWriteAt(&fixture, &result, "dep.ts", 3);
 }
 
+test "CHECK keeps the position of a flow-only dependency ZTS310 whose column passes the end of the entry line" {
+    // Line 3 of the entry, `  record();`, has 11 columns. Reading the
+    // dependency position 3:23 against the entry text carried it onto line 4.
+    // Only the flow evaluator finds this write, so its row joins the result
+    // after the entry rows.
+    var fixture = try SiblingFixture.init(sibling_record_handler);
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\const seen: number[] = [];
+        \\function addTo(xs: number[]): undefined {
+        \\  const n = 1; xs.push(n);
+        \\  return undefined;
+        \\}
+        \\export function record(): undefined {
+        \\  addTo(seen);
+        \\  return undefined;
+        \\}
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try expectOneStateWriteAt(&fixture, &result, "dep.ts", 3);
+    const diagnostic = diagnosticWithCode(&result, "ZTS310") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 23), diagnostic.column);
+}
+
 test "CHECK reports a ZTS310 warning at a dependency push that only the flow evaluator finds" {
     var fixture = try SiblingFixture.init(sibling_record_handler);
     defer fixture.deinit();
@@ -13751,4 +13778,324 @@ test "a ZTS606 row reports the helper's declaration line" {
     try std.testing.expectEqualStrings("missing-site.ts", diagnostics[1].file);
     try std.testing.expectEqual(@as(u32, 2), diagnostics[1].line);
     try std.testing.expectEqual(@as(u16, 1), diagnostics[1].column);
+}
+
+// ---------------------------------------------------------------------------
+// Dependency helper capsules: a helper in an imported module is held to the
+// `Proof<...>` and `Effects<...>` that it declares (capsules U3).
+// ---------------------------------------------------------------------------
+
+const capsule_stamp_handler =
+    \\import { stamp } from "./dep.ts";
+    \\
+    \\export function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const t = stamp();
+    \\  return Response.text(String(t));
+    \\}
+    \\
+;
+
+/// The first finding with `code` in a file whose path ends with `file_suffix`.
+fn findingInFile(result: *const CheckResult, code: []const u8, file_suffix: []const u8) ?json_diag.JsonDiagnostic {
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, code) and std.mem.endsWith(u8, d.file, file_suffix)) return d;
+    }
+    return null;
+}
+
+test "CHECK refuses a false Proof capsule on a helper of an imported module" {
+    var fixture = try SiblingFixture.init(capsule_stamp_handler);
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export function stamp(): Proof<number, "pure"> {
+        \\  return Date.now();
+        \\}
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const allocator = std.testing.allocator;
+    const directory = std.fs.path.dirname(fixture.handler_path) orelse return error.TestUnexpectedResult;
+    const expected_file = try std.fs.path.join(allocator, &.{ directory, "dep.ts" });
+    defer allocator.free(expected_file);
+
+    try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
+    const row = result.json_diagnostics.items[0];
+    try std.testing.expectEqualStrings("ZTS500", row.code);
+    try std.testing.expectEqualStrings("error", row.severity);
+    try std.testing.expectEqualStrings(expected_file, row.file);
+    try std.testing.expectEqual(@as(u32, 1), row.line);
+    try std.testing.expectEqual(@as(u16, 8), row.column);
+    try std.testing.expectEqualStrings(
+        "helper's declared Proof capsule does not hold (failing spec: pure)",
+        row.message,
+    );
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(usize, 1), contract.spec_diagnostics.items.len);
+    try std.testing.expectEqualStrings("stamp", contract.spec_diagnostics.items[0].function orelse return error.TestUnexpectedResult);
+}
+
+test "CHECK refuses an Effects ceiling that a dependency helper breaks and warns on one it never reaches" {
+    var fixture = try SiblingFixture.init(
+        \\import { digest } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(digest());
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\export function digest(): Effects<string, "clock"> {
+        \\  return sha256("a");
+        \\}
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const breach = findingInFile(&result, "ZTS503", "/dep.ts") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("error", breach.severity);
+    try std.testing.expectEqual(@as(u32, 3), breach.line);
+    const over = findingInFile(&result, "ZTS505", "/dep.ts") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("warning", over.severity);
+    try std.testing.expectEqual(@as(u32, 3), over.line);
+    try std.testing.expectEqual(@as(usize, 0), countDiagnosticsWithCode(&result, "ZTS611"));
+}
+
+test "CHECK refuses a false Proof capsule on an arrow helper of an imported module" {
+    var fixture = try SiblingFixture.init(capsule_stamp_handler);
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\const clock = (): Proof<number, "pure"> => {
+        \\  return Date.now();
+        \\};
+        \\
+        \\export function stamp(): number {
+        \\  return clock();
+        \\}
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const row = findingInFile(&result, "ZTS500", "/dep.ts") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 1), row.line);
+    try std.testing.expectEqual(@as(usize, 1), countDiagnosticsWithCode(&result, "ZTS500"));
+}
+
+test "CHECK refuses a false Proof capsule on a dependency helper that no module calls" {
+    var fixture = try SiblingFixture.init(
+        \\import { one } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(String(one()));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export function unused(): Proof<number, "pure"> {
+        \\  return Date.now();
+        \\}
+        \\
+        \\export function one(): number {
+        \\  return 1;
+        \\}
+        \\
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const row = findingInFile(&result, "ZTS500", "/dep.ts") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 1), row.line);
+    try std.testing.expectEqual(@as(usize, 1), countDiagnosticsWithCode(&result, "ZTS500"));
+}
+
+test "CHECK names the module-state write behind a false capsule on a dependency helper" {
+    var fixture = try SiblingFixture.init(
+        \\import { bump } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(String(bump()));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\let count: number = 0;
+        \\
+        \\export function bump(): Proof<number, "pure"> {
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const row = findingInFile(&result, "ZTS500", "/dep.ts") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 3), row.line);
+    try std.testing.expectEqualStrings(
+        "helper's declared Proof capsule does not hold (failing spec: pure; demoted at line 4:9 by `a write to module state`)",
+        row.message,
+    );
+}
+
+test "CHECK refuses a read_only capsule on a dependency helper whose write only the flow evaluator finds" {
+    var fixture = try SiblingFixture.init(
+        \\import { run } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(String(run()));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\const seen: number[] = [];
+        \\
+        \\function addTo(xs: number[]): undefined {
+        \\  xs.push(1);
+        \\  return undefined;
+        \\}
+        \\
+        \\function record(): Proof<number, "read_only"> {
+        \\  addTo(seen);
+        \\  return 1;
+        \\}
+        \\
+        \\export function run(): number {
+        \\  return record();
+        \\}
+        \\
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const row = findingInFile(&result, "ZTS500", "/dep.ts") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 8), row.line);
+}
+
+test "CHECK accepts a true Proof capsule on a dependency helper" {
+    var fixture = try SiblingFixture.init(
+        \\import { double } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(String(double(2)));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export function double(x: number): Proof<number, "pure" | "total"> {
+        \\  return x * 2;
+        \\}
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), result.contract.?.spec_diagnostics.items.len);
+}
+
+const capsule_through_handler =
+    \\import { viaB } from "./a.ts";
+    \\
+    \\export function handler(req: Request): Proof<Response, "read_only"> {
+    \\  return Response.text(String(viaB()));
+    \\}
+    \\
+;
+
+const capsule_b_pure =
+    \\export function one(): number {
+    \\  return 1;
+    \\}
+    \\
+;
+
+test "CHECK composes a dependency helper capsule through a third file" {
+    var fixture = try SiblingFixture.init(capsule_through_handler);
+    defer fixture.deinit();
+    try fixture.add("b.ts", capsule_b_pure);
+    try fixture.add("a.ts",
+        \\import { one } from "./b.ts";
+        \\
+        \\export function viaB(): Proof<number, "read_only"> {
+        \\  return one();
+        \\}
+        \\
+    );
+    var held = try fixture.check();
+    defer held.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 0), held.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), held.contract.?.spec_diagnostics.items.len);
+
+    try fixture.add("a.ts",
+        \\import { one } from "./b.ts";
+        \\
+        \\export function viaB(): Proof<number, "pure"> {
+        \\  return one();
+        \\}
+        \\
+    );
+    var refused = try fixture.check();
+    defer refused.deinit(std.testing.allocator);
+    const row = findingInFile(&refused, "ZTS500", "/a.ts") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 3), row.line);
+}
+
+test "CHECK refuses deterministic on a dependency helper that calls a clock reader of a third file" {
+    var fixture = try SiblingFixture.init(capsule_through_handler);
+    defer fixture.deinit();
+    try fixture.add("b.ts",
+        \\export function one(): number {
+        \\  return Date.now();
+        \\}
+        \\
+    );
+    try fixture.add("a.ts",
+        \\import { one } from "./b.ts";
+        \\
+        \\export function viaB(): Proof<number, "deterministic"> {
+        \\  return one();
+        \\}
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    const row = findingInFile(&result, "ZTS500", "/a.ts") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 3), row.line);
+}
+
+test "CHECK warns on an Effects capability that a dependency helper never reaches" {
+    var fixture = try SiblingFixture.init(
+        \\import { label } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(label());
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export function label(): Effects<string, "clock"> {
+        \\  return "x";
+        \\}
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    const row = findingInFile(&result, "ZTS505", "/dep.ts") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("warning", row.severity);
+    try std.testing.expectEqual(@as(u32, 1), row.line);
 }

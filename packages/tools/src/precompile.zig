@@ -4056,3 +4056,257 @@ test "formatProofCard: the card lists fault_covered and counts the call sites no
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "fault_covered") != null);
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "failable call sites covered, 1 not on any path") != null);
 }
+
+// ---------------------------------------------------------------------------
+// Dependency helper capsules: the graph compile holds a helper of an imported
+// module to the `Proof<...>` and `Effects<...>` that it declares.
+// ---------------------------------------------------------------------------
+
+const capsule_stamp_entry =
+    \\import { stamp } from "./dep.ts";
+    \\
+    \\export function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const t = stamp();
+    \\  return Response.text(String(t));
+    \\}
+    \\
+;
+
+test "compileHandler graph refuses a false Proof capsule on a dependency helper" {
+    var fixture = try importFixture(capsule_stamp_entry,
+        \\export function stamp(): Proof<number, "pure"> {
+        \\  return Date.now();
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+}
+
+test "compileHandler graph refuses an Effects ceiling that a dependency helper breaks" {
+    var fixture = try importFixture(
+        \\import { digest } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(digest());
+        \\}
+        \\
+    ,
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\export function digest(): Effects<string, "clock"> {
+        \\  return sha256("a");
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+}
+
+test "compileHandler graph refuses a false Proof capsule on an arrow helper of a dependency" {
+    var fixture = try importFixture(capsule_stamp_entry,
+        \\const clock = (): Proof<number, "pure"> => {
+        \\  return Date.now();
+        \\};
+        \\
+        \\export function stamp(): number {
+        \\  return clock();
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+}
+
+test "compileHandler graph refuses a false capsule on a dependency helper that no module calls" {
+    var fixture = try importFixture(
+        \\import { one } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(String(one()));
+        \\}
+        \\
+    ,
+        \\export function unused(): Proof<number, "pure"> {
+        \\  return Date.now();
+        \\}
+        \\
+        \\export function one(): number {
+        \\  return 1;
+        \\}
+        \\
+        \\
+    );
+    defer fixture.deinit();
+    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+}
+
+test "compileHandler graph refuses a dependency helper capsule that a module-state write breaks" {
+    var fixture = try importFixture(
+        \\import { bump } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  return Response.text(String(bump()));
+        \\}
+        \\
+    ,
+        \\let count: number = 0;
+        \\
+        \\export function bump(): Proof<number, "pure"> {
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+}
+
+test "compileHandler graph refuses a read_only capsule on a dependency helper whose write only the flow evaluator finds" {
+    var fixture = try importFixture(
+        \\import { run } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  return Response.text(String(run()));
+        \\}
+        \\
+    ,
+        \\const seen: number[] = [];
+        \\
+        \\function addTo(xs: number[]): undefined {
+        \\  xs.push(1);
+        \\  return undefined;
+        \\}
+        \\
+        \\function record(): Proof<number, "read_only"> {
+        \\  addTo(seen);
+        \\  return 1;
+        \\}
+        \\
+        \\export function run(): number {
+        \\  return record();
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+}
+
+test "compileHandler graph accepts a true Proof capsule on a dependency helper" {
+    var fixture = try importFixture(
+        \\import { double } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(String(double(2)));
+        \\}
+        \\
+    ,
+        \\export function double(x: number): Proof<number, "pure" | "total"> {
+        \\  return x * 2;
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), compiled.contract.?.spec_diagnostics.items.len);
+}
+
+test "compileHandler graph composes a dependency helper capsule through a third file" {
+    const entry =
+        \\import { viaB } from "./a.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(String(viaB()));
+        \\}
+        \\
+    ;
+    const b_source =
+        \\export function one(): number {
+        \\  return 1;
+        \\}
+        \\
+    ;
+    var held = try CompileGraphFixture.init("entry.ts", entry);
+    defer held.deinit();
+    try held.add("b.ts", b_source);
+    try held.add("a.ts",
+        \\import { one } from "./b.ts";
+        \\
+        \\export function viaB(): Proof<number, "read_only"> {
+        \\  return one();
+        \\}
+        \\
+    );
+    var compiled = try held.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(usize, 0), compiled.contract.?.spec_diagnostics.items.len);
+
+    var refused = try CompileGraphFixture.init("entry.ts", entry);
+    defer refused.deinit();
+    try refused.add("b.ts", b_source);
+    try refused.add("a.ts",
+        \\import { one } from "./b.ts";
+        \\
+        \\export function viaB(): Proof<number, "pure"> {
+        \\  return one();
+        \\}
+        \\
+    );
+    try std.testing.expectError(error.SpecDiagnosticsRefused, refused.compile(graph_verified));
+}
+
+test "compileHandler graph refuses deterministic on a dependency helper that calls a clock reader of a third file" {
+    var fixture = try CompileGraphFixture.init("entry.ts",
+        \\import { viaB } from "./a.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(String(viaB()));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("b.ts",
+        \\export function one(): number {
+        \\  return Date.now();
+        \\}
+        \\
+    );
+    try fixture.add("a.ts",
+        \\import { one } from "./b.ts";
+        \\
+        \\export function viaB(): Proof<number, "deterministic"> {
+        \\  return one();
+        \\}
+        \\
+    );
+    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+}
+
+test "compileHandler graph compiles a dependency helper whose Effects capability it never reaches" {
+    var fixture = try importFixture(
+        \\import { label } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(label());
+        \\}
+        \\
+    ,
+        \\export function label(): Effects<string, "clock"> {
+        \\  return "x";
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const rows = compiled.contract.?.spec_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    try std.testing.expectEqualStrings("label", rows[0].function orelse return error.TestUnexpectedResult);
+    const site = rows[0].site orelse return error.TestUnexpectedResult;
+    const directory = std.fs.path.dirname(fixture.entry_path) orelse return error.TestUnexpectedResult;
+    const expected_file = try std.fs.path.join(std.testing.allocator, &.{ directory, "dep.ts" });
+    defer std.testing.allocator.free(expected_file);
+    try std.testing.expectEqualStrings(expected_file, site.file orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqual(@as(u32, 1), site.line);
+}

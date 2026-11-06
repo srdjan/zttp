@@ -374,6 +374,118 @@ pub fn mergeDependencyContracts(
     return .{ .properties = dependency_properties, .established = established };
 }
 
+/// Discharge the `Proof<...>` and `Effects<...>` capsule of every helper in
+/// each dependency module of a graph, and append the failing rows to
+/// `contract.spec_diagnostics`. The entry is the last module of `compile_result`
+/// and stays out: its own helpers are discharged with its contract.
+///
+/// `extractContract` reads a dependency without authored source types, so it
+/// finds no capsule. This opens a second, typed session for each dependency
+/// with the verifier and flow passes off. The module's imported effects come
+/// from `loaded_effects`. Its writers come from `persistent_writes`, the flow
+/// result of the whole graph, and from `reported_writes`, the verifier writes
+/// by flow module id. Each row carries the dependency path in `site.file`.
+/// ZTS606, the public-helper rules, and the capsule summaries stay entry-only.
+pub fn dischargeDependencyCapsules(
+    allocator: std.mem.Allocator,
+    graph: *const zts.modules.ModuleGraph,
+    compile_result: *const zts.modules.CompileResult,
+    atoms: *zts.AtomTable,
+    exports: *const zts.ExportedSignatures,
+    loaded_effects: []const zts.pipeline.LoadedModuleEffects,
+    persistent_writes: []const zts.pipeline.PersistentWrite,
+    reported_writes: []const check_run_mod.WriteSite,
+    inputs: MultiModuleBuild,
+    contract: *HandlerContract,
+) !void {
+    const entry_index = compile_result.modules.len - 1;
+    for (compile_result.modules[0..entry_index], compile_result.parsers[0..entry_index], 0..) |compiled_module, *js_parser, position| {
+        const graph_idx = graph.execution_order[position];
+        const module = &graph.module_list.items[graph_idx];
+        const module_id: zts.pipeline.FlowModuleId = @intCast(position + 1);
+
+        const module_view = zts.IrView.fromIRStore(&js_parser.nodes, &js_parser.constants);
+        var parsed = zts.pipeline.ParsedModule.fromTypedExisting(module_view, compiled_module.root, atoms, &js_parser.type_store);
+        parsed.scopes = &js_parser.scopes;
+
+        var link_arena = std.heap.ArenaAllocator.init(allocator);
+        defer link_arena.deinit();
+        const file_imports = try fileImportSignatures(link_arena.allocator(), graph, module.path, module_view, atoms, exports);
+
+        var session: zts.pipeline.ModuleAnalysisSession = .{};
+        try session.initFull(allocator, parsed, .{
+            .source_types = .direct,
+            .strict = inputs.strict,
+            .manifest_registry = inputs.manifest_registry,
+            .select_verifier = false,
+            .select_flow = false,
+            .allow_raw_exported_boundary = true,
+            .file_import_signatures = &file_imports,
+        });
+        defer session.deinit();
+        try session.complete();
+
+        const imported_effects = try zts.pipeline.importedEffectsForLoadedModule(
+            allocator,
+            graph,
+            graph_idx,
+            try session.facts(),
+            loaded_effects,
+        );
+        defer allocator.free(imported_effects);
+        try session.setImportedEffects(imported_effects);
+
+        // The graph compile also stores the entry's writes, so keep this
+        // module's id exactly.
+        var verifier_writes: std.ArrayList(ir.NodeIndex) = .empty;
+        defer verifier_writes.deinit(allocator);
+        for (reported_writes) |site| {
+            if (site.module == module_id) try verifier_writes.append(allocator, site.node);
+        }
+        var writers = try zts.pipeline.StateWriterList.forModule(
+            allocator,
+            module_view,
+            module_id,
+            persistent_writes,
+            verifier_writes.items,
+        );
+        defer writers.deinit(allocator);
+
+        var table = try session.dischargeHelperCapsules(writers.view());
+        defer table.deinit(allocator);
+        for (table.capsules.items) |*capsule| {
+            try appendCapsuleRows(allocator, contract, capsule.name, module.path, capsule.line, capsule.column, capsule.diagnostics.items);
+            try appendCapsuleRows(allocator, contract, capsule.name, module.path, capsule.line, capsule.column, capsule.effect_diagnostics.items);
+        }
+    }
+}
+
+/// Copy the rows of one dependency helper into the merged contract, placed in
+/// the file of that dependency.
+fn appendCapsuleRows(
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+    function_name: []const u8,
+    module_path: []const u8,
+    line: u32,
+    column: u32,
+    rows: []const handler_contract.SpecDiagnostic,
+) !void {
+    for (rows) |row| {
+        var copy = try row.clone(allocator);
+        errdefer copy.deinit(allocator);
+        if (copy.function == null) copy.function = try allocator.dupe(u8, function_name);
+        const file = try allocator.dupe(u8, module_path);
+        if (copy.site) |*site| {
+            if (site.file) |old| allocator.free(old);
+            site.file = file;
+        } else {
+            copy.site = .{ .file = file, .line = line, .column = column };
+        }
+        try contract.spec_diagnostics.append(allocator, copy);
+    }
+}
+
 /// Build the contract of a handler with file imports.
 ///
 /// The base is the full contract of the entry module with its authored source
@@ -515,6 +627,24 @@ pub fn buildMultiModuleContract(
         if (handler_fn) |hf| try applyGraphPaths(allocator, &contract, &analysis, parsed, atoms, hf, inputs.filename);
     }
     foldDependencyProperties(allocator, &contract, dependency_facts.properties, dependency_facts.established);
+    // A dependency contract has no authored source types, so its helpers are
+    // discharged here, once the flow result of the whole graph exists.
+    const flow_writes: []const zts.pipeline.PersistentWrite = if (handler_fn != null)
+        (try analysis.completedFlow()).persistentWrites()
+    else
+        &.{};
+    try dischargeDependencyCapsules(
+        allocator,
+        graph,
+        compile_result,
+        atoms,
+        exports,
+        deps.loaded_effects.items,
+        flow_writes,
+        inputs.reported_writes,
+        inputs,
+        &contract,
+    );
     try refreshContractSpecDiagnostics(allocator, &contract);
     try refuseSpecErrors(&contract, inputs.filename);
     return contract;

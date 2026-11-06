@@ -602,10 +602,30 @@ pub fn runCheckOnlyFromSourceWithPathAllocator(
     };
     errdefer result.deinit(allocator);
     if (result.is_typescript and result.stages_run.contains(.parse)) {
-        remapDiagnosticsToSource(&result, .{ .text = source, .normalize_positions = true }, already_mapped);
+        remapEntryDiagnosticsToSource(&result, .{ .text = source, .normalize_positions = true }, already_mapped, handler_path);
     }
 
     return result;
+}
+
+/// Apply the entry's source-view coordinates after the recorded diagnostic
+/// boundary, to the rows of the entry file only. A row of a dependency, such as
+/// a flow-only write or a helper capsule finding, already holds a position in
+/// its own file; reading it against the entry text can carry it onto another
+/// line.
+fn remapEntryDiagnosticsToSource(
+    result: *CheckResult,
+    source_view: zts.SourceView,
+    already_mapped: usize,
+    entry_path: []const u8,
+) void {
+    const items = result.json_diagnostics.items;
+    for (items[@min(already_mapped, items.len)..]) |*diagnostic| {
+        if (!std.mem.eql(u8, diagnostic.file, entry_path)) continue;
+        const mapped = source_view.position(diagnostic.line, diagnostic.column);
+        diagnostic.line = mapped.line;
+        diagnostic.column = mapped.column;
+    }
 }
 
 /// Apply source-view coordinates after the recorded diagnostic boundary.
@@ -1145,6 +1165,14 @@ fn runCheckOnParsedSource(
             result.contract = null;
             return result;
         }
+        // A dependency contract has no authored source types, so the helper
+        // capsules of each dependency are discharged here, before any spec
+        // refresh, count, or print reads the rows.
+        const flow_writes: []const zts.pipeline.PersistentWrite = if (analysis.checkedModule()) |checked|
+            (if (checked.flowCompleted()) checked.flow_checker.persistentWrites() else &.{})
+        else
+            &.{};
+        try gc.dischargeCapsules(&result.contract.?, flow_writes);
     } else {
         try contract_mod.disclosePublicEnv(allocator, &result.contract.?, env_public);
     }
