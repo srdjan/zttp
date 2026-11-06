@@ -10,7 +10,7 @@ A Fable review and a Codex astra fact-check ran on the first draft on 2026-11-06
 |---|---|
 | U0 | Complete: results in "U0 results"; no stop condition applies |
 | U1 | Complete: each spec row that carries a `function` prints at the helper's declaration; 17 gates passed |
-| U2 | Not started |
+| U2 | Complete: an arrow or function-expression helper bound by `const` is held to its capsule; 17 gates passed |
 | U3 | Not started |
 | U4 | Not started |
 
@@ -23,7 +23,7 @@ The handler of each probe is `handler(req: Request): Proof<Response, "read_only"
 | Probe | Where `stamp` lives | `stamp` declares | `zts check` | `zts compile --verify --contract` | `zttp build` |
 |---|---|---|---|---|---|
 | p1 | `dep.ts`, imported | `function stamp(): Proof<number, "pure">`, returns `Date.now()` | exit 0, no diagnostic | exit 0 | exit 0, binary written |
-| p2 | `dep.ts`, imported | `function stamp(): Effects<number, "crypto">`, returns `Date.now()` | exit 0, no diagnostic | exit 0 | not run |
+| p2 | `dep.ts`, imported | `function digest(): Effects<string, "clock">`, returns `sha256("a")` from `zttp:crypto` | exit 0, no diagnostic | not run | not run |
 | p4 | `handler.ts`, same file | `function stamp(): Proof<number, "pure">`, returns `Date.now()` | exit 1, ZTS500 | exit 0 | exit 1, no binary |
 | pa | `handler.ts`, same file | `const stamp = (): Proof<number, "pure"> => { return Date.now(); }` | exit 0, no diagnostic | exit 0 | not run |
 
@@ -109,12 +109,12 @@ Each code unit starts with failing tests. The commit message records that each t
 
 U1 tests: p4 under `zts check --json` puts the ZTS500 at line 1 and the column of `stamp`, in `handler.ts`, with the literal message of the chosen option. The ZTS606 of `tests/corpus/check/bad/helper_breaks_handler_capsule.ts` moves to the helper's line. A handler-level ZTS500 keeps the handler's line.
 
-U2 tests: pa gives ZTS500 at line 1 of `handler.ts`. An arrow helper with a true capsule, `const double = (x: number): Proof<number, "pure" | "total"> => x * 2`, gives no diagnostic. An arrow helper under `Effects<number, "crypto">` that reads the clock gives ZTS503.
+U2 tests: pa gives ZTS500 at line 1 of `handler.ts`. An arrow helper with a true capsule, `const double = (x: number): Proof<number, "pure" | "total"> => x * 2`, gives no diagnostic. An arrow helper under `Effects<string, "clock">` that calls `sha256` gives ZTS503.
 
 U3 tests, each on a two-file or three-file graph, through CHECK (`precompile_check_tests.zig`) and the graph compile (`precompile.zig`) with `emit_verify` set:
 
 - p1 gives ZTS500 with `function` `stamp`. The `zts check --json` row has the literal `"file":"dep.ts"` and line 1. The graph compile fails with `error.SpecDiagnosticsRefused`.
-- p2 gives ZTS503 at `dep.ts` line 1.
+- p2 gives ZTS503 and the ZTS505 warning at `dep.ts` line 3, and no ZTS611: the public-helper rules stay entry-only.
 - An arrow helper in `dep.ts` with a false capsule gives ZTS500 at its line.
 - A dependency helper with a false capsule that no module calls gives ZTS500. The discharge does not depend on reachability.
 - A dependency helper `bump(): Proof<number, "pure">` that runs `count = count + 1` on a module binding gives ZTS500 with the write cause. The verifier names this write.
@@ -204,3 +204,4 @@ The ZTS500 message is defined once, in `specDiagnosticMessage` in `packages/tool
 ## Findings during execution
 
 - U1: the location is the declaration token, which is the `function` keyword. For `export function` it is the `function` after `export `. A helper ZTS500 whose cause is a clock read has no "demoted at" suffix: a helper's `cause` records only a write to module state. `reportSpecErrors` prints a file and a code, never a line. U1 sets no `Site.file`, so the owned-file path of `Site.clone` and `Site.deinit` gets its test in U3.
+- U2: `Date.now()` is not a capability. The first p2 probe, `Effects<number, "crypto">` around `Date.now()`, showed no missed ZTS503: in the entry file it gives only ZTS505. Probe p2 now uses `sha256` under `Effects<string, "clock">` (`/tmp/zttp-g1/p2b`). In the entry file the same helper gives ZTS503, ZTS505, and ZTS611 (`/tmp/zttp-g1/p2c`). The test in `packages/zts/src/typed_frontend_tests.zig` that asserted an arrow helper's capsule is not read now asserts that it is read. An arrow helper with an `Effects<...>` ceiling also gets ZTS623, the rule for a module-internal ceiling, as a `function` helper does.

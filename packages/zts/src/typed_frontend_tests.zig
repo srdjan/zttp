@@ -11517,7 +11517,7 @@ test "direct source pilot compacts annotated parameters by final owner" {
     try std.testing.expectEqual(@as(usize, 2), direct_env.direct_accumulator_events);
 }
 
-test "direct function specifications preserve variable arrow capsule absence" {
+test "direct function specifications read a variable arrow capsule" {
     const source =
         "const helper = (value: number): Proof<number, \"deterministic\"> => value;";
     var direct_count = CountingAllocator.init(std.testing.allocator);
@@ -11568,14 +11568,15 @@ test "direct function specifications preserve variable arrow capsule absence" {
     );
     defer direct_capsules.deinit(std.testing.allocator);
     const direct_capsule = direct_capsules.byName("helper") orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 0), direct_capsule.declared.items.len);
+    try std.testing.expectEqual(@as(usize, 1), direct_capsule.declared.items.len);
+    try std.testing.expectEqualStrings("deterministic", direct_capsule.declared.items[0]);
     try std.testing.expectEqual(@as(usize, 0), direct_capsule.effect_declared.items.len);
     try std.testing.expectEqual(@as(usize, 0), direct_capsule.inferred_caps.count());
     try std.testing.expect(direct_capsule.proven.total);
     try std.testing.expect(direct_capsule.proven.pure);
     try std.testing.expect(direct_capsule.proven.read_only);
     try std.testing.expect(direct_capsule.proven.deterministic);
-    try std.testing.expect(!direct_capsule.discharged());
+    try std.testing.expect(direct_capsule.discharged());
     try std.testing.expect(!direct_capsule.effectDischarged());
 }
 

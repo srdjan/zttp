@@ -339,16 +339,8 @@ fn functionSignature(
         .function_expr, .arrow_function => declaration,
         .function_decl => (ir_view.getVarDecl(declaration) orelse
             return error.InvalidFunctionOwner).init,
-        .var_decl => {
-            const variable = ir_view.getVarDecl(declaration) orelse
-                return error.InvalidFunctionOwner;
-            const init_tag = ir_view.getTag(variable.init) orelse
-                return error.InvalidFunctionOwner;
-            if (init_tag != .function_expr and init_tag != .arrow_function) {
-                return error.InvalidFunctionOwner;
-            }
-            return null;
-        },
+        .var_decl => (ir_view.getVarDecl(declaration) orelse
+            return error.InvalidFunctionOwner).init,
         else => return error.InvalidFunctionOwner,
     };
     const owner_tag = ir_view.getTag(owner) orelse return error.InvalidFunctionOwner;

@@ -13642,6 +13642,73 @@ test "formatProofCard: a helper ZTS500 line names the helper's declaration line"
     );
 }
 
+test "an arrow helper ZTS500 reports the helper's declaration line" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const stamp = (): Proof<number, "pure"> => {
+        \\  return Date.now();
+        \\};
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  const t = stamp();
+        \\  return Response.text(String(t));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "arrow-helper-site.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[0].code);
+    try std.testing.expectEqualStrings("arrow-helper-site.ts", diagnostics[0].file);
+    try std.testing.expectEqual(@as(u32, 1), diagnostics[0].line);
+    try std.testing.expectEqual(@as(u16, 1), diagnostics[0].column);
+    try std.testing.expectEqualStrings(
+        "helper's declared Proof capsule does not hold (failing spec: pure)",
+        diagnostics[0].message,
+    );
+}
+
+test "an arrow helper with a true Proof capsule gives no diagnostic" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const double = (x: number): Proof<number, "pure" | "total"> => x * 2;
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  const t = double(21);
+        \\  return Response.text(String(t));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "arrow-helper-true.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), result.json_diagnostics.items.len);
+}
+
+test "an arrow helper that reaches a capability outside its Effects ceiling gives ZTS503" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { sha256 } from "zttp:crypto";
+        \\
+        \\const digest = (): Effects<string, "clock"> => {
+        \\  return sha256("a");
+        \\};
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  const d = digest();
+        \\  return Response.text(d);
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "arrow-helper-effects.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 3), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS623", diagnostics[0].code);
+    try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
+    try std.testing.expectEqualStrings("ZTS503", diagnostics[1].code);
+    try std.testing.expectEqual(@as(u32, 3), diagnostics[1].line);
+    try std.testing.expectEqualStrings("ZTS505", diagnostics[2].code);
+    try std.testing.expectEqual(@as(u32, 3), diagnostics[2].line);
+}
+
 test "a handler ZTS500 keeps the handler's line" {
     const allocator = std.testing.allocator;
     const source =
