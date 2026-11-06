@@ -11,8 +11,8 @@ The F18 plan (`2026-11-05-f18-module-state-proofs-plan.md`) recorded five residu
 | U2 | Complete: edcdd08f; verify.sh passed |
 | U2b | Complete: edcdd08f, with U2 |
 | U3 | Complete: 7708ce03 |
-| U4 | Complete: ZTS500, helper ZTS500, ZTS606, and the default-profile hint name the write line |
-| U5 | Not started |
+| U4 | Complete: fe33d496 |
+| U5 | Complete: multi-module tests; the graph compile prints flow-only writes and names the entry write |
 | U6 | Not started |
 
 ## Reproduction
@@ -142,3 +142,5 @@ Measured at `bf6ad1c3` with `zts check --json` over 82 files: the 33 tracked `.t
 - U3: `extractContract` now runs the flow pass before contract extraction, so the capsule discharge can read the events. A module with type errors still stops before the flow pass.
 - U4: the cause of a property that a write removed is the first write of the entry module, by line and column. A property counts as removed by the write only when it was proven before the shared-state fact cleared it, so a `zttp:cache` write or a `Date.now()` keeps its own cause and hint. The cause snippet is the fixed text "a write to module state", because the contract builder holds no source text.
 - U4: `causeFor` is unchanged. The live-reload HUD and the counterexample pipeline read `causeFor` only, so they do not show a write cause. A write in a dependency module gives no line, and the graph compile path does not record the cause yet. U5 covers the graph path.
+- U5: the verifier names a push onto a dependency's module array inside a function that only module initialization calls, so that handler loses `state_isolated`. The flow fact alone would keep it. The result is conservative, and section 7 of `docs/verification.md` already states it for the entry module.
+- U5: a ZTS606 that the implicit default profile causes is not marked `implicit_default`, so the graph compile refuses it as an authored error. This was already so for a helper that calls `Date.now()`. `zttp compile` on a single module also refuses such a handler, through the default profile's ZTS500.

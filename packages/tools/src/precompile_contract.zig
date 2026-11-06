@@ -180,6 +180,9 @@ pub const MultiModuleBuild = struct {
     /// True when a module of the graph mutates module state or dispatches an
     /// unresolved route. Read only when `emit_verify` is set.
     shares_state: bool,
+    /// Each ZTS310 finding that the verifier made in a dependency module, by
+    /// flow module id, so a flow finding at the same node is not reported twice.
+    reported_writes: []const check_run_mod.WriteSite = &.{},
     /// Abort on a policy violation in a dependency. A check clears this, because
     /// it reports a violation on the merged contract and does not abort.
     enforce_policy: bool = true,
@@ -476,10 +479,22 @@ pub fn buildMultiModuleContract(
     // The flow evaluation joins the shared-state fact: the verifier names the
     // writes that it can read, and the evaluator follows the rest.
     var shares_state = inputs.shares_state;
+    var state_write: ?handler_contract.PropertyCause = null;
     if (handler_fn != null) {
         const completed = try analysis.completedFlow();
         try reportCompletedFlow(allocator, completed, analysis.flowErrorCount(), true, null, entry_view);
-        if (check_run_mod.flowSharesState(completed)) shares_state = true;
+        if (check_run_mod.flowSharesState(completed)) {
+            shares_state = true;
+            if (inputs.emit_verify) {
+                const checked = analysis.checkedModule() orelse return error.AnalysisPassIncomplete;
+                const unreported = try check_run_mod.unreportedWrites(allocator, completed, checked.verifierDiagnostics(), inputs.reported_writes);
+                defer allocator.free(unreported);
+                // The cause is a line of the entry file. A write in a dependency
+                // module has no line there, so it keeps the generic hint.
+                state_write = check_run_mod.firstEntryWriteCause(entry_view, checked.verifierDiagnostics(), unreported);
+                for (unreported) |site| try printFlowWrite(allocator, graph, compile_result, site);
+            }
+        }
     }
     try validateContractPolicyInputs(allocator, inputs.filename, &contract, inputs.sql_schema_path, inputs.policy);
     if (inputs.policy != null) policy_checked = true;
@@ -493,6 +508,7 @@ pub fn buildMultiModuleContract(
         .shares_state = verified and shares_state,
         .result_safe = verified,
         .optional_safe = verified,
+        .state_write = state_write,
     } });
 
     if (inputs.emit_contract) {
@@ -502,6 +518,38 @@ pub fn buildMultiModuleContract(
     try refreshContractSpecDiagnostics(allocator, &contract);
     try refuseSpecErrors(&contract, inputs.filename);
     return contract;
+}
+
+/// Print the ZTS310 warning of a write that the flow evaluator found and the
+/// verifier did not name, at the write, in the file of the module that holds
+/// it. `site.module` is a flow module id: 0 for the entry, and the position of a
+/// dependency in execution order plus one otherwise. A test build prints none.
+fn printFlowWrite(
+    allocator: std.mem.Allocator,
+    graph: *const zts.modules.ModuleGraph,
+    compile_result: *const zts.modules.CompileResult,
+    site: check_run_mod.WriteSite,
+) !void {
+    if (builtin.is_test) return;
+    const position: usize = if (site.module == 0) compile_result.modules.len - 1 else site.module - 1;
+    if (position >= compile_result.modules.len) return error.AnalysisPassIncomplete;
+    const module = &graph.module_list.items[graph.execution_order[position]];
+    const parser = &compile_result.parsers[position];
+    const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
+    if (view.getLoc(site.node) == null) return;
+    var diag_view = zts.SourceView.of(module.source);
+    diag_view.name = module.path;
+    diag_view.normalize_positions = true;
+    var output: std.ArrayList(u8) = .empty;
+    defer output.deinit(allocator);
+    var output_writer: std.Io.Writer.Allocating = .fromArrayList(allocator, &output);
+    const single = [_]zts.VerifierDiagnostic{check_run_mod.flowWriteDiagnostic(site)};
+    {
+        errdefer output = output_writer.toArrayList();
+        try zts.DiagnosticProjection.writeAll(.verifier, diag_view, &single, view, &output_writer.writer);
+    }
+    output = output_writer.toArrayList();
+    if (output.items.len > 0) debugPrint("{s}", .{output.items});
 }
 
 /// Keep, across the dependencies, the structural facts that every one of them holds.

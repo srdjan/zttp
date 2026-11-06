@@ -384,6 +384,54 @@ helper_out=$(cd "$TMP_DIR/helper-state-app" && "$ZTTP" compile narrow.ts -o narr
 [ "$helper_status" -eq 0 ] || fail "compile of a capsule without state_isolated exited $helper_status, expected 0: $helper_out"
 [ -x "$TMP_DIR/helper-state-app/narrow-bin" ] || fail "compile of a capsule without state_isolated wrote no binary"
 
+step "a write that only the flow evaluator finds prints a ZTS310 warning at its line in the file that holds it"
+mkdir -p "$TMP_DIR/flow-write-app"
+cat > "$TMP_DIR/flow-write-app/value.ts" <<'TS'
+export function value(): number {
+  return 1;
+}
+TS
+cat > "$TMP_DIR/flow-write-app/entry.ts" <<'TS'
+import { value } from "./value.ts";
+const seen: number[] = [];
+function pick(): number[] {
+  return seen;
+}
+export function handler(req: Request): Proof<Response, "result_safe"> {
+  const alias = pick();
+  alias.push(1);
+  return Response.text(String(value()));
+}
+TS
+cat > "$TMP_DIR/flow-write-app/writer.ts" <<'TS'
+const seen: number[] = [];
+function addTo(xs: number[]): undefined {
+  xs.push(1);
+  return undefined;
+}
+export function record(): undefined {
+  addTo(seen);
+  return undefined;
+}
+TS
+cat > "$TMP_DIR/flow-write-app/dependency-entry.ts" <<'TS'
+import { record } from "./writer.ts";
+export function handler(req: Request): Proof<Response, "result_safe"> {
+  record();
+  return Response.text("ok");
+}
+TS
+flow_status=0
+flow_out=$(cd "$TMP_DIR/flow-write-app" && "$ZTTP" compile entry.ts -o entry-bin --no-attest 2>&1 </dev/null) || flow_status=$?
+[ "$flow_status" -eq 0 ] || fail "compile with a flow-only write in the entry exited $flow_status, expected 0: $flow_out"
+grep -qF -- "ZTS310" <<<"$flow_out" || fail "compile with a flow-only write in the entry named no ZTS310: $flow_out"
+grep -qF -- "--> entry.ts:8:13" <<<"$flow_out" || fail "compile with a flow-only write in the entry did not point at entry.ts:8:13: $flow_out"
+flow_status=0
+flow_out=$(cd "$TMP_DIR/flow-write-app" && "$ZTTP" compile dependency-entry.ts -o dependency-bin --no-attest 2>&1 </dev/null) || flow_status=$?
+[ "$flow_status" -eq 0 ] || fail "compile with a flow-only write in a dependency exited $flow_status, expected 0: $flow_out"
+grep -qF -- "ZTS310" <<<"$flow_out" || fail "compile with a flow-only write in a dependency named no ZTS310: $flow_out"
+grep -qF -- "--> writer.ts:3:10" <<<"$flow_out" || fail "compile with a flow-only write in a dependency did not point at writer.ts:3:10: $flow_out"
+
 step "negative: test prints each error that its summary counts"
 cat > "$BROKEN_APP_DIR/src/handler.ts" <<'TS'
 import { env } from "zttp:env";

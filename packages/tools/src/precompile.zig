@@ -924,6 +924,10 @@ fn compileMultiModule(
     // generation above already ran on the kept parsers, so no bytecode moves.
     // The module state facts fold over the whole graph for the contract.
     var shares_state = false;
+    // The ZTS310 findings of the dependency verifier, by flow module id: the
+    // position in execution order plus one, because the entry is module 0.
+    var reported_writes: std.ArrayList(precompile_check_run_mod.WriteSite) = .empty;
+    defer reported_writes.deinit(allocator);
     var evidences: std.ArrayList(zts.ProofEvidence) = .empty;
     defer {
         for (evidences.items) |*evidence| evidence.deinit();
@@ -939,6 +943,9 @@ fn compileMultiModule(
             };
         }
         if (checks.verify_failed) return .{ .verify_failed = true };
+        for (checks.mutation_nodes) |node| {
+            try reported_writes.append(allocator, .{ .module = @intCast(module_index + 1), .node = node });
+        }
         if (checks.has_module_mutation or checks.unresolved_route_dispatch) shares_state = true;
     }
 
@@ -1023,6 +1030,7 @@ fn compileMultiModule(
         .sql_schema_path = sql_schema_path,
         .manifest_registry = manifest_registry,
         .shares_state = shares_state,
+        .reported_writes = reported_writes.items,
     });
 
     return .{
@@ -1868,6 +1876,193 @@ test "compileHandler graph clears state_isolated for a write through an imported
     defer compiled.deinit(std.testing.allocator);
     const props = try graphProperties(&compiled);
     try std.testing.expect(!props.state_isolated);
+}
+
+const record_entry =
+    \\import { record } from "./dep.ts";
+    \\export function handler(req: Request): Proof<Response, "result_safe"> {
+    \\  record();
+    \\  return Response.text("ok");
+    \\}
+    \\
+;
+
+test "compileHandler graph clears state_isolated when a dependency pushes onto its own module array" {
+    var fixture = try importFixture(record_entry,
+        \\const seen: number[] = [];
+        \\export function record(): undefined {
+        \\  seen.push(1);
+        \\  return undefined;
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const props = try graphProperties(&compiled);
+    try std.testing.expect(!props.state_isolated);
+}
+
+test "compileHandler graph clears state_isolated for a dependency push that only the flow evaluator finds" {
+    var fixture = try importFixture(record_entry,
+        \\const seen: number[] = [];
+        \\function addTo(xs: number[]): undefined {
+        \\  xs.push(1);
+        \\  return undefined;
+        \\}
+        \\export function record(): undefined {
+        \\  addTo(seen);
+        \\  return undefined;
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const props = try graphProperties(&compiled);
+    try std.testing.expect(!props.state_isolated);
+}
+
+const add_to_helper =
+    \\export function addTo(xs: number[]): undefined {
+    \\  xs.push(1);
+    \\  return undefined;
+    \\}
+    \\
+;
+
+test "compileHandler graph clears state_isolated when an imported helper writes an imported array passed to it" {
+    var fixture = try importFixture(
+        \\import { seen } from "./dep.ts";
+        \\import { addTo } from "./helpers.ts";
+        \\export function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  addTo(seen);
+        \\  return Response.text("ok");
+        \\}
+        \\
+    ,
+        \\export const seen: number[] = [];
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("helpers.ts", add_to_helper);
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const props = try graphProperties(&compiled);
+    try std.testing.expect(!props.state_isolated);
+}
+
+test "compileHandler graph keeps state_isolated when an imported helper writes a request-local array" {
+    var fixture = try importFixture(
+        \\import { addTo } from "./dep.ts";
+        \\export function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  const local: number[] = [];
+        \\  addTo(local);
+        \\  return Response.text("ok");
+        \\}
+        \\
+    , add_to_helper);
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const props = try graphProperties(&compiled);
+    try std.testing.expect(props.state_isolated);
+}
+
+const table_entry =
+    \\import { table } from "./dep.ts";
+    \\export function handler(req: Request): Proof<Response, "result_safe"> {
+    \\  return Response.text(String(table.length));
+    \\}
+    \\
+;
+
+test "compileHandler graph keeps state_isolated when a dependency writes a local array during module initialization" {
+    var local_fixture = try importFixture(table_entry,
+        \\function build(): number[] {
+        \\  const out: number[] = [];
+        \\  out.push(1);
+        \\  return out;
+        \\}
+        \\export const table: number[] = build();
+        \\
+    );
+    defer local_fixture.deinit();
+    var local_compiled = try local_fixture.compile(graph_verified);
+    defer local_compiled.deinit(std.testing.allocator);
+    try std.testing.expect((try graphProperties(&local_compiled)).state_isolated);
+}
+
+// The verifier names the push inside `build` whether or not a request runs it,
+// so a write during initialization alone still removes state_isolated.
+test "compileHandler graph clears state_isolated for a dependency helper that writes its module array during initialization" {
+    var module_fixture = try importFixture(table_entry,
+        \\const log: number[] = [];
+        \\function build(): number[] {
+        \\  log.push(1);
+        \\  return log;
+        \\}
+        \\export const table: number[] = build();
+        \\
+    );
+    defer module_fixture.deinit();
+    var module_compiled = try module_fixture.compile(graph_verified);
+    defer module_compiled.deinit(std.testing.allocator);
+    try std.testing.expect(!(try graphProperties(&module_compiled)).state_isolated);
+}
+
+const entry_write_entry =
+    \\import { value } from "./dep.ts";
+    \\const seen: number[] = [];
+    \\function pick(): number[] {
+    \\  return seen;
+    \\}
+    \\export function handler(req: Request): Response {
+    \\  const alias = pick();
+    \\  alias.push(1);
+    \\  return Response.text(String(value()));
+    \\}
+    \\
+;
+
+test "compileHandler graph names the entry write that removed state_isolated" {
+    var fixture = try importFixture(entry_write_entry,
+        \\export function value(): number {
+        \\  return 1;
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const contract = compiled.contract orelse return error.MissingContract;
+    try std.testing.expect(!(try graphProperties(&compiled)).state_isolated);
+    const cause = contract.property_provenance.state_write orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u32, 8), cause.line);
+    try std.testing.expectEqual(@as(u32, 13), cause.column);
+    try std.testing.expectEqualStrings("a write to module state", cause.snippet);
+    try std.testing.expect(contract.property_provenance.state_write_removed.contains(.state_isolated));
+}
+
+test "compileHandler graph gives a dependency write no cause line" {
+    var fixture = try importFixture(record_entry,
+        \\const seen: number[] = [];
+        \\function addTo(xs: number[]): undefined {
+        \\  xs.push(1);
+        \\  return undefined;
+        \\}
+        \\export function record(): undefined {
+        \\  addTo(seen);
+        \\  return undefined;
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const contract = compiled.contract orelse return error.MissingContract;
+    try std.testing.expect(!(try graphProperties(&compiled)).state_isolated);
+    try std.testing.expect(contract.property_provenance.state_write == null);
 }
 
 const LoadedFlowGraph = struct {

@@ -2793,6 +2793,179 @@ test "CHECK reports a ZTS310 warning for a push onto an imported const array" {
     try std.testing.expectEqual(@as(u32, 7), diagnostic.line);
 }
 
+fn countDiagnosticsWithCode(result: *const CheckResult, code: []const u8) usize {
+    var count: usize = 0;
+    for (result.json_diagnostics.items) |d| {
+        if (std.mem.eql(u8, d.code, code)) count += 1;
+    }
+    return count;
+}
+
+/// The check has exactly one ZTS310 finding. It is a warning at `line` of
+/// `file_name` in the directory of the fixture.
+fn expectOneStateWriteAt(fixture: *const SiblingFixture, result: *const CheckResult, file_name: []const u8, line: u32) !void {
+    const allocator = std.testing.allocator;
+    const directory = std.fs.path.dirname(fixture.handler_path) orelse return error.TestUnexpectedResult;
+    const expected = try std.fs.path.join(allocator, &.{ directory, file_name });
+    defer allocator.free(expected);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 1), countDiagnosticsWithCode(result, "ZTS310"));
+    const diagnostic = diagnosticWithCode(result, "ZTS310") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("warning", diagnostic.severity);
+    try std.testing.expectEqualStrings(expected, diagnostic.file);
+    try std.testing.expectEqual(line, diagnostic.line);
+}
+
+const sibling_record_handler =
+    \\import { record } from "./dep.ts";
+    \\function handler(req: Request): Proof<Response, "result_safe"> {
+    \\  record();
+    \\  return Response.text("ok");
+    \\}
+    \\
+;
+
+test "CHECK reports a ZTS310 warning at the push of a dependency onto its own module array" {
+    var fixture = try SiblingFixture.init(sibling_record_handler);
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\const seen: number[] = [];
+        \\export function record(): undefined {
+        \\  seen.push(1);
+        \\  return undefined;
+        \\}
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(!result.state_isolated);
+    try expectOneStateWriteAt(&fixture, &result, "dep.ts", 3);
+}
+
+test "CHECK reports a ZTS310 warning at a dependency push that only the flow evaluator finds" {
+    var fixture = try SiblingFixture.init(sibling_record_handler);
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\const seen: number[] = [];
+        \\function addTo(xs: number[]): undefined {
+        \\  xs.push(1);
+        \\  return undefined;
+        \\}
+        \\export function record(): undefined {
+        \\  addTo(seen);
+        \\  return undefined;
+        \\}
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(!result.state_isolated);
+    try expectOneStateWriteAt(&fixture, &result, "dep.ts", 3);
+}
+
+const sibling_add_helper =
+    \\export function addTo(xs: number[]): undefined {
+    \\  xs.push(1);
+    \\  return undefined;
+    \\}
+    \\
+;
+
+test "CHECK reports a ZTS310 warning in the helper that writes an imported array passed to it" {
+    var fixture = try SiblingFixture.init(
+        \\import { seen } from "./data.ts";
+        \\import { addTo } from "./helpers.ts";
+        \\function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  addTo(seen);
+        \\  return Response.text("ok");
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("data.ts", "export const seen: number[] = [];\n");
+    try fixture.add("helpers.ts", sibling_add_helper);
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(!result.state_isolated);
+    try expectOneStateWriteAt(&fixture, &result, "helpers.ts", 2);
+}
+
+test "CHECK keeps state_isolated when an imported helper writes a request-local array" {
+    var fixture = try SiblingFixture.init(
+        \\import { addTo } from "./helpers.ts";
+        \\function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  const local: number[] = [];
+        \\  addTo(local);
+        \\  return Response.text("ok");
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("helpers.ts", sibling_add_helper);
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(result.state_isolated);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), countDiagnosticsWithCode(&result, "ZTS310"));
+}
+
+test "CHECK keeps state_isolated when a dependency writes a local array during module initialization" {
+    var fixture = try SiblingFixture.init(
+        \\import { table } from "./dep.ts";
+        \\function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  return Response.text(String(table.length));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\function build(): number[] {
+        \\  const out: number[] = [];
+        \\  out.push(1);
+        \\  return out;
+        \\}
+        \\export const table: number[] = build();
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(result.state_isolated);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    try std.testing.expectEqual(@as(usize, 0), countDiagnosticsWithCode(&result, "ZTS310"));
+}
+
+// The verifier names the push inside `build` whether or not a request runs it,
+// so a write during initialization alone still removes state_isolated.
+test "CHECK reports the verifier ZTS310 for a dependency helper that writes its module array during initialization" {
+    var fixture = try SiblingFixture.init(
+        \\import { table } from "./dep.ts";
+        \\function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  return Response.text(String(table.length));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\const log: number[] = [];
+        \\function build(): number[] {
+        \\  log.push(1);
+        \\  return log;
+        \\}
+        \\export const table: number[] = build();
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(std.testing.allocator);
+    try std.testing.expect(!result.state_isolated);
+    try expectOneStateWriteAt(&fixture, &result, "dep.ts", 3);
+}
+
 test "CHECK does not classify a factory-produced callable as data" {
     var fixture = try SiblingFixture.init(
         \\import { save } from "./dep.ts";
