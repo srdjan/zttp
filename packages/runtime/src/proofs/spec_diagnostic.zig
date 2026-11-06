@@ -26,9 +26,12 @@ pub fn specStateFor(contract: *const zts.HandlerContract, name: []const u8) revi
             .discharged = false,
             .diagnostic_code = d.kind.code(),
             .diagnostic_message = specDiagnosticMessage(d),
-            .source_line = if (d.cause) |c| c.line else null,
-            .source_column = if (d.cause) |c| c.column else null,
-            .source_snippet = if (d.cause) |c| c.snippet else null,
+            // The review facts carry no file. A line and a column in another
+            // file would read as a place in the handler, so a cause with a
+            // file gives none; the suggestion names the file and the line.
+            .source_line = if (d.cause) |c| (if (c.file == null) c.line else null) else null,
+            .source_column = if (d.cause) |c| (if (c.file == null) c.column else null) else null,
+            .source_snippet = if (d.cause) |c| (if (c.file == null) c.snippet else null) else null,
         };
     }
     return .{ .name = name, .discharged = true };
@@ -69,4 +72,47 @@ fn specDiagnosticMessage(d: zts.SpecDiagnostic) []const u8 {
         .effect_row_lower_bound => d.suggestion orelse "effect row is a lower bound; a call through an unresolvable value cannot discharge a ceiling",
         .schema_not_compilable => d.suggestion orelse "a validation call names a schema zttp:validate cannot compile",
     };
+}
+
+fn contractWithReadOnlyCause(allocator: std.mem.Allocator, file: ?[]const u8) !zts.HandlerContract {
+    var contract = zts.handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    errdefer contract.deinit(allocator);
+    const spec_name = try allocator.dupe(u8, "read_only");
+    errdefer allocator.free(spec_name);
+    const suggestion = try allocator.dupe(u8, "remove that write");
+    errdefer allocator.free(suggestion);
+    const owned_file = if (file) |f| try allocator.dupe(u8, f) else null;
+    errdefer if (owned_file) |f| allocator.free(f);
+    try contract.spec_diagnostics.append(allocator, .{
+        .kind = .not_discharged,
+        .spec_name = spec_name,
+        .suggestion = suggestion,
+        .cause = .{ .line = 4, .column = 12, .snippet = zts.handler_contract.state_write_snippet, .file = owned_file },
+    });
+    return contract;
+}
+
+test "specStateFor gives no source line, column, or snippet for a cause in another file" {
+    const allocator = std.testing.allocator;
+    var contract = try contractWithReadOnlyCause(allocator, "dep.ts");
+    defer contract.deinit(allocator);
+
+    const state = specStateFor(&contract, "read_only");
+
+    try std.testing.expectEqualStrings("remove that write", state.diagnostic_message orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqual(@as(?u32, null), state.source_line);
+    try std.testing.expectEqual(@as(?u32, null), state.source_column);
+    try std.testing.expect(state.source_snippet == null);
+}
+
+test "specStateFor gives the source line, column, and snippet for a cause in the site file" {
+    const allocator = std.testing.allocator;
+    var contract = try contractWithReadOnlyCause(allocator, null);
+    defer contract.deinit(allocator);
+
+    const state = specStateFor(&contract, "read_only");
+
+    try std.testing.expectEqual(@as(?u32, 4), state.source_line);
+    try std.testing.expectEqual(@as(?u32, 12), state.source_column);
+    try std.testing.expectEqualStrings("a write to module state", state.source_snippet orelse return error.TestUnexpectedResult);
 }

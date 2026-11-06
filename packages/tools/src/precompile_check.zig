@@ -466,10 +466,17 @@ pub fn formatFailureSections(writer: anytype, r: *const CheckResult, filename: [
                 ) catch return;
                 if (specDiagnosticSubject(d)) |subject| {
                     if (d.cause) |cause| {
-                        writer.print(
-                            spec_suffix_with_cause,
-                            .{ subject, cause.line, cause.column, cause.snippet },
-                        ) catch return;
+                        if (cause.file) |file| {
+                            writer.print(
+                                spec_suffix_with_file_cause,
+                                .{ subject, file, cause.line, cause.column, cause.snippet },
+                            ) catch return;
+                        } else {
+                            writer.print(
+                                spec_suffix_with_cause,
+                                .{ subject, cause.line, cause.column, cause.snippet },
+                            ) catch return;
+                        }
                     } else {
                         writer.print(spec_suffix_plain, .{subject}) catch return;
                     }
@@ -640,6 +647,9 @@ fn specDiagnosticSubject(diag: zts.SpecDiagnostic) ?[]const u8 {
 /// first half while `--json` printed both, so `zttp check` named the spec and
 /// left out the line number - the half that turns one property into one edit.
 const spec_suffix_with_cause = " (failing spec: {s}; demoted at line {d}:{d} by `{s}`)";
+/// The same suffix for a cause in a file other than the file of the
+/// diagnostic's site. The file takes the place of the word "line".
+const spec_suffix_with_file_cause = " (failing spec: {s}; demoted at {s}:{d}:{d} by `{s}`)";
 const spec_suffix_plain = " (failing spec: {s})";
 
 fn specDiagnosticMessageAlloc(
@@ -649,6 +659,9 @@ fn specDiagnosticMessageAlloc(
     const base = specDiagnosticMessage(diag);
     const subject = specDiagnosticSubject(diag) orelse return allocator.dupe(u8, base);
     if (diag.cause) |cause| {
+        if (cause.file) |file| {
+            return allocator.print("{s}" ++ spec_suffix_with_file_cause, .{ base, subject, file, cause.line, cause.column, cause.snippet });
+        }
         return allocator.print("{s}" ++ spec_suffix_with_cause, .{ base, subject, cause.line, cause.column, cause.snippet });
     }
     return allocator.print("{s}" ++ spec_suffix_plain, .{ base, subject });
@@ -1176,6 +1189,42 @@ test "a spec diagnostic names the spec it is about" {
         .kind = .effect_undeclared,
         .spec_name = "Effects",
     }) == null);
+}
+
+test "a spec diagnostic names the file of a cause in an imported file" {
+    const allocator = std.testing.allocator;
+
+    const in_dependency = try specDiagnosticMessageAlloc(allocator, .{
+        .kind = .not_discharged,
+        .spec_name = "read_only",
+        .cause = .{ .line = 4, .column = 12, .snippet = zts.handler_contract.state_write_snippet, .file = "dep.ts" },
+    });
+    defer allocator.free(in_dependency);
+    try std.testing.expectEqualStrings(
+        "declared Proof capsule was not discharged by handler proof " ++
+            "(failing spec: read_only; demoted at dep.ts:4:12 by `a write to module state`)",
+        in_dependency,
+    );
+}
+
+test "a spec diagnostic with a cause and a site file keeps the line-only suffix" {
+    // A helper capsule row sits in its own file, `b.ts`, and its cause names no
+    // file: the file of the site is the file of the line.
+    const allocator = std.testing.allocator;
+
+    const in_site_file = try specDiagnosticMessageAlloc(allocator, .{
+        .kind = .not_discharged,
+        .spec_name = "pure",
+        .cause = .{ .line = 4, .column = 9, .snippet = zts.handler_contract.state_write_snippet },
+        .function = "bump",
+        .site = .{ .file = "b.ts", .line = 3, .column = 17 },
+    });
+    defer allocator.free(in_site_file);
+    try std.testing.expectEqualStrings(
+        "helper's declared Proof capsule does not hold " ++
+            "(failing spec: pure; demoted at line 4:9 by `a write to module state`)",
+        in_site_file,
+    );
 }
 
 /// `true` when the emitted `.d.ts` holds `line` exactly.

@@ -756,13 +756,30 @@ pub const RateLimitInfo = struct {
 /// Why a handler property was demoted from its optimistic default. Captured
 /// at the classifier site that decided to clear a boolean in
 /// `HandlerProperties` so the live-reload HUD can name both the file:line
-/// and the construct that caused the regression. Snippet is borrowed
-/// (typically a static const string like "Date.now()"); the contract owns
-/// no extra allocation.
+/// and the construct that caused the regression.
+///
+/// A `PropertyCause` value borrows its snippet and its file. The snippet is
+/// typically a static string like "Date.now()". Two holders own an allocated
+/// file: `HandlerContract.owned_state_write_file` backs the file of
+/// `property_provenance.state_write`, and `SpecDiagnostic` owns the file of
+/// its `cause`. A function that copies a cause into a `SpecDiagnostic` must
+/// duplicate a non-null file (see `cloneOwned`).
 pub const PropertyCause = struct {
     line: u32,
     column: u32,
     snippet: []const u8, // borrowed; static literal or arena-tied
+    /// The file that holds the line, as the ZTS310 row of the same write
+    /// prints it. Null means the file of the diagnostic's site: the entry file
+    /// for a handler row, and the helper's own file for a capsule row.
+    file: ?[]const u8 = null, // borrowed; see the holders above
+
+    /// A copy whose file is a new allocation. The caller owns that file and
+    /// frees it when it is non-null. The snippet stays borrowed.
+    pub fn cloneOwned(self: PropertyCause, allocator: std.mem.Allocator) !PropertyCause {
+        var copy = self;
+        copy.file = try dupeOptionalString(allocator, self.file);
+        return copy;
+    }
 };
 
 /// Per-property source provenance. All fields default to null; populated
@@ -775,9 +792,11 @@ pub const PropertyProvenance = struct {
     /// The first failable call the path walk never recorded. The snippet is the
     /// export name, a static string from the module binding.
     fault_covered: ?PropertyCause = null,
-    /// The first write to module state in the entry module, in source order.
-    /// Null when no write has a line in the entry module (a write in a
-    /// dependency module has none). The snippet is a static string.
+    /// The write to module state that removed the shared-state properties.
+    /// Null when no driver recorded one. The file is null for a write in the
+    /// entry module and names the dependency otherwise. The snippet is a
+    /// static string, and `HandlerContract.owned_state_write_file` backs the
+    /// file.
     state_write: ?PropertyCause = null,
     /// The shared-state properties that the write removed: each one was
     /// proven before the shared-state fact cleared it. A property that
@@ -874,9 +893,9 @@ pub const SpecDiagnostic = struct {
     /// Owned copy of the declared spec name.
     spec_name: []const u8,
     /// For .not_discharged with a known cause, the file:line:snippet captured
-    /// at the classifier site that demoted the property. Borrowed; must not
-    /// outlive the contract that owns the underlying snippet (which itself
-    /// is typically a static string literal).
+    /// at the classifier site that demoted the property. The snippet is
+    /// borrowed and typically a static string literal. This diagnostic owns
+    /// `cause.file` when it is non-null, and `deinit` frees it.
     cause: ?PropertyCause = null,
     /// For .incompatible_with_import: the offending module specifier
     /// (owned). null for the other kinds.
@@ -1014,7 +1033,10 @@ pub const SpecDiagnostic = struct {
         if (self.suggestion) |s| allocator.free(s);
         if (self.function) |f| allocator.free(f);
         if (self.site) |*s| s.deinit(allocator);
-        // cause snippet is borrowed; do not free.
+        // The snippet of the cause is borrowed. The file is owned.
+        if (self.cause) |cause| {
+            if (cause.file) |f| allocator.free(f);
+        }
     }
 
     /// Deep-copy. The caller owns the result and must `deinit` it. Used to
@@ -1031,10 +1053,14 @@ pub const SpecDiagnostic = struct {
         errdefer if (function) |f| allocator.free(f);
         var site: ?Site = if (self.site) |s| try s.clone(allocator) else null;
         errdefer if (site) |*s| s.deinit(allocator);
+        const cause: ?PropertyCause = if (self.cause) |c| try c.cloneOwned(allocator) else null;
+        errdefer if (cause) |c| {
+            if (c.file) |f| allocator.free(f);
+        };
         return .{
             .kind = self.kind,
             .spec_name = spec_name,
-            .cause = self.cause,
+            .cause = cause,
             .incompatible_module = incompatible_module,
             .suggestion = suggestion,
             .function = function,
@@ -1638,6 +1664,10 @@ pub const HandlerContract = struct {
     /// imported file, which is built at check time and so is not a static string.
     /// Transient and not serialized.
     owned_fault_cause_snippet: ?[]const u8 = null,
+    /// Backs `property_provenance.state_write.file` when the write is in a
+    /// dependency file, whose path is built at check time. Transient and not
+    /// serialized.
+    owned_state_write_file: ?[]const u8 = null,
     properties: ?HandlerProperties = null,
     /// True when effect inference resolved every callable that contributed to
     /// `properties`. Transient analysis state; contract JSON does not emit it.
@@ -1647,7 +1677,9 @@ pub const HandlerContract = struct {
     intent: ?IntentInfo = null,
     /// In-memory provenance for demoted properties. Not serialized; populated
     /// during build for the live-reload HUD's "Why" line. Snippets are
-    /// borrowed static strings, so deinit is a no-op.
+    /// borrowed static strings. The contract owns two allocations that back
+    /// provenance strings: `owned_fault_cause_snippet` and
+    /// `owned_state_write_file`. `deinit` frees both and nothing else here.
     property_provenance: PropertyProvenance = .{},
     /// Active handler specs. An explicit `Proof<Response, "name" | ...>` on
     /// the handler return type narrows this set; without one, every supported
@@ -1759,6 +1791,7 @@ pub const HandlerContract = struct {
         self.cache.namespaces.deinit(allocator);
         if (self.owned_rate_limit_namespace) |namespace| allocator.free(namespace);
         if (self.owned_fault_cause_snippet) |snippet| allocator.free(snippet);
+        if (self.owned_state_write_file) |file| allocator.free(file);
         self.sql.deinit(allocator);
         self.api.deinit(allocator);
         for (self.behaviors.items) |*b| {

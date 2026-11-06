@@ -646,7 +646,7 @@ pub fn compileHandler(
         try precompile_contract_mod.disclosePublicEnv(allocator, &contract.?, env_public);
 
         // Inject verification-derived properties (Checks 2, 6, 7)
-        applyContractFacts(allocator, &contract.?, .{ .verifier = .{
+        try applyContractFacts(allocator, &contract.?, .{ .verifier = .{
             .state_isolated = state_isolated,
             .shares_state = shares_state,
             .result_safe = result_safe,
@@ -717,7 +717,7 @@ pub fn compileHandler(
             // is complete.
             if (path_analysis) |*summary| {
                 summary.takeFaultStamp(&fault_stamp);
-                applyContractFacts(allocator, &contract.?, .{ .paths = summary });
+                try applyContractFacts(allocator, &contract.?, .{ .paths = summary });
             }
 
             if (fc_report.total_failable > 0) {

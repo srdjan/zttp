@@ -173,9 +173,11 @@ pub const VerifierFacts = struct {
     shares_state: bool,
     result_safe: bool,
     optional_safe: bool,
-    /// The first write to module state in the entry module, when a driver
-    /// found one with a line. It names the cause of each property that
-    /// `shares_state` removes.
+    /// The write to module state that a driver chose, when it found one with a
+    /// line. It names the cause of each property that `shares_state` removes.
+    /// The cause borrows its file. `applyContractFacts` copies the file into
+    /// `HandlerContract.owned_state_write_file`, so the borrowed file needs to
+    /// outlive that call only.
     state_write: ?handler_contract.PropertyCause = null,
 };
 
@@ -207,16 +209,20 @@ fn clearSharedStateProperties(props: *handler_contract.HandlerProperties) void {
 /// name it. A property that was already false before the shared-state fact, or
 /// that this fact left alone, is not recorded: another cause owns it.
 fn recordStateWrite(
-    provenance: *handler_contract.PropertyProvenance,
+    allocator: std.mem.Allocator,
+    contract: *handler_contract.HandlerContract,
+    recorded: ?handler_contract.PropertyCause,
     before: handler_contract.HandlerProperties,
     after: handler_contract.HandlerProperties,
-    verifier: VerifierFacts,
 ) void {
-    provenance.state_write = null;
+    const provenance = &contract.property_provenance;
+    // The contract owns the file of the cause that it keeps, and frees the file
+    // of the cause that it replaces.
+    if (contract.owned_state_write_file) |old| allocator.free(old);
+    contract.owned_state_write_file = if (recorded) |write| write.file else null;
+    provenance.state_write = recorded;
     provenance.state_write_removed = .empty;
-    if (!verifier.shares_state) return;
-    const write = verifier.state_write orelse return;
-    provenance.state_write = write;
+    if (recorded == null) return;
     // The verifier fact alone sets `state_isolated`, so the write is its cause
     // whatever the contract held before.
     if (!after.state_isolated) provenance.state_write_removed.insert(.state_isolated);
@@ -377,20 +383,27 @@ fn appendFlowWriteFindings(
 /// The one writer of the verifier, path, and fault facts on a contract. Both
 /// drivers (`compileHandler` and `runCheckOnParsedSource`) fill a
 /// `ContractFacts` from their own analysis and call this, so a new contract
-/// fact is added here once. It allocates nothing, so it cannot fail halfway.
+/// fact is added here once. The one allocation, the copy of the file of the
+/// state-write cause, happens before the first change, so a failed copy leaves
+/// the contract as it was.
 pub fn applyContractFacts(
     allocator: std.mem.Allocator,
     contract: *handler_contract.HandlerContract,
     facts: ContractFacts,
-) void {
+) !void {
     if (facts.verifier) |verifier| {
         if (contract.properties) |*props| {
+            // The verifier borrows the file of its cause. The contract keeps a copy.
+            const recorded: ?handler_contract.PropertyCause = if (verifier.shares_state)
+                (if (verifier.state_write) |write| try write.cloneOwned(allocator) else null)
+            else
+                null;
             const before = props.*;
             props.state_isolated = verifier.state_isolated;
             if (verifier.shares_state) clearSharedStateProperties(props);
             props.result_safe = verifier.result_safe;
             props.optional_safe = verifier.optional_safe;
-            recordStateWrite(&contract.property_provenance, before, props.*, verifier);
+            recordStateWrite(allocator, contract, recorded, before, props.*);
         }
     }
     if (facts.paths) |paths| {
@@ -1199,7 +1212,7 @@ fn runCheckOnParsedSource(
     }
 
     if (result.contract) |*c| {
-        applyContractFacts(allocator, c, .{ .verifier = .{
+        try applyContractFacts(allocator, c, .{ .verifier = .{
             .state_isolated = result.state_isolated,
             .shares_state = shares_state,
             .result_safe = result.results_safe,
@@ -1237,7 +1250,7 @@ fn runCheckOnParsedSource(
 
             // Populate behavioral contract
             if (result.contract) |*c| {
-                applyContractFacts(allocator, c, .{ .paths = &path_analysis });
+                try applyContractFacts(allocator, c, .{ .paths = &path_analysis });
                 // The cost facts of the paths came from the entry alone. The
                 // dependencies decide what survives of them.
                 if (graph_check) |gc| {

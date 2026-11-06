@@ -665,6 +665,131 @@ test "formatProofCard: the card names the demotion site --json already carried" 
     try std.testing.expect(std.mem.indexOf(u8, buf.items, "Date.now()") != null);
 }
 
+test "formatFailureSections: the card names the file of a cause in an imported file" {
+    // The cause of a write in an imported file carries the file. The card then
+    // prints "dep.ts:4:12" in place of "line 4:12", as the ZTS310 row does.
+    const allocator = std.testing.allocator;
+    const source =
+        \\let count: number = 0;
+        \\function handler(req: Request): Proof<Response, "read_only"> {
+        \\  count = count + 1;
+        \\  return Response.text(String(count));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "dep-cause-text.ts", .{});
+    defer result.deinit(allocator);
+
+    const contract = &(result.contract orelse return error.TestUnexpectedResult);
+    // The floor: the first diagnostic is the ZTS500 of `read_only`.
+    try std.testing.expectEqualStrings("read_only", contract.spec_diagnostics.items[0].spec_name);
+    contract.spec_diagnostics.items[0].cause = .{
+        .line = 4,
+        .column = 12,
+        .snippet = handler_contract.state_write_snippet,
+        .file = try allocator.dupe(u8, "dep.ts"),
+    };
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    check_mod.formatFailureSections(&aw.writer, &result, "dep-cause-text.ts");
+    buf = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        buf.items,
+        "declared Proof capsule was not discharged by handler proof (failing spec: read_only; demoted at dep.ts:4:12 by `a write to module state`)\n",
+    ) != null);
+}
+
+test "formatFailureSections: a cause with no file keeps the line-only suffix" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\let count: number = 0;
+        \\function handler(req: Request): Proof<Response, "read_only"> {
+        \\  count = count + 1;
+        \\  return Response.text(String(count));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "site-cause-text.ts", .{});
+    defer result.deinit(allocator);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    check_mod.formatFailureSections(&aw.writer, &result, "site-cause-text.ts");
+    buf = aw.toArrayList();
+
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        buf.items,
+        "declared Proof capsule was not discharged by handler proof (failing spec: read_only; demoted at line 3:9 by `a write to module state`)\n",
+    ) != null);
+}
+
+fn stateWriteVerifierFacts(file: ?[]const u8) check_run_mod.ContractFacts {
+    return .{ .verifier = .{
+        .state_isolated = false,
+        .shares_state = true,
+        .result_safe = true,
+        .optional_safe = true,
+        .state_write = .{ .line = 4, .column = 12, .snippet = handler_contract.state_write_snippet, .file = file },
+    } };
+}
+
+test "applyContractFacts owns the file of a state-write cause and frees the one it replaces" {
+    const allocator = std.testing.allocator;
+    var contract = handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(allocator);
+    contract.properties = .{
+        .pure = true,
+        .read_only = true,
+        .stateless = true,
+        .retry_safe = true,
+        .deterministic = true,
+        .has_egress = false,
+        .idempotent = true,
+        .state_isolated = true,
+    };
+
+    try check_run_mod.applyContractFacts(allocator, &contract, stateWriteVerifierFacts("first.ts"));
+    try std.testing.expectEqualStrings("first.ts", contract.property_provenance.state_write.?.file orelse return error.TestUnexpectedResult);
+
+    // A second application replaces the cause, and the first file is freed.
+    try check_run_mod.applyContractFacts(allocator, &contract, stateWriteVerifierFacts("second.ts"));
+    try std.testing.expectEqualStrings("second.ts", contract.property_provenance.state_write.?.file orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqualStrings("second.ts", contract.owned_state_write_file orelse return error.TestUnexpectedResult);
+
+    // A cause with no file leaves nothing owned.
+    try check_run_mod.applyContractFacts(allocator, &contract, stateWriteVerifierFacts(null));
+    try std.testing.expect(contract.property_provenance.state_write.?.file == null);
+    try std.testing.expect(contract.owned_state_write_file == null);
+
+    try check_run_mod.applyContractFacts(allocator, &contract, stateWriteVerifierFacts("third.ts"));
+    try std.testing.expectEqualStrings("third.ts", contract.property_provenance.state_write.?.file orelse return error.TestUnexpectedResult);
+}
+
+fn applyStateWriteTwice(allocator: std.mem.Allocator) !void {
+    var contract = handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(allocator);
+    contract.properties = .{
+        .pure = true,
+        .read_only = true,
+        .stateless = true,
+        .retry_safe = true,
+        .deterministic = true,
+        .has_egress = false,
+        .idempotent = true,
+        .state_isolated = true,
+    };
+    try check_run_mod.applyContractFacts(allocator, &contract, stateWriteVerifierFacts("first.ts"));
+    try check_run_mod.applyContractFacts(allocator, &contract, stateWriteVerifierFacts("second.ts"));
+}
+
+test "a failed allocation while recording a state-write file leaks nothing" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, applyStateWriteTwice, .{});
+}
+
 test "formatProofCard: strict canonical diagnostics are visible in text mode" {
     const allocator = std.testing.allocator;
     const source =

@@ -626,7 +626,7 @@ pub fn buildMultiModuleContract(
     const dependency_facts = try mergeDependencyContracts(allocator, &contract, &deps, env_public, inputs.filename, null);
 
     const verified = inputs.emit_verify and handler_fn != null;
-    applyContractFacts(allocator, &contract, .{ .verifier = .{
+    try applyContractFacts(allocator, &contract, .{ .verifier = .{
         .state_isolated = verified and !shares_state,
         .shares_state = verified and shares_state,
         .result_safe = verified,
@@ -774,7 +774,7 @@ fn applyGraphPaths(
     var fault_stamp = try check_run_mod.stampFaultCoverage(allocator, parsed.ir_view, &gen, &fc);
     defer fault_stamp.deinit(allocator);
     summary.takeFaultStamp(&fault_stamp);
-    applyContractFacts(allocator, contract, .{ .paths = &summary });
+    try applyContractFacts(allocator, contract, .{ .paths = &summary });
 }
 
 /// Which spec errors a caller gates on: the ones the author asked for, or those

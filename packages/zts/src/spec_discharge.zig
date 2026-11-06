@@ -167,6 +167,14 @@ pub fn stateWriteSuggestion(allocator: std.mem.Allocator, line: u32) ![]u8 {
     return allocator.print("line {d} writes module state: " ++ state_write_remedy ++ ".", .{line});
 }
 
+/// The ZTS500 suggestion for a property that a write in the imported file
+/// `file` removed. The author cannot copy a value into a local in a file that
+/// the handler does not own, so the text states the rule and two remedies.
+/// Caller frees.
+pub fn dependencyWriteSuggestion(allocator: std.mem.Allocator, file: []const u8, line: u32, name: []const u8) ![]u8 {
+    return allocator.print("`{s}` line {d} writes module state, and a module-state write in any imported file removes `{s}`: remove that write, or remove `{s}` from the capsule.", .{ file, line, name, name });
+}
+
 /// The ZTS606 suggestion for a helper that reaches the write at `line`.
 /// Caller frees.
 pub fn stateWriteHelperSuggestion(allocator: std.mem.Allocator, function: []const u8, line: u32) ![]u8 {
@@ -438,12 +446,21 @@ fn appendNotDischarged(
     // generic text. A recorded cause of another kind keeps its own text.
     const write_cause = if (provenance) |p| p.stateWriteCauseFor(name) else null;
     const suggestion = if (write_cause) |cause|
-        try stateWriteSuggestion(allocator, cause.line)
+        (if (cause.file) |file|
+            try dependencyWriteSuggestion(allocator, file, cause.line, name)
+        else
+            try stateWriteSuggestion(allocator, cause.line))
     else if (suggestionFor(name)) |s|
         try allocator.dupe(u8, s)
     else
         null;
     errdefer if (suggestion) |s| allocator.free(s);
+    // The diagnostic owns the file of its cause; the provenance borrows it.
+    const recorded: ?PropertyCause = if (provenance) |p| p.causeFor(name) orelse write_cause else null;
+    const cause: ?PropertyCause = if (recorded) |c| try c.cloneOwned(allocator) else null;
+    errdefer if (cause) |c| {
+        if (c.file) |f| allocator.free(f);
+    };
     try out.append(allocator, .{
         .kind = .not_discharged,
         .spec_name = spec_name,
@@ -452,7 +469,7 @@ fn appendNotDischarged(
         // one. `SpecDiagnostic.cause` has existed since the type was written
         // and nothing ever set it, so the exact line that broke a proof was
         // computed and then dropped one struct short of every reader.
-        .cause = if (provenance) |p| p.causeFor(name) orelse write_cause else null,
+        .cause = cause,
         .implicit_default = false,
     });
 }
@@ -514,16 +531,21 @@ fn implicitDefaultSuggestion(
     // drop them from the proof set but to remove the write.
     const p = provenance orelse return base;
     var write_line: u32 = 0;
+    var write_file: ?[]const u8 = null;
     var removed: std.ArrayList(u8) = .empty;
     defer removed.deinit(allocator);
     for (undischarged) |name| {
         const cause = p.stateWriteCauseFor(name) orelse continue;
         write_line = cause.line;
+        write_file = cause.file;
         if (removed.items.len > 0) try removed.appendSlice(allocator, ", ");
         try removed.appendSlice(allocator, name);
     }
     if (removed.items.len == 0) return base;
-    const joined = try allocator.print("{s} The write to module state at line {d} removes {s}. To keep them, " ++ state_write_remedy ++ ".", .{ base, write_line, removed.items });
+    const joined = if (write_file) |file|
+        try allocator.print("{s} The write to module state at `{s}` line {d} removes {s}. To keep them, remove that write from `{s}`.", .{ base, file, write_line, removed.items, file })
+    else
+        try allocator.print("{s} The write to module state at line {d} removes {s}. To keep them, " ++ state_write_remedy ++ ".", .{ base, write_line, removed.items });
     allocator.free(base);
     return joined;
 }
@@ -747,11 +769,16 @@ pub fn dischargeCapsule(
             break :blk try allocator.dupe(u8, text);
         };
         errdefer allocator.free(suggestion);
+        // The diagnostic owns the file of its cause; the facts borrow it.
+        const cause: ?PropertyCause = if (write_cause) |c| try c.cloneOwned(allocator) else null;
+        errdefer if (cause) |c| {
+            if (c.file) |f| allocator.free(f);
+        };
         try out.append(allocator, .{
             .kind = .not_discharged,
             .spec_name = spec_name,
             .suggestion = suggestion,
-            .cause = write_cause,
+            .cause = cause,
         });
     }
 
@@ -1611,4 +1638,179 @@ test "an unknown spec, capsule, or capability name carries a fixed suggestion" {
     var effects = try dischargeEffects(allocator, &declared_cap, inferred, false, false);
     defer freeDiags(allocator, &effects);
     try std.testing.expectEqualStrings("Name a capability that a zttp module declares.", effects.items[0].suggestion orelse "(null)");
+}
+
+// A write to module state in the imported file `dep.ts`, and the same write in
+// the file of the diagnostic's site (a cause with no file).
+const dep_write = PropertyCause{ .line = 4, .column = 12, .snippet = contract_types.state_write_snippet, .file = "dep.ts" };
+const site_write = PropertyCause{ .line = 4, .column = 12, .snippet = contract_types.state_write_snippet };
+
+// The declared set in the order CHECK sorts it.
+const shared_state_names = [_][]const u8{ "deterministic", "idempotent", "pure", "read_only", "retry_safe", "state_isolated", "stateless" };
+
+const shared_state_removed = std.EnumSet(contract_types.SharedStateProperty).initMany(&.{
+    .state_isolated, .pure, .stateless, .read_only, .retry_safe, .deterministic, .idempotent,
+});
+
+fn writtenModuleStateProperties() HandlerProperties {
+    return .{
+        .pure = false,
+        .read_only = false,
+        .stateless = false,
+        .retry_safe = false,
+        .deterministic = false,
+        .has_egress = false,
+        .idempotent = false,
+        .state_isolated = false,
+        .fault_covered = true,
+        .injection_safe = true,
+    };
+}
+
+test "dischargeSpecs names the dependency file and both remedies for a write in an imported file" {
+    const allocator = std.testing.allocator;
+    const declared: [1][]const u8 = .{"read_only"};
+    const modules: [0][]const u8 = .{};
+    const provenance = contract_types.PropertyProvenance{
+        .state_write = dep_write,
+        .state_write_removed = .initMany(&.{.read_only}),
+    };
+
+    var diags = try dischargeSpecs(allocator, &declared, writtenModuleStateProperties(), &modules, false, provenance);
+    defer freeDiags(allocator, &diags);
+
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqualStrings(
+        "`dep.ts` line 4 writes module state, and a module-state write in any imported file removes `read_only`: remove that write, or remove `read_only` from the capsule.",
+        diags.items[0].suggestion orelse return error.TestUnexpectedResult,
+    );
+    try std.testing.expectEqualStrings("dep.ts", diags.items[0].cause.?.file orelse return error.TestUnexpectedResult);
+}
+
+test "dischargeSpecs keeps the entry remedy for a write with no file" {
+    const allocator = std.testing.allocator;
+    const declared: [1][]const u8 = .{"read_only"};
+    const modules: [0][]const u8 = .{};
+    const provenance = contract_types.PropertyProvenance{
+        .state_write = site_write,
+        .state_write_removed = .initMany(&.{.read_only}),
+    };
+
+    var diags = try dischargeSpecs(allocator, &declared, writtenModuleStateProperties(), &modules, false, provenance);
+    defer freeDiags(allocator, &diags);
+
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqualStrings(
+        "line 4 writes module state: copy the value into a local before the write, or move the state to zttp:cache.",
+        diags.items[0].suggestion orelse return error.TestUnexpectedResult,
+    );
+    try std.testing.expect(diags.items[0].cause.?.file == null);
+}
+
+test "the default profile names the dependency file for a write in an imported file" {
+    const allocator = std.testing.allocator;
+    const modules: [0][]const u8 = .{};
+    const provenance = contract_types.PropertyProvenance{
+        .state_write = dep_write,
+        .state_write_removed = shared_state_removed,
+    };
+
+    var diags = try dischargeSpecs(allocator, &shared_state_names, writtenModuleStateProperties(), &modules, true, provenance);
+    defer freeDiags(allocator, &diags);
+
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    const suggestion = diags.items[0].suggestion orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        suggestion,
+        " The write to module state at `dep.ts` line 4 removes deterministic, idempotent, pure, read_only, retry_safe, state_isolated, stateless. To keep them, remove that write from `dep.ts`.",
+    ));
+}
+
+test "the default profile keeps the entry sentence for a write with no file" {
+    const allocator = std.testing.allocator;
+    const modules: [0][]const u8 = .{};
+    const provenance = contract_types.PropertyProvenance{
+        .state_write = site_write,
+        .state_write_removed = shared_state_removed,
+    };
+
+    var diags = try dischargeSpecs(allocator, &shared_state_names, writtenModuleStateProperties(), &modules, true, provenance);
+    defer freeDiags(allocator, &diags);
+
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    const suggestion = diags.items[0].suggestion orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        suggestion,
+        " The write to module state at line 4 removes deterministic, idempotent, pure, read_only, retry_safe, state_isolated, stateless. To keep them, copy the value into a local before the write, or move the state to zttp:cache.",
+    ));
+}
+
+test "dischargeCapsule keeps the helper remedy for a cause with no file" {
+    const allocator = std.testing.allocator;
+    const declared: [1][]const u8 = .{"read_only"};
+    const facts = CapsuleFacts{
+        .total = true,
+        .pure = true,
+        .read_only = false,
+        .deterministic = true,
+        .state_write = site_write,
+        .state_write_removed = .initMany(&.{.read_only}),
+    };
+
+    var diags = try dischargeCapsule(allocator, &declared, facts);
+    defer freeDiags(allocator, &diags);
+
+    try std.testing.expectEqual(@as(usize, 1), diags.items.len);
+    try std.testing.expectEqualStrings(
+        "line 4 writes module state: copy the value into a local before the write, or move the state to zttp:cache.",
+        diags.items[0].suggestion orelse return error.TestUnexpectedResult,
+    );
+    try std.testing.expect(diags.items[0].cause.?.file == null);
+}
+
+/// Discharge a contract whose write cause has a file, clone a diagnostic, and
+/// free everything. Every allocation sits behind `allocator`.
+fn dischargeAndCloneCauseWithFile(allocator: std.mem.Allocator) !void {
+    var contract = contract_types.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(allocator);
+    contract.owned_state_write_file = try allocator.dupe(u8, "dep.ts");
+    contract.property_provenance = .{
+        .state_write = .{ .line = 4, .column = 12, .snippet = contract_types.state_write_snippet, .file = contract.owned_state_write_file },
+        .state_write_removed = .initMany(&.{.read_only}),
+    };
+    const declared: [1][]const u8 = .{"read_only"};
+    const modules: [0][]const u8 = .{};
+    contract.spec_diagnostics = try dischargeSpecs(allocator, &declared, writtenModuleStateProperties(), &modules, false, contract.property_provenance);
+
+    var copy = try contract.spec_diagnostics.items[0].clone(allocator);
+    defer copy.deinit(allocator);
+    try std.testing.expectEqualStrings("dep.ts", copy.cause.?.file orelse return error.TestUnexpectedResult);
+    // The clone owns its file: it is not the contract's allocation.
+    try std.testing.expect(copy.cause.?.file.?.ptr != contract.owned_state_write_file.?.ptr);
+}
+
+test "a diagnostic owns the file of its cause across discharge, clone, and free" {
+    try dischargeAndCloneCauseWithFile(std.testing.allocator);
+}
+
+test "a failed allocation while discharging or cloning a cause with a file leaks nothing" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, dischargeAndCloneCauseWithFile, .{});
+}
+
+test "dischargeCapsule owns the file of a cause that has one" {
+    const allocator = std.testing.allocator;
+    const declared: [1][]const u8 = .{"read_only"};
+    const facts = CapsuleFacts{
+        .read_only = false,
+        .state_write = dep_write,
+        .state_write_removed = .initMany(&.{.read_only}),
+    };
+
+    var diags = try dischargeCapsule(allocator, &declared, facts);
+    defer freeDiags(allocator, &diags);
+
+    try std.testing.expectEqualStrings("dep.ts", diags.items[0].cause.?.file orelse return error.TestUnexpectedResult);
+    try std.testing.expect(diags.items[0].cause.?.file.?.ptr != dep_write.file.?.ptr);
 }

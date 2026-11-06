@@ -129,6 +129,13 @@ pub const entries = [_]Entry{
         .diff_reason = "design: an ownership detail of the live check, not a proven fact",
     },
     .{
+        .field = "owned_state_write_file",
+        .wire = .not_serialized,
+        .wire_reason = "an allocation that backs the property_provenance state_write file at check time; transient",
+        .diff = .not_diffed,
+        .diff_reason = "design: an ownership detail of the live check, not a proven fact",
+    },
+    .{
         .field = "properties",
         .wire = .serialized,
         .diff = .partly_diffed,
@@ -419,9 +426,9 @@ test "the census covers every HandlerContract field exactly once" {
         .serialized => serialized += 1,
         .not_serialized => not_serialized += 1,
     };
-    try std.testing.expectEqual(@as(usize, 36), entries.len);
+    try std.testing.expectEqual(@as(usize, 37), entries.len);
     try std.testing.expectEqual(@as(usize, 28), serialized);
-    try std.testing.expectEqual(@as(usize, 8), not_serialized);
+    try std.testing.expectEqual(@as(usize, 9), not_serialized);
 }
 
 test "the wire mirror table has one entry per ContractWire field" {
