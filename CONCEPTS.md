@@ -57,6 +57,11 @@ A severity of none is not a claim that the function cannot fail. It can mean tha
 ### Unseen call
 A call to a function with a Failure severity that the path enumeration cannot hold on any path, so no failure path can cover it. A path holds a call when it records the call or when its branch condition tests the call, and the coverage count uses the same rule, so a call is never both counted and unseen. Examples are a call inside a nested function or callback, a call at module scope, and a call in a file the Handler imports. An import that the analysis could not scan also counts as one. Any unseen call blocks the fault-coverage Property: the analysis fails closed on what it cannot see, and the absence of an answer is never read as a clean answer.
 
+### Persistent write
+A write that a request makes to state that outlives the request: a module-level binding, a built-in object, a value that module initialization captured, or any object one of them reaches, whatever alias, parameter, or call result the write goes through. One persistent write anywhere a request runs means the Handler is not state-isolated and cannot prove the Properties that assume a fresh start, such as determinism, purity, and safety to retry.
+
+A write during module initialization is not one, because initialization runs once before any request. A write into a native store such as the cache or a SQL table is not one either: the Effect row carries it. An analysis that cannot follow the Handler is treated as if it found one, so the absence of an answer never proves isolation. A helper that was running when the write happened cannot prove purity, read-only access, or determinism, even when its Proof capsule claims them.
+
 ## Accepting an artifact
 
 ### Deployment artifact
