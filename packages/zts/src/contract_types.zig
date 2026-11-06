@@ -898,6 +898,29 @@ pub const SpecDiagnostic = struct {
     /// never wrote. Transient: not serialized to contract.json; recomputed
     /// on each fresh check.
     implicit_default: bool = false,
+    /// Where the diagnostic belongs when that is not the handler's line: the
+    /// declaration of the helper that `function` names. Null for a
+    /// handler-level row, which prints at the handler. `Site.file` is owned
+    /// when present; null there means the entry file.
+    site: ?Site = null,
+
+    pub const Site = struct {
+        file: ?[]const u8 = null,
+        line: u32,
+        column: u32,
+
+        pub fn deinit(self: *Site, allocator: std.mem.Allocator) void {
+            if (self.file) |f| allocator.free(f);
+        }
+
+        pub fn clone(self: Site, allocator: std.mem.Allocator) !Site {
+            return .{
+                .file = try dupeOptionalString(allocator, self.file),
+                .line = self.line,
+                .column = self.column,
+            };
+        }
+    };
 
     pub const Severity = enum { err, warn };
 
@@ -990,6 +1013,7 @@ pub const SpecDiagnostic = struct {
         if (self.incompatible_module) |m| allocator.free(m);
         if (self.suggestion) |s| allocator.free(s);
         if (self.function) |f| allocator.free(f);
+        if (self.site) |*s| s.deinit(allocator);
         // cause snippet is borrowed; do not free.
     }
 
@@ -1004,6 +1028,9 @@ pub const SpecDiagnostic = struct {
         const suggestion = try dupeOptionalString(allocator, self.suggestion);
         errdefer if (suggestion) |s| allocator.free(s);
         const function = try dupeOptionalString(allocator, self.function);
+        errdefer if (function) |f| allocator.free(f);
+        var site: ?Site = if (self.site) |s| try s.clone(allocator) else null;
+        errdefer if (site) |*s| s.deinit(allocator);
         return .{
             .kind = self.kind,
             .spec_name = spec_name,
@@ -1012,6 +1039,7 @@ pub const SpecDiagnostic = struct {
             .suggestion = suggestion,
             .function = function,
             .implicit_default = self.implicit_default,
+            .site = site,
         };
     }
 };

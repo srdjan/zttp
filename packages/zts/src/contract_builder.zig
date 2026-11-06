@@ -720,7 +720,7 @@ pub const ContractBuilder = struct {
                         !cap.proven.holds(prop) and
                         !containsString(cap.declared.items, pname))
                     {
-                        var missing = try makeMissingCapsule(self.allocator, pname, cap.name, cap.proven.writeCauseFor(prop));
+                        var missing = try makeMissingCapsule(self.allocator, pname, cap.name, cap.proven.writeCauseFor(prop), capsuleSite(cap));
                         errdefer missing.deinit(self.allocator);
                         try contract.spec_diagnostics.append(self.allocator, missing);
                     }
@@ -1087,6 +1087,18 @@ pub const ContractBuilder = struct {
         return null;
     }
 
+    /// The declaration of a helper capsule, or null when the table could not
+    /// locate it, so the row then prints at the handler.
+    fn capsuleSite(cap: *const function_specs.Capsule) ?contract_types.SpecDiagnostic.Site {
+        if (cap.line == 0) return null;
+        return .{ .line = cap.line, .column = cap.column };
+    }
+
+    fn declarationSite(self: *const ContractBuilder, node: NodeIndex) ?contract_types.SpecDiagnostic.Site {
+        const loc = self.ir_view.getLoc(node) orelse return null;
+        return .{ .line = loc.line, .column = loc.column };
+    }
+
     /// Build a ZTS606 diagnostic for a helper that breaks a handler-demanded
     /// capsule property without declaring a capsule for it.
     fn makeMissingCapsule(
@@ -1096,6 +1108,7 @@ pub const ContractBuilder = struct {
         /// The write to module state that removed `property` from the helper.
         /// A write is not fixed by a capsule, so it gets its own remedy.
         write_cause: ?contract_types.PropertyCause,
+        site: ?contract_types.SpecDiagnostic.Site,
     ) !contract_types.SpecDiagnostic {
         const spec_name = try allocator.dupe(u8, property);
         errdefer allocator.free(spec_name);
@@ -1110,6 +1123,7 @@ pub const ContractBuilder = struct {
             .spec_name = spec_name,
             .suggestion = suggestion,
             .function = owned_func,
+            .site = site,
         };
     }
 
@@ -1231,7 +1245,7 @@ pub const ContractBuilder = struct {
                 if (!fe.direct_caps.contains(cap)) continue;
                 try contract.spec_diagnostics.append(
                     self.allocator,
-                    try makeHelperBudgetExceeded(self.allocator, @tagName(cap), fe.name),
+                    try makeHelperBudgetExceeded(self.allocator, @tagName(cap), fe.name, self.declarationSite(fe.decl_node)),
                 );
             }
         }
@@ -1275,6 +1289,7 @@ pub const ContractBuilder = struct {
         allocator: std.mem.Allocator,
         capability: []const u8,
         func: []const u8,
+        site: ?contract_types.SpecDiagnostic.Site,
     ) !contract_types.SpecDiagnostic {
         const spec_name = try allocator.dupe(u8, capability);
         errdefer allocator.free(spec_name);
@@ -1286,6 +1301,7 @@ pub const ContractBuilder = struct {
             .spec_name = spec_name,
             .suggestion = suggestion,
             .function = owned_func,
+            .site = site,
         };
     }
 

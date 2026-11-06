@@ -37,6 +37,8 @@ pub const Capsule = struct {
     name: []const u8,
     /// 1-based source line of the function declaration (0 when unknown).
     line: u32,
+    /// 1-based column of the same declaration token (0 when unknown).
+    column: u32 = 0,
     /// Owned, de-duplicated capsule property names declared on the return
     /// type. Empty when the helper carries no `Proof<...>` annotation.
     declared: std.ArrayList([]const u8) = .empty,
@@ -222,7 +224,9 @@ pub fn dischargeWithStateWriters(
     for (effects.all(), static_writers) |fe, static_writer| {
         if (std.mem.eql(u8, fe.name, handler_fn_name)) continue;
 
-        const line: u32 = if (ir_view.getLoc(fe.decl_node)) |loc| loc.line else 0;
+        const decl_loc = ir_view.getLoc(fe.decl_node);
+        const line: u32 = if (decl_loc) |loc| loc.line else 0;
+        const column: u32 = if (decl_loc) |loc| loc.column else 0;
         const signature = try functionSignature(source, ir_view, fe.decl_node);
 
         const flow_index: ?usize = if (functionOwnerNode(ir_view, fe.decl_node)) |owner|
@@ -289,6 +293,14 @@ pub fn dischargeWithStateWriters(
             effect_diagnostics.deinit(allocator);
         }
 
+        // Every row below belongs to this helper, so it prints at the helper's
+        // declaration and not at the handler.
+        if (decl_loc) |loc| {
+            const site: contract_types.SpecDiagnostic.Site = .{ .line = loc.line, .column = loc.column };
+            for (diagnostics.items) |*d| d.site = site;
+            for (effect_diagnostics.items) |*d| d.site = site;
+        }
+
         const owned_name = try allocator.dupe(u8, fe.name);
         errdefer allocator.free(owned_name);
 
@@ -300,6 +312,7 @@ pub fn dischargeWithStateWriters(
         try table.capsules.append(allocator, .{
             .name = owned_name,
             .line = line,
+            .column = column,
             .declared = declared,
             .proven = proven,
             .diagnostics = diagnostics,

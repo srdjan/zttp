@@ -6703,22 +6703,22 @@ test "CHECK preserves measured lookup winners shadows and captures" {
                 .{
                     .code = "ZTS606",
                     .message = "helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: pure)",
-                    .line = 12,
-                    .column = 24,
+                    .line = 1,
+                    .column = 1,
                     .suggestion = "annotate `compute` with `Proof<T, \"pure\">` and satisfy it, or inline the helper into the handler.",
                 },
                 .{
                     .code = "ZTS606",
                     .message = "helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: read_only)",
-                    .line = 12,
-                    .column = 24,
+                    .line = 1,
+                    .column = 1,
                     .suggestion = "annotate `compute` with `Proof<T, \"read_only\">` and satisfy it, or inline the helper into the handler.",
                 },
                 .{
                     .code = "ZTS606",
                     .message = "helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: deterministic)",
-                    .line = 12,
-                    .column = 24,
+                    .line = 1,
+                    .column = 1,
                     .suggestion = "annotate `compute` with `Proof<T, \"deterministic\">` and satisfy it, or inline the helper into the handler.",
                 },
             },
@@ -10780,7 +10780,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\  return Response.json({ a: t[2].age });
     \\}
     },
-    .{ .name = "r29_env_in_helper", .expect = "ZTS309@4,ZTS400@7,ZTS500@6,ZTS606@6", .source =
+    .{ .name = "r29_env_in_helper", .expect = "ZTS309@4,ZTS400@7,ZTS500@6,ZTS606@2", .source =
     \\import { env } from "zttp:env";
     \\function h(): number {
     \\  const name = env("APP_NAME");
@@ -10824,7 +10824,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\  return Response.json({ a: r.value.age });
     \\}
     },
-    .{ .name = "s05_upvalue_name_collision", .expect = "ZTS303@11,ZTS500@9,ZTS606@9", .source =
+    .{ .name = "s05_upvalue_name_collision", .expect = "ZTS303@11,ZTS500@9,ZTS606@4", .source =
     \\import { parseJson } from "zttp:json";
     \\structural P = { age: number };
     \\structural R = { ok: boolean; value?: P; error?: string };
@@ -13243,11 +13243,11 @@ test "a dictGet on a module table keeps the read-only family proven" {
 }
 
 // The write is `xs.push(1)` on line 3, whose call paren is at column 10.
-const capsule_failure_pure = "declared Proof capsule was not discharged by handler proof (failing spec: pure; demoted at line 3:10 by `a write to module state`)";
-const capsule_failure_read_only = "declared Proof capsule was not discharged by handler proof (failing spec: read_only; demoted at line 3:10 by `a write to module state`)";
+const capsule_failure_pure = "helper's declared Proof capsule does not hold (failing spec: pure; demoted at line 3:10 by `a write to module state`)";
+const capsule_failure_read_only = "helper's declared Proof capsule does not hold (failing spec: read_only; demoted at line 3:10 by `a write to module state`)";
 // The write is `seen.push(1)` on line 3, whose call paren is at column 12.
-const capsule_failure_pure_direct = "declared Proof capsule was not discharged by handler proof (failing spec: pure; demoted at line 3:12 by `a write to module state`)";
-const capsule_failure_read_only_direct = "declared Proof capsule was not discharged by handler proof (failing spec: read_only; demoted at line 3:12 by `a write to module state`)";
+const capsule_failure_pure_direct = "helper's declared Proof capsule does not hold (failing spec: pure; demoted at line 3:12 by `a write to module state`)";
+const capsule_failure_read_only_direct = "helper's declared Proof capsule does not hold (failing spec: read_only; demoted at line 3:12 by `a write to module state`)";
 
 test "a Proof capsule on a helper that pushes onto its parameter, called with a module array, fails ZTS500" {
     const allocator = std.testing.allocator;
@@ -13270,10 +13270,10 @@ test "a Proof capsule on a helper that pushes onto its parameter, called with a 
     try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
     try std.testing.expectEqualStrings("error", diagnostics[1].severity);
-    try std.testing.expectEqual(@as(u32, 6), diagnostics[1].line);
+    try std.testing.expectEqual(@as(u32, 2), diagnostics[1].line);
     try std.testing.expectEqualStrings(capsule_failure_pure, diagnostics[1].message);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[2].code);
-    try std.testing.expectEqual(@as(u32, 6), diagnostics[2].line);
+    try std.testing.expectEqual(@as(u32, 2), diagnostics[2].line);
     try std.testing.expectEqualStrings(capsule_failure_read_only, diagnostics[2].message);
 }
 
@@ -13297,10 +13297,10 @@ test "a Proof capsule on a helper that pushes onto a module array fails ZTS500 w
     try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
     try std.testing.expectEqualStrings("error", diagnostics[1].severity);
-    try std.testing.expectEqual(@as(u32, 6), diagnostics[1].line);
+    try std.testing.expectEqual(@as(u32, 2), diagnostics[1].line);
     try std.testing.expectEqualStrings(capsule_failure_pure_direct, diagnostics[1].message);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[2].code);
-    try std.testing.expectEqual(@as(u32, 6), diagnostics[2].line);
+    try std.testing.expectEqual(@as(u32, 2), diagnostics[2].line);
     try std.testing.expectEqualStrings(capsule_failure_read_only_direct, diagnostics[2].message);
 }
 
@@ -13324,10 +13324,10 @@ test "a Proof capsule on a helper that pushes onto a module array fails ZTS500 w
     try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
     try std.testing.expectEqualStrings("error", diagnostics[1].severity);
-    try std.testing.expectEqual(@as(u32, 6), diagnostics[1].line);
+    try std.testing.expectEqual(@as(u32, 2), diagnostics[1].line);
     try std.testing.expectEqualStrings(capsule_failure_pure_direct, diagnostics[1].message);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[2].code);
-    try std.testing.expectEqual(@as(u32, 6), diagnostics[2].line);
+    try std.testing.expectEqual(@as(u32, 2), diagnostics[2].line);
     try std.testing.expectEqualStrings(capsule_failure_read_only_direct, diagnostics[2].message);
 }
 
@@ -13368,8 +13368,8 @@ test "a deterministic capsule on a helper that writes through a module array par
     try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
     try std.testing.expectEqualStrings("error", diagnostics[1].severity);
-    try std.testing.expectEqual(@as(u32, 6), diagnostics[1].line);
-    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:10 by `a write to module state`)", diagnostics[1].message);
+    try std.testing.expectEqual(@as(u32, 2), diagnostics[1].line);
+    try std.testing.expectEqualStrings("helper's declared Proof capsule does not hold (failing spec: deterministic; demoted at line 3:10 by `a write to module state`)", diagnostics[1].message);
 }
 
 test "a capsule that calls a plain writer with a module array fails ZTS500" {
@@ -13394,8 +13394,8 @@ test "a capsule that calls a plain writer with a module array fails ZTS500" {
     try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
     try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
-    try std.testing.expectEqual(@as(u32, 9), diagnostics[1].line);
-    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: pure; demoted at line 3:10 by `a write to module state`)", diagnostics[1].message);
+    try std.testing.expectEqual(@as(u32, 6), diagnostics[1].line);
+    try std.testing.expectEqualStrings("helper's declared Proof capsule does not hold (failing spec: pure; demoted at line 3:10 by `a write to module state`)", diagnostics[1].message);
 }
 
 test "a capsule called once with a local and once with a module array fails ZTS500" {
@@ -13417,10 +13417,10 @@ test "a capsule called once with a local and once with a module array fails ZTS5
     try std.testing.expectEqual(@as(usize, 3), diagnostics.len);
     try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
-    try std.testing.expectEqual(@as(u32, 6), diagnostics[1].line);
+    try std.testing.expectEqual(@as(u32, 2), diagnostics[1].line);
     try std.testing.expectEqualStrings(capsule_failure_pure, diagnostics[1].message);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[2].code);
-    try std.testing.expectEqual(@as(u32, 6), diagnostics[2].line);
+    try std.testing.expectEqual(@as(u32, 2), diagnostics[2].line);
     try std.testing.expectEqualStrings(capsule_failure_read_only, diagnostics[2].message);
 }
 
@@ -13491,7 +13491,7 @@ test "a capsule that calls a plain module writer fails ZTS500 when no handler ca
     try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
     try std.testing.expectEqual(@as(u32, 3), diagnostics[0].line);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
-    try std.testing.expectEqual(@as(u32, 9), diagnostics[1].line);
+    try std.testing.expectEqual(@as(u32, 6), diagnostics[1].line);
     try std.testing.expectEqualStrings(capsule_failure_pure_direct, diagnostics[1].message);
 }
 
@@ -13561,7 +13561,7 @@ test "the pure ZTS500 of a capsule helper names the write line and the write rem
     const diagnostics = result.json_diagnostics.items;
     try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
-    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: pure; demoted at line 3:10 by `a write to module state`)", diagnostics[1].message);
+    try std.testing.expectEqualStrings("helper's declared Proof capsule does not hold (failing spec: pure; demoted at line 3:10 by `a write to module state`)", diagnostics[1].message);
     try std.testing.expectEqualStrings(write_remedy_line3, diagnostics[1].suggestion orelse return error.TestUnexpectedResult);
 }
 
@@ -13584,4 +13584,104 @@ test "the state_isolated ZTS500 of a direct handler write names the write line a
         try std.testing.expectEqualStrings(write_remedy_line3, diagnostic.suggestion orelse return error.TestUnexpectedResult);
     }
     try std.testing.expect(found);
+}
+
+test "a helper ZTS500 reports the helper's declaration line, not the handler's" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function stamp(): Proof<number, "pure"> {
+        \\  return Date.now();
+        \\}
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  const t = stamp();
+        \\  return Response.text(String(t));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "helper-site.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[0].code);
+    try std.testing.expectEqualStrings("helper-site.ts", diagnostics[0].file);
+    try std.testing.expectEqual(@as(u32, 1), diagnostics[0].line);
+    try std.testing.expectEqual(@as(u16, 1), diagnostics[0].column);
+    try std.testing.expectEqualStrings(
+        "helper's declared Proof capsule does not hold (failing spec: pure)",
+        diagnostics[0].message,
+    );
+}
+
+test "formatProofCard: a helper ZTS500 line names the helper's declaration line" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function stamp(): Proof<number, "pure"> {
+        \\  return Date.now();
+        \\}
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  const t = stamp();
+        \\  return Response.text(String(t));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "helper-card.ts", .{});
+    defer result.deinit(allocator);
+
+    var buf: std.ArrayList(u8) = .empty;
+    defer buf.deinit(allocator);
+    var aw: std.Io.Writer.Allocating = .fromArrayList(allocator, &buf);
+    check_mod.formatFailureSections(&aw.writer, &result, "helper-card.ts");
+    buf = aw.toArrayList();
+
+    const start = std.mem.indexOf(u8, buf.items, "\n  Spec diagnostics:\n") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "\n  Spec diagnostics:\n" ++
+            "    ZTS500 (error) helper-card.ts:1:1  helper's declared Proof capsule does not hold (failing spec: pure)\n" ++
+            "      help: remove module calls and clock or RNG reads so the helper stays pure.\n",
+        buf.items[start..],
+    );
+}
+
+test "a handler ZTS500 keeps the handler's line" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.json({ at: Date.now() });
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler-site.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[0].code);
+    try std.testing.expectEqualStrings("handler-site.ts", diagnostics[0].file);
+    try std.testing.expectEqual(@as(u32, 1), diagnostics[0].line);
+    try std.testing.expectEqualStrings(
+        "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 2:34 by `Date.now()`)",
+        diagnostics[0].message,
+    );
+}
+
+test "a ZTS606 row reports the helper's declaration line" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\// Proves: a helper that breaks a property the handler demands, with no capsule of its own, is refused (ZTS606).
+        \\function stamp(): string {
+        \\    return String(Date.now());
+        \\}
+        \\
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\    return Response.text(stamp());
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "missing-site.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[0].code);
+    try std.testing.expectEqual(@as(u32, 6), diagnostics[0].line);
+    try std.testing.expectEqualStrings("ZTS606", diagnostics[1].code);
+    try std.testing.expectEqualStrings("missing-site.ts", diagnostics[1].file);
+    try std.testing.expectEqual(@as(u32, 2), diagnostics[1].line);
+    try std.testing.expectEqual(@as(u16, 1), diagnostics[1].column);
 }

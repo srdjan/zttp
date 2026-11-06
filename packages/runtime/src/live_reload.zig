@@ -288,7 +288,7 @@ pub const LiveReloadState = struct {
                 analysis.errors,
                 elapsed_ms,
             });
-            printDiagnosticLines(analysis.diagnostics, new_code);
+            printDiagnosticLines(analysis.diagnostics, new_code, self.handler_path);
             printReload("Next: fix the {s} diagnostic above; the previous handler is still serving.\n", .{analysis.failure_stage});
             return;
         }
@@ -416,7 +416,7 @@ pub const LiveReloadState = struct {
         const elapsed_ms = if (timer) |*t| t.read() / std.time.ns_per_ms else 0;
         if (analysis.errors > 0) {
             printProve("Initial proof failed at {s} ({d} error(s), {d}ms).\n", .{ analysis.failure_stage, analysis.errors, elapsed_ms });
-            printDiagnosticLines(analysis.diagnostics, source);
+            printDiagnosticLines(analysis.diagnostics, source, self.handler_path);
             printProve("Next: fix the {s} diagnostic above, then save again.\n", .{analysis.failure_stage});
             return;
         }
@@ -784,11 +784,11 @@ fn mentionsAiRelevantProof(proof_unlocked: []const u8) bool {
 /// a framed why/buys/try block so first-time authors read the cut as deliberate
 /// design rather than a linter rule. `source`, when non-null, gates the
 /// in-frame code excerpt; pass the same buffer that was just analyzed.
-fn printDiagnosticLines(diagnostics: []const Diagnostic, source: ?[]const u8) void {
+fn printDiagnosticLines(diagnostics: []const Diagnostic, source: ?[]const u8, handler_path: []const u8) void {
     const tty = shared.stderrIsTty();
     var stderr_buf: [8 * 1024]u8 = undefined;
     var stderr_writer = printer_mod.FdWriter.init(std.c.STDERR_FILENO, stderr_buf[0..]);
-    writeDiagnosticLines(&stderr_writer.interface, diagnostics, source, tty) catch {};
+    writeDiagnosticLines(&stderr_writer.interface, diagnostics, source, handler_path, tty) catch {};
     stderr_writer.interface.flush() catch {};
 }
 
@@ -796,11 +796,12 @@ fn writeDiagnosticLines(
     writer: *std.Io.Writer,
     diagnostics: []const Diagnostic,
     source: ?[]const u8,
+    handler_path: []const u8,
     tty: bool,
 ) !void {
     for (diagnostics) |d| {
         if (std.mem.eql(u8, d.code, "ZTS001")) {
-            try writeRestrictionFrame(writer, d, source, tty);
+            try writeRestrictionFrame(writer, d, source, handler_path, tty);
             continue;
         }
         try writer.print("  {s}:{d}:{d}: {s}: {s}\n", .{ d.file, d.line, d.column, d.code, d.message });
@@ -812,6 +813,7 @@ fn writeRestrictionFrame(
     writer: *std.Io.Writer,
     d: Diagnostic,
     source: ?[]const u8,
+    handler_path: []const u8,
     tty: bool,
 ) !void {
     const c = shared.palette(tty);
@@ -825,7 +827,9 @@ fn writeRestrictionFrame(
     try writer.print("  {s}----------------------------------------------------------------------{s}\n", .{ c.dim, c.reset });
     try writer.print("  {s}{s}:{d}:{d}{s}\n", .{ c.dim, d.file, d.line, d.column, c.reset });
 
-    if (source) |src| {
+    // `source` is the handler's text. A row in another file has no line there.
+    const handler_source: ?[]const u8 = if (std.mem.eql(u8, d.file, handler_path)) source else null;
+    if (handler_source) |src| {
         if (zts.sourceLine(src, d.line)) |line_text| {
             try writer.print("    {d} | {s}\n", .{ d.line, line_text });
         }
@@ -987,7 +991,7 @@ test "writeDiagnosticLines: ZTS001 renders framed restriction rationale" {
         \\}
     ;
 
-    try writeDiagnosticLines(&aw.writer, &diagnostics, source, false);
+    try writeDiagnosticLines(&aw.writer, &diagnostics, source, "handler.ts", false);
     const out = aw.writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "restriction try/catch") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "handler.ts:2:5") != null);
@@ -1012,12 +1016,38 @@ test "writeDiagnosticLines: unknown ZTS001 falls back to suggestion" {
         .suggestion = @constCast("rewrite it explicitly"),
     }};
 
-    try writeDiagnosticLines(&aw.writer, &diagnostics, null, false);
+    try writeDiagnosticLines(&aw.writer, &diagnostics, null, "handler.ts", false);
     const out = aw.writer.buffered();
     try std.testing.expect(std.mem.indexOf(u8, out, "restriction future syntax") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "try    rewrite it explicitly") != null);
     try std.testing.expect(std.mem.indexOf(u8, out, "why    ") == null);
     try std.testing.expect(std.mem.indexOf(u8, out, "buys   ") == null);
+}
+
+test "writeDiagnosticLines: a ZTS001 row in another file prints no handler source line" {
+    const allocator = std.testing.allocator;
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+
+    const diagnostics = [_]Diagnostic{.{
+        .code = @constCast("ZTS001"),
+        .severity = @constCast("error"),
+        .file = @constCast("dep.ts"),
+        .line = 2,
+        .column = 5,
+        .message = @constCast("'try/catch' is not supported"),
+        .suggestion = @constCast("use Result types for error handling"),
+    }};
+    const handler_source =
+        \\function handler(req) {
+        \\    return Response.text("handler line two");
+        \\}
+    ;
+
+    try writeDiagnosticLines(&aw.writer, &diagnostics, handler_source, "handler.ts", false);
+    const out = aw.writer.buffered();
+    try std.testing.expect(std.mem.indexOf(u8, out, "dep.ts:2:5") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "handler line two") == null);
 }
 
 test "writeDiagnosticLines: non-ZTS001 keeps compact diagnostic form" {
@@ -1035,7 +1065,7 @@ test "writeDiagnosticLines: non-ZTS001 keeps compact diagnostic form" {
         .suggestion = @constCast("guard with !== undefined"),
     }};
 
-    try writeDiagnosticLines(&aw.writer, &diagnostics, null, false);
+    try writeDiagnosticLines(&aw.writer, &diagnostics, null, "handler.ts", false);
     try std.testing.expectEqualStrings(
         "  handler.ts:7:11: ZTS308: unchecked optional use\n      hint: guard with !== undefined\n",
         aw.writer.buffered(),

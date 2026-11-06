@@ -188,9 +188,9 @@ pub fn appendSpecDiagnosticsJson(
             .severity = if (diag.kind.severity() == .warn) "warning" else "error",
             .message = message,
             .message_owned = owned_message != null,
-            .file = handler_path,
-            .line = contract.handler.line,
-            .column = @intCast(@min(contract.handler.column, std.math.maxInt(u16))),
+            .file = if (diag.site) |site| (site.file orelse handler_path) else handler_path,
+            .line = if (diag.site) |site| site.line else contract.handler.line,
+            .column = @intCast(@min(if (diag.site) |site| site.column else contract.handler.column, std.math.maxInt(u16))),
             .suggestion = diag.suggestion,
         }) catch {
             if (owned_message) |owned| allocator.free(owned);
@@ -457,9 +457,12 @@ pub fn formatFailureSections(writer: anytype, r: *const CheckResult, filename: [
             writer.print("\n  Spec diagnostics:\n", .{}) catch return;
             for (contract.spec_diagnostics.items) |d| {
                 if (d.kind.severity() != .err) continue;
+                const place_file = if (d.site) |site| (site.file orelse filename) else filename;
+                const place_line = if (d.site) |site| site.line else contract.handler.line;
+                const place_column = if (d.site) |site| site.column else contract.handler.column;
                 writer.print(
                     "    {s} (error) {s}:{d}:{d}  {s}",
-                    .{ diagnostic_catalog.specCode(d.kind), filename, contract.handler.line, contract.handler.column, specDiagnosticMessage(d) },
+                    .{ diagnostic_catalog.specCode(d.kind), place_file, place_line, place_column, specDiagnosticMessage(d) },
                 ) catch return;
                 if (specDiagnosticSubject(d)) |subject| {
                     if (d.cause) |cause| {
@@ -662,7 +665,7 @@ fn specDiagnosticMessage(diag: zts.SpecDiagnostic) []const u8 {
         }
     }
     return switch (diag.kind) {
-        .not_discharged => "declared Proof capsule was not discharged by handler proof",
+        .not_discharged => if (diag.function != null) "helper's declared Proof capsule does not hold" else "declared Proof capsule was not discharged by handler proof",
         .incompatible_with_import => "declared Proof capsule is incompatible with imported module",
         .unknown_name => "declared Proof capsule name is not recognized",
         .missing_capsule => "helper breaks a handler-demanded property and carries no Proof<...> capsule",

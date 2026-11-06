@@ -647,8 +647,9 @@ pub fn reportSpecErrors(contract: *const HandlerContract, filename: []const u8, 
         if (diagnostic.kind.severity() != .err) continue;
         if (gate == .authored and diagnostic.implicit_default) continue;
         count += 1;
+        const place_file = if (diagnostic.site) |site| (site.file orelse filename) else filename;
         if (!builtin.is_test) debugPrint("{s}: {s} {s}\n", .{
-            filename,
+            place_file,
             diagnostic_catalog.specCode(diagnostic.kind),
             diagnostic.spec_name,
         });
