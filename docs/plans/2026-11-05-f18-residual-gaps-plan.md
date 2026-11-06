@@ -12,8 +12,19 @@ The F18 plan (`2026-11-05-f18-module-state-proofs-plan.md`) recorded five residu
 | U2b | Complete: edcdd08f, with U2 |
 | U3 | Complete: 7708ce03 |
 | U4 | Complete: fe33d496 |
-| U5 | Complete: multi-module tests; the graph compile prints flow-only writes and names the entry write |
-| U6 | Not started |
+| U5 | Complete: 58832721 |
+| U6 | Complete: `docs/verification.md` sections 7 and 9, the native-export rule in `packages/modules/AGENTS.md`, `docs/plans/README.md`; the website has no affected claim; `verify.sh` passed before the commit |
+
+## Gaps that remain
+
+Each of these is outside this plan. Each was present before it, except the over-reports, which can only remove a property.
+
+- CHECK does not discharge a `Proof` capsule on a helper in a dependency module. A dependency helper `stamp(): Proof<number, "pure">` that returns `Date.now()` passes `zts check` with no diagnostic.
+- The ZTS500 of a helper's own capsule points at the handler's line, and its message says "not discharged by handler proof". U4 puts the write line in the message and the hint only.
+- A ZTS606 that the implicit default profile causes is not marked `implicit_default`.
+- A write in a dependency module gets the generic hint, because `PropertyCause` has no file. The live-reload HUD and the counterexample pipeline do not show a write cause.
+- Over-reports: one allocation site for two request allocations behind the same call, one cell for each closure capture, and a verifier ZTS310 on a helper that only module initialization calls.
+- A module initialization that never returns proves every property (U1 finding). `zttp serve` aborts at load, so no request runs.
 
 ## Reproduction
 

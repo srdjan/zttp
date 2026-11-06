@@ -224,17 +224,25 @@ Fix: use `const` for module-level declarations, or move mutable state to `zttp:c
 
 A member or index write gets the same error when its base is a builtin such as `Math` or `parseInt`, a module-scope binding, or a local initialized from one of them. The check follows one level of alias. It does not follow an alias through a call or a member chain.
 
-A mutating array method writes through its receiver, so the same rule applies to the receiver: `seen.push(1)`, `store.items.push(1)`, and `const a = seen; a.push(1)` all get the error. A copy such as `const xs = [...seen]; xs.push(1)` does not. A receiver that is a call result, such as `getStore().items.push(1)`, is not tested.
+A mutating array method writes through its receiver, so the same rule applies to the receiver: `seen.push(1)`, `store.items.push(1)`, and `const a = seen; a.push(1)` all get the error. A copy such as `const xs = [...seen]; xs.push(1)` does not. The verifier does not test a receiver that is a call result, such as `getStore().items.push(1)`. The flow evaluator below covers that shape.
 
 The verifier also visits every other function of the program: a helper declared before or after the handler, a top-level arrow, a function in an object literal, and a function nested in any of them. A write or a mutating array method call in such a function, on a module-scope binding, a builtin object, or an alias of one, sets `state_isolated` to false. The write is a `module_scope_mutation` warning that names a helper. It is not an error. A capsule that demands none of `state_isolated`, `pure`, `stateless`, `read_only`, `retry_safe`, `deterministic`, and `idempotent` still compiles. A capsule that demands one of them, and a handler with no capsule, stop at ZTS500.
 
-The helper sweep does not follow calls. A helper that only module initialization calls therefore also clears `state_isolated`. That result is conservative. Code at the top level outside a function is module initialization and is not tested. A write through a function parameter, such as `p.hits = 1` or `p.push(1)` where `p` is an argument, is not modeled. So a module array that a handler passes to such a helper is not detected.
+The helper sweep does not follow calls. A helper that only module initialization calls therefore also clears `state_isolated`. That result is conservative. Code at the top level outside a function is module initialization and is not tested. The verifier does not model a write through a function parameter, such as `p.hits = 1` or `p.push(1)` where `p` is an argument. The flow evaluator below covers that shape.
 
 The runtime does not freeze builtin objects. A handler with no accepted certificate runs on `.reuse_bounded_by_count`: one runtime serves up to a fixed count of requests. State that such a handler writes, in a module-scope binding or in a builtin object, can cross requests within that count. The check above keeps that handler from proving `state_isolated`, which is the property that allows wider reuse.
 
 The result feeds into `HandlerProperties.state_isolated`. When no module-scope mutations are detected, `state_isolated` is proven true, enabling safe multi-tenant handler sharing. A contract built without `precompile --verify` leaves `state_isolated` false. `false` on any property means unproven, not violated.
 
-A write to shared state also removes six other properties. When the verifier ran and found a module-scope mutation or an unresolved route dispatch, `pure`, `stateless`, `read_only`, `retry_safe`, `deterministic`, and `idempotent` are not proven. A response can then depend on state that earlier requests wrote. The virtual-module effect row does not see a write to module state, so `clearSharedStateProperties` in `packages/tools/src/precompile_check_run.zig` applies the verifier fact. A contract built without verification keeps these properties. A helper capsule, such as `Proof<number, "read_only">` on a helper that pushes onto a module array, is still discharged from the effect row alone.
+A write to shared state also removes six other properties. When the verifier ran and found a module-scope mutation or an unresolved route dispatch, `pure`, `stateless`, `read_only`, `retry_safe`, `deterministic`, and `idempotent` are not proven. A response can then depend on state that earlier requests wrote. The virtual-module effect row does not see a write to module state, so `clearSharedStateProperties` in `packages/tools/src/precompile_check_run.zig` applies the verifier fact. A contract built without verification keeps these properties.
+
+The flow evaluator supplies a second fact that removes the same seven properties. It follows each request through the handler, the helpers that it calls, and the modules that it imports. It records each write that the request makes to state that outlives the request: a module binding, a builtin object, a capture of module initialization, or an object that one of them reaches. This covers what the verifier does not name: a write through a helper's parameter, through a call result, through an element read, or through an alias that the verifier does not follow. Each mutating array method counts, including `pop` and `shift`. A write during module initialization does not count. An evaluation that cannot follow the handler, for example after an unknown callee or at the step budget, also counts, because it proves nothing about state. `flowSharesState` in `packages/tools/src/precompile_check_run.zig` holds this rule. CHECK, the single-module compile, and the graph compile each read it. One evaluation of the entry handler covers the whole module graph, so a dependency needs no separate evaluation.
+
+A write that only the flow evaluator finds is a ZTS310 warning at the write, in the file that holds it. A write that the verifier names is not reported twice. The ZTS500 hint of a property that a write removed names the line of the first write in the entry file. A property that another cause removed, such as `Date.now()` for `deterministic` or a `zttp:cache` write for `read_only`, keeps its own cause and hint. A write in a dependency module gets the generic hint, because a cause has a line but no file.
+
+The flow evaluator follows a function export and an `export const` with an initializer. One copy of a `const` binding after the exporting module initializes is exact. The copy keeps its origins, so a write through an imported array reaches the exporting module's site. Admission refuses `export let` and `export var`, and the parser refuses re-exports and export lists.
+
+The fact covers the JavaScript heap only. A native store stays with the effect row: `zttp:cache`, SQL, and the per-pool `zttp:ratelimit` store. One allocation site stands for every object that it creates. Module initialization and a request use different sites, so a request-local object from a shared factory does not count as module state. Two request allocations behind the same call, and a closure capture, can still share a site. The result can then remove a property that holds. It cannot prove one that does not hold.
 
 ### 8. Author-Declared Proof Discharge
 
@@ -293,6 +301,13 @@ Helper failures reuse ZTS500 / ZTS502, each carrying a `function`
 attribution. A helper that breaks a property the handler's `Proof<T, P>`
 demands while carrying no capsule for it gets **ZTS606 -
 missing_capsule**: the proof cannot compose across that call boundary.
+A helper that writes state that outlives a request does not prove `pure`,
+`read_only`, or `deterministic`, with or without a capsule. The flow
+evaluator decides this for a helper that a request runs, from the
+helpers on the stack of each write (section 7). For a helper that no
+handler runs, the verifier decides it from a ZTS310 write in its body or
+in a function that it calls. CHECK does not discharge a capsule of a
+helper in a dependency module.
 `computeProperties` intersects the handler's classified properties with
 its call-graph-composed effect row, so a property the handler claims
 also accounts for every helper it transitively calls. `zts check
