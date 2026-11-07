@@ -6,9 +6,9 @@ The cross-module state writers plan (`2026-11-06-cross-module-state-writers-plan
 
 | Unit | Status |
 |---|---|
-| U1 | Committed on 2026-11-07 on local main; the 18 gates and `check-spine` passed from an empty cache |
-| U2 | Committed on 2026-11-07 on local main; the 18 gates and `check-spine` passed from an empty cache |
-| U3 | Not started |
+| U1 | Committed as `110f4cd9` on 2026-11-07 on local main; the 18 gates and `check-spine` passed from an empty cache |
+| U2 | Committed as `bad93c63` on 2026-11-07 on local main; the 18 gates and `check-spine` passed from an empty cache |
+| U3 | Done on 2026-11-07: reviews, probes, repair checks, mutants, timing, and `verify.sh`; the F1 fix is `37cc075c` |
 
 ## Reproduction
 
@@ -163,11 +163,54 @@ The same rules as for the U1 tests apply to regressions and controls.
 - A golden that holds a default-profile ZTS500 for a program with a helper that breaks a property changes in U2. The scan on 2026-11-07 found no such golden: `handler_without_proof_capsule.diag` and `modules_all.contract.golden.json` hold no ZTS606 row. The full gates in U2 confirm it.
 - No recorded transcript holds either text, so no corpus re-record is needed.
 
+## U3 results
+
+Opus, Fable, and Codex astra validated U1 (`110f4cd9`) and U2 (`bad93c63`) on 2026-11-07 with the binaries built at `bad93c63` (`/tmp/zttp-g4/out-u3`) and at `6af15c69` (`/tmp/zttp-g4/out`). The probes are in `/tmp/zttp-g4/u3-probes/` and `/tmp/zttp-g4/u3-fable/`.
+
+- Surfaces (Opus): `zts check` and `zttp compile --no-attest` give the same exit status on pE, pE3, pE3fix, pEg, pEg2, and pClean before and after, so both still refuse every error. The binary of pClean at `6af15c69` embeds the row "does not hold: cost_bounded, fault_covered", and the new binary does not. The new binary holds the phrase only in the empty format string of the runtime template. `zttp dev` refuses pE in its preflight with 3 errors and the new texts. `zttp proofs gate` on a status change of pE exits 2 at `6af15c69` and exits 1 with `breaking` at `bad93c63`. pE3 and A8 still exit 2.
+- Repair check (Opus): declaring the capsule that each ZTS500 row suggests gives 0 errors on pE, pEg2, pE3fix, and on 11 Fable probes with a ZTS606 row (A1 to A7, A11, B1, B5). B6 (a helper in a dependency) gets no ZTS606, which is gap 7. Fable repeated the check on 12 more shapes, with the same result except F3.
+- Second refresh (Fable): `zts compile --verify --contract` and `zts check --json` give the same spec rows on 16 probes. At `6af15c69` they differ on pClean and pE3.
+- Codex astra checked 8 claims: the readers of the mark, the build refusal, the order of the refresh in every driver, the second refresh, the token match, the borrowed names, the docs, and the recorded texts. Seven hold. Claim 7 found three doc sentences that claim more than the code. Opus corrected them: the gate accepts a side with only marked errors except a ZTS606 as stated, only the Effects errors ZTS504 and ZTS506 stop it (the ZTS505 warning does not), and ZTS606 covers a reachable helper in the entry file only.
+
+| Finding | Reviewer | Resolution |
+|---|---|---|
+| F1, should-fix | Fable | The gate accepted a marked ZTS606 only through the ZTS500 row. Under a `zttp:cache` or `zttp:sql` import the handler's `read_only` failure is in the marked ZTS501 row, so a helper that writes through the store kept exit 2. Fail-closed and older than U1. Fixed: `handlerFailsProperty` also reads a marked ZTS501 row whose property is the same, with a regression test and a control. |
+| F2, note | Fable | A clock read inside a nested function, an arrow in an object, or an inline arrow passed to a helper gets no ZTS606, and the handler keeps `deterministic` while the response follows a branch on it (probes h6, h8, h7b). The gate compares those sides at `6af15c69` too. This is the false `deterministic` proof: the three probes join the U3 list of the control-flow determinism plan. |
+| F3, note | Fable | When a helper declares its own capsule and fails it (h25), the suggested capsule leaves the helper's authored ZTS500. That row is correct, and the gate's exit 2 is right. No change. |
+| F4, note | Fable | "copy the value into a local before the write" clears the errors only with a real copy, such as a leading spread. An alias keeps the write. The authored text and the ZTS310 help use the same words. Recorded under "Gaps that remain after this plan". |
+| F5, note | Fable | The same module write gives `exhaustive_returns`, `results_safe`, and `optionals_safe` "---" inline and PROVEN in a helper. Older than this plan. Recorded under "Gaps that remain after this plan". |
+
+Mutants (Opus, in the scratch worktree `/tmp/zttp-g4/wt-mut` at `bad93c63`, unfiltered `test-precompile` or `test-cli`; logs in `/tmp/zttp-g4/mut-logs/`). Seven of ten are killed:
+
+| Mutant | Killed by |
+|---|---|
+| M1: the ZTS606 row never carries the mark | 6 CHECK tests, for example "a clock helper under the default profile gets default-profile ZTS606 text next to the ZTS500 row" |
+| M2: a marked ZTS606 row loses its subject | 6 CHECK tests, for example "check refuses a helper mutation only when the capsule demands state_isolated" |
+| M3: the write case uses the authored write text | "a module write in a helper under the default profile gets the default-profile write text on each ZTS606 row" |
+| M4: the refresh passes no excluded name | 4 tests, for example "a clock helper whose value the handler drops gets a ZTS500 capsule that leaves out the property of each ZTS606 row" |
+| M5: the gate accepts every marked ZTS606 row | "run: a default-profile clock helper whose value the handler drops still exits 2" and "run: a default-profile handler that branches on a clock helper still exits 2" |
+| M6: the gate accepts no marked ZTS606 row | "run: a default-profile clock helper that the handler returns gets a breaking verdict when the status changes" and "... is safe when only a comment changes" |
+| M7: no second refresh in compileHandler | "compileHandler gives a clock helper the ZTS500 capsule that leaves out the property of each ZTS606 row" and "compileHandler of a handler that holds every default property keeps no spec diagnostic in the contract" |
+
+Three survive, and no test can kill them today:
+
+- M8 (the refresh also excludes the property of an unmarked ZTS606 row): a contract holds marked or unmarked ZTS606 rows, never both, because the mark is `declared_specs_implicit`. With unmarked rows the handler declares a capsule, so no default-profile ZTS500 suggestion is built, and the list is never read.
+- M9 (`handlerFailsProperty` also reads a ZTS500 row with a `function`): no marked ZTS500 row has a `function`. The test is a guard against a future helper row with the mark.
+- M10 (a substring match instead of an exact token): no name of the v1 profile is a substring of another, so the two matches agree on every possible row.
+
+The F1 fix (`37cc075c`) got two more mutants, both killed: M11 (the ZTS501 line removed) by "run: a default-profile cache helper whose read_only the ZTS501 row names gets a breaking verdict when the status changes", and M12 (every marked ZTS501 row accepted) by "run: a default-profile clock helper under a cache import still exits 2 when the handler holds deterministic".
+
+Timing (Opus): `zts check` over the 149 tracked `.ts` files under `tests/corpus/check/`, three interleaved rounds, both binaries Debug builds from the same command: 0.75, 0.70, and 0.68 s at `6af15c69`, and 0.76, 0.69, and 0.70 s at `bad93c63`. No difference shows at this scale.
+
+`bash scripts/verify.sh` from an empty private cache at `37cc075c`: exit 0, "all per-commit gates passed".
+
 ## Gaps that remain after this plan
 
 - Items 5 to 7 of "Other gaps, ranked" in the cross-module state writers plan.
 - `zts compile` on one file exits 0 for an authored helper ZTS500 (probe pD2). `zttp compile` refuses it. This is older than this plan.
-- A false `deterministic` proof, found by Fable during the review of this plan and older than it. `deterministic` and `idempotent` ignore a branch on a clock value. Probe pA8c at `6af15c69`: the handler declares `Proof<Response, "deterministic" | "read_only">`, reads `const t = Date.now();`, and returns "even" or "odd" on `t % 2 === 0`. `zts check` gives 0 errors with `deterministic` PROVEN, and `zttp compile --no-attest` writes the binary. The binary logs "Proof accepted: weakest edge trusted, 3 disclosed edge(s)". It does not log "Proof cache: enabled", and 30 requests gave 17 "even" and 13 "odd". So the run cache was not observed to serve a stale response. When the server sets `cache_properties` is not measured yet. `docs/verification.md` discloses implicit flow for `no_secret_leakage` only (decision D9 of the flow redesign). In the PR gate, Fable's probe of the inline form gives "Verdict: `equivalent`" for a change that makes the response depend on the clock. This plan does not fix it. Decision 3 (c) keeps the helper form at exit 2.
+- "copy the value into a local before the write" (the default-profile write text, the authored write text, and the ZTS310 help) clears the errors only with a real copy, such as a leading spread. An alias keeps the write (U3 finding F4).
+- The same module write gives `exhaustive_returns`, `results_safe`, and `optionals_safe` "---" when it is inline in the handler, and PROVEN when it is in a helper (U3 finding F5, probes `i1_write_ret` and `h1_write_ret` in `/tmp/zttp-g4/u3-fable/p/`). One of the two is wrong. It is older than this plan.
+- A false `deterministic` proof, found by Fable during the review of this plan and older than it. The control-flow determinism plan (`2026-11-07-control-flow-determinism-plan.md`) fixes it, and its commit waits for the owner's re-record of the DeepSeek corpus. `deterministic` and `idempotent` ignore a branch on a clock value. Probe pA8c at `6af15c69`: the handler declares `Proof<Response, "deterministic" | "read_only">`, reads `const t = Date.now();`, and returns "even" or "odd" on `t % 2 === 0`. `zts check` gives 0 errors with `deterministic` PROVEN, and `zttp compile --no-attest` writes the binary. The binary logs "Proof accepted: weakest edge trusted, 3 disclosed edge(s)". It does not log "Proof cache: enabled", and 30 requests gave 17 "even" and 13 "odd". So the run cache was not observed to serve a stale response. When the server sets `cache_properties` is not measured yet. `docs/verification.md` discloses implicit flow for `no_secret_leakage` only (decision D9 of the flow redesign). In the PR gate, Fable's probe of the inline form gives "Verdict: `equivalent`" for a change that makes the response depend on the clock. This plan does not fix it. Decision 3 (c) keeps the helper form at exit 2.
 
 ## Review findings
 
