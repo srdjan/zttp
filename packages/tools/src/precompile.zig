@@ -4299,6 +4299,63 @@ test "compileHandler graph refuses a false Proof capsule on a dependency helper"
     try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
 }
 
+const clock_in_entry =
+    \\import { greet } from "./dep.ts";
+    \\
+    \\function stamp(): number {
+    \\  return Date.now();
+    \\}
+    \\
+    \\export function handler(req: Request): Response {
+    \\  return Response.text([greet(), String(stamp())].join(""));
+    \\}
+    \\
+;
+
+const clock_in_entry_declared =
+    \\import { greet } from "./dep.ts";
+    \\
+    \\function stamp(): number {
+    \\  return Date.now();
+    \\}
+    \\
+    \\export function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  return Response.text([greet(), String(stamp())].join(""));
+    \\}
+    \\
+;
+
+const greet_ok_dep =
+    \\export function greet(): string {
+    \\  return "ok";
+    \\}
+    \\
+;
+
+test "compileHandler graph accepts a clock helper of the entry under the default profile and marks all three rows" {
+    var fixture = try importFixture(clock_in_entry, greet_ok_dep);
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const contract = compiled.contract orelse return error.MissingContract;
+    const rows = contract.spec_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    try std.testing.expectEqual(zts.SpecDiagnostic.Kind.not_discharged, rows[0].kind);
+    try std.testing.expect(rows[0].implicit_default);
+    try std.testing.expectEqual(zts.SpecDiagnostic.Kind.missing_capsule, rows[1].kind);
+    try std.testing.expectEqualStrings("pure", rows[1].spec_name);
+    try std.testing.expect(rows[1].implicit_default);
+    try std.testing.expectEqual(zts.SpecDiagnostic.Kind.missing_capsule, rows[2].kind);
+    try std.testing.expectEqualStrings("deterministic", rows[2].spec_name);
+    try std.testing.expect(rows[2].implicit_default);
+}
+
+test "control: compileHandler graph refuses a clock helper of the entry under a declared deterministic capsule" {
+    var fixture = try importFixture(clock_in_entry_declared, greet_ok_dep);
+    defer fixture.deinit();
+    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+}
+
 const cross_writer_dep =
     \\let count = 0;
     \\

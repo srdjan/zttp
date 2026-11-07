@@ -301,6 +301,10 @@ Helper failures reuse ZTS500 / ZTS502, each carrying a `function`
 attribution. A helper that breaks a property the handler's `Proof<T, P>`
 demands while carrying no capsule for it gets **ZTS606 -
 missing_capsule**: the proof cannot compose across that call boundary.
+When the handler declares no capsule, the demanded set is the default profile.
+The ZTS606 row then carries the `implicit_default` mark, and its text names the
+default profile. Its remedy points at the capsule that the ZTS500 row of the
+handler suggests.
 A helper that writes state that outlives a request does not prove `pure`,
 `read_only`, or `deterministic`, with or without a capsule. The flow
 evaluator decides this for a helper that a request runs, from the

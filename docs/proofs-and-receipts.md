@@ -436,11 +436,19 @@ mark, and it compares the two contracts as for any other handler. The behavior
 verdict, the lost proofs, and the critical-loss rule apply unchanged. An added
 handler of this kind is `additive`, and a deleted one is `breaking`.
 
-The gate reads the mark, not the diagnostic code. A declared capsule that fails,
-a helper capsule that fails, ZTS606, the Effects diagnostics, and every
-analysis error still stop the gate with exit 2. The JSON report gives each
-handler a `capsule` field, `"implicit"` or `"declared"`. The Markdown report
-adds a "no declared capsule" note for an implicit handler.
+The gate reads the mark. For a ZTS606 row it also reads the code. A ZTS606 row
+under the default profile carries the mark, and the gate accepts that row only when its
+property is one that the ZTS500 row of the handler names as not held. The
+handler already fails that property, so the ZTS606 row adds no error. A ZTS606
+row for a property that the handler still holds stops the gate with exit 2. The
+`deterministic` and `idempotent` facts of the handler ignore a branch on a
+clock value, so only that row shows that a helper breaks the property. With no
+ZTS500 row for the handler, the ZTS606 row also stops the gate. A declared
+capsule that fails, a helper capsule that fails, a ZTS606 under a declared
+capsule, the Effects diagnostics, and every analysis error still stop the gate
+with exit 2. The JSON report gives each handler a `capsule` field, `"implicit"`
+or `"declared"`. The Markdown report adds a "no declared capsule" note for an
+implicit handler.
 
 ### A changed helper
 

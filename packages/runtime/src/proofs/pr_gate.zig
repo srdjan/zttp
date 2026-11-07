@@ -1149,15 +1149,44 @@ const SourceKind = enum { handler, implicit_handler, non_handler };
 /// the handler declared no `Proof<...>` capsule and misses a property of the
 /// default profile. The caller has already ruled out `hasAnalysisErrors`, so
 /// spec errors are the only errors left. The test reads the
-/// `SpecDiagnostic.implicit_default` flag and never a diagnostic code, so a
-/// declared capsule failure, a helper capsule failure, ZTS606, and the Effects
-/// errors all keep the answer false. Total: a null contract returns false.
+/// `SpecDiagnostic.implicit_default` flag, and a code only for the ZTS606 rule
+/// below, so a declared capsule failure, a helper capsule failure, an authored ZTS606, and
+/// the Effects errors all keep the answer false. Total: a null contract
+/// returns false.
+///
+/// A ZTS606 row with the mark gets one more test. The gate accepts it only
+/// when its property is one of the properties that the default-profile ZTS500
+/// row of the handler names as not held. The handler already fails that
+/// property, so the ZTS606 row adds no error to the ZTS500 row. A ZTS606 whose
+/// property the handler still holds is the one error that stops the gate here.
+/// The `deterministic` and `idempotent` facts of the handler ignore a branch on
+/// a clock value, so a helper that reads the clock can break `deterministic`
+/// while the handler claims it. The ZTS606 row is then the only sign of the
+/// break, and the gate must not compare that side. With no handler-level
+/// default-profile ZTS500 row, the ZTS606 row keeps the answer false.
 fn onlyImplicitDefaultSpecErrors(result: *const zts_cli.precompile.CheckResult) bool {
     const contract = if (result.contract) |*c| c else return false;
     for (contract.spec_diagnostics.items) |d| {
-        if (d.kind.severity() == .err and !d.implicit_default) return false;
+        if (d.kind.severity() != .err) continue;
+        if (!d.implicit_default) return false;
+        if (d.kind == .missing_capsule and !handlerFailsProperty(contract, d.spec_name)) return false;
     }
     return true;
+}
+
+/// True when the default-profile ZTS500 row of the handler (`not_discharged`,
+/// marked, with no `function`) lists `property` in its `", "`-joined
+/// `spec_name`. That list is the set of properties that the handler does not
+/// hold.
+fn handlerFailsProperty(contract: *const zts.HandlerContract, property: []const u8) bool {
+    for (contract.spec_diagnostics.items) |d| {
+        if (d.kind != .not_discharged or !d.implicit_default or d.function != null) continue;
+        var tokens = std.mem.tokenizeSequence(u8, d.spec_name, ", ");
+        while (tokens.next()) |token| {
+            if (std.mem.eql(u8, token, property)) return true;
+        }
+    }
+    return false;
 }
 
 /// Whether a check is clean enough to compare. Clean means no errors, or only
@@ -2172,6 +2201,163 @@ test "run: an implicit-default handler with an unchanged behavior is safe" {
 
 test "run: a declared capsule that fails on both sides still exits 2" {
     const g = try gateOverEdit(declared_failing_base, declared_failing_head, .json);
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 2), g.code);
+    try testing.expectEqual(@as(usize, 0), g.report.len);
+    try testing.expect(std.mem.indexOf(u8, g.stderr, "UnanalysableSource") != null);
+}
+
+// A default-profile handler that returns the value of a helper that reads the
+// clock. The handler fails `deterministic` and `pure` itself, so the two
+// default-profile ZTS606 rows add nothing to the ZTS500 row.
+const clock_helper_base =
+    \\function stamp(): number {
+    \\  return Date.now();
+    \\}
+    \\function handler(req: Request): Response {
+    \\  return Response.text(String(stamp()), { status: 200 });
+    \\}
+    \\
+;
+
+const clock_helper_status_changed =
+    \\function stamp(): number {
+    \\  return Date.now();
+    \\}
+    \\function handler(req: Request): Response {
+    \\  return Response.text(String(stamp()), { status: 404 });
+    \\}
+    \\
+;
+
+const clock_helper_comment_only =
+    \\// A comment that changes no behavior.
+    \\function stamp(): number {
+    \\  return Date.now();
+    \\}
+    \\function handler(req: Request): Response {
+    \\  return Response.text(String(stamp()), { status: 200 });
+    \\}
+    \\
+;
+
+test "run: a default-profile clock helper that the handler returns gets a breaking verdict when the status changes" {
+    const g = try gateOverEdit(clock_helper_base, clock_helper_status_changed, .json);
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 1), g.code);
+    try testing.expectEqualStrings("", g.stderr);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"verdict\":\"breaking\"") != null);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"capsule\":\"implicit\"") != null);
+}
+
+test "run: a default-profile clock helper that the handler returns is safe when only a comment changes" {
+    const g = try gateOverEdit(clock_helper_base, clock_helper_comment_only, .json);
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 0), g.code);
+    try testing.expectEqualStrings("", g.stderr);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"capsule\":\"implicit\"") != null);
+}
+
+// The handler calls the clock helper and drops the value, so it holds
+// `deterministic`. The ZTS606 row for `deterministic` is the only error that
+// stops the gate.
+const clock_dropped_base =
+    \\function stamp(): number {
+    \\  return Date.now();
+    \\}
+    \\function handler(req: Request): Response {
+    \\  const t = stamp();
+    \\  return Response.text("ok", { status: 200 });
+    \\}
+    \\
+;
+
+const clock_dropped_status_changed =
+    \\function stamp(): number {
+    \\  return Date.now();
+    \\}
+    \\function handler(req: Request): Response {
+    \\  const t = stamp();
+    \\  return Response.text("ok", { status: 404 });
+    \\}
+    \\
+;
+
+const clock_dropped_declared_base =
+    \\function stamp(): number {
+    \\  return Date.now();
+    \\}
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const t = stamp();
+    \\  return Response.text("ok", { status: 200 });
+    \\}
+    \\
+;
+
+const clock_dropped_declared_status_changed =
+    \\function stamp(): number {
+    \\  return Date.now();
+    \\}
+    \\function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const t = stamp();
+    \\  return Response.text("ok", { status: 404 });
+    \\}
+    \\
+;
+
+// Control (passes at HEAD): a ZTS606 under a declared capsule stops the gate.
+test "run: a ZTS606 under a declared deterministic capsule still exits 2" {
+    const g = try gateOverEdit(clock_dropped_declared_base, clock_dropped_declared_status_changed, .json);
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 2), g.code);
+    try testing.expectEqual(@as(usize, 0), g.report.len);
+    try testing.expect(std.mem.indexOf(u8, g.stderr, "UnanalysableSource") != null);
+}
+
+// Control (passes at HEAD): the handler holds `deterministic`, so the marked
+// ZTS606 row for it is not accepted. A change that accepted every marked row
+// would fail this test.
+test "run: a default-profile clock helper whose value the handler drops still exits 2" {
+    const g = try gateOverEdit(clock_dropped_base, clock_dropped_status_changed, .json);
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 2), g.code);
+    try testing.expectEqual(@as(usize, 0), g.report.len);
+    try testing.expect(std.mem.indexOf(u8, g.stderr, "UnanalysableSource") != null);
+}
+
+// Control (passes at HEAD): the handler branches on the clock value. Its
+// `deterministic` fact ignores the branch, so the handler holds it and the
+// marked ZTS606 row for it is not accepted.
+const clock_branch_base =
+    \\function stamp(): number {
+    \\  return Date.now();
+    \\}
+    \\function handler(req: Request): Response {
+    \\  const t = stamp();
+    \\  if (t > 0) {
+    \\    return Response.text("a");
+    \\  }
+    \\  return Response.text("b");
+    \\}
+    \\
+;
+
+const clock_branch_head =
+    \\function stamp(): number {
+    \\  return Date.now();
+    \\}
+    \\function handler(req: Request): Response {
+    \\  const t = stamp();
+    \\  if (t > 0) {
+    \\    return Response.text("a");
+    \\  }
+    \\  return Response.text("c");
+    \\}
+    \\
+;
+
+test "run: a default-profile handler that branches on a clock helper still exits 2" {
+    const g = try gateOverEdit(clock_branch_base, clock_branch_head, .json);
     defer g.deinit();
     try testing.expectEqual(@as(u8, 2), g.code);
     try testing.expectEqual(@as(usize, 0), g.report.len);

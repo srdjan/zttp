@@ -629,9 +629,11 @@ pub fn formatProofCard(writer: anytype, r: *const CheckResult, filename: []const
 ///
 /// Null for the implicit-default cases, which have no declared name, and for the
 /// `Effects<...>` kinds, whose `spec_name` is the literal "Effects" rather than
-/// anything a reader could act on.
+/// anything a reader could act on. A marked `.missing_capsule` row is the one
+/// exception: its `spec_name` is the single property that the helper breaks, so
+/// the row keeps its subject.
 fn specDiagnosticSubject(diag: zts.SpecDiagnostic) ?[]const u8 {
-    if (diag.implicit_default) return null;
+    if (diag.implicit_default and diag.kind != .missing_capsule) return null;
     if (diag.spec_name.len == 0) return null;
     return switch (diag.kind) {
         .not_discharged,
@@ -679,6 +681,7 @@ fn specDiagnosticMessage(diag: zts.SpecDiagnostic) []const u8 {
         switch (diag.kind) {
             .not_discharged => return "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold",
             .incompatible_with_import => return "handler returns no Proof<T, P> capsule; the default profile's read_only conflicts with a stateful module import",
+            .missing_capsule => return "helper breaks a property of the default proof profile and carries no Proof<...> capsule",
             else => {},
         }
     }

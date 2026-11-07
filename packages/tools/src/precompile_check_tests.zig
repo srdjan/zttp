@@ -6877,24 +6877,24 @@ test "CHECK preserves measured lookup winners shadows and captures" {
                 },
                 .{
                     .code = "ZTS606",
-                    .message = "helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: pure)",
+                    .message = "helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: pure)",
                     .line = 1,
                     .column = 1,
-                    .suggestion = "annotate `compute` with `Proof<T, \"pure\">` and satisfy it, or inline the helper into the handler.",
+                    .suggestion = "the handler returns no Proof<T, P> capsule, so the default profile demands `pure`, and `compute` breaks it: declare the narrow Proof<T, P> capsule that the handler's ZTS500 row suggests, or make `compute` hold `pure` and annotate it with `Proof<T, \"pure\">`.",
                 },
                 .{
                     .code = "ZTS606",
-                    .message = "helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: read_only)",
+                    .message = "helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: read_only)",
                     .line = 1,
                     .column = 1,
-                    .suggestion = "annotate `compute` with `Proof<T, \"read_only\">` and satisfy it, or inline the helper into the handler.",
+                    .suggestion = "the handler returns no Proof<T, P> capsule, so the default profile demands `read_only`, and `compute` breaks it: declare the narrow Proof<T, P> capsule that the handler's ZTS500 row suggests, or make `compute` hold `read_only` and annotate it with `Proof<T, \"read_only\">`.",
                 },
                 .{
                     .code = "ZTS606",
-                    .message = "helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: deterministic)",
+                    .message = "helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: deterministic)",
                     .line = 1,
                     .column = 1,
-                    .suggestion = "annotate `compute` with `Proof<T, \"deterministic\">` and satisfy it, or inline the helper into the handler.",
+                    .suggestion = "the handler returns no Proof<T, P> capsule, so the default profile demands `deterministic`, and `compute` breaks it: declare the narrow Proof<T, P> capsule that the handler's ZTS500 row suggests, or make `compute` hold `deterministic` and annotate it with `Proof<T, \"deterministic\">`.",
                 },
             },
         },
@@ -13163,9 +13163,9 @@ test "check refuses a helper mutation only when the capsule demands state_isolat
     try std.testing.expectEqualStrings("ZTS310", bare.json_diagnostics.items[0].code);
     try std.testing.expectEqualStrings("ZTS500", bare.json_diagnostics.items[1].code);
     try std.testing.expectEqualStrings("ZTS606", bare.json_diagnostics.items[2].code);
-    try std.testing.expectEqualStrings("helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: pure)", bare.json_diagnostics.items[2].message);
-    try std.testing.expectEqualStrings("helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: read_only)", bare.json_diagnostics.items[3].message);
-    try std.testing.expectEqualStrings("helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: deterministic)", bare.json_diagnostics.items[4].message);
+    try std.testing.expectEqualStrings("helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: pure)", bare.json_diagnostics.items[2].message);
+    try std.testing.expectEqualStrings("helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: read_only)", bare.json_diagnostics.items[3].message);
+    try std.testing.expectEqualStrings("helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: deterministic)", bare.json_diagnostics.items[4].message);
 
     // A capsule that leaves the property out: the check passes with the warning only.
     const narrow_source =
@@ -13184,6 +13184,148 @@ test "check refuses a helper mutation only when the capsule demands state_isolat
     try std.testing.expectEqual(@as(u32, 0), narrow.totalErrors());
     try std.testing.expectEqual(@as(usize, 1), narrow.json_diagnostics.items.len);
     try std.testing.expectEqualStrings("ZTS310", narrow.json_diagnostics.items[0].code);
+}
+
+const clock_helper_default_suggestion =
+    "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, " ++
+    "but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the " ++
+    "properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | " ++
+    "\"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | " ++
+    "\"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | " ++
+    "\"injection_safe\" | \"canonical\" | \"cost_bounded\">`.";
+
+const default_profile_zts500_message =
+    "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold";
+
+test "a clock helper under the default profile gets default-profile ZTS606 text next to the ZTS500 row" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function stamp(): number {
+        \\  return Date.now();
+        \\}
+        \\
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(String(stamp()));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 3), result.totalErrors());
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 3), diagnostics.len);
+    try expectCompoundDiagnostic(diagnostics[0], .{
+        .code = "ZTS500",
+        .message = default_profile_zts500_message,
+        .line = 5,
+        .column = 24,
+        .suggestion = clock_helper_default_suggestion,
+    });
+    try expectCompoundDiagnostic(diagnostics[1], .{
+        .code = "ZTS606",
+        .message = "helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: pure)",
+        .line = 1,
+        .column = 1,
+        .suggestion = "the handler returns no Proof<T, P> capsule, so the default profile demands `pure`, and `stamp` breaks it: declare the narrow Proof<T, P> capsule that the handler's ZTS500 row suggests, or make `stamp` hold `pure` and annotate it with `Proof<T, \"pure\">`.",
+    });
+    try expectCompoundDiagnostic(diagnostics[2], .{
+        .code = "ZTS606",
+        .message = "helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: deterministic)",
+        .line = 1,
+        .column = 1,
+        .suggestion = "the handler returns no Proof<T, P> capsule, so the default profile demands `deterministic`, and `stamp` breaks it: declare the narrow Proof<T, P> capsule that the handler's ZTS500 row suggests, or make `stamp` hold `deterministic` and annotate it with `Proof<T, \"deterministic\">`.",
+    });
+}
+
+test "control: a clock helper under a declared deterministic capsule keeps the authored ZTS606 text" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function stamp(): number {
+        \\  return Date.now();
+        \\}
+        \\
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text(String(stamp()));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 2), result.totalErrors());
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[0].code);
+    try std.testing.expectEqualStrings("ZTS606", diagnostics[1].code);
+    try std.testing.expectEqualStrings("helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: deterministic)", diagnostics[1].message);
+    try std.testing.expectEqualStrings("annotate `stamp` with `Proof<T, \"deterministic\">` and satisfy it, or inline the helper into the handler.", diagnostics[1].suggestion orelse "(null)");
+}
+
+test "a module write in a helper under the default profile gets the default-profile write text on each ZTS606 row" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\const store: number[] = [];
+        \\
+        \\function bump(): number {
+        \\  store.push(1);
+        \\  return store.length;
+        \\}
+        \\
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(String(bump()));
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 4), result.totalErrors());
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 5), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS310", diagnostics[0].code);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqualStrings(default_profile_zts500_message, diagnostics[1].message);
+    try expectCompoundDiagnostic(diagnostics[2], .{
+        .code = "ZTS606",
+        .message = "helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: pure)",
+        .line = 3,
+        .column = 1,
+        .suggestion = "the handler returns no Proof<T, P> capsule, so the default profile demands `pure`, and `bump` reaches a write to module state at line 4: declare the narrow Proof<T, P> capsule that the handler's ZTS500 row suggests, or copy the value into a local before the write.",
+    });
+    try expectCompoundDiagnostic(diagnostics[3], .{
+        .code = "ZTS606",
+        .message = "helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: read_only)",
+        .line = 3,
+        .column = 1,
+        .suggestion = "the handler returns no Proof<T, P> capsule, so the default profile demands `read_only`, and `bump` reaches a write to module state at line 4: declare the narrow Proof<T, P> capsule that the handler's ZTS500 row suggests, or copy the value into a local before the write.",
+    });
+    try expectCompoundDiagnostic(diagnostics[4], .{
+        .code = "ZTS606",
+        .message = "helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: deterministic)",
+        .line = 3,
+        .column = 1,
+        .suggestion = "the handler returns no Proof<T, P> capsule, so the default profile demands `deterministic`, and `bump` reaches a write to module state at line 4: declare the narrow Proof<T, P> capsule that the handler's ZTS500 row suggests, or copy the value into a local before the write.",
+    });
+}
+
+test "a clock helper whose value the handler drops keeps the default-profile ZTS500 row next to two ZTS606 rows" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function stamp(): number {
+        \\  return Date.now();
+        \\}
+        \\
+        \\export function handler(req: Request): Response {
+        \\  const t = stamp();
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 4), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS305", diagnostics[0].code);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqualStrings(default_profile_zts500_message, diagnostics[1].message);
+    try std.testing.expectEqualStrings("ZTS606", diagnostics[2].code);
+    try std.testing.expectEqualStrings("helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: pure)", diagnostics[2].message);
+    try std.testing.expectEqualStrings("ZTS606", diagnostics[3].code);
+    try std.testing.expectEqualStrings("helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: deterministic)", diagnostics[3].message);
 }
 
 const shared_state_default_help =
@@ -13349,9 +13491,9 @@ test "a helper that pushes onto its parameter, called with a module array, unpro
     try std.testing.expectEqualStrings("g1.ts", diagnostics[0].file);
     try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
     try std.testing.expectEqualStrings("ZTS606", diagnostics[2].code);
-    try std.testing.expectEqualStrings("helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: pure)", diagnostics[2].message);
-    try std.testing.expectEqualStrings("helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: read_only)", diagnostics[3].message);
-    try std.testing.expectEqualStrings("helper breaks a handler-demanded property and carries no Proof<...> capsule (failing spec: deterministic)", diagnostics[4].message);
+    try std.testing.expectEqualStrings("helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: pure)", diagnostics[2].message);
+    try std.testing.expectEqualStrings("helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: read_only)", diagnostics[3].message);
+    try std.testing.expectEqualStrings("helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: deterministic)", diagnostics[4].message);
     try std.testing.expectEqual(@as(u32, 1), result.verify_warnings);
 }
 

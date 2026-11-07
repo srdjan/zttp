@@ -183,6 +183,37 @@ pub fn stateWriteHelperSuggestion(allocator: std.mem.Allocator, function: []cons
     return allocator.print("`{s}` reaches a write to module state at line {d}: " ++ state_write_remedy ++ ".", .{ function, line });
 }
 
+/// The ZTS606 suggestion for a helper that breaks `property` of the default
+/// profile, with no write to module state as the cause. Caller frees.
+///
+/// The authored text tells the author to annotate the helper or to inline it.
+/// Under the default profile that advice fails. Inlining the helper moves the
+/// break into the handler, and the ZTS500 row of the handler then names the
+/// same property. The handler returns no capsule, so the way out is the narrow
+/// capsule that the ZTS500 row suggests, or a helper that holds `property`.
+pub fn defaultProfileHelperSuggestion(allocator: std.mem.Allocator, property: []const u8, function: []const u8) ![]u8 {
+    return allocator.print(
+        "the handler returns no Proof<T, P> capsule, so the default profile demands `{s}`, and `{s}` breaks it: declare the narrow Proof<T, P> capsule that the handler's ZTS500 row suggests, or make `{s}` hold `{s}` and annotate it with `Proof<T, \"{s}\">`.",
+        .{ property, function, function, property, property },
+    );
+}
+
+/// The ZTS606 suggestion for a helper that reaches the write at `line`, under
+/// the default profile. Caller frees.
+///
+/// This text differs from `stateWriteHelperSuggestion` for two reasons. The
+/// handler returns no capsule, so the way out is the narrow capsule that its
+/// ZTS500 row suggests. The remedy "move the state to zttp:cache" is also
+/// missing: under the default profile a `zttp:cache` import gives ZTS501 for
+/// `read_only`, so that move does not clear the error. Inlining the helper is
+/// missing too, because it moves the break into the handler.
+pub fn defaultProfileStateWriteHelperSuggestion(allocator: std.mem.Allocator, property: []const u8, function: []const u8, line: u32) ![]u8 {
+    return allocator.print(
+        "the handler returns no Proof<T, P> capsule, so the default profile demands `{s}`, and `{s}` reaches a write to module state at line {d}: declare the narrow Proof<T, P> capsule that the handler's ZTS500 row suggests, or copy the value into a local before the write.",
+        .{ property, function, line },
+    );
+}
+
 /// The helper whose row carries a writer of module state from another file.
 /// Both fields are borrowed; only `dischargeCapsule` reads them.
 pub const ImportedWriterCause = struct {

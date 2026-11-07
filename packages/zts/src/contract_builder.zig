@@ -720,7 +720,7 @@ pub const ContractBuilder = struct {
                         !cap.proven.holds(prop) and
                         !containsString(cap.declared.items, pname))
                     {
-                        var missing = try makeMissingCapsule(self.allocator, pname, cap.name, cap.proven.writeCauseFor(prop), capsuleSite(cap));
+                        var missing = try makeMissingCapsule(self.allocator, pname, cap.name, cap.proven.writeCauseFor(prop), capsuleSite(cap), contract.declared_specs_implicit);
                         errdefer missing.deinit(self.allocator);
                         try contract.spec_diagnostics.append(self.allocator, missing);
                     }
@@ -1101,6 +1101,11 @@ pub const ContractBuilder = struct {
 
     /// Build a ZTS606 diagnostic for a helper that breaks a handler-demanded
     /// capsule property without declaring a capsule for it.
+    ///
+    /// `implicit_default` is true when the handler returns no `Proof<T, P>`: the
+    /// demanded set is then the default profile, not an authored list. The row
+    /// carries the mark and the default-profile remedy. When it is false, every
+    /// text is the authored text.
     fn makeMissingCapsule(
         allocator: std.mem.Allocator,
         property: []const u8,
@@ -1109,13 +1114,19 @@ pub const ContractBuilder = struct {
         /// A write is not fixed by a capsule, so it gets its own remedy.
         write_cause: ?contract_types.PropertyCause,
         site: ?contract_types.SpecDiagnostic.Site,
+        implicit_default: bool,
     ) !contract_types.SpecDiagnostic {
         const spec_name = try allocator.dupe(u8, property);
         errdefer allocator.free(spec_name);
         const owned_func = try allocator.dupe(u8, func);
         errdefer allocator.free(owned_func);
         const suggestion = if (write_cause) |cause|
-            try spec_discharge.stateWriteHelperSuggestion(allocator, func, cause.line)
+            (if (implicit_default)
+                try spec_discharge.defaultProfileStateWriteHelperSuggestion(allocator, property, func, cause.line)
+            else
+                try spec_discharge.stateWriteHelperSuggestion(allocator, func, cause.line))
+        else if (implicit_default)
+            try spec_discharge.defaultProfileHelperSuggestion(allocator, property, func)
         else
             try allocator.print("annotate `{s}` with `Proof<T, \"{s}\">` and satisfy it, or inline the helper into the handler.", .{ func, property });
         return .{
@@ -1124,6 +1135,7 @@ pub const ContractBuilder = struct {
             .suggestion = suggestion,
             .function = owned_func,
             .site = site,
+            .implicit_default = implicit_default,
         };
     }
 
