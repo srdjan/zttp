@@ -13961,6 +13961,418 @@ test "CHECK refuses a false Proof capsule on a helper of an imported module" {
     try std.testing.expectEqualStrings("stamp", contract.spec_diagnostics.items[0].function orelse return error.TestUnexpectedResult);
 }
 
+// ---------------------------------------------------------------------------
+// The write in an imported file that breaks the handler's capsule (dependency
+// write causes U2).
+// ---------------------------------------------------------------------------
+
+fn siblingFilePath(fixture: *const SiblingFixture, name: []const u8) ![]u8 {
+    const directory = std.fs.path.dirname(fixture.handler_path) orelse return error.TestUnexpectedResult;
+    return std.fs.path.join(std.testing.allocator, &.{ directory, name });
+}
+
+const remember_handler =
+    \\import { remember } from "./dep.ts";
+    \\
+    \\export function handler(req: Request): Proof<Response, "read_only"> {
+    \\  const n = remember(1);
+    \\  return Response.text(String(n));
+    \\}
+    \\
+;
+
+const remember_dep =
+    \\const seen: number[] = [];
+    \\
+    \\export function remember(x: number): number {
+    \\  seen.push(x);
+    \\  return x;
+    \\}
+    \\
+;
+
+test "CHECK names the write in an imported file as the cause of a failing read_only capsule" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(remember_handler);
+    defer fixture.deinit();
+    try fixture.add("dep.ts", remember_dep);
+
+    var result = try fixture.check();
+    defer result.deinit(allocator);
+    const dep_path = try siblingFilePath(&fixture, "dep.ts");
+    defer allocator.free(dep_path);
+
+    const write = diagnosticWithCode(&result, "ZTS310") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(dep_path, write.file);
+    try std.testing.expectEqual(@as(u32, 4), write.line);
+    try std.testing.expectEqual(@as(u16, 12), write.column);
+
+    const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
+    const message = try std.fmt.allocPrint(
+        allocator,
+        "declared Proof capsule was not discharged by handler proof (failing spec: read_only; demoted at {s}:4:12 by `a write to module state`)",
+        .{dep_path},
+    );
+    defer allocator.free(message);
+    try std.testing.expectEqualStrings(message, row.message);
+    const suggestion = try std.fmt.allocPrint(
+        allocator,
+        "`{s}` line 4 writes module state, and a module-state write in any imported file removes `read_only`: remove that write, or remove `read_only` from the capsule.",
+        .{dep_path},
+    );
+    defer allocator.free(suggestion);
+    try std.testing.expectEqualStrings(suggestion, row.suggestion orelse return error.TestUnexpectedResult);
+}
+
+test "CHECK names the uncalled writer of a dependency as the cause of a failing deterministic capsule" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(
+        \\import { tally } from "./a.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text("ok");
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("a.ts",
+        \\import { bump } from "./b.ts";
+        \\
+        \\export function tally(): number {
+        \\  return bump();
+        \\}
+        \\
+    );
+    try fixture.add("b.ts", cross_writer_b);
+
+    var result = try fixture.check();
+    defer result.deinit(allocator);
+    const dep_path = try siblingFilePath(&fixture, "b.ts");
+    defer allocator.free(dep_path);
+
+    const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
+    const message = try std.fmt.allocPrint(
+        allocator,
+        "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at {s}:4:9 by `a write to module state`)",
+        .{dep_path},
+    );
+    defer allocator.free(message);
+    try std.testing.expectEqualStrings(message, row.message);
+    const suggestion = try std.fmt.allocPrint(
+        allocator,
+        "`{s}` line 4 writes module state, and a module-state write in any imported file removes `deterministic`: remove that write, or remove `deterministic` from the capsule.",
+        .{dep_path},
+    );
+    defer allocator.free(suggestion);
+    try std.testing.expectEqualStrings(suggestion, row.suggestion orelse return error.TestUnexpectedResult);
+}
+
+const bump_default_handler =
+    \\import { bump } from "./dep.ts";
+    \\
+    \\export function handler(req: Request): Response {
+    \\  return Response.text(String(bump()));
+    \\}
+    \\
+;
+
+test "CHECK names the write of a dependency in the default-profile suggestion" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(bump_default_handler);
+    defer fixture.deinit();
+    try fixture.add("dep.ts", cross_writer_b);
+
+    var result = try fixture.check();
+    defer result.deinit(allocator);
+    const dep_path = try siblingFilePath(&fixture, "dep.ts");
+    defer allocator.free(dep_path);
+
+    const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
+    const ending = try std.fmt.allocPrint(
+        allocator,
+        " The write to module state at `{s}` line 4 removes deterministic, idempotent, read_only, retry_safe, state_isolated, stateless. To keep them, remove that write from `{s}`.",
+        .{ dep_path, dep_path },
+    );
+    defer allocator.free(ending);
+    try std.testing.expect(std.mem.endsWith(u8, row.suggestion orelse return error.TestUnexpectedResult, ending));
+}
+
+test "CHECK names the entry write when the entry and a dependency both write module state" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(
+        \\import { bump } from "./dep.ts";
+        \\let hits = 0;
+        \\function mark(): number {
+        \\  hits = hits + 1;
+        \\  return hits;
+        \\}
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(String(mark() + bump()));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts", cross_writer_b);
+
+    var result = try fixture.check();
+    defer result.deinit(allocator);
+    const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "declared Proof capsule was not discharged by handler proof (failing spec: read_only; demoted at line 4:8 by `a write to module state`)",
+        row.message,
+    );
+    try std.testing.expectEqualStrings(
+        "line 4 writes module state: copy the value into a local before the write, or move the state to zttp:cache.",
+        row.suggestion orelse return error.TestUnexpectedResult,
+    );
+}
+
+test "CHECK names the write of the dependency that runs first" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(
+        \\import { bumpA } from "./a.ts";
+        \\import { bumpB } from "./b.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(String(bumpA() + bumpB()));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("a.ts",
+        \\import { base } from "./b.ts";
+        \\let hitsA = 0;
+        \\export function bumpA(): number {
+        \\  hitsA = hitsA + 1;
+        \\  return hitsA + base();
+        \\}
+        \\
+    );
+    try fixture.add("b.ts",
+        \\let hitsB = 0;
+        \\
+        \\export function base(): number {
+        \\  return 1;
+        \\}
+        \\
+        \\export function bumpB(): number {
+        \\  hitsB = hitsB + 1;
+        \\  return hitsB;
+        \\}
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(allocator);
+    const dep_path = try siblingFilePath(&fixture, "b.ts");
+    defer allocator.free(dep_path);
+
+    const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
+    const suggestion = try std.fmt.allocPrint(
+        allocator,
+        "`{s}` line 8 writes module state, and a module-state write in any imported file removes `read_only`: remove that write, or remove `read_only` from the capsule.",
+        .{dep_path},
+    );
+    defer allocator.free(suggestion);
+    try std.testing.expectEqualStrings(suggestion, row.suggestion orelse return error.TestUnexpectedResult);
+}
+
+test "CHECK names the flow-only write of a dependency that comes before a verifier write" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(
+        \\import { record } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(String(record()));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\const seen: number[] = [];
+        \\function addTo(xs: number[]): undefined {
+        \\  xs.push(1);
+        \\  return undefined;
+        \\}
+        \\let count = 0;
+        \\export function record(): number {
+        \\  addTo(seen);
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(allocator);
+    const dep_path = try siblingFilePath(&fixture, "dep.ts");
+    defer allocator.free(dep_path);
+
+    const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
+    const suggestion = try std.fmt.allocPrint(
+        allocator,
+        "`{s}` line 3 writes module state, and a module-state write in any imported file removes `read_only`: remove that write, or remove `read_only` from the capsule.",
+        .{dep_path},
+    );
+    defer allocator.free(suggestion);
+    try std.testing.expectEqualStrings(suggestion, row.suggestion orelse return error.TestUnexpectedResult);
+}
+
+const cache_and_count_dep =
+    \\import { cacheSet } from "zttp:cache";
+    \\let count = 0;
+    \\export function save(): number {
+    \\  cacheSet("items", "key", "value");
+    \\  count = count + 1;
+    \\  return count;
+    \\}
+    \\
+;
+
+test "CHECK names the write of a dependency for deterministic when the dependency also writes the cache" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(
+        \\import { save } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text(String(save()));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts", cache_and_count_dep);
+
+    var result = try fixture.check();
+    defer result.deinit(allocator);
+    const dep_path = try siblingFilePath(&fixture, "dep.ts");
+    defer allocator.free(dep_path);
+    const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
+    const suggestion = try std.fmt.allocPrint(
+        allocator,
+        "`{s}` line 5 writes module state, and a module-state write in any imported file removes `deterministic`: remove that write, or remove `deterministic` from the capsule.",
+        .{dep_path},
+    );
+    defer allocator.free(suggestion);
+    try std.testing.expectEqualStrings(suggestion, row.suggestion orelse return error.TestUnexpectedResult);
+}
+
+test "CHECK reports the import conflict and no write cause for read_only when a dependency writes the cache" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(
+        \\import { save } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(String(save()));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts", cache_and_count_dep);
+
+    var result = try fixture.check();
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), countDiagnosticsWithCode(&result, "ZTS500"));
+    const row = findingInFile(&result, "ZTS501", "/handler.ts") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "drop `read_only` from your proof-property set, or remove the zttp:cache import from this handler.",
+        row.suggestion orelse return error.TestUnexpectedResult,
+    );
+}
+
+test "CHECK leaves a property that a dependency removes out of the write sentence of the default profile" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(
+        \\import { bump } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(String(bump()));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\import { cacheSet } from "zttp:cache";
+        \\let count = 0;
+        \\export function save(): undefined {
+        \\  cacheSet("items", "key", "value");
+        \\  return undefined;
+        \\}
+        \\export function bump(): number {
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(allocator);
+    const dep_path = try siblingFilePath(&fixture, "dep.ts");
+    defer allocator.free(dep_path);
+    const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
+    const ending = try std.fmt.allocPrint(
+        allocator,
+        " The write to module state at `{s}` line 8 removes deterministic, state_isolated. To keep them, remove that write from `{s}`.",
+        .{ dep_path, dep_path },
+    );
+    defer allocator.free(ending);
+    try std.testing.expect(std.mem.endsWith(u8, row.suggestion orelse return error.TestUnexpectedResult, ending));
+}
+
+test "CHECK keeps the one-file texts for a write in the handler file" {
+    const allocator = std.testing.allocator;
+    var read_only = try checkOneFile(
+        \\const seen: number[] = [];
+        \\
+        \\function remember(x: number): number {
+        \\  seen.push(x);
+        \\  return x;
+        \\}
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  const n = remember(1);
+        \\  return Response.text(String(n));
+        \\}
+        \\
+    );
+    defer read_only.deinit(allocator);
+    const read_only_row = diagnosticWithCode(&read_only, "ZTS500") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(
+        "declared Proof capsule was not discharged by handler proof (failing spec: read_only; demoted at line 4:12 by `a write to module state`)",
+        read_only_row.message,
+    );
+    try std.testing.expectEqualStrings(
+        "line 4 writes module state: copy the value into a local before the write, or move the state to zttp:cache.",
+        read_only_row.suggestion orelse return error.TestUnexpectedResult,
+    );
+
+    var default_profile = try checkOneFile(
+        \\let count = 0;
+        \\
+        \\function bump(): number {
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(String(bump()));
+        \\}
+        \\
+    );
+    defer default_profile.deinit(allocator);
+    const default_row = diagnosticWithCode(&default_profile, "ZTS500") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        default_row.suggestion orelse return error.TestUnexpectedResult,
+        " The write to module state at line 4 removes deterministic, idempotent, pure, read_only, retry_safe, state_isolated, stateless. To keep them, copy the value into a local before the write, or move the state to zttp:cache.",
+    ));
+}
+
+fn checkOneFile(source: []const u8) !CheckResult {
+    var fixture = try SiblingFixture.init(source);
+    defer fixture.deinit();
+    return fixture.check();
+}
+
 test "CHECK refuses an Effects ceiling that a dependency helper breaks and warns on one it never reaches" {
     var fixture = try SiblingFixture.init(
         \\import { digest } from "./dep.ts";

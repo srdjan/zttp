@@ -623,13 +623,19 @@ pub fn compileHandler(
             // The verifier names the writes that it can read. The flow
             // evaluation joins the ones that it follows through a parameter, a
             // call result, or an element read, and a handler it cannot follow.
-            if (emit_verify and precompile_check_run_mod.flowSharesState(completed)) {
+            const flow_shares_state = precompile_check_run_mod.flowSharesState(completed);
+            if (emit_verify and flow_shares_state) {
                 shares_state = true;
                 state_isolated = false;
+            }
+            if (emit_verify and shares_state) {
                 const checked = analysis.checkedModule() orelse return error.AnalysisPassIncomplete;
-                const unreported = try precompile_check_run_mod.unreportedWrites(allocator, completed, checked.verifierDiagnostics(), &.{});
-                defer allocator.free(unreported);
-                state_write = precompile_check_run_mod.firstEntryWriteCause(ir_view_check, checked.verifierDiagnostics(), unreported);
+                const unreported: []const precompile_check_run_mod.WriteSite = if (flow_shares_state)
+                    try precompile_check_run_mod.unreportedWrites(allocator, completed, checked.verifierDiagnostics(), &.{})
+                else
+                    &.{};
+                defer if (flow_shares_state) allocator.free(unreported);
+                state_write = precompile_check_run_mod.firstWriteCause(ir_view_check, checked.verifierDiagnostics(), unreported, &.{}, null);
                 for (unreported) |site| {
                     if (builtin.is_test) continue;
                     var output: std.ArrayList(u8) = .empty;
@@ -2044,7 +2050,8 @@ test "compileHandler graph names the entry write that removed state_isolated" {
     try std.testing.expect(contract.property_provenance.state_write_removed.contains(.state_isolated));
 }
 
-test "compileHandler graph gives a dependency write no cause line" {
+test "compileHandler graph names the flow-only write of a dependency as the cause" {
+    const allocator = std.testing.allocator;
     var fixture = try importFixture(record_entry,
         \\const seen: number[] = [];
         \\function addTo(xs: number[]): undefined {
@@ -2059,10 +2066,219 @@ test "compileHandler graph gives a dependency write no cause line" {
     );
     defer fixture.deinit();
     var compiled = try fixture.compile(graph_verified);
-    defer compiled.deinit(std.testing.allocator);
+    defer compiled.deinit(allocator);
     const contract = compiled.contract orelse return error.MissingContract;
     try std.testing.expect(!(try graphProperties(&compiled)).state_isolated);
-    try std.testing.expect(contract.property_provenance.state_write == null);
+    const dep_path = try fixtureFilePath(&fixture, "dep.ts");
+    defer allocator.free(dep_path);
+    const cause = contract.property_provenance.state_write orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(dep_path, cause.file orelse return error.TestUnexpectedResult);
+    try std.testing.expectEqual(@as(u32, 3), cause.line);
+    try std.testing.expectEqual(@as(u32, 10), cause.column);
+    try std.testing.expectEqualStrings("a write to module state", cause.snippet);
+    try std.testing.expect(contract.property_provenance.state_write_removed.contains(.state_isolated));
+}
+
+fn fixtureFilePath(fixture: *const CompileGraphFixture, name: []const u8) ![]u8 {
+    const directory = std.fs.path.dirname(fixture.entry_path) orelse return error.TestUnexpectedResult;
+    return std.fs.path.join(std.testing.allocator, &.{ directory, name });
+}
+
+/// The suggestion of the implicit default-profile row, which a graph compile
+/// keeps when the handler returns no capsule.
+fn defaultProfileSuggestion(compiled: *const CompiledHandler) ![]const u8 {
+    const contract = compiled.contract orelse return error.MissingContract;
+    for (contract.spec_diagnostics.items) |diagnostic| {
+        if (diagnostic.implicit_default) return diagnostic.suggestion orelse error.TestUnexpectedResult;
+    }
+    return error.TestUnexpectedResult;
+}
+
+const bump_default_entry =
+    \\import { bump } from "./dep.ts";
+    \\export function handler(req: Request): Response {
+    \\  return Response.text(String(bump()));
+    \\}
+    \\
+;
+
+const bump_dep =
+    \\let count = 0;
+    \\
+    \\export function bump(): number {
+    \\  count = count + 1;
+    \\  return count;
+    \\}
+    \\
+;
+
+test "compileHandler graph names the write of a dependency in the default-profile suggestion" {
+    const allocator = std.testing.allocator;
+    var fixture = try importFixture(bump_default_entry, bump_dep);
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(allocator);
+    const dep_path = try fixtureFilePath(&fixture, "dep.ts");
+    defer allocator.free(dep_path);
+    const ending = try std.fmt.allocPrint(
+        allocator,
+        " The write to module state at `{s}` line 4 removes deterministic, idempotent, read_only, retry_safe, state_isolated, stateless. To keep them, remove that write from `{s}`.",
+        .{ dep_path, dep_path },
+    );
+    defer allocator.free(ending);
+    try std.testing.expect(std.mem.endsWith(u8, try defaultProfileSuggestion(&compiled), ending));
+}
+
+test "compileHandler graph names the uncalled writer of a dependency in a graph with no capsule" {
+    const allocator = std.testing.allocator;
+    var fixture = try importFixture(
+        \\import { bump } from "./dep.ts";
+        \\export function handler(req: Request): Response {
+        \\  return Response.text("ok");
+        \\}
+        \\
+    , bump_dep);
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(allocator);
+    const dep_path = try fixtureFilePath(&fixture, "dep.ts");
+    defer allocator.free(dep_path);
+    const ending = try std.fmt.allocPrint(
+        allocator,
+        " The write to module state at `{s}` line 4 removes deterministic, idempotent, pure, read_only, retry_safe, state_isolated, stateless. To keep them, remove that write from `{s}`.",
+        .{ dep_path, dep_path },
+    );
+    defer allocator.free(ending);
+    try std.testing.expect(std.mem.endsWith(u8, try defaultProfileSuggestion(&compiled), ending));
+}
+
+test "compileHandler graph names the entry write when the entry and a dependency both write module state" {
+    const allocator = std.testing.allocator;
+    var fixture = try importFixture(
+        \\import { bump } from "./dep.ts";
+        \\let hits = 0;
+        \\function mark(): number {
+        \\  hits = hits + 1;
+        \\  return hits;
+        \\}
+        \\export function handler(req: Request): Proof<Response, "result_safe"> {
+        \\  return Response.text(String(mark() + bump()));
+        \\}
+        \\
+    , bump_dep);
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(allocator);
+    const contract = compiled.contract orelse return error.MissingContract;
+    const cause = contract.property_provenance.state_write orelse return error.TestUnexpectedResult;
+    try std.testing.expect(cause.file == null);
+    try std.testing.expectEqual(@as(u32, 4), cause.line);
+    try std.testing.expectEqual(@as(u32, 8), cause.column);
+}
+
+test "compileHandler graph names the write of the dependency that runs first" {
+    const allocator = std.testing.allocator;
+    var fixture = try CompileGraphFixture.init("entry.ts",
+        \\import { bumpA } from "./a.ts";
+        \\import { bumpB } from "./b.ts";
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(String(bumpA() + bumpB()));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("a.ts",
+        \\import { base } from "./b.ts";
+        \\let hitsA = 0;
+        \\export function bumpA(): number {
+        \\  hitsA = hitsA + 1;
+        \\  return hitsA + base();
+        \\}
+        \\
+    );
+    try fixture.add("b.ts",
+        \\let hitsB = 0;
+        \\
+        \\export function base(): number {
+        \\  return 1;
+        \\}
+        \\
+        \\export function bumpB(): number {
+        \\  hitsB = hitsB + 1;
+        \\  return hitsB;
+        \\}
+        \\
+    );
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(allocator);
+    const dep_path = try fixtureFilePath(&fixture, "b.ts");
+    defer allocator.free(dep_path);
+    const ending = try std.fmt.allocPrint(
+        allocator,
+        " The write to module state at `{s}` line 8 removes deterministic, idempotent, read_only, retry_safe, state_isolated, stateless. To keep them, remove that write from `{s}`.",
+        .{ dep_path, dep_path },
+    );
+    defer allocator.free(ending);
+    try std.testing.expect(std.mem.endsWith(u8, try defaultProfileSuggestion(&compiled), ending));
+}
+
+test "compileHandler graph names the flow-only write of a dependency that comes before a verifier write" {
+    const allocator = std.testing.allocator;
+    var fixture = try importFixture(
+        \\import { record } from "./dep.ts";
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(String(record()));
+        \\}
+        \\
+    ,
+        \\const seen: number[] = [];
+        \\function addTo(xs: number[]): undefined {
+        \\  xs.push(1);
+        \\  return undefined;
+        \\}
+        \\let count = 0;
+        \\export function record(): number {
+        \\  addTo(seen);
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(allocator);
+    const dep_path = try fixtureFilePath(&fixture, "dep.ts");
+    defer allocator.free(dep_path);
+    const ending = try std.fmt.allocPrint(
+        allocator,
+        " The write to module state at `{s}` line 3 removes deterministic, idempotent, read_only, retry_safe, state_isolated, stateless. To keep them, remove that write from `{s}`.",
+        .{ dep_path, dep_path },
+    );
+    defer allocator.free(ending);
+    try std.testing.expect(std.mem.endsWith(u8, try defaultProfileSuggestion(&compiled), ending));
+}
+
+test "compileHandler graph keeps the one-file default-profile sentence for a write in the entry" {
+    const allocator = std.testing.allocator;
+    var compiled = try compileHandler(allocator,
+        \\let count = 0;
+        \\
+        \\function bump(): number {
+        \\  count = count + 1;
+        \\  return count;
+        \\}
+        \\
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(String(bump()));
+        \\}
+        \\
+    , "single.ts", graph_verified);
+    defer compiled.deinit(allocator);
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        try defaultProfileSuggestion(&compiled),
+        " The write to module state at line 4 removes deterministic, idempotent, pure, read_only, retry_safe, state_isolated, stateless. To keep them, copy the value into a local before the write, or move the state to zttp:cache.",
+    ));
 }
 
 const LoadedFlowGraph = struct {

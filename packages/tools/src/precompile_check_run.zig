@@ -234,26 +234,91 @@ fn recordStateWrite(
     if (before.idempotent and !after.idempotent) provenance.state_write_removed.insert(.idempotent);
 }
 
-/// The first write to module state in the entry module, in source order, as a
-/// cause. `verifier_diagnostics` are the entry module's verifier findings and
-/// `sites` the flow writes that the verifier did not name. A write in a
-/// dependency module has no line in the entry file, so it gives no cause.
-pub fn firstEntryWriteCause(
-    ir_view: zts.IrView,
+/// The compiled modules of a graph, to find the file and the nodes of a flow
+/// module id. Both borrow the graph, which outlives every cause that names a
+/// path of it.
+pub const GraphModules = struct {
+    graph: *const zts.modules.ModuleGraph,
+    compile_result: *const zts.modules.CompileResult,
+
+    pub const Resolved = struct {
+        /// Holds the path of the file, as the ZTS310 row of a write prints it.
+        module: *const zts.modules.module_graph.Module,
+        /// The nodes of the module, which a write of the module names.
+        view: zts.IrView,
+    };
+
+    /// The module of a flow module id: 0 is the entry, and a dependency is its
+    /// position in execution order plus one. Null for an id past the
+    /// dependencies. The graph compile also stores the writes of the entry under
+    /// the entry position plus one, and that id is past the dependencies.
+    pub fn resolve(self: GraphModules, id: zts.pipeline.FlowModuleId) ?Resolved {
+        const entry_position = self.compile_result.modules.len -| 1;
+        const position: usize = if (id == 0) entry_position else id - 1;
+        if (id != 0 and position >= entry_position) return null;
+        const parser = &self.compile_result.parsers[position];
+        return .{
+            .module = &self.graph.module_list.items[self.graph.execution_order[position]],
+            .view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants),
+        };
+    }
+};
+
+/// The write to module state that names the cause of `shares_state`, or null
+/// when no write has a line. A write in the entry is the cause when it exists:
+/// an entry verifier finding in `verifier_diagnostics`, or a flow site of module
+/// 0 in `flow_sites`, whichever comes first in source order. Without one, the
+/// cause is the earliest write of the dependency that runs first, among the
+/// dependency verifier findings in `dependency_verifier` and the flow sites. The
+/// cause then borrows the path of that dependency. `modules` is null for a
+/// compile of one file, which has no dependency.
+pub fn firstWriteCause(
+    entry_view: zts.IrView,
     verifier_diagnostics: []const zts.VerifierDiagnostic,
-    sites: []const WriteSite,
+    flow_sites: []const WriteSite,
+    dependency_verifier: []const WriteSite,
+    modules: ?GraphModules,
 ) ?handler_contract.PropertyCause {
     var first: ?ir.NodeIndex = null;
     for (verifier_diagnostics) |diagnostic| {
         if (diagnostic.kind != .module_scope_mutation) continue;
-        first = zts.spec_discharge.earlierWrite(ir_view, first, diagnostic.node);
+        first = zts.spec_discharge.earlierWrite(entry_view, first, diagnostic.node);
     }
-    for (sites) |site| {
+    for (flow_sites) |site| {
         if (site.module != 0) continue;
-        first = zts.spec_discharge.earlierWrite(ir_view, first, site.node);
+        first = zts.spec_discharge.earlierWrite(entry_view, first, site.node);
     }
-    const loc = ir_view.getLoc(first orelse return null) orelse return null;
-    return .{ .line = loc.line, .column = loc.column, .snippet = handler_contract.state_write_snippet };
+    if (first) |node| {
+        const loc = entry_view.getLoc(node) orelse return null;
+        return .{ .line = loc.line, .column = loc.column, .snippet = handler_contract.state_write_snippet };
+    }
+    const graph = modules orelse return null;
+    var chosen: ?GraphModules.Resolved = null;
+    var chosen_id: zts.pipeline.FlowModuleId = 0;
+    var earliest: ?ir.NodeIndex = null;
+    const lists = [_][]const WriteSite{ dependency_verifier, flow_sites };
+    for (lists) |list| {
+        for (list) |site| {
+            if (site.module == 0) continue;
+            const resolved = graph.resolve(site.module) orelse continue;
+            if (resolved.view.getLoc(site.node) == null) continue;
+            if (chosen != null and site.module > chosen_id) continue;
+            if (chosen == null or site.module < chosen_id) {
+                chosen = resolved;
+                chosen_id = site.module;
+                earliest = null;
+            }
+            earliest = zts.spec_discharge.earlierWrite(resolved.view, earliest, site.node);
+        }
+    }
+    const found = chosen orelse return null;
+    const loc = found.view.getLoc(earliest orelse return null) orelse return null;
+    return .{
+        .line = loc.line,
+        .column = loc.column,
+        .snippet = handler_contract.state_write_snippet,
+        .file = found.module.path,
+    };
 }
 
 /// A write that a request makes to state that outlives it, named by the flow
@@ -1090,7 +1155,13 @@ fn runCheckOnParsedSource(
             try appendFlowWriteFindings(allocator, &result, json_mode, write_sites, graph_check, ir_view, diag_view, handler_path);
         }
         result.state_isolated = !shares_state;
-        if (shares_state) state_write = firstEntryWriteCause(ir_view, verifier_diags, write_sites);
+        if (shares_state) state_write = firstWriteCause(
+            ir_view,
+            verifier_diags,
+            write_sites,
+            if (graph_check) |gc| gc.reported_writes.items else &.{},
+            if (graph_check) |gc| gc.modules() else null,
+        );
         if (result.verify_errors == 0) {
             result.exhaustive_returns = true;
             result.results_safe = true;

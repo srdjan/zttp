@@ -8,7 +8,7 @@ The cross-module state writers plan (`2026-11-06-cross-module-state-writers-plan
 |---|---|
 | U0 | Complete |
 | U1 | Complete: 18 gates, check-spine, and the census of eleven graphs are unchanged from U0 |
-| U2 | Not started |
+| U2 | Complete: 18 gates and check-spine pass; the census keeps every code and exit status, and four ZTS500 rows change as planned |
 | U3 | Not started |
 
 ## Reproduction

@@ -218,16 +218,24 @@ pub const GraphCheck = struct {
         result.link_errors += sink.link_errors;
     }
 
+    /// The compiled modules, to find the file of a flow module id. Null before
+    /// the graph is compiled.
+    pub fn modules(self: *const GraphCheck) ?check_run_mod.GraphModules {
+        if (self.compile_result) |*compile_result| {
+            return .{ .graph = &self.graph, .compile_result = compile_result };
+        }
+        return null;
+    }
+
     /// Report a persistent write in a dependency as a ZTS310 warning at the
     /// write, in the file of the dependency. `site.module` is a flow module id:
     /// the position of the dependency in execution order plus one.
     pub fn appendDependencyWrite(self: *GraphCheck, result: *CheckResult, json_mode: bool, site: check_run_mod.WriteSite) !void {
-        const compile_result = &(self.compile_result orelse return error.AnalysisPassIncomplete);
-        if (site.module == 0 or site.module > self.entryIndex()) return error.AnalysisPassIncomplete;
-        const position: usize = site.module - 1;
-        const module = &self.graph.module_list.items[self.graph.execution_order[position]];
-        const parser = &compile_result.parsers[position];
-        const view = zts.IrView.fromIRStore(&parser.nodes, &parser.constants);
+        if (site.module == 0) return error.AnalysisPassIncomplete;
+        const resolved = (self.modules() orelse return error.AnalysisPassIncomplete).resolve(site.module) orelse
+            return error.AnalysisPassIncomplete;
+        const module = resolved.module;
+        const view = resolved.view;
         if (view.getLoc(site.node) == null) return;
         const diagnostic = check_run_mod.flowWriteDiagnostic(site);
         result.verify_warnings += 1;

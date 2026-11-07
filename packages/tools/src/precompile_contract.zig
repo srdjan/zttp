@@ -606,17 +606,26 @@ pub fn buildMultiModuleContract(
     if (handler_fn != null) {
         const completed = try analysis.completedFlow();
         try reportCompletedFlow(allocator, completed, analysis.flowErrorCount(), true, null, entry_view);
-        if (check_run_mod.flowSharesState(completed)) {
-            shares_state = true;
-            if (inputs.emit_verify) {
-                const checked = analysis.checkedModule() orelse return error.AnalysisPassIncomplete;
-                const unreported = try check_run_mod.unreportedWrites(allocator, completed, checked.verifierDiagnostics(), inputs.reported_writes);
-                defer allocator.free(unreported);
-                // The cause is a line of the entry file. A write in a dependency
-                // module has no line there, so it keeps the generic hint.
-                state_write = check_run_mod.firstEntryWriteCause(entry_view, checked.verifierDiagnostics(), unreported);
-                for (unreported) |site| try printFlowWrite(allocator, graph, compile_result, site);
-            }
+        const flow_shares_state = check_run_mod.flowSharesState(completed);
+        if (flow_shares_state) shares_state = true;
+        if (inputs.emit_verify and shares_state) {
+            const checked = analysis.checkedModule() orelse return error.AnalysisPassIncomplete;
+            const unreported: []const check_run_mod.WriteSite = if (flow_shares_state)
+                try check_run_mod.unreportedWrites(allocator, completed, checked.verifierDiagnostics(), inputs.reported_writes)
+            else
+                &.{};
+            defer if (flow_shares_state) allocator.free(unreported);
+            // The cause is the write of the entry, or else the write of the
+            // dependency that runs first. A dependency write has the path of
+            // its file, which the graph keeps.
+            state_write = check_run_mod.firstWriteCause(
+                entry_view,
+                checked.verifierDiagnostics(),
+                unreported,
+                inputs.reported_writes,
+                .{ .graph = graph, .compile_result = compile_result },
+            );
+            for (unreported) |site| try printFlowWrite(allocator, graph, compile_result, site);
         }
     }
     try validateContractPolicyInputs(allocator, inputs.filename, &contract, inputs.sql_schema_path, inputs.policy);
@@ -720,6 +729,22 @@ pub fn foldDependencyProperties(
     established: bool,
 ) void {
     const props = if (contract.properties) |*value| value else return;
+    // A property that the dependencies remove is not restored when the write to
+    // module state goes away, so the write is not its cause. The write stays
+    // the cause of each other property that it removed. `idempotent` follows
+    // `deterministic and retry_safe`, so it leaves the set with `retry_safe`.
+    const removed = &contract.property_provenance.state_write_removed;
+    const held_pure = if (dependency) |held| held.pure else true;
+    const held_read_only = if (dependency) |held| held.read_only else true;
+    const held_stateless = if (dependency) |held| held.stateless else true;
+    const held_retry_safe = if (dependency) |held| held.retry_safe else true;
+    if (!established or !held_pure) removed.remove(.pure);
+    if (!established or !held_read_only) removed.remove(.read_only);
+    if (!established or !held_stateless) removed.remove(.stateless);
+    if (!established or !held_retry_safe) {
+        removed.remove(.retry_safe);
+        removed.remove(.idempotent);
+    }
     if (!established) {
         props.pure = false;
         props.read_only = false;
