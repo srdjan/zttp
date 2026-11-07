@@ -373,7 +373,17 @@ pub fn refreshSpecDiagnostics(allocator: std.mem.Allocator, result: *CheckResult
 /// Discharge the handler specs again against the contract's final properties.
 /// `ContractBuilder.build` discharges before the flow pass and the verifier
 /// set their properties, so a caller that sets them later calls this last.
+///
+/// The suggested capsule of an implicit default ZTS500 leaves out the property
+/// of each marked ZTS606 row, because a helper with no capsule breaks it and
+/// declaring it would give ZTS606.
 pub fn refreshContractSpecDiagnostics(allocator: std.mem.Allocator, contract: *HandlerContract) !void {
+    // The names borrow from the old rows, which live until the swap below.
+    var excluded: std.ArrayList([]const u8) = .empty;
+    defer excluded.deinit(allocator);
+    for (contract.spec_diagnostics.items) |diag| {
+        if (diag.kind == .missing_capsule and diag.implicit_default) try excluded.append(allocator, diag.spec_name);
+    }
     // Re-discharge the handler's Proof<T, P> obligations against the freshly
     // classified properties. Capsule diagnostics - those carrying a
     // `function` - come from proof-carrying-function discharge, which this
@@ -390,6 +400,7 @@ pub fn refreshContractSpecDiagnostics(allocator: std.mem.Allocator, contract: *H
         contract.modules.items,
         contract.declared_specs_implicit,
         contract.property_provenance,
+        excluded.items,
     );
     errdefer {
         for (refreshed.items) |*d| d.deinit(allocator);

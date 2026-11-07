@@ -649,6 +649,8 @@ pub const ContractBuilder = struct {
             contract.modules.items,
             declared_specs_implicit,
             contract.property_provenance,
+            // No ZTS606 row exists yet: the helper capsules are discharged after this.
+            &.{},
         );
     }
 

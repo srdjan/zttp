@@ -6730,7 +6730,7 @@ test "CHECK preserves measured lookup winners shadows and captures" {
         "default profile, but it does not hold: cost_bounded, idempotent, pure, " ++
         "read_only, retry_safe, stateless. Return a narrow Proof capsule with only the " ++
         "properties it holds, e.g. `function handler(req: Request): Proof<Response, " ++
-        "\"deterministic\" | \"state_isolated\" | \"fault_covered\" | \"result_safe\" | \"optional_safe\" | " ++
+        "\"state_isolated\" | \"fault_covered\" | \"result_safe\" | \"optional_safe\" | " ++
         "\"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | " ++
         "\"pii_contained\" | \"injection_safe\" | \"canonical\">`.";
     const cases = [_]struct {
@@ -13326,6 +13326,63 @@ test "a clock helper whose value the handler drops keeps the default-profile ZTS
     try std.testing.expectEqualStrings("helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: pure)", diagnostics[2].message);
     try std.testing.expectEqualStrings("ZTS606", diagnostics[3].code);
     try std.testing.expectEqualStrings("helper breaks a property of the default proof profile and carries no Proof<...> capsule (failing spec: deterministic)", diagnostics[3].message);
+}
+
+const clock_helper_dropped_suggestion =
+    "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, " ++
+    "but it does not hold: pure. Return a narrow Proof capsule with only the properties it holds, e.g. " ++
+    "`function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"idempotent\" | " ++
+    "\"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | " ++
+    "\"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | " ++
+    "\"injection_safe\" | \"canonical\" | \"cost_bounded\">`.";
+
+const clock_helper_dropped_source =
+    \\function stamp(): number {
+    \\  return Date.now();
+    \\}
+    \\
+    \\export function handler(req: Request): Response {
+    \\  const t = stamp();
+    \\  return Response.text("ok");
+    \\}
+;
+
+test "a clock helper whose value the handler drops gets a ZTS500 capsule that leaves out the property of each ZTS606 row" {
+    const allocator = std.testing.allocator;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, clock_helper_dropped_source, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 4), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS305", diagnostics[0].code);
+    try expectCompoundDiagnostic(diagnostics[1], .{
+        .code = "ZTS500",
+        .message = default_profile_zts500_message,
+        .line = 5,
+        .column = 24,
+        .suggestion = clock_helper_dropped_suggestion,
+    });
+    try std.testing.expectEqualStrings("ZTS606", diagnostics[2].code);
+    try std.testing.expectEqualStrings("ZTS606", diagnostics[3].code);
+}
+
+test "control: the capsule that the ZTS500 row suggests for a clock helper clears every spec diagnostic" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function stamp(): number {
+        \\  return Date.now();
+        \\}
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only" | "retry_safe" | "idempotent" | "state_isolated" | "fault_covered" | "stateless" | "result_safe" | "optional_safe" | "no_secret_leakage" | "no_credential_leakage" | "input_validated" | "pii_contained" | "injection_safe" | "canonical" | "cost_bounded"> {
+        \\  const t = stamp();
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 0), result.totalErrors());
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.len);
+    try std.testing.expectEqualStrings("ZTS305", diagnostics[0].code);
 }
 
 const shared_state_default_help =

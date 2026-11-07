@@ -7,7 +7,7 @@ The cross-module state writers plan (`2026-11-06-cross-module-state-writers-plan
 | Unit | Status |
 |---|---|
 | U1 | Committed on 2026-11-07 on local main; the 18 gates and `check-spine` passed from an empty cache |
-| U2 | Not started |
+| U2 | Committed on 2026-11-07 on local main; the 18 gates and `check-spine` passed from an empty cache |
 | U3 | Not started |
 
 ## Reproduction

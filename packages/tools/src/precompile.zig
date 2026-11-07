@@ -724,6 +724,9 @@ pub fn compileHandler(
             if (path_analysis) |*summary| {
                 summary.takeFaultStamp(&fault_stamp);
                 try applyContractFacts(allocator, &contract.?, .{ .paths = summary });
+                // The path facts change cost_bounded and fault_covered, so the
+                // ZTS500 must be discharged again against them.
+                try refreshContractSpecDiagnostics(allocator, &contract.?);
             }
 
             if (fc_report.total_failable > 0) {
@@ -4354,6 +4357,101 @@ test "control: compileHandler graph refuses a clock helper of the entry under a 
     var fixture = try importFixture(clock_in_entry_declared, greet_ok_dep);
     defer fixture.deinit();
     try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+}
+
+const stamp_dropped_suggestion =
+    "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, " ++
+    "but it does not hold: pure. Return a narrow Proof capsule with only the properties it holds, e.g. " ++
+    "`function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"idempotent\" | " ++
+    "\"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | " ++
+    "\"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | " ++
+    "\"injection_safe\" | \"canonical\" | \"cost_bounded\">`.";
+
+const stamp_dropped_source =
+    \\function stamp(): number {
+    \\  return Date.now();
+    \\}
+    \\
+    \\export function handler(req: Request): Response {
+    \\  const t = stamp();
+    \\  return Response.text("ok");
+    \\}
+;
+
+test "compileHandler graph gives a clock helper of the entry the ZTS500 capsule that leaves out the property of each ZTS606 row" {
+    var fixture = try importFixture(
+        \\import { greet } from "./dep.ts";
+        \\
+        \\function stamp(): number {
+        \\  return Date.now();
+        \\}
+        \\
+        \\export function handler(req: Request): Response {
+        \\  const t = stamp();
+        \\  return Response.text(greet());
+        \\}
+        \\
+    , greet_ok_dep);
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(std.testing.allocator);
+    const contract = compiled.contract orelse return error.MissingContract;
+    const rows = contract.spec_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    try std.testing.expectEqual(zts.SpecDiagnostic.Kind.not_discharged, rows[0].kind);
+    try std.testing.expectEqualStrings(stamp_dropped_suggestion, rows[0].suggestion orelse "(null)");
+    try std.testing.expectEqualStrings("pure", rows[1].spec_name);
+    try std.testing.expectEqualStrings("deterministic", rows[2].spec_name);
+}
+
+test "compileHandler gives a clock helper the ZTS500 capsule that leaves out the property of each ZTS606 row" {
+    const allocator = std.testing.allocator;
+    var compiled = try compileHandler(allocator, stamp_dropped_source, "handler.ts", .{ .emit_contract = true, .emit_verify = true });
+    defer compiled.deinit(allocator);
+    const contract = compiled.contract orelse return error.MissingContract;
+    const rows = contract.spec_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 3), rows.len);
+    try std.testing.expectEqual(zts.SpecDiagnostic.Kind.not_discharged, rows[0].kind);
+    try std.testing.expectEqualStrings("pure", rows[0].spec_name);
+    try std.testing.expectEqualStrings(stamp_dropped_suggestion, rows[0].suggestion orelse "(null)");
+    try std.testing.expectEqualStrings("pure", rows[1].spec_name);
+    try std.testing.expectEqualStrings("deterministic", rows[2].spec_name);
+}
+
+test "control: compileHandler keeps the authored ZTS606 row under a declared deterministic capsule" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\function stamp(): number {
+        \\  return Date.now();
+        \\}
+        \\
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const t = stamp();
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var compiled = try compileHandler(allocator, source, "handler.ts", .{ .emit_contract = true, .emit_verify = true });
+    defer compiled.deinit(allocator);
+    const contract = compiled.contract orelse return error.MissingContract;
+    const rows = contract.spec_diagnostics.items;
+    try std.testing.expectEqual(@as(usize, 1), rows.len);
+    try std.testing.expectEqual(zts.SpecDiagnostic.Kind.missing_capsule, rows[0].kind);
+    try std.testing.expect(!rows[0].implicit_default);
+    try std.testing.expectEqualStrings("deterministic", rows[0].spec_name);
+    try std.testing.expectEqualStrings("annotate `stamp` with `Proof<T, \"deterministic\">` and satisfy it, or inline the helper into the handler.", rows[0].suggestion orelse "(null)");
+}
+
+test "compileHandler of a handler that holds every default property keeps no spec diagnostic in the contract" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export function handler(req: Request): Response {
+        \\  return Response.text("ok");
+        \\}
+    ;
+    var compiled = try compileHandler(allocator, source, "handler.ts", .{ .emit_contract = true, .emit_verify = true });
+    defer compiled.deinit(allocator);
+    const contract = compiled.contract orelse return error.MissingContract;
+    try std.testing.expectEqual(@as(usize, 0), contract.spec_diagnostics.items.len);
 }
 
 const cross_writer_dep =
