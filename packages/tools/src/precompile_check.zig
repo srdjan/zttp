@@ -397,7 +397,12 @@ pub fn refreshContractSpecDiagnostics(allocator: std.mem.Allocator, contract: *H
     }
     for (contract.spec_diagnostics.items) |*diag| {
         if (preserveDuringSpecRefresh(diag.*)) {
-            try refreshed.append(allocator, try diag.clone(allocator));
+            // The copy has no owner until the list holds it.
+            var copy = try diag.clone(allocator);
+            refreshed.append(allocator, copy) catch |err| {
+                copy.deinit(allocator);
+                return err;
+            };
         }
     }
     for (contract.spec_diagnostics.items) |*diag| diag.deinit(allocator);

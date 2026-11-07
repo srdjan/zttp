@@ -870,8 +870,9 @@ fn dupeSortedDedupedSpecs(
     std.mem.sort(SpecState, temp, {}, SpecState.lessThan);
 
     var out: std.ArrayList(SpecState) = .empty;
+    // Each row owns its name and its diagnostic strings.
     errdefer {
-        for (out.items) |s| allocator.free(s.name);
+        for (out.items) |s| freeSpecStrings(allocator, s);
         out.deinit(allocator);
     }
     var prev_name: ?[]const u8 = null;
@@ -902,13 +903,15 @@ fn dupeSortedDedupedSpecs(
 }
 
 fn freeSpecList(allocator: std.mem.Allocator, items: []const SpecState) void {
-    for (items) |s| {
-        allocator.free(s.name);
-        if (s.diagnostic_code) |c| allocator.free(c);
-        if (s.diagnostic_message) |m| allocator.free(m);
-        if (s.source_snippet) |sn| allocator.free(sn);
-    }
+    for (items) |s| freeSpecStrings(allocator, s);
     allocator.free(items);
+}
+
+fn freeSpecStrings(allocator: std.mem.Allocator, s: SpecState) void {
+    allocator.free(s.name);
+    if (s.diagnostic_code) |c| allocator.free(c);
+    if (s.diagnostic_message) |m| allocator.free(m);
+    if (s.source_snippet) |sn| allocator.free(sn);
 }
 
 fn writeStringArray(json: *std.json.Stringify, items: []const []const u8) !void {
@@ -1278,6 +1281,45 @@ test "fromProvenFacts: dedupes duplicate env keys" {
     try std.testing.expectEqual(@as(usize, 2), review.env_keys.len);
     try std.testing.expectEqualStrings("DB_URL", review.env_keys[0]);
     try std.testing.expectEqualStrings("PORT", review.env_keys[1]);
+}
+
+fn reviewTwoFailedSpecs(allocator: std.mem.Allocator) !void {
+    const facts = ProvenFacts{
+        .env_vars = &.{},
+        .env_proven = true,
+        .egress_endpoints = &.{},
+        .egress_proven = true,
+        .cache_namespaces = &.{},
+        .cache_proven = true,
+        .routes = &.{},
+        .proof_level = .none,
+    };
+    const specs = [_]SpecState{
+        .{
+            .name = "deterministic",
+            .discharged = false,
+            .diagnostic_code = "ZTS500",
+            .diagnostic_message = "property not discharged",
+            .source_line = 4,
+            .source_column = 9,
+            .source_snippet = "a write to module state",
+        },
+        .{
+            .name = "read_only",
+            .discharged = false,
+            .diagnostic_code = "ZTS500",
+            .diagnostic_message = "property not discharged",
+            .source_line = 4,
+            .source_column = 9,
+            .source_snippet = "a write to module state",
+        },
+    };
+    var review = try ReviewFacts.fromProvenFacts(allocator, &facts, &.{}, "sha-1", &specs);
+    review.deinit(allocator);
+}
+
+test "fromProvenFacts: a failed allocation while copying failed specs leaks nothing" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, reviewTwoFailedSpecs, .{});
 }
 
 test "deriveDelta: a change from a literal to a dynamic env, egress, or cache set is a demotion" {

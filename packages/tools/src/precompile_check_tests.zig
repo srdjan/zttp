@@ -790,6 +790,29 @@ test "a failed allocation while recording a state-write file leaks nothing" {
     try std.testing.checkAllAllocationFailures(std.testing.allocator, applyStateWriteTwice, .{});
 }
 
+fn refreshKeepingHelperRow(allocator: std.mem.Allocator) !void {
+    var contract = handler_contract.emptyContract(try allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(allocator);
+    const helper_row = zts.SpecDiagnostic{
+        .kind = .not_discharged,
+        .spec_name = "read_only",
+        .cause = .{ .line = 4, .column = 9, .snippet = "a write to module state", .file = "b.ts" },
+        .suggestion = "remove `read_only` from the capsule",
+        .function = "tally",
+        .site = .{ .file = "a.ts", .line = 3, .column = 8 },
+    };
+    var owned = try helper_row.clone(allocator);
+    contract.spec_diagnostics.append(allocator, owned) catch |err| {
+        owned.deinit(allocator);
+        return err;
+    };
+    try check_mod.refreshContractSpecDiagnostics(allocator, &contract);
+}
+
+test "a failed allocation while refreshing spec diagnostics leaks no kept helper row" {
+    try std.testing.checkAllAllocationFailures(std.testing.allocator, refreshKeepingHelperRow, .{});
+}
+
 test "formatProofCard: strict canonical diagnostics are visible in text mode" {
     const allocator = std.testing.allocator;
     const source =
