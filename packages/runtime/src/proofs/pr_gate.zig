@@ -1156,8 +1156,9 @@ const SourceKind = enum { handler, implicit_handler, non_handler };
 ///
 /// A ZTS606 row with the mark gets one more test. The gate accepts it only
 /// when its property is one of the properties that the default-profile ZTS500
-/// row of the handler names as not held. The handler already fails that
-/// property, so the ZTS606 row adds no error to the ZTS500 row. A ZTS606 whose
+/// row of the handler names as not held, or the property of a marked ZTS501
+/// row. The handler already fails that property, so the ZTS606 row adds no
+/// error to those rows. A ZTS606 whose
 /// property the handler still holds is the one error that stops the gate here.
 /// The `deterministic` and `idempotent` facts of the handler ignore a branch on
 /// a clock value, so a helper that reads the clock can break `deterministic`
@@ -1176,11 +1177,16 @@ fn onlyImplicitDefaultSpecErrors(result: *const zts_cli.precompile.CheckResult) 
 
 /// True when the default-profile ZTS500 row of the handler (`not_discharged`,
 /// marked, with no `function`) lists `property` in its `", "`-joined
-/// `spec_name`. That list is the set of properties that the handler does not
-/// hold.
+/// `spec_name`, or a marked ZTS501 row of the handler names `property`. Those
+/// rows state the properties that the handler does not hold.
 fn handlerFailsProperty(contract: *const zts.HandlerContract, property: []const u8) bool {
     for (contract.spec_diagnostics.items) |d| {
-        if (d.kind != .not_discharged or !d.implicit_default or d.function != null) continue;
+        if (!d.implicit_default or d.function != null) continue;
+        // Under a `zttp:cache` or `zttp:sql` import the handler's `read_only`
+        // failure is in the marked ZTS501 row, and the ZTS500 row leaves
+        // `read_only` out. The ZTS501 row names one property.
+        if (d.kind == .incompatible_with_import and std.mem.eql(u8, d.spec_name, property)) return true;
+        if (d.kind != .not_discharged) continue;
         var tokens = std.mem.tokenizeSequence(u8, d.spec_name, ", ");
         while (tokens.next()) |token| {
             if (std.mem.eql(u8, token, property)) return true;
@@ -2248,6 +2254,81 @@ test "run: a default-profile clock helper that the handler returns gets a breaki
     try testing.expectEqualStrings("", g.stderr);
     try testing.expect(std.mem.indexOf(u8, g.report, "\"verdict\":\"breaking\"") != null);
     try testing.expect(std.mem.indexOf(u8, g.report, "\"capsule\":\"implicit\"") != null);
+}
+
+// A default-profile handler that imports `zttp:cache` and calls a helper that
+// writes through it. The handler's `read_only` failure is in the marked ZTS501
+// row, and the ZTS500 row leaves `read_only` out. The marked ZTS606 rows for
+// `pure` and `read_only` add nothing to those two rows.
+const cache_helper_base =
+    \\import { cacheSet } from "zttp:cache";
+    \\function save(): undefined {
+    \\  cacheSet("ns", "k", "v", 60);
+    \\}
+    \\function handler(req: Request): Response {
+    \\  save();
+    \\  return Response.text("ok", { status: 200 });
+    \\}
+    \\
+;
+
+const cache_helper_status_changed =
+    \\import { cacheSet } from "zttp:cache";
+    \\function save(): undefined {
+    \\  cacheSet("ns", "k", "v", 60);
+    \\}
+    \\function handler(req: Request): Response {
+    \\  save();
+    \\  return Response.text("ok", { status: 404 });
+    \\}
+    \\
+;
+
+test "run: a default-profile cache helper whose read_only the ZTS501 row names gets a breaking verdict when the status changes" {
+    const g = try gateOverEdit(cache_helper_base, cache_helper_status_changed, .json);
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 1), g.code);
+    try testing.expectEqualStrings("", g.stderr);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"verdict\":\"breaking\"") != null);
+    try testing.expect(std.mem.indexOf(u8, g.report, "\"capsule\":\"implicit\"") != null);
+}
+
+// Control: the same import, and a helper that reads the clock. The handler
+// drops the value, so it holds `deterministic`. The ZTS501 row names
+// `read_only`, not `deterministic`, so the marked ZTS606 row for
+// `deterministic` still stops the gate.
+const cache_clock_helper_base =
+    \\import { cacheSet } from "zttp:cache";
+    \\function stamp(): number {
+    \\  return Date.now();
+    \\}
+    \\function handler(req: Request): Response {
+    \\  cacheSet("ns", "k", "v", 60);
+    \\  const t = stamp();
+    \\  return Response.text("ok", { status: 200 });
+    \\}
+    \\
+;
+
+const cache_clock_helper_status_changed =
+    \\import { cacheSet } from "zttp:cache";
+    \\function stamp(): number {
+    \\  return Date.now();
+    \\}
+    \\function handler(req: Request): Response {
+    \\  cacheSet("ns", "k", "v", 60);
+    \\  const t = stamp();
+    \\  return Response.text("ok", { status: 404 });
+    \\}
+    \\
+;
+
+test "run: a default-profile clock helper under a cache import still exits 2 when the handler holds deterministic" {
+    const g = try gateOverEdit(cache_clock_helper_base, cache_clock_helper_status_changed, .json);
+    defer g.deinit();
+    try testing.expectEqual(@as(u8, 2), g.code);
+    try testing.expectEqual(@as(usize, 0), g.report.len);
+    try testing.expect(std.mem.indexOf(u8, g.stderr, "UnanalysableSource") != null);
 }
 
 test "run: a default-profile clock helper that the handler returns is safe when only a comment changes" {

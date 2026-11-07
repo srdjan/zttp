@@ -432,21 +432,25 @@ A handler without a `Proof<...>` return type must prove the whole default
 profile. When it misses a default property, the compiler reports ZTS500, and
 ZTS501 when it imports `zttp:cache` or `zttp:sql`. Those diagnostics carry the
 `implicit_default` mark. The gate accepts a side whose only errors have that
-mark, and it compares the two contracts as for any other handler. The behavior
+mark, except a ZTS606 row as the next paragraph states, and it compares the
+two contracts as for any other handler. The behavior
 verdict, the lost proofs, and the critical-loss rule apply unchanged. An added
 handler of this kind is `additive`, and a deleted one is `breaking`.
 
 The gate reads the mark. For a ZTS606 row it also reads the code. A ZTS606 row
 under the default profile carries the mark, and the gate accepts that row only when its
-property is one that the ZTS500 row of the handler names as not held. The
-handler already fails that property, so the ZTS606 row adds no error. A ZTS606
+property is one that the ZTS500 row of the handler names as not held, or the
+property of a marked ZTS501 row (`read_only` under a `zttp:cache` or `zttp:sql`
+import). The handler already fails that property, so the ZTS606 row adds no
+error. A ZTS606
 row for a property that the handler still holds stops the gate with exit 2. The
 `deterministic` and `idempotent` facts of the handler ignore a branch on a
 clock value, so only that row shows that a helper breaks the property. With no
 ZTS500 row for the handler, the ZTS606 row also stops the gate. A declared
 capsule that fails, a helper capsule that fails, a ZTS606 under a declared
-capsule, the Effects diagnostics, and every analysis error still stop the gate
-with exit 2. The JSON report gives each handler a `capsule` field, `"implicit"`
+capsule, the Effects errors (ZTS504 and ZTS506), and every analysis error
+still stop the gate with exit 2. The ZTS505 Effects warning does not stop it.
+The JSON report gives each handler a `capsule` field, `"implicit"`
 or `"declared"`. The Markdown report adds a "no declared capsule" note for an
 implicit handler.
 

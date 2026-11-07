@@ -298,9 +298,10 @@ helper's return type is discharged against the facts effect inference
 and path-return analysis prove about that function (`function_specs.zig`),
 for the v1 capsule set `total`, `pure`, `read_only`, `deterministic`.
 Helper failures reuse ZTS500 / ZTS502, each carrying a `function`
-attribution. A helper that breaks a property the handler's `Proof<T, P>`
-demands while carrying no capsule for it gets **ZTS606 -
-missing_capsule**: the proof cannot compose across that call boundary.
+attribution. A helper in the entry file that the handler reaches, and that
+breaks a property the handler's `Proof<T, P>` demands while carrying no capsule
+for it, gets **ZTS606 - missing_capsule**: the proof cannot compose across that
+call boundary. A function in an imported module gets no ZTS606.
 When the handler declares no capsule, the demanded set is the default profile.
 The ZTS606 row then carries the `implicit_default` mark, and its text names the
 default profile. Its remedy points at the capsule that the ZTS500 row of the
