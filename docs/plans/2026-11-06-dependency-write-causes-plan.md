@@ -1,6 +1,6 @@
 # Dependency write causes: name a write in another file when it breaks the handler's capsule
 
-The cross-module state writers plan (`2026-11-06-cross-module-state-writers-plan.md`) ranked this gap second in "Other gaps, ranked". After that plan closed, the owner said "keep going" on 2026-11-06. This document is the plan for that gap. Codex astra checked its facts and Fable checked its argument; "Review findings" lists each finding and its resolution. On 2026-11-06 the owner accepted Decisions 1 to 7 with option (a) each.
+The cross-module state writers plan (`2026-11-06-cross-module-state-writers-plan.md`) ranked this gap second in "Other gaps, ranked". After that plan closed, the owner said "keep going" on 2026-11-06. This document is the plan for that gap. Codex astra checked its facts and Fable checked its argument; "Review findings" lists each finding and its resolution. On 2026-11-06 the owner accepted Decisions 1 to 7 with option (a) each. The owner did not answer Decision 8 within the time limit, and Opus took option (a).
 
 ## Status
 
@@ -9,7 +9,7 @@ The cross-module state writers plan (`2026-11-06-cross-module-state-writers-plan
 | U0 | Complete |
 | U1 | Complete: 18 gates, check-spine, and the census of eleven graphs are unchanged from U0 |
 | U2 | Complete: 18 gates and check-spine pass; the census keeps every code and exit status, and four ZTS500 rows change as planned |
-| U3 | Not started |
+| U3 | Complete: two adversarial reviews and the empirical validation; the confirmed findings are fixed in U3a (`8c956f8c`) and U3b (`b998b2f0`); see "U3 results" |
 
 ## Reproduction
 
@@ -103,6 +103,18 @@ Option (b): add `sourceFile` to the review facts JSON, which the ledger stores.
 
 Option (a), recommended: run U0 to U3 in order. Commit each unit on local `main`, and do not push. Stop after U0 and report when a recorded DeepSeek transcript or a golden would change.
 
+## Decision 8: the remedy when the graph has several writes
+
+The Fable review in U3 found this question (finding F1 in "U3 results"). With two writing dependencies, the Decision 4 texts said "remove that write". After that repair, the property still failed, and the cause moved to the other write.
+
+Option (a), recommended: change only the remedy of the two dependency texts, so that it names every write. Each write already has its ZTS310 row. The suggestion ends ": remove every write to module state that a ZTS310 row names, or remove `read_only` from the capsule." The default-profile sentence ends "To keep them, remove every write to module state that a ZTS310 row names."
+
+Option (b): add the count, as in "the first of 2 writes". The selector must then count the writes the same way as the ZTS310 rows, over verifier and flow sites.
+
+Option (c): keep the texts, and record F1 as an accepted risk.
+
+The owner did not answer within the time limit on 2026-11-06. Opus took option (a), in U3b. The one-file texts do not change, because they do not claim that one write is enough.
+
 ## Units
 
 | Unit | Change | Main files | Model | Turn budget |
@@ -164,7 +176,7 @@ Empirical validation, by Opus at the U2 commit:
 - An owned file on a cause can leak or be freed twice through a copy path that the tests do not run. U1 test 8 runs the discharge, the clone, the replacement, and each allocation failure.
 - Decision 3 (a) makes the guard conservative. A dependency whose `pure` falls for any call loses the write as the cause of `pure`, and that row falls back to the generic text.
 - Decision 5 (a) moves contract.json text for a single-file handler with an uncalled writer. U0 lists the goldens.
-- The cause names one write. A handler can lose a property to several writes, and the text names the first only, as in one file today.
+- The cause names one write. A handler can lose a property to several writes, and the text names the first only, as in one file today. After U3b (Decision 8 (a)), the remedy of a dependency text names every write.
 
 ## Gaps that remain after this plan
 
@@ -172,6 +184,9 @@ Empirical validation, by Opus at the U2 commit:
 - The HUD regression line and the counterexample pipeline read `causeFor`, which returns no state-write cause, in one file and across files.
 - The entry remedy "move the state to zttp:cache" does not restore `read_only`, because `cacheSet` is classified `.write`. This text is the same in one file.
 - The other ranked gaps of the cross-module state writers plan: items 3 to 7.
+- An unresolved route dispatch also sets `shares_state` without a write (`GraphCheck` and `runCheckOnParsedSource`). With a dependency write present, the text names the write, and removing it does not restore the property. Fable could not build a shape that types: `const dispatch = found.handler; return dispatch(req);` gives ZTS600 (finding F3).
+- The generic `pure` suggestion "remove side effects (virtual-module calls, Date.now, Math.random) from the handler body" also appears when the only side effect is a call into an imported module. The guard of Decision 3 correctly gives that row no write. The text is older than this plan (finding F2).
+- In one file, the remedy of the default-profile sentence, "copy the value into a local before the write, or move the state to zttp:cache", names one write when there are several. The text is older than this plan. On 2026-11-06, `git grep` found it in no recorded transcript under `packages/pi/src/simulator/testdata`.
 
 ## Review findings
 
@@ -224,3 +239,53 @@ Tests and goldens:
 - The recorded DeepSeek data has two multi-file cases, `sibling-helper` and `sibling-helper-holes`. Their `lib/settings.ts` files have no module-level `let`, and no recorded file has a ZTS310 or module-state text. No recorded transcript moves.
 
 Side observation: `zts compile --verify --contract` exits 0 for pF1, pD, and pD1, and writes the ZTS500 rows into contract.json. It exits 1 for pF, because the graph compile refuses a failing declared capsule. `zttp build` refuses pF1 with exit 1 and prints the CHECK message, so no binary is built. The difference is in the exit status of `zts compile` only. It is outside this plan.
+
+## U3 results
+
+Commits on local `main`: U1 `e0cb9319`, U2 `410b6356`, U3a `8c956f8c`, U3b `b998b2f0`. Each commit passed the 18 gates and check-spine, and the R7c census reported `differences=0`. The lead reran U1, U2, and U3b from an empty cache. U3a ran on the lead's own cache, and the U3b run from an empty cache covers it again.
+
+### Adversarial review
+
+Fable probed the U1 and U2 diff at `410b6356`. Its probes are in `/tmp/zttp-g3/fable-probes`.
+
+- F1, confirmed and fixed in U3b. With two writing dependencies, the text said "remove that write", and after that repair `read_only` still failed (probes two-deps and flow-first-default). See Decision 8.
+- F2, older than this plan: the generic `pure` text. See "Gaps that remain after this plan".
+- F3, not built: an unresolved route dispatch with a dependency write. See "Gaps that remain after this plan".
+- F4, older than this plan: `zts compile` and `zttp build` print only "<path>: ZTS500 read_only" for a failing declared capsule, and `zttp build` prints an error return trace. No fact differs between surfaces.
+- Shapes that behaved correctly: a dependency in a subdirectory, a diamond import, one module under two spellings, an uncalled writer in the entry, a write through an imported array, a write in an arrow of an exported object literal, a write in a `forEach` callback, two writes on one line, a write during module initialization (not a write), a flow-only write in the first module, a helper capsule, four properties under one capsule, `Date.now()` together with a write, a `zttp:cache` write in one dependency and a module-state write in another, and a virtual-module import in an earlier dependency. Six runs of `zts check --json` gave identical output.
+
+Codex astra checked the facts of the same diff, read-only.
+
+- C1, confirmed and fixed in U3a: `refreshContractSpecDiagnostics` leaked the clone of a kept row when the append failed. The leak is older than this plan.
+- C2, confirmed and fixed in U3a: `dupeSortedDedupedSpecs` freed only the name of each row that it had copied when a later allocation failed. The leak is older than this plan.
+- C3, already a gap: a write named for `state_isolated` when the flow evaluation is also `cleared()`.
+- C4, rejected: tests build the expected text with `allocPrint`. Only the path of the temporary fixture is computed. The rest of each text is literal.
+- Sound: the ownership of the cause file on every path, the inputs of the selector in the three drivers, the exclusion of the entry's own id in `reported_writes`, the same file in the cause and in the ZTS310 row, the order of the fold and the re-discharge, and determinism.
+
+### Empirical validation
+
+1. Surfaces. pF, pB3, pB, pD, pC2, and pC5 ran through `zts check --json`, text `zts check`, `zts compile --verify --contract`, and `zttp compile`. Each surface that prints the cause gives the same file, line, and text. Text `zts check` prints the path relative to the current directory, as in "demoted at dep.ts:4:12".
+2. Repair. For pF, pB3, pB, pD, and pC5, removing the named write makes each named property hold, and each property that the text leaves out stays false for its own reason. In pC5, `idempotent` stays false because the dependency removes `retry_safe`, which shows the guard of Decision 3. After the write is removed, `let` must become `const`, or ZTS604 refuses the binding. After U3b, removing every write in two-deps gives exit 0, and in flow-first-default only `pure` still fails, which the sentence left out.
+3. Mutants, each against the unfiltered `test-precompile` and `test-zts` in a worktree at `410b6356`:
+
+| Mutant | Result |
+|---|---|
+| The selector takes the last write of the chosen module | Survived at `410b6356`. U3b adds "CHECK names the earlier of two writes in one imported file", which kills it (1 of 597 tests fails). |
+| The selector takes the module that runs last | Killed by both "runs first" tests |
+| The selector prefers a dependency write over an entry write | Killed by three entry-write tests |
+| The selector reads the entry's own id in `reported_writes` as a dependency | Survived. Equivalent: each such write is also an entry verifier finding, and the selector takes an entry write before any dependency write, so no driver output can change. |
+| The guard after the fold is removed | Killed by "CHECK leaves a property that a dependency removes out of the write sentence of the default profile" |
+| The message printer drops the file | Killed by three tests |
+| The card printer drops the file | Killed by "formatFailureSections: the card names the file of a cause in an imported file" |
+| `SpecDiagnostic.clone` copies the file shallowly | Killed in `test-zts` (double free) |
+| `recordStateWrite` does not free the replaced file | Killed in `test-precompile` (leak) |
+
+4. `zttp dev`. On pF, a reload that adds the write to `dep.ts` is refused, and the previous handler keeps serving. The reload prints "demoted at dep.ts:4:12" and the `dep.ts` remedy. The ledger holds one swap event, from the first proof. `zttp dev` refuses pD at start, because its default profile fails. So the HUD and the ledger record only states whose specs pass, and a cause in another file cannot reach them through `zttp dev`. The U1 tests of `specStateFor` cover that path.
+5. Timing, with `hyperfine -N -i --warmup 3 --runs 30` at a load average of 8, Debug builds of `17f5259e` and `b998b2f0`. `zts check --json`: graph 1 6.3 ms before and 6.3 ms after, graph 3 6.4 ms and 6.5 ms. `zts compile --verify --contract`: graph 1 6.7 ms and 6.7 ms, graph 3 6.6 ms and 6.8 ms. Each difference is within 0.2 ms, the standard deviation of the runs. Graph 3 has two ZTS500 rows, so it runs the cause path.
+
+### Side observations, older than this plan
+
+- `zts compile` with no output path prints "Missing output path." and exits 0.
+- Text `zts check` exits 2 for warnings only, as `docs/cli.md` says, but `zts check --json` exits 0 for the same input.
+- The U2 implementer saw `zts compile` hang on its probe pR3. It does not reproduce: the build of `17f5259e` and the build of U2 both exit 1 in 0.02 s.
+- The U1 implementer ran `python -` once and the U2 implementer ran `python3 --version` once, against the rule of this repository. Neither changed a file.
