@@ -2122,8 +2122,8 @@ test "compileHandler graph names the write of a dependency in the default-profil
     defer allocator.free(dep_path);
     const ending = try std.fmt.allocPrint(
         allocator,
-        " The write to module state at `{s}` line 4 removes deterministic, idempotent, read_only, retry_safe, state_isolated, stateless. To keep them, remove that write from `{s}`.",
-        .{ dep_path, dep_path },
+        " The write to module state at `{s}` line 4 removes deterministic, idempotent, read_only, retry_safe, state_isolated, stateless. To keep them, remove every write to module state that a ZTS310 row names.",
+        .{dep_path},
     );
     defer allocator.free(ending);
     try std.testing.expect(std.mem.endsWith(u8, try defaultProfileSuggestion(&compiled), ending));
@@ -2145,8 +2145,8 @@ test "compileHandler graph names the uncalled writer of a dependency in a graph 
     defer allocator.free(dep_path);
     const ending = try std.fmt.allocPrint(
         allocator,
-        " The write to module state at `{s}` line 4 removes deterministic, idempotent, pure, read_only, retry_safe, state_isolated, stateless. To keep them, remove that write from `{s}`.",
-        .{ dep_path, dep_path },
+        " The write to module state at `{s}` line 4 removes deterministic, idempotent, pure, read_only, retry_safe, state_isolated, stateless. To keep them, remove every write to module state that a ZTS310 row names.",
+        .{dep_path},
     );
     defer allocator.free(ending);
     try std.testing.expect(std.mem.endsWith(u8, try defaultProfileSuggestion(&compiled), ending));
@@ -2215,8 +2215,8 @@ test "compileHandler graph names the write of the dependency that runs first" {
     defer allocator.free(dep_path);
     const ending = try std.fmt.allocPrint(
         allocator,
-        " The write to module state at `{s}` line 8 removes deterministic, idempotent, read_only, retry_safe, state_isolated, stateless. To keep them, remove that write from `{s}`.",
-        .{ dep_path, dep_path },
+        " The write to module state at `{s}` line 8 removes deterministic, idempotent, read_only, retry_safe, state_isolated, stateless. To keep them, remove every write to module state that a ZTS310 row names.",
+        .{dep_path},
     );
     defer allocator.free(ending);
     try std.testing.expect(std.mem.endsWith(u8, try defaultProfileSuggestion(&compiled), ending));
@@ -2251,8 +2251,8 @@ test "compileHandler graph names the flow-only write of a dependency that comes 
     defer allocator.free(dep_path);
     const ending = try std.fmt.allocPrint(
         allocator,
-        " The write to module state at `{s}` line 3 removes deterministic, idempotent, read_only, retry_safe, state_isolated, stateless. To keep them, remove that write from `{s}`.",
-        .{ dep_path, dep_path },
+        " The write to module state at `{s}` line 3 removes deterministic, idempotent, read_only, retry_safe, state_isolated, stateless. To keep them, remove every write to module state that a ZTS310 row names.",
+        .{dep_path},
     );
     defer allocator.free(ending);
     try std.testing.expect(std.mem.endsWith(u8, try defaultProfileSuggestion(&compiled), ending));

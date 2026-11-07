@@ -169,10 +169,12 @@ pub fn stateWriteSuggestion(allocator: std.mem.Allocator, line: u32) ![]u8 {
 
 /// The ZTS500 suggestion for a property that a write in the imported file
 /// `file` removed. The author cannot copy a value into a local in a file that
-/// the handler does not own, so the text states the rule and two remedies.
+/// the handler does not own, so the text states the rule and two remedies. The
+/// cause is the first write only, and each write has its ZTS310 row, so the
+/// remedy names every write.
 /// Caller frees.
 pub fn dependencyWriteSuggestion(allocator: std.mem.Allocator, file: []const u8, line: u32, name: []const u8) ![]u8 {
-    return allocator.print("`{s}` line {d} writes module state, and a module-state write in any imported file removes `{s}`: remove that write, or remove `{s}` from the capsule.", .{ file, line, name, name });
+    return allocator.print("`{s}` line {d} writes module state, and a module-state write in any imported file removes `{s}`: remove every write to module state that a ZTS310 row names, or remove `{s}` from the capsule.", .{ file, line, name, name });
 }
 
 /// The ZTS606 suggestion for a helper that reaches the write at `line`.
@@ -543,7 +545,7 @@ fn implicitDefaultSuggestion(
     }
     if (removed.items.len == 0) return base;
     const joined = if (write_file) |file|
-        try allocator.print("{s} The write to module state at `{s}` line {d} removes {s}. To keep them, remove that write from `{s}`.", .{ base, file, write_line, removed.items, file })
+        try allocator.print("{s} The write to module state at `{s}` line {d} removes {s}. To keep them, remove every write to module state that a ZTS310 row names.", .{ base, file, write_line, removed.items })
     else
         try allocator.print("{s} The write to module state at line {d} removes {s}. To keep them, " ++ state_write_remedy ++ ".", .{ base, write_line, removed.items });
     allocator.free(base);
@@ -1681,7 +1683,7 @@ test "dischargeSpecs names the dependency file and both remedies for a write in 
 
     try std.testing.expectEqual(@as(usize, 1), diags.items.len);
     try std.testing.expectEqualStrings(
-        "`dep.ts` line 4 writes module state, and a module-state write in any imported file removes `read_only`: remove that write, or remove `read_only` from the capsule.",
+        "`dep.ts` line 4 writes module state, and a module-state write in any imported file removes `read_only`: remove every write to module state that a ZTS310 row names, or remove `read_only` from the capsule.",
         diags.items[0].suggestion orelse return error.TestUnexpectedResult,
     );
     try std.testing.expectEqualStrings("dep.ts", diags.items[0].cause.?.file orelse return error.TestUnexpectedResult);
@@ -1723,7 +1725,7 @@ test "the default profile names the dependency file for a write in an imported f
     try std.testing.expect(std.mem.endsWith(
         u8,
         suggestion,
-        " The write to module state at `dep.ts` line 4 removes deterministic, idempotent, pure, read_only, retry_safe, state_isolated, stateless. To keep them, remove that write from `dep.ts`.",
+        " The write to module state at `dep.ts` line 4 removes deterministic, idempotent, pure, read_only, retry_safe, state_isolated, stateless. To keep them, remove every write to module state that a ZTS310 row names.",
     ));
 }
 

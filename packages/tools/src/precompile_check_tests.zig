@@ -14040,7 +14040,7 @@ test "CHECK names the write in an imported file as the cause of a failing read_o
     try std.testing.expectEqualStrings(message, row.message);
     const suggestion = try std.fmt.allocPrint(
         allocator,
-        "`{s}` line 4 writes module state, and a module-state write in any imported file removes `read_only`: remove that write, or remove `read_only` from the capsule.",
+        "`{s}` line 4 writes module state, and a module-state write in any imported file removes `read_only`: remove every write to module state that a ZTS310 row names, or remove `read_only` from the capsule.",
         .{dep_path},
     );
     defer allocator.free(suggestion);
@@ -14083,7 +14083,7 @@ test "CHECK names the uncalled writer of a dependency as the cause of a failing 
     try std.testing.expectEqualStrings(message, row.message);
     const suggestion = try std.fmt.allocPrint(
         allocator,
-        "`{s}` line 4 writes module state, and a module-state write in any imported file removes `deterministic`: remove that write, or remove `deterministic` from the capsule.",
+        "`{s}` line 4 writes module state, and a module-state write in any imported file removes `deterministic`: remove every write to module state that a ZTS310 row names, or remove `deterministic` from the capsule.",
         .{dep_path},
     );
     defer allocator.free(suggestion);
@@ -14113,8 +14113,8 @@ test "CHECK names the write of a dependency in the default-profile suggestion" {
     const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
     const ending = try std.fmt.allocPrint(
         allocator,
-        " The write to module state at `{s}` line 4 removes deterministic, idempotent, read_only, retry_safe, state_isolated, stateless. To keep them, remove that write from `{s}`.",
-        .{ dep_path, dep_path },
+        " The write to module state at `{s}` line 4 removes deterministic, idempotent, read_only, retry_safe, state_isolated, stateless. To keep them, remove every write to module state that a ZTS310 row names.",
+        .{dep_path},
     );
     defer allocator.free(ending);
     try std.testing.expect(std.mem.endsWith(u8, row.suggestion orelse return error.TestUnexpectedResult, ending));
@@ -14190,14 +14190,58 @@ test "CHECK names the write of the dependency that runs first" {
     const dep_path = try siblingFilePath(&fixture, "b.ts");
     defer allocator.free(dep_path);
 
+    // Each write has its ZTS310 row, which the remedy points to.
+    try std.testing.expectEqual(@as(usize, 2), countDiagnosticsWithCode(&result, "ZTS310"));
     const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
     const suggestion = try std.fmt.allocPrint(
         allocator,
-        "`{s}` line 8 writes module state, and a module-state write in any imported file removes `read_only`: remove that write, or remove `read_only` from the capsule.",
+        "`{s}` line 8 writes module state, and a module-state write in any imported file removes `read_only`: remove every write to module state that a ZTS310 row names, or remove `read_only` from the capsule.",
         .{dep_path},
     );
     defer allocator.free(suggestion);
     try std.testing.expectEqualStrings(suggestion, row.suggestion orelse return error.TestUnexpectedResult);
+}
+
+test "CHECK names the earlier of two writes in one imported file" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(
+        \\import { first, second } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "read_only"> {
+        \\  return Response.text(String(second() + first()));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\let hits = 0;
+        \\
+        \\export function first(): number {
+        \\  hits = hits + 1;
+        \\  return hits;
+        \\}
+        \\
+        \\export function second(): number {
+        \\  hits = hits + 2;
+        \\  return hits;
+        \\}
+        \\
+    );
+
+    var result = try fixture.check();
+    defer result.deinit(allocator);
+    const dep_path = try siblingFilePath(&fixture, "dep.ts");
+    defer allocator.free(dep_path);
+
+    try std.testing.expectEqual(@as(usize, 2), countDiagnosticsWithCode(&result, "ZTS310"));
+    const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
+    const message = try std.fmt.allocPrint(
+        allocator,
+        "declared Proof capsule was not discharged by handler proof (failing spec: read_only; demoted at {s}:4:8 by `a write to module state`)",
+        .{dep_path},
+    );
+    defer allocator.free(message);
+    try std.testing.expectEqualStrings(message, row.message);
 }
 
 test "CHECK names the flow-only write of a dependency that comes before a verifier write" {
@@ -14234,7 +14278,7 @@ test "CHECK names the flow-only write of a dependency that comes before a verifi
     const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
     const suggestion = try std.fmt.allocPrint(
         allocator,
-        "`{s}` line 3 writes module state, and a module-state write in any imported file removes `read_only`: remove that write, or remove `read_only` from the capsule.",
+        "`{s}` line 3 writes module state, and a module-state write in any imported file removes `read_only`: remove every write to module state that a ZTS310 row names, or remove `read_only` from the capsule.",
         .{dep_path},
     );
     defer allocator.free(suggestion);
@@ -14272,7 +14316,7 @@ test "CHECK names the write of a dependency for deterministic when the dependenc
     const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
     const suggestion = try std.fmt.allocPrint(
         allocator,
-        "`{s}` line 5 writes module state, and a module-state write in any imported file removes `deterministic`: remove that write, or remove `deterministic` from the capsule.",
+        "`{s}` line 5 writes module state, and a module-state write in any imported file removes `deterministic`: remove every write to module state that a ZTS310 row names, or remove `deterministic` from the capsule.",
         .{dep_path},
     );
     defer allocator.free(suggestion);
@@ -14334,8 +14378,8 @@ test "CHECK leaves a property that a dependency removes out of the write sentenc
     const row = findingInFile(&result, "ZTS500", "/handler.ts") orelse return error.TestUnexpectedResult;
     const ending = try std.fmt.allocPrint(
         allocator,
-        " The write to module state at `{s}` line 8 removes deterministic, state_isolated. To keep them, remove that write from `{s}`.",
-        .{ dep_path, dep_path },
+        " The write to module state at `{s}` line 8 removes deterministic, state_isolated. To keep them, remove every write to module state that a ZTS310 row names.",
+        .{dep_path},
     );
     defer allocator.free(ending);
     try std.testing.expect(std.mem.endsWith(u8, row.suggestion orelse return error.TestUnexpectedResult, ending));
