@@ -102,6 +102,7 @@ pub const Config = struct {
 };
 
 pub const ClientError = error{
+    AbnormalFinish,
     DeepSeekGenerationStalled,
     DeepSeekServerUnavailable,
     EmptyResponse,
@@ -398,6 +399,11 @@ fn decodeResponseValue(
     const finish_reason = try optionalString(choice.object.get("finish_reason"));
     if (finish_reason) |reason| {
         if (std.mem.eql(u8, reason, "length")) return ClientError.OutputTruncated;
+        // "content_filter" and "insufficient_system_resource" end the reply on
+        // partial text, so only a natural stop or a tool call may decode.
+        if (!std.mem.eql(u8, reason, "stop") and !std.mem.eql(u8, reason, "tool_calls")) {
+            return ClientError.AbnormalFinish;
+        }
     }
     const message = choice.object.get("message") orelse return ClientError.UnexpectedResponseShape;
     if (message != .object) return ClientError.UnexpectedResponseShape;
@@ -1161,4 +1167,17 @@ test "a body that reaches its declared length ends without polling the silent so
     const body = try readBodyWithin(&reader, testing.allocator, 1 << 20, fds[0], 20, 1_000, &.{}, 10);
     defer testing.allocator.free(body);
     try testing.expectEqualStrings("0123456789", body);
+}
+
+test "a completion that the provider cut off for another reason is an error, not a short answer" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(ClientError.AbnormalFinish, decodeResponse(
+        arena.allocator(),
+        "{\"choices\":[{\"finish_reason\":\"content_filter\",\"message\":{\"content\":\"half a han\"}}]}",
+    ));
+    try testing.expectError(ClientError.AbnormalFinish, decodeResponse(
+        arena.allocator(),
+        "{\"choices\":[{\"finish_reason\":\"insufficient_system_resource\",\"message\":{\"content\":\"half a han\"}}]}",
+    ));
 }
