@@ -145,6 +145,26 @@ comptime {
     if (HandlerProperties.namesCoverageProblem("spec_discharge.suggestion_rows", &suggestion_names, &no_suggestion)) |problem| @compileError(problem);
 }
 
+/// The remedy for a response that a branch on a varying value selects. The branch is no read
+/// that the author can remove, so the text names the kinds of source and the two ways out.
+pub const branch_suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response.";
+
+/// The remedy for an export cause when only static text is available, such as in the
+/// live-reload preview. `deterministicSuggestion` names the export instead.
+pub const export_suggestion = "remove the varying read from the response path, or declare a capsule without `deterministic` and `idempotent`.";
+
+/// The remedy for a failed `deterministic`, by the cause that the builder or the flow pass
+/// recorded. A branch cause names the branch, a module export names the call, and a builtin
+/// read or no cause keeps the row text. Caller owns the result.
+fn deterministicSuggestion(allocator: std.mem.Allocator, cause: ?PropertyCause) std.mem.Allocator.Error![]u8 {
+    const found = cause orelse return allocator.dupe(u8, suggestionFor("deterministic") orelse "");
+    return switch (contract_types.deterministicCauseKind(found.snippet)) {
+        .branch => allocator.dupe(u8, branch_suggestion),
+        .builtin_read => allocator.dupe(u8, suggestionFor("deterministic") orelse ""),
+        .module_export => allocator.print("remove `{s}` from the response path, or declare a capsule without `deterministic` and `idempotent`.", .{found.snippet}),
+    };
+}
+
 /// Per-property HUD suggestion strings. Mandatory for cause-only specs so
 /// the proof card never renders an anemic single-line failure.
 pub fn suggestionFor(name: []const u8) ?[]const u8 {
@@ -489,6 +509,8 @@ fn appendNotDischarged(
             try dependencyWriteSuggestion(allocator, file, cause.line, name)
         else
             try stateWriteSuggestion(allocator, cause.line))
+    else if (std.mem.eql(u8, name, "deterministic"))
+        try deterministicSuggestion(allocator, if (provenance) |p| p.deterministic else null)
     else if (suggestionFor(name)) |s|
         try allocator.dupe(u8, s)
     else

@@ -12,6 +12,17 @@ const PropertyProvenance = zts.handler_contract.PropertyProvenance;
 
 pub const Preview = review.CounterexamplePreview;
 
+/// The suggestion for a cause. The preview holds static strings only, so an export cause gets
+/// the static export text and not the text that names the export.
+fn suggestionFor(name: []const u8, snippet: []const u8) ?[]const u8 {
+    if (!std.mem.eql(u8, name, "deterministic")) return zts.spec_discharge.suggestionFor(name);
+    return switch (zts.handler_contract.deterministicCauseKind(snippet)) {
+        .branch => zts.spec_discharge.branch_suggestion,
+        .builtin_read => zts.spec_discharge.suggestionFor(name),
+        .module_export => zts.spec_discharge.export_suggestion,
+    };
+}
+
 /// Return a preview for the first demoted property whose cause the verifier
 /// has recorded on `provenance`. Returns null when there are no demotions
 /// or none of them carry a cause yet.
@@ -31,7 +42,7 @@ pub fn buildFromDelta(
                 .column = c.column,
                 .snippet = c.snippet,
                 .handler_path = handler_path,
-                .suggestion = zts.spec_discharge.suggestionFor(demoted.name),
+                .suggestion = suggestionFor(demoted.name, c.snippet),
             };
         }
     }
@@ -84,4 +95,52 @@ test "buildFromDelta returns a populated preview when cause is recorded" {
     try testing.expectEqualStrings("src/handler.ts", preview.handler_path);
     try testing.expect(preview.suggestion != null);
     try testing.expect(std.mem.indexOf(u8, preview.suggestion.?, "Date.now()") != null);
+}
+
+test "buildFromDelta gives the branch suggestion for a branch cause of deterministic" {
+    const provenance = PropertyProvenance{
+        .deterministic = .{
+            .line = 3,
+            .column = 3,
+            .snippet = "a branch on a value that varies between requests",
+        },
+    };
+    const demoted = [_]review.PropertyChange{.{
+        .name = "deterministic",
+        .label = "deterministic",
+        .old_value = true,
+        .new_value = false,
+    }};
+    const delta = review.ReviewDelta{ .demoted_properties = demoted[0..] };
+
+    const preview = buildFromDelta("src/handler.ts", &provenance, &delta).?;
+    try testing.expectEqualStrings("a branch on a value that varies between requests", preview.snippet);
+    try testing.expectEqualStrings(
+        "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response.",
+        preview.suggestion.?,
+    );
+}
+
+test "buildFromDelta gives a static export suggestion for an export cause of deterministic" {
+    const provenance = PropertyProvenance{
+        .deterministic = .{
+            .line = 4,
+            .column = 13,
+            .snippet = "rateCheck",
+        },
+    };
+    const demoted = [_]review.PropertyChange{.{
+        .name = "deterministic",
+        .label = "deterministic",
+        .old_value = true,
+        .new_value = false,
+    }};
+    const delta = review.ReviewDelta{ .demoted_properties = demoted[0..] };
+
+    const preview = buildFromDelta("src/handler.ts", &provenance, &delta).?;
+    try testing.expectEqualStrings("rateCheck", preview.snippet);
+    try testing.expectEqualStrings(
+        "remove the varying read from the response path, or declare a capsule without `deterministic` and `idempotent`.",
+        preview.suggestion.?,
+    );
 }

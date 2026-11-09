@@ -74,6 +74,8 @@ const SiteVersion = flow_value.SiteVersion;
 const SchemaView = flow_value.SchemaView;
 const Defenses = flow_value.Defenses;
 const Flow = flow_value.Flow;
+const ControlSite = flow_value.ControlSite;
+const smallerSite = flow_value.smallerSite;
 const combineFlows = flow_value.combineFlows;
 const DefenseEdge = flow_value.DefenseEdge;
 const Value = flow_value.Value;
@@ -740,7 +742,7 @@ pub const FlowInterp = struct {
     /// closure whose value has no object origin reaching the captured value.
     fn projectPersistent(self: *FlowInterp, st: State) Error!State {
         if (!st.reachable) return State.bottom;
-        var out: State = .{ .top_cell = st.top_cell };
+        var out: State = .{ .top_cell = st.top_cell, .varying_control = st.varying_control };
         var pending: std.ArrayList(SiteKey) = .empty;
         var it = st.heap.keyIterator();
         while (it.next()) |site| if (site.kind == .module_binding or site.kind == .builtin) try pending.append(self.mem(), site.*);
@@ -906,6 +908,10 @@ pub const FlowInterp = struct {
                         // The abstract join does not prove that the optional
                         // fallback executes on a concrete invocation.
                         st.path = .{ .complete = false };
+                        // The profile refuses default parameters (ZTS054), so no handler reaches this
+                        // line today. It keeps the rule if the parser admits them: the default is
+                        // chosen when the passed value is absent.
+                        self.markControl(st, param_idx, value);
                         const fallback = try self.eval(elem.default_value, st);
                         value = try joinValue(self.mem(), value, fallback);
                     }
@@ -939,15 +945,40 @@ pub const FlowInterp = struct {
         };
     }
 
+    /// Whether a flow differs between requests: a clock or random read, or a value the
+    /// analysis cannot follow. Request data does not count.
+    fn varyingFlow(flow: Flow) bool {
+        return flow.labels.nondeterministic or flow.labels.unknown;
+    }
+
+    /// Record the control decision `node` of the active module on `st`. The first decision
+    /// on a path keeps the mark, so the site is the first branch that the response follows.
+    fn markSite(self: *const FlowInterp, st: *State, node: NodeIndex) void {
+        if (st.varying_control == null) st.varying_control = .{ .module = self.active_module, .node = node };
+    }
+
+    /// A control decision `node` on `v`: when `v` varies, mark `st`, and so every successor
+    /// state. This is a mark on the state and not a data label, so `no_secret_leakage` does
+    /// not see it (D9).
+    fn markControl(self: *const FlowInterp, st: *State, node: NodeIndex, v: Value) void {
+        if (varyingFlow(v.flow())) self.markSite(st, node);
+    }
+
+    /// `markControl` for an operand that may be absent, such as the results of a callback loop.
+    fn markControlOpt(self: *const FlowInterp, st: *State, node: NodeIndex, v: ?Value) void {
+        if (v) |value| self.markControl(st, node, value);
+    }
+
     fn observeSink(self: *FlowInterp, node: NodeIndex, st: *const State, sink: InputSink, reached: Flow) Error!void {
         const callsite = if (self.activations.items.len > 0) self.root_callsite else null;
         for (self.sink_events.items) |*event| {
             if (event.source_node == node and event.module == self.active_module and event.callsite == callsite and event.sink == sink and samePath(event.path, st.path)) {
                 event.reached = combineFlows(event.reached, reached);
+                event.varying_control = smallerSite(event.varying_control, st.varying_control);
                 return;
             }
         }
-        try self.sink_events.append(self.mem(), .{ .node = if (self.active_module == 0) node else self.root_callsite orelse self.root_entry_node, .source_node = node, .module = self.active_module, .callsite = callsite, .sink = sink, .reached = reached, .path = st.path });
+        try self.sink_events.append(self.mem(), .{ .node = if (self.active_module == 0) node else self.root_callsite orelse self.root_entry_node, .source_node = node, .module = self.active_module, .callsite = callsite, .sink = sink, .reached = reached, .path = st.path, .varying_control = st.varying_control });
     }
 
     fn observeEgress(self: *FlowInterp, node: NodeIndex, st: *const State, args: []const Value) Error!void {
@@ -1068,6 +1099,15 @@ pub const FlowInterp = struct {
         if (html) try self.observeSink(node, st, .response_html, try self.deepFlow(st, &.{body}));
     }
 
+    /// The position of a control decision, with the file of a dependency. Null when the node
+    /// has no location. The file borrows the module view.
+    fn branchCause(self: *const FlowInterp, site: ?ControlSite) ?report_types.BranchCause {
+        const found = site orelse return null;
+        const loc = self.sourceView(found.module).getLoc(found.node) orelse return null;
+        const file: ?[]const u8 = if (found.module == 0 or self.modules.len == 0) null else self.modules[found.module].path;
+        return .{ .line = loc.line, .column = loc.column, .file = file };
+    }
+
     fn finishHandlerReport(self: *FlowInterp, result: FunctionResult) Error!HandlerReport {
         for (result.completions) |completion| {
             if (completion.value) |v| {
@@ -1076,11 +1116,22 @@ pub const FlowInterp = struct {
         }
         var properties: report_types.FlowProperties = .{};
         var diagnostics: std.ArrayList(report_types.Diagnostic) = .empty;
+        // A labelled value that reaches the response clears `deterministic` as a value cause.
+        // The smallest branch site among the response events is the branch cause.
+        var value_varies = false;
+        var branch: ?ControlSite = null;
         for (self.sink_events.items) |event| {
             const labels = event.reached.labels;
             if (labels.secret or labels.unknown) properties.no_secret_leakage = false;
             if (labels.credential or labels.unknown) properties.no_credential_leakage = false;
-            if (event.sink == .response_other and (labels.nondeterministic or labels.unknown)) properties.deterministic = false;
+            if (event.sink == .response_other and (labels.nondeterministic or labels.unknown)) {
+                properties.deterministic = false;
+                value_varies = true;
+            }
+            if (event.sink == .response_other) if (event.varying_control) |site| {
+                properties.deterministic = false;
+                branch = smallerSite(branch, site);
+            };
             if (!inputAccepted(event.reached, event.sink, .input_validated)) properties.input_validated = false;
             if (!inputAccepted(event.reached, event.sink, .injection_safe)) properties.injection_safe = false;
             if (!inputAccepted(event.reached, event.sink, .pii_contained)) properties.pii_contained = false;
@@ -1154,6 +1205,7 @@ pub const FlowInterp = struct {
             .diagnostics = try diagnostics.toOwnedSlice(self.mem()),
             .events = try self.sink_events.toOwnedSlice(self.mem()),
             .defended_paths = try defended.toOwnedSlice(self.mem()),
+            .deterministic_branch = if (result.cleared or value_varies) null else self.branchCause(branch),
         };
     }
 
@@ -1469,7 +1521,7 @@ pub const FlowInterp = struct {
     /// cells of unnamed writes, and no bindings. The heap is copied, because
     /// the caller goes on mutating its own maps.
     fn heapState(self: *FlowInterp, st: *const State) Error!State {
-        return .{ .heap = try st.heap.clone(self.mem()), .top_cell = st.top_cell, .path = st.path };
+        return .{ .heap = try st.heap.clone(self.mem()), .top_cell = st.top_cell, .path = st.path, .varying_control = st.varying_control };
     }
 
     fn applyOrdinaryCall(self: *FlowInterp, node: NodeIndex, callee: Value, args: []const Value, st: *State) Error!Value {
@@ -1487,7 +1539,7 @@ pub const FlowInterp = struct {
         // results join. A result chosen through a labelled callee carries its
         // labels, as a read through a labelled key does.
         const joined = try self.runCallables(callee.callables, args, st);
-        return self.takeSummary(st, joined, callee.flow());
+        return self.takeSummary(node, st, joined, callee.flow());
     }
 
     /// Run every function of `callables` from `st` and join the summaries.
@@ -1504,7 +1556,7 @@ pub const FlowInterp = struct {
     /// Continue the caller from the joined summary of a call: its heap, and its
     /// value with `flow` added as data. A summary with no reachable completion
     /// leaves the caller unreachable.
-    fn takeSummary(self: *FlowInterp, st: *State, joined: Summary, flow: Flow) Error!Value {
+    fn takeSummary(self: *FlowInterp, node: NodeIndex, st: *State, joined: Summary, flow: Flow) Error!Value {
         if (!joined.state.reachable) {
             // No completion is reachable. The bindings stay readable for the
             // dead code that follows in the same expression.
@@ -1514,6 +1566,8 @@ pub const FlowInterp = struct {
         st.heap = try joined.state.heap.clone(self.mem());
         st.top_cell = joined.state.top_cell;
         st.path = joined.state.path;
+        if (st.varying_control == null) st.varying_control = joined.state.varying_control;
+        if (varyingFlow(flow)) self.markSite(st, node);
         return withFlow(joined.value orelse Value.clean, flow);
     }
 
@@ -1822,7 +1876,7 @@ pub const FlowInterp = struct {
         // `NotCallable` and returns nothing, so its flow reaches no result.
         // A candidate that may be any function returned above.
         const selected: Flow = if (user.callables.len > 0 or user.callables_top) user.flow() else .{};
-        return self.takeSummary(st, joined, selected);
+        return self.takeSummary(node, st, joined, selected);
     }
 
     /// Apply one builtin row to a copy of the heap and return its summary.
@@ -1903,7 +1957,10 @@ pub const FlowInterp = struct {
                 if (args.len == 0) return self.allocate(st, .allocated_array, node, &.{try self.readAll(st.*, r)}, flow);
                 // The comparator may run many times per element, and it sees
                 // two of them.
+                // The comparator count follows the length of the receiver (see `markCallbackCount`).
+                if (varyingFlow(try self.deepFlow(st, &.{r}))) self.markSite(st, node);
                 const results = try self.runCallback(node, args[0], &.{ .{ .elements = r }, .{ .elements = r } }, st);
+                self.markControlOpt(st, node, results);
                 const sorted = withFlow(try self.readAll(st.*, r), resultFlow(results));
                 return self.allocate(st, .allocated_array, node, &.{sorted}, flow);
             },
@@ -1913,6 +1970,7 @@ pub const FlowInterp = struct {
             },
             .array_filter => {
                 const results = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .{ .structure = r }, .{ .itself = r } }, st);
+                self.markControlOpt(st, node, results);
                 // The predicate decides which elements stay, so its flow
                 // reaches each one. The receiver is read after the loop, which
                 // sees what the callback wrote.
@@ -1921,6 +1979,7 @@ pub const FlowInterp = struct {
             },
             .array_find => {
                 const results = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .{ .structure = r }, .{ .itself = r } }, st);
+                self.markControlOpt(st, node, results);
                 const kept = withFlow(try self.readAll(st.*, r), resultFlow(results));
                 return withFlow(kept, flow);
             },
@@ -1930,6 +1989,7 @@ pub const FlowInterp = struct {
             },
             .array_test => {
                 const results = try self.runCallback(node, argAt(args, 0), &.{ .{ .elements = r }, .{ .structure = r }, .{ .itself = r } }, st);
+                self.markControlOpt(st, node, results);
                 const decided = combineFlows(try self.deepFlow(st, &.{r}), resultFlow(results));
                 return Value.flowing(combineFlows(flow, decided));
             },
@@ -2280,6 +2340,8 @@ pub const FlowInterp = struct {
         }
 
         if (std.mem.eql(u8, resolved.binding.specifier, "zttp:router") and std.mem.eql(u8, resolved.func.name, "routerMatch")) {
+            // The route operands choose the handler, so a varying operand is a control decision.
+            if (varyingFlow(try self.deepFlow(st, values))) self.markSite(st, node);
             const routes = argAt(values, 0);
             const handler = try self.storedRead(st, routes, .index);
             if (handler.callables_top or routes.origins_top) try self.record(node, .call, .unknown_callee);
@@ -2332,6 +2394,8 @@ pub const FlowInterp = struct {
         var results: ?Value = null;
         if (findCallbackExport(&callback_exports, resolved.binding.specifier, resolved.func.name)) |row| {
             results = try self.exportCallback(node, row.shape, values, st);
+            if (row.shape == .payload and varyingFlow(try self.deepFlow(st, &.{argAt(values, 0)}))) self.markSite(st, node);
+            if (std.mem.eql(u8, resolved.func.name, "dictFilter") or std.mem.eql(u8, resolved.func.name, "andThen") or std.mem.eql(u8, resolved.func.name, "orElse")) self.markControlOpt(st, node, results);
         } else {
             if (read.callables_top) try self.record(node, .call, .unknown_callee);
             if (read.callables.len > 0) {
@@ -2490,6 +2554,19 @@ pub const FlowInterp = struct {
         }
     }
 
+    /// The callback count follows the length of the receiver, and a reduce chooses
+    /// between its initial value and its results by that length. A receiver whose elements or
+    /// structure vary between requests sets `varying_control`. The mark is not a data label (D9).
+    fn markCallbackCount(self: *FlowInterp, node: NodeIndex, st: *State, params: LoopParams) Error!void {
+        switch (params) {
+            .presumed => |args| self.markControl(st, node, try self.reach(st, args)),
+            .precise => |list| for (list) |param| switch (param) {
+                .structure, .deep => |source| if (varyingFlow(try self.deepFlow(st, &.{source}))) self.markSite(st, node),
+                .acc, .elements, .elements_labelled, .itself => {},
+            },
+        }
+    }
+
     /// A callback loop: run every function of `f` as a callback until the loop
     /// head and the result set stop changing, and return the result set (null
     /// when no callback completes).
@@ -2507,6 +2584,7 @@ pub const FlowInterp = struct {
     fn runCallbackLoop(self: *FlowInterp, node: NodeIndex, f: Value, params: LoopParams, st: *State) Error!?Value {
         const arena = self.mem();
         const cap = @max(self.max_loop_passes, 1);
+        try self.markCallbackCount(node, st, params);
         var head = try self.heapState(st);
         head.path.complete = false;
         var results: ?Value = null;
@@ -2534,6 +2612,7 @@ pub const FlowInterp = struct {
         st.heap = try head.heap.clone(arena);
         st.top_cell = head.top_cell;
         st.path = head.path;
+        if (st.varying_control == null) st.varying_control = head.varying_control;
         return results;
     }
 
@@ -2642,7 +2721,7 @@ pub const FlowInterp = struct {
     fn recurse(self: *FlowInterp, index: usize, args: []const Value, st: *const State) Error!Summary {
         const arena = self.mem();
         // Shares the caller's maps by reference. `joinStates` copies them.
-        const caller: State = .{ .heap = st.heap, .top_cell = st.top_cell, .path = .{ .complete = false } };
+        const caller: State = .{ .heap = st.heap, .top_cell = st.top_cell, .path = .{ .complete = false }, .varying_control = st.varying_control };
         const record_ptr = &self.activations.items[index];
         record_ptr.used = true;
         record_ptr.pending_args = try joinArgs(arena, record_ptr.pending_args, args);
@@ -2719,7 +2798,7 @@ pub const FlowInterp = struct {
     /// The callee's completions are its own: a return, a failed assert, and the
     /// fallthrough are normal completions that return to the caller.
     fn runBody(self: *FlowInterp, function: ir.Node.FunctionExpr, args: []const Value, entry: State) Error!Summary {
-        var st: State = .{ .heap = try entry.heap.clone(self.mem()), .top_cell = entry.top_cell, .path = entry.path };
+        var st: State = .{ .heap = try entry.heap.clone(self.mem()), .top_cell = entry.top_cell, .path = entry.path, .varying_control = entry.varying_control };
         const saved_completions = self.completions;
         const saved_loops = self.loop_frames;
         self.completions = .empty;
@@ -3162,12 +3241,12 @@ pub const FlowInterp = struct {
         unary,
         binary_left: ir.Node.BinaryExpr,
         binary_right: Value,
-        short_left: struct { binary: ir.Node.BinaryExpr, state: *State },
+        short_left: struct { node: NodeIndex, binary: ir.Node.BinaryExpr, state: *State },
         short_right: struct { left: Value, state: *State, right: *State, entry_path: PathEvidence },
-        ternary_condition: struct { ternary: ir.Node.TernaryExpr, state: *State },
+        ternary_condition: struct { node: NodeIndex, ternary: ir.Node.TernaryExpr, state: *State },
         ternary_then: struct { ternary: ir.Node.TernaryExpr, state: *State, then_state: *State },
         ternary_else: struct { then_value: Value, state: *State, then_state: *State },
-        access_object: struct { tag: NodeTag, member: ir.Node.MemberExpr, state: *State },
+        access_object: struct { node: NodeIndex, tag: NodeTag, member: ir.Node.MemberExpr, state: *State },
         access_key: struct { object: Value, key_node: NodeIndex, state: *State },
         array_item: *PendingArray,
         object_item: *PendingObject,
@@ -3248,7 +3327,7 @@ pub const FlowInterp = struct {
                     .binary_op => {
                         const binary = self.ir_view.getBinary(current) orelse return self.missing(current);
                         switch (binary.op) {
-                            .and_op, .or_op, .nullish => try frames.append(self.mem(), .{ .short_left = .{ .binary = binary, .state = state } }),
+                            .and_op, .or_op, .nullish => try frames.append(self.mem(), .{ .short_left = .{ .node = current, .binary = binary, .state = state } }),
                             else => try frames.append(self.mem(), .{ .binary_left = binary }),
                         }
                         current = binary.left;
@@ -3261,13 +3340,13 @@ pub const FlowInterp = struct {
                     .ternary => {
                         state.path.complete = false;
                         const ternary = self.ir_view.getTernary(current) orelse return self.missing(current);
-                        try frames.append(self.mem(), .{ .ternary_condition = .{ .ternary = ternary, .state = state } });
+                        try frames.append(self.mem(), .{ .ternary_condition = .{ .node = current, .ternary = ternary, .state = state } });
                         current = ternary.condition;
                     },
                     .member_access, .optional_chain, .computed_access => {
                         if (tag == .optional_chain) state.path.complete = false;
                         const member = self.ir_view.getMember(current) orelse return self.missing(current);
-                        try frames.append(self.mem(), .{ .access_object = .{ .tag = tag, .member = member, .state = state } });
+                        try frames.append(self.mem(), .{ .access_object = .{ .node = current, .tag = tag, .member = member, .state = state } });
                         current = member.object;
                     },
                     .assignment => result = try self.evalAssignment(current, state),
@@ -3312,6 +3391,7 @@ pub const FlowInterp = struct {
                 },
                 .binary_right => |left| result = Value.flowing(combineFlows(left.flow(), value.flow())),
                 .short_left => |pending| {
+                    self.markControl(pending.state, pending.node, value);
                     const right_state = try self.mem().create(State);
                     right_state.* = try cloneState(self.mem(), pending.state.*);
                     const entry_path = pending.state.path;
@@ -3331,6 +3411,7 @@ pub const FlowInterp = struct {
                     result = selected;
                 },
                 .ternary_condition => |pending| {
+                    self.markControl(pending.state, pending.node, value);
                     const then_state = try self.mem().create(State);
                     then_state.* = try cloneState(self.mem(), pending.state.*);
                     try frames.append(self.mem(), .{ .ternary_then = .{ .ternary = pending.ternary, .state = pending.state, .then_state = then_state } });
@@ -3349,7 +3430,10 @@ pub const FlowInterp = struct {
                 },
                 .access_object => |pending| switch (pending.tag) {
                     .member_access => result = try self.readValue(pending.state, value, .{ .name = pending.member.property }),
-                    .optional_chain => result = try joinValue(self.mem(), try self.readValue(pending.state, value, .{ .name = pending.member.property }), Value.clean),
+                    .optional_chain => {
+                        self.markControl(pending.state, pending.node, value);
+                        result = try joinValue(self.mem(), try self.readValue(pending.state, value, .{ .name = pending.member.property }), Value.clean);
+                    },
                     .computed_access => {
                         try frames.append(self.mem(), .{ .access_key = .{ .object = value, .key_node = pending.member.computed, .state = pending.state } });
                         state = pending.state;
@@ -3397,6 +3481,7 @@ pub const FlowInterp = struct {
                     } else {
                         pending.key = .{ .name = property.member.property };
                         if (property.tag == .optional_chain) {
+                            self.markControl(pending.state, pending.node, value);
                             pending.skipped = try cloneState(self.mem(), pending.state.*);
                             pending.state.path.complete = false;
                         }
@@ -3414,6 +3499,7 @@ pub const FlowInterp = struct {
                 },
                 .match_discriminant => |pending| {
                     pending.discriminant = value;
+                    if (varyingFlow(value.flow()) or try self.patternsVary(pending.expression, value, pending.state)) self.markSite(pending.state, pending.node);
                     if (try self.scheduleMatchArm(pending, &frames, &current, &result)) {
                         state = pending.arm_state;
                     } else {
@@ -3651,9 +3737,10 @@ pub const FlowInterp = struct {
 
     /// The combined value of `old op rhs` for a compound assignment. A logical
     /// operator runs its right side on some paths only.
-    fn compoundValue(self: *FlowInterp, op: ir.BinaryOp, old: Value, rhs_node: NodeIndex, st: *State) Error!Value {
+    fn compoundValue(self: *FlowInterp, node: NodeIndex, op: ir.BinaryOp, old: Value, rhs_node: NodeIndex, st: *State) Error!Value {
         switch (op) {
             .and_op, .or_op, .nullish => {
+                self.markControl(st, node, old);
                 var right_state = try cloneState(self.mem(), st.*);
                 right_state.path.complete = false;
                 const rhs = try self.eval(rhs_node, &right_state);
@@ -3681,7 +3768,7 @@ pub const FlowInterp = struct {
                                 try self.record(asg.target, .identifier, .read_before_declaration);
                                 break :old_blk Value.top;
                             };
-                            break :blk try self.compoundValue(op, old, asg.value, st);
+                            break :blk try self.compoundValue(node, op, old, asg.value, st);
                         } else try self.eval(asg.value, st);
                         try self.storeLocal(st, key, assigned);
                         return assigned;
@@ -3694,7 +3781,7 @@ pub const FlowInterp = struct {
                             return assigned;
                         };
                         const assigned = if (asg.op) |op|
-                            try self.compoundValue(op, self.captureValue(st, key), asg.value, st)
+                            try self.compoundValue(node, op, self.captureValue(st, key), asg.value, st)
                         else
                             try self.eval(asg.value, st);
                         try self.notePersistentSiteWrite(node, self.captureSite(key));
@@ -3704,7 +3791,7 @@ pub const FlowInterp = struct {
                     // Module state has no cell here unless globals persist.
                     .global, .undeclared_global => {
                         const assigned = if (asg.op) |op|
-                            try self.compoundValue(op, (try self.loadGlobal(st, binding.name_atom)) orelse Value.top, asg.value, st)
+                            try self.compoundValue(node, op, (try self.loadGlobal(st, binding.name_atom)) orelse Value.top, asg.value, st)
                         else
                             try self.eval(asg.value, st);
                         if (self.persistent_globals) {
@@ -3742,7 +3829,7 @@ pub const FlowInterp = struct {
     fn assignThrough(self: *FlowInterp, node: NodeIndex, st: *State, o: Value, key: Key, asg: ir.Node.AssignExpr) Error!Value {
         const assigned = if (asg.op) |op| blk: {
             const old = try self.readValue(st, o, key);
-            break :blk try self.compoundValue(op, old, asg.value, st);
+            break :blk try self.compoundValue(node, op, old, asg.value, st);
         } else try self.eval(asg.value, st);
         try self.notePersistentWrite(node, o);
         try self.writeValue(st, o, key, assigned);
@@ -3818,6 +3905,60 @@ pub const FlowInterp = struct {
         }
     }
 
+    /// Whether an arm of `expression` tests a part of `disc` that varies between requests: a
+    /// field a record pattern names, or an element an array pattern reads. The answer sets
+    /// `varying_control` and no data label (D9).
+    fn patternsVary(self: *FlowInterp, expression: ir.Node.MatchExpr, disc: Value, st: *const State) Error!bool {
+        var i: u16 = 0;
+        while (i < expression.arms_count) : (i += 1) {
+            const arm = self.ir_view.getMatchArm(self.ir_view.getListIndex(expression.arms_start, i)) orelse continue;
+            if (try self.patternVaries(arm.pattern, disc, st)) return true;
+        }
+        return false;
+    }
+
+    /// Whether `pattern` tests a field or element of `disc` that varies, at any nesting depth.
+    fn patternVaries(self: *FlowInterp, pattern: NodeIndex, disc: Value, st: *const State) Error!bool {
+        if (pattern == null_node) return false;
+        switch (self.ir_view.getTag(pattern) orelse return false) {
+            .match_pattern => {
+                const pat = self.ir_view.getMatchPattern(pattern) orelse return false;
+                var i: u16 = 0;
+                while (i < pat.props_count) : (i += 1) {
+                    const prop = self.ir_view.getProperty(self.ir_view.getListIndex(pat.props_start, i)) orelse continue;
+                    const name = (try self.literalKey(prop.key)) orelse continue;
+                    const field = try self.readValue(st, disc, .{ .name = name });
+                    // A binding (`t` or `t: v`) reads the field and does not constrain it. A literal,
+                    // a type test, a nested pattern, and `_` (a presence test) do constrain it.
+                    if (prop.value != null_node and self.ir_view.getTag(prop.value) == .identifier) continue;
+                    if (varyingFlow(field.flow())) return true;
+                    if (prop.value == null_node) continue;
+                    const value_tag = self.ir_view.getTag(prop.value) orelse continue;
+                    if ((value_tag == .match_pattern or value_tag == .array_pattern) and try self.patternVaries(prop.value, field, st)) return true;
+                }
+                return false;
+            },
+            .array_pattern => {
+                const arr = self.ir_view.getArray(pattern) orelse return false;
+                if (arr.elements_count == 0) return false;
+                const element = try self.readValue(st, disc, .index);
+                if (varyingFlow(element.flow())) return true;
+                var i: u16 = 0;
+                while (i < arr.elements_count) : (i += 1) {
+                    const sub = self.ir_view.getListIndex(arr.elements_start, i);
+                    if (sub == null_node) continue;
+                    const sub_tag = self.ir_view.getTag(sub) orelse continue;
+                    if ((sub_tag == .match_pattern or sub_tag == .array_pattern) and try self.patternVaries(sub, element, st)) return true;
+                }
+                return false;
+            },
+            // exhaustive: any other pattern tag (a literal, a type test, a binding, a wildcard)
+            // tests only the whole value it meets. The caller or the enclosing arm of this
+            // function has already read the flow of that value (a field or an element).
+            else => return false,
+        }
+    }
+
     // --- statements ---
 
     pub fn exec(self: *FlowInterp, node: NodeIndex, st: *State) Error!void {
@@ -3874,7 +4015,7 @@ pub const FlowInterp = struct {
                     _ = try self.missing(node);
                     return;
                 };
-                _ = try self.eval(s.condition, st);
+                self.markControl(st, node, try self.eval(s.condition, st));
                 var then_state = try cloneState(self.mem(), st.*);
                 try self.branchEvidence(&then_state, s.condition, false);
                 try self.exec(s.then_branch, &then_state);
@@ -3898,7 +4039,7 @@ pub const FlowInterp = struct {
                     _ = try self.missing(node);
                     return;
                 };
-                _ = try self.eval(s.condition, st);
+                self.markControl(st, node, try self.eval(s.condition, st));
                 if (!st.reachable) return;
                 // The assert held on the path that continues, so the original
                 // state goes on. The failure is a completion of its own.
@@ -4008,6 +4149,9 @@ pub const FlowInterp = struct {
             return;
         }
         const iterable = try self.eval(loop.iterable, st);
+        // The loop count follows the length of the iterable, as the count of a callback loop does,
+        // so the whole of the iterable counts and not only its own flow.
+        self.markControl(st, node, try self.reach(st, &.{iterable}));
         const cap = @max(self.max_loop_passes, 1);
 
         var head = st.*;

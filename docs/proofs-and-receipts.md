@@ -67,11 +67,13 @@ An unchecked read has a runtime effect. A member read of `undefined` gives `unde
 |---|---|
 | `pure` | the handler calls no virtual modules and makes no call the compiler cannot resolve: it is a pure function of the request |
 | `read_only` | every virtual-module call is read-classified and every call resolves to a known function: no state is mutated |
-| `deterministic` | no value that can differ between runs, such as a clock read, a random draw, a network response, or stored data, reaches the response |
+| `deterministic` | no value that can differ between runs, such as a clock read, a random draw, a network response, or stored data, reaches the response, and no control decision on such a value leads to the response |
 | `retry_safe` | the same condition as `read_only` |
 | `idempotent` | deterministic and retry-safe: safe under at-least-once delivery |
 
 The analyzer decides from module binding metadata whether an export returns a varying value. An export varies when its capabilities include `clock`, `random`, `network`, `sqlite`, or `filesystem`. It also varies when it reads a stateful module, or when it declares `unknown` or `nondeterministic` in its return labels. So the result of `fetch` or `fetchWithRetry`, a cache read, a SQL read, and a rate-limit call count as varying. The rule is `exportVaries` in `packages/zts/src/module_binding.zig`. The flow analysis and the effect rows of helper capsules both use it. A fetch whose result the handler discards does not demote the property. `flow_analyzer_version` 9 introduced this rule.
+
+A control decision on a varying value also demotes `deterministic` when the response follows it. The decisions are an `if`, a ternary, a `match` arm test, an `assert`, `&&`, `||`, `??`, an optional chain, the count of a loop or a callback loop, a callback result that a builtin tests, a selected call target, and a route choice. The mark goes through joins, calls, and module initialization, so a branch whose result the response does not use also demotes the property. The mark is not a data label: `no_secret_leakage` and the other flow properties do not read it. The ZTS500 row names the first such decision, with the text "a branch on a value that varies between requests". A value that reaches the response is named before a branch. `flow_analyzer_version` 10 introduced this rule.
 
 **Security** - data-flow guarantees:
 
@@ -283,7 +285,8 @@ verifier classifies the property from the IR and, when it demotes the
 property, records a `PropertyCause` with the file line, column, and
 snippet that produced the demotion. The Counterexample frame pairs that
 cause with the hint catalog in `spec_discharge.suggestionFor` and
-renders. No witness, no replay, no request: the snippet is the
+renders. A `deterministic` cause that names a branch or a module export
+gets its own hint instead of the catalog row. No witness, no replay, no request: the snippet is the
 counterexample.
 
 The flow-driven set (`no_secret_leakage`, `no_credential_leakage`,
@@ -443,9 +446,11 @@ property is one that the ZTS500 row of the handler names as not held, or the
 property of a marked ZTS501 row (`read_only` under a `zttp:cache` or `zttp:sql`
 import). The handler already fails that property, so the ZTS606 row adds no
 error. A ZTS606
-row for a property that the handler still holds stops the gate with exit 2. The
-`deterministic` and `idempotent` facts of the handler ignore a branch on a
-clock value, so only that row shows that a helper breaks the property. With no
+row for a property that the handler still holds stops the gate with exit 2.
+When the handler branches on the clock value of a helper, the handler itself
+loses `deterministic` and `idempotent`, so its ZTS500 row names them and the
+gate accepts the ZTS606 row. When the handler drops that value, the handler
+holds both, and only the ZTS606 row shows that the helper breaks them. With no
 ZTS500 row for the handler, the ZTS606 row also stops the gate. A declared
 capsule that fails, a helper capsule that fails, a ZTS606 under a declared
 capsule, the Effects errors (ZTS504 and ZTS506), and every analysis error

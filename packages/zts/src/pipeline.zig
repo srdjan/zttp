@@ -576,6 +576,31 @@ pub fn projectFlowProperties(contract: *HandlerContract, flow: flow_checker_mod.
     }
 }
 
+/// Name the branch that cleared `deterministic` in the contract. The branch is the cause only
+/// when the flow cleared the fact through a branch alone: `was_deterministic` says that the
+/// contract held the fact before the flow ran, and `branch` is null when a varying value
+/// reached the response. A value cause stays as the builder recorded it. The contract owns a
+/// copy of the file of a dependency, and frees the one it replaces.
+pub fn projectBranchCause(
+    allocator: std.mem.Allocator,
+    contract: *HandlerContract,
+    was_deterministic: bool,
+    branch: ?flow_checker_mod.BranchCause,
+) !void {
+    const properties = contract.properties orelse return;
+    if (!was_deterministic or properties.deterministic) return;
+    const found = branch orelse return;
+    const file: ?[]const u8 = if (found.file) |path| try allocator.dupe(u8, path) else null;
+    if (contract.owned_deterministic_branch_file) |old| allocator.free(old);
+    contract.owned_deterministic_branch_file = file;
+    contract.property_provenance.deterministic = .{
+        .line = found.line,
+        .column = found.column,
+        .snippet = handler_contract_mod.deterministic_branch_snippet,
+        .file = file,
+    };
+}
+
 pub const CheckOptions = struct {
     /// Shared import index for this compile. Same lifetime rule as
     /// `ResolveOptions.module_facts`. An options struct rather than a fourth
@@ -1291,7 +1316,10 @@ pub const ModuleAnalysisSession = struct {
             self.parsed.ir_view,
             self.parsed.root,
         ) orelse return;
-        projectFlowProperties(contract, (try self.completedFlow()).getProperties());
+        const flow = try self.completedFlow();
+        const was_deterministic = if (contract.properties) |held| held.deterministic else false;
+        projectFlowProperties(contract, flow.getProperties());
+        try projectBranchCause(self.allocator, contract, was_deterministic, flow.deterministicBranch());
     }
 
     /// Error count of the completed flow pass.

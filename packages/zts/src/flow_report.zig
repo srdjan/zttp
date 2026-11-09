@@ -105,6 +105,15 @@ pub fn propertyTagForKind(kind: DiagnosticKind) ?counterexample.PropertyTag {
     };
 }
 
+/// The control decision that cleared `deterministic` alone, as a position. The file is null
+/// for the entry module, and the path of the file for a dependency. The path borrows the
+/// module view of the analysis.
+pub const BranchCause = struct {
+    line: u32,
+    column: u32,
+    file: ?[]const u8 = null,
+};
+
 /// Proven data flow properties for a handler.
 pub const FlowProperties = struct {
     /// No {secret} data reaches response bodies or headers, logs, or external

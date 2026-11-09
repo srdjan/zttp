@@ -19,8 +19,9 @@ const LabelSet = mb.LabelSet;
 /// Version of the flow verdict semantics, included in the policy identity. It
 /// also covers the `deterministic` verdict of `effect_inference.zig`, which has
 /// no version of its own: version 9 counts a network, SQL, filesystem, or
-/// stored-data read as a varying source (`module_binding.exportVaries`).
-pub const flow_analyzer_version: u32 = 9;
+/// stored-data read as a varying source (`module_binding.exportVaries`). Version 10 clears
+/// `deterministic` for a response that a control decision on a varying value reaches.
+pub const flow_analyzer_version: u32 = 10;
 
 pub const RepairIntent = report_types.RepairIntent;
 pub const Severity = report_types.Severity;
@@ -30,6 +31,7 @@ pub const Diagnostic = report_types.Diagnostic;
 pub const SafeForm = report_types.SafeForm;
 pub const DefendedPath = report_types.DefendedPath;
 pub const FlowProperties = report_types.FlowProperties;
+pub const BranchCause = report_types.BranchCause;
 pub const propertyTagForKind = report_types.propertyTagForKind;
 
 const unproven: FlowProperties = .{
@@ -61,6 +63,7 @@ pub const FlowChecker = struct {
     unresolved_count: usize = 0,
     evaluation_cleared: bool = false,
     persistent_writes: []const evaluator.PersistentWrite = &.{},
+    deterministic_branch: ?report_types.BranchCause = null,
 
     pub fn init(allocator: std.mem.Allocator, ir_view: ir.IrView, atoms: ?*engine.atom_table.AtomTable) FlowChecker {
         return .{ .allocator = allocator, .ir_view = ir_view, .atoms = atoms };
@@ -93,6 +96,7 @@ pub const FlowChecker = struct {
         self.unresolved_count = result.evaluation.unresolved.len;
         self.evaluation_cleared = result.evaluation.cleared;
         self.persistent_writes = result.evaluation.persistent_writes;
+        self.deterministic_branch = result.deterministic_branch;
         // Report storage lives in the evaluator arena, while the temporary
         // capture table is needed only during this analysis.
         analysis.captures = null;
@@ -102,6 +106,12 @@ pub const FlowChecker = struct {
 
     pub fn getProperties(self: *const FlowChecker) FlowProperties {
         return self.properties;
+    }
+
+    /// The branch that cleared `deterministic` alone, when the last `check` found one. The
+    /// file of a dependency borrows the module views of the analysis.
+    pub fn deterministicBranch(self: *const FlowChecker) ?report_types.BranchCause {
+        return self.deterministic_branch;
     }
 
     pub fn getDiagnostics(self: *const FlowChecker) []const Diagnostic {
@@ -149,6 +159,7 @@ pub const FlowChecker = struct {
         self.evaluation_cleared = false;
         self.defended_paths = &.{};
         self.persistent_writes = &.{};
+        self.deterministic_branch = null;
     }
 
     fn newEvaluator(self: *const FlowChecker) evaluator.FlowInterp {

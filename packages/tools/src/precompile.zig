@@ -4841,3 +4841,111 @@ test "compileHandler graph compiles a dependency helper whose Effects capability
     try std.testing.expectEqualStrings(expected_file, site.file orelse return error.TestUnexpectedResult);
     try std.testing.expectEqual(@as(u32, 1), site.line);
 }
+
+fn expectGraphDeterministicRefused(entry_source: []const u8, dep_source: []const u8) !void {
+    var fixture = try importFixture(entry_source, dep_source);
+    defer fixture.deinit();
+    try std.testing.expectError(error.SpecDiagnosticsRefused, fixture.compile(graph_verified));
+}
+
+test "compileHandler graph clears deterministic when a dependency helper branches on the clock" {
+    try expectGraphDeterministicRefused(
+        \\import { pick } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text(pick());
+        \\}
+        \\
+    ,
+        \\export function pick(): string {
+        \\  if (Date.now() % 2 === 0) {
+        \\    return "a";
+        \\  }
+        \\  return "b";
+        \\}
+        \\
+    );
+}
+
+test "compileHandler graph clears deterministic when the handler branches on a dependency clock helper" {
+    try expectGraphDeterministicRefused(
+        \\import { stamp } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  if (stamp() % 2 === 0) {
+        \\    return Response.text("a");
+        \\  }
+        \\  return Response.text("b");
+        \\}
+        \\
+    ,
+        \\export function stamp(): number {
+        \\  return Date.now();
+        \\}
+        \\
+    );
+}
+
+fn expectBranchCause(compiled: *const CompiledHandler, file: ?[]const u8, line: u32, column: u32) !void {
+    const contract = compiled.contract orelse return error.MissingContract;
+    try std.testing.expect(!(try graphProperties(compiled)).deterministic);
+    const cause = contract.property_provenance.deterministic orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("a branch on a value that varies between requests", cause.snippet);
+    try std.testing.expectEqual(line, cause.line);
+    try std.testing.expectEqual(column, cause.column);
+    if (file) |expected| {
+        try std.testing.expectEqualStrings(expected, cause.file orelse return error.TestUnexpectedResult);
+    } else {
+        try std.testing.expect(cause.file == null);
+    }
+}
+
+test "compileHandler graph names the dependency branch that selects the response as the cause" {
+    const allocator = std.testing.allocator;
+    var fixture = try importFixture(
+        \\import { pick } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Response {
+        \\  return Response.text(pick());
+        \\}
+        \\
+    ,
+        \\export function pick(): string {
+        \\  if (Date.now() % 2 === 0) {
+        \\    return "a";
+        \\  }
+        \\  return "b";
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(allocator);
+    const dep_path = try fixtureFilePath(&fixture, "dep.ts");
+    defer allocator.free(dep_path);
+    try expectBranchCause(&compiled, dep_path, 2, 3);
+}
+
+test "compileHandler graph names the entry branch on a dependency clock as the cause" {
+    const allocator = std.testing.allocator;
+    var fixture = try importFixture(
+        \\import { stamp } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Response {
+        \\  if (stamp() % 2 === 0) {
+        \\    return Response.text("a");
+        \\  }
+        \\  return Response.text("b");
+        \\}
+        \\
+    ,
+        \\export function stamp(): number {
+        \\  return Date.now();
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    var compiled = try fixture.compile(graph_verified);
+    defer compiled.deinit(allocator);
+    try expectBranchCause(&compiled, null, 4, 3);
+}

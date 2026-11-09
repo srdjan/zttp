@@ -15176,3 +15176,557 @@ test "CHECK warns on an Effects capability that a dependency helper never reache
     try std.testing.expectEqualStrings("warning", row.severity);
     try std.testing.expectEqual(@as(u32, 1), row.line);
 }
+
+// ---------------------------------------------------------------------------
+// Control-flow determinism: a response reached through a branch on a value that varies
+// between requests (a clock, a random number, a value the analysis cannot follow) does not
+// hold `deterministic`. A branch on request data does. The mark is not a data label, so
+// `no_secret_leakage` stays proven (D9).
+// ---------------------------------------------------------------------------
+
+const ControlRefusal = struct {
+    name: []const u8,
+    source: []const u8,
+    line: u32,
+    column: u32,
+    message: []const u8,
+    suggestion: []const u8,
+};
+
+const ControlSource = struct { name: []const u8, source: []const u8 };
+
+fn expectDeterministicRefused(allocator: std.mem.Allocator, row: ControlRefusal) !void {
+    errdefer std.debug.print("control-flow case failed: {s}\n", .{row.name});
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, row.source, "control-flow.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    const properties = contract.properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(!properties.deterministic);
+    try std.testing.expect(properties.no_secret_leakage);
+    try std.testing.expectEqual(@as(usize, 1), countDiagnosticsWithCode(&result, "ZTS500"));
+    const diagnostic = diagnosticWithCode(&result, "ZTS500") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("error", diagnostic.severity);
+    try std.testing.expectEqual(row.line, diagnostic.line);
+    try std.testing.expectEqual(row.column, diagnostic.column);
+    try std.testing.expectEqualStrings(row.message, diagnostic.message);
+    try std.testing.expectEqualStrings(row.suggestion, diagnostic.suggestion orelse return error.TestUnexpectedResult);
+}
+
+fn expectDeterministicHeld(allocator: std.mem.Allocator, row: ControlSource) !void {
+    errdefer std.debug.print("control-flow case failed: {s}\n", .{row.name});
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, row.source, "control-flow.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const contract = result.contract orelse return error.TestUnexpectedResult;
+    const properties = contract.properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(properties.deterministic);
+    try std.testing.expect(properties.no_secret_leakage);
+}
+
+test "a response chosen by a branch on a varying value is not deterministic" {
+    const allocator = std.testing.allocator;
+    const rows = [_]ControlRefusal{
+        .{ .name = "s1_if", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  if (t % 2 === 0) {\n    return Response.text(\"even\");\n  }\n  return Response.text(\"odd\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "s2_ternary", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  return Response.text(t % 2 === 0 ? \"even\" : \"odd\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:36 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "s4_match", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const k = t % 2;\n  const s = match (k) {\n    when 0: \"even\"\n    default: \"odd\"\n  };\n  return Response.text(s);\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:13 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "s5_loop", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const parts: string[] = [];\n  for (const i of range(t % 3)) {\n    parts.push(\"x\");\n  }\n  return Response.text(parts.join(\"\"));\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "s6_random", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  if (Math.random() > 0.5) {\n    return Response.text(\"a\");\n  }\n  return Response.text(\"b\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 2:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "s7_status", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  if (t % 2 === 0) {\n    return Response.json({ ok: true }, { status: 201 });\n  }\n  return Response.json({ ok: true });\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "s13_let", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  let s = \"even\";\n  if (t % 2 === 1) {\n    s = \"odd\";\n  }\n  return Response.text(s);\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "s15_assert", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  assert t % 2 === 0;\n  return Response.text(\"ok\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "s18_rate", .source = "import { rateCheck } from \"zttp:ratelimit\";\n\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const r = rateCheck(\"k\", 5, 60);\n  if (r.ok) {\n    return Response.text(\"ok\");\n  }\n  return Response.text(\"slow down\");\n}\n", .line = 3, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "s19_cache", .source = "import { cacheGet } from \"zttp:cache\";\n\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const v = cacheGet(\"ns\", \"k\");\n  if (v === undefined) {\n    return Response.text(\"miss\");\n  }\n  return Response.text(\"hit\");\n}\n", .line = 3, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "p_modinit", .source = "const SEED = Date.now() % 2 === 0 ? \"a\" : \"b\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(SEED);\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 1:35 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "p_call_after_branch", .source = "function pick(req: Request): string {\n  if (req.url.length > 5) {\n    return \"long\";\n  }\n  return \"short\";\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  let s = \"even\";\n  if (t % 2 === 1) {\n    s = pick(req);\n  }\n  return Response.text(s);\n}\n", .line = 7, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 10:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "p_map_branch", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs = [\"a\", \"b\"].map((x) => {\n    if (t % 2 === 0) {\n      return \"even\";\n    }\n    return \"odd\";\n  });\n  return Response.text(xs.join(\",\"));\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:5 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "p_recurse", .source = "function rep(n: number): string {\n  if (n === 0) {\n    return \"\";\n  }\n  return [\"x\", rep(n - 1)].join(\"\");\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  return Response.text(rep(t % 3));\n}\n", .line = 7, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 2:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "p_header", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const k = t % 2 === 0 ? \"a\" : \"b\";\n  return Response.text(\"ok\", { headers: { \"x-k\": k } });\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:25 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "p_holder", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const h = { v: \"even\" };\n  if (t % 2 === 1) {\n    h.v = \"odd\";\n  }\n  return Response.text(h.v);\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:3 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "e_match_record", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { kind: t % 2, name: \"n\" };\n  const s = match (o) {\n    when { kind: 0 }: \"even\"\n    default: \"odd\"\n  };\n  return Response.text(\"x\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:13 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "e_filter", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = [\"a\", \"b\"].filter((x: string): boolean => x.length > t % 3);\n  return Response.text(\"x\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:30 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "d_opt_prop", .source = "import { dictGet, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { n: 1 };\n  const d: Dict<string, { n: number }> = dictSet(dictEmpty(), \"a\", o);\n  const m = dictGet(d, String(t));\n  const s = m?.n;\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 7:14 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "d_opt_call3", .source = "import { dictGet, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { f: (): string => \"a\" };\n  const d: Dict<string, { f: () => string }> = dictSet(dictEmpty(), \"a\", o);\n  const m = dictGet(d, String(t));\n  const s = m?.f();\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 6:20 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+    };
+    for (rows) |row| try expectDeterministicRefused(allocator, row);
+}
+
+test "each control decision of the flow interpreter marks a branch on a varying value" {
+    const allocator = std.testing.allocator;
+    const rows = [_]ControlRefusal{
+        .{ .name = "d_and_stmt", .source = "function setOdd(h: { v: string }): boolean {\n  h.v = \"odd\";\n  return true;\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const h = { v: \"even\" };\n  t % 2 === 1 && setOdd(h);\n  return Response.text(h.v);\n}\n", .line = 5, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 8:15 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "d_or_stmt", .source = "function setOdd(h: { v: string }): boolean {\n  h.v = \"odd\";\n  return true;\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const h = { v: \"even\" };\n  t % 2 === 0 || setOdd(h);\n  return Response.text(h.v);\n}\n", .line = 5, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 8:15 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "d_dictfilter", .source = "import { dictFilter, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const d: Dict<string, number> = dictSet(dictEmpty(), \"a\", 1);\n  const f = dictFilter(d, (v: number, k: string): boolean => v > t % 3);\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:23 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "d_andthen", .source = "import { andThen, ok, err } from \"zttp:result\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = andThen(ok(1), (n: number) => t % 2 === 0 ? ok(n) : err(\"odd\"));\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:55 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "d_andthen2", .source = "import { andThen, ok, err } from \"zttp:result\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = andThen(ok(t), (n: number) => ok(n + 1));\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:20 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "d_andthen3", .source = "import { andThen, ok } from \"zttp:result\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const base = ok(1);\n  const r = andThen(base, (n: number) => ok(t));\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:20 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "d_foreach_range", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const h = { v: \"\" };\n  const xs: number[] = range(t % 3);\n  xs.forEach((i: number): undefined => {\n    h.v = \"x\";\n  });\n  return Response.text(h.v);\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:13 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "d_reduce_noinit", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs: number[] = range(t % 3);\n  const n = xs.reduce((acc: number, x: number): number => 1);\n  return Response.text(\"x\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:22 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "e_find", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = [\"a\", \"b\"].find((x: string): boolean => x.length > t % 3);\n  return Response.text(\"x\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:28 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "e_some", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = [\"a\", \"b\"].some((x: string): boolean => x.length > t % 3);\n  return Response.text(\"x\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:28 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "e_every", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = [\"a\", \"b\"].every((x: string): boolean => x.length > t % 3);\n  return Response.text(\"x\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:29 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "e_findIndex", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = [\"a\", \"b\"].findIndex((x: string): boolean => x.length > t % 3);\n  return Response.text(\"x\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:33 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "e_toSorted", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = [\"a\", \"b\"].toSorted((a: string, b: string): number => t % 2);\n  return Response.text(\"x\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:32 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "e_orElse", .source = "import { orElse, ok } from \"zttp:result\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const base = ok(t);\n  const r = orElse(base, (n: number) => ok(1));\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:19 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "e_mapResult", .source = "import { mapResult, ok } from \"zttp:result\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const base = ok(t);\n  const r = mapResult(base, (n: number) => ok(1));\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:22 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "e_mapError", .source = "import { mapError, ok } from \"zttp:result\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const base = ok(t);\n  const r = mapError(base, (n: number) => ok(1));\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:21 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+        .{ .name = "e_dictfold_varying", .source = "import { dictFold, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const d: Dict<string, number> = dictSet(dictEmpty(), String(t), 1);\n  const r = dictFold(d, (acc: number, v: number, k: string): number => 1, 0);\n  return Response.text(\"x\");\n}\n", .line = 2, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:21 by `a branch on a value that varies between requests`)", .suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response." },
+    };
+    for (rows) |row| try expectDeterministicRefused(allocator, row);
+}
+
+test "a branch on a varying value keeps the refusal that a varying value already had" {
+    const allocator = std.testing.allocator;
+    const rows = [_]ControlRefusal{
+        .{ .name = "s9_and", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const b = t % 2 === 0 && true;\n  return Response.text(String(b));\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 2:17 by `Date.now()`)", .suggestion = "remove Date.now(), Math.random(), and performance.now() from the response path." },
+        .{ .name = "s10_control", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  return Response.text(String(t));\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 2:17 by `Date.now()`)", .suggestion = "remove Date.now(), Math.random(), and performance.now() from the response path." },
+        .{ .name = "s18b_rate_value", .source = "import { rateCheck } from \"zttp:ratelimit\";\n\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const r = rateCheck(\"k\", 5, 60);\n  return Response.text(String(r.ok));\n}\n", .line = 3, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:13 by `rateCheck`)", .suggestion = "remove `rateCheck` from the response path, or declare a capsule without `deterministic` and `idempotent`." },
+    };
+    for (rows) |row| try expectDeterministicRefused(allocator, row);
+}
+
+test "a branch on request data, a constant, or an unused clock read keeps deterministic" {
+    const allocator = std.testing.allocator;
+    const rows = [_]ControlSource{
+        .{ .name = "c_reqjson", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const body = requestJson(req);\n  if (body.ok) {\n    return Response.text(\"ok\");\n  }\n  return Response.text(\"bad\", { status: 400 });\n}\n" },
+        .{ .name = "c_header", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const h = req.headers.get(\"x\");\n  if (h === \"a\") {\n    return Response.text(\"a\");\n  }\n  return Response.text(\"b\");\n}\n" },
+        .{ .name = "c_urllen", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  if (req.url.length > 5) {\n    return Response.text(\"long\");\n  }\n  return Response.text(\"short\");\n}\n" },
+        .{ .name = "c_const", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const k = 3;\n  if (k > 2) {\n    return Response.text(\"big\");\n  }\n  return Response.text(\"small\");\n}\n" },
+        .{ .name = "c_pE3", .source = "function stamp(): number {\n  return Date.now();\n}\n\nexport function handler(req: Request): Response {\n  const t = stamp();\n  return Response.text(\"ok\");\n}\n" },
+        .{ .name = "c_logts", .source = "import { logInfo } from \"zttp:log\";\n\nstructural LoggedResponse<T> = Proof<T, \"deterministic\" | \"state_isolated\">;\n\nexport function handler(req: Request): LoggedResponse<Response> {\n  const at = Date.now();\n  logInfo(\"served request\", { at: at });\n  return Response.json({ ok: true });\n}\n" },
+        .{ .name = "c_secret_det", .source = "import { env } from \"zttp:env\";\nexport function handler(req: Request): Proof<Response, \"no_secret_leakage\" | \"deterministic\"> {\n  const secret = env(\"API_KEY\");\n  const guess = req.headers.get(\"x\");\n  if (secret === guess) {\n    return Response.text(\"yes\");\n  }\n  return Response.text(\"no\");\n}\n" },
+        .{ .name = "d_map_data", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs = [\"a\", \"b\"].map((x: string): string => \"k\");\n  return Response.text(xs.join(\",\"));\n}\n" },
+        .{ .name = "d_map_data2", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs = [\"a\", \"b\"].map((x: string): number => t);\n  return Response.text(\"x\");\n}\n" },
+        .{ .name = "d_arrayfrom", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs = Array.from([\"a\", \"b\"], (x: string): number => t);\n  return Response.text(\"x\");\n}\n" },
+        .{ .name = "d_foreach_data", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  [\"a\"].forEach((x: string): number => t);\n  return Response.text(\"x\");\n}\n" },
+        .{ .name = "d_dictmapvalues", .source = "import { dictMapValues, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const d: Dict<string, number> = dictSet(dictEmpty(), \"a\", 1);\n  const f = dictMapValues(d, (v: number, k: string): number => v + t);\n  return Response.text(\"x\");\n}\n" },
+        .{ .name = "e_reduce_cb", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = [1, 2].reduce((acc: number, x: number): number => acc + t, 0);\n  return Response.text(\"x\");\n}\n" },
+        .{ .name = "e_dictfold", .source = "import { dictFold, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const d: Dict<string, number> = dictSet(dictEmpty(), \"a\", 1);\n  const r = dictFold(d, (acc: number, v: number, k: string): number => acc + t, 0);\n  return Response.text(\"x\");\n}\n" },
+        .{ .name = "e_dictfold_clean", .source = "import { dictFold, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const d: Dict<string, number> = dictSet(dictEmpty(), \"a\", 1);\n  const r = dictFold(d, (acc: number, v: number, k: string): number => acc + v, 0);\n  return Response.text(\"x\");\n}\n" },
+        .{ .name = "d_andthen_clean", .source = "import { andThen, ok } from \"zttp:result\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const r = andThen(ok(1), (n: number) => ok(n));\n  return Response.text(\"x\");\n}\n" },
+        .{ .name = "d_dictfilter_clean", .source = "import { dictFilter, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const d: Dict<string, number> = dictSet(dictEmpty(), \"a\", 1);\n  const f = dictFilter(d, (v: number, k: string): boolean => v > 0);\n  return Response.text(\"x\");\n}\n" },
+        .{ .name = "d_foreach_range_clean", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const h = { v: \"\" };\n  const xs: number[] = range(3);\n  xs.forEach((i: number): undefined => {\n    h.v = \"x\";\n  });\n  return Response.text(h.v);\n}\n" },
+        .{ .name = "d_reduce_clean", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const xs: number[] = range(3);\n  const n = xs.reduce((acc: string, x: number): string => \"y\", \"init\");\n  return Response.text(n);\n}\n" },
+        .{ .name = "d_opt_call_clean", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { f: (): string => \"a\" };\n  const os = [o];\n  const m = os[0];\n  const s = m?.f();\n  return Response.text(\"x\");\n}\n" },
+        .{ .name = "d_opt_call3_clean", .source = "import { dictGet, dictSet, dictEmpty } from \"zttp:collections\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const o = { f: (): string => \"a\" };\n  const d: Dict<string, { f: () => string }> = dictSet(dictEmpty(), \"a\", o);\n  const m = dictGet(d, \"a\");\n  const s = m?.f();\n  return Response.text(\"x\");\n}\n" },
+        .{ .name = "e_mapResult_clean", .source = "import { mapResult, ok } from \"zttp:result\";\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const base = ok(1);\n  const r = mapResult(base, (n: number) => ok(2));\n  return Response.text(\"x\");\n}\n" },
+        .{ .name = "d_router", .source = "import { routerMatch } from \"zttp:router\";\nfunction getUser(req: Request): Response {\n  return Response.text(\"u\");\n}\nconst routes = { \"GET /users/:id\": getUser };\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  const found = routerMatch(routes, req);\n  if (found !== undefined) {\n    return found.handler(req);\n  }\n  return Response.text(\"nf\", { status: 404 });\n}\n" },
+    };
+    for (rows) |row| try expectDeterministicHeld(allocator, row);
+}
+
+test "a branch on a clock keeps retry_safe and read_only and clears deterministic and idempotent" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export function handler(req: Request): Proof<Response, "deterministic" | "idempotent" | "retry_safe" | "read_only"> {
+        \\  const t = Date.now();
+        \\  if (t % 2 === 0) {
+        \\    return Response.text("even");
+        \\  }
+        \\  return Response.text("odd");
+        \\}
+        \\
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "control-flow-family.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const properties = (result.contract orelse return error.TestUnexpectedResult).properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(properties.retry_safe);
+    try std.testing.expect(properties.read_only);
+    try std.testing.expect(!properties.deterministic);
+    try std.testing.expect(!properties.idempotent);
+    try std.testing.expectEqual(@as(usize, 2), countDiagnosticsWithCode(&result, "ZTS500"));
+    const diagnostics = result.json_diagnostics.items;
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[0].code);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:3 by `a branch on a value that varies between requests`)", diagnostics[0].message);
+    try std.testing.expectEqualStrings("ZTS500", diagnostics[1].code);
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: idempotent)", diagnostics[1].message);
+}
+
+test "a branch on a secret against a guess keeps no_secret_leakage proven" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { env } from "zttp:env";
+        \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+        \\  const secret = env("API_KEY");
+        \\  const guess = req.headers.get("x");
+        \\  if (secret === guess) {
+        \\    return Response.text("yes");
+        \\  }
+        \\  return Response.text("no");
+        \\}
+        \\
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "control-flow-secret.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const properties = (result.contract orelse return error.TestUnexpectedResult).properties orelse return error.TestUnexpectedResult;
+    try std.testing.expect(properties.no_secret_leakage);
+    try std.testing.expectEqual(@as(usize, 0), countDiagnosticsWithCode(&result, "ZTS500"));
+}
+
+// ---------------------------------------------------------------------------
+// The cause of a ZTS500 for `deterministic` when a branch on a varying value selects the response.
+// A branch cause names the branch, with the static snippet of the contract. A value cause stays
+// the first varying site of the entry file, and an imported export that varies is such a site.
+// ---------------------------------------------------------------------------
+
+const branch_suggestion = "the response is reached through a branch on a value that varies between requests, such as a clock, random, network, rate-limit, cache, or token read: declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response.";
+
+const s1_clock_branch =
+    \\export function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const t = Date.now();
+    \\  if (t % 2 === 0) {
+    \\    return Response.text("even");
+    \\  }
+    \\  return Response.text("odd");
+    \\}
+    \\
+;
+
+const s18_rate_branch =
+    \\import { rateCheck } from "zttp:ratelimit";
+    \\
+    \\export function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const r = rateCheck("k", 5, 60);
+    \\  if (r.ok) {
+    \\    return Response.text("ok");
+    \\  }
+    \\  return Response.text("slow down");
+    \\}
+    \\
+;
+
+const s19_cache_branch =
+    \\import { cacheGet } from "zttp:cache";
+    \\
+    \\export function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const v = cacheGet("ns", "k");
+    \\  if (v === undefined) {
+    \\    return Response.text("miss");
+    \\  }
+    \\  return Response.text("hit");
+    \\}
+    \\
+;
+
+const s18b_rate_value =
+    \\import { rateCheck } from "zttp:ratelimit";
+    \\
+    \\export function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const r = rateCheck("k", 5, 60);
+    \\  return Response.text(String(r.ok));
+    \\}
+    \\
+;
+
+test "a branch on a varying value is the cause of a failed deterministic" {
+    const allocator = std.testing.allocator;
+    const rows = [_]ControlRefusal{
+        .{ .name = "s1_if", .source = s1_clock_branch, .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 3:3 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
+        .{ .name = "s18_rate_branch", .source = s18_rate_branch, .line = 3, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:3 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
+        .{ .name = "s19_cache_branch", .source = s19_cache_branch, .line = 3, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:3 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
+        // The return in the loop is reached only on the second pass, through the back edge, and
+        // that pass carries the mark.
+        .{ .name = "m1_loop_second_pass", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  let n = 0;\n  for (const x of [1, 2]) {\n    if (n === 1) {\n      return Response.text(\"second\");\n    }\n    if (Date.now() % 2 === 0) {\n      n = 1;\n    }\n  }\n  assert(false);\n  return Response.text(\"never\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 7:5 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
+        // The loop reaches `h` only on its second pass, through `f`, and the branch in `h` changes
+        // nothing but the mark. The loop fixpoint must compare the site, or it stops before the
+        // return reads the mark.
+        .{ .name = "m3_mark_only_pass", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const g = (): number => {\n    return 0;\n  };\n  const h = (): number => {\n    if (Date.now() % 2 === 0) {\n      assert(false);\n    }\n    return 0;\n  };\n  let f = g;\n  let n = 0;\n  for (const x of [1, 2, 3]) {\n    if (x === 3) {\n      return Response.text(String(n));\n    }\n    n = f();\n    f = h;\n  }\n  assert(false);\n  return Response.text(\"never\");\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 6:5 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
+        // Two arms mark the state at different sites. The join keeps the smaller site, the
+        // first branch in the source.
+        .{ .name = "m2_two_sites", .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  let s = \"x\";\n  if (req.url.length > 3) {\n    if (Date.now() % 2 === 0) {\n      s = \"a\";\n    }\n  } else {\n    if (Math.random() > 0.5) {\n      s = \"b\";\n    }\n  }\n  return Response.text(s);\n}\n", .line = 1, .column = 24, .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:5 by `a branch on a value that varies between requests`)", .suggestion = branch_suggestion },
+    };
+    for (rows) |row| try expectDeterministicRefused(allocator, row);
+}
+
+test "a value cause that an imported export makes names the export" {
+    try expectDeterministicRefused(std.testing.allocator, .{
+        .name = "s18b_rate_value",
+        .source = s18b_rate_value,
+        .line = 3,
+        .column = 24,
+        .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:13 by `rateCheck`)",
+        .suggestion = "remove `rateCheck` from the response path, or declare a capsule without `deterministic` and `idempotent`.",
+    });
+}
+
+test "a value cause that a clock read makes keeps the builtin suggestion" {
+    try expectDeterministicRefused(std.testing.allocator, .{
+        .name = "s10_clock_value",
+        .source = "export function handler(req: Request): Proof<Response, \"deterministic\"> {\n  const t = Date.now();\n  return Response.text(String(t));\n}\n",
+        .line = 1,
+        .column = 24,
+        .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 2:17 by `Date.now()`)",
+        .suggestion = "remove Date.now(), Math.random(), and performance.now() from the response path.",
+    });
+}
+
+test "CHECK names the branch in the dependency that selects the response" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(
+        \\import { pick } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text(pick());
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export function pick(): string {
+        \\  if (Date.now() % 2 === 0) {
+        \\    return "a";
+        \\  }
+        \\  return "b";
+        \\}
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(allocator);
+    const directory = std.fs.path.dirname(fixture.handler_path) orelse return error.TestUnexpectedResult;
+    const expected = try std.fmt.allocPrint(allocator, "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at {s}/dep.ts:2:3 by `a branch on a value that varies between requests`)", .{directory});
+    defer allocator.free(expected);
+    try std.testing.expectEqual(@as(usize, 1), countDiagnosticsWithCode(&result, "ZTS500"));
+    const diagnostic = diagnosticWithCode(&result, "ZTS500") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings(expected, diagnostic.message);
+    try std.testing.expectEqualStrings(branch_suggestion, diagnostic.suggestion orelse return error.TestUnexpectedResult);
+}
+
+test "CHECK names the branch in the entry when the condition comes from a dependency clock" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(
+        \\import { stamp } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  if (stamp() % 2 === 0) {
+        \\    return Response.text("a");
+        \\  }
+        \\  return Response.text("b");
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export function stamp(): number {
+        \\  return Date.now();
+        \\}
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), countDiagnosticsWithCode(&result, "ZTS500"));
+    const diagnostic = diagnosticWithCode(&result, "ZTS500") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:3 by `a branch on a value that varies between requests`)", diagnostic.message);
+    try std.testing.expectEqualStrings(branch_suggestion, diagnostic.suggestion orelse return error.TestUnexpectedResult);
+}
+
+test "a handler with no capsule that branches on the clock reports the default profile" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\export function handler(req: Request): Response {
+        \\  const t = Date.now();
+        \\  if (t % 2 === 0) {
+        \\    return Response.text("even");
+        \\  }
+        \\  return Response.text("odd");
+        \\}
+        \\
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "default-branch.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), countDiagnosticsWithCode(&result, "ZTS500"));
+    const diagnostic = diagnosticWithCode(&result, "ZTS500") orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqualStrings("handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", diagnostic.message);
+    try std.testing.expectEqual(@as(u32, 1), diagnostic.line);
+    try std.testing.expectEqual(@as(u32, 24), diagnostic.column);
+    try std.testing.expectEqualStrings("this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`.", diagnostic.suggestion orelse return error.TestUnexpectedResult);
+}
+
+const clock_suggestion = "remove Date.now(), Math.random(), and performance.now() from the response path.";
+
+test "a loop over an array whose length a varying value set is not deterministic" {
+    try expectDeterministicRefused(std.testing.allocator, .{
+        .name = "c1_splice_forof",
+        .source =
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const xs = ["a", "b", "c"];
+        \\  xs.splice(0, Date.now() % 3);
+        \\  const out: string[] = [];
+        \\  for (const x of xs) {
+        \\    out.push("y");
+        \\  }
+        \\  return Response.text(out.join(""));
+        \\}
+        \\
+        ,
+        .line = 1,
+        .column = 24,
+        .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:3 by `a branch on a value that varies between requests`)",
+        .suggestion = branch_suggestion,
+    });
+}
+
+test "a comparator over an array whose length a varying value set is not deterministic" {
+    try expectDeterministicRefused(std.testing.allocator, .{
+        .name = "c6b_tosorted_count",
+        .source =
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const out: string[] = [];
+        \\  const r: number[] = range(Date.now() % 4);
+        \\  const ys = r.toSorted((a: number, b: number): number => {
+        \\    out.push("c");
+        \\    return 0;
+        \\  });
+        \\  return Response.text(out.join(""));
+        \\}
+        \\
+        ,
+        .line = 1,
+        .column = 24,
+        .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:24 by `a branch on a value that varies between requests`)",
+        .suggestion = branch_suggestion,
+    });
+}
+
+test "a router match on a request whose route operands vary is not deterministic" {
+    try expectDeterministicRefused(std.testing.allocator, .{
+        .name = "c2b_router_varying_url",
+        .source =
+        \\import { routerMatch } from "zttp:router";
+        \\function a(req: Request): Response {
+        \\  return Response.text("a");
+        \\}
+        \\function b(req: Request): Response {
+        \\  return Response.text("b");
+        \\}
+        \\const routes = { "GET /0": a, "GET /1": b };
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  req.url = ["/", String(Date.now() % 2)].join("");
+        \\  const found = routerMatch(routes, req);
+        \\  if (found !== undefined) {
+        \\    return found.handler(req);
+        \\  }
+        \\  return Response.text("nf", { status: 404 });
+        \\}
+        \\
+        ,
+        .line = 9,
+        .column = 24,
+        .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 11:28 by `a branch on a value that varies between requests`)",
+        .suggestion = branch_suggestion,
+    });
+}
+
+const n01_binding_new_name =
+    \\export function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const t = Date.now();
+    \\  const r = { m: req.method, t: t };
+    \\  const s = match (r) {
+    \\    when { m: "GET", t: v }: "get"
+    \\    default: "other"
+    \\  };
+    \\  return Response.text(s);
+    \\}
+    \\
+;
+
+const n01_binding_shorthand =
+    \\export function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const t = Date.now();
+    \\  const r = { m: req.method, t: t };
+    \\  const s = match (r) {
+    \\    when { m: "GET", t }: "get"
+    \\    default: "other"
+    \\  };
+    \\  return Response.text(s);
+    \\}
+    \\
+;
+
+test "a record pattern field that only binds a varying value tests nothing" {
+    try expectDeterministicHeld(std.testing.allocator, .{ .name = "n01_binding_new_name", .source = n01_binding_new_name });
+    try expectDeterministicHeld(std.testing.allocator, .{ .name = "n01_binding_shorthand", .source = n01_binding_shorthand });
+}
+
+test "a record pattern literal test on a varying field is not deterministic" {
+    try expectDeterministicRefused(std.testing.allocator, .{
+        .name = "n01_literal_on_varying_field",
+        .source =
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const t = Date.now();
+        \\  const r = { m: req.method, t: t % 2 };
+        \\  const s = match (r) {
+        \\    when { m: "GET", t: 0 }: "get"
+        \\    default: "other"
+        \\  };
+        \\  return Response.text(s);
+        \\}
+        \\
+        ,
+        .line = 1,
+        .column = 24,
+        .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:13 by `a branch on a value that varies between requests`)",
+        .suggestion = branch_suggestion,
+    });
+}
+
+test "a clock read that reaches the response wins over an earlier discarded export" {
+    const allocator = std.testing.allocator;
+    const rows = [_]ControlRefusal{
+        .{
+            .name = "o8_discarded_rateCheck_then_clock",
+            .source =
+            \\import { rateCheck } from "zttp:ratelimit";
+            \\
+            \\export function handler(req: Request): Proof<Response, "deterministic"> {
+            \\  const r = rateCheck("k", 5, 60);
+            \\  const t = Date.now();
+            \\  return Response.text(String(t));
+            \\}
+            \\
+            ,
+            .line = 3,
+            .column = 24,
+            .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:17 by `Date.now()`)",
+            .suggestion = clock_suggestion,
+        },
+        .{
+            .name = "o9_discarded_fetch_then_clock",
+            .source =
+            \\import { fetch } from "zttp:fetch";
+            \\
+            \\export function handler(req: Request): Proof<Response, "deterministic"> {
+            \\  const r = fetch("https://api.example.com/v1");
+            \\  return Response.text(String(Date.now()));
+            \\}
+            \\
+            ,
+            .line = 3,
+            .column = 24,
+            .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 5:35 by `Date.now()`)",
+            .suggestion = clock_suggestion,
+        },
+    };
+    for (rows) |row| try expectDeterministicRefused(allocator, row);
+}
+
+const n01_wildcard_presence =
+    \\export function handler(req: Request): Proof<Response, "deterministic"> {
+    \\  const t = Date.now();
+    \\  const r = { m: req.method, t: t % 2 };
+    \\  const s = match (r) {
+    \\    when { m: "GET", t: _ }: "get"
+    \\    default: "other"
+    \\  };
+    \\  return Response.text(s);
+    \\}
+    \\
+;
+
+test "a record pattern wildcard on a varying field is a presence test" {
+    try expectDeterministicRefused(std.testing.allocator, .{
+        .name = "n01_wildcard_presence",
+        .source = n01_wildcard_presence,
+        .line = 1,
+        .column = 24,
+        .message = "declared Proof capsule was not discharged by handler proof (failing spec: deterministic; demoted at line 4:13 by `a branch on a value that varies between requests`)",
+        .suggestion = branch_suggestion,
+    });
+}

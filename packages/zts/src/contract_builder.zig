@@ -25,7 +25,7 @@ fn snippetForVaryingRead(object_name: []const u8, property_name: []const u8) []c
             return read.object ++ "." ++ read.property ++ "()";
         }
     }
-    return "a varying global read";
+    return contract_types.varying_global_snippet;
 }
 
 const json_utils = @import("zts-base").json_utils;
@@ -175,6 +175,9 @@ pub const ContractBuilder = struct {
     /// First call site that broke determinism. Captured for the live-reload
     /// HUD's "Why" line. Borrowed snippet (static string).
     nondeterministic_cause: ?contract_types.PropertyCause = null,
+    /// First call of an imported export whose binding varies. A builtin read in `nondeterministic_cause`
+    /// wins over it: the read is the first remedy, and removing the export alone clears nothing.
+    export_cause: ?contract_types.PropertyCause = null,
 
     fn subtreeContains(self: *ContractBuilder, root: NodeIndex, target: NodeIndex) bool {
         return self.ir_view.subtreeContains(root, target);
@@ -490,7 +493,7 @@ pub const ContractBuilder = struct {
             .effect_analysis_complete = if (handler_row) |row| !row.lower_bound else false,
             .intent = intent_value,
             .property_provenance = .{
-                .deterministic = self.nondeterministic_cause,
+                .deterministic = self.nondeterministic_cause orelse self.export_cause,
             },
             .extensions = self.extensions,
         };
@@ -1377,6 +1380,22 @@ pub const ContractBuilder = struct {
                                     try self.extractLiteralArgAt(call, ext.arg_position, target, transform);
                                 }
                             },
+                        }
+                    }
+                }
+
+                // An imported export whose binding varies between runs breaks determinism too: a
+                // clock, a random source, the network, stored data, or a labelled return. The
+                // first such call is the export cause. The snippet is the export name, a static
+                // string of the binding.
+                if (self.export_cause == null) {
+                    if (self.factsRef().importForReference(binding, .module_reference, .builtin, .first)) |record| {
+                        if (builtin_modules.findExport(record.module_specifier, record.imported_name)) |found| {
+                            if (module_binding.exportVaries(found.binding, found.func)) {
+                                if (self.ir_view.getLoc(call.callee)) |l| {
+                                    self.export_cause = .{ .line = l.line, .column = l.column, .snippet = found.func.name };
+                                }
+                            }
                         }
                     }
                 }

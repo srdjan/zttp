@@ -13,6 +13,7 @@ const std = @import("std");
 // adapter and the engine into every consumer of a contract.
 const module_binding = @import("zts-base").module_authorization;
 const profile_identity = @import("zts-base").profile_identity;
+const known_globals = @import("zts-base").known_globals;
 
 fn dupeOptionalString(allocator: std.mem.Allocator, s: ?[]const u8) !?[]const u8 {
     return if (s) |v| try allocator.dupe(u8, v) else null;
@@ -759,11 +760,12 @@ pub const RateLimitInfo = struct {
 /// and the construct that caused the regression.
 ///
 /// A `PropertyCause` value borrows its snippet and its file. The snippet is
-/// typically a static string like "Date.now()". Two holders own an allocated
+/// typically a static string like "Date.now()". Three holders own an allocated
 /// file: `HandlerContract.owned_state_write_file` backs the file of
-/// `property_provenance.state_write`, and `SpecDiagnostic` owns the file of
-/// its `cause`. A function that copies a cause into a `SpecDiagnostic` must
-/// duplicate a non-null file (see `cloneOwned`).
+/// `property_provenance.state_write`, `HandlerContract.owned_deterministic_branch_file`
+/// backs the file of `property_provenance.deterministic` when a branch in a dependency
+/// is the cause, and `SpecDiagnostic` owns the file of its `cause`. A function that
+/// copies a cause into a `SpecDiagnostic` must duplicate a non-null file (see `cloneOwned`).
 pub const PropertyCause = struct {
     line: u32,
     column: u32,
@@ -788,6 +790,9 @@ pub const PropertyCause = struct {
 /// not serialized into contract.json (purely a build-time artifact for the
 /// proof HUD's regression line).
 pub const PropertyProvenance = struct {
+    /// The first varying read of the entry file or the first varying export that it calls
+    /// (a value cause), or the branch on a varying value that the flow pass found when no
+    /// labelled value reached the response (`deterministic_branch_snippet`).
     deterministic: ?PropertyCause = null,
     /// The first failable call the path walk never recorded. The snippet is the
     /// export name, a static string from the module binding.
@@ -840,6 +845,48 @@ pub const SharedStateProperty = enum {
 /// The snippet of a state-write cause. The cause names the write by its line;
 /// the text is a fixed string because the contract builder holds no source.
 pub const state_write_snippet = "a write to module state";
+
+/// The snippet of a branch cause of `deterministic`. The cause names the branch by its line;
+/// the text is a fixed string because the flow report holds no source.
+pub const deterministic_branch_snippet = "a branch on a value that varies between requests";
+
+/// The snippet of a varying read that the builder does not name by object and property.
+pub const varying_global_snippet = "a varying global read";
+
+/// The three kinds of cause of a failed `deterministic`. The contract builder, the flow pass,
+/// the HUD, the counterexample preview, and the proof trace tell them apart by this one
+/// classifier, so their texts cannot drift.
+pub const DeterministicCauseKind = enum {
+    /// The response follows a branch on a varying value (`deterministic_branch_snippet`).
+    branch,
+    /// A clock or entropy read of the language: `Date.now()`, `Math.random()`, `performance.now()`.
+    builtin_read,
+    /// A call of a module export whose binding varies. The snippet is the export name.
+    module_export,
+};
+
+/// The kind of the cause that carries `snippet`.
+pub fn deterministicCauseKind(snippet: []const u8) DeterministicCauseKind {
+    if (std.mem.eql(u8, snippet, deterministic_branch_snippet)) return .branch;
+    if (std.mem.eql(u8, snippet, varying_global_snippet)) return .builtin_read;
+    inline for (known_globals.varying_reads) |read| {
+        if (std.mem.eql(u8, snippet, read.object ++ "." ++ read.property ++ "()")) return .builtin_read;
+    }
+    return .module_export;
+}
+
+test "deterministicCauseKind tells a branch, a builtin read, and a module export apart" {
+    const rows = [_]struct { snippet: []const u8, kind: DeterministicCauseKind }{
+        .{ .snippet = "a branch on a value that varies between requests", .kind = .branch },
+        .{ .snippet = "Date.now()", .kind = .builtin_read },
+        .{ .snippet = "Math.random()", .kind = .builtin_read },
+        .{ .snippet = "performance.now()", .kind = .builtin_read },
+        .{ .snippet = "a varying global read", .kind = .builtin_read },
+        .{ .snippet = "rateCheck", .kind = .module_export },
+        .{ .snippet = "fetch", .kind = .module_export },
+    };
+    for (rows) |row| try std.testing.expectEqual(row.kind, deterministicCauseKind(row.snippet));
+}
 
 test "PropertyProvenance.stateWriteCauseFor returns the write only for a property it removed" {
     const write = PropertyCause{ .line = 5, .column = 12, .snippet = state_write_snippet };
@@ -1668,6 +1715,9 @@ pub const HandlerContract = struct {
     /// dependency file, whose path is built at check time. Transient and not
     /// serialized.
     owned_state_write_file: ?[]const u8 = null,
+    /// Backs `property_provenance.deterministic.file` when the branch that cleared
+    /// `deterministic` is in a dependency file. Transient and not serialized.
+    owned_deterministic_branch_file: ?[]const u8 = null,
     properties: ?HandlerProperties = null,
     /// True when effect inference resolved every callable that contributed to
     /// `properties`. Transient analysis state; contract JSON does not emit it.
@@ -1677,9 +1727,9 @@ pub const HandlerContract = struct {
     intent: ?IntentInfo = null,
     /// In-memory provenance for demoted properties. Not serialized; populated
     /// during build for the live-reload HUD's "Why" line. Snippets are
-    /// borrowed static strings. The contract owns two allocations that back
-    /// provenance strings: `owned_fault_cause_snippet` and
-    /// `owned_state_write_file`. `deinit` frees both and nothing else here.
+    /// borrowed static strings. The contract owns three allocations that back
+    /// provenance strings: `owned_fault_cause_snippet`, `owned_state_write_file`, and
+    /// `owned_deterministic_branch_file`. `deinit` frees all three and nothing else here.
     property_provenance: PropertyProvenance = .{},
     /// Active handler specs. An explicit `Proof<Response, "name" | ...>` on
     /// the handler return type narrows this set; without one, every supported
@@ -1792,6 +1842,7 @@ pub const HandlerContract = struct {
         if (self.owned_rate_limit_namespace) |namespace| allocator.free(namespace);
         if (self.owned_fault_cause_snippet) |snippet| allocator.free(snippet);
         if (self.owned_state_write_file) |file| allocator.free(file);
+        if (self.owned_deterministic_branch_file) |file| allocator.free(file);
         self.sql.deinit(allocator);
         self.api.deinit(allocator);
         for (self.behaviors.items) |*b| {

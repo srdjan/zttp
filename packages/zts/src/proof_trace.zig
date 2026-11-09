@@ -565,14 +565,38 @@ fn buildTrace(
         .structural => {
             if (!holds and eql(name, "deterministic")) {
                 if (contract.property_provenance.causeFor("deterministic")) |cause| {
-                    trace.summary = try arena.print("{s} reads a clock or RNG: two runs of the same request can differ.", .{cause.snippet});
-                    trace.counterexample = .{
-                        .kind = .offending_node,
-                        .line = cause.line,
-                        .column = cause.column,
-                        .snippet = cause.snippet,
-                        .fix = "remove the varying read, or take the value from the request.",
-                    };
+                    switch (handler_contract.deterministicCauseKind(cause.snippet)) {
+                        .branch => {
+                            trace.summary = try arena.print("The response is reached through {s}: two runs of the same request can differ.", .{cause.snippet});
+                            trace.counterexample = .{
+                                .kind = .offending_node,
+                                .line = cause.line,
+                                .column = cause.column,
+                                .snippet = cause.snippet,
+                                .fix = "declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response.",
+                            };
+                        },
+                        .builtin_read => {
+                            trace.summary = try arena.print("{s} reads a clock or RNG: two runs of the same request can differ.", .{cause.snippet});
+                            trace.counterexample = .{
+                                .kind = .offending_node,
+                                .line = cause.line,
+                                .column = cause.column,
+                                .snippet = cause.snippet,
+                                .fix = "remove the varying read, or take the value from the request.",
+                            };
+                        },
+                        .module_export => {
+                            trace.summary = try arena.print("`{s}` returns a value that varies between requests: two runs of the same request can differ.", .{cause.snippet});
+                            trace.counterexample = .{
+                                .kind = .offending_node,
+                                .line = cause.line,
+                                .column = cause.column,
+                                .snippet = cause.snippet,
+                                .fix = try arena.print("remove `{s}` from the response path, or declare a capsule without `deterministic` and `idempotent`.", .{cause.snippet}),
+                            };
+                        },
+                    }
                 }
             }
         },
@@ -1185,4 +1209,80 @@ test "contained request evidence names only the property governed sinks" {
         try testing.expect(std.mem.indexOf(u8, resisted.chain[1], "never reaches a response, log") == null);
     }
     try testing.expect((try resistedFor(arena.allocator(), .{ .property = .injection_safe, .safe_form = .validated }, .injection_safe)) == null);
+}
+
+/// The trace of `deterministic` among `traces`, or null.
+fn deterministicTrace(traces: []const ProofTrace) ?ProofTrace {
+    for (traces) |trace| {
+        if (std.mem.eql(u8, trace.property, "deterministic")) return trace;
+    }
+    return null;
+}
+
+test "a branch cause of deterministic names the branch and not a clock read" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var contract = handler_contract.emptyContract(try testing.allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(testing.allocator);
+    contract.properties = .{ .pure = false, .read_only = false, .stateless = false, .retry_safe = false, .deterministic = false, .has_egress = false, .fault_covered = false };
+    contract.property_provenance.deterministic = .{
+        .line = 3,
+        .column = 3,
+        .snippet = "a branch on a value that varies between requests",
+    };
+
+    const traces = try collect(arena.allocator(), &contract, &.{}, &.{}, undefined, 1, true);
+    const trace = deterministicTrace(traces) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(
+        "The response is reached through a branch on a value that varies between requests: two runs of the same request can differ.",
+        trace.summary,
+    );
+    const cx = trace.counterexample orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u32, 3), cx.line);
+    try testing.expectEqual(@as(u32, 3), cx.column);
+    try testing.expectEqualStrings(
+        "declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response.",
+        cx.fix,
+    );
+}
+
+test "a clock read as the cause of deterministic keeps the clock summary" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var contract = handler_contract.emptyContract(try testing.allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(testing.allocator);
+    contract.properties = .{ .pure = false, .read_only = false, .stateless = false, .retry_safe = false, .deterministic = false, .has_egress = false, .fault_covered = false };
+    contract.property_provenance.deterministic = .{ .line = 2, .column = 17, .snippet = "Date.now()" };
+
+    const traces = try collect(arena.allocator(), &contract, &.{}, &.{}, undefined, 1, true);
+    const trace = deterministicTrace(traces) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("Date.now() reads a clock or RNG: two runs of the same request can differ.", trace.summary);
+    const cx = trace.counterexample orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("remove the varying read, or take the value from the request.", cx.fix);
+}
+
+test "a module export as the cause of deterministic names the export and not a clock read" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    var contract = handler_contract.emptyContract(try testing.allocator.dupe(u8, "handler.ts"));
+    defer contract.deinit(testing.allocator);
+    contract.properties = .{ .pure = false, .read_only = false, .stateless = false, .retry_safe = false, .deterministic = false, .has_egress = false, .fault_covered = false };
+    contract.property_provenance.deterministic = .{ .line = 4, .column = 13, .snippet = "fetch" };
+
+    const traces = try collect(arena.allocator(), &contract, &.{}, &.{}, undefined, 1, true);
+    const trace = deterministicTrace(traces) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings(
+        "`fetch` returns a value that varies between requests: two runs of the same request can differ.",
+        trace.summary,
+    );
+    const cx = trace.counterexample orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(u32, 4), cx.line);
+    try testing.expectEqual(@as(u32, 13), cx.column);
+    try testing.expectEqualStrings(
+        "remove `fetch` from the response path, or declare a capsule without `deterministic` and `idempotent`.",
+        cx.fix,
+    );
 }

@@ -611,6 +611,36 @@ pub fn samePath(a: PathEvidence, b: PathEvidence) bool {
         (a.constraints.len == 0 or a.constraints.ptr == b.constraints.ptr) and (a.io_calls.len == 0 or a.io_calls.ptr == b.io_calls.ptr);
 }
 
+/// A control decision: the module and the IR node of the decision, in the numbering of that
+/// module. Sites order by module id first, then by node index.
+pub const ControlSite = struct {
+    module: ModuleId,
+    node: NodeIndex,
+
+    pub fn before(a: ControlSite, b: ControlSite) bool {
+        if (a.module != b.module) return a.module < b.module;
+        return a.node < b.node;
+    }
+
+    pub fn eql(a: ControlSite, b: ControlSite) bool {
+        return a.module == b.module and a.node == b.node;
+    }
+};
+
+/// The smaller of two optional sites. A missing site loses to a present one.
+pub fn smallerSite(a: ?ControlSite, b: ?ControlSite) ?ControlSite {
+    const left = a orelse return b;
+    const right = b orelse return left;
+    return if (right.before(left)) right else left;
+}
+
+/// Whether two optional sites are the same mark.
+pub fn sameSite(a: ?ControlSite, b: ?ControlSite) bool {
+    const left = a orelse return b == null;
+    const right = b orelse return false;
+    return left.eql(right);
+}
+
 /// The abstract machine state: the bindings of the function, the heap, and the
 /// cells that writes through an unnamed target land in. A state is reachable
 /// or bottom, and the join of bottom with `s` is `s`.
@@ -627,6 +657,15 @@ pub const State = struct {
     /// them, because the unnamed object might be that receiver.
     top_cell: Cells = .{},
     path: PathEvidence = .{},
+    /// Sticky: the first control decision on a value that varies between requests that was
+    /// taken on the way here, or null. Unlike `path`, no join or call boundary resets it. A
+    /// join of two marked states keeps the smaller site, so the choice is deterministic and a
+    /// fixpoint converges. It is a mark on the state and not a data label: `no_secret_leakage`
+    /// tracks explicit flow only (D9), so only the `deterministic` rule reads it, through
+    /// `SinkEvent.varying_control`. A request pass keeps it in the persistent state for the
+    /// next pass. A write to module state already clears `deterministic` at request time, so
+    /// no verdict shows that carry.
+    varying_control: ?ControlSite = null,
 
     pub const bottom: State = .{ .reachable = false };
 };
@@ -638,6 +677,7 @@ pub fn cloneState(arena: std.mem.Allocator, s: State) Error!State {
         .heap = try s.heap.clone(arena),
         .top_cell = s.top_cell,
         .path = s.path,
+        .varying_control = s.varying_control,
     };
 }
 
@@ -675,6 +715,7 @@ pub fn joinStates(arena: std.mem.Allocator, a: State, b: State) Error!State {
         .heap = heap,
         .top_cell = try joinCells(arena, a.top_cell, b.top_cell),
         .path = if (samePath(a.path, b.path)) a.path else .{ .complete = false },
+        .varying_control = smallerSite(a.varying_control, b.varying_control),
     };
 }
 
@@ -740,6 +781,7 @@ fn cellsEql(a: Cells, b: Cells) bool {
 pub fn stateEql(a: State, b: State) bool {
     if (a.reachable != b.reachable) return false;
     if (!a.reachable) return true;
+    if (!sameSite(a.varying_control, b.varying_control)) return false;
     if (!valueMapEql(a.env, b.env)) return false;
     if (a.heap.count() != b.heap.count()) return false;
     var it = a.heap.iterator();
@@ -753,7 +795,7 @@ pub fn stateEql(a: State, b: State) bool {
 /// The state of a callee as its caller sees it: the heap and the cells of
 /// unnamed writes. The maps are shared with `s`, so the result is read-only.
 pub fn heapOnly(s: State) State {
-    return .{ .reachable = s.reachable, .heap = s.heap, .top_cell = s.top_cell, .path = s.path };
+    return .{ .reachable = s.reachable, .heap = s.heap, .top_cell = s.top_cell, .path = s.path, .varying_control = s.varying_control };
 }
 
 pub fn joinSummary(arena: std.mem.Allocator, a: Summary, b: Summary) Error!Summary {

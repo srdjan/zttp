@@ -151,6 +151,10 @@ pub const SinkEvent = struct {
     sink: InputSink,
     reached: Flow,
     path: PathEvidence = .{},
+    /// The smallest `varying_control` site that a state held when the sink was reached: a
+    /// branch on a varying value led here. Only `deterministic` reads it. It is not a data
+    /// label, so it cannot reach `no_secret_leakage` (D9).
+    varying_control: ?flow_value.ControlSite = null,
 };
 
 /// Unsupported constructs clear every property. Sink
@@ -161,6 +165,9 @@ pub const HandlerReport = struct {
     diagnostics: []const report_types.Diagnostic,
     events: []const SinkEvent,
     defended_paths: []const report_types.DefendedPath = &.{},
+    /// The branch that cleared `deterministic` alone: no varying value reached the response
+    /// and the evaluation held. Null when a value cleared it, or when no branch did.
+    deterministic_branch: ?report_types.BranchCause = null,
 };
 
 /// A handled tag that reaches an evaluator in a position its parent rule does

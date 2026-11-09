@@ -2406,9 +2406,14 @@ test "run: a default-profile clock helper whose value the handler drops still ex
     try testing.expect(std.mem.indexOf(u8, g.stderr, "UnanalysableSource") != null);
 }
 
-// Control (passes at HEAD): the handler branches on the clock value. Its
-// `deterministic` fact ignores the branch, so the handler holds it and the
-// marked ZTS606 row for it is not accepted.
+// The handler branches on the clock value. A branch on a varying value clears
+// `deterministic` of the handler itself, so its default-profile ZTS500 row names
+// the property and the marked ZTS606 row for it is accepted. The gate compares
+// both sides and gives a verdict. (Before the control-flow rule the handler held
+// `deterministic`, the ZTS606 row was not accepted, and the gate exited 2.)
+// The edit changes only a response body, and the behavior diff compares response
+// statuses (`diffBehaviors` in packages/zts/src/contract_diff.zig), so the
+// verdict is `equivalent`.
 const clock_branch_base =
     \\function stamp(): number {
     \\  return Date.now();
@@ -2437,12 +2442,15 @@ const clock_branch_head =
     \\
 ;
 
-test "run: a default-profile handler that branches on a clock helper still exits 2" {
+test "run: a default-profile handler that branches on a clock helper gets an equivalent verdict" {
     const g = try gateOverEdit(clock_branch_base, clock_branch_head, .json);
     defer g.deinit();
-    try testing.expectEqual(@as(u8, 2), g.code);
-    try testing.expectEqual(@as(usize, 0), g.report.len);
-    try testing.expect(std.mem.indexOf(u8, g.stderr, "UnanalysableSource") != null);
+    try testing.expectEqual(@as(u8, 0), g.code);
+    try testing.expectEqualStrings("", g.stderr);
+    try testing.expectEqualStrings(
+        "{\"schema\":\"zttp.proof-gate.v1\",\"base\":\"HEAD\",\"head\":\"working tree\",\"verdict\":\"equivalent\",\"safe\":true,\"handlersChecked\":1,\"handlers\":[{\"path\":\"handler.ts\",\"verdict\":\"equivalent\",\"capsule\":\"implicit\",\"behaviorDiff\":{\"preserved\":2,\"responseChanged\":0,\"added\":0,\"removed\":0},\"surface\":{\"routes\":{\"added\":[],\"removed\":[]},\"env\":{\"added\":[],\"removed\":[]},\"egress\":{\"added\":[],\"removed\":[]},\"cache\":{\"added\":[],\"removed\":[]},\"capabilitiesWidened\":false,\"capabilitiesNarrowed\":false},\"counterexamples\":[],\"lostProperties\":[]}],\"skipped\":[]}\n",
+        g.report,
+    );
 }
 
 // helper.ts fails its own type check, so CHECK does not follow its import
