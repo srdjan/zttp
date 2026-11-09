@@ -123,6 +123,7 @@ pub const Snapshot = struct {
         );
 
         for (prepared.changes) |change| {
+            try requireBaseline(allocator, change);
             if (!containsAbsolute(entries.items, change.resolved_path)) {
                 const relative = common.relativeToRoot(prepared.project_root, change.resolved_path);
                 try appendAbsent(allocator, &entries, change.resolved_path, relative);
@@ -265,6 +266,18 @@ fn collectInputs(
             else => {},
         }
     }
+}
+
+/// An edit that landed after `change_set.prepare` read the baseline would be
+/// overwritten by the commit, so the target must still match that baseline.
+fn requireBaseline(allocator: std.mem.Allocator, change: change_set.PreparedChange) !void {
+    const current = zts.file_io.readFile(allocator, change.resolved_path, max_read_file_bytes) catch |err| switch (err) {
+        error.FileNotFound => null,
+        else => return err,
+    };
+    defer if (current) |bytes| allocator.free(bytes);
+    const digest = digestReadState(current);
+    if (!std.mem.eql(u8, &digest, &change.baseline_sha256)) return error.ProofReadSetChanged;
 }
 
 fn isExcludedName(name: []const u8) bool {
@@ -509,6 +522,25 @@ test "snapshot leaves secret-named files out of the read set and recheck passes"
     try testing.expectError(error.FileNotFound, zts.file_io.readFile(testing.allocator, copied, 64));
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "concurrent" });
     try testing.expectError(error.ProofReadSetChanged, snapshot.recheck(testing.allocator));
+}
+
+test "snapshot capture refuses a target edited after its baseline was prepared" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old-a" });
+    const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root_z);
+    const root = try testing.allocator.dupe(u8, root_z);
+    defer testing.allocator.free(root);
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/a.ts", .content = "new-a" });
+    defer prepared.deinit(testing.allocator);
+
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "concurrent" });
+    try testing.expectError(error.ProofReadSetChanged, Snapshot.capture(testing.allocator, &prepared));
+    var contents: [64]u8 = undefined;
+    const current = try tmp.dir.readFile(testing.io, "src/a.ts", &contents);
+    try testing.expectEqualStrings("concurrent", current);
 }
 
 test "snapshot captures configured SQL and policy inputs regardless of extension" {
