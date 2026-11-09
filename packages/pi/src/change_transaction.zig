@@ -834,7 +834,10 @@ fn removeStageFiles(allocator: std.mem.Allocator, manifest: Manifest, proof_id: 
     for (manifest.changes) |change| {
         const stage = try stagePath(allocator, change.path, proof_id);
         defer allocator.free(stage);
+        if (!try pathExists(allocator, stage)) continue;
+        // The unlink must be durable before the journal that names it is deleted.
         try deleteFileIfPresent(allocator, stage);
+        try syncDirectory(allocator, std.fs.path.dirname(stage) orelse return error.InvalidTargetPath);
     }
 }
 
@@ -2699,6 +2702,31 @@ test "acquire removes the stage files of a prepared transaction so the same chan
     var receipt = try workspace.commit(&fixture.prepared, &fixture.snapshot, &fixture.proof, .{});
     defer receipt.deinit(testing.allocator);
     try expectFixtureCandidates(&fixture, true);
+}
+
+test "acquire recovers a prepared transaction whose target directory is gone" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    const transaction_dir = try transactionPath(testing.allocator, fixture.root, &fixture.proof.proof_id);
+    defer testing.allocator.free(transaction_dir);
+    {
+        var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+        defer lock.deinit();
+        try testing.expectError(
+            error.InjectedTransactionFailure,
+            commitLocked(testing.allocator, &lock, &fixture.prepared, &fixture.snapshot, &fixture.proof, .{
+                .fault = .after_prepared,
+            }),
+        );
+    }
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/.a.ts.zttp-aaaaaaaaaaaaaaaa.stage", .data = "stale-a" });
+    try tmp.dir.deleteTree(testing.io, "src");
+
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+    defer workspace.deinit();
+    try testing.expect(!try pathExists(testing.allocator, transaction_dir));
 }
 
 test "acquire removes the stage files of an applying transaction it rolls forward" {
