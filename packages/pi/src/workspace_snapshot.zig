@@ -123,8 +123,12 @@ pub const Snapshot = struct {
         );
 
         for (prepared.changes) |change| {
-            try requireBaseline(allocator, change);
-            if (!containsAbsolute(entries.items, change.resolved_path)) {
+            // The check uses the bytes that the snapshot recorded, so an edit
+            // cannot pass it by being undone and redone around a second read.
+            if (findAbsolute(entries.items, change.resolved_path)) |recorded| {
+                if (!std.mem.eql(u8, &recorded.sha256, &change.baseline_sha256)) return error.ProofReadSetChanged;
+            } else {
+                try requireBaseline(allocator, change);
                 const relative = common.relativeToRoot(prepared.project_root, change.resolved_path);
                 try appendAbsent(allocator, &entries, change.resolved_path, relative);
             }
@@ -295,6 +299,11 @@ fn isProofInput(name: []const u8) bool {
 fn containsAbsolute(entries: []const ReadEntry, absolute: []const u8) bool {
     for (entries) |entry| if (std.mem.eql(u8, entry.absolute_path, absolute)) return true;
     return false;
+}
+
+fn findAbsolute(entries: []const ReadEntry, absolute: []const u8) ?*const ReadEntry {
+    for (entries) |*entry| if (std.mem.eql(u8, entry.absolute_path, absolute)) return entry;
+    return null;
 }
 
 fn appendAbsent(
@@ -613,4 +622,63 @@ test "scratch directory creation never reuses an existing directory" {
     defer testing.allocator.free(name);
     defer tmp_dir.deleteTree(io, name) catch {};
     try testing.expect(!std.mem.eql(u8, taken, name));
+}
+
+const SwapWorker = struct {
+    dir: std.Io.Dir,
+    stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+    failed: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
+
+    fn run(self: *SwapWorker) void {
+        const contents = [_][]const u8{ "edit", "old" };
+        var index: usize = 0;
+        while (!self.stop.load(.acquire)) {
+            self.dir.writeFile(testing.io, .{ .sub_path = "src/.a.swap", .data = contents[index] }) catch {
+                self.failed.store(true, .release);
+                return;
+            };
+            self.dir.rename("src/.a.swap", self.dir, "src/a.ts", testing.io) catch {
+                self.failed.store(true, .release);
+                return;
+            };
+            index = 1 - index;
+        }
+    }
+};
+
+test "a captured target always matches its prepared baseline while the target changes underneath" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+    const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root_z);
+    const root = try testing.allocator.dupe(u8, root_z);
+    defer testing.allocator.free(root);
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/a.ts", .content = "new" });
+    defer prepared.deinit(testing.allocator);
+
+    var worker: SwapWorker = .{ .dir = tmp.dir };
+    const thread = try std.Thread.spawn(.{}, SwapWorker.run, .{&worker});
+    var violations: usize = 0;
+    var failure: ?anyerror = null;
+    for (0..200) |_| {
+        var snapshot = Snapshot.capture(testing.allocator, &prepared) catch |err| switch (err) {
+            error.ProofReadSetChanged => continue,
+            else => {
+                failure = err;
+                break;
+            },
+        };
+        defer snapshot.deinit(testing.allocator);
+        for (snapshot.entries) |entry| {
+            if (!std.mem.eql(u8, entry.relative_path, "src/a.ts")) continue;
+            if (!std.mem.eql(u8, &entry.sha256, &prepared.changes[0].baseline_sha256)) violations += 1;
+        }
+    }
+    worker.stop.store(true, .release);
+    thread.join();
+    if (failure) |err| return err;
+    try testing.expect(!worker.failed.load(.acquire));
+    try testing.expectEqual(@as(usize, 0), violations);
 }
