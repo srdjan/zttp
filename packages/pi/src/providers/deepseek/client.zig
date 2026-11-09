@@ -543,14 +543,17 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
         remainingMs(request_started_ns, request_timeout_ms),
     );
     var response = request.receiveHead(&.{}) catch return ClientError.DeepSeekServerUnavailable;
-    // The head arrives before generation starts, so the long silence is here,
-    // between the head and the first body byte. Poll for it rather than letting
-    // a blocking read sit on the socket past its timeout.
-    try waitForReadable(
-        connection.stream_reader.stream.socket.handle,
-        silence_ceiling_ms,
-        remainingMs(request_started_ns, request_timeout_ms),
-    );
+    // The wait covers the silence before the first body byte. It is skipped when
+    // decrypted body bytes are already buffered, because the socket can then be
+    // silent with the body complete. A partial encrypted record still needs the
+    // socket, so the ciphertext reader is not checked here.
+    if (connection.reader().bufferedLen() == 0) {
+        try waitForReadable(
+            connection.stream_reader.stream.socket.handle,
+            silence_ceiling_ms,
+            remainingMs(request_started_ns, request_timeout_ms),
+        );
+    }
     const declared_len = http_errors.declaredBodyLength(response.head);
     var transfer_buf: [4096]u8 = undefined;
     var decompress: std.http.Decompress = undefined;
