@@ -342,11 +342,12 @@ fn getReadiness(arena: std.mem.Allocator, url: []const u8, read_body: bool) !Rea
     try waitForResponseHead(connection.stream_reader.stream.socket.handle, response_head_timeout_ms);
     var response = request.receiveHead(&.{}) catch return ClientError.LocalServerUnavailable;
     if (!read_body) return .{ .status = response.head.status, .body = "" };
+    const declared_len = http_errors.declaredBodyLength(response.head);
     var transfer_buf: [4096]u8 = undefined;
     var decompress: std.http.Decompress = undefined;
     var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
     const reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
-    const body = http_errors.readBody(reader, arena, max_response_body_bytes) catch |err| switch (err) {
+    const body = http_errors.readBody(reader, arena, max_response_body_bytes, declared_len) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return ClientError.LocalServerUnavailable,
     };
@@ -898,11 +899,12 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
         effectiveRequestTimeoutMs(config.request_timeout_ms, response_head_timeout_ms),
     );
     var response = request.receiveHead(&.{}) catch return ClientError.LocalServerUnavailable;
+    const declared_len = http_errors.declaredBodyLength(response.head);
     var transfer_buf: [4096]u8 = undefined;
     var decompress: std.http.Decompress = undefined;
     var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
     const reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
-    const response_body = http_errors.readBody(reader, arena, max_response_body_bytes) catch |err| switch (err) {
+    const response_body = http_errors.readBody(reader, arena, max_response_body_bytes, declared_len) catch |err| switch (err) {
         error.StreamTooLong => return ClientError.ResponseTooLarge,
         error.OutOfMemory => return error.OutOfMemory,
         error.RequestTimedOut => return error.RequestTimedOut,
@@ -1608,4 +1610,52 @@ test "local client exposes the loop-facing request signature" {
     var client = Client.init(.{ .system_prompt = "s" });
     const model_client = client.asModelClient();
     try testing.expect(model_client.context == @as(*anyopaque, @ptrCast(&client)));
+}
+
+const TruncatedBodyServer = struct {
+    listener: std.Io.net.Server,
+    io: std.Io,
+
+    fn run(self: *TruncatedBodyServer) void {
+        const io = self.io;
+        var stream = self.listener.accept(io) catch return;
+        defer stream.close(io);
+        var chunk: [4096]u8 = undefined;
+        var vecs: [1][]u8 = .{chunk[0..]};
+        _ = stream.readWithControl(io, &vecs, &.{}) catch return;
+        var out_buf: [4096]u8 = undefined;
+        var writer = stream.writer(io, &out_buf);
+        const out = &writer.interface;
+        const prefix = "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":\"";
+        out.writeAll("HTTP/1.1 200 OK\r\nContent-Length: 500\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n") catch return;
+        out.writeAll(prefix) catch return;
+        var pad: [100 - prefix.len]u8 = undefined;
+        @memset(&pad, 'a');
+        out.writeAll(&pad) catch return;
+        out.flush() catch return;
+    }
+};
+
+test "a body that ends before its Content-Length is a transport failure" {
+    const allocator = testing.allocator;
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server: TruncatedBodyServer = .{ .listener = try address.listen(io, .{ .reuse_address = true }), .io = io };
+    defer server.listener.deinit(io);
+    const port = server.listener.socket.address.getPort();
+    const thread = try std.Thread.spawn(.{}, TruncatedBodyServer.run, .{&server});
+    defer thread.join();
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const base = try std.fmt.allocPrint(arena, "http://127.0.0.1:{d}", .{port});
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(allocator);
+    try transcript.append(allocator, .{ .user_text = "hi" });
+    var client = Client.init(.{ .base_url = base, .model = "m", .system_prompt = "s" });
+    const result = client.sendTurn(arena, &transcript, null);
+    try testing.expectError(ClientError.LocalServerUnavailable, result);
 }

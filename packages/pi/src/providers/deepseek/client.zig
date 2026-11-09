@@ -544,6 +544,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
         silence_ceiling_ms,
         request_timeout_ms,
     );
+    const declared_len = http_errors.declaredBodyLength(response.head);
     var transfer_buf: [4096]u8 = undefined;
     var decompress: std.http.Decompress = undefined;
     var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
@@ -556,6 +557,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
         silence_ceiling_ms,
         request_timeout_ms,
         &.{ connection.reader(), &connection.stream_reader.interface },
+        declared_len,
     ) catch |err| switch (err) {
         error.StreamTooLong => return ClientError.ResponseTooLarge,
         error.OutOfMemory => return error.OutOfMemory,
@@ -588,6 +590,9 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
 /// a byte that the HTTP connection reader already took off the socket is not
 /// readable there, and polling would report a stall that is not one.
 /// `upstream` lists the connection readers beneath the body reader.
+///
+/// A stream that ends with fewer than `declared_len` bytes is `error.BodyTruncated`,
+/// and a body that reaches `declared_len` ends without a further wait.
 fn readBodyWithin(
     reader: *std.Io.Reader,
     arena: std.mem.Allocator,
@@ -596,10 +601,12 @@ fn readBodyWithin(
     silence_ceiling_ms: i32,
     request_timeout_ms: i32,
     upstream: []const *const std.Io.Reader,
+    declared_len: ?u64,
 ) ![]u8 {
     var body: std.ArrayList(u8) = .empty;
     errdefer body.deinit(arena);
     while (true) {
+        if (declared_len == body.items.len) break;
         if (!hasBufferedBytes(reader, upstream)) {
             try waitForReadable(fd, silence_ceiling_ms, request_timeout_ms);
         }
@@ -612,6 +619,9 @@ fn readBodyWithin(
         if (body.items.len + available.len > limit_bytes) return error.StreamTooLong;
         try body.appendSlice(arena, available);
         reader.tossBuffered();
+    }
+    if (declared_len) |len| {
+        if (body.items.len < len) return error.BodyTruncated;
     }
     return body.toOwnedSlice(arena);
 }
@@ -1000,7 +1010,7 @@ test "a mid-body stall expires on the silence ceiling, not on the socket" {
     var stalled_reader = std.Io.Reader.fixed(stalled_payload);
     try testing.expectError(
         ClientError.DeepSeekGenerationStalled,
-        readBodyWithin(&stalled_reader, allocator, 1 << 20, pipe_fds[0], 20, 1_000, &.{}),
+        readBodyWithin(&stalled_reader, allocator, 1 << 20, pipe_fds[0], 20, 1_000, &.{}, null),
     );
 
     // With the ceiling at the budget the same silence is exhaustion, not a
@@ -1008,7 +1018,7 @@ test "a mid-body stall expires on the silence ceiling, not on the socket" {
     var spent_reader = std.Io.Reader.fixed(stalled_payload);
     try testing.expectError(
         error.RequestTimedOut,
-        readBodyWithin(&spent_reader, allocator, 1 << 20, pipe_fds[0], 20, 20, &.{}),
+        readBodyWithin(&spent_reader, allocator, 1 << 20, pipe_fds[0], 20, 20, &.{}, null),
     );
 
     // The floor under both: a body that arrives is read whole, across chunks,
@@ -1018,7 +1028,7 @@ test "a mid-body stall expires on the silence ceiling, not on the socket" {
     defer allocator.free(whole_payload);
     for (whole_payload, 0..) |*byte, i| byte.* = @intCast(i % 251);
     var whole_reader = std.Io.Reader.fixed(whole_payload);
-    const body = try readBodyWithin(&whole_reader, allocator, 1 << 20, pipe_fds[0], 20, 1_000, &.{});
+    const body = try readBodyWithin(&whole_reader, allocator, 1 << 20, pipe_fds[0], 20, 1_000, &.{}, null);
     defer allocator.free(body);
     try testing.expectEqualSlices(u8, whole_payload, body);
 
@@ -1026,7 +1036,7 @@ test "a mid-body stall expires on the silence ceiling, not on the socket" {
     var large_reader = std.Io.Reader.fixed(whole_payload);
     try testing.expectError(
         error.StreamTooLong,
-        readBodyWithin(&large_reader, allocator, 4096, pipe_fds[0], 20, 1_000, &.{}),
+        readBodyWithin(&large_reader, allocator, 4096, pipe_fds[0], 20, 1_000, &.{}, null),
     );
 }
 
@@ -1081,7 +1091,7 @@ test "a body that trickles in below one chunk and then goes silent stalls on the
     // instead of hanging the suite.
     const watchdog = try std.Thread.spawn(.{}, shutdownPeerAfterTwoSeconds, .{fds[1]});
     const started = monotonicNowNs().?;
-    const result = readBodyWithin(&stream_reader.interface, testing.allocator, 1 << 20, fds[0], 20, 1_000, &.{});
+    const result = readBodyWithin(&stream_reader.interface, testing.allocator, 1 << 20, fds[0], 20, 1_000, &.{}, null);
     const elapsed = elapsedMs(started).?;
     watchdog.join();
     defer if (result) |body| testing.allocator.free(body) else |_| {};
@@ -1113,6 +1123,42 @@ test "bytes that a lower reader already holds are read without polling the silen
     const lowers = [_]*const std.Io.Reader{&lower.interface};
     try testing.expectError(
         error.StreamTooLong,
-        readBodyWithin(&upper.interface, testing.allocator, 9, fds[0], 20, 1_000, &lowers),
+        readBodyWithin(&upper.interface, testing.allocator, 9, fds[0], 20, 1_000, &lowers, null),
     );
+}
+
+test "a body that the peer closes before its declared length is a truncated body" {
+    if (@TypeOf(std.posix.system.socketpair) == void) return error.SkipZigTest;
+    var fds: [2]std.posix.fd_t = undefined;
+    switch (std.posix.errno(std.posix.system.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds))) {
+        .SUCCESS => {},
+        else => return error.SkipZigTest,
+    }
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+    _ = std.posix.system.write(fds[1], "01234", 5);
+    _ = std.posix.system.shutdown(fds[1], 1);
+
+    var stream: std.Io.net.Stream = .{ .socket = .{ .handle = fds[0], .address = undefined } };
+    var buf: [4096]u8 = undefined;
+    var stream_reader = stream.reader(testing.io, &buf);
+    const result = readBodyWithin(&stream_reader.interface, testing.allocator, 1 << 20, fds[0], 20, 1_000, &.{}, 10);
+    defer if (result) |body| testing.allocator.free(body) else |_| {};
+    try testing.expectError(error.BodyTruncated, result);
+}
+
+test "a body that reaches its declared length ends without polling the silent socket" {
+    if (@TypeOf(std.posix.system.socketpair) == void) return error.SkipZigTest;
+    var fds: [2]std.posix.fd_t = undefined;
+    switch (std.posix.errno(std.posix.system.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds))) {
+        .SUCCESS => {},
+        else => return error.SkipZigTest,
+    }
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    var reader = std.Io.Reader.fixed("0123456789");
+    const body = try readBodyWithin(&reader, testing.allocator, 1 << 20, fds[0], 20, 1_000, &.{}, 10);
+    defer testing.allocator.free(body);
+    try testing.expectEqualStrings("0123456789", body);
 }

@@ -142,13 +142,30 @@ pub fn setWriteTimeoutMs(fd: std.posix.fd_t, timeout_ms: u64) void {
     std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
 }
 
+/// The body length a response head promises, or null when the head does not
+/// promise a length that the body reader's output must match: a chunked
+/// transfer ends itself, and a compressed body decodes to a different length.
+pub fn declaredBodyLength(head: std.http.Client.Response.Head) ?u64 {
+    if (head.transfer_encoding != .none) return null;
+    if (head.content_encoding != .identity) return null;
+    return head.content_length;
+}
+
 /// Read the full response body, mapping an idle-read timeout to a clean
 /// `error.RequestTimedOut` (shared by both provider clients).
-pub fn readBody(reader: anytype, arena: std.mem.Allocator, limit_bytes: usize) ![]u8 {
-    return reader.allocRemaining(arena, .limited(limit_bytes)) catch |err| {
+///
+/// A connection that closes mid-body ends the reader as if the body were
+/// whole, so a body shorter than `declared_len` is `error.BodyTruncated`: a
+/// transport failure that a caller may reissue, not a decode failure.
+pub fn readBody(reader: anytype, arena: std.mem.Allocator, limit_bytes: usize, declared_len: ?u64) ![]u8 {
+    const body = reader.allocRemaining(arena, .limited(limit_bytes)) catch |err| {
         if (isTimeout(err)) return error.RequestTimedOut;
         return err;
     };
+    if (declared_len) |len| {
+        if (body.len < len) return error.BodyTruncated;
+    }
+    return body;
 }
 
 const testing = std.testing;
