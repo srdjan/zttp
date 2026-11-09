@@ -527,8 +527,9 @@ fn runTurnBody(
     // `.prompt_user` arm reads it to append a concrete next step to the bare
     // "budget exhausted" line so the user is not left at a dead end.
     var hit_roundtrip_budget = false;
-    // Set when the per-turn tool-call budget is exceeded; causes end_turn/none
-    // to log budget_tool_calls instead of approved.
+    // Set when the per-turn tool-call budget is exceeded. The model still gets
+    // the refusal and may answer, but the turn logs budget_tool_calls instead
+    // of approved.
     var hit_tool_budget = false;
     // Set when the per-turn wall-time budget is exhausted. The `.prompt_user`
     // arm reads it to show a timeout-specific message instead of the generic
@@ -904,7 +905,7 @@ fn runTurnBody(
                 try transcript.append(allocator, entry);
                 const end_reason: session_events.TurnEndReason = switch (msg) {
                     .diagnostic_box => .veto_exhausted,
-                    else => .approved,
+                    else => if (hit_tool_budget) .budget_tool_calls else .approved,
                 };
                 return finishTurn(
                     &machine,
@@ -2581,4 +2582,31 @@ test "a secret path reaches the model as the deny-list refusal, not its content"
     try testing.expect(!result.ok);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "deny list") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "hunter2") == null);
+}
+
+test "a turn that exceeded the tool-call budget ends with budget_tool_calls after the model answers" {
+    const replies = [_]turn.AssistantReply{
+        .{ .response = .{ .tool_calls = &[_]turn.ToolCall{
+            .{ .id = "toolu_a", .name = "stub", .args_json = "{}" },
+            .{ .id = "toolu_b", .name = "stub", .args_json = "{}" },
+        } } },
+        .{ .response = .{ .final_text = "answer without the tools" } },
+    };
+    var seq: SequenceClient = .{ .replies = &replies };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, stub_tool);
+
+    const result = try runTurnWith(
+        testing.allocator,
+        seq.asClient(),
+        &registry,
+        &tr,
+        "run the stub twice",
+        .{ .max_tool_calls_per_turn = 1 },
+    );
+    try testing.expectEqual(session_events.TurnEndReason.budget_tool_calls, result.end_reason);
+    try testing.expectEqual(@as(u8, 2), result.roundtrips);
 }
