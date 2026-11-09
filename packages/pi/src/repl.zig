@@ -750,6 +750,17 @@ pub fn baseSessionConfig(flags: ExpertFlags, overrides: agent.SessionConfig) age
     return cfg;
 }
 
+/// A failed session switch leaves the current session untouched, so the REPL
+/// reports the error and keeps running instead of ending the conversation.
+fn reportSessionSwitchFailure(err: anyerror) void {
+    if (err == error.CrossProviderResume) {
+        const message = "Cannot resume a session from another provider in this process. Restart with --provider and optional --model.\n";
+        _ = std.c.write(std.c.STDERR_FILENO, message.ptr, message.len);
+        return;
+    }
+    loop.writeTurnErrorToStderr(err);
+}
+
 pub fn run(
     allocator: std.mem.Allocator,
     registry: *const Registry,
@@ -871,25 +882,20 @@ pub fn run(
                     }
                 }
             },
-            .session_resume => agent_fork.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{ .resume_latest = true })) catch |err| {
-                if (err != error.CrossProviderResume) return err;
-                const message = "Cannot resume a session from another provider in this process. Restart with --provider and optional --model.\n";
-                _ = std.c.write(std.c.STDERR_FILENO, message.ptr, message.len);
-            },
-            .session_new => try agent_fork.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{
+            .session_resume => agent_fork.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{ .resume_latest = true })) catch |err| reportSessionSwitchFailure(err),
+            .session_new => agent_fork.rebuildSession(allocator, &session, registry, baseSessionConfig(flags, .{
                 .provider = session.activeProvider(),
                 .model = session.currentModel(),
-            })),
+            })) catch |err| reportSessionSwitchFailure(err),
             .session_compact => {
                 const msg = try agent_compaction.compact(allocator, &session);
                 defer allocator.free(msg);
                 _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
             },
-            .session_fork => {
-                const msg = try agent_fork.fork(allocator, &session);
+            .session_fork => if (agent_fork.fork(allocator, &session)) |msg| {
                 defer allocator.free(msg);
                 _ = std.c.write(std.c.STDOUT_FILENO, msg.ptr, msg.len);
-            },
+            } else |err| reportSessionSwitchFailure(err),
         }
     }
 
@@ -2145,4 +2151,97 @@ test "renderLedgerGuidance omits the metrics block for a fresh session" {
     defer res.deinit(testing.allocator);
     try testing.expect(std.mem.indexOf(u8, res.llm_text, "This session so far:") == null);
     try testing.expect(std.mem.indexOf(u8, res.llm_text, "zttp ledger export") != null);
+}
+
+const IsolatedTmp = @import("test_support/tmp.zig").IsolatedTmp;
+const EnvOverride = @import("test_support/env.zig").EnvOverride;
+const CwdOverride = @import("test_support/cwd.zig").CwdOverride;
+
+/// Replaces the process stdin with `input` and captures what the REPL writes to
+/// stderr, so a test can drive `run` through its real file descriptors.
+const ReplStdio = struct {
+    saved_in: c_int,
+    saved_out: c_int,
+    saved_err: c_int,
+    out_read: c_int,
+    err_read: c_int,
+
+    fn begin(input: []const u8) !ReplStdio {
+        var in_pipe: [2]c_int = undefined;
+        var out_pipe: [2]c_int = undefined;
+        var err_pipe: [2]c_int = undefined;
+        if (std.c.pipe(&in_pipe) != 0) return error.PipeFailed;
+        if (std.c.pipe(&out_pipe) != 0) return error.PipeFailed;
+        if (std.c.pipe(&err_pipe) != 0) return error.PipeFailed;
+        _ = std.c.write(in_pipe[1], input.ptr, input.len);
+        _ = std.c.close(in_pipe[1]);
+        const self: ReplStdio = .{
+            .saved_in = std.c.dup(std.c.STDIN_FILENO),
+            .saved_out = std.c.dup(std.c.STDOUT_FILENO),
+            .saved_err = std.c.dup(std.c.STDERR_FILENO),
+            .out_read = out_pipe[0],
+            .err_read = err_pipe[0],
+        };
+        _ = std.c.dup2(in_pipe[0], std.c.STDIN_FILENO);
+        _ = std.c.dup2(out_pipe[1], std.c.STDOUT_FILENO);
+        _ = std.c.dup2(err_pipe[1], std.c.STDERR_FILENO);
+        _ = std.c.close(in_pipe[0]);
+        _ = std.c.close(out_pipe[1]);
+        _ = std.c.close(err_pipe[1]);
+        return self;
+    }
+
+    /// Restores the process descriptors and returns the captured stderr text.
+    fn end(self: *ReplStdio, buf: []u8) []const u8 {
+        _ = std.c.dup2(self.saved_in, std.c.STDIN_FILENO);
+        _ = std.c.dup2(self.saved_out, std.c.STDOUT_FILENO);
+        _ = std.c.dup2(self.saved_err, std.c.STDERR_FILENO);
+        _ = std.c.close(self.saved_in);
+        _ = std.c.close(self.saved_out);
+        _ = std.c.close(self.saved_err);
+        var len: usize = 0;
+        while (len < buf.len) {
+            const n = std.c.read(self.err_read, buf[len..].ptr, buf.len - len);
+            if (n <= 0) break;
+            len += @intCast(n);
+        }
+        _ = std.c.close(self.out_read);
+        _ = std.c.close(self.err_read);
+        return buf[0..len];
+    }
+};
+
+const year_2100_unix_ms: i64 = 4102444800000;
+
+test "run: a failed /resume leaves the REPL running and reports the error on stderr" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "repl");
+    defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+    var deepseek = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "test-key");
+    defer deepseek.restore(allocator);
+
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    // A second live REPL holds the newest session open, so its lock is taken.
+    var other = try agent_bootstrap.initFromEnvWithSessionConfig(allocator, &registry, .{ .no_context_files = true });
+    defer other.deinit(allocator);
+    const other_meta_path = other.meta_path orelse return error.TestUnexpectedResult;
+    var meta = try session_events.readMeta(allocator, other_meta_path);
+    defer session_events.freeMeta(allocator, &meta);
+    meta.created_at_unix_ms = year_2100_unix_ms;
+    try session_events.writeMeta(allocator, other_meta_path, meta);
+
+    var stdio = try ReplStdio.begin("/resume\n/quit\n");
+    const run_result = run(allocator, &registry, .{ .no_context_files = true }, null);
+    var captured_buf: [512]u8 = undefined;
+    const captured = stdio.end(&captured_buf);
+
+    try run_result;
+    try testing.expectEqualStrings("error: SessionAlreadyActive\n", captured);
 }
