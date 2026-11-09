@@ -2245,3 +2245,67 @@ test "run: a failed /resume leaves the REPL running and reports the error on std
     try run_result;
     try testing.expectEqualStrings("error: SessionAlreadyActive\n", captured);
 }
+
+/// Persists one session for the current cwd, then closes it so its lock is free.
+fn persistSessionWithMessage(allocator: std.mem.Allocator, registry: *const Registry, text: []const u8) !void {
+    var persisted = try agent_bootstrap.initFromEnvWithSessionConfig(allocator, registry, .{ .no_context_files = true });
+    defer persisted.deinit(allocator);
+    try persisted.transcript.append(allocator, .{ .user_text = text });
+    const index = persisted.transcript.len() - 1;
+    try persisted.appendPersistedEntry(allocator, persisted.transcript.entryIdAt(index), persisted.transcript.at(index));
+    persisted.last_persisted_len = persisted.transcript.len();
+}
+
+test "run: /resume under --no-session reports that sessions are disabled on stderr" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "repl");
+    defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+    var deepseek = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "test-key");
+    defer deepseek.restore(allocator);
+
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    try persistSessionWithMessage(allocator, &registry, "persisted message");
+
+    var stdio = try ReplStdio.begin("/resume\n/quit\n");
+    const run_result = run(allocator, &registry, .{ .no_context_files = true, .no_session = true }, null);
+    var captured_buf: [512]u8 = undefined;
+    const captured = stdio.end(&captured_buf);
+
+    try run_result;
+    try testing.expectEqualStrings("error: SessionsDisabled\n", captured);
+}
+
+test "rebuildSession: /resume under no_session is refused and keeps the live transcript" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "repl");
+    defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
+    const sessions_dir = try tmp.childPath(allocator, "sessions");
+    defer allocator.free(sessions_dir);
+    var sessions = try EnvOverride.set(allocator, "ZTTP_SESSIONS_DIR", sessions_dir);
+    defer sessions.restore(allocator);
+    var deepseek = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "test-key");
+    defer deepseek.restore(allocator);
+
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    try persistSessionWithMessage(allocator, &registry, "persisted message");
+    var session = try agent_bootstrap.initFromEnvWithSessionConfig(allocator, &registry, .{ .no_context_files = true, .no_session = true });
+    defer session.deinit(allocator);
+    try session.transcript.append(allocator, .{ .user_text = "live message" });
+
+    try testing.expectError(
+        error.SessionsDisabled,
+        agent_fork.rebuildSession(allocator, &session, &registry, .{ .resume_latest = true, .no_session = true, .no_context_files = true }),
+    );
+    try testing.expectEqual(@as(usize, 2), session.transcript.len());
+    try testing.expectEqualStrings("live message", session.transcript.at(1).user_text);
+}

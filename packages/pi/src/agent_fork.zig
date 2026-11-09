@@ -141,6 +141,9 @@ pub fn rebuildSession(
     registry: *const Registry,
     config: SessionConfig,
 ) !void {
+    // Bootstrap returns before reconstruction under no_session, so a resume would
+    // swap in an empty session and silently drop the live conversation.
+    if (config.resume_latest and config.no_session) return error.SessionsDisabled;
     var prepared_resume = if (config.resume_latest)
         try prepareLatestResume(allocator)
     else
