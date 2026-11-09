@@ -555,6 +555,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
         connection.stream_reader.stream.socket.handle,
         silence_ceiling_ms,
         request_timeout_ms,
+        &.{ connection.reader(), &connection.stream_reader.interface },
     ) catch |err| switch (err) {
         error.StreamTooLong => return ClientError.ResponseTooLarge,
         error.OutOfMemory => return error.OutOfMemory,
@@ -571,8 +572,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
     return .{ .ok = response_body };
 }
 
-/// Read the response body a chunk at a time, polling the socket whenever more
-/// is expected.
+/// Read the response body as it arrives, polling the socket before each wait.
 ///
 /// `http_errors.readBody` reads to end of stream in one call, so the only bound
 /// on a mid-body stall was `SO_RCVTIMEO` - which is the 15-minute generation
@@ -582,9 +582,12 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
 /// there for the full ceiling with no output and no error, long past the
 /// deadline `setProviderRequestTimeout` was asked to enforce.
 ///
-/// A short read is end of stream, so the loop only polls after a chunk that
-/// filled the buffer: the wait is taken where more data is genuinely expected,
-/// and the last chunk returns without one.
+/// Each pass takes the bytes that are available and does not wait for a full
+/// chunk, so a body that trickles in and goes quiet is bounded too. The socket
+/// is polled only when `reader` and every reader in `upstream` hold no bytes:
+/// a byte that the HTTP connection reader already took off the socket is not
+/// readable there, and polling would report a stall that is not one.
+/// `upstream` lists the connection readers beneath the body reader.
 fn readBodyWithin(
     reader: *std.Io.Reader,
     arena: std.mem.Allocator,
@@ -592,21 +595,33 @@ fn readBodyWithin(
     fd: std.posix.fd_t,
     silence_ceiling_ms: i32,
     request_timeout_ms: i32,
+    upstream: []const *const std.Io.Reader,
 ) ![]u8 {
     var body: std.ArrayList(u8) = .empty;
     errdefer body.deinit(arena);
-    var chunk: [4096]u8 = undefined;
     while (true) {
-        const read = reader.readSliceShort(&chunk) catch |err| {
+        if (!hasBufferedBytes(reader, upstream)) {
+            try waitForReadable(fd, silence_ceiling_ms, request_timeout_ms);
+        }
+        reader.fill(1) catch |err| {
+            if (err == error.EndOfStream) break;
             if (http_errors.isTimeout(err)) return error.RequestTimedOut;
             return err;
         };
-        if (body.items.len + read > limit_bytes) return error.StreamTooLong;
-        try body.appendSlice(arena, chunk[0..read]);
-        if (read < chunk.len) break;
-        try waitForReadable(fd, silence_ceiling_ms, request_timeout_ms);
+        const available = reader.buffered();
+        if (body.items.len + available.len > limit_bytes) return error.StreamTooLong;
+        try body.appendSlice(arena, available);
+        reader.tossBuffered();
     }
     return body.toOwnedSlice(arena);
+}
+
+fn hasBufferedBytes(reader: *const std.Io.Reader, upstream: []const *const std.Io.Reader) bool {
+    if (reader.bufferedLen() > 0) return true;
+    for (upstream) |lower| {
+        if (lower.bufferedLen() > 0) return true;
+    }
+    return false;
 }
 
 /// Block until the socket has bytes to read, bounded by the silence ceiling.
@@ -985,7 +1000,7 @@ test "a mid-body stall expires on the silence ceiling, not on the socket" {
     var stalled_reader = std.Io.Reader.fixed(stalled_payload);
     try testing.expectError(
         ClientError.DeepSeekGenerationStalled,
-        readBodyWithin(&stalled_reader, allocator, 1 << 20, pipe_fds[0], 20, 1_000),
+        readBodyWithin(&stalled_reader, allocator, 1 << 20, pipe_fds[0], 20, 1_000, &.{}),
     );
 
     // With the ceiling at the budget the same silence is exhaustion, not a
@@ -993,7 +1008,7 @@ test "a mid-body stall expires on the silence ceiling, not on the socket" {
     var spent_reader = std.Io.Reader.fixed(stalled_payload);
     try testing.expectError(
         error.RequestTimedOut,
-        readBodyWithin(&spent_reader, allocator, 1 << 20, pipe_fds[0], 20, 20),
+        readBodyWithin(&spent_reader, allocator, 1 << 20, pipe_fds[0], 20, 20, &.{}),
     );
 
     // The floor under both: a body that arrives is read whole, across chunks,
@@ -1003,7 +1018,7 @@ test "a mid-body stall expires on the silence ceiling, not on the socket" {
     defer allocator.free(whole_payload);
     for (whole_payload, 0..) |*byte, i| byte.* = @intCast(i % 251);
     var whole_reader = std.Io.Reader.fixed(whole_payload);
-    const body = try readBodyWithin(&whole_reader, allocator, 1 << 20, pipe_fds[0], 20, 1_000);
+    const body = try readBodyWithin(&whole_reader, allocator, 1 << 20, pipe_fds[0], 20, 1_000, &.{});
     defer allocator.free(body);
     try testing.expectEqualSlices(u8, whole_payload, body);
 
@@ -1011,7 +1026,7 @@ test "a mid-body stall expires on the silence ceiling, not on the socket" {
     var large_reader = std.Io.Reader.fixed(whole_payload);
     try testing.expectError(
         error.StreamTooLong,
-        readBodyWithin(&large_reader, allocator, 4096, pipe_fds[0], 20, 1_000),
+        readBodyWithin(&large_reader, allocator, 4096, pipe_fds[0], 20, 1_000, &.{}),
     );
 }
 
@@ -1040,4 +1055,64 @@ test "a silence ceiling separates a stalled request from a spent budget" {
 
     // Zero would be an instant, permanent stall on a healthy socket.
     try testing.expectEqual(@as(i32, 1), effectiveStallCeilingMs(0, budget_ms));
+}
+
+fn shutdownPeerAfterTwoSeconds(fd: std.posix.fd_t) void {
+    std.Io.sleep(testing.io, .fromMilliseconds(2000), .awake) catch {};
+    _ = std.posix.system.shutdown(fd, 1);
+}
+
+test "a body that trickles in below one chunk and then goes silent stalls on the silence ceiling" {
+    if (@TypeOf(std.posix.system.socketpair) == void) return error.SkipZigTest;
+    var fds: [2]std.posix.fd_t = undefined;
+    switch (std.posix.errno(std.posix.system.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds))) {
+        .SUCCESS => {},
+        else => return error.SkipZigTest,
+    }
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+    _ = std.posix.system.write(fds[1], "0123456789", 10);
+
+    var stream: std.Io.net.Stream = .{ .socket = .{ .handle = fds[0], .address = undefined } };
+    var buf: [4096]u8 = undefined;
+    var stream_reader = stream.reader(testing.io, &buf);
+
+    // The watchdog closes the peer after 2 s so a defective read returns
+    // instead of hanging the suite.
+    const watchdog = try std.Thread.spawn(.{}, shutdownPeerAfterTwoSeconds, .{fds[1]});
+    const started = monotonicNowNs().?;
+    const result = readBodyWithin(&stream_reader.interface, testing.allocator, 1 << 20, fds[0], 20, 1_000, &.{});
+    const elapsed = elapsedMs(started).?;
+    watchdog.join();
+    defer if (result) |body| testing.allocator.free(body) else |_| {};
+    try testing.expectError(ClientError.DeepSeekGenerationStalled, result);
+    try testing.expect(elapsed < 500);
+}
+
+test "bytes that a lower reader already holds are read without polling the silent socket" {
+    if (@TypeOf(std.posix.system.socketpair) == void) return error.SkipZigTest;
+    var fds: [2]std.posix.fd_t = undefined;
+    switch (std.posix.errno(std.posix.system.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds))) {
+        .SUCCESS => {},
+        else => return error.SkipZigTest,
+    }
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+    _ = std.posix.system.write(fds[1], "0123456789", 10);
+
+    var stream: std.Io.net.Stream = .{ .socket = .{ .handle = fds[0], .address = undefined } };
+    var lower_buf: [4096]u8 = undefined;
+    var lower = stream.reader(testing.io, &lower_buf);
+    // The lower reader takes the bytes off the socket, so the socket is silent now.
+    try lower.interface.fill(10);
+    var upper_buf: [4096]u8 = undefined;
+    var upper = std.Io.Reader.limited(&lower.interface, .limited(10), &upper_buf);
+
+    // A false stall would surface as DeepSeekGenerationStalled. The 9-byte
+    // limit makes the first pass end in the size refusal instead.
+    const lowers = [_]*const std.Io.Reader{&lower.interface};
+    try testing.expectError(
+        error.StreamTooLong,
+        readBodyWithin(&upper.interface, testing.allocator, 9, fds[0], 20, 1_000, &lowers),
+    );
 }
