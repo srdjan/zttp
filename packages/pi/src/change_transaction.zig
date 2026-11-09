@@ -561,10 +561,19 @@ fn recoverOne(
         return executeRecoveryPlan(allocator, transaction_dir, &plan, options);
     }
 
+    const phase = try observePreparedPhase(allocator, transaction_dir);
+    if (phase == .aborted) {
+        // An aborted transaction is only deleted. Its manifest and images may
+        // be gone when an earlier delete stopped partway.
+        var planner: RecoveryPlanner = .{ .aborted = {} };
+        var plan = try planner.finish();
+        defer plan.deinit(allocator);
+        return executeRecoveryPlan(allocator, transaction_dir, &plan, options);
+    }
+
     var parsed = try loadManifest(allocator, transaction_dir);
     defer parsed.deinit();
     const manifest = parsed.value;
-    const phase = try observePreparedPhase(allocator, transaction_dir);
     // Recovery never writes a committed transaction, so a moved or copied
     // workspace keeps its receipts replayable. Every transaction that recovery
     // writes must still name the workspace it lives in.
@@ -1606,7 +1615,7 @@ test "recovery ignores progress markers when classifying a transaction" {
     try expectFixtureCandidates(&fixture, false);
 }
 
-test "recovery validates images before an aborted marker takes precedence" {
+test "recovery deletes an aborted transaction without validating its images" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var fixture = try Fixture.init(testing.allocator, &tmp);
@@ -1625,11 +1634,8 @@ test "recovery validates images before an aborted marker takes precedence" {
     defer testing.allocator.free(after_path);
     try zts.file_io.writeFile(testing.allocator, after_path, "corrupt");
     try writeMarker(testing.allocator, transaction_dir, "aborted");
-    try testing.expectError(
-        error.CorruptTransactionJournal,
-        recoverAllLocked(testing.allocator, &lock, fixture.root),
-    );
-    try testing.expect(try pathExists(testing.allocator, transaction_dir));
+    try testing.expectEqual(@as(usize, 1), try recoverAllLocked(testing.allocator, &lock, fixture.root));
+    try testing.expect(!try pathExists(testing.allocator, transaction_dir));
     try expectFixtureCandidates(&fixture, false);
 }
 
@@ -2568,4 +2574,37 @@ test "acquire accepts a committed receipted transaction after the workspace dire
     const written = try zts.file_io.readFile(testing.allocator, moved_prepared.changes[0].resolved_path, 64);
     defer testing.allocator.free(written);
     try testing.expectEqualStrings("moved-context", written);
+}
+
+test "acquire deletes an aborted transaction whose manifest is already gone" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    const transaction_dir = try transactionPath(testing.allocator, fixture.root, &fixture.proof.proof_id);
+    defer testing.allocator.free(transaction_dir);
+    {
+        var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+        defer lock.deinit();
+        try testing.expectError(
+            error.InjectedTransactionFailure,
+            commitLocked(testing.allocator, &lock, &fixture.prepared, &fixture.snapshot, &fixture.proof, .{
+                .fault = .after_prepared,
+            }),
+        );
+        try testing.expectError(
+            error.InjectedTransactionFailure,
+            recoverAllLockedWithOptions(testing.allocator, &lock, fixture.root, .{
+                .fault = .after_aborted_marker,
+            }),
+        );
+        const manifest_path = try std.fs.path.resolve(testing.allocator, &.{ transaction_dir, "manifest.json" });
+        defer testing.allocator.free(manifest_path);
+        try deleteFileIfPresent(testing.allocator, manifest_path);
+    }
+
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+    defer workspace.deinit();
+    try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+    try expectFixtureCandidates(&fixture, false);
 }
