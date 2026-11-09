@@ -564,8 +564,11 @@ fn recoverOne(
     var parsed = try loadManifest(allocator, transaction_dir);
     defer parsed.deinit();
     const manifest = parsed.value;
-    try validateManifestAndImages(allocator, transaction_dir, manifest);
     const phase = try observePreparedPhase(allocator, transaction_dir);
+    // Recovery never writes a committed transaction, so a moved or copied
+    // workspace keeps its receipts replayable. Every transaction that recovery
+    // writes must still name the workspace it lives in.
+    try validateManifestAndImages(allocator, transaction_dir, manifest, phase != .committed);
     if (phase == .committed) {
         try validateReceipt(allocator, transaction_dir, manifest.proof_id);
     }
@@ -986,12 +989,13 @@ fn validateManifestAndImages(
     allocator: std.mem.Allocator,
     transaction_dir: []const u8,
     manifest: Manifest,
+    enforce_workspace_root: bool,
 ) !void {
     if (!std.fs.path.isAbsolute(manifest.workspace_root)) return error.CorruptTransactionJournal;
     const change_sets_dir = std.fs.path.dirname(transaction_dir) orelse return error.CorruptTransactionJournal;
     const state_dir = std.fs.path.dirname(change_sets_dir) orelse return error.CorruptTransactionJournal;
     const expected_workspace = std.fs.path.dirname(state_dir) orelse return error.CorruptTransactionJournal;
-    if (!std.mem.eql(u8, manifest.workspace_root, expected_workspace) or
+    if ((enforce_workspace_root and !std.mem.eql(u8, manifest.workspace_root, expected_workspace)) or
         !std.mem.eql(u8, manifest.proof_id, std.fs.path.basename(transaction_dir)))
     {
         return error.CorruptTransactionJournal;
@@ -2522,4 +2526,46 @@ test "workspace lock excludes a second writer" {
     var first = try WorkspaceLock.acquire(testing.allocator, root);
     defer first.deinit();
     try testing.expectError(error.WorkspaceChangeSetActive, WorkspaceLock.acquire(testing.allocator, root));
+}
+
+test "acquire accepts a committed receipted transaction after the workspace directory moves" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "before");
+    var before = try tmp.dir.openDir(testing.io, "before", .{});
+    var before_tmp: std.testing.TmpDir = .{
+        .dir = before,
+        .parent_dir = tmp.parent_dir,
+        .sub_path = tmp.sub_path,
+    };
+    var fixture = try Fixture.init(testing.allocator, &before_tmp);
+    defer fixture.deinit(testing.allocator);
+    {
+        var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+        defer workspace.deinit();
+        var receipt = try workspace.commit(&fixture.prepared, &fixture.snapshot, &fixture.proof, .{});
+        defer receipt.deinit(testing.allocator);
+        try workspace.markReceipted(&fixture.proof.proof_id);
+    }
+    before.close(testing.io);
+    try tmp.dir.rename("before", tmp.dir, "after", testing.io);
+    const moved_root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, "after", testing.allocator);
+    defer testing.allocator.free(moved_root);
+
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, moved_root);
+    defer workspace.deinit();
+    var moved_prepared = try change_set.prepare(testing.allocator, moved_root, .{
+        .file = "src/context.ts",
+        .content = "moved-context",
+    });
+    defer moved_prepared.deinit(testing.allocator);
+    var moved_snapshot = try workspace_snapshot.Snapshot.capture(testing.allocator, &moved_prepared);
+    defer moved_snapshot.deinit(testing.allocator);
+    var moved_proof = fixture.proof;
+    moved_proof.proof_id = @splat('c');
+    var receipt = try workspace.commit(&moved_prepared, &moved_snapshot, &moved_proof, .{});
+    defer receipt.deinit(testing.allocator);
+    const written = try zts.file_io.readFile(testing.allocator, moved_prepared.changes[0].resolved_path, 64);
+    defer testing.allocator.free(written);
+    try testing.expectEqualStrings("moved-context", written);
 }
