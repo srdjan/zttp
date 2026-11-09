@@ -768,7 +768,10 @@ fn runTurnBody(
                             transcript,
                             call_id,
                             true,
-                            "verified: aggregate compiler and read-set proof passed",
+                            if (options.replay_mode)
+                                "verified, not written: this turn replays a resumed session, so no file changed"
+                            else
+                                "verified: aggregate compiler and read-set proof passed",
                         );
                         if (machine.attempt == 1) {
                             var rewrite_count: usize = 0;
@@ -795,7 +798,10 @@ fn runTurnBody(
                         }
                         next_event = .{ .change_set_verified = .{
                             .ok = true,
-                            .llm_text = try ta.print("aggregate proof passed for {d} source file{s}", .{ prepared.changes.len, if (prepared.changes.len == 1) "" else "s" }),
+                            .llm_text = try ta.print(
+                                "aggregate proof passed for {d} source file{s}{s}",
+                                .{ prepared.changes.len, if (prepared.changes.len == 1) "" else "s", if (options.replay_mode) "; replay turn, nothing written" else "" },
+                            ),
                         } };
                     },
                 }
@@ -2270,6 +2276,51 @@ test "replay_mode skips filesystem writes for a verified edit" {
         else => return error.TestFailed,
     }
     try testing.expect(!file_io.fileExists(testing.allocator, written_path));
+}
+
+test "a replayed verified edit tells the model that nothing was written" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+
+    var canned: CannedClient = .{ .reply = .{
+        .response = .{ .change_set = .{
+            .file = "src/handler.ts",
+            .content = clean_handler,
+        } },
+    } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    _ = try runTurnWith(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "add an ok response",
+        .{ .workspace_root = workspace_root, .replay_mode = true },
+    );
+
+    switch (tr.at(tr.len() - 2).*) {
+        .tool_result => |result| {
+            try testing.expectEqualStrings("propose_change_set", result.tool_name);
+            try testing.expectEqualStrings(
+                "verified, not written: this turn replays a resumed session, so no file changed",
+                result.llm_text,
+            );
+        },
+        else => return error.TestFailed,
+    }
+    switch (tr.at(tr.len() - 1).*) {
+        .proof_card => |card| try testing.expectEqualStrings(
+            "aggregate proof passed for 1 source file; replay turn, nothing written",
+            card.llm_text,
+        ),
+        else => return error.TestFailed,
+    }
 }
 
 test "replay_mode skips the approval callback" {
