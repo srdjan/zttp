@@ -562,8 +562,11 @@ fn recoverOne(
     }
 
     const phase = try observePreparedPhase(allocator, transaction_dir);
+    // A prepared transaction without an applying marker has written no target,
+    // and recovery removes its stage files before it writes the aborted marker,
+    // so finishing the delete is what the prepared plan does.
     var parsed = loadManifest(allocator, transaction_dir) catch |err| {
-        if (phase == .aborted and err == error.FileNotFound) return finishAbortedDelete(allocator, transaction_dir, options);
+        if ((phase == .aborted or phase == .prepared) and err == error.FileNotFound) return finishAbortedDelete(allocator, transaction_dir, options);
         return err;
     };
     defer parsed.deinit();
@@ -572,7 +575,7 @@ fn recoverOne(
     // workspace keeps its receipts replayable. Every transaction that recovery
     // writes must still name the workspace it lives in.
     validateManifestAndImages(allocator, transaction_dir, manifest, phase != .committed) catch |err| {
-        if (phase == .aborted and err == error.FileNotFound) return finishAbortedDelete(allocator, transaction_dir, options);
+        if ((phase == .aborted or phase == .prepared) and err == error.FileNotFound) return finishAbortedDelete(allocator, transaction_dir, options);
         return err;
     };
     if (phase == .committed) {
@@ -811,7 +814,7 @@ fn writeProvidedReceipt(
     try durableWriteWithDigest(allocator, path, receipt_json);
 }
 
-/// A delete of an aborted transaction that stopped partway leaves journal files
+/// A delete of an aborted or prepared transaction that stopped partway leaves journal files
 /// missing. Corrupt content still fails closed; only absence finishes the delete.
 fn finishAbortedDelete(allocator: std.mem.Allocator, transaction_dir: []const u8, options: RecoveryOptions) !bool {
     var planner: RecoveryPlanner = .{ .aborted = {} };
@@ -2626,6 +2629,42 @@ test "acquire deletes an aborted transaction whose manifest is already gone" {
         const manifest_path = try std.fs.path.resolve(testing.allocator, &.{ transaction_dir, "manifest.json" });
         defer testing.allocator.free(manifest_path);
         try deleteFileIfPresent(testing.allocator, manifest_path);
+    }
+
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+    defer workspace.deinit();
+    try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+    try expectFixtureCandidates(&fixture, false);
+}
+
+test "acquire deletes a transaction whose delete removed the aborted marker before the prepared marker" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    const transaction_dir = try transactionPath(testing.allocator, fixture.root, &fixture.proof.proof_id);
+    defer testing.allocator.free(transaction_dir);
+    {
+        var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+        defer lock.deinit();
+        try testing.expectError(
+            error.InjectedTransactionFailure,
+            commitLocked(testing.allocator, &lock, &fixture.prepared, &fixture.snapshot, &fixture.proof, .{
+                .fault = .after_prepared,
+            }),
+        );
+        try testing.expectError(
+            error.InjectedTransactionFailure,
+            recoverAllLockedWithOptions(testing.allocator, &lock, fixture.root, .{
+                .fault = .after_aborted_marker,
+            }),
+        );
+        const manifest_path = try std.fs.path.resolve(testing.allocator, &.{ transaction_dir, "manifest.json" });
+        defer testing.allocator.free(manifest_path);
+        try deleteFileIfPresent(testing.allocator, manifest_path);
+        const aborted_path = try std.fs.path.resolve(testing.allocator, &.{ transaction_dir, "aborted" });
+        defer testing.allocator.free(aborted_path);
+        try deleteFileIfPresent(testing.allocator, aborted_path);
     }
 
     var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
