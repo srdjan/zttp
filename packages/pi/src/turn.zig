@@ -162,9 +162,12 @@ pub const TurnMachine = struct {
 
     pub fn transition(self: *TurnMachine, event: TurnEvent) Action {
         switch (event) {
-            .budget_exhausted => {
-                self.state = .awaiting_user;
-                return .{ .prompt_user = "agent budget exhausted before a final answer" };
+            .budget_exhausted => switch (self.state) {
+                .awaiting_model, .verifying_change_set, .executing_tools => {
+                    self.state = .awaiting_user;
+                    return .{ .prompt_user = "agent budget exhausted before a final answer" };
+                },
+                .idle, .awaiting_user, .done => return .none,
             },
             else => {},
         }
@@ -397,4 +400,18 @@ test ".done is terminal" {
     var m: TurnMachine = .{ .state = .done };
     try testing.expect(m.transition(.{ .user_submitted = "hi" }) == .none);
     try testing.expectEqual(TurnState.done, m.state);
+}
+
+test "budget_exhausted leaves idle, done, and awaiting_user unchanged" {
+    var idle: TurnMachine = .{ .state = .idle };
+    try testing.expect(idle.transition(.budget_exhausted) == .none);
+    try testing.expectEqual(TurnState.idle, idle.state);
+
+    var done: TurnMachine = .{ .state = .done };
+    try testing.expect(done.transition(.budget_exhausted) == .none);
+    try testing.expectEqual(TurnState.done, done.state);
+
+    var waiting: TurnMachine = .{ .state = .awaiting_user };
+    try testing.expect(waiting.transition(.budget_exhausted) == .none);
+    try testing.expectEqual(TurnState.awaiting_user, waiting.state);
 }
