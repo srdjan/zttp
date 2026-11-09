@@ -1,8 +1,7 @@
 //! Line-buffered expert REPL driver.
 //!
 //! Natural language goes to the model by default. Deterministic slash commands,
-//! safe raw `zts ...` / `zig build ...` commands, and direct tool names are
-//! routed locally.
+//! safe raw `zts ...` commands, and direct tool names are routed locally.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -242,12 +241,23 @@ pub fn shouldDispatchTool(registry: *const Registry, line: []const u8) bool {
     const trimmed = std.mem.trim(u8, line, " \t\r\n");
     if (trimmed.len == 0) return true;
 
-    var first_token_iter = std.mem.tokenizeAny(u8, trimmed, " \t\r\n");
-    const first = first_token_iter.next() orelse return true;
-    if (commands.isQuit(first) or commands.isHelp(first)) return true;
-    if (commands.isSessionResume(first) or commands.isSessionNew(first)) return true;
-    if (first.len > 0 and first[0] == '/') return true;
-    if (std.mem.eql(u8, first, "zts") or std.mem.eql(u8, first, "zig")) return true;
+    var argv_buf: [64][]const u8 = undefined;
+    var argc: usize = 0;
+    var it = std.mem.tokenizeAny(u8, trimmed, " \t\r\n");
+    while (it.next()) |token| {
+        if (argc == argv_buf.len) break;
+        argv_buf[argc] = token;
+        argc += 1;
+    }
+    const argv = argv_buf[0..argc];
+    const first = argv[0];
+    if (first[0] == '/') return true;
+    if (commands.isQuit(first)) return argc == 1;
+    if (commands.isHelp(first)) {
+        return argc == 1 or (argc == 2 and
+            (std.mem.eql(u8, argv[1], "tools") or std.mem.eql(u8, argv[1], "--tools")));
+    }
+    if (std.mem.eql(u8, first, "zts")) return commands.lookup(argv) != null;
     return registry.findByName(first) != null;
 }
 
@@ -326,8 +336,7 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry, show_tool
             try w.print(" {s}", .{name});
         }
     }
-    try w.writeAll(" ...\n");
-    try w.writeAll("  zig build <step>  zig build test[-...]\n\n");
+    try w.writeAll(" ...\n\n");
     try w.writeAll("Approval flags (pass on launch):\n");
     try w.writeAll("  --yes      auto-approve every verified edit\n");
     try w.writeAll("  --no-edit  auto-reject every verified edit\n");
@@ -1544,7 +1553,25 @@ test "shouldDispatchTool is false for plain natural language" {
 
     try testing.expect(!shouldDispatchTool(&reg, "add a GET route and then run tests"));
     try testing.expect(shouldDispatchTool(&reg, "/test"));
-    try testing.expect(shouldDispatchTool(&reg, "zig build test-zts"));
+}
+
+test "shouldDispatchTool routes natural language that starts with a command word to the model" {
+    var reg = try buildMiniRegistry(testing.allocator);
+    defer reg.deinit(testing.allocator);
+
+    try testing.expect(!shouldDispatchTool(&reg, "exit early when the body is empty"));
+    try testing.expect(!shouldDispatchTool(&reg, "help me add a route"));
+    try testing.expect(!shouldDispatchTool(&reg, "zig build test"));
+    try testing.expect(!shouldDispatchTool(&reg, "zig is fast, rewrite it"));
+    try testing.expect(!shouldDispatchTool(&reg, "zts is the analyzer, explain it"));
+    try testing.expect(shouldDispatchTool(&reg, "exit"));
+    try testing.expect(shouldDispatchTool(&reg, "/quit"));
+    try testing.expect(shouldDispatchTool(&reg, "help"));
+    try testing.expect(shouldDispatchTool(&reg, "help tools"));
+    try testing.expect(shouldDispatchTool(&reg, "help --tools"));
+    try testing.expect(shouldDispatchTool(&reg, "zts meta"));
+    try testing.expect(shouldDispatchTool(&reg, "/nosuchcommand"));
+    try testing.expect(shouldDispatchTool(&reg, "zts_expert_query meta"));
 }
 
 test "selectApprovalFn: auto_approve resolves to loop.autoApprove" {
