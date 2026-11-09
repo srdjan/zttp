@@ -614,6 +614,9 @@ fn recoverOne(
     var plan = try planner.finish();
     planner_owned = false;
     defer plan.deinit(allocator);
+    // A killed process leaves stage files, and proof ids are deterministic, so
+    // the same change would fail with StaleStageFile until they are gone.
+    if (phase == .prepared or phase == .applying) try removeStageFiles(allocator, manifest, manifest.proof_id);
     return executeRecoveryPlan(allocator, transaction_dir, &plan, options);
 }
 
@@ -811,6 +814,21 @@ fn writeProvidedReceipt(
     try durableWriteWithDigest(allocator, path, receipt_json);
 }
 
+/// The stage file that sits next to a target while a transaction applies.
+fn stagePath(allocator: std.mem.Allocator, target: []const u8, proof_id: []const u8) ![]u8 {
+    const parent = std.fs.path.dirname(target) orelse return error.InvalidTargetPath;
+    const base = std.fs.path.basename(target);
+    return allocator.print("{s}/.{s}.zttp-{s}.stage", .{ parent, base, proof_id[0..16] });
+}
+
+fn removeStageFiles(allocator: std.mem.Allocator, manifest: Manifest, proof_id: []const u8) !void {
+    for (manifest.changes) |change| {
+        const stage = try stagePath(allocator, change.path, proof_id);
+        defer allocator.free(stage);
+        try deleteFileIfPresent(allocator, stage);
+    }
+}
+
 fn stageCandidates(
     allocator: std.mem.Allocator,
     prepared: *const change_set.PreparedChangeSet,
@@ -827,9 +845,7 @@ fn stageCandidates(
         allocator.free(stages);
     }
     for (prepared.changes, 0..) |change, index| {
-        const parent = std.fs.path.dirname(change.resolved_path) orelse return error.InvalidTargetPath;
-        const base = std.fs.path.basename(change.resolved_path);
-        const stage = try allocator.print("{s}/.{s}.zttp-{s}.stage", .{ parent, base, proof_id[0..16] });
+        const stage = try stagePath(allocator, change.resolved_path, proof_id);
         errdefer allocator.free(stage);
         if (try pathExists(allocator, stage)) return error.StaleStageFile;
         switch (fault) {
@@ -2607,4 +2623,57 @@ test "acquire deletes an aborted transaction whose manifest is already gone" {
     defer workspace.deinit();
     try testing.expect(!try pathExists(testing.allocator, transaction_dir));
     try expectFixtureCandidates(&fixture, false);
+}
+
+test "acquire removes the stage files of a prepared transaction so the same change commits" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    {
+        var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+        defer lock.deinit();
+        try testing.expectError(
+            error.InjectedTransactionFailure,
+            commitLocked(testing.allocator, &lock, &fixture.prepared, &fixture.snapshot, &fixture.proof, .{
+                .fault = .after_prepared,
+            }),
+        );
+    }
+    // A process killed between staging and the first rename leaves these files.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/.a.ts.zttp-aaaaaaaaaaaaaaaa.stage", .data = "stale-a" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/.b.ts.zttp-aaaaaaaaaaaaaaaa.stage", .data = "stale-b" });
+
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+    defer workspace.deinit();
+    try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "src/.a.ts.zttp-aaaaaaaaaaaaaaaa.stage", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "src/.b.ts.zttp-aaaaaaaaaaaaaaaa.stage", .{}));
+    var receipt = try workspace.commit(&fixture.prepared, &fixture.snapshot, &fixture.proof, .{});
+    defer receipt.deinit(testing.allocator);
+    try expectFixtureCandidates(&fixture, true);
+}
+
+test "acquire removes the stage files of an applying transaction it rolls forward" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    {
+        var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+        defer lock.deinit();
+        try testing.expectError(
+            error.InjectedTransactionFailure,
+            commitLocked(testing.allocator, &lock, &fixture.prepared, &fixture.snapshot, &fixture.proof, .{
+                .fault = .after_applying,
+            }),
+        );
+    }
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/.a.ts.zttp-aaaaaaaaaaaaaaaa.stage", .data = "stale-a" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/.b.ts.zttp-aaaaaaaaaaaaaaaa.stage", .data = "stale-b" });
+
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+    defer workspace.deinit();
+    try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "src/.a.ts.zttp-aaaaaaaaaaaaaaaa.stage", .{}));
+    try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "src/.b.ts.zttp-aaaaaaaaaaaaaaaa.stage", .{}));
+    try expectFixtureCandidates(&fixture, true);
 }
