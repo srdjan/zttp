@@ -241,7 +241,10 @@ fn finalize(
     defer unmet_buf.deinit(allocator);
 
     for (options.goals) |goal| {
-        const satisfied = if (props) |p| session_state.propertyByName(p, goal) else false;
+        // An achieved verdict rests on a goal check that passed every goal,
+        // with or without a change set.
+        const satisfied = verdict == .achieved or
+            (if (props) |p| session_state.propertyByName(p, goal) else false);
         if (satisfied) {
             try met_buf.append(allocator, goal);
         } else {
@@ -1569,5 +1572,38 @@ test "drive reports achieved when the patch of the last iteration meets every go
         u8,
         events,
         "\"autoloop_outcome\",\"d\":{\"verdict\":\"achieved\",\"iterations\":1,\"goals_met\":[\"no_secret_leakage\"],\"goals_unmet\":[],\"final_change_set_hash\":\"",
+    ) != null);
+}
+
+test "autoloop outcome frame lists every goal as met when the goals were met without a patch" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "autoloop-no-patch-frame");
+    defer tmp.cleanup(allocator);
+    const events_path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(events_path);
+
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(allocator);
+    try registry.register(allocator, goalCheckTool(StubTool.alwaysOkGoalCheck));
+    try registry.register(allocator, repairPlanTool(StubTool.emptyRepairPlan));
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(allocator);
+
+    const outcome = try drive(allocator, &registry, &transcript, .{
+        .workspace_root = ".",
+        .file = "handler.ts",
+        .goals = &.{ "retry_safe", "pure" },
+        .events_path = events_path,
+    });
+
+    try testing.expectEqual(AutoloopVerdict.achieved, outcome.verdict);
+    try testing.expectEqual(@as(u32, 2), outcome.goals_met_count);
+    try testing.expectEqual(@as(u32, 0), outcome.goals_unmet_count);
+    const events = try zts.file_io.readFile(allocator, events_path, 4 * 1024 * 1024);
+    defer allocator.free(events);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        events,
+        "\"autoloop_outcome\",\"d\":{\"verdict\":\"achieved\",\"iterations\":0,\"goals_met\":[\"retry_safe\",\"pure\"],\"goals_unmet\":[]}}",
     ) != null);
 }
