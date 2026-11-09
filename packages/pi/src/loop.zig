@@ -158,6 +158,7 @@ pub fn providerErrorRemediation(err: anyerror) ?[]const u8 {
         error.InvalidCompactionToolPair,
         => "The request crossed the context target but could not be compacted safely. Close pending tool work, run `/compact`, or narrow the request.",
         error.OutputTruncated => "The change set was too large for one response and was cut off at the model's output limit. Split the change into smaller change sets (change one function or section at a time), or switch to a model with a larger output budget via `/model <id>`.",
+        error.AbnormalFinish => "The provider stopped the answer early (content filter or provider resources). Rephrase the request or try again.",
         error.InvalidChangeSetArgs => "The model sent a `propose_change_set` call this host cannot accept: it must carry one nonempty `changes` array of `{file, content}` objects and no host-owned baseline fields. Retry the ask.",
         error.RequestTimedOut => "The request timed out with no response. Check your network and try again.",
         error.LocalServerUnavailable,
@@ -2609,4 +2610,12 @@ test "a turn that exceeded the tool-call budget ends with budget_tool_calls afte
     );
     try testing.expectEqual(session_events.TurnEndReason.budget_tool_calls, result.end_reason);
     try testing.expectEqual(@as(u8, 2), result.roundtrips);
+}
+
+test "an abnormal provider finish tells the user what to do next" {
+    const hint = providerErrorRemediation(error.AbnormalFinish) orelse return error.TestExpectedHint;
+    try testing.expectEqualStrings(
+        "The provider stopped the answer early (content filter or provider resources). Rephrase the request or try again.",
+        hint,
+    );
 }
