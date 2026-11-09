@@ -640,8 +640,18 @@ fn runTurnBody(
                     try appendChangeSetToolUse(allocator, ta, transcript, call_id, proposal, null);
                     try transcript.append(allocator, .{ .diagnostic_box = .{ .llm_text = message } });
                     try appendEditToolResult(allocator, transcript, call_id, false, message);
-                    next_event = .{ .change_set_verified = .{ .ok = false, .llm_text = message } };
-                    continue;
+                    // A held lock or a recovery conflict is a host condition the model
+                    // cannot fix, so retrying the draft cannot help.
+                    return finishTurn(
+                        &machine,
+                        turn_usage,
+                        .error_exit,
+                        model_roundtrips,
+                        workflow_hint,
+                        workflow_hint_injected,
+                        tool_calls_used,
+                        progress,
+                    );
                 };
 
                 defer workspace.deinit();
@@ -2141,6 +2151,35 @@ test "unreadable edit target fails closed as a recoverable baseline diagnostic" 
     };
     try testing.expect(saw_baseline_failure);
     try testing.expect(!saw_verified_change_set);
+}
+
+test "workspace lock held by another writer ends the turn at once with error_exit" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+    var holder = try change_transaction.RecoveredWorkspace.acquireReporting(testing.allocator, workspace_root, null);
+    defer holder.deinit();
+
+    var canned: CannedClient = .{ .reply = .{ .response = .{ .change_set = .{
+        .file = "handler.ts",
+        .content = clean_handler,
+    } } } };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+
+    const result = try runTurnWith(
+        testing.allocator,
+        canned.asClient(),
+        &registry,
+        &tr,
+        "write the handler",
+        .{ .workspace_root = workspace_root, .max_attempts = 3 },
+    );
+    try testing.expectEqual(@as(usize, 1), canned.request_count);
+    try testing.expectEqual(session_events.TurnEndReason.error_exit, result.end_reason);
 }
 
 test "resolveInsideWorkspace converts a relative root to absolute" {
