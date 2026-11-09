@@ -100,7 +100,7 @@ pub fn drive(
 
     while (iter < options.budget.max_iterations) : (iter += 1) {
         if (tools_common.nowUnixMs() - start_ms > options.budget.max_wall_time_ms) {
-            return finalize(allocator, transcript, options, .exhausted_time, iter);
+            return finalizeExhausted(allocator, registry, transcript, options, .exhausted_time, iter);
         }
 
         const check = try invokePathGoalsTool(allocator, registry, "pi_goal_check", options.file, options.goals);
@@ -154,7 +154,26 @@ pub fn drive(
         last_goals_met_count = current_met;
     }
 
-    return finalize(allocator, transcript, options, .exhausted_iters, iter);
+    return finalizeExhausted(allocator, registry, transcript, options, .exhausted_iters, iter);
+}
+
+/// A budget that ends the loop right after a patch has not yet seen that
+/// patch checked. Run the goal check once more, so a patch that met every
+/// goal reports `.achieved` and not an exhausted verdict.
+fn finalizeExhausted(
+    allocator: std.mem.Allocator,
+    registry: *const registry_mod.Registry,
+    transcript: *const transcript_mod.Transcript,
+    options: DriveOptions,
+    exhausted: AutoloopVerdict,
+    iterations: u32,
+) !Outcome {
+    const check = try invokePathGoalsTool(allocator, registry, "pi_goal_check", options.file, options.goals);
+    defer allocator.free(check);
+    const check_result = try parseGoalCheckResult(allocator, check);
+    defer ui_payload.freeWitnessBodySlice(allocator, check_result.witnesses);
+    const verdict: AutoloopVerdict = if (check_result.ok) .achieved else exhausted;
+    return finalize(allocator, transcript, options, verdict, iterations);
 }
 
 fn countMetGoals(
@@ -1485,4 +1504,70 @@ test "diffWitnessKeys returns empty slice when a is empty" {
     const diff = try diffWitnessKeys(allocator, a, b);
     defer allocator.free(diff);
     try testing.expectEqual(@as(usize, 0), diff.len);
+}
+
+var final_patch_goal_check_calls: u32 = 0;
+
+fn failsThenPassesGoalCheck(alloc: std.mem.Allocator, args: []const []const u8) anyerror!registry_mod.ToolResult {
+    _ = args;
+    final_patch_goal_check_calls += 1;
+    const body = if (final_patch_goal_check_calls >= 2)
+        "{\"ok\":true,\"goals\":[],\"witnesses\":[]}"
+    else
+        "{\"ok\":false,\"goals\":[\"state_isolated\"],\"witnesses\":[]}";
+    return .{ .ok = true, .llm_text = try alloc.dupe(u8, body) };
+}
+
+fn letToConstRepairPlan(alloc: std.mem.Allocator, args: []const []const u8) anyerror!registry_mod.ToolResult {
+    _ = args;
+    return .{ .ok = true, .llm_text = try alloc.dupe(
+        u8,
+        "{\"ok\":false,\"plans\":[{\"id\":\"rp_test\",\"behavioral_change\":false,\"edit_intent\":{\"kind\":\"replace_let_with_const\",\"line\":2,\"column\":3,\"template\":\"\"}}]}",
+    ) };
+}
+
+test "drive reports achieved when the patch of the last iteration meets every goal" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "autoloop-final-patch");
+    defer tmp.cleanup(allocator);
+    try tmp.writeFile(allocator, "handler.ts",
+        \\function handler(req: Request): Proof<Response, "state_isolated"> {
+        \\  let total = 1;
+        \\  return Response.json({ total: total });
+        \\}
+        \\
+    );
+    const events_path = try tmp.childPath(allocator, "events.jsonl");
+    defer allocator.free(events_path);
+    const saved_cwd = try cwd_support.cwdPathAlloc(allocator);
+    defer allocator.free(saved_cwd);
+    defer std.Io.Threaded.chdir(saved_cwd) catch {};
+    try std.Io.Threaded.chdir(tmp.abs_path);
+
+    final_patch_goal_check_calls = 0;
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(allocator);
+    try registry.register(allocator, goalCheckTool(failsThenPassesGoalCheck));
+    try registry.register(allocator, repairPlanTool(letToConstRepairPlan));
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(allocator);
+
+    const outcome = try drive(allocator, &registry, &transcript, .{
+        .workspace_root = tmp.abs_path,
+        .file = "handler.ts",
+        .goals = &.{"no_secret_leakage"},
+        .budget = .{ .max_iterations = 1, .max_wall_time_ms = 60_000 },
+        .events_path = events_path,
+    });
+
+    try testing.expectEqual(AutoloopVerdict.achieved, outcome.verdict);
+    try testing.expectEqual(@as(u32, 1), outcome.iterations);
+    try testing.expectEqual(@as(u32, 2), final_patch_goal_check_calls);
+    const events = try zts.file_io.readFile(allocator, events_path, 4 * 1024 * 1024);
+    defer allocator.free(events);
+    try testing.expect(std.mem.indexOf(
+        u8,
+        events,
+        "\"autoloop_outcome\",\"d\":{\"verdict\":\"achieved\",\"iterations\":1,\"goals_met\":[\"no_secret_leakage\"],\"goals_unmet\":[],\"final_change_set_hash\":\"",
+    ) != null);
 }
