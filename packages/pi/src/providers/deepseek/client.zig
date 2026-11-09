@@ -496,6 +496,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
     };
     const request_timeout_ms = effectiveRequestTimeoutMs(config.request_timeout_ms, generation_ceiling_ms);
     const silence_ceiling_ms = effectiveStallCeilingMs(config.stall_timeout_ms, request_timeout_ms);
+    const request_started_ns = monotonicNowNs();
     // The socket gets the generation ceiling, never the turn's remaining budget.
     //
     // `SO_RCVTIMEO` expiring inside a blocking read is POSIX EAGAIN, which Zig
@@ -539,7 +540,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
     try waitForReadable(
         connection.stream_reader.stream.socket.handle,
         silence_ceiling_ms,
-        request_timeout_ms,
+        remainingMs(request_started_ns, request_timeout_ms),
     );
     var response = request.receiveHead(&.{}) catch return ClientError.DeepSeekServerUnavailable;
     // The head arrives before generation starts, so the long silence is here,
@@ -548,7 +549,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
     try waitForReadable(
         connection.stream_reader.stream.socket.handle,
         silence_ceiling_ms,
-        request_timeout_ms,
+        remainingMs(request_started_ns, request_timeout_ms),
     );
     const declared_len = http_errors.declaredBodyLength(response.head);
     var transfer_buf: [4096]u8 = undefined;
@@ -561,7 +562,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
         max_response_body_bytes,
         connection.stream_reader.stream.socket.handle,
         silence_ceiling_ms,
-        request_timeout_ms,
+        remainingMs(request_started_ns, request_timeout_ms),
         &.{ connection.reader(), &connection.stream_reader.interface },
         declared_len,
     ) catch |err| switch (err) {
@@ -597,6 +598,10 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
 /// readable there, and polling would report a stall that is not one.
 /// `upstream` lists the connection readers beneath the body reader.
 ///
+/// `request_timeout_ms` is the budget that remains when the call starts. Each wait gets
+/// that budget minus the time already spent in this function, so a body that keeps
+/// trickling still ends with `error.RequestTimedOut` when the budget is gone.
+///
 /// A stream that ends with fewer than `declared_len` bytes is `error.BodyTruncated`,
 /// and a body that reaches `declared_len` ends without a further wait.
 fn readBodyWithin(
@@ -611,10 +616,11 @@ fn readBodyWithin(
 ) ![]u8 {
     var body: std.ArrayList(u8) = .empty;
     errdefer body.deinit(arena);
+    const started_ns = monotonicNowNs();
     while (true) {
         if (declared_len == body.items.len) break;
         if (!hasBufferedBytes(reader, upstream)) {
-            try waitForReadable(fd, silence_ceiling_ms, request_timeout_ms);
+            try waitForReadable(fd, silence_ceiling_ms, remainingMs(started_ns, request_timeout_ms));
         }
         reader.fill(1) catch |err| {
             if (err == error.EndOfStream) break;
@@ -650,17 +656,29 @@ fn hasBufferedBytes(reader: *const std.Io.Reader, upstream: []const *const std.I
 /// turn could still afford another, which is a stall the caller may reissue.
 /// A ceiling that reaches the budget expiring means the budget itself is gone,
 /// and reissuing would only fail again with nothing left to spend.
+///
+/// `request_timeout_ms` is the budget that remains at the call. The poll lasts for the
+/// shorter of the ceiling and that budget, and a budget of zero or less fails at once.
 fn waitForReadable(fd: std.posix.fd_t, silence_ceiling_ms: i32, request_timeout_ms: i32) !void {
+    if (request_timeout_ms <= 0) return error.RequestTimedOut;
     var fds = [_]std.posix.pollfd{.{
         .fd = fd,
         .events = std.posix.POLL.IN,
         .revents = 0,
     }};
-    const ready = std.posix.poll(&fds, silence_ceiling_ms) catch
+    const ready = std.posix.poll(&fds, @min(silence_ceiling_ms, request_timeout_ms)) catch
         return ClientError.DeepSeekServerUnavailable;
     if (ready != 0) return;
     if (silence_ceiling_ms < request_timeout_ms) return ClientError.DeepSeekGenerationStalled;
     return error.RequestTimedOut;
+}
+
+/// The part of `budget_ms` left since `started_ns`, never below zero. An unavailable
+/// clock counts as no time spent.
+fn remainingMs(started_ns: ?u64, budget_ms: i32) i32 {
+    const spent: u64 = elapsedMs(started_ns) orelse 0;
+    const spent_ms: i32 = @intCast(@min(spent, @as(u64, std.math.maxInt(i32))));
+    return @max(budget_ms -| spent_ms, 0);
 }
 
 fn effectiveRequestTimeoutMs(request_timeout_ms: ?u64, ceiling_ms: i32) i32 {
@@ -1103,6 +1121,41 @@ test "a body that trickles in below one chunk and then goes silent stalls on the
     defer if (result) |body| testing.allocator.free(body) else |_| {};
     try testing.expectError(ClientError.DeepSeekGenerationStalled, result);
     try testing.expect(elapsed < 500);
+}
+
+fn trickleSixtyBytes(fd: std.posix.fd_t) void {
+    var sent: usize = 0;
+    while (sent < 60) : (sent += 1) {
+        std.Io.sleep(testing.io, .fromMilliseconds(20), .awake) catch {};
+        _ = std.posix.system.write(fd, "x", 1);
+    }
+    _ = std.posix.system.shutdown(fd, 1);
+}
+
+test "a body that keeps trickling past the request budget times out" {
+    if (@TypeOf(std.posix.system.socketpair) == void) return error.SkipZigTest;
+    var fds: [2]std.posix.fd_t = undefined;
+    switch (std.posix.errno(std.posix.system.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds))) {
+        .SUCCESS => {},
+        else => return error.SkipZigTest,
+    }
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    var stream: std.Io.net.Stream = .{ .socket = .{ .handle = fds[0], .address = undefined } };
+    var buf: [4096]u8 = undefined;
+    var stream_reader = stream.reader(testing.io, &buf);
+
+    // One byte every 20 ms never lets one silence poll expire, so only the
+    // request budget can end the read. The peer closes after about 1.2 s.
+    const trickler = try std.Thread.spawn(.{}, trickleSixtyBytes, .{fds[1]});
+    const started = monotonicNowNs().?;
+    const result = readBodyWithin(&stream_reader.interface, testing.allocator, 1 << 20, fds[0], 100, 300, &.{}, null);
+    const elapsed = elapsedMs(started).?;
+    trickler.join();
+    defer if (result) |body| testing.allocator.free(body) else |_| {};
+    try testing.expectError(error.RequestTimedOut, result);
+    try testing.expect(elapsed < 800);
 }
 
 test "bytes that a lower reader already holds are read without polling the silent socket" {
