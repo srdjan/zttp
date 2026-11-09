@@ -52,7 +52,7 @@ resulting `benchmarks/perf-baseline.json` separately from the tooling change.
 
 ## Compiler Measurements
 
-Use Zig 0.17.0 and ReleaseFast for compiler measurements:
+Use Zig 0.17.1 and ReleaseFast for compiler measurements:
 
 ```bash
 zig build compile-bench -Doptimize=fast -- --json --iterations 50

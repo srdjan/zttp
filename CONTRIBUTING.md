@@ -4,7 +4,8 @@ How to build, how to test, and the conventions a PR must respect before merge. F
 
 ## Prerequisites
 
-Use Zig `0.17.0` stable. The full verifier also requires `jq`
+Use Zig `0.17.1` stable. The root build accepts only this version.
+The full verifier also requires `jq`
 and ripgrep. Ripgrep is part of the recorded expert output, so its in-process
 fallback does not produce the same cassette bytes.
 

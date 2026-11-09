@@ -52,7 +52,7 @@ on aarch64. There is no Intel macOS binary; build from source there.
 curl -fsSL https://raw.githubusercontent.com/srdjan/zigttp/main/install.sh | sh
 ```
 
-Or build from source with Zig `0.17.0`:
+Or build from source with Zig `0.17.1`:
 
 ```bash
 git clone https://github.com/srdjan/zigttp.git

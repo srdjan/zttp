@@ -23,6 +23,14 @@ const smoke = @import("build/smoke.zig");
 const step_coverage = @import("build/step_coverage.zig");
 const agent_spine = @import("build/agent_spine.zig");
 
+comptime {
+    const required_zig = @import("build.zig.zon").minimum_zig_version;
+    const actual_zig = @import("builtin").zig_version_string;
+    if (!std.mem.eql(u8, actual_zig, required_zig)) {
+        @compileError("ZTTP requires Zig " ++ required_zig ++ "; found " ++ actual_zig);
+    }
+}
+
 pub fn build(b: *std.Build) void {
     const ctx = Context.init(b);
 

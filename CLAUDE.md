@@ -11,7 +11,7 @@ deferred from this beta.
 
 ## Build & Run
 
-Validated on Zig 0.17.0 stable. The build produces three binaries: `zttp` (developer CLI and local runtime entry point), `zttp-runtime` (internal runtime template wrapped by self-contained outputs), and `zts` (pi-free analyzer CLI for IDE and CI integrations).
+Validated on Zig 0.17.1 stable. The build produces three binaries: `zttp` (developer CLI and local runtime entry point), `zttp-runtime` (internal runtime template wrapped by self-contained outputs), and `zts` (pi-free analyzer CLI for IDE and CI integrations).
 
 ```bash
 zig build                                            # Debug build (all three binaries)

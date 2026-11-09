@@ -452,7 +452,7 @@ binary needs none of them.
 
 ## Source Coverage Is Unavailable
 
-The repository uses Zig 0.17.0. Its normal `zig test` path does not
+The repository uses Zig 0.17.1. Its normal `zig test` path does not
 provide source line or branch coverage instrumentation. `zig test --help`
 exposes PC instrumentation only through `-ffuzz`, which measures fuzzing
 inputs rather than ordinary test execution. The local LLVM report tools cannot

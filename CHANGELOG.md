@@ -10,6 +10,7 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+- Source builds and release verification now require Zig 0.17.1 exactly.
 - An unannotated array literal binding now widens its elements. `const ys = [4, 5]` is `number[]`, `const t = ["a", 1]` is `[string, number]`, and `const out = []` is `unknown[]`. The loop variable of `for...of` over a tuple is the union of the widened element types. Before, the variable had no type, and `s.toUpperCase()` in `for (const s of [1, 2])` passed CHECK and answered 500.
 - `Object.values(o)` is now `unknown[]`, `Object.entries(o)` is `[string, unknown][]`, and `u.length` with `u: string | string[]` is a `number`.
 - After `if (r.ok)`, a read on a Result `value` whose type admits `undefined`, such as `r.value.length` with `r = ok(req.headers.get("x"))`, now gets ZTS309. Check the value for `undefined` first.

@@ -5,7 +5,7 @@ description: Use when running a zttp build beyond the everyday debug build and t
 
 # zttp build reference
 
-Validated on Zig 0.17.0 stable. The build produces three binaries: `zttp` (developer CLI and
+Validated on Zig 0.17.1 stable. The build produces three binaries: `zttp` (developer CLI and
 local runtime entry point), `zttp-runtime` (internal runtime template wrapped by self-contained
 outputs), and `zts` (pi-free analyzer CLI for IDE and CI integrations).
 

@@ -62,7 +62,7 @@ GitHub. It runs these steps in order and stops at the first failure:
       block the release if the rerun also misses.
 - [ ] `zig build release-check -- --json`.
 - [ ] The same `bash scripts/verify.sh --release` on Linux arm64, inside the
-      `zttp-release-linux:0.17.0-arm64` image. Note the duration the script
+      `zttp-release-linux:0.17.1-arm64` image. Note the duration the script
       prints. The gate cannot run under Rosetta: Rosetta refuses the
       `translate-c` helper that Zig builds with its x86_64 backend. No full
       x86_64 test run occurs, so only the tarball smoke test checks x86_64 Linux.

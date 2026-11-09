@@ -682,7 +682,7 @@ const extension_build_zon_template =
     \\    .name = .{{package_name}},
     \\    .version = "0.0.0",
     \\    .fingerprint = {{fingerprint}}, // Changing this has security and trust implications.
-    \\    .minimum_zig_version = "0.17.0",
+    \\    .minimum_zig_version = "0.17.1",
     \\    .dependencies = .{
     \\        // Replace this placeholder with the version of zttp-sdk you depend on.
     \\        // For monorepo use, set `.path = "../zttp-sdk"`. For external use,
