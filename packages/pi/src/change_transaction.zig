@@ -218,7 +218,12 @@ fn commitLocked(
 
     const transaction_dir = try transactionPath(allocator, prepared.workspace_root, &proof.proof_id);
     defer allocator.free(transaction_dir);
-    if (try pathExists(allocator, transaction_dir)) return error.TransactionAlreadyExists;
+    if (try pathExists(allocator, transaction_dir)) {
+        const receipted = try markerPresent(allocator, transaction_dir, "committed") and
+            try markerPresent(allocator, transaction_dir, "receipted");
+        if (!receipted) return error.TransactionAlreadyExists;
+        try archiveReceiptedTransaction(allocator, transaction_dir, &proof.proof_id);
+    }
     const images_dir = try std.fs.path.resolve(allocator, &.{ transaction_dir, "images" });
     defer allocator.free(images_dir);
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
@@ -945,6 +950,37 @@ fn syncDirectory(allocator: std.mem.Allocator, path: []const u8) !void {
     defer dir.close(io_backend.io());
     if (std.c.fsync(dir.handle) != 0) return error.DirectorySyncFailure;
 }
+
+/// Proof ids repeat when a change is proposed again, so a kept record can hold
+/// the id that a new commit needs. A receipted record is history, not pending
+/// work, so it moves out of the scanned directory to a numbered archive name.
+fn archiveReceiptedTransaction(
+    allocator: std.mem.Allocator,
+    transaction_dir: []const u8,
+    proof_id: *const [64]u8,
+) !void {
+    const change_sets_dir = std.fs.path.dirname(transaction_dir) orelse return error.InvalidTargetPath;
+    const zttp_dir = std.fs.path.dirname(change_sets_dir) orelse return error.InvalidTargetPath;
+    const archive_dir = try std.fs.path.resolve(allocator, &.{ zttp_dir, "change-sets-archive" });
+    defer allocator.free(archive_dir);
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io_backend.io(), archive_dir);
+    try syncDirectory(allocator, zttp_dir);
+    var n: usize = 1;
+    while (n <= max_archived_transactions) : (n += 1) {
+        const name = try allocator.print("{s}.{d}", .{ proof_id[0..], n });
+        defer allocator.free(name);
+        const target = try std.fs.path.resolve(allocator, &.{ archive_dir, name });
+        defer allocator.free(target);
+        if (try pathExists(allocator, target)) continue;
+        try renameAndSync(allocator, transaction_dir, target);
+        return syncDirectory(allocator, change_sets_dir);
+    }
+    return error.TooManyArchivedTransactions;
+}
+
+const max_archived_transactions: usize = 1024;
 
 fn renameAndSync(allocator: std.mem.Allocator, source: []const u8, target: []const u8) !void {
     const source_z = try allocator.dupeSentinel(u8, source, 0);
@@ -2702,6 +2738,44 @@ test "acquire removes the stage files of a prepared transaction so the same chan
     var receipt = try workspace.commit(&fixture.prepared, &fixture.snapshot, &fixture.proof, .{});
     defer receipt.deinit(testing.allocator);
     try expectFixtureCandidates(&fixture, true);
+}
+
+test "a receipted transaction is archived so the same change commits again" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+    defer workspace.deinit();
+    var first = try workspace.commit(&fixture.prepared, &fixture.snapshot, &fixture.proof, .{});
+    defer first.deinit(testing.allocator);
+    try workspace.markReceipted(&fixture.proof.proof_id);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old-a" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/b.ts", .data = "old-b" });
+
+    var second = try workspace.commit(&fixture.prepared, &fixture.snapshot, &fixture.proof, .{});
+    defer second.deinit(testing.allocator);
+    try expectFixtureCandidates(&fixture, true);
+    const archived = ".zttp/change-sets-archive/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.1/receipted";
+    try tmp.dir.access(testing.io, archived, .{});
+}
+
+test "a transaction that is not receipted still blocks the same proof id" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+    defer workspace.deinit();
+    var first = try workspace.commit(&fixture.prepared, &fixture.snapshot, &fixture.proof, .{});
+    defer first.deinit(testing.allocator);
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old-a" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/b.ts", .data = "old-b" });
+
+    try testing.expectError(
+        error.TransactionAlreadyExists,
+        workspace.commit(&fixture.prepared, &fixture.snapshot, &fixture.proof, .{}),
+    );
 }
 
 test "acquire recovers a prepared transaction whose target directory is gone" {
