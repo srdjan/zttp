@@ -236,6 +236,9 @@ fn collectInputs(
     var iterator = dir.iterate();
     while (try iterator.next(io)) |entry| {
         if (isExcludedName(entry.name)) continue;
+        // The tools refuse these paths, so recheck could not reopen them and
+        // their bytes must not reach a proof scratch directory.
+        if (common.isSecretBasename(entry.name)) continue;
         const absolute = try std.fs.path.resolve(allocator, &.{ directory, entry.name });
         defer allocator.free(absolute);
         switch (entry.kind) {
@@ -479,6 +482,31 @@ test "snapshot recheck detects changed and newly created proof inputs" {
     defer snapshot.deinit(testing.allocator);
     try snapshot.recheck(testing.allocator);
 
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "concurrent" });
+    try testing.expectError(error.ProofReadSetChanged, snapshot.recheck(testing.allocator));
+}
+
+test "snapshot leaves secret-named files out of the read set and recheck passes" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".env.local.json", .data = "{\"token\":\"secret-bytes\"}" });
+    const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root_z);
+    const root = try testing.allocator.dupe(u8, root_z);
+    defer testing.allocator.free(root);
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/a.ts", .content = "new" });
+    defer prepared.deinit(testing.allocator);
+    var snapshot = try Snapshot.capture(testing.allocator, &prepared);
+    defer snapshot.deinit(testing.allocator);
+    try snapshot.recheck(testing.allocator);
+
+    var baseline = try snapshot.materializeBaseline(testing.allocator);
+    defer baseline.deinit();
+    const copied = try baseline.pathFor(testing.allocator, ".env.local.json");
+    defer testing.allocator.free(copied);
+    try testing.expectError(error.FileNotFound, zts.file_io.readFile(testing.allocator, copied, 64));
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "concurrent" });
     try testing.expectError(error.ProofReadSetChanged, snapshot.recheck(testing.allocator));
 }
