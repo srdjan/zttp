@@ -562,22 +562,19 @@ fn recoverOne(
     }
 
     const phase = try observePreparedPhase(allocator, transaction_dir);
-    if (phase == .aborted) {
-        // An aborted transaction is only deleted. Its manifest and images may
-        // be gone when an earlier delete stopped partway.
-        var planner: RecoveryPlanner = .{ .aborted = {} };
-        var plan = try planner.finish();
-        defer plan.deinit(allocator);
-        return executeRecoveryPlan(allocator, transaction_dir, &plan, options);
-    }
-
-    var parsed = try loadManifest(allocator, transaction_dir);
+    var parsed = loadManifest(allocator, transaction_dir) catch |err| {
+        if (phase == .aborted and err == error.FileNotFound) return finishAbortedDelete(allocator, transaction_dir, options);
+        return err;
+    };
     defer parsed.deinit();
     const manifest = parsed.value;
     // Recovery never writes a committed transaction, so a moved or copied
     // workspace keeps its receipts replayable. Every transaction that recovery
     // writes must still name the workspace it lives in.
-    try validateManifestAndImages(allocator, transaction_dir, manifest, phase != .committed);
+    validateManifestAndImages(allocator, transaction_dir, manifest, phase != .committed) catch |err| {
+        if (phase == .aborted and err == error.FileNotFound) return finishAbortedDelete(allocator, transaction_dir, options);
+        return err;
+    };
     if (phase == .committed) {
         try validateReceipt(allocator, transaction_dir, manifest.proof_id);
     }
@@ -812,6 +809,15 @@ fn writeProvidedReceipt(
     const path = try std.fs.path.resolve(allocator, &.{ transaction_dir, "receipt.json" });
     defer allocator.free(path);
     try durableWriteWithDigest(allocator, path, receipt_json);
+}
+
+/// A delete of an aborted transaction that stopped partway leaves journal files
+/// missing. Corrupt content still fails closed; only absence finishes the delete.
+fn finishAbortedDelete(allocator: std.mem.Allocator, transaction_dir: []const u8, options: RecoveryOptions) !bool {
+    var planner: RecoveryPlanner = .{ .aborted = {} };
+    var plan = try planner.finish();
+    defer plan.deinit(allocator);
+    return executeRecoveryPlan(allocator, transaction_dir, &plan, options);
 }
 
 /// The stage file that sits next to a target while a transaction applies.
@@ -1631,7 +1637,7 @@ test "recovery ignores progress markers when classifying a transaction" {
     try expectFixtureCandidates(&fixture, false);
 }
 
-test "recovery deletes an aborted transaction without validating its images" {
+test "recovery validates images before an aborted marker takes precedence" {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     var fixture = try Fixture.init(testing.allocator, &tmp);
@@ -1650,8 +1656,11 @@ test "recovery deletes an aborted transaction without validating its images" {
     defer testing.allocator.free(after_path);
     try zts.file_io.writeFile(testing.allocator, after_path, "corrupt");
     try writeMarker(testing.allocator, transaction_dir, "aborted");
-    try testing.expectEqual(@as(usize, 1), try recoverAllLocked(testing.allocator, &lock, fixture.root));
-    try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+    try testing.expectError(
+        error.CorruptTransactionJournal,
+        recoverAllLocked(testing.allocator, &lock, fixture.root),
+    );
+    try testing.expect(try pathExists(testing.allocator, transaction_dir));
     try expectFixtureCandidates(&fixture, false);
 }
 
