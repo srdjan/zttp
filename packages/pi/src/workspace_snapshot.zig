@@ -380,8 +380,9 @@ fn captureConfiguredPath(
     total_bytes: *usize,
 ) !void {
     if (!common.isPathInsideRoot(project_root, absolute)) return error.ProofContextOutsideProject;
-    if (containsAbsolute(entries.items, absolute)) return;
     const relative = common.relativeToRoot(project_root, absolute);
+    if (common.isSecretPath(relative)) return error.SecretPath;
+    if (containsAbsolute(entries.items, absolute)) return;
     const stat = std.Io.Dir.cwd().statFile(io, absolute, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return appendAbsent(allocator, entries, absolute, relative),
         else => return err,
@@ -573,6 +574,25 @@ test "snapshot captures configured SQL and policy inputs regardless of extension
     try testing.expect(saw_policy);
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "schema.custom", .data = "changed-schema" });
     try testing.expectError(error.ProofReadSetChanged, snapshot.recheck(testing.allocator));
+}
+
+test "capture refuses a configured proof input with a secret name" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".env.policy.json", .data = "{\"profiles\":[]}" });
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "zttp.json",
+        .data = "{\"entry\":\"src/a.ts\",\"policy\":\".env.policy.json\"}",
+    });
+    const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root_z);
+    const root = try testing.allocator.dupe(u8, root_z);
+    defer testing.allocator.free(root);
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/a.ts", .content = "new" });
+    defer prepared.deinit(testing.allocator);
+    try testing.expectError(error.SecretPath, Snapshot.capture(testing.allocator, &prepared));
 }
 
 test "scratch directory creation never reuses an existing directory" {
