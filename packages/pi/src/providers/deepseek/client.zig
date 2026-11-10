@@ -1225,6 +1225,42 @@ test "a body that reaches its declared length ends without polling the silent so
     try testing.expectEqualStrings("0123456789", body);
 }
 
+const SilentPeer = struct {
+    listener: std.Io.net.Server,
+    io: std.Io,
+
+    /// Accepts one connection and never answers it. Closes it after 2 s so a
+    /// defective connect returns instead of hanging the suite.
+    fn run(self: *SilentPeer) void {
+        const io = self.io;
+        var stream = self.listener.accept(io) catch return;
+        defer stream.close(io);
+        std.Io.sleep(io, .fromMilliseconds(2000), .awake) catch {};
+    }
+};
+
+test "a TLS handshake that the peer never answers ends at the connect budget" {
+    const allocator = testing.allocator;
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var peer: SilentPeer = .{ .listener = try address.listen(io, .{ .reuse_address = true }), .io = io };
+    defer peer.listener.deinit(io);
+    const port = peer.listener.socket.address.getPort();
+    const thread = try std.Thread.spawn(.{}, SilentPeer.run, .{&peer});
+    defer thread.join();
+
+    var client = std.http.Client{ .allocator = allocator, .io = io };
+    defer client.deinit();
+    client.now = std.Io.Clock.real.now(io);
+    const started = monotonicNowNs().?;
+    const result = http_errors.connectWithin(&client, .{ .bytes = "127.0.0.1" }, port, .tls, 200);
+    const elapsed = elapsedMs(started).?;
+    try testing.expectError(error.RequestTimedOut, result);
+    try testing.expect(elapsed < 1000);
+}
+
 test "a completion that the provider cut off for another reason is an error, not a short answer" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

@@ -111,20 +111,44 @@ pub fn connectWithin(
     // `setReadTimeoutMs`).
     const remaining: ?u64 = if (request_timeout_ms) |ms| @max(@as(u64, 1), ms) else null;
     const connect_budget_ms = @min(connect_timeout_ms, remaining orelse connect_timeout_ms);
-    const connection = client.connectTcpOptions(.{
+    // `std.http.Client.connectTcpOptions` does not read its `timeout` option, and
+    // the TLS handshake runs before a socket timeout can be set. The connect
+    // therefore races a sleep, and the race cancels the task that loses.
+    const io = client.io;
+    var race_buffer: [2]ConnectRace.Union = undefined;
+    var race: ConnectRace = .init(io, &race_buffer);
+    race.concurrent(.expired, std.Io.sleep, .{
+        io,
+        std.Io.Duration.fromMilliseconds(connect_budget_ms),
+        .awake,
+    }) catch |err| {
+        abandonConnect(&race, client);
+        return err;
+    };
+    race.concurrent(.connected, std.http.Client.connectTcpOptions, .{ client, .{
         .host = host,
         .port = explicit_port orelse switch (protocol) {
             .plain => 80,
             .tls => 443,
         },
         .protocol = protocol,
-        .timeout = .{ .duration = .{
-            .raw = std.Io.Duration.fromMilliseconds(connect_budget_ms),
-            .clock = .awake,
-        } },
-    }) catch |err| {
-        if (isTimeout(err)) return error.RequestTimedOut;
+    } }) catch |err| {
+        abandonConnect(&race, client);
         return err;
+    };
+    const first = race.await() catch |err| {
+        abandonConnect(&race, client);
+        return err;
+    };
+    const connection = switch (first) {
+        .expired => {
+            abandonConnect(&race, client);
+            return error.RequestTimedOut;
+        },
+        .connected => |result| connected: {
+            race.cancelDiscard();
+            break :connected try result;
+        },
     };
     // Bound a stalled stream so a hung response can't freeze the CLI forever,
     // on both the read side (SO_RCVTIMEO) and the body-write side (SO_SNDTIMEO).
@@ -132,6 +156,23 @@ pub fn connectWithin(
     setReadTimeoutMs(sock_handle, if (remaining) |ms| @min(read_idle_timeout_ms, ms) else read_idle_timeout_ms);
     setWriteTimeoutMs(sock_handle, if (remaining) |ms| @min(write_idle_timeout_ms, ms) else write_idle_timeout_ms);
     return connection;
+}
+
+const ConnectRace = std.Io.Select(union(enum) {
+    connected: std.http.Client.ConnectTcpError!*std.http.Client.Connection,
+    expired: std.Io.Cancelable!void,
+});
+
+/// Cancel the tasks that remain in the race. A connection that completed after
+/// the budget expired is closed, so the pool holds no used connection.
+fn abandonConnect(race: *ConnectRace, client: *std.http.Client) void {
+    while (race.cancel()) |late| switch (late) {
+        .connected => |result| if (result) |connection| {
+            connection.closing = true;
+            client.connection_pool.release(connection, client.io);
+        } else |_| {},
+        .expired => {},
+    };
 }
 
 pub fn setWriteTimeoutMs(fd: std.posix.fd_t, timeout_ms: u64) void {
