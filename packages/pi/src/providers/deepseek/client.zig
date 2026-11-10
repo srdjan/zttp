@@ -531,11 +531,10 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
         else => return ClientError.DeepSeekServerUnavailable,
     };
     defer request.deinit();
-    request.transfer_encoding = .{ .content_length = body.len };
-    var request_body = request.sendBodyUnflushed(&.{}) catch return ClientError.DeepSeekServerUnavailable;
-    request_body.writer.writeAll(body) catch return ClientError.DeepSeekServerUnavailable;
-    request_body.end() catch return ClientError.DeepSeekServerUnavailable;
-    request.connection.?.flush() catch return ClientError.DeepSeekServerUnavailable;
+    http_errors.sendBodyWithin(&request, body, config.request_timeout_ms) catch |err| switch (err) {
+        error.RequestTimedOut => return error.RequestTimedOut,
+        else => return ClientError.DeepSeekServerUnavailable,
+    };
 
     var response = http_errors.receiveHeadWithin(
         &request,
@@ -1333,6 +1332,38 @@ test "a TLS handshake that the peer never answers ends at the connect budget" {
     client.now = std.Io.Clock.real.now(io);
     const started = monotonicNowNs().?;
     const result = http_errors.connectWithin(&client, .{ .bytes = "127.0.0.1" }, port, .tls, 200);
+    const elapsed = elapsedMs(started).?;
+    try testing.expectError(error.RequestTimedOut, result);
+    try testing.expect(elapsed < 1000);
+}
+
+test "a request body that the peer never reads ends at the request budget" {
+    const allocator = testing.allocator;
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var peer: SilentPeer = .{ .listener = try address.listen(io, .{ .reuse_address = true }), .io = io };
+    defer peer.listener.deinit(io);
+    const port = peer.listener.socket.address.getPort();
+    const thread = try std.Thread.spawn(.{}, SilentPeer.run, .{&peer});
+    defer thread.join();
+
+    var client = std.http.Client{ .allocator = allocator, .io = io };
+    defer client.deinit();
+    const connection = try http_errors.connectWithin(&client, .{ .bytes = "127.0.0.1" }, port, .plain, 300);
+    var request = try client.request(.POST, try std.Uri.parse("http://127.0.0.1/"), .{
+        .keep_alive = false,
+        .connection = connection,
+    });
+    defer request.deinit();
+    // 64 MiB is more than the socket buffers of a loopback connection hold, so
+    // the write blocks when the peer does not read.
+    const body = try allocator.alloc(u8, 64 << 20);
+    defer allocator.free(body);
+    @memset(body, 'x');
+    const started = monotonicNowNs().?;
+    const result = http_errors.sendBodyWithin(&request, body, 300);
     const elapsed = elapsedMs(started).?;
     try testing.expectError(error.RequestTimedOut, result);
     try testing.expect(elapsed < 1000);

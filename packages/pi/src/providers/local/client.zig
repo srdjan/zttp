@@ -906,11 +906,10 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
         else => return ClientError.LocalServerUnavailable,
     };
     defer request.deinit();
-    request.transfer_encoding = .{ .content_length = body.len };
-    var request_body = request.sendBodyUnflushed(&.{}) catch return ClientError.LocalServerUnavailable;
-    request_body.writer.writeAll(body) catch return ClientError.LocalServerUnavailable;
-    request_body.end() catch return ClientError.LocalServerUnavailable;
-    request.connection.?.flush() catch return ClientError.LocalServerUnavailable;
+    http_errors.sendBodyWithin(&request, body, config.request_timeout_ms) catch |err| switch (err) {
+        error.RequestTimedOut => return error.RequestTimedOut,
+        else => return ClientError.LocalServerUnavailable,
+    };
 
     const socket = connection.stream_reader.stream.socket.handle;
     const request_timeout_ms = http_errors.effectiveRequestTimeoutMs(config.request_timeout_ms, response_head_timeout_ms);

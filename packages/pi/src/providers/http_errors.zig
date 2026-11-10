@@ -61,8 +61,9 @@ pub const read_idle_timeout_ms: u64 = 120_000;
 
 /// Send budget for the request body. A half-open / stalled peer that accepts
 /// the connection but never drains its receive window would otherwise block the
-/// body write (writeAll + flush) forever. Bounded via SO_SNDTIMEO.
-pub const write_idle_timeout_ms: u64 = 120_000;
+/// body write (writeAll + flush) forever. Bounded by the race in
+/// `sendBodyWithin`: the whole body must leave within this budget.
+pub const send_timeout_ms: u64 = 120_000;
 
 /// The same guard with an explicit budget, for a provider whose silence is not
 /// a stall. A non-streaming completion sends its response head at once and then
@@ -107,7 +108,7 @@ pub fn connectWithin(
     request_timeout_ms: ?u64,
 ) !*std.http.Client.Connection {
     // A caller with no deadline gets each budget's own default. Folding the
-    // absent case into the connect budget would cut the 120 s idle budgets to
+    // absent case into the connect budget would cut the 120 s idle budget to
     // 15 s, and an under-sized `SO_RCVTIMEO` panics rather than returning (see
     // `setReadTimeoutMs`).
     const remaining: ?u64 = if (request_timeout_ms) |ms| @max(@as(u64, 1), ms) else null;
@@ -151,11 +152,10 @@ pub fn connectWithin(
             break :connected try result;
         },
     };
-    // Bound a stalled stream so a hung response can't freeze the CLI forever,
-    // on both the read side (SO_RCVTIMEO) and the body-write side (SO_SNDTIMEO).
+    // Bound a stalled stream so a hung response can't freeze the CLI forever.
+    // The body write has its own bound in `sendBodyWithin`.
     const sock_handle = connection.stream_reader.stream.socket.handle;
     setReadTimeoutMs(sock_handle, if (remaining) |ms| @min(read_idle_timeout_ms, ms) else read_idle_timeout_ms);
-    setWriteTimeoutMs(sock_handle, if (remaining) |ms| @min(write_idle_timeout_ms, ms) else write_idle_timeout_ms);
     return connection;
 }
 
@@ -176,12 +176,46 @@ fn abandonConnect(race: *ConnectRace, client: *std.http.Client) void {
     };
 }
 
-pub fn setWriteTimeoutMs(fd: std.posix.fd_t, timeout_ms: u64) void {
-    const tv = std.posix.timeval{
-        .sec = @intCast(timeout_ms / 1000),
-        .usec = @intCast((timeout_ms % 1000) * 1000),
+/// Send the request with `body`, bounded by the send budget and by the request
+/// budget that remains.
+///
+/// A socket send timeout cannot bound the write: an expired `SO_SNDTIMEO`
+/// surfaces as EAGAIN inside the blocking write, which panics instead of
+/// returning (see `setReadTimeoutMs`). The write therefore races a sleep, as the
+/// connect does, and the race cancels the write when the budget is gone.
+pub fn sendBodyWithin(
+    request: *std.http.Client.Request,
+    body: []const u8,
+    request_timeout_ms: ?u64,
+) !void {
+    const io = request.client.io;
+    const budget_ms = @min(send_timeout_ms, @max(@as(u64, 1), request_timeout_ms orelse send_timeout_ms));
+    var race_buffer: [2]SendRace.Union = undefined;
+    var race: SendRace = .init(io, &race_buffer);
+    defer race.cancelDiscard();
+    try race.concurrent(.expired, std.Io.sleep, .{
+        io,
+        std.Io.Duration.fromMilliseconds(budget_ms),
+        .awake,
+    });
+    try race.concurrent(.sent, sendBody, .{ request, body });
+    return switch (try race.await()) {
+        .expired => error.RequestTimedOut,
+        .sent => |result| result,
     };
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&tv)) catch {};
+}
+
+const SendRace = std.Io.Select(union(enum) {
+    sent: std.Io.Writer.Error!void,
+    expired: std.Io.Cancelable!void,
+});
+
+fn sendBody(request: *std.http.Client.Request, body: []const u8) std.Io.Writer.Error!void {
+    request.transfer_encoding = .{ .content_length = body.len };
+    var request_body = try request.sendBodyUnflushed(&.{});
+    try request_body.writer.writeAll(body);
+    try request_body.end();
+    try request.connection.?.flush();
 }
 
 /// The body length a response head promises, or null when the head does not
