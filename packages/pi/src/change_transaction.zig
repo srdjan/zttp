@@ -356,8 +356,9 @@ fn pendingReceiptsLocked(
 }
 
 /// Durably records that the exact committed receipt is now present in its
-/// owning persistence surface. This is idempotent and never removes the
-/// workspace receipt.
+/// owning persistence surface, then moves the record, receipt included, to
+/// `.zttp/change-sets-archive`. A repeated call finds the archived record and
+/// returns, so acknowledgement stays idempotent after a failed synchronization.
 fn markReceiptedLocked(
     allocator: std.mem.Allocator,
     lock: *const WorkspaceLock,
@@ -387,6 +388,13 @@ fn markReceiptedLockedWithOptions(
     if (!isCanonicalProofId(transaction_id)) return error.InvalidTransactionId;
     const transaction_dir = try transactionPath(allocator, workspace_root, transaction_id);
     defer allocator.free(transaction_dir);
+    // The archive fills from `.1` upward, so an id that was ever archived has
+    // `.1`, whichever number the last rename took.
+    if (!try pathExists(allocator, transaction_dir)) {
+        const first_archive = try archivedRecordPath(allocator, transaction_dir, transaction_id, 1);
+        defer allocator.free(first_archive);
+        if (try markerPresent(allocator, first_archive, "receipted")) return;
+    }
     if (!try markerPresent(allocator, transaction_dir, "prepared") or
         !try markerPresent(allocator, transaction_dir, "committed"))
     {
@@ -397,6 +405,7 @@ fn markReceiptedLockedWithOptions(
         try writeMarker(allocator, transaction_dir, "receipted");
         if (options.fault == .after_receipted_marker) return error.InjectedTransactionFailure;
     }
+    try archiveReceiptedTransaction(allocator, transaction_dir, transaction_id);
 }
 
 fn recoverAllLocked(
@@ -577,6 +586,15 @@ fn recoverOne(
     }
 
     const phase = try observePreparedPhase(allocator, transaction_dir);
+    // A receipted record is history: the session holds its receipt. Recovery
+    // moves it out before it reads the manifest or the receipt, so a damaged
+    // record cannot block an acquire.
+    if (phase == .committed and try markerPresent(allocator, transaction_dir, "receipted")) {
+        const name = std.fs.path.basename(transaction_dir);
+        if (!isCanonicalProofId(name)) return error.CorruptTransactionDirectory;
+        try archiveReceiptedTransaction(allocator, transaction_dir, name[0..64]);
+        return false;
+    }
     // A prepared transaction without an applying marker has written no target,
     // and recovery removes its stage files before it writes the aborted marker,
     // so finishing the delete is what the prepared plan does.
@@ -1007,15 +1025,28 @@ fn archiveReceiptedTransaction(
     try syncDirectory(allocator, zttp_dir);
     var n: usize = 1;
     while (n <= max_archived_transactions) : (n += 1) {
-        const name = try allocator.print("{s}.{d}", .{ proof_id[0..], n });
-        defer allocator.free(name);
-        const target = try std.fs.path.resolve(allocator, &.{ archive_dir, name });
+        const target = try archivedRecordPath(allocator, transaction_dir, proof_id, n);
         defer allocator.free(target);
         if (try pathExists(allocator, target)) continue;
         try renameAndSync(allocator, transaction_dir, target);
         return syncDirectory(allocator, change_sets_dir);
     }
     return error.TooManyArchivedTransactions;
+}
+
+/// `.zttp/change-sets-archive/<id>.<n>`, beside the `change-sets` directory
+/// that holds `transaction_dir`.
+fn archivedRecordPath(
+    allocator: std.mem.Allocator,
+    transaction_dir: []const u8,
+    proof_id: *const [64]u8,
+    n: usize,
+) ![]u8 {
+    const change_sets_dir = std.fs.path.dirname(transaction_dir) orelse return error.InvalidTargetPath;
+    const zttp_dir = std.fs.path.dirname(change_sets_dir) orelse return error.InvalidTargetPath;
+    const name = try allocator.print("{s}.{d}", .{ proof_id[0..], n });
+    defer allocator.free(name);
+    return std.fs.path.resolve(allocator, &.{ zttp_dir, "change-sets-archive", name });
 }
 
 const max_archived_transactions: usize = 1024;
@@ -1468,6 +1499,7 @@ const MarkerCaseOutcome = enum {
     corrupt,
     delete_transaction,
     preserve_committed,
+    archive_receipted,
     roll_forward,
 };
 
@@ -1491,15 +1523,15 @@ const marker_case_outcomes = [32]MarkerCaseOutcome{
     .preserve_committed,
     .corrupt,
     .preserve_committed,
-    // 0b0_1000 through 0b0_1111.
+    // 0b0_1000 through 0b0_1111. A committed and receipted record moves to the archive.
     .corrupt,
     .delete_transaction,
     .corrupt,
     .roll_forward,
     .corrupt,
-    .preserve_committed,
+    .archive_receipted,
     .corrupt,
-    .preserve_committed,
+    .archive_receipted,
     // 0b1_0000 through 0b1_0111. Aborted wins whenever prepared is present.
     .delete_transaction,
     .delete_transaction,
@@ -1605,11 +1637,16 @@ fn assertMarkerCase(mask: u8) !void {
             try testing.expectEqual(@as(usize, 0), try recoverAllLocked(testing.allocator, &lock, fixture.root));
             try testing.expect(try pathExists(testing.allocator, transaction_dir));
             try expectFixtureCandidates(&fixture, false);
-            try expectPendingReceiptCount(
-                &lock,
-                fixture.root,
-                if (markerSet(mask, marker_receipted)) 0 else 1,
-            );
+            try expectPendingReceiptCount(&lock, fixture.root, 1);
+        },
+        .archive_receipted => {
+            try testing.expectEqual(@as(usize, 0), try recoverAllLocked(testing.allocator, &lock, fixture.root));
+            try testing.expect(!try pathExists(testing.allocator, transaction_dir));
+            const archived = try archivedRecordPath(testing.allocator, transaction_dir, &fixture.proof.proof_id, 1);
+            defer testing.allocator.free(archived);
+            try testing.expect(try markerPresent(testing.allocator, archived, "receipted"));
+            try expectFixtureCandidates(&fixture, false);
+            try expectPendingReceiptCount(&lock, fixture.root, 0);
         },
         .roll_forward => {
             try testing.expectEqual(@as(usize, 1), try recoverAllLocked(testing.allocator, &lock, fixture.root));
@@ -1804,10 +1841,10 @@ test "recovery does not read markers below the selected precedence" {
                 try writeMalformedMarker(testing.allocator, transaction_dir, "applying");
                 try writeMalformedMarker(testing.allocator, transaction_dir, "receipted");
             },
+            // Recovery reads `receipted` on a committed record to archive it.
             .committed => {
                 try writeMarker(testing.allocator, transaction_dir, "committed");
                 try writeMalformedMarker(testing.allocator, transaction_dir, "applying");
-                try writeMalformedMarker(testing.allocator, transaction_dir, "receipted");
             },
             .prepared => try writeMalformedMarker(testing.allocator, transaction_dir, "receipted"),
             .applying => {
@@ -2119,7 +2156,9 @@ test "recovery keeps a committed receipt pending until its durable owner acknowl
     }
     try testing.expectEqual(@as(usize, 1), pending.len);
     try markReceiptedLocked(testing.allocator, &lock, fixture.root, &fixture.proof.proof_id);
-    try testing.expect(try markerPresent(testing.allocator, transaction_dir, "receipted"));
+    const archived = try archivedRecordPath(testing.allocator, transaction_dir, &fixture.proof.proof_id, 1);
+    defer testing.allocator.free(archived);
+    try testing.expect(try markerPresent(testing.allocator, archived, "receipted"));
 }
 
 test "transaction recovery covers journal image receipt stage and rename failures" {
@@ -2805,6 +2844,69 @@ test "a receipted transaction is archived so the same change commits again" {
     try expectFixtureCandidates(&fixture, true);
     const archived = ".zttp/change-sets-archive/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.1/receipted";
     try tmp.dir.access(testing.io, archived, .{});
+}
+
+test "acknowledging a receipt moves its record to the archive" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+    defer workspace.deinit();
+    var receipt = try workspace.commit(&fixture.prepared, &fixture.snapshot, &fixture.proof, .{});
+    defer receipt.deinit(testing.allocator);
+    try workspace.markReceipted(&fixture.proof.proof_id);
+    try workspace.markReceipted(&fixture.proof.proof_id);
+    try testing.expectError(error.FileNotFound, tmp.dir.access(
+        testing.io,
+        ".zttp/change-sets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        .{},
+    ));
+    try tmp.dir.access(
+        testing.io,
+        ".zttp/change-sets-archive/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.1/receipt.json",
+        .{},
+    );
+}
+
+test "acquire archives a receipted record without reading its receipt" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    {
+        var lock = try WorkspaceLock.acquire(testing.allocator, fixture.root);
+        defer lock.deinit();
+        var receipt = try commitLocked(testing.allocator, &lock, &fixture.prepared, &fixture.snapshot, &fixture.proof, .{});
+        defer receipt.deinit(testing.allocator);
+        try testing.expectError(
+            error.InjectedTransactionFailure,
+            markReceiptedLockedWithOptions(
+                testing.allocator,
+                &lock,
+                fixture.root,
+                &fixture.proof.proof_id,
+                .{ .fault = .after_receipted_marker },
+            ),
+        );
+    }
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = ".zttp/change-sets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/receipt.json",
+        .data = "corrupt",
+    });
+
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+    defer workspace.deinit();
+    try testing.expectError(error.FileNotFound, tmp.dir.access(
+        testing.io,
+        ".zttp/change-sets/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        .{},
+    ));
+    try tmp.dir.access(
+        testing.io,
+        ".zttp/change-sets-archive/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.1/receipted",
+        .{},
+    );
 }
 
 test "a transaction that is not receipted still blocks the same proof id" {
