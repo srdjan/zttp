@@ -35,24 +35,34 @@ fn recoverWorkspaceSourcesBeforeBackend(allocator: std.mem.Allocator) !void {
     defer workspace.deinit();
 }
 
-pub fn transactionIdFromEntry(entry: *const transcript_mod.OwnedEntry) ?[]const u8 {
+fn receiptFromEntry(entry: *const transcript_mod.OwnedEntry) ?ui_payload.VerifiedChangeSetPayload {
     return switch (entry.*) {
         .verified_change_set => |message| if (message.ui_payload) |payload| switch (payload) {
-            .verified_change_set => |receipt| receipt.transaction_id,
+            .verified_change_set => |receipt| receipt,
             else => null,
         } else null,
         else => null,
     };
 }
 
-fn transcriptHasTransaction(session: *const AgentSession, transaction_id: []const u8) bool {
+pub fn transactionIdFromEntry(entry: *const transcript_mod.OwnedEntry) ?[]const u8 {
+    const receipt = receiptFromEntry(entry) orelse return null;
+    return receipt.transaction_id;
+}
+
+/// A transaction id repeats when the same change commits again after a
+/// revert, so the id alone does not identify a commit. The id and the time of
+/// application together do.
+fn transcriptHasReceipt(session: *const AgentSession, receipt: ui_payload.VerifiedChangeSetPayload) bool {
     for (session.transcript.entries.items) |*entry| {
-        const present = transactionIdFromEntry(entry) orelse continue;
-        if (std.mem.eql(u8, present, transaction_id)) return true;
+        const present = receiptFromEntry(entry) orelse continue;
+        if (present.applied_at_unix_ms == receipt.applied_at_unix_ms and
+            std.mem.eql(u8, present.transaction_id, receipt.transaction_id)) return true;
     }
     return false;
 }
 
+/// Appends the pending receipt unless the transcript already holds it.
 fn appendRecoveredReceipt(
     allocator: std.mem.Allocator,
     session: *AgentSession,
@@ -71,6 +81,7 @@ fn appendRecoveredReceipt(
     };
     if (!std.mem.eql(u8, receipt.transaction_id, &pending.transaction_id))
         return error.InvalidRecoveredChangeSetReceipt;
+    if (transcriptHasReceipt(session, receipt)) return;
     const summary = try allocator.print("recovered verified change set: {d} source file{s} ({s})", .{
         receipt.changes.len,
         if (receipt.changes.len == 1) "" else "s",
@@ -111,8 +122,7 @@ pub fn reconcileWorkspaceReceipts(
         allocator.free(pending);
     }
     for (pending) |receipt| {
-        if (!transcriptHasTransaction(session, &receipt.transaction_id))
-            try appendRecoveredReceipt(allocator, session, receipt);
+        try appendRecoveredReceipt(allocator, session, receipt);
         if (session.events_path != null) try persistTranscriptTail(allocator, session);
         try workspace.markReceipted(&receipt.transaction_id);
     }
