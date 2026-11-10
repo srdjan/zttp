@@ -239,6 +239,9 @@ compiler decided. Read the auto-rendered block in the terminal HUD to see:
   that it was read but never reached a response, log, or egress sink. The
   evidence is derived from what the prover observed, never invented: a named
   guard appears only when the validator binding is recovered from the source.
+  A chain step gives a place in the checked file as `L<line>`. It gives a
+  guard or a sink in an imported file as `<file>:<line>`, and that line is a
+  line of the imported file.
 
 The trace is the same data on every surface. `zttp check --json` emits it as
 a `proof.proofTrace` object keyed by property name, so agents and CI read the

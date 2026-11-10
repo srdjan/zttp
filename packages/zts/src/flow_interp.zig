@@ -1104,8 +1104,13 @@ pub const FlowInterp = struct {
     fn branchCause(self: *const FlowInterp, site: ?ControlSite) ?report_types.BranchCause {
         const found = site orelse return null;
         const loc = self.sourceView(found.module).getLoc(found.node) orelse return null;
-        const file: ?[]const u8 = if (found.module == 0 or self.modules.len == 0) null else self.modules[found.module].path;
-        return .{ .line = loc.line, .column = loc.column, .file = file };
+        return .{ .line = loc.line, .column = loc.column, .file = self.dependencyFile(found.module) };
+    }
+
+    /// The path of a dependency, borrowed from the module view. Null for the checked file: a
+    /// line with no file is a line of that file.
+    fn dependencyFile(self: *const FlowInterp, module: ModuleId) ?[]const u8 {
+        return if (module == 0 or self.modules.len == 0) null else self.modules[module].path;
     }
 
     fn finishHandlerReport(self: *FlowInterp, result: FunctionResult) Error!HandlerReport {
@@ -1187,8 +1192,10 @@ pub const FlowInterp = struct {
                                     .safe_form = .validated,
                                     .guard_func = guard.func,
                                     .guard_line = if (guard_loc) |loc| loc.line else 0,
+                                    .guard_file = self.dependencyFile(guard.module),
                                     .sink_label = sinkLabel(event.sink),
                                     .sink_line = if (sink_loc) |loc| loc.line else 0,
+                                    .sink_file = self.dependencyFile(event.module),
                                 });
                             },
                         }

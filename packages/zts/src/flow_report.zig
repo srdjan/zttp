@@ -80,10 +80,16 @@ pub const DefendedPath = struct {
     /// Borrowed binding metadata, retained for the checker lifetime.
     guard_func: ?[]const u8 = null,
     guard_line: u32 = 0,
+    /// The dependency file that `guard_line` counts in, borrowed from the
+    /// module graph. Null when the guard is in the checked file.
+    guard_file: ?[]const u8 = null,
     /// Human label of the sink the validated value safely reached
     /// (static literal); "" for `.never_reached`.
     sink_label: []const u8 = "",
     sink_line: u32 = 0,
+    /// The dependency file that `sink_line` counts in, borrowed from the
+    /// module graph. Null when the sink is in the checked file.
+    sink_file: ?[]const u8 = null,
 };
 
 /// Map a diagnostic kind to the property tag it witnesses. `null` when the

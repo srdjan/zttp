@@ -658,6 +658,12 @@ fn sourcePhrase(tag: counterexample.PropertyTag) []const u8 {
     };
 }
 
+/// A place in the evidence text: "L<line>" in the checked file, and "<file>:<line>" in a
+/// dependency, because a line with no file reads as a line of the checked file.
+fn placeText(arena: std.mem.Allocator, file: ?[]const u8, line: u32) ![]const u8 {
+    return if (file) |path| arena.print("{s}:{d}", .{ path, line }) else arena.print("L{d}", .{line});
+}
+
 /// Build the green-proof evidence from a defended path. Soundness: a
 /// `.validated` path always carries a named guard (the flow checker only
 /// records one when the validator binding is recovered), so the chain never
@@ -673,8 +679,8 @@ fn resistedFor(
         .validated => {
             const guard = dp.guard_func orelse return null;
             try chain.append(arena, try arena.print("{s} enters the handler", .{source}));
-            try chain.append(arena, try arena.print("validated by {s}() at L{d}", .{ guard, dp.guard_line }));
-            try chain.append(arena, try arena.print("reaches {s} at L{d}, already cleared", .{ dp.sink_label, dp.sink_line }));
+            try chain.append(arena, try arena.print("validated by {s}() at {s}", .{ guard, try placeText(arena, dp.guard_file, dp.guard_line) }));
+            try chain.append(arena, try arena.print("reaches {s} at {s}, already cleared", .{ dp.sink_label, try placeText(arena, dp.sink_file, dp.sink_line) }));
             return .{
                 .attack_input = counterexample.attackInput(tag),
                 .chain = try chain.toOwnedSlice(arena),

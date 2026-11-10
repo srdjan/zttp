@@ -15532,6 +15532,101 @@ test "the proof trace gives a branch in the checked file a location with no file
     try std.testing.expect(std.mem.indexOf(u8, trace, "\"deterministic\":{\"holds\":false,\"kind\":\"structural\",\"summary\":\"The response is reached through a branch on a value that varies between requests: two runs of the same request can differ.\",\"counterexample\":{\"kind\":\"offending-node\",\"location\":{\"line\":3,\"column\":3},\"snippet\":\"a branch on a value that varies between requests\",") != null);
 }
 
+// The resisted evidence of `check --json` gives the guard and the sink as "at L<line>". A line
+// with no file reads as a line of the checked file, so a guard or a sink in a dependency must
+// name its file, as the branch location above does.
+const resisted_dep_forwarder =
+    \\import { fetch } from "zttp:fetch";
+    \\import { schemaCompile } from "zttp:validate";
+    \\import { decodeJson } from "zttp:decode";
+    \\
+    \\schemaCompile("charge", JSON.stringify({ type: "object", properties: { name: { type: "string" } }, required: ["name"] }));
+    \\
+    \\export function forward(raw: string): boolean {
+    \\  const parsed = decodeJson("charge", raw);
+    \\  if (!parsed.ok) {
+    \\    return false;
+    \\  }
+    \\  const receipt = fetch("http://billing.example/charge", { method: "POST", body: parsed.value.name });
+    \\  return receipt.ok;
+    \\}
+    \\
+;
+
+test "the resisted evidence names the file of a guard and a sink in a dependency" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(
+        \\import { forward } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Response {
+        \\  if (forward(req.body ?? "{}")) {
+        \\    return Response.text("sent");
+        \\  }
+        \\  return Response.text("refused");
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts", resisted_dep_forwarder);
+    var result = try fixture.check();
+    defer result.deinit(allocator);
+    const directory = std.fs.path.dirname(fixture.handler_path) orelse return error.TestUnexpectedResult;
+    const expected = try std.fmt.allocPrint(allocator, "\"input_validated\":{{\"holds\":true,\"kind\":\"flow-trace\",\"summary\":\"All user input passes a validation step before any egress call.\",\"resisted\":{{\"attackInput\":\"{{\\\"q\\\":\\\"<oversized/malformed payload>\\\"}}\",\"chain\":[\"user input enters the handler\",\"validated by decodeJson() at {s}/dep.ts:8\",\"reaches fetchSync body at {s}/dep.ts:12, already cleared\"],\"conclusion\":\"the request data reaches this sink with its required defense; the property holds.\"}}}}", .{ directory, directory });
+    defer allocator.free(expected);
+    const trace = result.proof_trace_json orelse return error.TestUnexpectedResult;
+    errdefer std.debug.print("proof trace: {s}\n", .{trace});
+    try std.testing.expect(std.mem.indexOf(u8, trace, expected) != null);
+}
+
+// A guard in a dependency and a sink in the checked file: only the guard names a file.
+test "the resisted evidence names the file of a guard in a dependency and gives the sink in the checked file a line alone" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(
+        \\import { clean } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Response {
+        \\  return Response.html(clean(req.headers.get("x-name") ?? "anon"));
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\import { escapeHtml } from "zttp:text";
+        \\
+        \\export function clean(raw: string): string {
+        \\  return escapeHtml(raw);
+        \\}
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(allocator);
+    const directory = std.fs.path.dirname(fixture.handler_path) orelse return error.TestUnexpectedResult;
+    const expected = try std.fmt.allocPrint(allocator, "\"chain\":[\"user input enters the handler\",\"validated by escapeHtml() at {s}/dep.ts:4\",\"reaches Response.html at L4, already cleared\"]", .{directory});
+    defer allocator.free(expected);
+    const trace = result.proof_trace_json orelse return error.TestUnexpectedResult;
+    errdefer std.debug.print("proof trace: {s}\n", .{trace});
+    try std.testing.expect(std.mem.indexOf(u8, trace, expected) != null);
+}
+
+// Control: a guard and a sink in the checked file keep a line with no file.
+test "the resisted evidence gives a guard and a sink in the checked file a line alone" {
+    const allocator = std.testing.allocator;
+    const source =
+        \\import { escapeHtml } from "zttp:text";
+        \\
+        \\export function handler(req: Request): Response {
+        \\  const safe: string = escapeHtml(req.headers.get("x-name") ?? "anon");
+        \\  return Response.html(safe);
+        \\}
+        \\
+    ;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, source, "resisted.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const trace = result.proof_trace_json orelse return error.TestUnexpectedResult;
+    errdefer std.debug.print("proof trace: {s}\n", .{trace});
+    try std.testing.expect(std.mem.indexOf(u8, trace, "\"chain\":[\"user input enters the handler\",\"validated by escapeHtml() at L4\",\"reaches Response.html at L5, already cleared\"]") != null);
+}
+
 test "CHECK names the branch in the entry when the condition comes from a dependency clock" {
     const allocator = std.testing.allocator;
     var fixture = try SiblingFixture.init(
