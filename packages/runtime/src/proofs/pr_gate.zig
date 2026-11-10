@@ -1160,11 +1160,14 @@ const SourceKind = enum { handler, implicit_handler, non_handler };
 /// row. The handler already fails that property, so the ZTS606 row adds no
 /// error to those rows. A ZTS606 whose
 /// property the handler still holds is the one error that stops the gate here.
-/// The `deterministic` and `idempotent` facts of the handler ignore a branch on
-/// a clock value, so a helper that reads the clock can break `deterministic`
-/// while the handler claims it. The ZTS606 row is then the only sign of the
-/// break, and the gate must not compare that side. With no handler-level
-/// default-profile ZTS500 row, the ZTS606 row keeps the answer false.
+/// The handler can hold `deterministic` while a helper that reads the clock
+/// breaks it: the handler's fact follows the response, and the helper's fact
+/// is its effect row. The ZTS606 row is then the only row that names the
+/// property, and the gate does not compare that side. A handler whose
+/// response follows a branch on the clock value fails `deterministic` itself,
+/// so its ZTS500 row names the property and the ZTS606 row is accepted. With
+/// no handler-level default-profile ZTS500 row, the ZTS606 row keeps the
+/// answer false.
 fn onlyImplicitDefaultSpecErrors(result: *const zts_cli.precompile.CheckResult) bool {
     const contract = if (result.contract) |*c| c else return false;
     for (contract.spec_diagnostics.items) |d| {
