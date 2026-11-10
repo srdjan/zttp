@@ -622,8 +622,7 @@ fn recoverOne(
     var plan = try planner.finish();
     planner_owned = false;
     defer plan.deinit(allocator);
-    // A killed process leaves stage files, and proof ids are deterministic, so
-    // the same change would fail with StaleStageFile until they are gone.
+    // A killed process leaves stage files beside the targets.
     if (phase == .prepared or phase == .applying) try removeStageFiles(allocator, manifest, manifest.proof_id);
     return executeRecoveryPlan(allocator, transaction_dir, &plan, options);
 }
@@ -882,7 +881,8 @@ fn stageCandidates(
     for (prepared.changes, 0..) |change, index| {
         const stage = try stagePath(allocator, change.resolved_path, proof_id);
         errdefer allocator.free(stage);
-        if (try pathExists(allocator, stage)) return error.StaleStageFile;
+        // Recovery has run under the workspace lock, so no journal names a file
+        // that is already at this path. The atomic write replaces it.
         switch (fault) {
             .before_stage_write => |fault_index| if (fault_index == index)
                 return error.InjectedTransactionFailure,
@@ -2893,4 +2893,20 @@ test "recovery refuses to write a target below a directory that became a symlink
     );
     var contents: [64]u8 = undefined;
     try testing.expectEqualStrings("old-a", try outside.dir.readFile(testing.io, "src/a.ts", &contents));
+}
+
+test "a stage file that no journal names does not block the same change" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    // A killed process leaves this file, and then the state directory is deleted.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/.a.ts.zttp-aaaaaaaaaaaaaaaa.stage", .data = "stale-a" });
+
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+    defer workspace.deinit();
+    var receipt = try workspace.commit(&fixture.prepared, &fixture.snapshot, &fixture.proof, .{});
+    defer receipt.deinit(testing.allocator);
+    try expectFixtureCandidates(&fixture, true);
+    try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "src/.a.ts.zttp-aaaaaaaaaaaaaaaa.stage", .{}));
 }
