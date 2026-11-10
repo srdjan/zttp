@@ -7,6 +7,7 @@
 //! credit, rate-limit, model, overload, and prompt-too-long failures.
 
 const std = @import("std");
+const response_sanitize = @import("response_sanitize.zig");
 
 pub fn uriHost(uri: std.Uri, buffer: *[std.Io.net.HostName.max_len]u8) std.Io.net.HostName.FromUriError!std.Io.net.HostName {
     const component = uri.host orelse return error.UriMissingHost;
@@ -192,21 +193,111 @@ pub fn declaredBodyLength(head: std.http.Client.Response.Head) ?u64 {
     return head.content_length;
 }
 
-/// Read the full response body, mapping an idle-read timeout to a clean
-/// `error.RequestTimedOut` (shared by both provider clients).
+/// Read the response body as it arrives, polling the socket before each wait
+/// (shared by both provider clients).
+///
+/// A read to end of stream in one call is bounded only by `SO_RCVTIMEO`, and an
+/// expired `SO_RCVTIMEO` panics instead of returning (see `setReadTimeoutMs`).
+/// Each pass here takes the bytes that are available and does not wait for a
+/// full chunk, so a body that trickles in and goes quiet is bounded too. The
+/// socket is polled only when `reader` and every reader in `upstream` hold no
+/// bytes: a byte that the HTTP connection reader already took off the socket is
+/// not readable there, and polling would report a stall that is not one.
+/// `upstream` lists the connection readers beneath the body reader.
+///
+/// `request_timeout_ms` is the budget that remains when the call starts. Each wait gets
+/// that budget minus the time already spent in this function, so a body that keeps
+/// trickling still ends with `error.RequestTimedOut` when the budget is gone.
 ///
 /// A connection that closes mid-body ends the reader as if the body were
-/// whole, so a body shorter than `declared_len` is `error.BodyTruncated`: a
-/// transport failure that a caller may reissue, not a decode failure.
-pub fn readBody(reader: anytype, arena: std.mem.Allocator, limit_bytes: usize, declared_len: ?u64) ![]u8 {
-    const body = reader.allocRemaining(arena, .limited(limit_bytes)) catch |err| {
-        if (isTimeout(err)) return error.RequestTimedOut;
-        return err;
-    };
-    if (declared_len) |len| {
-        if (body.len < len) return error.BodyTruncated;
+/// whole, so a stream that ends with fewer than `declared_len` bytes is
+/// `error.BodyTruncated`: a transport failure that a caller may reissue, not a
+/// decode failure. A body that reaches `declared_len` ends without a further wait.
+pub fn readBodyWithin(
+    reader: *std.Io.Reader,
+    arena: std.mem.Allocator,
+    limit_bytes: usize,
+    fd: std.posix.fd_t,
+    silence_ceiling_ms: i32,
+    request_timeout_ms: i32,
+    upstream: []const *const std.Io.Reader,
+    declared_len: ?u64,
+) ![]u8 {
+    var body: std.ArrayList(u8) = .empty;
+    errdefer body.deinit(arena);
+    const started_ns = response_sanitize.monotonicNowNs();
+    while (true) {
+        if (declared_len == body.items.len) break;
+        if (!hasBufferedBytes(reader, upstream)) {
+            try waitForReadable(fd, silence_ceiling_ms, remainingMs(started_ns, request_timeout_ms));
+        }
+        reader.fill(1) catch |err| {
+            if (err == error.EndOfStream) break;
+            if (isTimeout(err)) return error.RequestTimedOut;
+            return err;
+        };
+        const available = reader.buffered();
+        if (body.items.len + available.len > limit_bytes) return error.StreamTooLong;
+        try body.appendSlice(arena, available);
+        reader.tossBuffered();
     }
-    return body;
+    if (declared_len) |len| {
+        if (body.items.len < len) return error.BodyTruncated;
+    }
+    return body.toOwnedSlice(arena);
+}
+
+fn hasBufferedBytes(reader: *const std.Io.Reader, upstream: []const *const std.Io.Reader) bool {
+    if (reader.bufferedLen() > 0) return true;
+    for (upstream) |lower| {
+        if (lower.bufferedLen() > 0) return true;
+    }
+    return false;
+}
+
+/// Block until the socket has bytes to read, bounded by the silence ceiling.
+/// Used before the head and again before the body: a blocking read that
+/// outlives `SO_RCVTIMEO` panics instead of erroring, so the wait is done here
+/// where a timeout is a typed error.
+///
+/// Which error it is depends on what was still on the clock. A ceiling shorter
+/// than the request budget expiring is `error.RequestStalled`: this one request
+/// went quiet while the turn could still afford another, which the caller may
+/// reissue. A ceiling that reaches the budget expiring is
+/// `error.RequestTimedOut`: the budget itself is gone, and reissuing would only
+/// fail again with nothing left to spend.
+///
+/// `request_timeout_ms` is the budget that remains at the call. The poll lasts for the
+/// shorter of the ceiling and that budget, and a budget of zero or less fails at once.
+pub fn waitForReadable(
+    fd: std.posix.fd_t,
+    silence_ceiling_ms: i32,
+    request_timeout_ms: i32,
+) error{ RequestTimedOut, RequestStalled, PollFailed }!void {
+    if (request_timeout_ms <= 0) return error.RequestTimedOut;
+    var fds = [_]std.posix.pollfd{.{
+        .fd = fd,
+        .events = std.posix.POLL.IN,
+        .revents = 0,
+    }};
+    const ready = std.posix.poll(&fds, @min(silence_ceiling_ms, request_timeout_ms)) catch
+        return error.PollFailed;
+    if (ready != 0) return;
+    if (silence_ceiling_ms < request_timeout_ms) return error.RequestStalled;
+    return error.RequestTimedOut;
+}
+
+/// The part of `budget_ms` left since `started_ns`, never below zero. An unavailable
+/// clock counts as no time spent.
+pub fn remainingMs(started_ns: ?u64, budget_ms: i32) i32 {
+    const spent: u64 = response_sanitize.elapsedMs(started_ns) orelse 0;
+    const spent_ms: i32 = @intCast(@min(spent, @as(u64, std.math.maxInt(i32))));
+    return @max(budget_ms -| spent_ms, 0);
+}
+
+pub fn effectiveRequestTimeoutMs(request_timeout_ms: ?u64, ceiling_ms: i32) i32 {
+    const ceiling: u64 = @intCast(ceiling_ms);
+    return @intCast(@max(@as(u64, 1), @min(request_timeout_ms orelse ceiling, ceiling)));
 }
 
 const testing = std.testing;

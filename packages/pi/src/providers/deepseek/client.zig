@@ -572,7 +572,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
         error.StreamTooLong => return ClientError.ResponseTooLarge,
         error.OutOfMemory => return error.OutOfMemory,
         error.RequestTimedOut => return error.RequestTimedOut,
-        error.DeepSeekGenerationStalled => return ClientError.DeepSeekGenerationStalled,
+        error.RequestStalled => return ClientError.DeepSeekGenerationStalled,
         else => return ClientError.DeepSeekServerUnavailable,
     };
     if (response.head.status != .ok) {
@@ -584,109 +584,19 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
     return .{ .ok = response_body };
 }
 
-/// Read the response body as it arrives, polling the socket before each wait.
-///
-/// `http_errors.readBody` reads to end of stream in one call, so the only bound
-/// on a mid-body stall was `SO_RCVTIMEO` - which is the 15-minute generation
-/// ceiling, never the turn's remaining budget. The two polls above cover the
-/// wait before the head and the wait before the first body byte and nothing
-/// after, so a connection that went silent once bytes had started arriving sat
-/// there for the full ceiling with no output and no error, long past the
-/// deadline `setProviderRequestTimeout` was asked to enforce.
-///
-/// Each pass takes the bytes that are available and does not wait for a full
-/// chunk, so a body that trickles in and goes quiet is bounded too. The socket
-/// is polled only when `reader` and every reader in `upstream` hold no bytes:
-/// a byte that the HTTP connection reader already took off the socket is not
-/// readable there, and polling would report a stall that is not one.
-/// `upstream` lists the connection readers beneath the body reader.
-///
-/// `request_timeout_ms` is the budget that remains when the call starts. Each wait gets
-/// that budget minus the time already spent in this function, so a body that keeps
-/// trickling still ends with `error.RequestTimedOut` when the budget is gone.
-///
-/// A stream that ends with fewer than `declared_len` bytes is `error.BodyTruncated`,
-/// and a body that reaches `declared_len` ends without a further wait.
-fn readBodyWithin(
-    reader: *std.Io.Reader,
-    arena: std.mem.Allocator,
-    limit_bytes: usize,
-    fd: std.posix.fd_t,
-    silence_ceiling_ms: i32,
-    request_timeout_ms: i32,
-    upstream: []const *const std.Io.Reader,
-    declared_len: ?u64,
-) ![]u8 {
-    var body: std.ArrayList(u8) = .empty;
-    errdefer body.deinit(arena);
-    const started_ns = monotonicNowNs();
-    while (true) {
-        if (declared_len == body.items.len) break;
-        if (!hasBufferedBytes(reader, upstream)) {
-            try waitForReadable(fd, silence_ceiling_ms, remainingMs(started_ns, request_timeout_ms));
-        }
-        reader.fill(1) catch |err| {
-            if (err == error.EndOfStream) break;
-            if (http_errors.isTimeout(err)) return error.RequestTimedOut;
-            return err;
-        };
-        const available = reader.buffered();
-        if (body.items.len + available.len > limit_bytes) return error.StreamTooLong;
-        try body.appendSlice(arena, available);
-        reader.tossBuffered();
-    }
-    if (declared_len) |len| {
-        if (body.items.len < len) return error.BodyTruncated;
-    }
-    return body.toOwnedSlice(arena);
-}
+const readBodyWithin = http_errors.readBodyWithin;
+const remainingMs = http_errors.remainingMs;
+const effectiveRequestTimeoutMs = http_errors.effectiveRequestTimeoutMs;
 
-fn hasBufferedBytes(reader: *const std.Io.Reader, upstream: []const *const std.Io.Reader) bool {
-    if (reader.bufferedLen() > 0) return true;
-    for (upstream) |lower| {
-        if (lower.bufferedLen() > 0) return true;
-    }
-    return false;
-}
-
-/// Block until the socket has bytes to read, bounded by the silence ceiling.
-/// Used before the head and again before the body: a blocking read that
-/// outlives `SO_RCVTIMEO` panics instead of erroring, so the wait is done here
-/// where a timeout is a typed error.
-///
-/// Which error it is depends on what was still on the clock. A ceiling shorter
-/// than the request budget expiring means this one request went quiet while the
-/// turn could still afford another, which is a stall the caller may reissue.
-/// A ceiling that reaches the budget expiring means the budget itself is gone,
-/// and reissuing would only fail again with nothing left to spend.
-///
-/// `request_timeout_ms` is the budget that remains at the call. The poll lasts for the
-/// shorter of the ceiling and that budget, and a budget of zero or less fails at once.
+/// The shared wait, with its outcomes named for this provider. A stall is one
+/// request that went quiet while the turn could still afford another, which the
+/// caller may reissue.
 fn waitForReadable(fd: std.posix.fd_t, silence_ceiling_ms: i32, request_timeout_ms: i32) !void {
-    if (request_timeout_ms <= 0) return error.RequestTimedOut;
-    var fds = [_]std.posix.pollfd{.{
-        .fd = fd,
-        .events = std.posix.POLL.IN,
-        .revents = 0,
-    }};
-    const ready = std.posix.poll(&fds, @min(silence_ceiling_ms, request_timeout_ms)) catch
-        return ClientError.DeepSeekServerUnavailable;
-    if (ready != 0) return;
-    if (silence_ceiling_ms < request_timeout_ms) return ClientError.DeepSeekGenerationStalled;
-    return error.RequestTimedOut;
-}
-
-/// The part of `budget_ms` left since `started_ns`, never below zero. An unavailable
-/// clock counts as no time spent.
-fn remainingMs(started_ns: ?u64, budget_ms: i32) i32 {
-    const spent: u64 = elapsedMs(started_ns) orelse 0;
-    const spent_ms: i32 = @intCast(@min(spent, @as(u64, std.math.maxInt(i32))));
-    return @max(budget_ms -| spent_ms, 0);
-}
-
-fn effectiveRequestTimeoutMs(request_timeout_ms: ?u64, ceiling_ms: i32) i32 {
-    const ceiling: u64 = @intCast(ceiling_ms);
-    return @intCast(@max(@as(u64, 1), @min(request_timeout_ms orelse ceiling, ceiling)));
+    http_errors.waitForReadable(fd, silence_ceiling_ms, request_timeout_ms) catch |err| return switch (err) {
+        error.RequestTimedOut => error.RequestTimedOut,
+        error.RequestStalled => ClientError.DeepSeekGenerationStalled,
+        error.PollFailed => ClientError.DeepSeekServerUnavailable,
+    };
 }
 
 /// The silence ceiling never exceeds the budget it sits inside. A configured
@@ -1036,7 +946,7 @@ test "a mid-body stall expires on the silence ceiling, not on the socket" {
     @memset(stalled_payload, 'x');
     var stalled_reader = std.Io.Reader.fixed(stalled_payload);
     try testing.expectError(
-        ClientError.DeepSeekGenerationStalled,
+        error.RequestStalled,
         readBodyWithin(&stalled_reader, allocator, 1 << 20, pipe_fds[0], 20, 1_000, &.{}, null),
     );
 
@@ -1094,6 +1004,20 @@ test "a silence ceiling separates a stalled request from a spent budget" {
     try testing.expectEqual(@as(i32, 1), effectiveStallCeilingMs(0, budget_ms));
 }
 
+test "the wait on a silent socket names a stall and a spent budget for DeepSeek" {
+    if (@TypeOf(std.posix.system.socketpair) == void) return error.SkipZigTest;
+    var fds: [2]std.posix.fd_t = undefined;
+    switch (std.posix.errno(std.posix.system.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds))) {
+        .SUCCESS => {},
+        else => return error.SkipZigTest,
+    }
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+
+    try testing.expectError(ClientError.DeepSeekGenerationStalled, waitForReadable(fds[0], 20, 1_000));
+    try testing.expectError(error.RequestTimedOut, waitForReadable(fds[0], 20, 20));
+}
+
 fn shutdownPeerAfterTwoSeconds(fd: std.posix.fd_t) void {
     std.Io.sleep(testing.io, .fromMilliseconds(2000), .awake) catch {};
     _ = std.posix.system.shutdown(fd, 1);
@@ -1122,7 +1046,7 @@ test "a body that trickles in below one chunk and then goes silent stalls on the
     const elapsed = elapsedMs(started).?;
     watchdog.join();
     defer if (result) |body| testing.allocator.free(body) else |_| {};
-    try testing.expectError(ClientError.DeepSeekGenerationStalled, result);
+    try testing.expectError(error.RequestStalled, result);
     try testing.expect(elapsed < 500);
 }
 

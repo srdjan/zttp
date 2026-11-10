@@ -46,6 +46,9 @@ const chat_completions_path = "/v1/chat/completions";
 const max_tool_envelope_bytes: usize = 1024 * 1024;
 const max_tool_calls: usize = 16;
 const response_head_timeout_ms: i32 = 15 * 60 * 1000;
+/// The body arrives at once when generation ends, so a silence of this length
+/// after the head is a hung server.
+const body_silence_ceiling_ms: i32 = @intCast(http_errors.read_idle_timeout_ms);
 const tool_call_start = "<|tool_call_start|>";
 const tool_call_end = "<|tool_call_end|>";
 
@@ -348,7 +351,16 @@ fn getReadiness(arena: std.mem.Allocator, url: []const u8, read_body: bool) !Rea
     var decompress: std.http.Decompress = undefined;
     var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
     const reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
-    const body = http_errors.readBody(reader, arena, max_response_body_bytes, declared_len) catch |err| switch (err) {
+    const body = http_errors.readBodyWithin(
+        reader,
+        arena,
+        max_response_body_bytes,
+        connection.stream_reader.stream.socket.handle,
+        body_silence_ceiling_ms,
+        response_head_timeout_ms,
+        &.{connection.reader()},
+        declared_len,
+    ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => return ClientError.LocalServerUnavailable,
     };
@@ -900,20 +912,29 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
     request_body.end() catch return ClientError.LocalServerUnavailable;
     request.connection.?.flush() catch return ClientError.LocalServerUnavailable;
 
-    try waitForResponseHead(
-        connection.stream_reader.stream.socket.handle,
-        effectiveRequestTimeoutMs(config.request_timeout_ms, response_head_timeout_ms),
-    );
+    const socket = connection.stream_reader.stream.socket.handle;
+    const request_timeout_ms = http_errors.effectiveRequestTimeoutMs(config.request_timeout_ms, response_head_timeout_ms);
+    const wait_started_ns = monotonicNowNs();
+    try waitForResponseHead(socket, request_timeout_ms);
     var response = request.receiveHead(&.{}) catch return ClientError.LocalServerUnavailable;
     const declared_len = http_errors.declaredBodyLength(response.head);
     var transfer_buf: [4096]u8 = undefined;
     var decompress: std.http.Decompress = undefined;
     var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
     const reader = response.readerDecompressing(&transfer_buf, &decompress, &decompress_buf);
-    const response_body = http_errors.readBody(reader, arena, max_response_body_bytes, declared_len) catch |err| switch (err) {
+    const response_body = http_errors.readBodyWithin(
+        reader,
+        arena,
+        max_response_body_bytes,
+        socket,
+        body_silence_ceiling_ms,
+        http_errors.remainingMs(wait_started_ns, request_timeout_ms),
+        &.{connection.reader()},
+        declared_len,
+    ) catch |err| switch (err) {
         error.StreamTooLong => return ClientError.ResponseTooLarge,
         error.OutOfMemory => return error.OutOfMemory,
-        error.RequestTimedOut => return error.RequestTimedOut,
+        error.RequestTimedOut, error.RequestStalled => return error.RequestTimedOut,
         else => return ClientError.LocalServerUnavailable,
     };
     if (response.head.status != .ok) {
@@ -936,11 +957,6 @@ fn waitForResponseHead(fd: std.posix.fd_t, timeout_ms: i32) !void {
     const ready = std.posix.poll(&fds, timeout_ms) catch
         return ClientError.LocalServerUnavailable;
     if (ready == 0) return error.RequestTimedOut;
-}
-
-fn effectiveRequestTimeoutMs(request_timeout_ms: ?u64, ceiling_ms: i32) i32 {
-    const ceiling: u64 = @intCast(ceiling_ms);
-    return @intCast(@max(@as(u64, 1), @min(request_timeout_ms orelse ceiling, ceiling)));
 }
 
 const writeJsonString = json_writer.writeString;
@@ -1631,6 +1647,8 @@ test "local client exposes the loop-facing request signature" {
 const TruncatedBodyServer = struct {
     listener: std.Io.net.Server,
     io: std.Io,
+    /// How long the server keeps the connection open after the partial body.
+    hold_ms: i64 = 0,
 
     fn run(self: *TruncatedBodyServer) void {
         const io = self.io;
@@ -1649,8 +1667,41 @@ const TruncatedBodyServer = struct {
         @memset(&pad, 'a');
         out.writeAll(&pad) catch return;
         out.flush() catch return;
+        std.Io.sleep(io, .fromMilliseconds(self.hold_ms), .awake) catch {};
     }
 };
+
+test "a body that goes silent before its Content-Length times out at the request budget" {
+    const allocator = testing.allocator;
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    // The server closes after 2 s so a defective read returns instead of hanging the suite.
+    var server: TruncatedBodyServer = .{
+        .listener = try address.listen(io, .{ .reuse_address = true }),
+        .io = io,
+        .hold_ms = 2000,
+    };
+    defer server.listener.deinit(io);
+    const port = server.listener.socket.address.getPort();
+    const thread = try std.Thread.spawn(.{}, TruncatedBodyServer.run, .{&server});
+    defer thread.join();
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const base = try std.fmt.allocPrint(arena, "http://127.0.0.1:{d}", .{port});
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(allocator);
+    try transcript.append(allocator, .{ .user_text = "hi" });
+    var client = Client.init(.{ .base_url = base, .model = "m", .system_prompt = "s", .request_timeout_ms = 300 });
+    const started = monotonicNowNs().?;
+    const result = client.sendTurn(arena, &transcript, null);
+    const elapsed = elapsedMs(started).?;
+    try testing.expectError(error.RequestTimedOut, result);
+    try testing.expect(elapsed < 1000);
+}
 
 test "a body that ends before its Content-Length is a transport failure" {
     const allocator = testing.allocator;
