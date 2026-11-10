@@ -358,6 +358,7 @@ fn getReadiness(arena: std.mem.Allocator, url: []const u8, read_body: bool) !Rea
         body_silence_ceiling_ms,
         response_head_timeout_ms,
         &.{connection.reader()},
+        null,
         declared_len,
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -928,6 +929,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
         body_silence_ceiling_ms,
         http_errors.remainingMs(wait_started_ns, request_timeout_ms),
         &.{connection.reader()},
+        null,
         declared_len,
     ) catch |err| switch (err) {
         error.StreamTooLong => return ClientError.ResponseTooLarge,

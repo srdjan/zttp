@@ -200,10 +200,12 @@ pub fn declaredBodyLength(head: std.http.Client.Response.Head) ?u64 {
 /// expired `SO_RCVTIMEO` panics instead of returning (see `setReadTimeoutMs`).
 /// Each pass here takes the bytes that are available and does not wait for a
 /// full chunk, so a body that trickles in and goes quiet is bounded too. The
-/// socket is polled only when `reader` and every reader in `upstream` hold no
-/// bytes: a byte that the HTTP connection reader already took off the socket is
-/// not readable there, and polling would report a stall that is not one.
-/// `upstream` lists the connection readers beneath the body reader.
+/// wait is skipped when `reader` or a reader in `upstream` holds bytes: a byte
+/// that the HTTP connection reader already took off the socket is not readable
+/// there, and polling would report a stall that is not one. `upstream` lists the
+/// connection readers beneath the body reader whose bytes need no socket read.
+/// `tls_input` is the socket reader beneath a TLS client, or null on a plain
+/// connection: its bytes count only as a whole record (see `waitForInput`).
 ///
 /// `request_timeout_ms` is the budget that remains when the call starts. Each wait gets
 /// that budget minus the time already spent in this function, so a body that keeps
@@ -221,6 +223,7 @@ pub fn readBodyWithin(
     silence_ceiling_ms: i32,
     request_timeout_ms: i32,
     upstream: []const *const std.Io.Reader,
+    tls_input: ?*std.Io.Reader,
     declared_len: ?u64,
 ) ![]u8 {
     var body: std.ArrayList(u8) = .empty;
@@ -229,7 +232,7 @@ pub fn readBodyWithin(
     while (true) {
         if (declared_len == body.items.len) break;
         if (!hasBufferedBytes(reader, upstream)) {
-            try waitForReadable(fd, silence_ceiling_ms, remainingMs(started_ns, request_timeout_ms));
+            try waitForInput(fd, tls_input, silence_ceiling_ms, started_ns, request_timeout_ms);
         }
         reader.fill(1) catch |err| {
             if (err == error.EndOfStream) break;
