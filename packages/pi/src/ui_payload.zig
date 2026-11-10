@@ -1007,7 +1007,8 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
         if (stats_val != .object or repairs_val != .array) return error.InvalidUiPayload;
         var repairs_buf = TextBuffer.init(allocator);
         defer repairs_buf.deinit();
-        try std.json.Stringify.value(repairs_val, .{}, repairs_buf.writer());
+        // The buffer writes to memory, so its one failure is a failed allocation.
+        std.json.Stringify.value(repairs_val, .{}, repairs_buf.writer()) catch return error.OutOfMemory;
         const stats_obj = stats_val.object;
         return .{ .protocol_repair = try ProtocolRepairPayload.init(
             allocator,
@@ -1893,6 +1894,15 @@ test "verified change set parser rejects a witness that is not an object" {
         \\"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],
         \\"proof_roots":["src/a.ts"],"witnesses_defeated":[5]}
     );
+}
+
+test "protocol repair parser reports a failed allocation as OutOfMemory" {
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"kind":"protocol_repair","stats":{},"repairs":[]}
+    , .{});
+    defer parsed.deinit();
+    var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
+    try testing.expectError(error.OutOfMemory, parse(failing.allocator(), parsed.value));
 }
 
 test "session tree payload round-trips" {
