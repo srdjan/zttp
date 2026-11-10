@@ -276,8 +276,12 @@ fn isExcludedName(name: []const u8) bool {
     return false;
 }
 
+/// A database is a proof input only when `zttp.json` names it, and
+/// `captureConfiguredInputs` reads that path whatever its extension. The walk
+/// leaves every other database out: the proof never opens one, and a running
+/// server writes its database while a proof waits for the commit.
 fn isProofInput(name: []const u8) bool {
-    const extensions = [_][]const u8{ ".ts", ".js", ".json", ".sql", ".sqlite", ".sqlite3", ".db" };
+    const extensions = [_][]const u8{ ".ts", ".js", ".json", ".sql" };
     for (extensions) |extension| if (std.mem.endsWith(u8, name, extension)) return true;
     return false;
 }
@@ -778,4 +782,54 @@ test "a captured target always matches its prepared baseline while the target ch
     if (failure) |err| return err;
     try testing.expect(!worker.failed.load(.acquire));
     try testing.expectEqual(@as(usize, 0), violations);
+}
+
+test "capture leaves a database that zttp.json does not name out of the read set" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "data.db", .data = "rows-1" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "data.sqlite", .data = "rows-1" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "data.sqlite3", .data = "rows-1" });
+    const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root_z);
+    const root = try testing.allocator.dupe(u8, root_z);
+    defer testing.allocator.free(root);
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/a.ts", .content = "new" });
+    defer prepared.deinit(testing.allocator);
+    var snapshot = try Snapshot.capture(testing.allocator, &prepared);
+    defer snapshot.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 3), snapshot.entries.len);
+    try testing.expectEqualStrings("src/a.ts", snapshot.entries[0].relative_path);
+    try testing.expectEqualStrings("src/zttp.json", snapshot.entries[1].relative_path);
+    try testing.expectEqualStrings("zttp.json", snapshot.entries[2].relative_path);
+    // A running server writes its database while a proof waits for the commit.
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "data.db", .data = "rows-2" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "data.sqlite", .data = "rows-2" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "data.sqlite3", .data = "rows-2" });
+    try snapshot.recheck(testing.allocator);
+}
+
+test "capture accepts a project with a database larger than the read limit that zttp.json does not name" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+    {
+        var file = try tmp.dir.createFile(testing.io, "data.db", .{});
+        defer file.close(testing.io);
+        try file.setLength(testing.io, max_read_file_bytes + 1);
+    }
+    const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root_z);
+    const root = try testing.allocator.dupe(u8, root_z);
+    defer testing.allocator.free(root);
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/a.ts", .content = "new" });
+    defer prepared.deinit(testing.allocator);
+    var snapshot = try Snapshot.capture(testing.allocator, &prepared);
+    defer snapshot.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 3), snapshot.entries.len);
 }
