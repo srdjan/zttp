@@ -1130,8 +1130,10 @@ fn approveEdit(preview: loop.ChangeSetApprovalPreview) !bool {
         const line = maybe_line orelse return false;
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
         if (trimmed.len == 0) return false;
+        // A typed-ahead request such as "you should also add tests" starts with
+        // y, so only the whole answer approves.
+        if (std.ascii.eqlIgnoreCase(trimmed, "y") or std.ascii.eqlIgnoreCase(trimmed, "yes")) return true;
         switch (trimmed[0]) {
-            'y', 'Y' => return true,
             'd', 'D' => {
                 for (preview.changes) |change| {
                     _ = std.c.write(std.c.STDOUT_FILENO, "\n", 1);
@@ -2308,4 +2310,29 @@ test "rebuildSession: /resume under no_session is refused and keeps the live tra
     );
     try testing.expectEqual(@as(usize, 2), session.transcript.len());
     try testing.expectEqualStrings("live message", session.transcript.at(1).user_text);
+}
+
+const one_line_preview: loop.ChangeSetApprovalPreview = .{
+    .proof_id = "proof",
+    .changes = &.{.{ .file = "handler.ts", .after = "return 1;\n" }},
+    .system_proven = true,
+};
+
+test "approveEdit: only y or yes approves, and a line that starts with y does not" {
+    var discard: [16]u8 = undefined;
+
+    var typed_ahead = try ReplStdio.begin("you should also add tests\n");
+    const typed_ahead_answer = approveEdit(one_line_preview);
+    _ = typed_ahead.end(&discard);
+    try testing.expectEqual(false, try typed_ahead_answer);
+
+    var letter = try ReplStdio.begin("y\n");
+    const letter_answer = approveEdit(one_line_preview);
+    _ = letter.end(&discard);
+    try testing.expectEqual(true, try letter_answer);
+
+    var word = try ReplStdio.begin("Yes\n");
+    const word_answer = approveEdit(one_line_preview);
+    _ = word.end(&discard);
+    try testing.expectEqual(true, try word_answer);
 }
