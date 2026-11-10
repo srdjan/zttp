@@ -31,16 +31,20 @@ fn execute(
     var strict = false;
     var builtins = false;
     var paths = args;
+    // The parsed document owns each path string and the path list, so it lives
+    // until the audit has written the envelope.
+    var parsed: ?std.json.Parsed(std.json.Value) = null;
+    defer if (parsed) |document| document.deinit();
 
     if (args.len == 1 and args[0].len > 0 and args[0][0] == '{') {
-        var parsed = std.json.parseFromSlice(std.json.Value, allocator, args[0], .{}) catch {
+        const document = std.json.parseFromSlice(std.json.Value, allocator, args[0], .{}) catch {
             return registry_mod.ToolResult.err(allocator, "zts_expert_verify_modules: invalid JSON input\n");
         };
-        defer parsed.deinit();
-        if (parsed.value != .object) {
+        parsed = document;
+        if (document.value != .object) {
             return registry_mod.ToolResult.err(allocator, "zts_expert_verify_modules: expected JSON object\n");
         }
-        const obj = parsed.value.object;
+        const obj = document.value.object;
         strict = if (obj.get("strict")) |value| value == .bool and value.bool else false;
         builtins = if (obj.get("builtins")) |value| value == .bool and value.bool else false;
 
@@ -68,7 +72,7 @@ fn execute(
         if (paths_val != .array or paths_val.array.items.len == 0) {
             return registry_mod.ToolResult.err(allocator, "zts_expert_verify_modules requires at least one path or builtins=true\n");
         }
-        const parsed_paths = try allocator.alloc([]const u8, paths_val.array.items.len);
+        const parsed_paths = try document.arena.allocator().alloc([]const u8, paths_val.array.items.len);
         for (paths_val.array.items, 0..) |item, i| {
             if (item != .string) {
                 return registry_mod.ToolResult.err(allocator, "zts_expert_verify_modules: paths must be strings\n");
@@ -226,4 +230,23 @@ test "diagnostics payload refuses a damaged violation" {
         defer testing.allocator.free(envelope);
         try testing.expectError(error.InvalidDiagnosticsEnvelope, buildDiagnosticsPayloadFromEnvelope(testing.allocator, envelope));
     }
+}
+
+test "a JSON paths argument names each audited path in the envelope" {
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, tool);
+    var result = try registry.invokeJson(testing.allocator, name, "{\"paths\":[\"/tmp/zts-pi-not-a-module.zig\"]}");
+    defer result.deinit(testing.allocator);
+    try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"checked_files\":[\"/tmp/zts-pi-not-a-module.zig\"]") != null);
+}
+
+test "a JSON paths argument with a path that is not a string is refused" {
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, tool);
+    var result = try registry.invokeJson(testing.allocator, name, "{\"paths\":[5]}");
+    defer result.deinit(testing.allocator);
+    try testing.expect(!result.ok);
+    try testing.expectEqualStrings("zts_expert_verify_modules: paths must be strings\n", result.llm_text);
 }
