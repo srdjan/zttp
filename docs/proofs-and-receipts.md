@@ -195,7 +195,9 @@ Why: -deterministic at src/handler.ts:14: Date.now()
 
 It reads as: the `deterministic` property was lost (`-`), the construct that
 broke it is at `src/handler.ts`, and that construct is `Date.now()`. Remove
-or relocate it and the property returns on the next save.
+or relocate it and the property returns on the next save. When the construct
+is a branch in an imported file, the row and the Counterexample block name
+that file, and the line is a line of that file.
 
 ### Counterexamples
 
@@ -205,7 +207,9 @@ shapes.
 
 An **offending node** is a single source location: the line and column, a
 snippet of the breaking construct, and a one-line fix. This is what you get
-for `deterministic` and similar path properties.
+for `deterministic` and similar path properties. In `check --json`, the
+`location` object has a `file` member only when the construct is in an
+imported file. A location with no `file` is a place in the checked file.
 
 A **flow chain** is an ordered walk of a tainted value from the call that
 produced it to the sink that leaked it, plus the request method and URL that

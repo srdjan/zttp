@@ -154,7 +154,7 @@ fn buildWhyRow(
     for (card.delta.demoted_properties) |demoted| {
         for (card.property_causes) |cause| {
             if (std.mem.eql(u8, cause.field, demoted.name)) {
-                return try allocator.print("Why: -{s} at {s}:{d}: {s}", .{ demoted.label, card.handler_path, cause.line, cause.snippet });
+                return try allocator.print("Why: -{s} at {s}:{d}: {s}", .{ demoted.label, cause.file orelse card.handler_path, cause.line, cause.snippet });
             }
         }
     }
@@ -707,6 +707,46 @@ test "writeProofCardFrame: renders Why row when a demoted property has a cause" 
     const out = aw.writer.buffered();
 
     try std.testing.expect(std.mem.indexOf(u8, out, "Why: -deterministic at src/handler.ts:14: Date.now()") != null);
+}
+
+test "writeProofCardFrame: the Why row names the dependency file of a cause, not the handler" {
+    const allocator = std.testing.allocator;
+
+    var current = try buildTestFacts(allocator);
+    defer current.deinit(allocator);
+    var baseline = try buildTestFacts(allocator);
+    defer baseline.deinit(allocator);
+    current.properties.deterministic = false;
+    baseline.properties.deterministic = true;
+
+    var delta = try review.deriveDelta(allocator, &current, &baseline);
+    defer delta.deinit(allocator);
+
+    const causes = [_]review.PropertyCauseEntry{.{
+        .field = "deterministic",
+        .line = 2,
+        .column = 3,
+        .snippet = "a branch",
+        .file = "src/dep.ts",
+    }};
+
+    const card = ProofCard{
+        .handler_path = "src/handler.ts",
+        .service_name = "demo",
+        .region = "local",
+        .current = &current,
+        .baseline = &baseline,
+        .delta = &delta,
+        .property_causes = causes[0..],
+    };
+
+    var aw = std.Io.Writer.Allocating.init(allocator);
+    defer aw.deinit();
+    try writeProofCardFrame(allocator, &card, &aw.writer, .{});
+    const out = aw.writer.buffered();
+
+    try std.testing.expect(std.mem.indexOf(u8, out, "Why: -deterministic at src/dep.ts:2: a branch") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out, "src/handler.ts:2") == null);
 }
 
 test "writeProofCardFrame: no Why row when there are no demotions" {

@@ -25,7 +25,9 @@ fn suggestionFor(name: []const u8, snippet: []const u8) ?[]const u8 {
 
 /// Return a preview for the first demoted property whose cause the verifier
 /// has recorded on `provenance`. Returns null when there are no demotions
-/// or none of them carry a cause yet.
+/// or none of them carry a cause yet. The path of the preview is the file of
+/// the cause: the dependency when the cause names one, and the handler when it
+/// does not. The line of a dependency cause is a line of that dependency.
 pub fn buildFromDelta(
     handler_path: []const u8,
     provenance: *const PropertyProvenance,
@@ -41,7 +43,7 @@ pub fn buildFromDelta(
                 .line = c.line,
                 .column = c.column,
                 .snippet = c.snippet,
-                .handler_path = handler_path,
+                .handler_path = c.file orelse handler_path,
                 .suggestion = suggestionFor(demoted.name, c.snippet),
             };
         }
@@ -143,4 +145,26 @@ test "buildFromDelta gives a static export suggestion for an export cause of det
         "remove the varying read from the response path, or declare a capsule without `deterministic` and `idempotent`.",
         preview.suggestion.?,
     );
+}
+
+test "buildFromDelta names the dependency file of a branch cause, not the handler" {
+    const provenance = PropertyProvenance{
+        .deterministic = .{
+            .line = 2,
+            .column = 3,
+            .snippet = "a branch on a value that varies between requests",
+            .file = "src/dep.ts",
+        },
+    };
+    const demoted = [_]review.PropertyChange{.{
+        .name = "deterministic",
+        .label = "deterministic",
+        .old_value = true,
+        .new_value = false,
+    }};
+    const delta = review.ReviewDelta{ .demoted_properties = demoted[0..] };
+
+    const preview = buildFromDelta("src/handler.ts", &provenance, &delta).?;
+    try testing.expectEqual(@as(u32, 2), preview.line);
+    try testing.expectEqualStrings("src/dep.ts", preview.handler_path);
 }

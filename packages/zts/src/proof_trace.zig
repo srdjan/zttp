@@ -52,6 +52,9 @@ pub const ProofCounterexample = struct {
     /// offending_node: the source location of the breaking construct.
     line: u32 = 0,
     column: u32 = 0,
+    /// offending_node: the file of the construct when it is not the checked
+    /// file, such as a branch in a dependency. Null for the checked file.
+    file: ?[]const u8 = null,
     snippet: []const u8 = "",
     /// flow_chain: ordered human-readable steps the tainted value travels.
     flow: []const []const u8 = &.{},
@@ -572,6 +575,8 @@ fn buildTrace(
                                 .kind = .offending_node,
                                 .line = cause.line,
                                 .column = cause.column,
+                                // The branch can be in a dependency. The contract owns that path.
+                                .file = if (cause.file) |file| try arena.dupe(u8, file) else null,
                                 .snippet = cause.snippet,
                                 .fix = "declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response.",
                             };
@@ -788,10 +793,14 @@ pub fn writeJson(writer: anytype, traces: []const ProofTrace) !void {
 fn writeCounterexample(writer: anytype, cx: ProofCounterexample) !void {
     switch (cx.kind) {
         .offending_node => {
-            try writer.print(
-                "{{\"kind\":\"offending-node\",\"location\":{{\"line\":{d},\"column\":{d}}},\"snippet\":",
-                .{ cx.line, cx.column },
-            );
+            // A location with no file is a place in the checked file.
+            try writer.writeAll("{\"kind\":\"offending-node\",\"location\":{");
+            if (cx.file) |file| {
+                try writer.writeAll("\"file\":");
+                try json_utils.writeJsonString(writer, file);
+                try writer.writeByte(',');
+            }
+            try writer.print("\"line\":{d},\"column\":{d}}},\"snippet\":", .{ cx.line, cx.column });
             try json_utils.writeJsonString(writer, cx.snippet);
             try writer.writeAll(",\"fix\":");
             try json_utils.writeJsonString(writer, cx.fix);

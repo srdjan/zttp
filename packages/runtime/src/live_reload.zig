@@ -552,6 +552,7 @@ pub const LiveReloadState = struct {
                 .line = c.line,
                 .column = c.column,
                 .snippet = c.snippet,
+                .file = c.file,
             };
             n_causes += 1;
         }

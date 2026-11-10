@@ -15489,6 +15489,49 @@ test "CHECK names the branch in the dependency that selects the response" {
     try std.testing.expectEqualStrings(branch_suggestion, diagnostic.suggestion orelse return error.TestUnexpectedResult);
 }
 
+// The proof trace of `check --json` gives the branch as a location. A location with no file
+// reads as a place in the checked file, so a branch in a dependency must name its file, as the
+// ZTS500 row above does.
+test "the proof trace names the file of a branch in a dependency that selects the response" {
+    const allocator = std.testing.allocator;
+    var fixture = try SiblingFixture.init(
+        \\import { pick } from "./dep.ts";
+        \\
+        \\export function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  return Response.text(pick());
+        \\}
+        \\
+    );
+    defer fixture.deinit();
+    try fixture.add("dep.ts",
+        \\export function pick(): string {
+        \\  if (Date.now() % 2 === 0) {
+        \\    return "a";
+        \\  }
+        \\  return "b";
+        \\}
+        \\
+    );
+    var result = try fixture.check();
+    defer result.deinit(allocator);
+    const directory = std.fs.path.dirname(fixture.handler_path) orelse return error.TestUnexpectedResult;
+    const expected = try std.fmt.allocPrint(allocator, "\"deterministic\":{{\"holds\":false,\"kind\":\"structural\",\"summary\":\"The response is reached through a branch on a value that varies between requests: two runs of the same request can differ.\",\"counterexample\":{{\"kind\":\"offending-node\",\"location\":{{\"file\":\"{s}/dep.ts\",\"line\":2,\"column\":3}},\"snippet\":\"a branch on a value that varies between requests\",\"fix\":\"declare a capsule without `deterministic` and `idempotent`, or move the varying read so that no branch on it precedes the return of the response.\"}}}}", .{directory});
+    defer allocator.free(expected);
+    const trace = result.proof_trace_json orelse return error.TestUnexpectedResult;
+    errdefer std.debug.print("proof trace: {s}\n", .{trace});
+    try std.testing.expect(std.mem.indexOf(u8, trace, expected) != null);
+}
+
+// Control: a branch in the checked file keeps a location with no file.
+test "the proof trace gives a branch in the checked file a location with no file" {
+    const allocator = std.testing.allocator;
+    var result = try runCheckOnlyFromSourceWithOptions(allocator, s1_clock_branch, "control-flow.ts", .{ .json_mode = true });
+    defer result.deinit(allocator);
+    const trace = result.proof_trace_json orelse return error.TestUnexpectedResult;
+    errdefer std.debug.print("proof trace: {s}\n", .{trace});
+    try std.testing.expect(std.mem.indexOf(u8, trace, "\"deterministic\":{\"holds\":false,\"kind\":\"structural\",\"summary\":\"The response is reached through a branch on a value that varies between requests: two runs of the same request can differ.\",\"counterexample\":{\"kind\":\"offending-node\",\"location\":{\"line\":3,\"column\":3},\"snippet\":\"a branch on a value that varies between requests\",") != null);
+}
+
 test "CHECK names the branch in the entry when the condition comes from a dependency clock" {
     const allocator = std.testing.allocator;
     var fixture = try SiblingFixture.init(

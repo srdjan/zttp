@@ -622,6 +622,9 @@ pub const PropertyCauseEntry = struct {
     line: u32,
     column: u32,
     snippet: []const u8,
+    /// The dependency file that holds the cause, borrowed from the contract.
+    /// Null when the cause is in the handler file.
+    file: ?[]const u8 = null,
 };
 
 /// All `[]const u8` fields are borrowed: the live-reload session that builds
@@ -633,6 +636,8 @@ pub const CounterexamplePreview = struct {
     line: u32,
     column: u32,
     snippet: []const u8,
+    /// The file that `line` counts in: the handler, or the dependency that
+    /// holds the cause.
     handler_path: []const u8,
     suggestion: ?[]const u8 = null,
 };
