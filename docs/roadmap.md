@@ -73,6 +73,10 @@ The recommendation remains at `pre-rebase:docs/zttp-next/zttp-v1.0-scope-and-v1x
   handler accepts multipart input.
 - There is no scrape-able `/metrics` endpoint. `/_health` and `/_readiness`
   return bare status codes.
+- A handler cannot set a response header. A Response init accepts only
+  `status`, and `zts check` refuses every other member with ZTS203. Header
+  support needs flow analysis that reads header values and a re-record of the
+  codegen corpus.
 - Windows is not supported.
 - Proof receipts have no identity binding. `zttp verify <url>` checks a
   signature against the key the endpoint supplies, so only `--trust-key`

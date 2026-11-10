@@ -68,7 +68,7 @@ Not supported (detected at parse time with suggestions): classes, async/await, P
 
 Statement termination is explicit: there is no automatic semicolon insertion (ZTS047). The escape set, the numeric forms, and the identifier character set are closed - an unknown escape (ZTS013), a backslash before a real newline (ZTS045), a radix prefix or exponent with no digits and a legacy octal literal (ZTS012), and a byte above ASCII in an identifier (ZTS046) are all refused with a location.
 
-Response helpers: `Response.json()`, `Response.text()`, `Response.html()`, `Response.redirect()`, `Response.rawJson()`. `Response.json` refuses a payload whose type JSON cannot carry (ZTS213); `Response.text` is the total constructor.
+Response helpers: `Response.json()`, `Response.text()`, `Response.html()`, `Response.redirect()`, `Response.rawJson()`. `Response.json` refuses a payload whose type JSON cannot carry (ZTS213); `Response.text` is the total constructor. A Response init accepts only a number `status`, and `Response.redirect` takes a status number, not an init; any other form is ZTS203.
 
 Request body readers (globals): `requestBody(req)` returns `Bytes` and is total, `requestText(req)` and `requestJson(req)` return a `Result` whose error names `absent`, `invalid-encoding`, or spec 6.4's JSON taxonomy. The `.value` of `requestJson(req)` is raw JSON, and a member or index read on it is refused (ZTS201). Decode it with `decodeJson` and a schema, or check `isDict(v)` and read with `dictGet(v, key)` from `zttp:collections`.
 
