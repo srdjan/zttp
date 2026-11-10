@@ -191,6 +191,11 @@ pub const CompileOptions = struct {
     emit_proof_evidence: bool = false,
 };
 
+// The SQL schema reader has no other test root.
+test {
+    _ = @import("precompile_sql.zig");
+}
+
 test "compile and check agree on summarized and exhaustive behavior paths" {
     const allocator = std.testing.allocator;
     const cases = [_]struct { source: []const u8, exhaustive: bool }{

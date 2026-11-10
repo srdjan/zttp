@@ -13,6 +13,7 @@ pub const verify_paths_core = @import("verify_paths_core.zig");
 pub const describe_rule = @import("describe_rule.zig");
 pub const edit_simulate = @import("edit_simulate.zig");
 pub const canonicalize = @import("canonicalize.zig");
+pub const precompile_sql = @import("precompile_sql.zig");
 pub const module_audit = @import("module_audit.zig");
 pub const json_diagnostics = @import("json_diagnostics.zig");
 const json_diag = precompile.json_diag;

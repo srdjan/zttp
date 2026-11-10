@@ -83,6 +83,45 @@ fn openSqlSchemaDatabase(allocator: std.mem.Allocator, schema_path: []const u8) 
     return sqlite.Db.openReadOnly(allocator, schema_path);
 }
 
+const schema_query =
+    "SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' " ++
+    "ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 WHEN 'view' THEN 2 ELSE 3 END, rowid";
+
+/// The schema of a SQLite database file as SQL text: each statement followed by
+/// `;\n`. A statement prepare depends on the schema and never on rows, so the
+/// proof hashes this text and not the file. The text runs back through
+/// `execSqlite` to a database that prepares the same statements.
+pub fn readDatabaseSchema(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    var db = try sqlite.Db.openReadOnly(allocator, path);
+    defer db.close();
+    // A running server may hold a write lock while the proof reads.
+    if (sqlite.c.sqlite3_busy_timeout(db.handle, sqlite.busy_timeout_ms) != sqlite.c.SQLITE_OK) {
+        return error.SqlSchemaReadFailed;
+    }
+    var stmt = db.prepare(schema_query) catch return error.SqlSchemaReadFailed;
+    defer stmt.finalize();
+
+    var text: std.ArrayList(u8) = .empty;
+    errdefer text.deinit(allocator);
+    while (true) {
+        const rc = stmt.step();
+        if (rc == sqlite.c.SQLITE_DONE) break;
+        if (rc != sqlite.c.SQLITE_ROW) return error.SqlSchemaReadFailed;
+        const column = sqlite.c.sqlite3_column_text(stmt.handle, 0) orelse return error.SqlSchemaReadFailed;
+        const length: usize = @intCast(sqlite.c.sqlite3_column_bytes(stmt.handle, 0));
+        try text.appendSlice(allocator, column[0..length]);
+        try text.appendSlice(allocator, ";\n");
+    }
+    return text.toOwnedSlice(allocator);
+}
+
+/// Run `sql_text` against the database at `path`, creating the file when absent.
+pub fn execSqlite(allocator: std.mem.Allocator, path: []const u8, sql_text: []const u8) !void {
+    var db = try sqlite.Db.openReadWriteCreate(allocator, path);
+    defer db.close();
+    try db.exec(allocator, sql_text);
+}
+
 fn ensureNamedParameters(stmt: *sqlite.Stmt, query_name: []const u8) !void {
     const count = stmt.paramCount();
     for (1..count + 1) |idx| {
@@ -93,4 +132,31 @@ fn ensureNamedParameters(stmt: *sqlite.Stmt, query_name: []const u8) !void {
             return error.PositionalSqlParameter;
         }
     }
+}
+
+test "readDatabaseSchema leaves out sqlite_sequence and orders an index after its table" {
+    const testing = std.testing;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root_z);
+    const path = try std.fs.path.join(testing.allocator, &.{ root_z, "data.db" });
+    defer testing.allocator.free(path);
+    try execSqlite(
+        testing.allocator,
+        path,
+        "CREATE TABLE a(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);" ++
+            "CREATE INDEX a_name ON a(name);" ++
+            "CREATE TABLE b(x INTEGER);" ++
+            "INSERT INTO a(name) VALUES ('row');",
+    );
+
+    const schema = try readDatabaseSchema(testing.allocator, path);
+    defer testing.allocator.free(schema);
+    try testing.expectEqualStrings(
+        "CREATE TABLE a(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT);\n" ++
+            "CREATE TABLE b(x INTEGER);\n" ++
+            "CREATE INDEX a_name ON a(name);\n",
+        schema,
+    );
 }
