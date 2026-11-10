@@ -8,7 +8,8 @@
 //! Errors:
 //!   - `error.SchemaVersionUnsupported` - the journal is not direct-cutover v4.
 //!   - `error.CorruptEventsLog` - frame or JSON corruption, invalid stable IDs,
-//!     a malformed checkpoint, or an unknown event kind.
+//!     a malformed checkpoint, a damaged display payload, or an unknown event
+//!     kind.
 //!   - Underlying file-IO errors propagate (`error.FileNotFound`, etc.).
 //!
 //! Empty file returns a fresh empty `Transcript`.
@@ -69,7 +70,7 @@ pub fn reconstructTranscript(
         };
         defer decoded.deinit();
         applyDecodedEnvelope(allocator, &tr, &decoded) catch |err| switch (err) {
-            error.CorruptEventsLog, error.InvalidProjectionCut => {
+            error.CorruptEventsLog, error.InvalidProjectionCut, error.InvalidUiPayload => {
                 if (diag) |d| d.* = .{
                     .line_number = record_number,
                     .message = "invalid or malformed v4 event frame",
@@ -998,6 +999,36 @@ test "reconstructTranscript is read-only and recovery requires the journal lock"
     var tr = try reconstructTranscript(allocator, path, null);
     defer tr.deinit(allocator);
     try testing.expectEqual(@as(usize, 1), tr.len());
+}
+
+test "reconstructTranscript reports a damaged display payload as a corrupt record" {
+    const allocator = testing.allocator;
+    var tmp = try initTmp(allocator);
+    defer tmp.cleanup(allocator);
+
+    // Each second record has a valid frame and a valid envelope. Its
+    // ui_payload is damaged: a plain_text with no text, and an exit code
+    // above the u8 range.
+    const cases = [_]struct { name: []const u8, payload: []const u8 }{
+        .{
+            .name = "tool-result-payload.events",
+            .payload = "{\"v\":4,\"entry_id\":2,\"k\":\"tool_result\",\"d\":{\"tool_use_id\":\"toolu_1\",\"tool_name\":\"tool\",\"ok\":true,\"llm_text\":\"result\",\"ui_payload\":{\"kind\":\"plain_text\"}}}",
+        },
+        .{
+            .name = "proof-card-payload.events",
+            .payload = "{\"v\":4,\"entry_id\":2,\"k\":\"proof_card\",\"d\":{\"llm_text\":\"proof\",\"ui_payload\":{\"kind\":\"command_outcome\",\"title\":\"t\",\"exit_code\":256,\"stdout\":\"\",\"stderr\":\"\",\"command\":\"c\"}}}",
+        },
+    };
+    for (cases) |case| {
+        const path = try tmp.childPath(allocator, case.name);
+        defer allocator.free(path);
+        try writeRawSchema4Frame(allocator, path, "{\"v\":4,\"entry_id\":1,\"k\":\"user_text\",\"d\":\"one\"}");
+        try appendRawSchema4Frame(allocator, path, case.payload);
+
+        var diag: Diagnostic = .{};
+        try testing.expectError(error.CorruptEventsLog, reconstructTranscript(allocator, path, &diag));
+        try testing.expectEqual(@as(usize, 2), diag.line_number);
+    }
 }
 
 test "reconstructTranscript reports the line number of the first corrupt record" {
