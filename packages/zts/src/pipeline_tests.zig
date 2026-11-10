@@ -6799,6 +6799,47 @@ test "response init: a shadowed Response is a different value" {
 }
 
 // ---------------------------------------------------------------------------
+// Response constructor: `Response?.json` and `Response["json"]` call it too
+// ---------------------------------------------------------------------------
+
+/// `source` must report exactly one ZTS213 (`unencodable_json_payload`) with `message`.
+fn expectOneUnencodablePayload(source: []const u8, comptime message: []const u8) !void {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.typeDiagnostics();
+            try testing.expectEqual(@as(usize, 1), diagnostics.len);
+            try testing.expectEqual(type_checker_mod.DiagnosticKind.unencodable_json_payload, diagnostics[0].kind);
+            try testing.expectEqualStrings(message, diagnostics[0].message);
+        }
+    };
+    try withSession(testing.allocator, source, Probe.run);
+}
+
+test "response constructor: a Bytes payload behind an optional call is ZTS213" {
+    try expectOneUnencodablePayload(
+        \\function handler(req: Request): Response { return Response?.json({ raw: requestBody(req) }); }
+    , "Response.json cannot encode this payload: Bytes is not a JSON value");
+}
+
+test "response constructor: a Bytes payload behind a string literal key is ZTS213" {
+    try expectOneUnencodablePayload(
+        \\function handler(req: Request): Response { return Response["json"]({ raw: requestBody(req) }); }
+    , "Response.json cannot encode this payload: Bytes is not a JSON value");
+}
+
+test "response constructor: an optional call has the Response type" {
+    try expectOneMismatch(
+        \\function f(): string { const s: string = Response?.text("x"); return s; }
+    , "type 'Response' is not assignable to type 'string'");
+}
+
+test "response constructor: a call through a string literal key has the Response type" {
+    try expectOneMismatch(
+        \\function f(): string { const s: string = Response["text"]("x"); return s; }
+    , "type 'Response' is not assignable to type 'string'");
+}
+
+// ---------------------------------------------------------------------------
 // Module-state writers across a file import
 // ---------------------------------------------------------------------------
 

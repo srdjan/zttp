@@ -4889,9 +4889,11 @@ pub const TypeChecker = struct {
         const call = self.ir_view.getCall(node) orelse return null_type_idx;
         const callee_tag = self.ir_view.getTag(call.callee) orelse return null_type_idx;
 
+        // Before the branches on the callee tag: `responseConstructorName`
+        // reads every spelling of the callee.
+        const constructed = self.inferResponseConstructorType(call);
+        if (constructed != null_type_idx) return constructed;
         if (callee_tag == .member_access) {
-            const constructed = self.inferResponseConstructorType(call);
-            if (constructed != null_type_idx) return constructed;
             const declared = self.inferFunctionReturnType(self.inferType(call.callee));
             if (declared != null_type_idx) return declared;
             return self.inferBuiltinMemberCall(call);
@@ -7864,6 +7866,7 @@ pub const TypeChecker = struct {
         const callee_tag = self.ir_view.getTag(call.callee) orelse return;
         // Before the branches on the callee tag: `responseConstructorName`
         // reads every spelling of the callee.
+        self.checkResponseJsonPayload(call);
         self.checkResponseInit(call);
         if (callee_tag == .identifier) {
             self.checkModuleEncodableArgs(call);
@@ -7873,7 +7876,6 @@ pub const TypeChecker = struct {
             if (self.checkDictCallbackParams(call)) return;
         }
         if (callee_tag == .member_access) {
-            self.checkResponseJsonPayload(call);
             if (self.checkArrayCallbackParams(call)) return;
             const callee_type = self.inferType(call.callee);
             const tag = self.env.pool.getTag(callee_type) orelse return;
