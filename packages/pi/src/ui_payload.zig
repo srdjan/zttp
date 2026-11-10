@@ -984,10 +984,7 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
         errdefer allocator.free(stderr_copy);
         return .{ .command_outcome = .{
             .title = title_copy,
-            .exit_code = if (getUnsigned(obj, "exit_code")) |exit_code|
-                std.math.cast(u8, exit_code) orelse return error.InvalidUiPayload
-            else
-                null,
+            .exit_code = try getOptionalUnsigned(u8, obj.get("exit_code")),
             .stdout = stdout_copy,
             .stderr = stderr_copy,
             .command = try allocator.dupe(u8, command),
@@ -1318,7 +1315,7 @@ fn parsePropertiesSnapshot(value_opt: ?std.json.Value) !?PropertiesSnapshot {
             inline for (@typeInfo(PropertiesSnapshot).@"struct".field_names) |field| {
                 @field(snapshot, field) = switch (@typeInfo(@FieldType(PropertiesSnapshot, field))) {
                     .bool => getBoolOrDefault(obj, field, false),
-                    .optional => try getOptionalUnsignedValue(obj.get(field)),
+                    .optional => |optional| try getOptionalUnsigned(optional.child, obj.get(field)),
                     else => @compileError("unsupported PropertiesSnapshot field type"),
                 };
             }
@@ -1493,21 +1490,17 @@ fn parseProofStats(obj: std.json.ObjectMap) !ProofStats {
     return .{
         .total = try requireU32(obj, "total"),
         .new = try requireU32(obj, "new"),
-        .preexisting = if (getUnsigned(obj, "preexisting")) |preexisting|
-            std.math.cast(u32, preexisting) orelse return error.InvalidUiPayload
-        else
-            null,
+        .preexisting = try getOptionalUnsigned(u32, obj.get("preexisting")),
     };
 }
 
-fn getOptionalUnsignedValue(value_opt: ?std.json.Value) !?u32 {
+/// An absent value and a null read as absent. A present value that `T` cannot
+/// hold marks a damaged document.
+fn getOptionalUnsigned(comptime T: type, value_opt: ?std.json.Value) !?T {
     const value = value_opt orelse return null;
     return switch (value) {
         .null => null,
-        .integer => |integer| blk: {
-            if (integer < 0) return error.InvalidUiPayload;
-            break :blk std.math.cast(u32, integer) orelse return error.InvalidUiPayload;
-        },
+        .integer => |integer| std.math.cast(T, integer) orelse error.InvalidUiPayload,
         else => error.InvalidUiPayload,
     };
 }
@@ -2118,6 +2111,64 @@ test "parse accepts the largest number that a field holds" {
     try testing.expectEqual(@as(u32, 4294967295), card.proof_card.stats.total);
     try testing.expectEqual(@as(u32, 4294967295), card.proof_card.stats.new);
     try testing.expectEqual(@as(?u32, 4294967295), card.proof_card.stats.preexisting);
+}
+
+test "parse refuses an optional number that its field cannot hold" {
+    // Each row changes one optional number of a census document to a negative
+    // number or to a string.
+    const Case = struct { kind: std.meta.Tag(UiPayload), valid: []const u8, damaged: []const u8 };
+    const cases = [_]Case{
+        .{ .kind = .command_outcome, .valid = "\"exit_code\":1,", .damaged = "\"exit_code\":-1," },
+        .{ .kind = .command_outcome, .valid = "\"exit_code\":1,", .damaged = "\"exit_code\":\"1\"," },
+        .{ .kind = .proof_card, .valid = "\"preexisting\":2}", .damaged = "\"preexisting\":-1}" },
+        .{ .kind = .proof_card, .valid = "\"preexisting\":2}", .damaged = "\"preexisting\":\"2\"}" },
+        .{ .kind = .repair_candidate, .valid = "\"preexisting\":2}", .damaged = "\"preexisting\":-1}" },
+        .{ .kind = .protocol_repair, .valid = "\"preexisting\":2}", .damaged = "\"preexisting\":-1}" },
+    };
+    for (cases) |case| {
+        const sample = sampleDocument(case.kind);
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sample, case.valid));
+        const damaged = try std.mem.replaceOwned(u8, testing.allocator, sample, case.valid, case.damaged);
+        defer testing.allocator.free(damaged);
+        try expectInvalidPayload(damaged);
+    }
+}
+
+test "parse reads an absent optional number as absent" {
+    var null_exit = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"kind":"command_outcome","title":"t","exit_code":null,"stdout":"","stderr":"",
+        \\"command":"c"}
+    , .{});
+    defer null_exit.deinit();
+    var command = try parse(testing.allocator, null_exit.value);
+    defer command.deinit(testing.allocator);
+    try testing.expectEqual(@as(?u8, null), command.command_outcome.exit_code);
+
+    var no_exit = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"kind":"command_outcome","title":"t","stdout":"","stderr":"","command":"c"}
+    , .{});
+    defer no_exit.deinit();
+    var command_without_key = try parse(testing.allocator, no_exit.value);
+    defer command_without_key.deinit(testing.allocator);
+    try testing.expectEqual(@as(?u8, null), command_without_key.command_outcome.exit_code);
+
+    var null_preexisting = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"kind":"proof_card","title":"t","summary":"s",
+        \\"stats":{"total":1,"new":1,"preexisting":null},"highlights":[]}
+    , .{});
+    defer null_preexisting.deinit();
+    var card = try parse(testing.allocator, null_preexisting.value);
+    defer card.deinit(testing.allocator);
+    try testing.expectEqual(@as(?u32, null), card.proof_card.stats.preexisting);
+
+    var no_preexisting = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"kind":"proof_card","title":"t","summary":"s","stats":{"total":1,"new":1},
+        \\"highlights":[]}
+    , .{});
+    defer no_preexisting.deinit();
+    var card_without_key = try parse(testing.allocator, no_preexisting.value);
+    defer card_without_key.deinit(testing.allocator);
+    try testing.expectEqual(@as(?u32, null), card_without_key.proof_card.stats.preexisting);
 }
 
 test "session tree payload round-trips" {
