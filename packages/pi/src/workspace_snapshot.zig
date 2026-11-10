@@ -390,7 +390,11 @@ fn captureConfiguredPath(
 ) !void {
     if (!common.isPathInsideRoot(project_root, absolute)) return error.ProofContextOutsideProject;
     const relative = common.relativeToRoot(project_root, absolute);
-    if (common.isSecretPath(relative)) return error.SecretPath;
+    // `recheck` resolves every entry through this call. A path that it would
+    // refuse on every commit is refused here, before its bytes are read.
+    const canonical = try common.resolveInsideWorkspace(allocator, project_root, relative);
+    defer allocator.free(canonical);
+    if (!std.mem.eql(u8, canonical, absolute)) return error.SymlinkProofInputUnsupported;
     if (containsAbsolute(entries.items, absolute)) return;
     const stat = std.Io.Dir.cwd().statFile(io, absolute, .{ .follow_symlinks = false }) catch |err| switch (err) {
         error.FileNotFound => return appendAbsent(allocator, entries, absolute, relative),
@@ -602,6 +606,48 @@ test "capture refuses a configured proof input with a secret name" {
     var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/a.ts", .content = "new" });
     defer prepared.deinit(testing.allocator);
     try testing.expectError(error.SecretPath, Snapshot.capture(testing.allocator, &prepared));
+}
+
+test "capture refuses a configured proof input reached through a symlink to a secret directory" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.createDirPath(testing.io, ".env.d");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".env.d/policy.json", .data = "{\"profiles\":[]}" });
+    try tmp.dir.symLink(testing.io, ".env.d", "conf", .{ .is_directory = true });
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "zttp.json",
+        .data = "{\"entry\":\"src/a.ts\",\"policy\":\"conf/policy.json\"}",
+    });
+    const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root_z);
+    const root = try testing.allocator.dupe(u8, root_z);
+    defer testing.allocator.free(root);
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/a.ts", .content = "new" });
+    defer prepared.deinit(testing.allocator);
+    try testing.expectError(error.SecretPath, Snapshot.capture(testing.allocator, &prepared));
+}
+
+test "capture refuses a configured proof input reached through a symlinked directory" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.createDirPath(testing.io, "real");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "real/policy.json", .data = "{\"profiles\":[]}" });
+    try tmp.dir.symLink(testing.io, "real", "conf", .{ .is_directory = true });
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "zttp.json",
+        .data = "{\"entry\":\"src/a.ts\",\"policy\":\"conf/policy.json\"}",
+    });
+    const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root_z);
+    const root = try testing.allocator.dupe(u8, root_z);
+    defer testing.allocator.free(root);
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/a.ts", .content = "new" });
+    defer prepared.deinit(testing.allocator);
+    try testing.expectError(error.SymlinkProofInputUnsupported, Snapshot.capture(testing.allocator, &prepared));
 }
 
 test "scratch directory creation never reuses an existing directory" {
