@@ -925,8 +925,8 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
                 getString(item_obj, "code") orelse return error.InvalidUiPayload,
                 getString(item_obj, "severity") orelse return error.InvalidUiPayload,
                 getString(item_obj, "path") orelse return error.InvalidUiPayload,
-                @intCast(getUnsigned(item_obj, "line") orelse return error.InvalidUiPayload),
-                @intCast(getUnsigned(item_obj, "column") orelse return error.InvalidUiPayload),
+                try requireU32(item_obj, "line"),
+                try requireU32(item_obj, "column"),
                 getString(item_obj, "message") orelse return error.InvalidUiPayload,
                 getBool(item_obj, "introduced_by_patch"),
             );
@@ -961,14 +961,7 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             if (highlight != .string) return error.InvalidUiPayload;
             highlights[i] = try allocator.dupe(u8, highlight.string);
         }
-        const stats: ProofStats = .{
-            .total = @intCast(getUnsigned(stats_obj, "total") orelse return error.InvalidUiPayload),
-            .new = @intCast(getUnsigned(stats_obj, "new") orelse return error.InvalidUiPayload),
-            .preexisting = if (getUnsigned(stats_obj, "preexisting")) |preexisting|
-                @intCast(preexisting)
-            else
-                null,
-        };
+        const stats = try parseProofStats(stats_obj);
         const title_copy = try allocator.dupe(u8, title);
         errdefer allocator.free(title_copy);
         return .{ .proof_card = .{
@@ -992,7 +985,7 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
         return .{ .command_outcome = .{
             .title = title_copy,
             .exit_code = if (getUnsigned(obj, "exit_code")) |exit_code|
-                @intCast(exit_code)
+                std.math.cast(u8, exit_code) orelse return error.InvalidUiPayload
             else
                 null,
             .stdout = stdout_copy,
@@ -1012,14 +1005,7 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             getString(obj, "proposed_content") orelse return error.InvalidUiPayload,
             getBool(obj, "verification_ok") orelse return error.InvalidUiPayload,
             getString(obj, "verification_summary") orelse return error.InvalidUiPayload,
-            .{
-                .total = @intCast(getUnsigned(stats_obj, "total") orelse return error.InvalidUiPayload),
-                .new = @intCast(getUnsigned(stats_obj, "new") orelse return error.InvalidUiPayload),
-                .preexisting = if (getUnsigned(stats_obj, "preexisting")) |preexisting|
-                    @intCast(preexisting)
-                else
-                    null,
-            },
+            try parseProofStats(stats_obj),
         ) };
     }
     if (std.mem.eql(u8, kind_val.string, "protocol_repair")) {
@@ -1041,14 +1027,7 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             getString(obj, "policy_hash") orelse return error.InvalidUiPayload,
             getString(obj, "module_graph_hash") orelse return error.InvalidUiPayload,
             getString(obj, "verification_summary") orelse return error.InvalidUiPayload,
-            .{
-                .total = @intCast(getUnsigned(stats_obj, "total") orelse return error.InvalidUiPayload),
-                .new = @intCast(getUnsigned(stats_obj, "new") orelse return error.InvalidUiPayload),
-                .preexisting = if (getUnsigned(stats_obj, "preexisting")) |preexisting|
-                    @intCast(preexisting)
-                else
-                    null,
-            },
+            try parseProofStats(stats_obj),
         ) };
     }
     if (std.mem.eql(u8, kind_val.string, "verified_change_set")) {
@@ -1446,14 +1425,14 @@ fn parseWitnessBody(
         const stub_val = stubs_value.array.items[si];
         if (stub_val != .object) return error.InvalidUiPayload;
         const stub_obj = stub_val.object;
-        const seq_value = getUnsigned(stub_obj, "seq") orelse return error.InvalidUiPayload;
+        const seq_value = try requireU32(stub_obj, "seq");
         const module_copy = try allocator.dupe(u8, getString(stub_obj, "module") orelse return error.InvalidUiPayload);
         errdefer allocator.free(module_copy);
         const func_copy = try allocator.dupe(u8, getString(stub_obj, "func") orelse return error.InvalidUiPayload);
         errdefer allocator.free(func_copy);
         const result_copy = try allocator.dupe(u8, getString(stub_obj, "result_json") orelse return error.InvalidUiPayload);
         stubs[si] = .{
-            .seq = @intCast(seq_value),
+            .seq = seq_value,
             .module = module_copy,
             .func = func_copy,
             .result_json = result_copy,
@@ -1464,10 +1443,10 @@ fn parseWitnessBody(
         .key = key_copy,
         .property = property_copy,
         .summary = summary_copy,
-        .origin_line = @intCast(getUnsigned(origin_obj.object, "line") orelse return error.InvalidUiPayload),
-        .origin_column = @intCast(getUnsigned(origin_obj.object, "column") orelse return error.InvalidUiPayload),
-        .sink_line = @intCast(getUnsigned(sink_obj.object, "line") orelse return error.InvalidUiPayload),
-        .sink_column = @intCast(getUnsigned(sink_obj.object, "column") orelse return error.InvalidUiPayload),
+        .origin_line = try requireU32(origin_obj.object, "line"),
+        .origin_column = try requireU32(origin_obj.object, "column"),
+        .sink_line = try requireU32(sink_obj.object, "line"),
+        .sink_column = try requireU32(sink_obj.object, "column"),
         .request_method = method_copy,
         .request_url = url_copy,
         .request_has_auth = has_auth,
@@ -1508,6 +1487,23 @@ pub fn getUnsigned(obj: std.json.ObjectMap, key: []const u8) ?usize {
     const value = obj.get(key) orelse return null;
     if (value != .integer or value.integer < 0) return null;
     return std.math.cast(usize, value.integer);
+}
+
+/// A number that the field cannot hold marks a damaged document.
+fn requireU32(obj: std.json.ObjectMap, key: []const u8) !u32 {
+    const value = getUnsigned(obj, key) orelse return error.InvalidUiPayload;
+    return std.math.cast(u32, value) orelse error.InvalidUiPayload;
+}
+
+fn parseProofStats(obj: std.json.ObjectMap) !ProofStats {
+    return .{
+        .total = try requireU32(obj, "total"),
+        .new = try requireU32(obj, "new"),
+        .preexisting = if (getUnsigned(obj, "preexisting")) |preexisting|
+            std.math.cast(u32, preexisting) orelse return error.InvalidUiPayload
+        else
+            null,
+    };
 }
 
 fn getOptionalUnsignedValue(value_opt: ?std.json.Value) !?u32 {
@@ -2046,6 +2042,60 @@ test "parse frees every allocation when any one allocation fails, for every payl
 
         try testing.checkAllAllocationFailures(testing.allocator, parseThenFree, .{parsed.value});
     }
+}
+
+test "parse refuses a number that is too large for its field" {
+    // Each row changes one number of a census document to the first value that
+    // the field type cannot hold: 2^32 for a u32, 256 for the u8 exit code.
+    const Case = struct { kind: std.meta.Tag(UiPayload), valid: []const u8, too_large: []const u8 };
+    const cases = [_]Case{
+        .{ .kind = .diagnostics, .valid = "\"line\":3,", .too_large = "\"line\":4294967296," },
+        .{ .kind = .diagnostics, .valid = "\"column\":7,", .too_large = "\"column\":4294967296," },
+        .{ .kind = .proof_card, .valid = "\"total\":3,", .too_large = "\"total\":4294967296," },
+        .{ .kind = .proof_card, .valid = "\"new\":1,", .too_large = "\"new\":4294967296," },
+        .{ .kind = .proof_card, .valid = "\"preexisting\":2}", .too_large = "\"preexisting\":4294967296}" },
+        .{ .kind = .command_outcome, .valid = "\"exit_code\":1,", .too_large = "\"exit_code\":256," },
+        .{ .kind = .repair_candidate, .valid = "\"total\":3,", .too_large = "\"total\":4294967296," },
+        .{ .kind = .repair_candidate, .valid = "\"new\":1,", .too_large = "\"new\":4294967296," },
+        .{ .kind = .repair_candidate, .valid = "\"preexisting\":2}", .too_large = "\"preexisting\":4294967296}" },
+        .{ .kind = .protocol_repair, .valid = "\"total\":3,", .too_large = "\"total\":4294967296," },
+        .{ .kind = .protocol_repair, .valid = "\"new\":1,", .too_large = "\"new\":4294967296," },
+        .{ .kind = .protocol_repair, .valid = "\"preexisting\":2}", .too_large = "\"preexisting\":4294967296}" },
+        .{ .kind = .verified_change_set, .valid = "\"seq\":0,", .too_large = "\"seq\":4294967296," },
+        .{ .kind = .verified_change_set, .valid = "\"origin\":{\"line\":1,", .too_large = "\"origin\":{\"line\":4294967296," },
+        .{ .kind = .verified_change_set, .valid = "\"column\":2}", .too_large = "\"column\":4294967296}" },
+        .{ .kind = .verified_change_set, .valid = "\"sink\":{\"line\":3,", .too_large = "\"sink\":{\"line\":4294967296," },
+        .{ .kind = .verified_change_set, .valid = "\"column\":4}", .too_large = "\"column\":4294967296}" },
+    };
+    for (cases) |case| {
+        const sample = sampleDocument(case.kind);
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, sample, case.valid));
+        const damaged = try std.mem.replaceOwned(u8, testing.allocator, sample, case.valid, case.too_large);
+        defer testing.allocator.free(damaged);
+        try expectInvalidPayload(damaged);
+    }
+}
+
+test "parse accepts the largest number that a field holds" {
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"kind":"command_outcome","title":"t","exit_code":255,"stdout":"","stderr":"",
+        \\"command":"c"}
+    , .{});
+    defer parsed.deinit();
+    var command = try parse(testing.allocator, parsed.value);
+    defer command.deinit(testing.allocator);
+    try testing.expectEqual(@as(?u8, 255), command.command_outcome.exit_code);
+
+    var parsed_card = try std.json.parseFromSlice(std.json.Value, testing.allocator,
+        \\{"kind":"proof_card","title":"t","summary":"s","highlights":[],
+        \\"stats":{"total":4294967295,"new":4294967295,"preexisting":4294967295}}
+    , .{});
+    defer parsed_card.deinit();
+    var card = try parse(testing.allocator, parsed_card.value);
+    defer card.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 4294967295), card.proof_card.stats.total);
+    try testing.expectEqual(@as(u32, 4294967295), card.proof_card.stats.new);
+    try testing.expectEqual(@as(?u32, 4294967295), card.proof_card.stats.preexisting);
 }
 
 test "session tree payload round-trips" {
