@@ -804,8 +804,10 @@ fn writeProvidedReceipt(
     proof_id: *const [64]u8,
 ) !void {
     if (receipt_json.len == 0 or receipt_json.len > 64 * 1024 * 1024) return error.InvalidChangeSetReceipt;
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, receipt_json, .{}) catch
-        return error.InvalidChangeSetReceipt;
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, receipt_json, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.InvalidChangeSetReceipt,
+    };
     defer parsed.deinit();
     if (parsed.value != .object) return error.InvalidChangeSetReceipt;
     const kind = parsed.value.object.get("kind") orelse return error.InvalidChangeSetReceipt;
@@ -1136,8 +1138,10 @@ fn validateReceipt(
     defer allocator.free(path);
     const bytes = try readVerifiedFile(allocator, path, 64 * 1024 * 1024);
     defer allocator.free(bytes);
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch
-        return error.CorruptTransactionJournal;
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.CorruptTransactionJournal,
+    };
     defer parsed.deinit();
     if (parsed.value != .object) return error.CorruptTransactionJournal;
     const object = parsed.value.object;
@@ -2909,4 +2913,46 @@ test "a stage file that no journal names does not block the same change" {
     defer receipt.deinit(testing.allocator);
     try expectFixtureCandidates(&fixture, true);
     try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "src/.a.ts.zttp-aaaaaaaaaaaaaaaa.stage", .{}));
+}
+
+fn acquireAndListPending(allocator: std.mem.Allocator, root: []const u8) !void {
+    var workspace = try RecoveredWorkspace.acquire(allocator, root);
+    defer workspace.deinit();
+    const pending = try workspace.pendingReceipts();
+    for (pending) |*receipt| receipt.deinit(allocator);
+    allocator.free(pending);
+}
+
+test "acquire and pending receipts report a failed allocation as out of memory" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    {
+        var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+        defer workspace.deinit();
+        var receipt = try workspace.commit(&fixture.prepared, &fixture.snapshot, &fixture.proof, .{});
+        defer receipt.deinit(testing.allocator);
+    }
+    // A property test: the standard library fails each allocation in turn and
+    // accepts only error.OutOfMemory, with every allocation freed.
+    try testing.checkAllAllocationFailures(testing.allocator, acquireAndListPending, .{fixture.root});
+}
+
+fn writeFixtureReceipt(allocator: std.mem.Allocator, transaction_dir: []const u8) !void {
+    const proof_id: [64]u8 = @splat('a');
+    try writeProvidedReceipt(
+        allocator,
+        transaction_dir,
+        "{\"kind\":\"verified_change_set\",\"transaction_id\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}",
+        &proof_id,
+    );
+}
+
+test "a provided receipt reports a failed allocation as out of memory" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const transaction_dir = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(transaction_dir);
+    try testing.checkAllAllocationFailures(testing.allocator, writeFixtureReceipt, .{transaction_dir});
 }
