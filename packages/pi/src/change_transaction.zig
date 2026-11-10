@@ -313,6 +313,7 @@ fn pendingReceiptsLocked(
     defer transaction_ids.deinit(allocator);
     var iterator = dir.iterate();
     while (try iterator.next(io)) |entry| {
+        if (isFinderMetadata(entry)) continue;
         if (entry.kind != .directory or !isCanonicalProofId(entry.name)) return error.CorruptTransactionDirectory;
         const transaction_dir = try std.fs.path.resolve(allocator, &.{ root, entry.name });
         defer allocator.free(transaction_dir);
@@ -431,6 +432,7 @@ fn recoverAllLockedWithOptions(
     var recovered: usize = 0;
     var iterator = dir.iterate();
     while (try iterator.next(io)) |entry| {
+        if (isFinderMetadata(entry)) continue;
         if (entry.kind != .directory or !isCanonicalProofId(entry.name)) return error.CorruptTransactionDirectory;
         const transaction_dir = try std.fs.path.resolve(allocator, &.{ root, entry.name });
         defer allocator.free(transaction_dir);
@@ -1229,6 +1231,13 @@ fn pathExists(allocator: std.mem.Allocator, path: []const u8) !bool {
         else => return err,
     };
     return true;
+}
+
+/// Finder writes `.DS_Store` into a directory that a user opens. The file is
+/// not a transaction, so the two scans of `change-sets` skip it. Every other
+/// stray entry stays a refusal.
+fn isFinderMetadata(entry: std.Io.Dir.Entry) bool {
+    return entry.kind == .file and std.mem.eql(u8, entry.name, ".DS_Store");
 }
 
 fn isCanonicalProofId(value: []const u8) bool {
@@ -3013,4 +3022,39 @@ test "two target names that can be one file never leave a recovery conflict" {
     }
     var workspace = try RecoveredWorkspace.acquire(testing.allocator, root);
     defer workspace.deinit();
+}
+
+test "acquire accepts a Finder metadata file beside the transactions" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    try tmp.dir.createDirPath(testing.io, ".zttp/change-sets");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".zttp/change-sets/.DS_Store", .data = "Bud1" });
+
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, fixture.root);
+    defer workspace.deinit();
+    var receipt = try workspace.commit(&fixture.prepared, &fixture.snapshot, &fixture.proof, .{});
+    defer receipt.deinit(testing.allocator);
+    const pending = try workspace.pendingReceipts();
+    defer {
+        for (pending) |*item| item.deinit(testing.allocator);
+        testing.allocator.free(pending);
+    }
+    try testing.expectEqual(@as(usize, 1), pending.len);
+    try expectFixtureCandidates(&fixture, true);
+}
+
+test "acquire refuses a stray file that is not Finder metadata" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    try tmp.dir.createDirPath(testing.io, ".zttp/change-sets");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = ".zttp/change-sets/notes.txt", .data = "stray" });
+
+    try testing.expectError(
+        error.CorruptTransactionDirectory,
+        RecoveredWorkspace.acquire(testing.allocator, fixture.root),
+    );
 }
