@@ -104,6 +104,7 @@ pub fn prepare(
         const resolved_path = try common.resolveInsideWorkspace(allocator, canonical_workspace, model_change.file);
         errdefer allocator.free(resolved_path);
         if (!std.mem.eql(u8, lexical_path, resolved_path)) return error.SymlinkTargetUnsupported;
+        if (isToolStatePath(common.relativeToRoot(canonical_workspace, resolved_path))) return error.UnsupportedSourceTarget;
         try requireExistingParent(io, resolved_path);
         try requireRegularOrAbsent(io, resolved_path);
 
@@ -153,6 +154,14 @@ pub fn prepare(
 
 fn isSupportedSourcePath(path: []const u8) bool {
     return std.mem.endsWith(u8, path, ".ts");
+}
+
+/// `.zttp` holds the transaction journal. Recovery refuses every later
+/// acquire when `.zttp/change-sets` holds an entry that is not a transaction.
+fn isToolStatePath(relative: []const u8) bool {
+    var parts = std.mem.tokenizeScalar(u8, relative, std.fs.path.sep);
+    while (parts.next()) |part| if (std.mem.eql(u8, part, ".zttp")) return true;
+    return false;
 }
 
 fn requireExistingParent(io: std.Io, path: []const u8) !void {
@@ -268,6 +277,19 @@ test "prepare rejects duplicate aliases no-ops and unsupported targets" {
     try testing.expectError(error.MissingTargetParent, prepare(testing.allocator, root, .{
         .file = "missing/a.ts",
         .content = "new",
+    }));
+}
+
+test "prepare rejects a target inside the tool state directory" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, ".zttp/change-sets");
+    const root = try rootPath(testing.allocator, &tmp);
+    defer testing.allocator.free(root);
+
+    try testing.expectError(error.UnsupportedSourceTarget, prepare(testing.allocator, root, .{
+        .file = ".zttp/change-sets/x.ts",
+        .content = "stray",
     }));
 }
 
