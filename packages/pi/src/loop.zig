@@ -529,8 +529,8 @@ fn runTurnBody(
     // "budget exhausted" line so the user is not left at a dead end.
     var hit_roundtrip_budget = false;
     // Set when the per-turn tool-call budget is exceeded. The model still gets
-    // the refusal and may answer, but the turn logs budget_tool_calls instead
-    // of approved.
+    // the refusal and may answer, but a turn that ends on a text answer logs
+    // budget_tool_calls instead of approved.
     var hit_tool_budget = false;
     // Set when the per-turn wall-time budget is exhausted. The `.prompt_user`
     // arm reads it to show a timeout-specific message instead of the generic
@@ -912,6 +912,9 @@ fn runTurnBody(
                 try transcript.append(allocator, entry);
                 const end_reason: session_events.TurnEndReason = switch (msg) {
                     .diagnostic_box => .veto_exhausted,
+                    // A verified change set is the outcome of the turn, whatever
+                    // tool batch the host refused before it.
+                    .proof_card => .approved,
                     else => if (hit_tool_budget) .budget_tool_calls else .approved,
                 };
                 return finishTurn(
@@ -2661,6 +2664,43 @@ test "a turn that exceeded the tool-call budget ends with budget_tool_calls afte
     );
     try testing.expectEqual(session_events.TurnEndReason.budget_tool_calls, result.end_reason);
     try testing.expectEqual(@as(u8, 2), result.roundtrips);
+}
+
+test "a turn that exceeded the tool-call budget and then applied a verified edit ends approved" {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const workspace_root = try tmpWorkspacePath(testing.allocator, &tmp);
+    defer testing.allocator.free(workspace_root);
+    const written_path = try testing.allocator.print("{s}/src/handler.ts", .{workspace_root});
+    defer testing.allocator.free(written_path);
+
+    const replies = [_]turn.AssistantReply{
+        .{ .response = .{ .tool_calls = &[_]turn.ToolCall{
+            .{ .id = "toolu_a", .name = "stub", .args_json = "{}" },
+            .{ .id = "toolu_b", .name = "stub", .args_json = "{}" },
+        } } },
+        .{ .response = .{ .change_set = .{ .file = "src/handler.ts", .content = clean_handler } } },
+    };
+    var seq: SequenceClient = .{ .replies = &replies };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(testing.allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(testing.allocator);
+    try registry.register(testing.allocator, stub_tool);
+
+    const result = try runTurnWith(
+        testing.allocator,
+        seq.asClient(),
+        &registry,
+        &tr,
+        "add an ok response",
+        .{ .workspace_root = workspace_root, .max_tool_calls_per_turn = 1 },
+    );
+    const written = try file_io.readFile(testing.allocator, written_path, 1024 * 1024);
+    defer testing.allocator.free(written);
+    try testing.expectEqualStrings(clean_handler, written);
+    try testing.expect(result.applied_change_set);
+    try testing.expectEqual(session_events.TurnEndReason.approved, result.end_reason);
 }
 
 test "an abnormal provider finish tells the user what to do next" {
