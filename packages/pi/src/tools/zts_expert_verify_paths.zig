@@ -60,7 +60,6 @@ fn buildDiagnosticsPayload(allocator: std.mem.Allocator, llm_text: []const u8) !
     if (file != .string) return error.InvalidDiagnosticsEnvelope;
 
     const items = try allocator.alloc(ui_payload.DiagnosticItem, diagnostics.array.items.len);
-    errdefer allocator.free(items);
     var initialized: usize = 0;
     errdefer {
         while (initialized > 0) {
@@ -78,8 +77,8 @@ fn buildDiagnosticsPayload(allocator: std.mem.Allocator, llm_text: []const u8) !
             getString(object, "code") orelse return error.InvalidDiagnosticsEnvelope,
             getString(object, "severity") orelse return error.InvalidDiagnosticsEnvelope,
             getString(object, "file") orelse return error.InvalidDiagnosticsEnvelope,
-            @intCast(getInteger(object, "line") orelse return error.InvalidDiagnosticsEnvelope),
-            @intCast(getInteger(object, "column") orelse return error.InvalidDiagnosticsEnvelope),
+            try requireU32(object, "line"),
+            try requireU32(object, "column"),
             getString(object, "message") orelse return error.InvalidDiagnosticsEnvelope,
             null,
         );
@@ -96,9 +95,11 @@ fn getString(object: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     return if (value == .string) value.string else null;
 }
 
-fn getInteger(object: std.json.ObjectMap, key: []const u8) ?i64 {
-    const value = object.get(key) orelse return null;
-    return if (value == .integer) value.integer else null;
+/// A number that the field cannot hold marks a damaged envelope.
+fn requireU32(object: std.json.ObjectMap, key: []const u8) !u32 {
+    const value = object.get(key) orelse return error.InvalidDiagnosticsEnvelope;
+    if (value != .integer) return error.InvalidDiagnosticsEnvelope;
+    return std.math.cast(u32, value.integer) orelse error.InvalidDiagnosticsEnvelope;
 }
 
 const testing = std.testing;
@@ -184,4 +185,50 @@ test "verify-paths registry preserves out-of-root refusal" {
         "path_outside_project_root",
         parsed.value.object.get("error").?.object.get("code").?.string,
     );
+}
+
+/// One diagnostic, with every field that the payload reads. The line breaks
+/// between JSON tokens only.
+const one_diagnostic_envelope =
+    \\{"payload":{"file":"handler.ts"},"diagnostics":[{"code":"ZTS001","severity":"error",
+    \\"file":"handler.ts","line":3,"column":7,"message":"unsupported feature"}]}
+;
+
+fn buildPayloadThenFree(allocator: std.mem.Allocator, envelope: []const u8) !void {
+    var payload = try buildDiagnosticsPayload(allocator, envelope);
+    payload.deinit(allocator);
+}
+
+test "diagnostics payload carries each diagnostic of the envelope" {
+    var payload = try buildDiagnosticsPayload(testing.allocator, one_diagnostic_envelope);
+    defer payload.deinit(testing.allocator);
+    try testing.expectEqualStrings("checked handler.ts: 1 diagnostic(s)", payload.diagnostics.summary);
+    try testing.expectEqual(@as(usize, 1), payload.diagnostics.items.len);
+    try testing.expectEqualStrings("ZTS001", payload.diagnostics.items[0].code);
+    try testing.expectEqual(@as(u32, 3), payload.diagnostics.items[0].line);
+    try testing.expectEqual(@as(u32, 7), payload.diagnostics.items[0].column);
+}
+
+test "diagnostics payload frees every allocation when any one allocation fails" {
+    try testing.checkAllAllocationFailures(testing.allocator, buildPayloadThenFree, .{one_diagnostic_envelope});
+}
+
+test "diagnostics payload refuses a damaged diagnostic" {
+    // Each row changes one token of `one_diagnostic_envelope`. 4294967296 is
+    // the first value that a u32 cannot hold.
+    const Case = struct { valid: []const u8, damaged: []const u8 };
+    const cases = [_]Case{
+        .{ .valid = "\"message\":\"unsupported feature\"}]", .damaged = "\"message\":\"unsupported feature\"},5]" },
+        .{ .valid = "\"message\":\"unsupported feature\"", .damaged = "\"message\":5" },
+        .{ .valid = "\"line\":3,", .damaged = "\"line\":4294967296," },
+        .{ .valid = "\"line\":3,", .damaged = "\"line\":-1," },
+        .{ .valid = "\"column\":7,", .damaged = "\"column\":4294967296," },
+        .{ .valid = "\"column\":7,", .damaged = "\"column\":-1," },
+    };
+    for (cases) |case| {
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, one_diagnostic_envelope, case.valid));
+        const envelope = try std.mem.replaceOwned(u8, testing.allocator, one_diagnostic_envelope, case.valid, case.damaged);
+        defer testing.allocator.free(envelope);
+        try testing.expectError(error.InvalidDiagnosticsEnvelope, buildDiagnosticsPayload(testing.allocator, envelope));
+    }
 }

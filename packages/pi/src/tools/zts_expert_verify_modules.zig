@@ -113,8 +113,6 @@ fn buildDiagnosticsPayloadFromEnvelope(
     if (checked_files != .array or violations != .array) return error.InvalidDiagnosticsEnvelope;
 
     const items = try allocator.alloc(ui_payload.DiagnosticItem, violations.array.items.len);
-    errdefer allocator.free(items);
-    for (items) |*item| item.* = undefined;
     var i: usize = 0;
     errdefer {
         while (i > 0) {
@@ -132,8 +130,8 @@ fn buildDiagnosticsPayloadFromEnvelope(
             getString(diag_obj, "code") orelse return error.InvalidDiagnosticsEnvelope,
             getString(diag_obj, "severity") orelse return error.InvalidDiagnosticsEnvelope,
             getString(diag_obj, "file") orelse return error.InvalidDiagnosticsEnvelope,
-            @intCast(getInteger(diag_obj, "line") orelse return error.InvalidDiagnosticsEnvelope),
-            @intCast(getInteger(diag_obj, "column") orelse return error.InvalidDiagnosticsEnvelope),
+            try requireU32(diag_obj, "line"),
+            try requireU32(diag_obj, "column"),
             getString(diag_obj, "message") orelse return error.InvalidDiagnosticsEnvelope,
             null,
         );
@@ -150,9 +148,11 @@ fn getString(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     return if (value == .string) value.string else null;
 }
 
-fn getInteger(obj: std.json.ObjectMap, key: []const u8) ?i64 {
-    const value = obj.get(key) orelse return null;
-    return if (value == .integer) value.integer else null;
+/// A number that the field cannot hold marks a damaged envelope.
+fn requireU32(obj: std.json.ObjectMap, key: []const u8) !u32 {
+    const value = obj.get(key) orelse return error.InvalidDiagnosticsEnvelope;
+    if (value != .integer) return error.InvalidDiagnosticsEnvelope;
+    return std.math.cast(u32, value.integer) orelse error.InvalidDiagnosticsEnvelope;
 }
 
 // ---------------------------------------------------------------------------
@@ -179,4 +179,51 @@ test "nonexistent module path produces a v1 envelope" {
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"checked_files\":") != null);
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "\"violations\":") != null);
     try testing.expect(result.ui_payload != null);
+}
+
+/// One violation, with every field that the payload reads. The line breaks
+/// between JSON tokens only.
+const one_violation_envelope =
+    \\{"checked_files":["packages/modules/src/env.zig"],"violations":[{"code":"ZTS900",
+    \\"severity":"error","file":"packages/modules/src/env.zig","line":3,"column":7,
+    \\"message":"missing capability"}]}
+;
+
+fn buildPayloadThenFree(allocator: std.mem.Allocator, envelope: []const u8) !void {
+    var payload = try buildDiagnosticsPayloadFromEnvelope(allocator, envelope);
+    payload.deinit(allocator);
+}
+
+test "diagnostics payload carries each violation of the envelope" {
+    var payload = try buildDiagnosticsPayloadFromEnvelope(testing.allocator, one_violation_envelope);
+    defer payload.deinit(testing.allocator);
+    try testing.expectEqualStrings("1 checked file(s), 1 diagnostic(s)", payload.diagnostics.summary);
+    try testing.expectEqual(@as(usize, 1), payload.diagnostics.items.len);
+    try testing.expectEqualStrings("ZTS900", payload.diagnostics.items[0].code);
+    try testing.expectEqual(@as(u32, 3), payload.diagnostics.items[0].line);
+    try testing.expectEqual(@as(u32, 7), payload.diagnostics.items[0].column);
+}
+
+test "diagnostics payload frees every allocation when any one allocation fails" {
+    try testing.checkAllAllocationFailures(testing.allocator, buildPayloadThenFree, .{one_violation_envelope});
+}
+
+test "diagnostics payload refuses a damaged violation" {
+    // Each row changes one token of `one_violation_envelope`. 4294967296 is
+    // the first value that a u32 cannot hold.
+    const Case = struct { valid: []const u8, damaged: []const u8 };
+    const cases = [_]Case{
+        .{ .valid = "\"message\":\"missing capability\"}]", .damaged = "\"message\":\"missing capability\"},5]" },
+        .{ .valid = "\"message\":\"missing capability\"", .damaged = "\"message\":5" },
+        .{ .valid = "\"line\":3,", .damaged = "\"line\":4294967296," },
+        .{ .valid = "\"line\":3,", .damaged = "\"line\":-1," },
+        .{ .valid = "\"column\":7,", .damaged = "\"column\":4294967296," },
+        .{ .valid = "\"column\":7,", .damaged = "\"column\":-1," },
+    };
+    for (cases) |case| {
+        try testing.expectEqual(@as(usize, 1), std.mem.count(u8, one_violation_envelope, case.valid));
+        const envelope = try std.mem.replaceOwned(u8, testing.allocator, one_violation_envelope, case.valid, case.damaged);
+        defer testing.allocator.free(envelope);
+        try testing.expectError(error.InvalidDiagnosticsEnvelope, buildDiagnosticsPayloadFromEnvelope(testing.allocator, envelope));
+    }
 }
