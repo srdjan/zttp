@@ -123,15 +123,22 @@ pub const Snapshot = struct {
         );
 
         for (prepared.changes) |change| {
-            // The check uses the bytes that the snapshot recorded, so an edit
-            // cannot pass it by being undone and redone around a second read.
-            if (findAbsolute(entries.items, change.resolved_path)) |recorded| {
-                if (!std.mem.eql(u8, &recorded.sha256, &change.baseline_sha256)) return error.ProofReadSetChanged;
-            } else {
-                try requireBaseline(allocator, change);
-                const relative = common.relativeToRoot(prepared.project_root, change.resolved_path);
-                try appendAbsent(allocator, &entries, change.resolved_path, relative);
-            }
+            // The walk skips excluded directory names, so it does not record a
+            // target below one. Such a target is read here, present or absent.
+            if (!containsAbsolute(entries.items, change.resolved_path)) try captureNamedPath(
+                allocator,
+                io_backend.io(),
+                &entries,
+                prepared.project_root,
+                change.resolved_path,
+                &total_bytes,
+            );
+            // An edit that landed after `change_set.prepare` read the baseline
+            // would be overwritten by the commit. The check uses the bytes that
+            // the snapshot recorded, so an edit cannot pass it by being undone
+            // and redone around a second read.
+            const recorded = findAbsolute(entries.items, change.resolved_path) orelse return error.ProofReadSetChanged;
+            if (!std.mem.eql(u8, &recorded.sha256, &change.baseline_sha256)) return error.ProofReadSetChanged;
             try captureDiscoveryAbsences(allocator, &entries, prepared.project_root, change.resolved_path);
         }
         try captureNamedAbsence(allocator, &entries, prepared.project_root, "zttp.json");
@@ -272,18 +279,6 @@ fn collectInputs(
     }
 }
 
-/// An edit that landed after `change_set.prepare` read the baseline would be
-/// overwritten by the commit, so the target must still match that baseline.
-fn requireBaseline(allocator: std.mem.Allocator, change: change_set.PreparedChange) !void {
-    const current = zts.file_io.readFile(allocator, change.resolved_path, max_read_file_bytes) catch |err| switch (err) {
-        error.FileNotFound => null,
-        else => return err,
-    };
-    defer if (current) |bytes| allocator.free(bytes);
-    const digest = digestReadState(current);
-    if (!std.mem.eql(u8, &digest, &change.baseline_sha256)) return error.ProofReadSetChanged;
-}
-
 fn isExcludedName(name: []const u8) bool {
     const excluded = [_][]const u8{ ".git", ".zttp", ".zig-cache", "zig-out", "node_modules", "dist", "coverage" };
     for (excluded) |value| if (std.mem.eql(u8, name, value)) return true;
@@ -369,18 +364,18 @@ fn captureConfiguredInputs(
     defer config.deinit(allocator);
     const entry_path = try config.resolvedEntry(allocator);
     defer allocator.free(entry_path);
-    try captureConfiguredPath(allocator, io, entries, project_root, entry_path, total_bytes);
+    try captureNamedPath(allocator, io, entries, project_root, entry_path, total_bytes);
     if (try config.resolvedSqlitePath(allocator)) |path| {
         defer allocator.free(path);
-        try captureConfiguredPath(allocator, io, entries, project_root, path, total_bytes);
+        try captureNamedPath(allocator, io, entries, project_root, path, total_bytes);
     }
     if (try config.resolvedPolicyPath(allocator)) |path| {
         defer allocator.free(path);
-        try captureConfiguredPath(allocator, io, entries, project_root, path, total_bytes);
+        try captureNamedPath(allocator, io, entries, project_root, path, total_bytes);
     }
 }
 
-fn captureConfiguredPath(
+fn captureNamedPath(
     allocator: std.mem.Allocator,
     io: std.Io,
     entries: *std.ArrayList(ReadEntry),
@@ -555,6 +550,30 @@ test "snapshot capture refuses a target edited after its baseline was prepared" 
     var contents: [64]u8 = undefined;
     const current = try tmp.dir.readFile(testing.io, "src/a.ts", &contents);
     try testing.expectEqualStrings("concurrent", current);
+}
+
+test "an existing target under an excluded directory name is captured with its bytes and recheck passes" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src/coverage");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/coverage/quote.ts", .data = "old" });
+    const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root_z);
+    const root = try testing.allocator.dupe(u8, root_z);
+    defer testing.allocator.free(root);
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/coverage/quote.ts", .content = "new" });
+    defer prepared.deinit(testing.allocator);
+    var snapshot = try Snapshot.capture(testing.allocator, &prepared);
+    defer snapshot.deinit(testing.allocator);
+    try snapshot.recheck(testing.allocator);
+
+    var baseline = try snapshot.materializeBaseline(testing.allocator);
+    defer baseline.deinit();
+    const copied = try baseline.pathFor(testing.allocator, "src/coverage/quote.ts");
+    defer testing.allocator.free(copied);
+    const before = try zts.file_io.readFile(testing.allocator, copied, 64);
+    defer testing.allocator.free(before);
+    try testing.expectEqualStrings("old", before);
 }
 
 test "snapshot captures configured SQL and policy inputs regardless of extension" {
