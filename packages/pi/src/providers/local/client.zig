@@ -343,8 +343,7 @@ fn getReadiness(arena: std.mem.Allocator, url: []const u8, read_body: bool) !Rea
     }) catch return ClientError.LocalServerUnavailable;
     defer request.deinit();
     request.sendBodiless() catch return ClientError.LocalServerUnavailable;
-    try waitForResponseHead(connection.stream_reader.stream.socket.handle, response_head_timeout_ms);
-    var response = request.receiveHead(&.{}) catch return ClientError.LocalServerUnavailable;
+    var response = try receiveHead(&request, response_head_timeout_ms);
     if (!read_body) return .{ .status = response.head.status, .body = "" };
     const declared_len = http_errors.declaredBodyLength(response.head);
     var transfer_buf: [4096]u8 = undefined;
@@ -915,8 +914,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
     const socket = connection.stream_reader.stream.socket.handle;
     const request_timeout_ms = http_errors.effectiveRequestTimeoutMs(config.request_timeout_ms, response_head_timeout_ms);
     const wait_started_ns = monotonicNowNs();
-    try waitForResponseHead(socket, request_timeout_ms);
-    var response = request.receiveHead(&.{}) catch return ClientError.LocalServerUnavailable;
+    var response = try receiveHead(&request, request_timeout_ms);
     const declared_len = http_errors.declaredBodyLength(response.head);
     var transfer_buf: [4096]u8 = undefined;
     var decompress: std.http.Decompress = undefined;
@@ -943,20 +941,14 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
     return response_body;
 }
 
-/// MLX does not send response headers until generation completes. The shared
-/// socket has a two-minute idle read timeout, so entering `receiveHead` before
-/// a long generation finishes can surface POSIX EAGAIN inside Zig's blocking
-/// reader. Poll first without consuming bytes, then let the HTTP parser read a
-/// ready header. This also provides a typed upper bound for a hung server.
-fn waitForResponseHead(fd: std.posix.fd_t, timeout_ms: i32) !void {
-    var fds = [_]std.posix.pollfd{.{
-        .fd = fd,
-        .events = std.posix.POLL.IN,
-        .revents = 0,
-    }};
-    const ready = std.posix.poll(&fds, timeout_ms) catch
-        return ClientError.LocalServerUnavailable;
-    if (ready == 0) return error.RequestTimedOut;
+/// MLX does not send response headers until generation completes, so the wait
+/// for the head is the wait for the generation, and its silence ceiling is the
+/// whole budget. A head that stops part way times out on the same budget.
+fn receiveHead(request: *std.http.Client.Request, timeout_ms: i32) !std.http.Client.Response {
+    return http_errors.receiveHeadWithin(request, timeout_ms, timeout_ms) catch |err| switch (err) {
+        error.RequestTimedOut, error.RequestStalled => error.RequestTimedOut,
+        else => ClientError.LocalServerUnavailable,
+    };
 }
 
 const writeJsonString = json_writer.writeString;
@@ -1725,4 +1717,52 @@ test "a body that ends before its Content-Length is a transport failure" {
     var client = Client.init(.{ .base_url = base, .model = "m", .system_prompt = "s" });
     const result = client.sendTurn(arena, &transcript, null);
     try testing.expectError(ClientError.LocalServerUnavailable, result);
+}
+
+const PartialHeadServer = struct {
+    listener: std.Io.net.Server,
+    io: std.Io,
+
+    /// Sends part of a response head and nothing more. Closes after 2 s so a
+    /// defective read returns instead of hanging the suite.
+    fn run(self: *PartialHeadServer) void {
+        const io = self.io;
+        var stream = self.listener.accept(io) catch return;
+        defer stream.close(io);
+        var chunk: [4096]u8 = undefined;
+        var vecs: [1][]u8 = .{chunk[0..]};
+        _ = stream.readWithControl(io, &vecs, &.{}) catch return;
+        var out_buf: [4096]u8 = undefined;
+        var writer = stream.writer(io, &out_buf);
+        writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Le") catch return;
+        writer.interface.flush() catch return;
+        std.Io.sleep(io, .fromMilliseconds(2000), .awake) catch {};
+    }
+};
+
+test "a response head that goes silent before its end times out at the request budget" {
+    const allocator = testing.allocator;
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server: PartialHeadServer = .{ .listener = try address.listen(io, .{ .reuse_address = true }), .io = io };
+    defer server.listener.deinit(io);
+    const port = server.listener.socket.address.getPort();
+    const thread = try std.Thread.spawn(.{}, PartialHeadServer.run, .{&server});
+    defer thread.join();
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const base = try std.fmt.allocPrint(arena, "http://127.0.0.1:{d}", .{port});
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(allocator);
+    try transcript.append(allocator, .{ .user_text = "hi" });
+    var client = Client.init(.{ .base_url = base, .model = "m", .system_prompt = "s", .request_timeout_ms = 300 });
+    const started = monotonicNowNs().?;
+    const result = client.sendTurn(arena, &transcript, null);
+    const elapsed = elapsedMs(started).?;
+    try testing.expectError(error.RequestTimedOut, result);
+    try testing.expect(elapsed < 1000);
 }

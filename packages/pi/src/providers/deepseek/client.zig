@@ -537,12 +537,15 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
     request_body.end() catch return ClientError.DeepSeekServerUnavailable;
     request.connection.?.flush() catch return ClientError.DeepSeekServerUnavailable;
 
-    try waitForReadable(
-        connection.stream_reader.stream.socket.handle,
+    var response = http_errors.receiveHeadWithin(
+        &request,
         silence_ceiling_ms,
         remainingMs(request_started_ns, request_timeout_ms),
-    );
-    var response = request.receiveHead(&.{}) catch return ClientError.DeepSeekServerUnavailable;
+    ) catch |err| switch (err) {
+        error.RequestTimedOut => return error.RequestTimedOut,
+        error.RequestStalled => return ClientError.DeepSeekGenerationStalled,
+        else => return ClientError.DeepSeekServerUnavailable,
+    };
     // The wait covers the silence before the first body byte. It is skipped when
     // decrypted body bytes are already buffered, because the socket can then be
     // silent with the body complete. A partial encrypted record still needs the
@@ -1147,6 +1150,123 @@ test "a body that reaches its declared length ends without polling the silent so
     const body = try readBodyWithin(&reader, testing.allocator, 1 << 20, fds[0], 20, 1_000, &.{}, 10);
     defer testing.allocator.free(body);
     try testing.expectEqualStrings("0123456789", body);
+}
+
+test "a response head that stops part way names a stall and a spent budget" {
+    if (@TypeOf(std.posix.system.socketpair) == void) return error.SkipZigTest;
+    var fds: [2]std.posix.fd_t = undefined;
+    switch (std.posix.errno(std.posix.system.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds))) {
+        .SUCCESS => {},
+        else => return error.SkipZigTest,
+    }
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+    _ = std.posix.system.write(fds[1], "HTTP/1.1 200 OK\r\nContent-Le", 27);
+
+    var stream: std.Io.net.Stream = .{ .socket = .{ .handle = fds[0], .address = undefined } };
+    var buf: [4096]u8 = undefined;
+    var stream_reader = stream.reader(testing.io, &buf);
+    const reader = &stream_reader.interface;
+    try testing.expectError(error.RequestStalled, http_errors.fillHeadWithin(reader, 4096, fds[0], 20, 1_000, null));
+    try testing.expectError(error.RequestTimedOut, http_errors.fillHeadWithin(reader, 4096, fds[0], 20, 20, null));
+
+    // The floor under both: the rest of the head arrives, and the fill ends
+    // with the whole head in the reader.
+    _ = std.posix.system.write(fds[1], "ngth: 0\r\n\r\n", 11);
+    try http_errors.fillHeadWithin(reader, 4096, fds[0], 20, 1_000, null);
+    try testing.expectEqualStrings("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", reader.buffered());
+}
+
+/// Stands in for the reader of the std TLS client, which exists only after a
+/// handshake that no test peer can answer. It takes whole records off `input`
+/// with the reads that the TLS client makes, and passes each payload on as it
+/// arrived.
+const RecordReader = struct {
+    input: *std.Io.Reader,
+    interface: std.Io.Reader,
+
+    fn init(input: *std.Io.Reader, buffer: []u8) RecordReader {
+        return .{ .input = input, .interface = .{
+            .vtable = &.{ .stream = stream, .readVec = readVec },
+            .buffer = buffer,
+            .seek = 0,
+            .end = 0,
+        } };
+    }
+
+    fn stream(r: *std.Io.Reader, _: *std.Io.Writer, _: std.Io.Limit) std.Io.Reader.StreamError!usize {
+        return readRecord(r);
+    }
+
+    fn readVec(r: *std.Io.Reader, _: [][]u8) std.Io.Reader.Error!usize {
+        return readRecord(r);
+    }
+
+    fn readRecord(r: *std.Io.Reader) std.Io.Reader.Error!usize {
+        const self: *RecordReader = @alignCast(@fieldParentPtr("interface", r));
+        const header = try self.input.peek(5);
+        const record_len = 5 + @as(usize, std.mem.readInt(u16, header[3..5], .big));
+        if (record_len > self.input.bufferedLen()) {
+            try self.input.fillMore();
+            if (record_len > self.input.bufferedLen()) return 0;
+        }
+        const payload = (try self.input.take(record_len))[5..];
+        @memcpy(r.buffer[r.end..][0..payload.len], payload);
+        r.end += payload.len;
+        return 0;
+    }
+};
+
+test "a TLS record that stops part way stalls the head on the silence ceiling" {
+    if (@TypeOf(std.posix.system.socketpair) == void) return error.SkipZigTest;
+    var fds: [2]std.posix.fd_t = undefined;
+    switch (std.posix.errno(std.posix.system.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds))) {
+        .SUCCESS => {},
+        else => return error.SkipZigTest,
+    }
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+    // The record header declares 38 bytes, and 27 of them arrive.
+    _ = std.posix.system.write(fds[1], "\x17\x03\x03\x00\x26HTTP/1.1 200 OK\r\nContent-Le", 32);
+
+    var stream: std.Io.net.Stream = .{ .socket = .{ .handle = fds[0], .address = undefined } };
+    var input_buf: [4096]u8 = undefined;
+    var input = stream.reader(testing.io, &input_buf);
+    var records_buf: [4096]u8 = undefined;
+    var records: RecordReader = .init(&input.interface, &records_buf);
+
+    // The watchdog closes the peer after 2 s so a defective read returns
+    // instead of hanging the suite.
+    const watchdog = try std.Thread.spawn(.{}, shutdownPeerAfterTwoSeconds, .{fds[1]});
+    const started = monotonicNowNs().?;
+    const result = http_errors.fillHeadWithin(&records.interface, 4096, fds[0], 20, 1_000, &input.interface);
+    const elapsed = elapsedMs(started).?;
+    watchdog.join();
+    try testing.expectError(error.RequestStalled, result);
+    try testing.expect(elapsed < 500);
+}
+
+test "a whole TLS record that the socket reader holds completes the head without a wait" {
+    if (@TypeOf(std.posix.system.socketpair) == void) return error.SkipZigTest;
+    var fds: [2]std.posix.fd_t = undefined;
+    switch (std.posix.errno(std.posix.system.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds))) {
+        .SUCCESS => {},
+        else => return error.SkipZigTest,
+    }
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+    _ = std.posix.system.write(fds[1], "\x17\x03\x03\x00\x26HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", 43);
+
+    var stream: std.Io.net.Stream = .{ .socket = .{ .handle = fds[0], .address = undefined } };
+    var input_buf: [4096]u8 = undefined;
+    var input = stream.reader(testing.io, &input_buf);
+    // The socket reader takes the record off the socket, so the socket is silent now.
+    try input.interface.fill(43);
+    var records_buf: [4096]u8 = undefined;
+    var records: RecordReader = .init(&input.interface, &records_buf);
+
+    try http_errors.fillHeadWithin(&records.interface, 4096, fds[0], 20, 1_000, &input.interface);
+    try testing.expectEqualStrings("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", records.interface.buffered());
 }
 
 const SilentPeer = struct {

@@ -255,6 +255,95 @@ fn hasBufferedBytes(reader: *const std.Io.Reader, upstream: []const *const std.I
     return false;
 }
 
+/// Receive the response head with a poll before each socket read (shared by
+/// both provider clients).
+///
+/// `Request.receiveHead` reads the socket until the head is whole. A peer that
+/// sends part of a head, or part of a TLS record, and then goes quiet holds
+/// that read until `SO_RCVTIMEO` expires, and an expired `SO_RCVTIMEO` panics
+/// instead of returning (see `setReadTimeoutMs`). The fill here leaves a whole
+/// head in the connection reader, so the parser reads no socket.
+///
+/// The two budgets and the two timeout errors are those of `waitForReadable`.
+pub fn receiveHeadWithin(
+    request: *std.http.Client.Request,
+    silence_ceiling_ms: i32,
+    request_timeout_ms: i32,
+) !std.http.Client.Response {
+    const connection = request.connection.?;
+    try fillHeadWithin(
+        connection.reader(),
+        request.reader.max_head_len,
+        connection.stream_reader.stream.socket.handle,
+        silence_ceiling_ms,
+        request_timeout_ms,
+        if (connection.protocol == .tls) &connection.stream_reader.interface else null,
+    );
+    return request.receiveHead(&.{});
+}
+
+/// Fill `reader`, the connection reader that the HTTP parser reads, until it
+/// holds a whole response head. `tls_input` is the socket reader beneath a TLS
+/// client, or null when `reader` reads the socket itself.
+///
+/// The fill stops without an error at a head of `max_head_len` bytes, at the
+/// end of the stream, and at a failed read. The HTTP parser meets each of
+/// those again without a blocking read, and reports it.
+pub fn fillHeadWithin(
+    reader: *std.Io.Reader,
+    max_head_len: usize,
+    fd: std.posix.fd_t,
+    silence_ceiling_ms: i32,
+    request_timeout_ms: i32,
+    tls_input: ?*std.Io.Reader,
+) error{ RequestTimedOut, RequestStalled, PollFailed }!void {
+    const started_ns = response_sanitize.monotonicNowNs();
+    var parser: std.http.HeadParser = .{};
+    var head_len: usize = 0;
+    while (true) {
+        head_len += parser.feed(reader.buffered()[head_len..]);
+        if (parser.state == .finished or head_len >= max_head_len) return;
+        try waitForInput(fd, tls_input, silence_ceiling_ms, started_ns, request_timeout_ms);
+        reader.fillMore() catch return;
+    }
+}
+
+/// Block until one read from the connection reader cannot block on the socket.
+///
+/// On a plain connection that is a readable socket. A TLS client reads the
+/// socket until `tls_input` holds one whole record, so a readable socket is not
+/// enough: a record that arrives in part and then stops holds the client in a
+/// blocking read. The record is therefore completed here, with a poll before
+/// each socket read. A read that ends or fails stops the wait without an
+/// error, because the TLS client meets the same end or failure at once.
+///
+/// Each poll gets `request_timeout_ms` minus the time spent since `started_ns`.
+fn waitForInput(
+    fd: std.posix.fd_t,
+    tls_input: ?*std.Io.Reader,
+    silence_ceiling_ms: i32,
+    started_ns: ?u64,
+    request_timeout_ms: i32,
+) error{ RequestTimedOut, RequestStalled, PollFailed }!void {
+    const input = tls_input orelse
+        return waitForReadable(fd, silence_ceiling_ms, remainingMs(started_ns, request_timeout_ms));
+    while (!holdsTlsRecord(input)) {
+        try waitForReadable(fd, silence_ceiling_ms, remainingMs(started_ns, request_timeout_ms));
+        input.fillMore() catch return;
+    }
+}
+
+/// True when the TLS client can take its next record from `input` without a
+/// socket read. A record that the buffer cannot hold counts as held: the TLS
+/// client refuses it from its header, without a read.
+fn holdsTlsRecord(input: *std.Io.Reader) bool {
+    const header_len = std.crypto.tls.record_header_len;
+    const buffered = input.buffered();
+    if (buffered.len < header_len) return false;
+    const record_len = header_len + @as(usize, std.mem.readInt(u16, buffered[3..5], .big));
+    return buffered.len >= record_len or record_len > input.buffer.len;
+}
+
 /// Block until the socket has bytes to read, bounded by the silence ceiling.
 /// Used before the head and again before the body: a blocking read that
 /// outlives `SO_RCVTIMEO` panics instead of erroring, so the wait is done here
