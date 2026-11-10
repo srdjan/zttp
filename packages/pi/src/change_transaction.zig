@@ -241,6 +241,14 @@ fn commitLocked(
         try writeReceipt(allocator, transaction_dir, prepared, proof);
     try writeMarker(allocator, transaction_dir, "prepared");
     try syncDirectory(allocator, transaction_dir);
+    // A power loss must not keep a renamed target and lose its journal. The
+    // entries that name the transaction directory, `change-sets`, and `.zttp`
+    // become durable here, before the first stage file.
+    const change_sets_dir = std.fs.path.dirname(transaction_dir) orelse return error.InvalidTargetPath;
+    const zttp_dir = std.fs.path.dirname(change_sets_dir) orelse return error.InvalidTargetPath;
+    try syncDirectory(allocator, change_sets_dir);
+    try syncDirectory(allocator, zttp_dir);
+    try syncDirectory(allocator, std.fs.path.dirname(zttp_dir) orelse return error.InvalidTargetPath);
     if (options.fault == .after_prepared) return error.InjectedTransactionFailure;
 
     try snapshot.recheck(allocator);
