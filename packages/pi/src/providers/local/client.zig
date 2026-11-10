@@ -62,6 +62,7 @@ pub const Config = struct {
 };
 
 pub const ClientError = error{
+    AbnormalFinish,
     EmptyResponse,
     InvalidMlxBaseUrl,
     InvalidResponseJson,
@@ -459,6 +460,11 @@ fn decodeResponseValue(
     const finish_reason = try optionalString(choice.object.get("finish_reason"));
     if (finish_reason) |reason| {
         if (std.mem.eql(u8, reason, "length")) return ClientError.OutputTruncated;
+        // The same rule as the DeepSeek client: every other finish ends the
+        // reply on partial text, so only a natural stop or a tool call may decode.
+        if (!std.mem.eql(u8, reason, "stop") and !std.mem.eql(u8, reason, "tool_calls")) {
+            return ClientError.AbnormalFinish;
+        }
     }
     const message = choice.object.get("message") orelse return ClientError.UnexpectedResponseShape;
     if (message != .object) return ClientError.UnexpectedResponseShape;
@@ -1414,6 +1420,16 @@ test "local response reports invalid JSON and output truncation distinctly" {
         arena.allocator(),
         "request",
         "{\"choices\":[{\"finish_reason\":\"length\",\"message\":{\"content\":\"partial\"}}]}",
+    ));
+}
+
+test "local response refuses a completion that the server cut off for another reason" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try testing.expectError(error.AbnormalFinish, decodeResponse(
+        arena.allocator(),
+        "request",
+        "{\"choices\":[{\"finish_reason\":\"content_filter\",\"message\":{\"content\":\"half a han\"}}]}",
     ));
 }
 
