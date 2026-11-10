@@ -871,6 +871,13 @@ fn stageCandidates(
     proof_id: *const [64]u8,
     fault: FaultPoint,
 ) ![][]u8 {
+    // Recovery has run under the workspace lock, so no journal names a file
+    // that is already at a stage path. Such a file is a leftover.
+    for (prepared.changes) |change| {
+        const leftover = try stagePath(allocator, change.resolved_path, proof_id);
+        defer allocator.free(leftover);
+        try deleteFileIfPresent(allocator, leftover);
+    }
     const stages = try allocator.alloc([]u8, prepared.changes.len);
     var initialized: usize = 0;
     errdefer {
@@ -883,8 +890,9 @@ fn stageCandidates(
     for (prepared.changes, 0..) |change, index| {
         const stage = try stagePath(allocator, change.resolved_path, proof_id);
         errdefer allocator.free(stage);
-        // Recovery has run under the workspace lock, so no journal names a file
-        // that is already at this path. The atomic write replaces it.
+        // The leftovers are gone, so a file at this path is the stage of an
+        // earlier target: on this filesystem two target names are one file.
+        if (try pathExists(allocator, stage)) return error.DuplicateTarget;
         switch (fault) {
             .before_stage_write => |fault_index| if (fault_index == index)
                 return error.InjectedTransactionFailure,
@@ -2955,4 +2963,46 @@ test "a provided receipt reports a failed allocation as out of memory" {
     const transaction_dir = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
     defer testing.allocator.free(transaction_dir);
     try testing.checkAllAllocationFailures(testing.allocator, writeFixtureReceipt, .{transaction_dir});
+}
+
+test "two target names that can be one file never leave a recovery conflict" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    const tail = [_]@import("turn.zig").Change{.{ .file = "src/new.ts", .content = "lower" }};
+    var prepared = try change_set.prepare(testing.allocator, root, .{
+        .file = "src/New.ts",
+        .content = "upper",
+        .additional = &tail,
+    });
+    defer prepared.deinit(testing.allocator);
+    var snapshot = try workspace_snapshot.Snapshot.capture(testing.allocator, &prepared);
+    defer snapshot.deinit(testing.allocator);
+    const roots = try testing.allocator.alloc([]u8, 1);
+    roots[0] = try testing.allocator.dupe(u8, "src/New.ts");
+    var proof: aggregate_proof.AggregateProof = .{
+        .proof_id = @splat('a'),
+        .policy_hash = zts.policyHash(),
+        .read_set_digest = @splat('b'),
+        .proof_roots = roots,
+        .diagnostics = try testing.allocator.alloc(aggregate_proof.Diagnostic, 0),
+        .system_proven = false,
+    };
+    defer proof.deinit(testing.allocator);
+
+    // On a case-insensitive filesystem the two names are one file, and the
+    // commit must fail before it writes a target. On a case-sensitive
+    // filesystem the commit succeeds. The arena owns the receipt of that case.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    {
+        var first = try RecoveredWorkspace.acquire(arena.allocator(), root);
+        defer first.deinit();
+        const receipt: ?CommitReceipt = first.commit(&prepared, &snapshot, &proof, .{}) catch null;
+        _ = receipt;
+    }
+    var workspace = try RecoveredWorkspace.acquire(testing.allocator, root);
+    defer workspace.deinit();
 }
