@@ -134,8 +134,10 @@ pub fn prepare(
             common_project_root = try allocator.dupe(u8, project_root);
         }
 
+        const authored_path = try allocator.dupe(u8, model_change.file);
+        errdefer allocator.free(authored_path);
         changes[index] = .{
-            .authored_path = try allocator.dupe(u8, model_change.file),
+            .authored_path = authored_path,
             .resolved_path = resolved_path,
             .candidate = try allocator.dupe(u8, model_change.content),
             .baseline = baseline,
@@ -246,6 +248,27 @@ test "prepare owns ordered present and absent baselines" {
     try testing.expectEqualStrings("old", prepared.changes[0].baseline.bytes().?);
     try testing.expect(prepared.changes[1].baseline == .absent);
     try testing.expectEqualStrings("src/b.ts", prepared.changes[1].authored_path);
+}
+
+fn prepareAndRelease(allocator: std.mem.Allocator, root: []const u8) !void {
+    const tail = [_]turn.Change{.{ .file = "src/b.ts", .content = "new" }};
+    var prepared = try prepare(allocator, root, .{
+        .file = "src/a.ts",
+        .content = "changed",
+        .additional = &tail,
+    });
+    prepared.deinit(allocator);
+}
+
+test "prepare frees every allocation when an allocation fails" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+    const root = try rootPath(testing.allocator, &tmp);
+    defer testing.allocator.free(root);
+    // A property test: the standard library fails each allocation in turn.
+    try testing.checkAllAllocationFailures(testing.allocator, prepareAndRelease, .{root});
 }
 
 test "prepare rejects duplicate aliases no-ops and unsupported targets" {
