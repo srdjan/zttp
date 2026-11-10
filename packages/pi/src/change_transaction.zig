@@ -3058,3 +3058,16 @@ test "acquire refuses a stray file that is not Finder metadata" {
         RecoveredWorkspace.acquire(testing.allocator, fixture.root),
     );
 }
+
+test "acquire refuses a directory with the Finder metadata name" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var fixture = try Fixture.init(testing.allocator, &tmp);
+    defer fixture.deinit(testing.allocator);
+    try tmp.dir.createDirPath(testing.io, ".zttp/change-sets/.DS_Store");
+
+    try testing.expectError(
+        error.CorruptTransactionDirectory,
+        RecoveredWorkspace.acquire(testing.allocator, fixture.root),
+    );
+}
