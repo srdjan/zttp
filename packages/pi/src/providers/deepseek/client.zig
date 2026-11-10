@@ -546,17 +546,6 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
         error.RequestStalled => return ClientError.DeepSeekGenerationStalled,
         else => return ClientError.DeepSeekServerUnavailable,
     };
-    // The wait covers the silence before the first body byte. It is skipped when
-    // decrypted body bytes are already buffered, because the socket can then be
-    // silent with the body complete. A partial encrypted record still needs the
-    // socket, so the ciphertext reader is not checked here.
-    if (connection.reader().bufferedLen() == 0) {
-        try waitForReadable(
-            connection.stream_reader.stream.socket.handle,
-            silence_ceiling_ms,
-            remainingMs(request_started_ns, request_timeout_ms),
-        );
-    }
     const declared_len = http_errors.declaredBodyLength(response.head);
     var transfer_buf: [4096]u8 = undefined;
     var decompress: std.http.Decompress = undefined;
@@ -591,17 +580,6 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
 const readBodyWithin = http_errors.readBodyWithin;
 const remainingMs = http_errors.remainingMs;
 const effectiveRequestTimeoutMs = http_errors.effectiveRequestTimeoutMs;
-
-/// The shared wait, with its outcomes named for this provider. A stall is one
-/// request that went quiet while the turn could still afford another, which the
-/// caller may reissue.
-fn waitForReadable(fd: std.posix.fd_t, silence_ceiling_ms: i32, request_timeout_ms: i32) !void {
-    http_errors.waitForReadable(fd, silence_ceiling_ms, request_timeout_ms) catch |err| return switch (err) {
-        error.RequestTimedOut => error.RequestTimedOut,
-        error.RequestStalled => ClientError.DeepSeekGenerationStalled,
-        error.PollFailed => ClientError.DeepSeekServerUnavailable,
-    };
-}
 
 /// The silence ceiling never exceeds the budget it sits inside. A configured
 /// value at or above the budget collapses to the budget, which is the same
@@ -1008,7 +986,7 @@ test "a silence ceiling separates a stalled request from a spent budget" {
     try testing.expectEqual(@as(i32, 1), effectiveStallCeilingMs(0, budget_ms));
 }
 
-test "the wait on a silent socket names a stall and a spent budget for DeepSeek" {
+test "the wait on a silent socket names a stall and a spent budget" {
     if (@TypeOf(std.posix.system.socketpair) == void) return error.SkipZigTest;
     var fds: [2]std.posix.fd_t = undefined;
     switch (std.posix.errno(std.posix.system.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds))) {
@@ -1018,8 +996,8 @@ test "the wait on a silent socket names a stall and a spent budget for DeepSeek"
     defer std.Io.Threaded.closeFd(fds[0]);
     defer std.Io.Threaded.closeFd(fds[1]);
 
-    try testing.expectError(ClientError.DeepSeekGenerationStalled, waitForReadable(fds[0], 20, 1_000));
-    try testing.expectError(error.RequestTimedOut, waitForReadable(fds[0], 20, 20));
+    try testing.expectError(error.RequestStalled, http_errors.waitForReadable(fds[0], 20, 1_000));
+    try testing.expectError(error.RequestTimedOut, http_errors.waitForReadable(fds[0], 20, 20));
 }
 
 fn shutdownPeerAfterTwoSeconds(fd: std.posix.fd_t) void {
