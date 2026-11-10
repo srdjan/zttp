@@ -586,6 +586,9 @@ fn recoverOne(
     if (phase == .committed) {
         try validateReceipt(allocator, transaction_dir, manifest.proof_id);
     }
+    // In these two phases recovery deletes stage files beside the targets,
+    // and in the second it also writes the targets.
+    if (phase == .prepared or phase == .applying) try requireCanonicalTargets(allocator, manifest);
 
     var planner: RecoveryPlanner = switch (phase) {
         .aborted => .{ .aborted = {} },
@@ -826,6 +829,21 @@ fn finishAbortedDelete(allocator: std.mem.Allocator, transaction_dir: []const u8
     var plan = try planner.finish();
     defer plan.deinit(allocator);
     return executeRecoveryPlan(allocator, transaction_dir, &plan, options);
+}
+
+/// `change_set.prepare` accepts a target only at its canonical path. The
+/// manifest check is a prefix comparison, so it passes a path that now leaves
+/// the workspace through `..` or through a directory that became a symlink.
+/// Recovery refuses such a path, and a secret name, before it touches a target.
+fn requireCanonicalTargets(allocator: std.mem.Allocator, manifest: Manifest) !void {
+    for (manifest.changes) |change| {
+        const canonical = common.resolveInsideWorkspace(allocator, manifest.workspace_root, change.path) catch |err| switch (err) {
+            error.PathOutsideWorkspace, error.SecretPath => return error.NonCanonicalTransactionTarget,
+            else => return err,
+        };
+        defer allocator.free(canonical);
+        if (!std.mem.eql(u8, canonical, change.path)) return error.NonCanonicalTransactionTarget;
+    }
 }
 
 /// The stage file that sits next to a target while a transaction applies.
@@ -2826,4 +2844,53 @@ test "acquire removes the stage files of an applying transaction it rolls forwar
     try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "src/.a.ts.zttp-aaaaaaaaaaaaaaaa.stage", .{}));
     try testing.expectError(error.FileNotFound, tmp.dir.access(testing.io, "src/.b.ts.zttp-aaaaaaaaaaaaaaaa.stage", .{}));
     try expectFixtureCandidates(&fixture, true);
+}
+
+test "recovery refuses to write a target below a directory that became a symlink" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    var outside = testing.tmpDir(.{});
+    defer outside.cleanup();
+    try tmp.dir.createDirPath(testing.io, "pkg/src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "pkg/src/a.ts", .data = "old-a" });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root);
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "pkg/src/a.ts", .content = "new-a" });
+    defer prepared.deinit(testing.allocator);
+    var snapshot = try workspace_snapshot.Snapshot.capture(testing.allocator, &prepared);
+    defer snapshot.deinit(testing.allocator);
+    const roots = try testing.allocator.alloc([]u8, 1);
+    roots[0] = try testing.allocator.dupe(u8, "pkg/src/a.ts");
+    var proof: aggregate_proof.AggregateProof = .{
+        .proof_id = @splat('a'),
+        .policy_hash = zts.policyHash(),
+        .read_set_digest = @splat('b'),
+        .proof_roots = roots,
+        .diagnostics = try testing.allocator.alloc(aggregate_proof.Diagnostic, 0),
+        .system_proven = false,
+    };
+    defer proof.deinit(testing.allocator);
+    {
+        var lock = try WorkspaceLock.acquire(testing.allocator, root);
+        defer lock.deinit();
+        try testing.expectError(
+            error.InjectedTransactionFailure,
+            commitLocked(testing.allocator, &lock, &prepared, &snapshot, &proof, .{ .fault = .after_applying }),
+        );
+    }
+    // The target still holds the baseline. A directory outside the workspace
+    // holds the same bytes at the same relative path, and `pkg` now links there.
+    try outside.dir.createDirPath(testing.io, "src");
+    try outside.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old-a" });
+    const outside_root = try std.Io.Dir.realPathFileAlloc(outside.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(outside_root);
+    try tmp.dir.rename("pkg", tmp.dir, "pkg-moved", testing.io);
+    try tmp.dir.symLink(testing.io, outside_root, "pkg", .{ .is_directory = true });
+
+    try testing.expectError(
+        error.NonCanonicalTransactionTarget,
+        RecoveredWorkspace.acquire(testing.allocator, root),
+    );
+    var contents: [64]u8 = undefined;
+    try testing.expectEqualStrings("old-a", try outside.dir.readFile(testing.io, "src/a.ts", &contents));
 }
