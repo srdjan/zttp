@@ -156,8 +156,10 @@ pub const Snapshot = struct {
             }
         }.lessThan);
 
+        const project_root = try allocator.dupe(u8, prepared.project_root);
+        errdefer allocator.free(project_root);
         return .{
-            .project_root = try allocator.dupe(u8, prepared.project_root),
+            .project_root = project_root,
             .entries = try entries.toOwnedSlice(allocator),
         };
     }
@@ -257,19 +259,8 @@ fn collectInputs(
             .directory => try collectInputs(allocator, io, project_root, absolute, entries, total_bytes),
             .file => {
                 if (!isProofInput(entry.name)) continue;
-                if (entries.items.len >= max_read_entries) return error.ProofReadSetTooLarge;
-                const bytes = try zts.file_io.readFile(allocator, absolute, max_read_file_bytes);
-                errdefer allocator.free(bytes);
-                total_bytes.* = std.math.add(usize, total_bytes.*, bytes.len) catch
-                    return error.ProofReadSetTooLarge;
-                if (total_bytes.* > max_read_set_bytes) return error.ProofReadSetTooLarge;
                 const relative = common.relativeToRoot(project_root, absolute);
-                try entries.append(allocator, .{
-                    .absolute_path = try allocator.dupe(u8, absolute),
-                    .relative_path = try allocator.dupe(u8, relative),
-                    .state = .{ .present = bytes },
-                    .sha256 = digestReadState(bytes),
-                });
+                try appendPresent(allocator, entries, absolute, relative, total_bytes);
             },
             .sym_link => {
                 if (isProofInput(entry.name)) return error.SymlinkProofInputUnsupported;
@@ -308,12 +299,42 @@ fn appendAbsent(
     relative: []const u8,
 ) !void {
     if (containsAbsolute(entries.items, absolute)) return;
+    try appendEntry(allocator, entries, absolute, relative, .absent);
+}
+
+/// Reads one regular file into the read set, within the size limits.
+fn appendPresent(
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayList(ReadEntry),
+    absolute: []const u8,
+    relative: []const u8,
+    total_bytes: *usize,
+) !void {
+    const bytes = try zts.file_io.readFile(allocator, absolute, max_read_file_bytes);
+    errdefer allocator.free(bytes);
+    total_bytes.* = std.math.add(usize, total_bytes.*, bytes.len) catch return error.ProofReadSetTooLarge;
+    if (total_bytes.* > max_read_set_bytes) return error.ProofReadSetTooLarge;
+    try appendEntry(allocator, entries, absolute, relative, .{ .present = bytes });
+}
+
+/// The one place that appends an entry. It owns `state` only after it succeeds.
+fn appendEntry(
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayList(ReadEntry),
+    absolute: []const u8,
+    relative: []const u8,
+    state: ReadState,
+) !void {
     if (entries.items.len >= max_read_entries) return error.ProofReadSetTooLarge;
+    const owned_absolute = try allocator.dupe(u8, absolute);
+    errdefer allocator.free(owned_absolute);
+    const owned_relative = try allocator.dupe(u8, relative);
+    errdefer allocator.free(owned_relative);
     try entries.append(allocator, .{
-        .absolute_path = try allocator.dupe(u8, absolute),
-        .relative_path = try allocator.dupe(u8, relative),
-        .state = .absent,
-        .sha256 = digestReadState(null),
+        .absolute_path = owned_absolute,
+        .relative_path = owned_relative,
+        .state = state,
+        .sha256 = digestReadState(state.bytes()),
     });
 }
 
@@ -397,21 +418,7 @@ fn captureNamedPath(
     };
     if (stat.kind == .sym_link) return error.SymlinkProofInputUnsupported;
     if (stat.kind != .file) return error.NonRegularProofInput;
-    if (entries.items.len >= max_read_entries) return error.ProofReadSetTooLarge;
-    const bytes = try zts.file_io.readFile(allocator, absolute, max_read_file_bytes);
-    errdefer allocator.free(bytes);
-    total_bytes.* = std.math.add(usize, total_bytes.*, bytes.len) catch return error.ProofReadSetTooLarge;
-    if (total_bytes.* > max_read_set_bytes) return error.ProofReadSetTooLarge;
-    const owned_absolute = try allocator.dupe(u8, absolute);
-    errdefer allocator.free(owned_absolute);
-    const owned_relative = try allocator.dupe(u8, relative);
-    errdefer allocator.free(owned_relative);
-    try entries.append(allocator, .{
-        .absolute_path = owned_absolute,
-        .relative_path = owned_relative,
-        .state = .{ .present = bytes },
-        .sha256 = digestReadState(bytes),
-    });
+    try appendPresent(allocator, entries, absolute, relative, total_bytes);
 }
 
 fn captureAbsentIfMissing(
@@ -667,6 +674,31 @@ test "capture refuses a configured proof input reached through a symlinked direc
     var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/a.ts", .content = "new" });
     defer prepared.deinit(testing.allocator);
     try testing.expectError(error.SymlinkProofInputUnsupported, Snapshot.capture(testing.allocator, &prepared));
+}
+
+fn captureAndRelease(allocator: std.mem.Allocator, prepared: *const change_set.PreparedChangeSet) !void {
+    var snapshot = try Snapshot.capture(allocator, prepared);
+    snapshot.deinit(allocator);
+}
+
+test "capture frees every allocation when an allocation fails" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+    const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root_z);
+    const root = try testing.allocator.dupe(u8, root_z);
+    defer testing.allocator.free(root);
+    const tail = [_]@import("turn.zig").Change{.{ .file = "src/new.ts", .content = "new-file" }};
+    var prepared = try change_set.prepare(testing.allocator, root, .{
+        .file = "src/a.ts",
+        .content = "new",
+        .additional = &tail,
+    });
+    defer prepared.deinit(testing.allocator);
+    // A property test: the standard library fails each allocation in turn.
+    try testing.checkAllAllocationFailures(testing.allocator, captureAndRelease, .{&prepared});
 }
 
 test "scratch directory creation never reuses an existing directory" {
