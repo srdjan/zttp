@@ -943,10 +943,21 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
 }
 
 /// MLX does not send response headers until generation completes, so the wait
-/// for the head is the wait for the generation, and its silence ceiling is the
-/// whole budget. A head that stops part way times out on the same budget.
+/// for the first byte of the head is the wait for the generation, and it can
+/// take the whole budget. The rest of the head follows at once, so a silence of
+/// `body_silence_ceiling_ms` inside the head is a hung server, as in the body.
 fn receiveHead(request: *std.http.Client.Request, timeout_ms: i32) !std.http.Client.Response {
-    return http_errors.receiveHeadWithin(request, timeout_ms, timeout_ms) catch |err| switch (err) {
+    const started_ns = monotonicNowNs();
+    const socket = request.connection.?.stream_reader.stream.socket.handle;
+    http_errors.waitForReadable(socket, timeout_ms, timeout_ms) catch |err| return switch (err) {
+        error.RequestTimedOut, error.RequestStalled => error.RequestTimedOut,
+        error.PollFailed => ClientError.LocalServerUnavailable,
+    };
+    return http_errors.receiveHeadWithin(
+        request,
+        body_silence_ceiling_ms,
+        http_errors.remainingMs(started_ns, timeout_ms),
+    ) catch |err| switch (err) {
         error.RequestTimedOut, error.RequestStalled => error.RequestTimedOut,
         else => ClientError.LocalServerUnavailable,
     };
@@ -1725,8 +1736,10 @@ const PartialHeadServer = struct {
     io: std.Io,
     /// How long the server keeps the connection open after the partial head.
     hold_ms: i64 = 0,
+    /// What the server sends: no whole response head.
+    sent: []const u8 = "HTTP/1.1 200 OK\r\nContent-Le",
 
-    /// Sends part of a response head and nothing more.
+    /// Sends `sent` and nothing more.
     fn run(self: *PartialHeadServer) void {
         const io = self.io;
         var stream = self.listener.accept(io) catch return;
@@ -1736,7 +1749,7 @@ const PartialHeadServer = struct {
         _ = stream.readWithControl(io, &vecs, &.{}) catch return;
         var out_buf: [4096]u8 = undefined;
         var writer = stream.writer(io, &out_buf);
-        writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Le") catch return;
+        writer.interface.writeAll(self.sent) catch return;
         writer.interface.flush() catch return;
         std.Io.sleep(io, .fromMilliseconds(self.hold_ms), .awake) catch {};
     }
@@ -1796,4 +1809,37 @@ test "a connection that closes inside the response head is a transport failure" 
     var client = Client.init(.{ .base_url = base, .model = "m", .system_prompt = "s" });
     const result = client.sendTurn(arena, &transcript, null);
     try testing.expectError(ClientError.LocalServerUnavailable, result);
+}
+
+test "a server that sends no response times out at the request budget" {
+    const allocator = testing.allocator;
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    // The server closes after 2 s so a defective read returns instead of hanging the suite.
+    var server: PartialHeadServer = .{
+        .listener = try address.listen(io, .{ .reuse_address = true }),
+        .io = io,
+        .hold_ms = 2000,
+        .sent = "",
+    };
+    defer server.listener.deinit(io);
+    const port = server.listener.socket.address.getPort();
+    const thread = try std.Thread.spawn(.{}, PartialHeadServer.run, .{&server});
+    defer thread.join();
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const base = try std.fmt.allocPrint(arena, "http://127.0.0.1:{d}", .{port});
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(allocator);
+    try transcript.append(allocator, .{ .user_text = "hi" });
+    var client = Client.init(.{ .base_url = base, .model = "m", .system_prompt = "s", .request_timeout_ms = 300 });
+    const started = monotonicNowNs().?;
+    const result = client.sendTurn(arena, &transcript, null);
+    const elapsed = elapsedMs(started).?;
+    try testing.expectError(error.RequestTimedOut, result);
+    try testing.expect(elapsed < 1000);
 }
