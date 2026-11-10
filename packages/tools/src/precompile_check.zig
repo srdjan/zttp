@@ -829,6 +829,7 @@ pub fn generateTypeDefs(writer: anytype) void {
         \\  static json(data: unknown, init?: ResponseInit): Response;
         \\  static text(text: string, init?: ResponseInit): Response;
         \\  static html(html: string, init?: ResponseInit): Response;
+        \\  static rawJson(json: string, init?: ResponseInit): Response;
         \\  static redirect(url: string, status?: number): Response;
         \\}}
         \\
@@ -1260,6 +1261,12 @@ test "type defs: a Result whose runtime error is a record declares an unknown er
 // the type checker refuses every other member (ZTS203).
 test "type defs: a Response init declares status and no other member" {
     try std.testing.expect(try typeDefsContain("interface ResponseInit {\n  status?: number;\n}\n"));
+}
+
+// `Response.rawJson` is a runtime helper (`http.zig` `responseRawJson`) that
+// sends a JSON string as it is.
+test "type defs: Response declares rawJson" {
+    try std.testing.expect(try typeDefsContain("  static rawJson(json: string, init?: ResponseInit): Response;\n"));
 }
 
 test "type defs: a Result whose runtime error is a string message declares a string error" {
