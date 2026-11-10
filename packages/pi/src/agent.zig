@@ -1036,6 +1036,89 @@ test "reconciliation records a second commit of the same change set" {
     try testing.expectEqual(@as(usize, 2), session.transcript.len());
 }
 
+/// Starts from an empty journal, commits and stops as a killed process does,
+/// and reconciles the one pending receipt. Only the reconciliation uses
+/// `allocator`.
+fn reconcileOnePendingReceipt(
+    allocator: std.mem.Allocator,
+    tmp_dir: std.Io.Dir,
+    prepared: *const change_set.PreparedChangeSet,
+    snapshot: *const workspace_snapshot.Snapshot,
+    proof: *const aggregate_proof.AggregateProof,
+    receipt_json: []const u8,
+) !void {
+    try tmp_dir.deleteTree(testing.io, ".zttp");
+    try tmp_dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+    {
+        var workspace = try change_transaction.RecoveredWorkspace.acquire(testing.allocator, prepared.workspace_root);
+        defer workspace.deinit();
+        try testing.expectError(
+            error.InjectedTransactionFailure,
+            workspace.commit(prepared, snapshot, proof, .{
+                .receipt_json = receipt_json,
+                .fault = .after_committed,
+            }),
+        );
+    }
+    var session = AgentSession.initStub();
+    defer session.deinit(allocator);
+    try reconcileWorkspaceReceipts(allocator, &session);
+}
+
+test "reconciliation reports a failed allocation as out of memory" {
+    const allocator = testing.allocator;
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+    const root = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", allocator);
+    defer allocator.free(root);
+    var prepared = try change_set.prepare(allocator, root, .{
+        .file = "src/a.ts",
+        .content = "new",
+    });
+    defer prepared.deinit(allocator);
+    var snapshot = try workspace_snapshot.Snapshot.capture(allocator, &prepared);
+    defer snapshot.deinit(allocator);
+    const roots = try allocator.alloc([]u8, 1);
+    roots[0] = try allocator.dupe(u8, "src/a.ts");
+    var proof: aggregate_proof.AggregateProof = .{
+        .proof_id = @splat('f'),
+        .policy_hash = zts.policyHash(),
+        .read_set_digest = @splat('a'),
+        .proof_roots = roots,
+        .diagnostics = try allocator.alloc(aggregate_proof.Diagnostic, 0),
+        .system_proven = false,
+    };
+    defer proof.deinit(allocator);
+    var receipt_payload: ui_payload.UiPayload = .{ .verified_change_set = try change_set_receipt.build(
+        allocator,
+        &prepared,
+        &snapshot,
+        &proof,
+        42,
+    ) };
+    defer receipt_payload.deinit(allocator);
+    var receipt_json = TextBuffer.init(allocator);
+    defer receipt_json.deinit();
+    try ui_payload.writeJson(receipt_json.writer(), receipt_payload);
+
+    const prior_cwd = try cwdPathAlloc(allocator);
+    defer allocator.free(prior_cwd);
+    try std.Io.Threaded.chdir(root);
+    defer std.Io.Threaded.chdir(prior_cwd) catch {};
+
+    // A property test: the standard library fails each allocation in turn and
+    // accepts only error.OutOfMemory, with every allocation freed.
+    try testing.checkAllAllocationFailures(allocator, reconcileOnePendingReceipt, .{
+        tmp.dir,
+        &prepared,
+        &snapshot,
+        &proof,
+        receipt_json.written(),
+    });
+}
+
 test "SessionMetrics folds a clarifying text turn then an applied edit" {
     var m: SessionMetrics = .{};
     // Turn 1: a clarifying question - plain text, ends approved, applies no edit.

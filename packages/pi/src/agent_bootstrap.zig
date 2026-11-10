@@ -68,11 +68,15 @@ fn appendRecoveredReceipt(
     session: *AgentSession,
     pending: change_transaction.PendingReceipt,
 ) !void {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, pending.json, .{}) catch
-        return error.InvalidRecoveredChangeSetReceipt;
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, pending.json, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.InvalidRecoveredChangeSetReceipt,
+    };
     defer parsed.deinit();
-    var payload = ui_payload.parse(allocator, parsed.value) catch
-        return error.InvalidRecoveredChangeSetReceipt;
+    var payload = ui_payload.parse(allocator, parsed.value) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.InvalidRecoveredChangeSetReceipt,
+    };
     var payload_owned = true;
     defer if (payload_owned) payload.deinit(allocator);
     const receipt = switch (payload) {
