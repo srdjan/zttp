@@ -619,7 +619,10 @@ fn writeChangeSetLine(writer: *std.Io.Writer, receipt: LedgerChangeSet) !void {
 }
 
 fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !ExportMeta {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch return error.InvalidLedgerFile;
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.InvalidLedgerFile,
+    };
     defer parsed.deinit();
 
     if (parsed.value != .object) return error.InvalidLedgerFile;
@@ -645,7 +648,10 @@ fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !ExportMeta {
 }
 
 fn parseChangeSetLine(allocator: std.mem.Allocator, line: []const u8) !LedgerChangeSet {
-    var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch return error.InvalidLedgerFile;
+    var parsed = std.json.parseFromSlice(std.json.Value, allocator, line, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => return error.InvalidLedgerFile,
+    };
     defer parsed.deinit();
 
     if (parsed.value != .object) return error.InvalidLedgerFile;
@@ -928,6 +934,30 @@ test "readLedgerFile rejects an invalid line that follows a valid change set" {
     try zts.file_io.writeFile(testing.allocator, path, buf.written());
 
     try testing.expectError(error.InvalidLedgerFile, readLedgerFile(testing.allocator, path));
+}
+
+fn readLedgerFileThenFree(allocator: std.mem.Allocator, path: []const u8) !void {
+    var bundle = try readLedgerFile(allocator, path);
+    bundle.deinit(allocator);
+}
+
+test "readLedgerFile reports OutOfMemory and frees every allocation when any one allocation fails" {
+    var tmp = try initTmp(testing.allocator);
+    defer tmp.cleanup(testing.allocator);
+    const path = try tmp.childPath(testing.allocator, "ledger.ndjson");
+    defer testing.allocator.free(path);
+    var receipt = try testLedgerReceipt(testing.allocator, "before", "after", &@as([64:0]u8, @splat('a')));
+    defer receipt.deinit(testing.allocator);
+    var buf = TextBuffer.init(testing.allocator);
+    defer buf.deinit();
+    try buf.writer().writeAll(test_meta_line);
+    try writeChangeSetLine(buf.writer(), receipt);
+    try buf.writer().writeByte('\n');
+    try writeChangeSetLine(buf.writer(), receipt);
+    try buf.writer().writeByte('\n');
+    try zts.file_io.writeFile(testing.allocator, path, buf.written());
+
+    try testing.checkAllAllocationFailures(testing.allocator, readLedgerFileThenFree, .{path});
 }
 
 test "replayBundleInWorkspace detects policy drift" {
