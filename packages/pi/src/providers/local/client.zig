@@ -1723,9 +1723,10 @@ test "a body that ends before its Content-Length is a transport failure" {
 const PartialHeadServer = struct {
     listener: std.Io.net.Server,
     io: std.Io,
+    /// How long the server keeps the connection open after the partial head.
+    hold_ms: i64 = 0,
 
-    /// Sends part of a response head and nothing more. Closes after 2 s so a
-    /// defective read returns instead of hanging the suite.
+    /// Sends part of a response head and nothing more.
     fn run(self: *PartialHeadServer) void {
         const io = self.io;
         var stream = self.listener.accept(io) catch return;
@@ -1737,7 +1738,7 @@ const PartialHeadServer = struct {
         var writer = stream.writer(io, &out_buf);
         writer.interface.writeAll("HTTP/1.1 200 OK\r\nContent-Le") catch return;
         writer.interface.flush() catch return;
-        std.Io.sleep(io, .fromMilliseconds(2000), .awake) catch {};
+        std.Io.sleep(io, .fromMilliseconds(self.hold_ms), .awake) catch {};
     }
 };
 
@@ -1747,7 +1748,12 @@ test "a response head that goes silent before its end times out at the request b
     defer io_backend.deinit();
     const io = io_backend.io();
     const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
-    var server: PartialHeadServer = .{ .listener = try address.listen(io, .{ .reuse_address = true }), .io = io };
+    // The server closes after 2 s so a defective read returns instead of hanging the suite.
+    var server: PartialHeadServer = .{
+        .listener = try address.listen(io, .{ .reuse_address = true }),
+        .io = io,
+        .hold_ms = 2000,
+    };
     defer server.listener.deinit(io);
     const port = server.listener.socket.address.getPort();
     const thread = try std.Thread.spawn(.{}, PartialHeadServer.run, .{&server});
@@ -1766,4 +1772,28 @@ test "a response head that goes silent before its end times out at the request b
     const elapsed = elapsedMs(started).?;
     try testing.expectError(error.RequestTimedOut, result);
     try testing.expect(elapsed < 1000);
+}
+
+test "a connection that closes inside the response head is a transport failure" {
+    const allocator = testing.allocator;
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const io = io_backend.io();
+    const address = try std.Io.net.IpAddress.parseIp4("127.0.0.1", 0);
+    var server: PartialHeadServer = .{ .listener = try address.listen(io, .{ .reuse_address = true }), .io = io };
+    defer server.listener.deinit(io);
+    const port = server.listener.socket.address.getPort();
+    const thread = try std.Thread.spawn(.{}, PartialHeadServer.run, .{&server});
+    defer thread.join();
+
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+    const base = try std.fmt.allocPrint(arena, "http://127.0.0.1:{d}", .{port});
+    var transcript: transcript_mod.Transcript = .{};
+    defer transcript.deinit(allocator);
+    try transcript.append(allocator, .{ .user_text = "hi" });
+    var client = Client.init(.{ .base_url = base, .model = "m", .system_prompt = "s" });
+    const result = client.sendTurn(arena, &transcript, null);
+    try testing.expectError(ClientError.LocalServerUnavailable, result);
 }

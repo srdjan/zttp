@@ -1247,6 +1247,48 @@ test "a whole TLS record that the socket reader holds completes the head without
     try testing.expectEqualStrings("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", records.interface.buffered());
 }
 
+test "a head that reaches the length limit ends the fill without a further wait" {
+    if (@TypeOf(std.posix.system.socketpair) == void) return error.SkipZigTest;
+    var fds: [2]std.posix.fd_t = undefined;
+    switch (std.posix.errno(std.posix.system.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds))) {
+        .SUCCESS => {},
+        else => return error.SkipZigTest,
+    }
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+    _ = std.posix.system.write(fds[1], "HTTP/1.1 200 OK\r\nContent-Le", 27);
+
+    var stream: std.Io.net.Stream = .{ .socket = .{ .handle = fds[0], .address = undefined } };
+    var buf: [4096]u8 = undefined;
+    var stream_reader = stream.reader(testing.io, &buf);
+    // The HTTP parser refuses a head of 16 bytes or more without a read, so
+    // the fill leaves the unfinished head to the parser.
+    try http_errors.fillHeadWithin(&stream_reader.interface, 16, fds[0], 20, 1_000, null);
+    try testing.expectEqualStrings("HTTP/1.1 200 OK\r\nContent-Le", stream_reader.interface.buffered());
+}
+
+test "a TLS record that the socket reader cannot hold ends the wait" {
+    if (@TypeOf(std.posix.system.socketpair) == void) return error.SkipZigTest;
+    var fds: [2]std.posix.fd_t = undefined;
+    switch (std.posix.errno(std.posix.system.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds))) {
+        .SUCCESS => {},
+        else => return error.SkipZigTest,
+    }
+    defer std.Io.Threaded.closeFd(fds[0]);
+    defer std.Io.Threaded.closeFd(fds[1]);
+    // The record header declares 100 bytes, and the socket reader holds 16.
+    _ = std.posix.system.write(fds[1], "\x17\x03\x03\x00\x64", 5);
+
+    var stream: std.Io.net.Stream = .{ .socket = .{ .handle = fds[0], .address = undefined } };
+    var input_buf: [16]u8 = undefined;
+    var input = stream.reader(testing.io, &input_buf);
+    try input.interface.fill(5);
+    // The std TLS client refuses such a record from its header, without a
+    // read. An ended reader stands in for that refusal.
+    var refused = std.Io.Reader.fixed("");
+    try http_errors.fillHeadWithin(&refused, 4096, fds[0], 20, 1_000, &input.interface);
+}
+
 test "a TLS record that stops part way stalls the body on the silence ceiling" {
     if (@TypeOf(std.posix.system.socketpair) == void) return error.SkipZigTest;
     var fds: [2]std.posix.fd_t = undefined;
