@@ -291,45 +291,6 @@ pub const PropertiesSnapshot = struct {
     }
 };
 
-pub const ViolationDeltaItem = struct {
-    stable_key: []u8,
-    code: []u8,
-    severity: []u8,
-    message: []u8,
-    line: u32,
-    column: u32,
-    introduced_by_patch: bool,
-
-    pub fn init(
-        allocator: std.mem.Allocator,
-        stable_key: []const u8,
-        code: []const u8,
-        severity: []const u8,
-        message: []const u8,
-        line: u32,
-        column: u32,
-        introduced_by_patch: bool,
-    ) !ViolationDeltaItem {
-        return .{
-            .stable_key = try allocator.dupe(u8, stable_key),
-            .code = try allocator.dupe(u8, code),
-            .severity = try allocator.dupe(u8, severity),
-            .message = try allocator.dupe(u8, message),
-            .line = line,
-            .column = column,
-            .introduced_by_patch = introduced_by_patch,
-        };
-    }
-
-    pub fn clone(self: ViolationDeltaItem, allocator: std.mem.Allocator) !ViolationDeltaItem {
-        return payload_memory.cloneOwned(ViolationDeltaItem, self, allocator);
-    }
-
-    pub fn deinit(self: *ViolationDeltaItem, allocator: std.mem.Allocator) void {
-        payload_memory.freeOwned(ViolationDeltaItem, self, allocator);
-    }
-};
-
 pub const DiffHunk = struct {
     old_start: u32,
     old_count: u32,
