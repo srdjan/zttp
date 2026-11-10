@@ -862,7 +862,6 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
         const nodes_val = obj.get("nodes") orelse return error.InvalidUiPayload;
         if (nodes_val != .array) return error.InvalidUiPayload;
         const nodes = try allocator.alloc(SessionTreeNode, nodes_val.array.items.len);
-        errdefer allocator.free(nodes);
         for (nodes) |*node| node.* = undefined;
         var i: usize = 0;
         errdefer {
@@ -898,7 +897,6 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
         const items_val = obj.get("items") orelse return error.InvalidUiPayload;
         if (items_val != .array) return error.InvalidUiPayload;
         const items = try allocator.alloc(DiagnosticItem, items_val.array.items.len);
-        errdefer allocator.free(items);
         for (items) |*item| item.* = undefined;
         var i: usize = 0;
         errdefer {
@@ -938,7 +936,6 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
         const highlights_val = obj.get("highlights") orelse return error.InvalidUiPayload;
         if (highlights_val != .array) return error.InvalidUiPayload;
         const highlights = try allocator.alloc([]u8, highlights_val.array.items.len);
-        errdefer allocator.free(highlights);
         var i: usize = 0;
         errdefer {
             while (i > 0) {
@@ -1342,7 +1339,6 @@ fn parseStringArrayField(allocator: std.mem.Allocator, value_opt: ?std.json.Valu
     if (value != .array) return error.InvalidUiPayload;
 
     const items = try allocator.alloc([]u8, value.array.items.len);
-    errdefer allocator.free(items);
     var i: usize = 0;
     errdefer {
         while (i > 0) {
@@ -1368,7 +1364,6 @@ fn parseWitnessBodyArray(
     if (value != .array) return error.InvalidUiPayload;
 
     const items = try allocator.alloc(WitnessBody, value.array.items.len);
-    errdefer allocator.free(items);
     for (items) |*body| body.* = undefined;
     var i: usize = 0;
     errdefer {
@@ -1843,6 +1838,61 @@ test "verified change set parser rejects an empty proof cohort" {
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
     defer parsed.deinit();
     try testing.expectError(error.InvalidUiPayload, parse(testing.allocator, parsed.value));
+}
+
+fn expectInvalidPayload(json: []const u8) !void {
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
+    defer parsed.deinit();
+    try testing.expectError(error.InvalidUiPayload, parse(testing.allocator, parsed.value));
+}
+
+const receipt_hash_fields =
+    \\"transaction_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    \\"policy_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    \\"grammar_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    \\"semantics_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    \\"diagnostic_catalog_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    \\"read_set_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+;
+
+test "session tree parser rejects a node that is not an object" {
+    try expectInvalidPayload(
+        \\{"kind":"session_tree","nodes":[5]}
+    );
+}
+
+test "diagnostics parser rejects an item that is not an object" {
+    try expectInvalidPayload(
+        \\{"kind":"diagnostics","summary":"s","items":[5]}
+    );
+}
+
+test "proof card parser rejects a highlight that is not a string" {
+    try expectInvalidPayload(
+        \\{"kind":"proof_card","title":"t","summary":"s","stats":{},"highlights":[5]}
+    );
+}
+
+test "verified change set parser rejects a rewrite trace entry that is not a string" {
+    try expectInvalidPayload("{\"kind\":\"verified_change_set\"," ++ receipt_hash_fields ++
+        \\"changes":[{"baseline_state":"present",
+        \\"baseline_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\"candidate_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\"rewrite_trace":[5]}],
+        \\"proof_inputs":[{}],"proof_roots":["src/a.ts"]}
+    );
+}
+
+test "verified change set parser rejects a witness that is not an object" {
+    try expectInvalidPayload("{\"kind\":\"verified_change_set\"," ++ receipt_hash_fields ++
+        \\"changes":[{"file":"src/a.ts","baseline_state":"present",
+        \\"baseline_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\"candidate_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\"before":"old","after":"new","unified_diff":""}],
+        \\"proof_inputs":[{"path":"src/a.ts","state":"present",
+        \\"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],
+        \\"proof_roots":["src/a.ts"],"witnesses_defeated":[5]}
+    );
 }
 
 test "session tree payload round-trips" {
