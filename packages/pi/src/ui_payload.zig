@@ -1306,32 +1306,26 @@ fn writePropertiesSnapshot(writer: *std.Io.Writer, snapshot: ?PropertiesSnapshot
     try writer.writeAll("null");
 }
 
+/// Reads each field that `writePropertiesSnapshot` writes. A boolean that the
+/// document does not hold reads as false, so a journal from a writer with
+/// fewer properties still parses.
 fn parsePropertiesSnapshot(value_opt: ?std.json.Value) !?PropertiesSnapshot {
     const value = value_opt orelse return null;
-    return switch (value) {
-        .null => null,
-        .object => |obj| .{
-            .pure = getBoolOrDefault(obj, "pure", false),
-            .read_only = getBoolOrDefault(obj, "read_only", false),
-            .stateless = getBoolOrDefault(obj, "stateless", false),
-            .retry_safe = getBoolOrDefault(obj, "retry_safe", false),
-            .deterministic = getBoolOrDefault(obj, "deterministic", false),
-            .has_egress = getBoolOrDefault(obj, "has_egress", false),
-            .no_secret_leakage = getBoolOrDefault(obj, "no_secret_leakage", false),
-            .no_credential_leakage = getBoolOrDefault(obj, "no_credential_leakage", false),
-            .input_validated = getBoolOrDefault(obj, "input_validated", false),
-            .pii_contained = getBoolOrDefault(obj, "pii_contained", false),
-            .idempotent = getBoolOrDefault(obj, "idempotent", false),
-            .max_io_depth = try getOptionalUnsignedValue(obj.get("max_io_depth")),
-            .injection_safe = getBoolOrDefault(obj, "injection_safe", false),
-            .state_isolated = getBoolOrDefault(obj, "state_isolated", false),
-            .fault_covered = getBoolOrDefault(obj, "fault_covered", false),
-            .result_safe = getBoolOrDefault(obj, "result_safe", false),
-            .optional_safe = getBoolOrDefault(obj, "optional_safe", false),
-            .canonical = getBoolOrDefault(obj, "canonical", false),
+    switch (value) {
+        .null => return null,
+        .object => |obj| {
+            var snapshot: PropertiesSnapshot = undefined;
+            inline for (@typeInfo(PropertiesSnapshot).@"struct".field_names) |field| {
+                @field(snapshot, field) = switch (@typeInfo(@FieldType(PropertiesSnapshot, field))) {
+                    .bool => getBoolOrDefault(obj, field, false),
+                    .optional => try getOptionalUnsignedValue(obj.get(field)),
+                    else => @compileError("unsupported PropertiesSnapshot field type"),
+                };
+            }
+            return snapshot;
         },
-        else => error.InvalidUiPayload,
-    };
+        else => return error.InvalidUiPayload,
+    }
 }
 
 fn parseStringArrayField(allocator: std.mem.Allocator, value_opt: ?std.json.Value) ![][]u8 {
@@ -1969,8 +1963,6 @@ fn sampleDocument(kind: std.meta.Tag(UiPayload)) []const u8 {
         \\"module_graph_hash":"graph","verification_summary":"0 new",
         \\"stats":{"total":3,"new":1,"preexisting":2}}
         ,
-        // `cost_bounded` and `post_only` are false because
-        // `parsePropertiesSnapshot` does not read them.
         .verified_change_set =>
         \\{"kind":"verified_change_set","proof_schema_version":"zttp-aggregate-source-proof-v1",
         \\"transaction_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -1993,7 +1985,7 @@ fn sampleDocument(kind: std.meta.Tag(UiPayload)) []const u8 {
         \\"no_secret_leakage":true,"no_credential_leakage":true,"input_validated":true,
         \\"pii_contained":true,"idempotent":true,"max_io_depth":2,
         \\"injection_safe":true,"state_isolated":true,"fault_covered":true,
-        \\"result_safe":true,"optional_safe":true,"cost_bounded":false,"post_only":false,
+        \\"result_safe":true,"optional_safe":true,"cost_bounded":true,"post_only":true,
         \\"canonical":true},
         \\"proof_roots":["src/a.ts"],
         \\"changes":[{"file":"src/a.ts","baseline_state":"present",
@@ -2042,6 +2034,36 @@ test "parse frees every allocation when any one allocation fails, for every payl
 
         try testing.checkAllAllocationFailures(testing.allocator, parseThenFree, .{parsed.value});
     }
+}
+
+test "parse reads cost_bounded and post_only of a verified change set" {
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, sampleDocument(.verified_change_set), .{});
+    defer parsed.deinit();
+    var payload = try parse(testing.allocator, parsed.value);
+    defer payload.deinit(testing.allocator);
+    const receipt = payload.verified_change_set;
+    try testing.expectEqual(true, receipt.primary_properties.?.cost_bounded);
+    try testing.expectEqual(true, receipt.primary_properties.?.post_only);
+    try testing.expectEqual(false, receipt.baseline_primary_properties.?.cost_bounded);
+    try testing.expectEqual(false, receipt.baseline_primary_properties.?.post_only);
+}
+
+test "parse reads a verified change set that has no cost_bounded and no post_only" {
+    // A journal from a writer that did not emit the two properties.
+    const document = sampleDocument(.verified_change_set);
+    const two_properties = "\"cost_bounded\":true,\"post_only\":true,";
+    try testing.expectEqual(@as(usize, 1), std.mem.count(u8, document, two_properties));
+    const older = try std.mem.replaceOwned(u8, testing.allocator, document, two_properties, "");
+    defer testing.allocator.free(older);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, older, .{});
+    defer parsed.deinit();
+    var payload = try parse(testing.allocator, parsed.value);
+    defer payload.deinit(testing.allocator);
+    const properties = payload.verified_change_set.primary_properties.?;
+    try testing.expectEqual(false, properties.cost_bounded);
+    try testing.expectEqual(false, properties.post_only);
+    try testing.expectEqual(true, properties.optional_safe);
+    try testing.expectEqual(true, properties.canonical);
 }
 
 test "parse refuses a number that is too large for its field" {
