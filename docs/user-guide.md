@@ -521,8 +521,10 @@ replay compatibility or current model quality.
    `propose_change_set` proposal.
 4. The host acquires the recovered workspace owner and its lock. Before any
    write, it normalizes the whole source overlay, proves it once, and records
-   every proof input in a read set. A draft that introduces a violation is
-   rejected and the agent retries.
+   every proof input in a read set. For a configured SQLite database, the read
+   set holds the schema and not the rows, so a row write does not fail the
+   commit. A draft that introduces a violation is rejected and the agent
+   retries.
 5. On a pass you see every normalized diff plus one aggregate proof card and
    approve or reject once. `--yes` approves every verified change set;
    `--no-edit` blocks writes entirely.

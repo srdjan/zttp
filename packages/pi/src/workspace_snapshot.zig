@@ -10,6 +10,7 @@ const zts = @import("zts");
 const project_config = @import("project_config");
 const change_set = @import("change_set.zig");
 const common = @import("tools/common.zig");
+const zts_cli = @import("zts_cli");
 
 pub const max_read_entries: usize = 4096;
 pub const max_read_file_bytes: usize = 32 * 1024 * 1024;
@@ -37,11 +38,19 @@ pub const ReadState = union(enum) {
     }
 };
 
+/// How the proof read an entry. A `sqlite_schema` entry holds the SQL text of
+/// a database schema and never its rows: the proof only prepares statements,
+/// and a prepare depends on the schema alone.
+pub const ReadKind = enum { file, sqlite_schema };
+
+const sqlite_header = "SQLite format 3\x00";
+
 pub const ReadEntry = struct {
     absolute_path: []u8,
     relative_path: []u8,
     state: ReadState,
     sha256: [32]u8,
+    kind: ReadKind = .file,
 
     fn deinit(self: *ReadEntry, allocator: std.mem.Allocator) void {
         allocator.free(self.absolute_path);
@@ -205,7 +214,14 @@ pub const Snapshot = struct {
             const bytes = entry.state.bytes() orelse continue;
             const target = try std.fs.path.resolve(allocator, &.{ root, entry.relative_path });
             defer allocator.free(target);
-            try writeOwnedFile(allocator, io, target, bytes);
+            switch (entry.kind) {
+                .file => try writeOwnedFile(allocator, io, target, bytes),
+                .sqlite_schema => {
+                    const parent = std.fs.path.dirname(target) orelse return error.InvalidSnapshotPath;
+                    try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, parent);
+                    try zts_cli.precompile_sql.execSqlite(allocator, target, bytes);
+                },
+            }
         }
         if (overlay) |prepared| {
             for (prepared.changes) |change| {
@@ -226,6 +242,17 @@ pub const Snapshot = struct {
             };
             defer allocator.free(resolved);
             if (!std.mem.eql(u8, resolved, entry.absolute_path)) return error.ProofReadSetChanged;
+            if (entry.kind == .sqlite_schema) {
+                const schema = readSqliteSchema(allocator, entry.absolute_path) catch |err| switch (err) {
+                    error.OutOfMemory => return err,
+                    // A missing file, a replaced file, or a database that cannot be read.
+                    else => return error.ProofReadSetChanged,
+                };
+                defer allocator.free(schema);
+                const live = digestSchema(schema);
+                if (!std.mem.eql(u8, &live, &entry.sha256)) return error.ProofReadSetChanged;
+                continue;
+            }
             const current = zts.file_io.readFile(allocator, entry.absolute_path, max_read_file_bytes) catch |err| switch (err) {
                 error.FileNotFound => null,
                 else => return err,
@@ -277,9 +304,10 @@ fn isExcludedName(name: []const u8) bool {
 }
 
 /// A database is a proof input only when `zttp.json` names it, and
-/// `captureConfiguredInputs` reads that path whatever its extension. The walk
-/// leaves every other database out: the proof never opens one, and a running
-/// server writes its database while a proof waits for the commit.
+/// `captureConfiguredInputs` reads the schema of that path whatever its
+/// extension. The walk leaves every other database out: the proof never opens
+/// one. A running server writes its database while a proof waits for the
+/// commit, so the read set holds the schema and never the rows.
 fn isProofInput(name: []const u8) bool {
     const extensions = [_][]const u8{ ".ts", ".js", ".json", ".sql" };
     for (extensions) |extension| if (std.mem.endsWith(u8, name, extension)) return true;
@@ -303,7 +331,7 @@ fn appendAbsent(
     relative: []const u8,
 ) !void {
     if (containsAbsolute(entries.items, absolute)) return;
-    try appendEntry(allocator, entries, absolute, relative, .absent);
+    try appendEntry(allocator, entries, absolute, relative, .absent, .file);
 }
 
 /// Reads one regular file into the read set, within the size limits.
@@ -318,7 +346,42 @@ fn appendPresent(
     errdefer allocator.free(bytes);
     total_bytes.* = std.math.add(usize, total_bytes.*, bytes.len) catch return error.ProofReadSetTooLarge;
     if (total_bytes.* > max_read_set_bytes) return error.ProofReadSetTooLarge;
-    try appendEntry(allocator, entries, absolute, relative, .{ .present = bytes });
+    try appendEntry(allocator, entries, absolute, relative, .{ .present = bytes }, .file);
+}
+
+/// Reads the schema of one SQLite database into the read set. The schema text
+/// counts toward the size limits and the rows do not.
+fn appendSchema(
+    allocator: std.mem.Allocator,
+    entries: *std.ArrayList(ReadEntry),
+    absolute: []const u8,
+    relative: []const u8,
+    total_bytes: *usize,
+) !void {
+    const schema = try zts_cli.precompile_sql.readDatabaseSchema(allocator, absolute);
+    errdefer allocator.free(schema);
+    if (schema.len > max_read_file_bytes) return error.ProofReadSetTooLarge;
+    total_bytes.* = std.math.add(usize, total_bytes.*, schema.len) catch return error.ProofReadSetTooLarge;
+    if (total_bytes.* > max_read_set_bytes) return error.ProofReadSetTooLarge;
+    try appendEntry(allocator, entries, absolute, relative, .{ .present = schema }, .sqlite_schema);
+}
+
+/// True when the file starts with the SQLite header. A missing file is an error.
+fn hasSqliteHeader(allocator: std.mem.Allocator, path: []const u8) !bool {
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
+    defer allocator.free(path_z);
+    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
+    defer std.Io.Threaded.closeFd(fd);
+    var header: [sqlite_header.len]u8 = undefined;
+    const count = try std.posix.read(fd, &header);
+    return std.mem.eql(u8, header[0..count], sqlite_header);
+}
+
+/// The schema text of the database at `path`. A file that is not a SQLite
+/// database is `error.NotSqliteDatabase`.
+fn readSqliteSchema(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    if (!try hasSqliteHeader(allocator, path)) return error.NotSqliteDatabase;
+    return zts_cli.precompile_sql.readDatabaseSchema(allocator, path);
 }
 
 /// The one place that appends an entry. It owns `state` only after it succeeds.
@@ -328,6 +391,7 @@ fn appendEntry(
     absolute: []const u8,
     relative: []const u8,
     state: ReadState,
+    kind: ReadKind,
 ) !void {
     if (entries.items.len >= max_read_entries) return error.ProofReadSetTooLarge;
     const owned_absolute = try allocator.dupe(u8, absolute);
@@ -338,7 +402,11 @@ fn appendEntry(
         .absolute_path = owned_absolute,
         .relative_path = owned_relative,
         .state = state,
-        .sha256 = digestReadState(state.bytes()),
+        .sha256 = switch (kind) {
+            .file => digestReadState(state.bytes()),
+            .sqlite_schema => digestSchema(state.bytes() orelse ""),
+        },
+        .kind = kind,
     });
 }
 
@@ -392,7 +460,11 @@ fn captureConfiguredInputs(
     try captureNamedPath(allocator, io, entries, project_root, entry_path, total_bytes);
     if (try config.resolvedSqlitePath(allocator)) |path| {
         defer allocator.free(path);
-        try captureNamedPath(allocator, io, entries, project_root, path, total_bytes);
+        // The proof prepares statements against the schema and never reads a
+        // row. Reading the schema keeps a row write from failing the commit.
+        // An `.sql` file is schema text already and stays a byte input.
+        const database = !std.mem.endsWith(u8, path, ".sql");
+        try captureInput(allocator, io, entries, project_root, path, total_bytes, database);
     }
     if (try config.resolvedPolicyPath(allocator)) |path| {
         defer allocator.free(path);
@@ -408,6 +480,21 @@ fn captureNamedPath(
     absolute: []const u8,
     total_bytes: *usize,
 ) !void {
+    try captureInput(allocator, io, entries, project_root, absolute, total_bytes, false);
+}
+
+/// `database` marks a path that may be a SQLite database. A file with the
+/// SQLite header enters the read set as its schema. Any other file, such as an
+/// empty file or a text file, enters it as bytes.
+fn captureInput(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    entries: *std.ArrayList(ReadEntry),
+    project_root: []const u8,
+    absolute: []const u8,
+    total_bytes: *usize,
+    database: bool,
+) !void {
     if (!common.isPathInsideRoot(project_root, absolute)) return error.ProofContextOutsideProject;
     const relative = common.relativeToRoot(project_root, absolute);
     // `recheck` resolves every entry through this call. A path that it would
@@ -422,6 +509,9 @@ fn captureNamedPath(
     };
     if (stat.kind == .sym_link) return error.SymlinkProofInputUnsupported;
     if (stat.kind != .file) return error.NonRegularProofInput;
+    if (database and try hasSqliteHeader(allocator, absolute)) {
+        return appendSchema(allocator, entries, absolute, relative, total_bytes);
+    }
     try appendPresent(allocator, entries, absolute, relative, total_bytes);
 }
 
@@ -444,6 +534,15 @@ fn writeOwnedFile(allocator: std.mem.Allocator, io: std.Io, target: []const u8, 
     const parent = std.fs.path.dirname(target) orelse return error.InvalidSnapshotPath;
     try std.Io.Dir.createDirPath(std.Io.Dir.cwd(), io, parent);
     try zts.file_io.writeFile(allocator, target, bytes);
+}
+
+/// Domain-separated from `digestReadState`, so a schema entry never equals a
+/// byte entry that holds the same text.
+fn digestSchema(text: []const u8) [32]u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+    hasher.update("sqlite-schema\x00");
+    hasher.update(text);
+    return hasher.finalResult();
 }
 
 pub fn digestReadState(bytes: ?[]const u8) [32]u8 {
@@ -832,4 +931,114 @@ test "capture accepts a project with a database larger than the read limit that 
     defer snapshot.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 3), snapshot.entries.len);
+}
+
+fn tmpRoot(tmp: *testing.TmpDir) ![]u8 {
+    const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root_z);
+    return testing.allocator.dupe(u8, root_z);
+}
+
+fn createUsersDatabase(root: []const u8) !void {
+    const path = try std.fs.path.join(testing.allocator, &.{ root, "data.db" });
+    defer testing.allocator.free(path);
+    try zts_cli.precompile_sql.execSqlite(testing.allocator, path, "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT)");
+}
+
+fn findEntry(snapshot: *const Snapshot, relative: []const u8) ?*const ReadEntry {
+    for (snapshot.entries) |*entry| if (std.mem.eql(u8, entry.relative_path, relative)) return entry;
+    return null;
+}
+
+test "a configured database is recorded as its schema and a row write keeps the read set" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "zttp.json", .data = "{\"entry\":\"src/a.ts\",\"sqlite\":\"data.db\"}" });
+    const root = try tmpRoot(&tmp);
+    defer testing.allocator.free(root);
+    try createUsersDatabase(root);
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/a.ts", .content = "new" });
+    defer prepared.deinit(testing.allocator);
+    var snapshot = try Snapshot.capture(testing.allocator, &prepared);
+    defer snapshot.deinit(testing.allocator);
+
+    const entry = findEntry(&snapshot, "data.db") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT);\n", entry.state.bytes().?);
+
+    const db_path = try std.fs.path.join(testing.allocator, &.{ root, "data.db" });
+    defer testing.allocator.free(db_path);
+    try zts_cli.precompile_sql.execSqlite(testing.allocator, db_path, "INSERT INTO users(name) VALUES ('a')");
+    try snapshot.recheck(testing.allocator);
+    try zts_cli.precompile_sql.execSqlite(testing.allocator, db_path, "ALTER TABLE users ADD COLUMN email TEXT");
+    try testing.expectError(error.ProofReadSetChanged, snapshot.recheck(testing.allocator));
+}
+
+test "a configured database over the read limit is captured as its schema" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "zttp.json", .data = "{\"entry\":\"src/a.ts\",\"sqlite\":\"data.db\"}" });
+    const root = try tmpRoot(&tmp);
+    defer testing.allocator.free(root);
+    const db_path = try std.fs.path.join(testing.allocator, &.{ root, "data.db" });
+    defer testing.allocator.free(db_path);
+    try zts_cli.precompile_sql.execSqlite(
+        testing.allocator,
+        db_path,
+        "CREATE TABLE blobs(b BLOB); INSERT INTO blobs VALUES (zeroblob(33554433))",
+    );
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/a.ts", .content = "new" });
+    defer prepared.deinit(testing.allocator);
+    var snapshot = try Snapshot.capture(testing.allocator, &prepared);
+    defer snapshot.deinit(testing.allocator);
+
+    const entry = findEntry(&snapshot, "data.db") orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("CREATE TABLE blobs(b BLOB);\n", entry.state.bytes().?);
+}
+
+test "a materialized baseline holds a database with the recorded schema" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "zttp.json", .data = "{\"entry\":\"src/a.ts\",\"sqlite\":\"data.db\"}" });
+    const root = try tmpRoot(&tmp);
+    defer testing.allocator.free(root);
+    try createUsersDatabase(root);
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/a.ts", .content = "new" });
+    defer prepared.deinit(testing.allocator);
+    var snapshot = try Snapshot.capture(testing.allocator, &prepared);
+    defer snapshot.deinit(testing.allocator);
+    var baseline = try snapshot.materializeBaseline(testing.allocator);
+    defer baseline.deinit();
+
+    const copy = try baseline.pathFor(testing.allocator, "data.db");
+    defer testing.allocator.free(copy);
+    const schema = try zts_cli.precompile_sql.readDatabaseSchema(testing.allocator, copy);
+    defer testing.allocator.free(schema);
+    try testing.expectEqualStrings("CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT);\n", schema);
+}
+
+test "recheck refuses a configured database replaced by a text file with the same schema" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "zttp.json", .data = "{\"entry\":\"src/a.ts\",\"sqlite\":\"data.db\"}" });
+    const root = try tmpRoot(&tmp);
+    defer testing.allocator.free(root);
+    try createUsersDatabase(root);
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/a.ts", .content = "new" });
+    defer prepared.deinit(testing.allocator);
+    var snapshot = try Snapshot.capture(testing.allocator, &prepared);
+    defer snapshot.deinit(testing.allocator);
+
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "data.db",
+        .data = "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT);\n",
+    });
+    try testing.expectError(error.ProofReadSetChanged, snapshot.recheck(testing.allocator));
 }
