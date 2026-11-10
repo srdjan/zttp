@@ -188,7 +188,7 @@ test "nonexistent module path produces a v1 envelope" {
 /// One violation, with every field that the payload reads. The line breaks
 /// between JSON tokens only.
 const one_violation_envelope =
-    \\{"checked_files":["packages/modules/src/env.zig"],"violations":[{"code":"ZTS900",
+    \\{"checked_files":["packages/modules/src/env.zig"],"violations":[{"code":"ZVM001",
     \\"severity":"error","file":"packages/modules/src/env.zig","line":3,"column":7,
     \\"message":"missing capability"}]}
 ;
@@ -203,7 +203,7 @@ test "diagnostics payload carries each violation of the envelope" {
     defer payload.deinit(testing.allocator);
     try testing.expectEqualStrings("1 checked file(s), 1 diagnostic(s)", payload.diagnostics.summary);
     try testing.expectEqual(@as(usize, 1), payload.diagnostics.items.len);
-    try testing.expectEqualStrings("ZTS900", payload.diagnostics.items[0].code);
+    try testing.expectEqualStrings("ZVM001", payload.diagnostics.items[0].code);
     try testing.expectEqual(@as(u32, 3), payload.diagnostics.items[0].line);
     try testing.expectEqual(@as(u32, 7), payload.diagnostics.items[0].column);
 }
