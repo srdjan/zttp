@@ -1036,9 +1036,11 @@ test "reconciliation records a second commit of the same change set" {
     try testing.expectEqual(@as(usize, 2), session.transcript.len());
 }
 
-/// Starts from an empty journal, commits and stops as a killed process does,
-/// and reconciles the one pending receipt. Only the reconciliation uses
-/// `allocator`.
+/// Reconciles one pending receipt. Only the reconciliation uses `allocator`.
+/// When no receipt is pending, the change commits again and stops as a killed
+/// process does: the first run, and each run after a failure that followed the
+/// acknowledgement. The setup runs once for each failure index, so it uses an
+/// allocator that records no stack trace.
 fn reconcileOnePendingReceipt(
     allocator: std.mem.Allocator,
     tmp_dir: std.Io.Dir,
@@ -1047,18 +1049,25 @@ fn reconcileOnePendingReceipt(
     proof: *const aggregate_proof.AggregateProof,
     receipt_json: []const u8,
 ) !void {
-    try tmp_dir.deleteTree(testing.io, ".zttp");
-    try tmp_dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
     {
-        var workspace = try change_transaction.RecoveredWorkspace.acquire(testing.allocator, prepared.workspace_root);
+        const setup = std.heap.smp_allocator;
+        var workspace = try change_transaction.RecoveredWorkspace.acquire(setup, prepared.workspace_root);
         defer workspace.deinit();
-        try testing.expectError(
-            error.InjectedTransactionFailure,
-            workspace.commit(prepared, snapshot, proof, .{
-                .receipt_json = receipt_json,
-                .fault = .after_committed,
-            }),
-        );
+        const pending = try workspace.pendingReceipts();
+        defer {
+            for (pending) |*receipt| receipt.deinit(setup);
+            setup.free(pending);
+        }
+        if (pending.len == 0) {
+            try tmp_dir.writeFile(testing.io, .{ .sub_path = "src/a.ts", .data = "old" });
+            try testing.expectError(
+                error.InjectedTransactionFailure,
+                workspace.commit(prepared, snapshot, proof, .{
+                    .receipt_json = receipt_json,
+                    .fault = .after_committed,
+                }),
+            );
+        }
     }
     var session = AgentSession.initStub();
     defer session.deinit(allocator);
