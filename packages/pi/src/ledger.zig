@@ -225,10 +225,12 @@ pub fn readLedgerFile(
 
     var change_sets = std.ArrayList(LedgerChangeSet).empty;
     defer change_sets.deinit(allocator);
+    errdefer for (change_sets.items) |*parsed_line| parsed_line.deinit(allocator);
 
     while (lines.next()) |line| {
         if (line.len == 0) continue;
-        try change_sets.append(allocator, try parseChangeSetLine(allocator, line));
+        try change_sets.ensureUnusedCapacity(allocator, 1);
+        change_sets.appendAssumeCapacity(try parseChangeSetLine(allocator, line));
     }
 
     bundle.change_sets = try change_sets.toOwnedSlice(allocator);
@@ -626,14 +628,19 @@ fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !ExportMeta {
     const version = obj.get("schema_version") orelse return error.InvalidLedgerFile;
     if (version != .integer or version.integer != export_schema_version) return error.InvalidLedgerFile;
 
+    const exported_at_unix_ms = getInteger(obj, "exported_at_unix_ms") orelse return error.InvalidLedgerFile;
+    const workspace_hash = try allocator.dupe(u8, getString(obj, "workspace_hash") orelse return error.InvalidLedgerFile);
+    errdefer allocator.free(workspace_hash);
+    const session_id = try allocator.dupe(u8, getString(obj, "session_id") orelse return error.InvalidLedgerFile);
+    errdefer allocator.free(session_id);
     return .{
-        .workspace_hash = try allocator.dupe(u8, getString(obj, "workspace_hash") orelse return error.InvalidLedgerFile),
-        .session_id = try allocator.dupe(u8, getString(obj, "session_id") orelse return error.InvalidLedgerFile),
+        .workspace_hash = workspace_hash,
+        .session_id = session_id,
         .parent_session_id = if (try getOptionalString(obj, "parent_session_id")) |parent|
             try allocator.dupe(u8, parent)
         else
             null,
-        .exported_at_unix_ms = getInteger(obj, "exported_at_unix_ms") orelse return error.InvalidLedgerFile,
+        .exported_at_unix_ms = exported_at_unix_ms,
     };
 }
 
@@ -649,13 +656,16 @@ fn parseChangeSetLine(allocator: std.mem.Allocator, line: []const u8) !LedgerCha
     var payload_union = try ui_payload.parse(allocator, payload_val);
     errdefer payload_union.deinit(allocator);
 
-    return switch (payload_union) {
-        .verified_change_set => |payload| .{
-            .session_id = try allocator.dupe(u8, getString(obj, "session_id") orelse return error.InvalidLedgerFile),
-            .summary = try allocator.dupe(u8, getString(obj, "summary") orelse return error.InvalidLedgerFile),
-            .payload = payload,
-        },
-        else => error.InvalidLedgerFile,
+    const payload = switch (payload_union) {
+        .verified_change_set => |payload| payload,
+        else => return error.InvalidLedgerFile,
+    };
+    const session_id = try allocator.dupe(u8, getString(obj, "session_id") orelse return error.InvalidLedgerFile);
+    errdefer allocator.free(session_id);
+    return .{
+        .session_id = session_id,
+        .summary = try allocator.dupe(u8, getString(obj, "summary") orelse return error.InvalidLedgerFile),
+        .payload = payload,
     };
 }
 
@@ -866,6 +876,58 @@ test "readLedgerFile round-trips exported verified change-set payload" {
     try testing.expectEqual(@as(usize, 1), bundle.change_sets.len);
     try testing.expectEqualStrings("handler.ts", bundle.change_sets[0].payload.changes[0].file);
     try testing.expectEqualStrings(&@as([64:0]u8, @splat('a')), bundle.change_sets[0].payload.transaction_id);
+}
+
+const test_meta_line =
+    \\{"kind":"meta","schema_version":2,"workspace_hash":"h","session_id":"sess-1","parent_session_id":"sess-0","exported_at_unix_ms":99}
+++ "\n";
+
+test "readLedgerFile rejects a meta line without a session id" {
+    var tmp = try initTmp(testing.allocator);
+    defer tmp.cleanup(testing.allocator);
+    const path = try tmp.childPath(testing.allocator, "ledger.ndjson");
+    defer testing.allocator.free(path);
+    try zts.file_io.writeFile(testing.allocator, path,
+        \\{"kind":"meta","schema_version":2,"workspace_hash":"h"}
+    );
+
+    try testing.expectError(error.InvalidLedgerFile, readLedgerFile(testing.allocator, path));
+}
+
+test "readLedgerFile rejects a change set line without a summary" {
+    var tmp = try initTmp(testing.allocator);
+    defer tmp.cleanup(testing.allocator);
+    const path = try tmp.childPath(testing.allocator, "ledger.ndjson");
+    defer testing.allocator.free(path);
+    var receipt = try testLedgerReceipt(testing.allocator, null, "after", &@as([64:0]u8, @splat('a')));
+    defer receipt.deinit(testing.allocator);
+    var buf = TextBuffer.init(testing.allocator);
+    defer buf.deinit();
+    try buf.writer().writeAll(test_meta_line ++
+        \\{"kind":"verified_change_set","session_id":"sess-1","payload":
+    );
+    try ui_payload.writeJson(buf.writer(), .{ .verified_change_set = receipt.payload });
+    try buf.writer().writeAll("}\n");
+    try zts.file_io.writeFile(testing.allocator, path, buf.written());
+
+    try testing.expectError(error.InvalidLedgerFile, readLedgerFile(testing.allocator, path));
+}
+
+test "readLedgerFile rejects an invalid line that follows a valid change set" {
+    var tmp = try initTmp(testing.allocator);
+    defer tmp.cleanup(testing.allocator);
+    const path = try tmp.childPath(testing.allocator, "ledger.ndjson");
+    defer testing.allocator.free(path);
+    var receipt = try testLedgerReceipt(testing.allocator, null, "after", &@as([64:0]u8, @splat('a')));
+    defer receipt.deinit(testing.allocator);
+    var buf = TextBuffer.init(testing.allocator);
+    defer buf.deinit();
+    try buf.writer().writeAll(test_meta_line);
+    try writeChangeSetLine(buf.writer(), receipt);
+    try buf.writer().writeAll("\n{}\n");
+    try zts.file_io.writeFile(testing.allocator, path, buf.written());
+
+    try testing.expectError(error.InvalidLedgerFile, readLedgerFile(testing.allocator, path));
 }
 
 test "replayBundleInWorkspace detects policy drift" {
