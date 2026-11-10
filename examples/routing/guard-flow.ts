@@ -6,16 +6,11 @@ import { routerMatch } from "zttp:router";
 import { env } from "zttp:env";
 import { parseBearer, jwtVerify } from "zttp:auth";
 
-function preflight(req: Request): Response | undefined {
+// A Response init supports only `status`. Response headers are not supported,
+// so this guard cannot grant a CORS preflight. It answers OPTIONS before auth.
+function answerOptions(req: Request): Response | undefined {
   if (req.method === "OPTIONS") {
-    return Response.text("", {
-      status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST",
-        "Access-Control-Allow-Headers": "Authorization, Content-Type",
-      },
-    });
+    return Response.text("", { status: 204 });
   }
 }
 
@@ -55,11 +50,11 @@ function routeHandler(req: Request): Response {
   return Response.json({ error: "Not Found" }, { status: 404 });
 }
 
-// preflight -> auth -> routes
+// options -> auth -> routes
 function handler(req: Request): Proof<Response, "state_isolated" | "injection_safe"> {
-  const preflighted = preflight(req);
-  if (preflighted !== undefined) {
-    return preflighted;
+  const answered = answerOptions(req);
+  if (answered !== undefined) {
+    return answered;
   }
   const refused = requireAuth(req);
   if (refused !== undefined) {

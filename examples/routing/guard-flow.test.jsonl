@@ -1,4 +1,4 @@
-{"type":"test","name":"OPTIONS returns CORS preflight"}
+{"type":"test","name":"OPTIONS returns 204 before auth"}
 {"type":"request","method":"OPTIONS","url":"/health","headers":{},"body":null}
 {"type":"expect","status":204}
 

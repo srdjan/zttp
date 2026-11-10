@@ -1031,6 +1031,8 @@ pub const FlowInterp = struct {
         }
         // Helper init.headers is discarded by the runtime. Only status is
         // consumed; copied response-header fields remain mutable afterwards.
+        // The type checker refuses every init member other than status
+        // (`type_checker.zig` `checkResponseInit`), so typed source names none.
         return response;
     }
 

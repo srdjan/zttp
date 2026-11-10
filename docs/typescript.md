@@ -493,6 +493,17 @@ A tuple type names its length. So `push`, `pop`, `shift`, `unshift`, `splice`, a
 
 A `const` or `let` with no annotation widens the literal types of the slot when its initializer is an object or array literal, or a name bound to one. So `const o = { n: 0 }; o.n = 1;` is accepted. A write through any other binding keeps the declared type. `alias.kind = "c"` with `const alias = s` and `s: { kind: "a" | "b" }` gets ZTS200. A write of a value with no type passes, and a fresh array literal such as `[1, 2].pop()` is not checked.
 
+### Response Init
+
+`Response.json`, `Response.text`, `Response.html`, and `Response.rawJson` take an optional init record as the second argument. The init supports only `status`. Response headers are not supported. The check refuses every other member with ZTS203.
+
+```ts
+Response.json({ ok: true }, { status: 201 });                             // accepted
+Response.json({ ok: true }, { status: 201, headers: { "x-id": "1" } });   // ZTS203: Response.json does not support the init member 'headers'
+```
+
+The check reads an init literal member by member, and it reads the record type of a spread operand. For every other init, it reads the record type of the value. The check does not refuse an init when it cannot find the type. A call through `Response?.json` or through `Response["json"]` follows the same rule. `Response.redirect` takes a URL and a status number.
+
 ### Dict Types
 
 A `Dict<K, V>` is immutable, and a key that it does not hold reads `undefined`. When the first argument is one Dict type, the `zttp:collections` exports have these types:

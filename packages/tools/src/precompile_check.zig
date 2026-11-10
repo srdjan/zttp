@@ -809,8 +809,6 @@ pub fn generateTypeDefs(writer: anytype) void {
         \\
         \\interface ResponseInit {{
         \\  status?: number;
-        \\  statusText?: string;
-        \\  headers?: Record<string, string>;
         \\}}
         \\
         \\declare class Request {{
@@ -1256,6 +1254,12 @@ fn typeDefsContain(line: []const u8) !bool {
 
 test "type defs: a Result whose runtime error is a record declares an unknown error" {
     try std.testing.expect(try typeDefsContain("  export function parseJson(arg0: string): { ok: boolean; value?: unknown; error?: unknown; errors?: unknown };\n"));
+}
+
+// The runtime reads `status` from a helper init and sends no other member, and
+// the type checker refuses every other member (ZTS203).
+test "type defs: a Response init declares status and no other member" {
+    try std.testing.expect(try typeDefsContain("interface ResponseInit {\n  status?: number;\n}\n"));
 }
 
 test "type defs: a Result whose runtime error is a string message declares a string error" {

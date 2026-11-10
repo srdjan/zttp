@@ -6661,6 +6661,144 @@ test "result shape: an andThen callback declared to return unknown is ZTS203" {
 }
 
 // ---------------------------------------------------------------------------
+// Response init: the runtime reads `status` and sends no other member
+// ---------------------------------------------------------------------------
+
+test "response init: a headers member of a Response.json init is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response { return Response.json({ ok: true }, { status: 201, headers: { a: "b" } }); }
+    , "Response.json does not support the init member 'headers'");
+}
+
+test "response init: a headers member of a Response.text init is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response { return Response.text("x", { headers: { a: "b" } }); }
+    , "Response.text does not support the init member 'headers'");
+}
+
+test "response init: a headers member of a Response.html init is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response { return Response.html("<p>x</p>", { status: 200, headers: { a: "b" } }); }
+    , "Response.html does not support the init member 'headers'");
+}
+
+test "response init: a headers member of a Response.rawJson init is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response { return Response.rawJson("{}", { status: 200, headers: { a: "b" } }); }
+    , "Response.rawJson does not support the init member 'headers'");
+}
+
+test "response init: a member that is not status is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response { return Response.text("x", { status: 201, statusText: "Made" }); }
+    , "Response.text does not support the init member 'statusText'");
+}
+
+test "response init: a quoted member name is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response { return Response.text("x", { "Content-Type": "text/html" }); }
+    , "Response.text does not support the init member 'Content-Type'");
+}
+
+test "response init: a headers member of a named init record is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response {
+        \\  const init = { status: 201, headers: { a: "b" } };
+        \\  return Response.text("x", init);
+        \\}
+    , "Response.text does not support the init member 'headers'");
+}
+
+test "response init: a headers member of a spread operand is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response {
+        \\  const base = { headers: { a: "b" } };
+        \\  return Response.json({ ok: true }, { ...base, status: 201 });
+        \\}
+    , "Response.json does not support the init member 'headers'");
+}
+
+test "response init: a headers member of a declared parameter type is ZTS203" {
+    try expectOneArgMismatch(
+        \\function reply(init: { status: number; headers: { a: string } }): Response { return Response.text("x", init); }
+    , "Response.text does not support the init member 'headers'");
+}
+
+test "response init: a headers member of a named record type is ZTS203" {
+    try expectOneArgMismatch(
+        \\structural Init = { status: number; headers: { a: string } };
+        \\function reply(init: Init): Response { return Response.text("x", init); }
+    , "Response.text does not support the init member 'headers'");
+}
+
+test "response init: a headers member of one branch of a conditional init is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response {
+        \\  return Response.text("x", req.method === "GET" ? { status: 200 } : { status: 404, headers: { a: "b" } });
+        \\}
+    , "Response.text does not support the init member 'headers'");
+}
+
+test "response init: a headers member behind an optional call is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response { return Response?.text("x", { headers: { a: "b" } }); }
+    , "Response.text does not support the init member 'headers'");
+}
+
+test "response init: a headers member behind a string literal key is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response { return Response["text"]("x", { headers: { a: "b" } }); }
+    , "Response.text does not support the init member 'headers'");
+}
+
+test "response init: each unsupported member of an init literal gets a diagnostic" {
+    const Probe = struct {
+        fn run(session: Session) anyerror!void {
+            const diagnostics = session.resolved.typeDiagnostics();
+            try testing.expectEqual(@as(usize, 2), diagnostics.len);
+            try testing.expectEqualStrings("Response.text does not support the init member 'headers'", diagnostics[0].message);
+            try testing.expectEqualStrings("Response.text does not support the init member 'statusText'", diagnostics[1].message);
+        }
+    };
+    try withSession(testing.allocator,
+        \\function handler(req: Request): Response { return Response.text("x", { status: 201, headers: { a: "b" }, statusText: "Made" }); }
+    , Probe.run);
+}
+
+test "response init: a status member alone is accepted on every helper" {
+    try expectNoTypeDiagnostic(
+        \\function a(req: Request): Response { return Response.json({ ok: true }, { status: 201 }); }
+        \\function b(req: Request): Response { return Response.text("x", { status: 202 }); }
+        \\function c(req: Request): Response { return Response.html("<p>x</p>", { status: 203 }); }
+        \\function d(req: Request): Response { return Response.rawJson("{}", { status: 204 }); }
+    );
+}
+
+test "response init: a named init record that holds only status is accepted" {
+    try expectNoTypeDiagnostic(
+        \\function handler(req: Request): Response {
+        \\  const init = { status: 404 };
+        \\  return Response.json({ error: "not found" }, init);
+        \\}
+    );
+}
+
+test "response init: a redirect status number is accepted" {
+    try expectNoTypeDiagnostic(
+        \\function handler(req: Request): Response { return Response.redirect("/next", 301); }
+    );
+}
+
+test "response init: a shadowed Response is a different value" {
+    try expectNoTypeDiagnostic(
+        \\function f(): string {
+        \\  const Response = { text: (body: string, init: { headers: { a: string } }): string => body };
+        \\  return Response.text("x", { headers: { a: "b" } });
+        \\}
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Module-state writers across a file import
 // ---------------------------------------------------------------------------
 

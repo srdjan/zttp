@@ -87,6 +87,12 @@ Response.json({ ok: true }, { status: 201 })
 Response.html("<h1>Hello</h1>")
 ```
 
+`Response.text`, `Response.json`, `Response.html`, and `Response.rawJson` take an optional init record as the second argument.
+The init supports only `status`.
+Response headers are not supported.
+The check refuses every other init member, `headers` included, with ZTS203.
+`Response.redirect` takes a URL and a status number.
+
 ## Routing
 
 Small handlers can branch directly:

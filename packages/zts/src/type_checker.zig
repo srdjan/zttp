@@ -28,6 +28,10 @@ const isMutatingArrayMethod = @import("mutating_methods.zig").isMutatingArrayMet
 const undefined_source_help_text = "the value may be undefined: check it first, or use `?? fallback`";
 const mismatch_help_text = "Change the value or the declared type so that the two types match.";
 const arg_type_help_text = "Pass a value of the parameter type, or change the parameter type.";
+/// Help for a ZTS203 on a member of a `Response` helper init.
+const response_init_help_text = "A Response init supports only `status`. Response headers are not supported. Remove this member.";
+/// The one member that a `Response` helper reads from its init.
+const response_init_status = "status";
 const result_shape_fallback = "a Result argument has the wrong type";
 const object = @import("zts-engine").object;
 const context = @import("zts-engine").context;
@@ -3522,15 +3526,7 @@ pub const TypeChecker = struct {
                 continue;
             }
             const prop = self.ir_view.getProperty(prop_idx) orelse continue;
-            // The key is a node index (identifier, string, or computed); extract atom from it
-            const key_tag = self.ir_view.getTag(prop.key) orelse continue;
-            const prop_name = if (key_tag == .identifier)
-                (if (self.ir_view.getBinding(prop.key)) |b| self.resolveAtomName(b.name_atom) else null)
-            else if (key_tag == .lit_string)
-                (if (self.ir_view.getStringIdx(prop.key)) |si| self.ir_view.getString(si) else null)
-            else
-                null;
-            const prop_name_str = prop_name orelse continue;
+            const prop_name_str = self.propertyKeyName(prop.key) orelse continue;
             const val_type = self.inferType(prop.value);
             const n = self.env.pool.addName(self.allocator, prop_name_str);
             fields_buf.append(self.allocator, .{
@@ -4846,23 +4842,46 @@ pub const TypeChecker = struct {
         return self.builtinCallResult(call, row, null_type_idx);
     }
 
-    /// The `Response` type when `call` is one of the four constructors on the
-    /// `Response` global, otherwise `null_type_idx`.
+    /// The constructor name when `call` is `Response.<constructor>(...)` on the
+    /// `Response` global, otherwise null.
     ///
     /// `Response` is a global with no binding to hang a type on, so the object
     /// side of `Response.json(...)` infers nothing and the member read after it
     /// infers nothing either. Matching the name is how the checker reaches the
     /// only thing that constructs a response. A shadowed `Response` is a
     /// different value and is left alone, the same way `Array.isArray` is.
+    ///
+    /// `Response.json`, `Response?.json`, and `Response["json"]` name the same
+    /// constructor. Strict mode refuses a computed key that is not a literal
+    /// (ZTS605), and the parser refuses an optional computed access.
+    fn responseConstructorName(self: *const TypeChecker, call: Node.CallExpr) ?[]const u8 {
+        const callee_tag = self.ir_view.getTag(call.callee) orelse return null;
+        if (callee_tag != .member_access and callee_tag != .optional_chain and callee_tag != .computed_access) return null;
+        const callee = self.ir_view.getMember(call.callee) orelse return null;
+        if (self.ir_view.getTag(callee.object) != .identifier) return null;
+        const object_binding = self.ir_view.getBinding(callee.object) orelse return null;
+        const object_name = self.resolveAtomName(object_binding.name_atom) orelse return null;
+        if (!std.mem.eql(u8, object_name, abi_types.RESPONSE_TYPE_NAME)) return null;
+        if (self.binding_types.get(bindingKey(object_binding)) != null) return null;
+        const spelled = if (callee_tag == .computed_access)
+            self.literalKeyName(callee.computed)
+        else
+            self.resolveAtomName(callee.property);
+        const method = spelled orelse return null;
+        if (!abi_types.isResponseConstructor(method)) return null;
+        return method;
+    }
+
+    /// The text of the string literal at `key`, or null when `key` is not one.
+    fn literalKeyName(self: *const TypeChecker, key: NodeIndex) ?[]const u8 {
+        if (self.ir_view.getTag(key) != .lit_string) return null;
+        return self.getLiteralString(key);
+    }
+
+    /// The `Response` type when `call` is one of the constructors on the
+    /// `Response` global, otherwise `null_type_idx`.
     fn inferResponseConstructorType(self: *const TypeChecker, call: Node.CallExpr) TypeIndex {
-        const callee = self.ir_view.getMember(call.callee) orelse return null_type_idx;
-        if (self.ir_view.getTag(callee.object) != .identifier) return null_type_idx;
-        const object_binding = self.ir_view.getBinding(callee.object) orelse return null_type_idx;
-        const object_name = self.resolveAtomName(object_binding.name_atom) orelse return null_type_idx;
-        if (!std.mem.eql(u8, object_name, abi_types.RESPONSE_TYPE_NAME)) return null_type_idx;
-        if (self.binding_types.get(bindingKey(object_binding)) != null) return null_type_idx;
-        const method = self.resolveAtomName(callee.property) orelse return null_type_idx;
-        if (!abi_types.isResponseConstructor(method)) return null_type_idx;
+        if (self.responseConstructorName(call) == null) return null_type_idx;
         return abi_types.responseType(self.env);
     }
 
@@ -6672,20 +6691,136 @@ pub const TypeChecker = struct {
     /// decides it; the residual - the size limit, which no payload type
     /// discharges - stays a run-time fault.
     fn checkResponseJsonPayload(self: *TypeChecker, call: Node.CallExpr) void {
-        const callee = self.ir_view.getMember(call.callee) orelse return;
-        if (self.ir_view.getTag(callee.object) != .identifier) return;
-        const object_binding = self.ir_view.getBinding(callee.object) orelse return;
-        const object_name = self.resolveAtomName(object_binding.name_atom) orelse return;
-        if (!std.mem.eql(u8, object_name, abi_types.RESPONSE_TYPE_NAME)) return;
-        // A shadowed `Response` is a different value, the same way
-        // `inferResponseConstructorType` leaves one alone.
-        if (self.binding_types.get(bindingKey(object_binding)) != null) return;
-        const method = self.resolveAtomName(callee.property) orelse return;
+        const method = self.responseConstructorName(call) orelse return;
         if (!std.mem.eql(u8, method, "json")) return;
         if (call.args_count == 0) return;
 
         const arg_idx = self.ir_view.getListIndex(call.args_start, 0);
         self.reportIfUnencodable(arg_idx, "Response.json");
+    }
+
+    /// `Response.json(body, init)`: refuse an init member that the runtime
+    /// does not send.
+    ///
+    /// The helpers `json`, `text`, `html`, and `rawJson` read `init.status` and
+    /// nothing else (`http.zig` `statusFromInitObject`), and flow analysis
+    /// models the same (`flow_interp.zig` `makeResponse`). A `headers` member
+    /// passed this check and the runtime dropped it, so the response lacked a
+    /// header that the source named. The init parameter is the closed record
+    /// `{ status?: number }`, and an argument with another member does not
+    /// match it: ZTS203. `redirect` takes a status number and no init.
+    ///
+    /// An object literal gets one diagnostic at each member, where the edit
+    /// is. Any other expression is judged by its type and gets one diagnostic.
+    /// Like `firstUnencodable`, the type walk refuses only what it knows is
+    /// wrong: an init whose type the checker cannot resolve is admitted.
+    fn checkResponseInit(self: *TypeChecker, call: Node.CallExpr) void {
+        const method = self.responseConstructorName(call) orelse return;
+        if (std.mem.eql(u8, method, "redirect")) return;
+        if (call.args_count < 2) return;
+
+        const init_arg = self.ir_view.getListIndex(call.args_start, 1);
+        if (self.ir_view.getTag(init_arg) != .object_literal) return self.checkResponseInitType(init_arg, method);
+        const literal = self.ir_view.getObject(init_arg) orelse return;
+        for (0..literal.properties_count) |i| {
+            const member = self.ir_view.getListIndex(literal.properties_start, @intCast(i));
+            if (self.ir_view.getTag(member) == .object_spread) {
+                if (self.ir_view.getOptValue(member)) |operand| self.checkResponseInitType(operand, method);
+                continue;
+            }
+            const property = self.ir_view.getProperty(member) orelse continue;
+            // The parser refuses a computed key and a numeric key (ZTS001). A
+            // key with no readable name is not `status`, so it is refused too.
+            const name = self.propertyKeyName(property.key) orelse "";
+            if (!std.mem.eql(u8, name, response_init_status)) self.reportResponseInitMember(property.key, method, name);
+        }
+    }
+
+    /// Report ZTS203 when the type of `node` has a member that is not `status`.
+    fn checkResponseInitType(self: *TypeChecker, node: NodeIndex, method: []const u8) void {
+        const name = self.firstUnsupportedInitField(self.inferType(node), 0) orelse return;
+        self.reportResponseInitMember(node, method, name);
+    }
+
+    /// The name of the first member of `idx` that is not `status`. Null when
+    /// `idx` has no such member, or when the checker cannot resolve `idx`.
+    fn firstUnsupportedInitField(self: *const TypeChecker, idx: TypeIndex, depth: u8) ?[]const u8 {
+        if (idx == null_type_idx or depth >= 16) return null;
+        const pool = self.env.pool;
+        const tag = pool.getTag(idx) orelse return null;
+        return switch (tag) {
+            .t_record => blk: {
+                for (pool.getRecordFields(idx)) |field| {
+                    const name = pool.getName(field.name_start, field.name_len);
+                    if (!std.mem.eql(u8, name, response_init_status)) break :blk name;
+                }
+                break :blk null;
+            },
+            .t_union => blk: {
+                for (pool.getUnionMembers(idx)) |member| {
+                    if (self.firstUnsupportedInitField(member, depth + 1)) |name| break :blk name;
+                }
+                break :blk null;
+            },
+            .t_intersection => blk: {
+                for (pool.getIntersectionMembers(idx)) |member| {
+                    if (self.firstUnsupportedInitField(member, depth + 1)) |name| break :blk name;
+                }
+                break :blk null;
+            },
+            .t_nullable => self.firstUnsupportedInitField(pool.getNullableInner(idx), depth + 1),
+            .t_ref => blk: {
+                const resolved = self.env.resolveRef(idx);
+                if (resolved == idx) break :blk null;
+                break :blk self.firstUnsupportedInitField(resolved, depth + 1);
+            },
+            // A type with no record members names no member to refuse. A type
+            // that this walk cannot resolve is admitted.
+            .t_boolean,
+            .t_number,
+            .t_string,
+            .t_null,
+            .t_dict,
+            .t_bytes,
+            .t_undefined,
+            .t_void,
+            .t_never,
+            .t_unknown_type,
+            .t_array,
+            .t_tuple,
+            .t_function,
+            .t_literal_string,
+            .t_literal_number,
+            .t_literal_bool,
+            .t_generic_param,
+            .t_generic_app,
+            .t_template_literal,
+            .t_error,
+            => null,
+        };
+    }
+
+    fn reportResponseInitMember(self: *TypeChecker, node: NodeIndex, method: []const u8, member: []const u8) void {
+        if (self.allocator.print("Response.{s} does not support the init member '{s}'", .{ method, member })) |msg| {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .arg_type_mismatch,
+                .node = node,
+                .message = msg,
+                .help = response_init_help_text,
+                .allocated = true,
+            });
+        } else |_| self.markAllocationFailure();
+    }
+
+    /// The name that a record literal key spells, or null when the key is
+    /// neither an identifier nor a string literal.
+    fn propertyKeyName(self: *const TypeChecker, key: NodeIndex) ?[]const u8 {
+        if (self.ir_view.getTag(key) == .identifier) {
+            const binding = self.ir_view.getBinding(key) orelse return null;
+            return self.resolveAtomName(binding.name_atom);
+        }
+        return self.literalKeyName(key);
     }
 
     /// Report ZTS213 when the value at `arg_idx` has a type JSON cannot carry.
@@ -7727,6 +7862,9 @@ pub const TypeChecker = struct {
 
     fn checkCallArgs(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
         const callee_tag = self.ir_view.getTag(call.callee) orelse return;
+        // Before the branches on the callee tag: `responseConstructorName`
+        // reads every spelling of the callee.
+        self.checkResponseInit(call);
         if (callee_tag == .identifier) {
             self.checkModuleEncodableArgs(call);
             self.checkModuleBooleanPredicate(call);

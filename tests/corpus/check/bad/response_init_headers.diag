@@ -1,0 +1,2 @@
+stages: strip,parse,imports,boolean,types,strict
+{"code":"ZTS203","severity":"error","message":"Response.json does not support the init member 'headers'","file":"check/bad/response_init_headers.ts","line":3,"column":55,"suggestion":"A Response init supports only `status`. Response headers are not supported. Remove this member.","repair_intent":null}
