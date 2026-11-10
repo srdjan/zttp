@@ -176,20 +176,27 @@ fn abandonConnect(race: *ConnectRace, client: *std.http.Client) void {
     };
 }
 
-/// Send the request with `body`, bounded by the send budget and by the request
+/// Send the request with `body`, bounded by `send_ceiling_ms` and by the request
 /// budget that remains.
 ///
 /// A socket send timeout cannot bound the write: an expired `SO_SNDTIMEO`
 /// surfaces as EAGAIN inside the blocking write, which panics instead of
 /// returning (see `setReadTimeoutMs`). The write therefore races a sleep, as the
-/// connect does, and the race cancels the write when the budget is gone.
+/// connect does, and the race cancels the write when the time is gone.
+///
+/// The two timeout errors are those of `waitForReadable`. A ceiling shorter
+/// than the request budget expiring is `error.RequestStalled`, which the caller
+/// may reissue: no response was decoded. A ceiling that reaches the budget
+/// expiring is `error.RequestTimedOut`.
 pub fn sendBodyWithin(
     request: *std.http.Client.Request,
     body: []const u8,
+    send_ceiling_ms: u32,
     request_timeout_ms: ?u64,
 ) !void {
     const io = request.client.io;
-    const budget_ms = @min(send_timeout_ms, @max(@as(u64, 1), request_timeout_ms orelse send_timeout_ms));
+    const remaining_ms = request_timeout_ms orelse std.math.maxInt(u64);
+    const budget_ms = @max(1, @min(send_ceiling_ms, remaining_ms));
     var race_buffer: [2]SendRace.Union = undefined;
     var race: SendRace = .init(io, &race_buffer);
     defer race.cancelDiscard();
@@ -200,7 +207,7 @@ pub fn sendBodyWithin(
     });
     try race.concurrent(.sent, sendBody, .{ request, body });
     return switch (try race.await()) {
-        .expired => error.RequestTimedOut,
+        .expired => if (send_ceiling_ms < remaining_ms) error.RequestStalled else error.RequestTimedOut,
         .sent => |result| result,
     };
 }

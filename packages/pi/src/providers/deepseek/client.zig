@@ -531,7 +531,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) !TransportRe
         else => return ClientError.DeepSeekServerUnavailable,
     };
     defer request.deinit();
-    http_errors.sendBodyWithin(&request, body, config.request_timeout_ms) catch |err| switch (err) {
+    http_errors.sendBodyWithin(&request, body, http_errors.send_timeout_ms, config.request_timeout_ms) catch |err| switch (err) {
         error.RequestTimedOut => return error.RequestTimedOut,
         else => return ClientError.DeepSeekServerUnavailable,
     };
@@ -1379,7 +1379,7 @@ test "a TLS handshake that the peer never answers ends at the connect budget" {
     try testing.expect(elapsed < 1000);
 }
 
-test "a request body that the peer never reads ends at the request budget" {
+test "a request body that the peer never reads names a stall and a spent budget" {
     const allocator = testing.allocator;
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
@@ -1388,27 +1388,39 @@ test "a request body that the peer never reads ends at the request budget" {
     var peer: SilentPeer = .{ .listener = try address.listen(io, .{ .reuse_address = true }), .io = io };
     defer peer.listener.deinit(io);
     const port = peer.listener.socket.address.getPort();
-    const thread = try std.Thread.spawn(.{}, SilentPeer.run, .{&peer});
-    defer thread.join();
+    // Each thread accepts one of the two connections. Both connections are made
+    // before the first check, so a failed check leaves no thread in accept.
+    const first_thread = try std.Thread.spawn(.{}, SilentPeer.run, .{&peer});
+    defer first_thread.join();
+    const second_thread = try std.Thread.spawn(.{}, SilentPeer.run, .{&peer});
+    defer second_thread.join();
 
     var client = std.http.Client{ .allocator = allocator, .io = io };
     defer client.deinit();
-    const connection = try http_errors.connectWithin(&client, .{ .bytes = "127.0.0.1" }, port, .plain, 300);
-    var request = try client.request(.POST, try std.Uri.parse("http://127.0.0.1/"), .{
-        .keep_alive = false,
-        .connection = connection,
-    });
-    defer request.deinit();
+    const uri = try std.Uri.parse("http://127.0.0.1/");
     // 64 MiB is more than the socket buffers of a loopback connection hold, so
     // the write blocks when the peer does not read.
     const body = try allocator.alloc(u8, 64 << 20);
     defer allocator.free(body);
     @memset(body, 'x');
-    const started = monotonicNowNs().?;
-    const result = http_errors.sendBodyWithin(&request, body, 300);
-    const elapsed = elapsedMs(started).?;
-    try testing.expectError(error.RequestTimedOut, result);
-    try testing.expect(elapsed < 1000);
+
+    const stalled_connection = try http_errors.connectWithin(&client, .{ .bytes = "127.0.0.1" }, port, .plain, 1_000);
+    const spent_connection = try http_errors.connectWithin(&client, .{ .bytes = "127.0.0.1" }, port, .plain, 1_000);
+    var stalled_request = try client.request(.POST, uri, .{ .keep_alive = false, .connection = stalled_connection });
+    defer stalled_request.deinit();
+    const stalled_started = monotonicNowNs().?;
+    const stalled = http_errors.sendBodyWithin(&stalled_request, body, 300, 1_000);
+    const stalled_elapsed = elapsedMs(stalled_started).?;
+    try testing.expectError(error.RequestStalled, stalled);
+    try testing.expect(stalled_elapsed < 900);
+
+    var spent_request = try client.request(.POST, uri, .{ .keep_alive = false, .connection = spent_connection });
+    defer spent_request.deinit();
+    const spent_started = monotonicNowNs().?;
+    const spent = http_errors.sendBodyWithin(&spent_request, body, 300, 300);
+    const spent_elapsed = elapsedMs(spent_started).?;
+    try testing.expectError(error.RequestTimedOut, spent);
+    try testing.expect(spent_elapsed < 900);
 }
 
 test "a completion that the provider cut off for another reason is an error, not a short answer" {

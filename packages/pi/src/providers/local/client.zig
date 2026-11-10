@@ -906,7 +906,7 @@ fn post(arena: std.mem.Allocator, config: Config, body: []const u8) ![]const u8 
         else => return ClientError.LocalServerUnavailable,
     };
     defer request.deinit();
-    http_errors.sendBodyWithin(&request, body, config.request_timeout_ms) catch |err| switch (err) {
+    http_errors.sendBodyWithin(&request, body, http_errors.send_timeout_ms, config.request_timeout_ms) catch |err| switch (err) {
         error.RequestTimedOut => return error.RequestTimedOut,
         else => return ClientError.LocalServerUnavailable,
     };
