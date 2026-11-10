@@ -225,3 +225,16 @@ Decision 4 (a): this supersedes the line of the P7 specification that merged mul
 Decision 5 (a): `zttp check` does not change, except that every top-level function is a root for the state checks. Until unit G8 of the plan, the build is the stricter gate, and `zttp build` refuses some handlers that `zttp check` passes. D-012 freezes the output of `zttp check`, and G8 waits for a re-record window.
 
 Check parity, 2026-11-01: the owner opened that window, and the [check parity plan](plans/2026-11-01-check-parity-plan.md) closes Decision 5. `zttp check` calls the graph checks and the contract merge of the build, so one implementation serves both. A diagnostic in a dependency keeps its code and names the dependency in `file`. ZTS063 `module_link_refused` and ZTS064 `file_import_untyped` name the refusals that no checker reports. `zttp check` folds the proof evidence, so the Result limit refuses there too. `GraphResultsNotProved` stays build-only, because no source reached it in 11 probes.
+
+## Handler API
+
+### D-019 Response headers wait for the next codegen corpus re-record
+
+- Status: standing
+- Decided: 2026-11-10
+- Binds: packages/zts/src/type_checker.zig, packages/zts/src/flow_checker.zig, docs/roadmap.md
+- Gate: none
+
+A handler cannot set a response header. A Response init accepts only a number `status`, and `zts check` refuses every other member with ZTS203. On 2026-11-10 the owner chose option (b) of Decision 5 of the [receipt archive plan](plans/2026-11-10-receipt-archive-and-schema-input-plan.md).
+
+Header support lands with the next re-record of the codegen corpus. That work honors `headers` in a Response init. The flow analysis treats each header value as response content, so a secret in a header is a leak. `flow_analyzer_version` moves from 10 to 11, which moves the policy hash and breaks the corpus replay. The work and the re-record therefore land together. Until then, the ZTS203 refusal stands.
