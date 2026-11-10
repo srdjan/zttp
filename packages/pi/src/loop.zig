@@ -166,15 +166,18 @@ pub fn providerErrorRemediation(err: anyerror) ?[]const u8 {
         error.LocalModelUnavailable,
         => "The local MLX model is not ready. Start `mlx_lm.server --model LiquidAI/LFM2.5-2.6B-MLX-8bit --host 127.0.0.1 --port 8080`, then retry.",
         error.InvalidMlxBaseUrl => "ZTTP_MLX_BASE_URL must be a credential-free HTTP loopback root such as http://127.0.0.1:8080.",
+        error.DeepSeekServerUnavailable => "DeepSeek could not be reached or closed the connection. Check your network and try again.",
+        error.DeepSeekGenerationStalled => "DeepSeek stopped sending the response. Try again.",
+        // Both provider clients return the errors below, so the text names no provider.
         error.InvalidResponseJson,
         error.MalformedToolCall,
         error.MalformedToolEnvelope,
         error.UnexpectedResponseShape,
         error.EmptyResponse,
-        => "The local MLX response was malformed or incomplete. Check the tested MLX-LM version and model, then retry.",
+        => "The model response was malformed or incomplete. Retry. For the local provider, check the tested MLX-LM version and model.",
         error.ResponseTooLarge,
         error.TooManyToolCalls,
-        => "The local MLX response exceeded zttp's bounded response limits. Narrow the request and retry.",
+        => "The model response exceeded zttp's bounded response limits. Narrow the request and retry.",
         else => null,
     };
 }
@@ -2701,6 +2704,25 @@ test "a turn that exceeded the tool-call budget and then applied a verified edit
     try testing.expectEqualStrings(clean_handler, written);
     try testing.expect(result.applied_change_set);
     try testing.expectEqual(session_events.TurnEndReason.approved, result.end_reason);
+}
+
+test "a DeepSeek failure is not explained as a local MLX failure" {
+    try testing.expectEqualStrings(
+        "DeepSeek could not be reached or closed the connection. Check your network and try again.",
+        providerErrorRemediation(error.DeepSeekServerUnavailable) orelse return error.TestExpectedHint,
+    );
+    try testing.expectEqualStrings(
+        "DeepSeek stopped sending the response. Try again.",
+        providerErrorRemediation(error.DeepSeekGenerationStalled) orelse return error.TestExpectedHint,
+    );
+    try testing.expectEqualStrings(
+        "The model response was malformed or incomplete. Retry. For the local provider, check the tested MLX-LM version and model.",
+        providerErrorRemediation(error.EmptyResponse) orelse return error.TestExpectedHint,
+    );
+    try testing.expectEqualStrings(
+        "The model response exceeded zttp's bounded response limits. Narrow the request and retry.",
+        providerErrorRemediation(error.ResponseTooLarge) orelse return error.TestExpectedHint,
+    );
 }
 
 test "an abnormal provider finish tells the user what to do next" {
