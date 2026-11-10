@@ -144,11 +144,19 @@ pub const RepairCandidatePayload = struct {
         verification_summary: []const u8,
         stats: ProofStats,
     ) !RepairCandidatePayload {
+        const owned_path = try allocator.dupe(u8, path);
+        errdefer allocator.free(owned_path);
+        const owned_plan_id = try allocator.dupe(u8, plan_id);
+        errdefer allocator.free(owned_plan_id);
+        const owned_intent_kind = try allocator.dupe(u8, intent_kind);
+        errdefer allocator.free(owned_intent_kind);
+        const owned_content = try allocator.dupe(u8, proposed_content);
+        errdefer allocator.free(owned_content);
         return .{
-            .path = try allocator.dupe(u8, path),
-            .plan_id = try allocator.dupe(u8, plan_id),
-            .intent_kind = try allocator.dupe(u8, intent_kind),
-            .proposed_content = try allocator.dupe(u8, proposed_content),
+            .path = owned_path,
+            .plan_id = owned_plan_id,
+            .intent_kind = owned_intent_kind,
+            .proposed_content = owned_content,
             .verification_ok = verification_ok,
             .verification_summary = try allocator.dupe(u8, verification_summary),
             .stats = stats,
@@ -881,8 +889,10 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             const depth = getUnsigned(item_obj, "depth") orelse return error.InvalidUiPayload;
             const is_current = getBool(item_obj, "is_current") orelse return error.InvalidUiPayload;
             const is_orphan_root = getBool(item_obj, "is_orphan_root") orelse return error.InvalidUiPayload;
+            const session_id_copy = try allocator.dupe(u8, session_id);
+            errdefer allocator.free(session_id_copy);
             nodes[i] = .{
-                .session_id = try allocator.dupe(u8, session_id),
+                .session_id = session_id_copy,
                 .parent_id = if (parent_id) |pid| try allocator.dupe(u8, pid) else null,
                 .created_at_unix_ms = created_at_unix_ms,
                 .depth = depth,
@@ -910,7 +920,7 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             const item_val = items_val.array.items[i];
             if (item_val != .object) return error.InvalidUiPayload;
             const item_obj = item_val.object;
-            items[i] = try DiagnosticItem.init(
+            var diagnostic = try DiagnosticItem.init(
                 allocator,
                 getString(item_obj, "code") orelse return error.InvalidUiPayload,
                 getString(item_obj, "severity") orelse return error.InvalidUiPayload,
@@ -920,7 +930,9 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
                 getString(item_obj, "message") orelse return error.InvalidUiPayload,
                 getBool(item_obj, "introduced_by_patch"),
             );
-            try items[i].setHelp(allocator, getString(item_obj, "suggestion"));
+            errdefer diagnostic.deinit(allocator);
+            try diagnostic.setHelp(allocator, getString(item_obj, "suggestion"));
+            items[i] = diagnostic;
         }
         return .{ .diagnostics = .{
             .summary = try allocator.dupe(u8, summary),
@@ -949,17 +961,20 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
             if (highlight != .string) return error.InvalidUiPayload;
             highlights[i] = try allocator.dupe(u8, highlight.string);
         }
+        const stats: ProofStats = .{
+            .total = @intCast(getUnsigned(stats_obj, "total") orelse return error.InvalidUiPayload),
+            .new = @intCast(getUnsigned(stats_obj, "new") orelse return error.InvalidUiPayload),
+            .preexisting = if (getUnsigned(stats_obj, "preexisting")) |preexisting|
+                @intCast(preexisting)
+            else
+                null,
+        };
+        const title_copy = try allocator.dupe(u8, title);
+        errdefer allocator.free(title_copy);
         return .{ .proof_card = .{
-            .title = try allocator.dupe(u8, title),
+            .title = title_copy,
             .summary = try allocator.dupe(u8, summary),
-            .stats = .{
-                .total = @intCast(getUnsigned(stats_obj, "total") orelse return error.InvalidUiPayload),
-                .new = @intCast(getUnsigned(stats_obj, "new") orelse return error.InvalidUiPayload),
-                .preexisting = if (getUnsigned(stats_obj, "preexisting")) |preexisting|
-                    @intCast(preexisting)
-                else
-                    null,
-            },
+            .stats = stats,
             .highlights = highlights,
         } };
     }
@@ -968,14 +983,20 @@ pub fn parse(allocator: std.mem.Allocator, value: std.json.Value) !UiPayload {
         const stdout = getString(obj, "stdout") orelse return error.InvalidUiPayload;
         const stderr = getString(obj, "stderr") orelse return error.InvalidUiPayload;
         const command = getString(obj, "command") orelse return error.InvalidUiPayload;
+        const title_copy = try allocator.dupe(u8, title);
+        errdefer allocator.free(title_copy);
+        const stdout_copy = try allocator.dupe(u8, stdout);
+        errdefer allocator.free(stdout_copy);
+        const stderr_copy = try allocator.dupe(u8, stderr);
+        errdefer allocator.free(stderr_copy);
         return .{ .command_outcome = .{
-            .title = try allocator.dupe(u8, title),
+            .title = title_copy,
             .exit_code = if (getUnsigned(obj, "exit_code")) |exit_code|
                 @intCast(exit_code)
             else
                 null,
-            .stdout = try allocator.dupe(u8, stdout),
-            .stderr = try allocator.dupe(u8, stderr),
+            .stdout = stdout_copy,
+            .stderr = stderr_copy,
             .command = try allocator.dupe(u8, command),
         } };
     }
@@ -1903,6 +1924,128 @@ test "protocol repair parser reports a failed allocation as OutOfMemory" {
     defer parsed.deinit();
     var failing = testing.FailingAllocator.init(testing.allocator, .{ .fail_index = 0 });
     try testing.expectError(error.OutOfMemory, parse(failing.allocator(), parsed.value));
+}
+
+test "proof card parser rejects stats without a total" {
+    try expectInvalidPayload(
+        \\{"kind":"proof_card","title":"t","summary":"s","stats":{},"highlights":[]}
+    );
+}
+
+/// One document for each payload kind, with every optional field present. The
+/// lines break between JSON tokens only. The switch has no `else`, so a new
+/// kind does not compile until it has a document.
+fn sampleDocument(kind: std.meta.Tag(UiPayload)) []const u8 {
+    return switch (kind) {
+        .plain_text =>
+        \\{"kind":"plain_text","text":"hello"}
+        ,
+        .session_tree =>
+        \\{"kind":"session_tree","nodes":[
+        \\{"session_id":"root","parent_id":null,"created_at_unix_ms":1,"depth":0,
+        \\"is_current":false,"is_orphan_root":true},
+        \\{"session_id":"child","parent_id":"root","created_at_unix_ms":2,"depth":1,
+        \\"is_current":true,"is_orphan_root":false}]}
+        ,
+        .diagnostics =>
+        \\{"kind":"diagnostics","summary":"1 violation","items":[
+        \\{"code":"ZTS001","severity":"error","path":"handler.ts","line":3,"column":7,
+        \\"message":"unsupported feature","introduced_by_patch":true,"suggestion":"use const"}]}
+        ,
+        .proof_card =>
+        \\{"kind":"proof_card","title":"Compiler verification","summary":"No new violations",
+        \\"stats":{"total":3,"new":1,"preexisting":2},"highlights":["retry_safe","idempotent"]}
+        ,
+        .command_outcome =>
+        \\{"kind":"command_outcome","title":"zig test","exit_code":1,"stdout":"out",
+        \\"stderr":"err","command":"zig build test-zts"}
+        ,
+        .repair_candidate =>
+        \\{"kind":"repair_candidate","path":"handler.ts","plan_id":"rp_001",
+        \\"intent_kind":"insert_guard_before_line","proposed_content":"const a = 1;",
+        \\"verification_ok":true,"verification_summary":"0 new",
+        \\"stats":{"total":3,"new":1,"preexisting":2}}
+        ,
+        .protocol_repair =>
+        \\{"kind":"protocol_repair","path":"handler.ts","proposed_content":"const a = 1;",
+        \\"repairs":[{"intent":"replace_let_with_const","line":1}],
+        \\"source_digest":"source","profile_id":"zts-model-1","policy_hash":"policy",
+        \\"module_graph_hash":"graph","verification_summary":"0 new",
+        \\"stats":{"total":3,"new":1,"preexisting":2}}
+        ,
+        // `cost_bounded` and `post_only` are false because
+        // `parsePropertiesSnapshot` does not read them.
+        .verified_change_set =>
+        \\{"kind":"verified_change_set","proof_schema_version":"zttp-aggregate-source-proof-v1",
+        \\"transaction_id":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\"compiler_version":"0.1.0","profile_id":"zttp-public-v1",
+        \\"policy_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\"grammar_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\"semantics_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\"diagnostic_catalog_hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\"read_set_digest":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\"applied_at_unix_ms":42,"system_proven":true,
+        \\"baseline_primary_properties":{"pure":false,"read_only":false,"stateless":false,
+        \\"retry_safe":false,"deterministic":false,"has_egress":false,
+        \\"no_secret_leakage":false,"no_credential_leakage":false,"input_validated":false,
+        \\"pii_contained":false,"idempotent":false,"max_io_depth":null,
+        \\"injection_safe":false,"state_isolated":false,"fault_covered":false,
+        \\"result_safe":false,"optional_safe":false,"cost_bounded":false,"post_only":false,
+        \\"canonical":false},
+        \\"primary_properties":{"pure":true,"read_only":true,"stateless":true,
+        \\"retry_safe":true,"deterministic":true,"has_egress":true,
+        \\"no_secret_leakage":true,"no_credential_leakage":true,"input_validated":true,
+        \\"pii_contained":true,"idempotent":true,"max_io_depth":2,
+        \\"injection_safe":true,"state_isolated":true,"fault_covered":true,
+        \\"result_safe":true,"optional_safe":true,"cost_bounded":false,"post_only":false,
+        \\"canonical":true},
+        \\"proof_roots":["src/a.ts"],
+        \\"changes":[{"file":"src/a.ts","baseline_state":"present",
+        \\"baseline_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\"candidate_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\"before":"old","after":"new","unified_diff":"@@ -1 +1 @@",
+        \\"rewrite_trace":["normalize-semicolon"]}],
+        \\"proof_inputs":[{"path":"src/a.ts","state":"present",
+        \\"sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}],
+        \\"repair_plan_ids":["rp_001"],"goal_context":["retry_safe"],
+        \\"witnesses_defeated":[{"key":"k1","property":"no_secret_leakage",
+        \\"summary":"secret reaches the response",
+        \\"origin":{"line":1,"column":2},"sink":{"line":3,"column":4},
+        \\"request":{"method":"POST","url":"/x","has_auth_header":true,"body":"{}"},
+        \\"io_stubs":[{"seq":0,"module":"env","func":"env","result_json":"1"}]}],
+        \\"witnesses_new":[{"key":"k2","property":"no_credential_leakage","summary":"",
+        \\"origin":{"line":5,"column":6},"sink":{"line":7,"column":8},
+        \\"request":{"method":"GET","url":"/y","has_auth_header":false,"body":null},
+        \\"io_stubs":[]}]}
+        ,
+    };
+}
+
+fn parseThenFree(allocator: std.mem.Allocator, value: std.json.Value) !void {
+    var payload = try parse(allocator, value);
+    payload.deinit(allocator);
+}
+
+test "parse frees every allocation when any one allocation fails, for every payload kind" {
+    for (std.enums.values(std.meta.Tag(UiPayload))) |kind| {
+        const document = sampleDocument(kind);
+        var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, document, .{});
+        defer parsed.deinit();
+
+        // Floor: the parser reads the document as its own kind and drops no
+        // field, so the writer gives the same bytes back.
+        var payload = try parse(testing.allocator, parsed.value);
+        defer payload.deinit(testing.allocator);
+        try testing.expectEqual(kind, std.meta.activeTag(payload));
+        const expected = try std.mem.replaceOwned(u8, testing.allocator, document, "\n", "");
+        defer testing.allocator.free(expected);
+        var written = TextBuffer.init(testing.allocator);
+        defer written.deinit();
+        try writeJson(written.writer(), payload);
+        try testing.expectEqualStrings(expected, written.written());
+
+        try testing.checkAllAllocationFailures(testing.allocator, parseThenFree, .{parsed.value});
+    }
 }
 
 test "session tree payload round-trips" {
