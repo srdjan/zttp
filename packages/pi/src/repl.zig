@@ -825,7 +825,13 @@ pub fn run(
             _ = std.c.write(std.c.STDOUT_FILENO, prompt.ptr, prompt.len);
         }
 
-        const maybe_line = try readLine(&line_buf);
+        const maybe_line = readLine(&line_buf) catch |err| switch (err) {
+            error.LineTooLong => {
+                loop.writeTurnErrorToStderr(err);
+                continue;
+            },
+            else => return err,
+        };
         const line = maybe_line orelse break;
 
         // Stream entries live during interactive turns. Cleared right after so
@@ -1126,7 +1132,10 @@ fn approveEdit(preview: loop.ChangeSetApprovalPreview) !bool {
         _ = std.c.write(std.c.STDOUT_FILENO, prompt.ptr, prompt.len);
 
         var line_buf: [256]u8 = undefined;
-        const maybe_line = try readLine(&line_buf);
+        const maybe_line = readLine(&line_buf) catch |err| switch (err) {
+            error.LineTooLong => return false,
+            else => return err,
+        };
         const line = maybe_line orelse return false;
         const trimmed = std.mem.trim(u8, line, " \t\r\n");
         if (trimmed.len == 0) return false;
@@ -1421,23 +1430,29 @@ fn writeRewriteTrace(trace: []const []u8) void {
     _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
 }
 
+/// Read one line from stdin. A line that does not fit in `buf` is consumed to
+/// its end and refused, so its tail is never read as the next line.
 fn readLine(buf: []u8) !?[]const u8 {
     var len: usize = 0;
-    while (len < buf.len) {
+    var too_long = false;
+    while (true) {
         var byte: [1]u8 = undefined;
         const n = std.posix.read(std.posix.STDIN_FILENO, &byte) catch |err| switch (err) {
             error.WouldBlock => continue,
             else => return err,
         };
-        if (n == 0) {
-            if (len == 0) return null;
+        if (n == 0 or byte[0] == '\n') {
+            if (too_long) return error.LineTooLong;
+            if (n == 0 and len == 0) return null;
             return buf[0..len];
         }
-        if (byte[0] == '\n') return buf[0..len];
+        if (len == buf.len) {
+            too_long = true;
+            continue;
+        }
         buf[len] = byte[0];
         len += 1;
     }
-    return buf[0..len];
 }
 
 fn selectApprovalFn(policy: loop.ApprovalPolicy) loop.ApprovalFn {
@@ -2317,6 +2332,18 @@ const one_line_preview: loop.ChangeSetApprovalPreview = .{
     .changes = &.{.{ .file = "handler.ts", .after = "return 1;\n" }},
     .system_proven = true,
 };
+
+test "readLine: a line longer than the buffer is refused whole and the next line is intact" {
+    var discard: [16]u8 = undefined;
+    var stdio = try ReplStdio.begin("abcdefghij\nnext\n");
+    var long_buf: [4]u8 = undefined;
+    const long = readLine(&long_buf);
+    var next_buf: [4]u8 = undefined;
+    const following = readLine(&next_buf);
+    _ = stdio.end(&discard);
+    try testing.expectError(error.LineTooLong, long);
+    try testing.expectEqualStrings("next", (try following).?);
+}
 
 test "approveEdit: only y or yes approves, and a line that starts with y does not" {
     var discard: [16]u8 = undefined;
