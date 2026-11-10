@@ -495,14 +495,23 @@ A `const` or `let` with no annotation widens the literal types of the slot when 
 
 ### Response Init
 
-`Response.json`, `Response.text`, `Response.html`, and `Response.rawJson` take an optional init record as the second argument. The init supports only `status`. Response headers are not supported. The check refuses every other member with ZTS203.
+`Response.json`, `Response.text`, `Response.html`, and `Response.rawJson` take an optional init record as the second argument. The init supports only `status`, and `status` is a number. Response headers are not supported. The check refuses every other member with ZTS203. It also refuses, with ZTS203, an init that is not a record and a `status` that is not a number. The runtime sends the default status for those values.
 
 ```ts
 Response.json({ ok: true }, { status: 201 });                             // accepted
 Response.json({ ok: true }, { status: 201, headers: { "x-id": "1" } });   // ZTS203: Response.json does not support the init member 'headers'
+Response.json({ ok: true }, { status: "201" });                           // ZTS203: Response.json init member 'status' must be a number, got 'string'
+Response.text("not found", 404);                                          // ZTS203: Response.text init must be a record, got 'number'
 ```
 
-The check reads an init literal member by member, and it reads the record type of a spread operand. For every other init, it reads the record type of the value. The check does not refuse an init when it cannot find the type. A call through `Response?.json` or through `Response["json"]` follows the same rule. `Response.redirect` takes a URL and a status number.
+The check reads an init literal member by member, and it reads the record type of a spread operand. For every other init, it reads the type of the value. The check does not refuse an init or a status when it cannot find the type. A call through `Response?.json` or through `Response["json"]` follows the same rule.
+
+`Response.redirect` takes a URL and an optional status number. It takes no init record. The check refuses a second argument that is not a number with ZTS203.
+
+```ts
+Response.redirect("/next", 301);             // accepted
+Response.redirect("/next", { status: 301 }); // ZTS203: Response.redirect status must be a number, got '{ status: 301 }'
+```
 
 ### Dict Types
 

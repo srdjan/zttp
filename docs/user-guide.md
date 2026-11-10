@@ -88,10 +88,12 @@ Response.html("<h1>Hello</h1>")
 ```
 
 `Response.text`, `Response.json`, `Response.html`, and `Response.rawJson` take an optional init record as the second argument.
-The init supports only `status`.
+The init supports only `status`, and `status` is a number.
 Response headers are not supported.
 The check refuses every other init member, `headers` included, with ZTS203.
-`Response.redirect` takes a URL and a status number.
+The check also refuses an init that is not a record, such as `Response.text("x", 404)`, and a `status` that is not a number.
+`Response.redirect` takes a URL and an optional status number, and it takes no init record.
+The check refuses `Response.redirect(url, { status: 301 })` with ZTS203.
 
 ## Routing
 

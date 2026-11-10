@@ -6789,6 +6789,139 @@ test "response init: a redirect status number is accepted" {
     );
 }
 
+// The runtime reads an init only when it is a record, reads `status` only when
+// it is a number, and reads the second argument of `redirect` only when it is
+// a number. It sends the default status for every other value.
+
+test "response init: a status number where the init belongs is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response { return Response.text("x", 404); }
+    , "Response.text init must be a record, got 'number'");
+}
+
+test "response init: a number-typed parameter where the init belongs is ZTS203" {
+    try expectOneArgMismatch(
+        \\function reply(code: number): Response { return Response.json({ ok: true }, code); }
+    , "Response.json init must be a record, got 'number'");
+}
+
+test "response init: a string where the init belongs is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response { return Response.html("<p>x</p>", "404"); }
+    , "Response.html init must be a record, got 'string'");
+}
+
+test "response init: a null where the init belongs is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response { return Response.rawJson("{}", null); }
+    , "Response.rawJson init must be a record, got 'null'");
+}
+
+test "response init: a number in one member of a union init is ZTS203" {
+    try expectOneArgMismatch(
+        \\function reply(init: number | { status: number }): Response { return Response.text("x", init); }
+    , "Response.text init must be a record, got 'number'");
+}
+
+test "response init: a string status in an init literal is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response { return Response.json({ ok: true }, { status: "201" }); }
+    , "Response.json init member 'status' must be a number, got 'string'");
+}
+
+test "response init: a string-typed status in an init literal is ZTS203" {
+    try expectOneArgMismatch(
+        \\function reply(code: string): Response { return Response.text("x", { status: code }); }
+    , "Response.text init member 'status' must be a number, got 'string'");
+}
+
+test "response init: a null status in an init literal is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response { return Response.html("<p>x</p>", { status: null }); }
+    , "Response.html init member 'status' must be a number, got 'null'");
+}
+
+test "response init: a status that is a number or a string is ZTS203" {
+    try expectOneArgMismatch(
+        \\function reply(code: number | string): Response { return Response.rawJson("{}", { status: code }); }
+    , "Response.rawJson init member 'status' must be a number, got 'string'");
+}
+
+test "response init: a string status in a named init record is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response {
+        \\  const init = { status: "201" };
+        \\  return Response.json({ ok: true }, init);
+        \\}
+    , "Response.json init member 'status' must be a number, got 'string'");
+}
+
+test "response init: a string status in a declared parameter type is ZTS203" {
+    try expectOneArgMismatch(
+        \\function reply(init: { status: string }): Response { return Response.text("x", init); }
+    , "Response.text init member 'status' must be a number, got 'string'");
+}
+
+test "response init: a string status in a spread operand is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response {
+        \\  const base = { status: "201" };
+        \\  return Response.json({ ok: true }, { ...base });
+        \\}
+    , "Response.json init member 'status' must be a number, got 'string'");
+}
+
+test "response init: an init record where the redirect status belongs is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response { return Response.redirect("/next", { status: 301 }); }
+    , "Response.redirect status must be a number, got '{ status: 301 }'");
+}
+
+test "response init: a string where the redirect status belongs is ZTS203" {
+    try expectOneArgMismatch(
+        \\function handler(req: Request): Response { return Response.redirect("/next", "301"); }
+    , "Response.redirect status must be a number, got 'string'");
+}
+
+test "response init: a string-typed redirect status behind a string literal key is ZTS203" {
+    try expectOneArgMismatch(
+        \\function go(code: string): Response { return Response["redirect"]("/next", code); }
+    , "Response.redirect status must be a number, got 'string'");
+}
+
+test "response init: a status from a number-typed value is accepted" {
+    try expectNoTypeDiagnostic(
+        \\function a(code: number): Response { return Response.json({ ok: true }, { status: code }); }
+        \\function b(req: Request): Response { return Response.text("x", { status: req.method === "GET" ? 200 : 405 }); }
+        \\function c(code: number | undefined): Response { return Response.html("<p>x</p>", { status: code }); }
+        \\function d(init: { status?: number }): Response { return Response.rawJson("{}", init); }
+    );
+}
+
+test "response init: an init or a status of an unknown type is accepted" {
+    try expectNoTypeDiagnostic(
+        \\function a(init: unknown): Response { return Response.text("x", init); }
+        \\function b(code: unknown): Response { return Response.text("x", { status: code }); }
+        \\function c(code: unknown): Response { return Response.redirect("/next", code); }
+    );
+}
+
+test "response init: an omitted init is accepted" {
+    try expectNoTypeDiagnostic(
+        \\function a(req: Request): Response { return Response.text("x"); }
+        \\function b(req: Request): Response { return Response.text("x", undefined); }
+        \\function c(init: { status: number } | undefined): Response { return Response.json({ ok: true }, init); }
+    );
+}
+
+test "response init: a redirect with no status or a number-typed status is accepted" {
+    try expectNoTypeDiagnostic(
+        \\function a(req: Request): Response { return Response.redirect("/next"); }
+        \\function b(code: number): Response { return Response.redirect("/next", code); }
+        \\function c(req: Request): Response { return Response.redirect("/next", req.method === "GET" ? 302 : 303); }
+    );
+}
+
 test "response init: a shadowed Response is a different value" {
     try expectNoTypeDiagnostic(
         \\function f(): string {

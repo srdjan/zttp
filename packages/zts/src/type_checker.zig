@@ -30,8 +30,21 @@ const mismatch_help_text = "Change the value or the declared type so that the tw
 const arg_type_help_text = "Pass a value of the parameter type, or change the parameter type.";
 /// Help for a ZTS203 on a member of a `Response` helper init.
 const response_init_help_text = "A Response init supports only `status`. Response headers are not supported. Remove this member.";
+/// Help for a ZTS203 on a `Response` helper init that is not a record.
+const response_init_record_help_text = "Pass the status in an init record, for example `{ status: 404 }`, or remove this argument.";
+/// Help for a ZTS203 on a `status` member that is not a number.
+const response_init_status_help_text = "Write the status as a number, for example `{ status: 201 }`, or remove this member.";
+/// Help for a ZTS203 on a `Response.redirect` status that is not a number.
+const response_redirect_status_help_text = "Pass the status as a number, for example `Response.redirect(url, 301)`. Response.redirect takes no init record.";
 /// The one member that a `Response` helper reads from its init.
 const response_init_status = "status";
+/// What the type of a `Response` helper init holds that the runtime does not read.
+const ResponseInitFault = union(enum) {
+    /// The name of a member that is not `status`.
+    member: []const u8,
+    /// The type of a `status` member that is not a number.
+    status: TypeIndex,
+};
 const result_shape_fallback = "a Result argument has the wrong type";
 const object = @import("zts-engine").object;
 const context = @import("zts-engine").context;
@@ -6701,8 +6714,8 @@ pub const TypeChecker = struct {
         self.reportIfUnencodable(arg_idx, "Response.json");
     }
 
-    /// `Response.json(body, init)`: refuse an init member that the runtime
-    /// does not send.
+    /// `Response.json(body, init)`: refuse a second argument that the runtime
+    /// does not read.
     ///
     /// The helpers `json`, `text`, `html`, and `rawJson` read `init.status` and
     /// nothing else (`http.zig` `statusFromInitObject`), and flow analysis
@@ -6710,20 +6723,35 @@ pub const TypeChecker = struct {
     /// passed this check and the runtime dropped it, so the response lacked a
     /// header that the source named. The init parameter is the closed record
     /// `{ status?: number }`, and an argument with another member does not
-    /// match it: ZTS203. `redirect` takes a status number and no init.
+    /// match it: ZTS203.
+    ///
+    /// The runtime reads the init only when it is a record, and reads `status`
+    /// only when it is a number (`http.zig` `normalizeStatus`). `redirect`
+    /// takes a status number and no init. For every other value the runtime
+    /// sends the default status, so `Response.text("x", 404)` answered 200.
+    /// Each of those arguments is ZTS203 too.
     ///
     /// An object literal gets one diagnostic at each member, where the edit
     /// is. Any other expression is judged by its type and gets one diagnostic.
-    /// Like `firstUnencodable`, the type walk refuses only what it knows is
-    /// wrong: an init whose type the checker cannot resolve is admitted.
+    /// Like `firstUnencodable`, the type walks refuse only what they know is
+    /// wrong: an init or a status whose type the checker cannot resolve is
+    /// admitted.
     fn checkResponseInit(self: *TypeChecker, call: Node.CallExpr) void {
         const method = self.responseConstructorName(call) orelse return;
-        if (std.mem.eql(u8, method, "redirect")) return;
         if (call.args_count < 2) return;
 
-        const init_arg = self.ir_view.getListIndex(call.args_start, 1);
-        if (self.ir_view.getTag(init_arg) != .object_literal) return self.checkResponseInitType(init_arg, method);
-        const literal = self.ir_view.getObject(init_arg) orelse return;
+        const second = self.ir_view.getListIndex(call.args_start, 1);
+        if (std.mem.eql(u8, method, "redirect")) {
+            const bad = self.firstNonNumberStatus(self.inferType(second), 0) orelse return;
+            return self.reportResponseArgType(second, method, "status must be a number", bad, response_redirect_status_help_text);
+        }
+        if (self.ir_view.getTag(second) != .object_literal) {
+            if (self.firstNonRecordInit(self.inferType(second), 0)) |bad| {
+                self.reportResponseArgType(second, method, "init must be a record", bad, response_init_record_help_text);
+            }
+            return self.checkResponseInitType(second, method);
+        }
+        const literal = self.ir_view.getObject(second) orelse return;
         for (0..literal.properties_count) |i| {
             const member = self.ir_view.getListIndex(literal.properties_start, @intCast(i));
             if (self.ir_view.getTag(member) == .object_spread) {
@@ -6734,19 +6762,29 @@ pub const TypeChecker = struct {
             // The parser refuses a computed key and a numeric key (ZTS001). A
             // key with no readable name is not `status`, so it is refused too.
             const name = self.propertyKeyName(property.key) orelse "";
-            if (!std.mem.eql(u8, name, response_init_status)) self.reportResponseInitMember(property.key, method, name);
+            if (!std.mem.eql(u8, name, response_init_status)) {
+                self.reportResponseInitMember(property.key, method, name);
+                continue;
+            }
+            const bad = self.firstNonNumberStatus(self.inferType(property.value), 0) orelse continue;
+            self.reportResponseInitStatus(property.value, method, bad);
         }
     }
 
-    /// Report ZTS203 when the type of `node` has a member that is not `status`.
+    /// Report ZTS203 when the type of `node` has a member that is not `status`,
+    /// or a `status` member that is not a number.
     fn checkResponseInitType(self: *TypeChecker, node: NodeIndex, method: []const u8) void {
-        const name = self.firstUnsupportedInitField(self.inferType(node), 0) orelse return;
-        self.reportResponseInitMember(node, method, name);
+        const fault = self.firstResponseInitFault(self.inferType(node), 0) orelse return;
+        switch (fault) {
+            .member => |name| self.reportResponseInitMember(node, method, name),
+            .status => |bad| self.reportResponseInitStatus(node, method, bad),
+        }
     }
 
-    /// The name of the first member of `idx` that is not `status`. Null when
-    /// `idx` has no such member, or when the checker cannot resolve `idx`.
-    fn firstUnsupportedInitField(self: *const TypeChecker, idx: TypeIndex, depth: u8) ?[]const u8 {
+    /// The first member of `idx` that is not `status`, or the type of a
+    /// `status` member that is not a number. Null when `idx` has neither, or
+    /// when the checker cannot resolve `idx`.
+    fn firstResponseInitFault(self: *const TypeChecker, idx: TypeIndex, depth: u8) ?ResponseInitFault {
         if (idx == null_type_idx or depth >= 16) return null;
         const pool = self.env.pool;
         const tag = pool.getTag(idx) orelse return null;
@@ -6754,27 +6792,28 @@ pub const TypeChecker = struct {
             .t_record => blk: {
                 for (pool.getRecordFields(idx)) |field| {
                     const name = pool.getName(field.name_start, field.name_len);
-                    if (!std.mem.eql(u8, name, response_init_status)) break :blk name;
+                    if (!std.mem.eql(u8, name, response_init_status)) break :blk .{ .member = name };
+                    if (self.firstNonNumberStatus(field.type_idx, depth + 1)) |bad| break :blk .{ .status = bad };
                 }
                 break :blk null;
             },
             .t_union => blk: {
                 for (pool.getUnionMembers(idx)) |member| {
-                    if (self.firstUnsupportedInitField(member, depth + 1)) |name| break :blk name;
+                    if (self.firstResponseInitFault(member, depth + 1)) |fault| break :blk fault;
                 }
                 break :blk null;
             },
             .t_intersection => blk: {
                 for (pool.getIntersectionMembers(idx)) |member| {
-                    if (self.firstUnsupportedInitField(member, depth + 1)) |name| break :blk name;
+                    if (self.firstResponseInitFault(member, depth + 1)) |fault| break :blk fault;
                 }
                 break :blk null;
             },
-            .t_nullable => self.firstUnsupportedInitField(pool.getNullableInner(idx), depth + 1),
+            .t_nullable => self.firstResponseInitFault(pool.getNullableInner(idx), depth + 1),
             .t_ref => blk: {
                 const resolved = self.env.resolveRef(idx);
                 if (resolved == idx) break :blk null;
-                break :blk self.firstUnsupportedInitField(resolved, depth + 1);
+                break :blk self.firstResponseInitFault(resolved, depth + 1);
             },
             // A type with no record members names no member to refuse. A type
             // that this walk cannot resolve is admitted.
@@ -6802,6 +6841,106 @@ pub const TypeChecker = struct {
         };
     }
 
+    /// The first type in `idx` that is a value and not a record, where a
+    /// `Response` helper init belongs. Null when `idx` has no such type, or
+    /// when the checker cannot resolve `idx`.
+    fn firstNonRecordInit(self: *const TypeChecker, idx: TypeIndex, depth: u8) ?TypeIndex {
+        if (idx == null_type_idx or depth >= 16) return null;
+        const pool = self.env.pool;
+        const tag = pool.getTag(idx) orelse return null;
+        return switch (tag) {
+            .t_boolean,
+            .t_number,
+            .t_string,
+            .t_null,
+            .t_bytes,
+            .t_array,
+            .t_tuple,
+            .t_function,
+            .t_literal_string,
+            .t_literal_number,
+            .t_literal_bool,
+            .t_template_literal,
+            => idx,
+            .t_union => blk: {
+                for (pool.getUnionMembers(idx)) |member| {
+                    if (self.firstNonRecordInit(member, depth + 1)) |bad| break :blk bad;
+                }
+                break :blk null;
+            },
+            .t_nullable => self.firstNonRecordInit(pool.getNullableInner(idx), depth + 1),
+            .t_ref => blk: {
+                const resolved = self.env.resolveRef(idx);
+                if (resolved == idx) break :blk null;
+                break :blk self.firstNonRecordInit(resolved, depth + 1);
+            },
+            // A record is an init, and `firstResponseInitFault` reads its
+            // members. `undefined` and `void` are an omitted init. The checker
+            // cannot name the members of a Dict. A type that this walk cannot
+            // resolve is admitted.
+            .t_record,
+            .t_intersection,
+            .t_dict,
+            .t_undefined,
+            .t_void,
+            .t_never,
+            .t_unknown_type,
+            .t_generic_param,
+            .t_generic_app,
+            .t_error,
+            => null,
+        };
+    }
+
+    /// The first type in `idx` that is not a number, where a response status
+    /// belongs. Null when `idx` has no such type, or when the checker cannot
+    /// resolve `idx`.
+    fn firstNonNumberStatus(self: *const TypeChecker, idx: TypeIndex, depth: u8) ?TypeIndex {
+        if (idx == null_type_idx or depth >= 16) return null;
+        const pool = self.env.pool;
+        const tag = pool.getTag(idx) orelse return null;
+        return switch (tag) {
+            .t_boolean,
+            .t_string,
+            .t_null,
+            .t_dict,
+            .t_bytes,
+            .t_record,
+            .t_array,
+            .t_tuple,
+            .t_function,
+            .t_literal_string,
+            .t_literal_bool,
+            .t_template_literal,
+            => idx,
+            .t_union => blk: {
+                for (pool.getUnionMembers(idx)) |member| {
+                    if (self.firstNonNumberStatus(member, depth + 1)) |bad| break :blk bad;
+                }
+                break :blk null;
+            },
+            .t_nullable => self.firstNonNumberStatus(pool.getNullableInner(idx), depth + 1),
+            .t_ref => blk: {
+                const resolved = self.env.resolveRef(idx);
+                if (resolved == idx) break :blk null;
+                break :blk self.firstNonNumberStatus(resolved, depth + 1);
+            },
+            // A number is a status. `undefined` and `void` are an omitted
+            // status. A type that this walk cannot resolve is admitted.
+            .t_number,
+            .t_literal_number,
+            .t_undefined,
+            .t_void,
+            .t_never,
+            .t_unknown_type,
+            .t_intersection,
+            .t_generic_param,
+            .t_generic_app,
+            .t_error,
+            => null,
+        };
+    }
+
     fn reportResponseInitMember(self: *TypeChecker, node: NodeIndex, method: []const u8, member: []const u8) void {
         if (self.allocator.print("Response.{s} does not support the init member '{s}'", .{ method, member })) |msg| {
             self.addDiagnostic(.{
@@ -6810,6 +6949,34 @@ pub const TypeChecker = struct {
                 .node = node,
                 .message = msg,
                 .help = response_init_help_text,
+                .allocated = true,
+            });
+        } else |_| self.markAllocationFailure();
+    }
+
+    fn reportResponseInitStatus(self: *TypeChecker, node: NodeIndex, method: []const u8, got: TypeIndex) void {
+        self.reportResponseArgType(node, method, "init member 'status' must be a number", got, response_init_status_help_text);
+    }
+
+    /// Report ZTS203 for an argument of `Response.<method>` whose type `got`
+    /// does not meet `requirement`. A literal type prints as its base type.
+    fn reportResponseArgType(
+        self: *TypeChecker,
+        node: NodeIndex,
+        method: []const u8,
+        requirement: []const u8,
+        got: TypeIndex,
+        help: []const u8,
+    ) void {
+        var buf: [1024]u8 = undefined;
+        const got_str = self.env.pool.formatType(self.env.pool.widenLiteral(got), &buf);
+        if (self.allocator.print("Response.{s} {s}, got '{s}'", .{ method, requirement, got_str })) |msg| {
+            self.addDiagnostic(.{
+                .severity = .err,
+                .kind = .arg_type_mismatch,
+                .node = node,
+                .message = msg,
+                .help = help,
                 .allocated = true,
             });
         } else |_| self.markAllocationFailure();
