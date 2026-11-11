@@ -94,3 +94,9 @@ Until then, ZTS203 refuses every init member except `status`.
 
 The archive keeps at most 1024 records for one proof id. At that bound,
 acknowledgement fails with `TooManyArchivedTransactions`.
+
+## Status
+
+Complete 2026-11-10. D3 is `32b8e531`. D4 is `8ad0c240` and `dcc50bce`. D5 is `1e5a2402`. `bash scripts/verify.sh` exited 0 at `dcc50bce` on macOS and in the Linux arm64 container.
+
+D4 test 3 (materialize) and test 4 (text file replaces the database) passed before the change. Those two tests guard the new schema path, and they do not reproduce the old defect. A configured SQLite file with a `.ts`, `.js`, `.json`, or `.sql` extension is captured by the directory walk as bytes, as before.
