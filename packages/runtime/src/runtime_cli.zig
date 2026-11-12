@@ -551,6 +551,10 @@ fn parseCommonServeFlag(
         config.security_log_path = try shared.takeArg(i, argv, error.MissingSecurityLogPath);
         return true;
     }
+    if (std.mem.eql(u8, arg, "--incident-log")) {
+        config.runtime_config.incident_log_path = try shared.takeArg(i, argv, error.MissingIncidentLog);
+        return true;
+    }
     if (std.mem.eql(u8, arg, "--lifecycle")) {
         const value = try shared.takeArg(i, argv, error.MissingLifecycleValue);
         config.lifecycle_override = parseLifecycle(value) orelse return error.InvalidLifecycleValue;
@@ -654,8 +658,6 @@ fn applyServeFlags(
             config.runtime_config.sqlite_path = try shared.takeArg(&i, argv, error.MissingSqlitePath);
         } else if (std.mem.eql(u8, arg, "--trace")) {
             config.runtime_config.trace_file_path = try shared.takeArg(&i, argv, error.MissingTraceFile);
-        } else if (std.mem.eql(u8, arg, "--incident-log")) {
-            config.runtime_config.incident_log_path = try shared.takeArg(&i, argv, error.MissingIncidentLog);
         } else if (std.mem.eql(u8, arg, "--_debug-panic-path")) {
             try parseDebugPanicPathFlag(builtin.mode, config, &i, argv);
         } else if (std.mem.eql(u8, arg, "--replay")) {
@@ -882,6 +884,7 @@ fn printAppendedHelp() !void {
         \\  -q, --quiet           Disable request logging
         \\  --no-env-check        Skip required environment checks
         \\  --security-log <FILE> Write security decisions to FILE
+        \\  --incident-log <FILE> Append runtime soundness incidents as JSONL
         \\  --lifecycle <MODE>    ephemeral, bounded, ttl, or reuse
         \\
     ;
@@ -1298,6 +1301,12 @@ test "serveAppended argv rejects unknown positional args" {
     var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
     try std.testing.expectError(error.UnknownArgument, parseAppendedServeArgs(&.{ "-p", "3001", "extra" }, &config, false));
     try std.testing.expectEqual(@as(u16, 3001), config.port);
+}
+
+test "serveAppended argv accepts an incident log" {
+    var config = ServerConfig{ .handler = .{ .inline_code = "" }, .runtime_config = .{} };
+    try parseAppendedServeArgs(&.{ "--incident-log", "incidents.jsonl" }, &config, false);
+    try std.testing.expectEqualStrings("incidents.jsonl", config.runtime_config.incident_log_path.?);
 }
 
 test "serveAppended argv rejects unknown options" {

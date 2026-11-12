@@ -484,11 +484,8 @@ pub const ConnectionPool = struct {
                     if (err == error.HandlerNotImplemented) break :blk "Not Implemented: this path reached a hole() the handler has not filled yet";
                     if (err == error.HandlerTypeFault) {
                         // Proof-explained failure: attribute the fault against the
-                        // handler's proven contract, in hand here under contract_lock.
-                        const proof: fault_explain.Proof = if (self.server.contract) |*c| p: {
-                            const props = c.properties();
-                            break :p .{ .optional_safe = props.optional_safe, .result_safe = props.result_safe };
-                        } else .{};
+                        // facts the recorder used, in hand here under contract_lock.
+                        const proof = Server.claimedFaultFacts(if (self.server.contract) |*c| c else null);
                         // The runtime already detected and recorded any soundness
                         // incident (it holds handler_proof and the incident log);
                         // here we render the explained 500 body and append the

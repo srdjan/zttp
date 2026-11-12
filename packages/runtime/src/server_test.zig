@@ -23,6 +23,8 @@ const std = @import("std");
 const server = @import("server.zig");
 const engine = @import("engine_adapter.zig");
 const http_types = @import("http_types.zig");
+const contract_runtime = @import("contract_runtime.zig");
+const incident_log = @import("incident_log.zig");
 
 const Server = server.Server;
 const ServerConfig = server.ServerConfig;
@@ -298,6 +300,72 @@ test "B6: handler returning a non-Response primitive yields 500, not silent empt
     // The non-Response 500 is now proof-explained against the exhaustive_returns
     // chip instead of a bare "did not return a Response object" string.
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "exhaustive_returns") != null);
+}
+
+test "a type fault on a path the compiler claims safe writes one incident line" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    const log_path = try std.fmt.allocPrint(allocator, ".zig-cache/tmp/{s}/incidents.jsonl", .{tmp.sub_path});
+    defer allocator.free(log_path);
+    const fd = try incident_log.open(allocator, log_path);
+    defer std.Io.Threaded.closeFd(fd);
+
+    var srv = try Server.init(allocator, .{
+        .handler = .{ .inline_code = "function handler(req) { const o = { a: 1 }; const f = o.missing; return f(); }" },
+        .pool_size = 1,
+        .log_requests = false,
+    });
+    defer srv.deinit();
+    srv.pool = try HandlerPool.init(allocator, .{ .incident_log_fd = fd }, srv.handler_code, "<incident>", 1, 0);
+
+    // The compiler claims both guarding chips, and no certificate accepted them.
+    var analyzed: engine.HandlerContract = .{
+        .handler = .{ .path = try allocator.dupe(u8, "handler.ts"), .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = .{ .backend = "sqlite", .queries = .empty, .dynamic = false },
+        .api = .{
+            .schemas = .empty,
+            .requests = .{ .schema_refs = .empty, .dynamic = false },
+            .auth = .{ .bearer = false, .jwt = false },
+            .routes = .empty,
+            .schemas_dynamic = false,
+            .routes_dynamic = false,
+        },
+        .verification = null,
+        .aot = null,
+        .source_identity = engine.sourceIdentityForPath("handler.ts"),
+        .properties = .{
+            .pure = false,
+            .read_only = false,
+            .stateless = false,
+            .retry_safe = false,
+            .deterministic = false,
+            .has_egress = false,
+            .result_safe = true,
+            .optional_safe = true,
+        },
+    };
+    defer analyzed.deinit(allocator);
+    contract_runtime.stampLiveHandlerForTest(&analyzed);
+    const validated = try contract_runtime.validate(try contract_runtime.fromHandlerContract(allocator, &analyzed), .{});
+    try srv.installSourceContract(validated, &analyzed, null);
+
+    var req = try getRequest(allocator, "/boom");
+    defer req.deinit(allocator);
+    try std.testing.expectError(error.HandlerTypeFault, srv.pool.?.executeHandler(req.asView()));
+
+    const contents = try tmp.dir.readFileAlloc(std.testing.io, "incidents.jsonl", allocator, .limited(4096));
+    defer allocator.free(contents);
+    try std.testing.expectEqualStrings(
+        "{\"kind\":\"soundness_incident\",\"method\":\"GET\",\"path\":\"/boom\",\"proven\":[\"optional_safe\",\"result_safe\"],\"detail\":\"NotCallable at 1:73\"}\n",
+        contents,
+    );
 }
 
 test "handler returning a string body yields a 200 with that body" {

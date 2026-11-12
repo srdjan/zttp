@@ -68,19 +68,27 @@ When a guarding chip was not proven, that chip is the predicted cause:
 This response path was not proven optional_safe. A value was used without narrowing its type. at 12:9
 ```
 
-When every guarding chip was accepted by the artifact checker and the handler
-still faulted, the fault contradicts the accepted proof, and the body says so:
+When the compiler claimed every guarding chip and the handler still faulted,
+the fault contradicts the claim, and the body says so:
 
 ```text
 Possible soundness incident: the handler faulted on a path proven optional_safe/result_safe. This should be impossible; please report it.
 ```
 
+The runtime judges a fault against the compiler's claims, not against the
+facts that the artifact checker accepted. The checker accepts no
+`optional_safe`, so accepted facts would hide every type-fault incident. These
+facts explain a fault. They do not change pooling, caching, or attestation.
+The runtime contract carries no `exhaustive_returns` claim, so the runtime
+reports a non-Response return as a predicted cause, never as an incident.
+
 An unmapped fault returns the plain `Internal Server Error` body. The trailing
 `line:column` is appended only when the interpreter resolved a source location;
 JS-thrown exceptions often carry none.
 
-`--incident-log <file>` is an opt-in JSONL sink for confirmed soundness
-incidents. Each is appended as one line through a shared `O_APPEND` fd:
+`--incident-log <file>` is an opt-in JSONL sink for soundness incidents.
+`zttp serve`, `zttp dev`, and a self-contained binary accept it. Each incident
+is appended as one line through a shared `O_APPEND` fd:
 
 ```json
 {"kind":"soundness_incident","method":"GET","path":"/users/1","proven":["optional_safe","result_safe"],"detail":"TypeError"}

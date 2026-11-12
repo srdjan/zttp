@@ -365,7 +365,7 @@ pub const Server = struct {
         const pool = if (self.pool) |*p| p else return error.NoHandlerPool;
         const source = candidate.source orelse return error.MissingHandlerSource;
         try activation.requireSourceSwap(self.generationIsGuarded(), null, candidate.configured_policy_checked);
-        const invalidated = try pool.reloadSourceGeneration(source.code, source.filename, candidate.policy, self.sourceServingSettings());
+        const invalidated = try pool.reloadSourceGeneration(source.code, source.filename, candidate.policy, self.sourceServingSettings(if (candidate.contract) |*incoming| incoming else null));
         // Pool preparation is the final fallible operation. It does not read
         // the retired source under runtime-init before any backing is freed.
         if (self.superseded_source) |*retired| retired.deinit();
@@ -395,7 +395,7 @@ pub const Server = struct {
             try pool.installDevPolicyGeneration(
                 self.stageDevCapabilityPolicy(analyzed, configured),
                 engine.contractRequiresRuntimePolicyIndex(analyzed),
-                self.sourceServingSettings(),
+                self.sourceServingSettings(&contract),
             );
         }
 
@@ -509,7 +509,8 @@ pub const Server = struct {
         if (self.contract) |*contract| contract.deinit();
         self.contract = new_contract;
         // Source analysis is not acceptance. Discard all authority and cached
-        // values belonging to the previous artifact, including fault facts.
+        // values belonging to the previous artifact. Fault facts follow the
+        // new contract's claims.
         self.clearProofChecked();
         if (self.proof_cache) |*cache| cache.deinit();
         self.proof_cache = null;
@@ -526,9 +527,11 @@ pub const Server = struct {
 
     /// Only accepted proof facts can enable proof-driven serving behavior.
     /// A decoded/validated contract supplies no authority to this derivation.
+    /// Fault explanation is diagnosis, not authority: it reads the claims.
     fn servingSettings(self: *const Self, checked: ?*const contract_runtime.ProofCheckedContract) ServingSettings {
         var settings = ServingSettings{
             .pooling = self.config.lifecycle_override orelse contract_runtime.derivePoolingPolicy(checked),
+            .handler_proof = claimedFaultFacts(if (self.contract) |*contract| contract else null),
             .policy_index_required = requiresRuntimePolicyIndex(
                 self.config.runtime_config.runtime_policy_index_required,
                 if (checked) |proof| proof.guards.required > 0 else false,
@@ -536,10 +539,6 @@ pub const Server = struct {
         };
         if (checked) |proof| {
             const properties = proof.properties;
-            settings.handler_proof = .{
-                .optional_safe = properties.optional_safe,
-                .result_safe = properties.result_safe,
-            };
             if ((properties.pure or (properties.deterministic and properties.read_only)) and !proof.reads_request_state) {
                 settings.cache_properties = properties;
             }
@@ -547,11 +546,21 @@ pub const Server = struct {
         return settings;
     }
 
-    fn sourceServingSettings(self: *const Self) @import("runtime_pool.zig").ServingSettings {
+    /// The compiler's claims for the chips that guard a runtime fault. The
+    /// incident recorder and the 500 body both read these, so a fault on a
+    /// claimed-safe path is a soundness incident on both sides. The checker
+    /// accepts no `optional_safe`, so accepted facts would hide every incident.
+    pub fn claimedFaultFacts(contract: ?*const ValidatedRuntimeContract) fault_explain.Proof {
+        const claimed = (contract orelse return .{}).properties();
+        return .{ .optional_safe = claimed.optional_safe, .result_safe = claimed.result_safe };
+    }
+
+    fn sourceServingSettings(self: *const Self, contract: ?*const ValidatedRuntimeContract) @import("runtime_pool.zig").ServingSettings {
         // Source analysis carries no accepted certificate, even when replacing
         // an artifact that had one. Preserve the operator's lifecycle override.
+        // Fault facts come from the incoming contract, not the one it replaces.
         const settings = self.servingSettings(null);
-        return .{ .handler_proof = settings.handler_proof, .pooling_policy = settings.pooling };
+        return .{ .handler_proof = claimedFaultFacts(contract), .pooling_policy = settings.pooling };
     }
 
     /// Apply the same derived facts used at pool startup after a source change.
@@ -624,8 +633,8 @@ pub const Server = struct {
         // interpreter's cooperative deadline check is enforced per handler call.
         var pool_rt_config = self.config.runtime_config;
         pool_rt_config.request_timeout_ms = self.config.timeout_ms;
-        // Fault explanation, pooling and response-cache eligibility share one
-        // derivation from accepted facts. Contract integrity alone earns none.
+        // Pooling and response-cache eligibility derive from accepted facts.
+        // Contract integrity alone earns none. Fault explanation reads claims.
         const settings = self.servingSettings(if (self.proof_checked) |*proof| proof else null);
         pool_rt_config.handler_proof = settings.handler_proof;
 
@@ -2716,7 +2725,8 @@ test "source replacement keeps failed state and retires successful generations t
         try std.testing.expect(server.proof_cache == null);
         try std.testing.expect(server.attestation_headers == null);
         try std.testing.expect(server.well_known_doc == null);
-        try std.testing.expect(!pool.config.handler_proof.result_safe);
+        // Fault facts follow the claims of the incoming contract.
+        try std.testing.expectEqual(fault_explain.Proof{ .result_safe = true }, pool.config.handler_proof);
         try std.testing.expectEqual(contract_runtime.PoolingPolicy.reuse_bounded_by_count, pool.pooling_policy);
         try std.testing.expect(pool.policy_generation.policy.allowsEnv("NEW_KEY"));
         try std.testing.expect(!pool.policy_generation.policy.allowsEnv("OLD_KEY"));
@@ -2733,6 +2743,7 @@ test "source replacement keeps failed state and retires successful generations t
         defer candidate.deinit();
         _ = try server.replaceSourceGeneration(&candidate);
         try std.testing.expect(server.contract == null);
+        try std.testing.expectEqual(fault_explain.Proof{}, pool.config.handler_proof);
         try std.testing.expectEqualStrings("new.ts", server.superseded_source.?.filename);
         try std.testing.expectEqualStrings("latest.ts", server.handler_filename);
         var response = try pool.executeHandler(request);
