@@ -133,7 +133,25 @@ Acceptance check: one `zig build verify` run writes one line for each route
 that it ran. The second part of E9, the review of steps that never fail, waits
 until the owner asks for it.
 
+Complete 2026-11-12 (`a3823825`). `bash scripts/verify.sh` passed with an empty
+cache and added one line for each of its 10 per-commit routes. The `exit`
+field is `null` when the child did not exit. The commit field comes from `git
+describe` and carries a `-dirty` suffix when the tree has changes.
+
+### U6: closing validation
+
+- Model: Fable and Codex astra review; Opus probes and fixes.
+- Files: none planned. A confirmed finding gets its own unit.
+- Turn budget: 40 for Opus.
+
+After U1, U3, and U4, Fable and Codex astra review the combined diff of E2
+(`335abac4`), U1, U3, U4, and U5, with split briefs. Each brief gives the diff
+and this plan, not the conclusions of Opus. Opus probes each finding at the
+commit. A confirmed finding gets a failing test and a fix. A rejected finding
+gets its reason in this plan. The probes cover a deployed binary, `zttp dev`,
+and `zttp serve`, with and without `--incident-log`, and a client that reads
+the `Zttp-Proofs` header.
+
 ## Order
 
-U5 first, because the record gains value only as time passes. Then U1, U3, and
-U4. U2 waits for Decision 3.
+U5 is complete. Then U1, U3, U4, and U6. U2 waits for Decision 3.
