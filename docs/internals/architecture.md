@@ -423,9 +423,11 @@ runtime leases retain their compiled executable and refcounted policy.
 
 A source transition clears the prior certificate promotion, cached responses,
 attestation and stale route filter. Source analysis supplies no proof acceptance.
-One serving-settings derivation supplies pooling, fault-explanation facts and
-cache eligibility from accepted proof facts at startup; a source transition
-passes no accepted proof. The pool installs changed settings under its runtime
+One serving-settings derivation supplies pooling and cache eligibility from
+accepted proof facts at startup; a source transition passes no accepted proof.
+Fault-explanation facts come from the compiler's claims in the incoming
+contract (`Server.claimedFaultFacts`), because the checker accepts no
+`optional_safe`. The pool installs changed settings under its runtime
 initialization lock before publishing the generation counter, so newly acquired
 runtimes cannot retain the old artifact's fault-explanation facts. The separate
 source-policy index requirement remains intact.
@@ -486,11 +488,12 @@ calls it and then creates the pool. The attestation-header block stays in `Serve
 because it runs after the pool exists. `swapRefusal` in the same file owns the refusal of a
 live-reload source swap.
 
-Only a `ProofCheckedContract` drives the proof response cache, unbounded runtime
-reuse, and the result and optional fault-explanation facts.
-`ValidatedRuntimeContract` - integrity without acceptance - drives
-env validation and route pre-filtering and nothing that is unsound if a compiler
-claim is wrong. A dev server, a live-reload swap, and a `-Dhandler` build have
+Only a `ProofCheckedContract` drives the proof response cache and unbounded
+runtime reuse. `ValidatedRuntimeContract` - integrity without acceptance -
+drives env validation, route pre-filtering, and the fault-explanation facts,
+and nothing that is unsound if a compiler claim is wrong. A wrong claim makes
+a fault report a possible soundness incident, which is the purpose of that
+report. A dev server, a live-reload swap, and a `-Dhandler` build have
 no artifact and no certificate, so they get no promotion at all.
 
 ## Testing And Governance
