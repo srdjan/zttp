@@ -16,8 +16,11 @@ Decision 2 (a): this plan. It holds E1 (grade every published claim with the
 checker verdict), E6 (one description of the build steps and a short root
 `AGENTS.md`), and the first part of E9 (a record of each gate run).
 
-Decision 3 is open: U2 below changes the attestation wire. It waits for the
-owner.
+Decision 3 (a), approved 2026-11-13: U2 below runs after U1, with a new
+attestation version.
+
+Decision 4 (a), approved 2026-11-13: run U1, U3, U4, and U6. U1 and U3 change
+different files, so they run in parallel with separate Zig caches.
 
 ## Facts that the units depend on
 
@@ -48,9 +51,19 @@ is ignored by git.
 
 - Model: Sonnet.
 - Files: `packages/runtime/src/attest/header_strings.zig`,
-  `packages/runtime/src/server.zig`, `docs/proofs-and-receipts.md`,
+  `packages/runtime/src/server.zig`, `packages/runtime/src/contract_runtime.zig`,
+  `packages/runtime/src/server_test.zig`, `docs/proofs-and-receipts.md`,
   `docs/user-guide.md`.
 - Turn budget: 60.
+
+`ProofCheckedContract` keeps only the accepted chips. It drops the
+`PropertyVerdicts` and their marks for properties derived again, so U1 adds the
+verdicts to it. The accepted chips already map each chip to its kernel
+property, so a chip is in `claimed=` when the compiler claims it and the
+accepted chips do not hold it.
+
+The value separates groups with `; ` and names with `, `. An empty group is
+left out. A value with no group is not sent.
 
 The header keeps its name. Its value names three disjoint groups in this
 order: `checked=` lists the properties that the checker derived again,
@@ -74,7 +87,8 @@ the full header line. It fails before the change. Then `zig build test-server`,
 
 ### U2: the attestation value only at the well-known path (E1, second step)
 
-Waits for Decision 3. Today each response carries the full `Zttp-Attest` value.
+Decision 3 (a) approved it. It starts after U1 is committed, because both units
+change the header code. Today each response carries the full `Zttp-Attest` value.
 The review measured 2,069 bytes for that line and 2,393 header bytes for an
 11-byte body. The change sends a short digest in the header and the full value
 at `/.well-known/zttp-attest`. It changes the attestation wire. It follows the
@@ -97,9 +111,9 @@ the gates for that path. `docs/internals/testing.md` keeps only what the build
 graph cannot say. `check-docs-drift.sh` drops the checks that bound the removed
 copies.
 
-Before the edit, the implementer reads the root-file rule of the agent-spine
-convention. If that rule requires the full table, the implementer stops and
-reports.
+The agent-spine convention was read on 2026-11-13. It requires that a generated
+block agree with `agents.json`. It does not require every gate in the root
+file.
 
 Acceptance check: the byte count of the root `AGENTS.md`, before and after.
 `zig build check-spine`, `zig build test-spine`, `zig build test-docs-drift`,
@@ -144,8 +158,8 @@ describe` and carries a `-dirty` suffix when the tree has changes.
 - Files: none planned. A confirmed finding gets its own unit.
 - Turn budget: 40 for Opus.
 
-After U1, U3, and U4, Fable and Codex astra review the combined diff of E2
-(`335abac4`), U1, U3, U4, and U5, with split briefs. Each brief gives the diff
+After U1, U2, U3, and U4, Fable and Codex astra review the combined diff of E2
+(`335abac4`), U1, U2, U3, U4, and U5, with split briefs. Each brief gives the diff
 and this plan, not the conclusions of Opus. Opus probes each finding at the
 commit. A confirmed finding gets a failing test and a fix. A rejected finding
 gets its reason in this plan. The probes cover a deployed binary, `zttp dev`,
@@ -154,4 +168,6 @@ the `Zttp-Proofs` header.
 
 ## Order
 
-U5 is complete. Then U1, U3, U4, and U6. U2 waits for Decision 3.
+U5 is complete. U1 and U3 run in parallel. U2 follows U1, and U4 follows U3,
+because each pair changes the same files. One `bash scripts/verify.sh` run
+covers each pair of commits. U6 runs last.
