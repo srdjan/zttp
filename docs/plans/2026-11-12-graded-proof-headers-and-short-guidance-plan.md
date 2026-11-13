@@ -195,6 +195,47 @@ gets its reason in this plan. The probes cover a deployed binary, `zttp dev`,
 and `zttp serve`, with and without `--incident-log`, and a client that reads
 the `Zttp-Proofs` header.
 
+### Status, 2026-11-13
+
+U1 is `9c068be4`, U2 is `0ecd316e`, U3 is `397175ef`, and U4 is `099a8975`.
+The root `AGENTS.md` went from 31,364 to 21,808 bytes. A deployed binary from
+the `zttp init` template sent 463 header bytes for a 65-byte body, and the
+`Zttp-Attest` line was 86 bytes.
+
+U6 findings. Fable reviewed E2, U1, and U2. Codex astra reviewed U3, U4, U5,
+and the U2 verifier.
+
+- The production policy accepts only `response_total`, `results_checked`, and
+  `no_secret_leakage`. The documented header example could not occur.
+  Fixed in `ccb985b6`: the document shows the deployed value, and the test
+  uses the production verdict shape.
+- The well-known receipt said `max-age=3600`. After a redeploy, a shared cache
+  could make `zttp verify` refuse a valid server. Both reviewers found it.
+  Fixed in `ccb985b6`: `Cache-Control: no-cache` on both sides.
+- `zig build brief -- <path>` lists only the gates bound to the path. It
+  omitted `bench-check` for `server.zig` and `smoke-getting-started` for
+  `docs/user-guide.md`. Fixed in `571ad967`: the root sentence says so, and the
+  path brief names `zig build brief` for every gate.
+- Two `verify` runs could write ledger lines at one offset. Fixed in
+  `ae427d20` with an exclusive file lock.
+- A solution note described the removed host-root check. Fixed in `571ad967`.
+- CHANGELOG.md had no entry for the wire changes. Fixed in `ccb985b6`.
+- Rejected: a `compress` or `zstd` receipt would reach `unreachable` in the
+  verifier. A run against a fake endpoint showed that the Zig client refuses
+  the encoding first, with `HttpContentEncodingUnsupported` and exit 5.
+- Rejected: `zttp verify` on the well-known URL reports "not attested". This
+  is older than U2. The receipt is not a handler response.
+- Open, with no test: the network path of `zttp verify` has no automated test.
+  A fake endpoint showed exit 3 on a mismatch. The equality of the 500 body and
+  the incident line rests on probes of a deployed binary and `zttp dev`.
+- Open, for the owner: the 500 body, the incident log line, and the JSON key
+  say "proven" for facts that the header grades as `claimed=`.
+- Observation, older than this plan: the production policy never accepts
+  `deterministic`, `read_only`, or `state_isolated`, and `acceptedProperties`
+  never sets `pure`. A deployed binary therefore never enables the proof cache,
+  and its pooling policy is always `reuse_bounded_by_count`. The startup log of
+  the `zttp init` deploy showed exactly that.
+
 ## Order
 
 U5 is complete. U1 and U3 run in parallel. U2 follows U1, and U4 follows U3,
