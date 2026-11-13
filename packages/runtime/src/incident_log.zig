@@ -21,12 +21,12 @@ pub fn write(
     fd: std.c.fd_t,
     method: []const u8,
     path: []const u8,
-    proven_chips: []const []const u8,
+    claimed_chips: []const []const u8,
     detail: []const u8,
 ) void {
     var line: std.ArrayList(u8) = .empty;
     defer line.deinit(allocator);
-    build(allocator, &line, method, path, proven_chips, detail) catch return;
+    build(allocator, &line, method, path, claimed_chips, detail) catch return;
     // Single small write under O_APPEND is atomic across pooled runtimes.
     _ = std.c.write(fd, line.items.ptr, line.items.len);
 }
@@ -37,15 +37,15 @@ pub fn build(
     out: *std.ArrayList(u8),
     method: []const u8,
     path: []const u8,
-    proven_chips: []const []const u8,
+    claimed_chips: []const []const u8,
     detail: []const u8,
 ) !void {
     try out.appendSlice(allocator, "{\"kind\":\"soundness_incident\",\"method\":\"");
     try appendEscaped(allocator, out, method);
     try out.appendSlice(allocator, "\",\"path\":\"");
     try appendEscaped(allocator, out, path);
-    try out.appendSlice(allocator, "\",\"proven\":[");
-    for (proven_chips, 0..) |chip, i| {
+    try out.appendSlice(allocator, "\",\"claimed\":[");
+    for (claimed_chips, 0..) |chip, i| {
         if (i > 0) try out.append(allocator, ',');
         try out.append(allocator, '"');
         try appendEscaped(allocator, out, chip);
@@ -130,7 +130,7 @@ test "build emits one JSON line with the incident fields" {
     try std.testing.expect(std.mem.indexOf(u8, s, "\"kind\":\"soundness_incident\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"method\":\"GET\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"path\":\"/users\"") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"proven\":[\"optional_safe\",\"result_safe\"]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"claimed\":[\"optional_safe\",\"result_safe\"]") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "\"detail\":\"NotCallable\"") != null);
 }
 
@@ -143,7 +143,7 @@ test "build escapes quotes and control characters in dynamic fields" {
     const s = line.items;
     try std.testing.expect(std.mem.indexOf(u8, s, "/a\\\"b") != null);
     try std.testing.expect(std.mem.indexOf(u8, s, "line1\\nq\\\"uote") != null);
-    try std.testing.expect(std.mem.indexOf(u8, s, "\"proven\":[]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, s, "\"claimed\":[]") != null);
 }
 
 test "appendEscaped sanitizes invalid UTF-8 and preserves valid multibyte" {

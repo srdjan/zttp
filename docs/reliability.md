@@ -62,17 +62,17 @@ it against what the handler proved.
 | Non-Response return | The handler returned something that is not a `Response`. | `exhaustive_returns` |
 | Unmapped | Everything else. | none |
 
-When a guarding chip was not proven, that chip is the predicted cause:
+When the compiler did not claim a guarding chip, that chip is the predicted cause:
 
 ```text
-This response path was not proven optional_safe. A value was used without narrowing its type. at 12:9
+The compiler did not claim optional_safe for this response path. A value was used without narrowing its type. at 12:9
 ```
 
 When the compiler claimed every guarding chip and the handler still faulted,
 the fault contradicts the claim, and the body says so:
 
 ```text
-Possible soundness incident: the handler faulted on a path proven optional_safe/result_safe. This should be impossible; please report it.
+Possible soundness incident: the handler faulted on a path the compiler claims optional_safe/result_safe. This should be impossible; please report it.
 ```
 
 The runtime judges a fault against the compiler's claims, not against the
@@ -91,7 +91,7 @@ JS-thrown exceptions often carry none.
 is appended as one line through a shared `O_APPEND` fd:
 
 ```json
-{"kind":"soundness_incident","method":"GET","path":"/users/1","proven":["optional_safe","result_safe"],"detail":"TypeError"}
+{"kind":"soundness_incident","method":"GET","path":"/users/1","claimed":["optional_safe","result_safe"],"detail":"TypeError"}
 ```
 
 Writing is best-effort and never fails the request path. The always-on error log

@@ -25,6 +25,7 @@ const engine = @import("engine_adapter.zig");
 const http_types = @import("http_types.zig");
 const contract_runtime = @import("contract_runtime.zig");
 const incident_log = @import("incident_log.zig");
+const fault_explain = @import("fault_explain.zig");
 const attest_header_strings = @import("attest/header_strings.zig");
 const server_response = @import("server_response.zig");
 const attest_well_known = @import("attest/well_known.zig");
@@ -306,6 +307,18 @@ test "B6: handler returning a non-Response primitive yields 500, not silent empt
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "exhaustive_returns") != null);
 }
 
+test "the 500 body names the compiler's claims" {
+    var buf: [256]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "The compiler did not claim result_safe for this response path. A value was used without narrowing its type.",
+        fault_explain.formatMessage(&buf, fault_explain.diagnose(.{ .optional_safe = true }, .type_fault)),
+    );
+    try std.testing.expectEqualStrings(
+        "Possible soundness incident: the handler faulted on a path the compiler claims optional_safe/result_safe. This should be impossible; please report it.",
+        fault_explain.formatMessage(&buf, fault_explain.diagnose(.{ .optional_safe = true, .result_safe = true }, .type_fault)),
+    );
+}
+
 test "a type fault on a path the compiler claims safe writes one incident line" {
     const allocator = std.testing.allocator;
     var tmp = std.testing.tmpDir(.{});
@@ -367,7 +380,7 @@ test "a type fault on a path the compiler claims safe writes one incident line" 
     const contents = try tmp.dir.readFileAlloc(std.testing.io, "incidents.jsonl", allocator, .limited(4096));
     defer allocator.free(contents);
     try std.testing.expectEqualStrings(
-        "{\"kind\":\"soundness_incident\",\"method\":\"GET\",\"path\":\"/boom\",\"proven\":[\"optional_safe\",\"result_safe\"],\"detail\":\"NotCallable at 1:73\"}\n",
+        "{\"kind\":\"soundness_incident\",\"method\":\"GET\",\"path\":\"/boom\",\"claimed\":[\"optional_safe\",\"result_safe\"],\"detail\":\"NotCallable at 1:73\"}\n",
         contents,
     );
 }

@@ -111,13 +111,13 @@ pub fn formatMessage(buf: []u8, diag: Diagnosis) []const u8 {
     return switch (diag.verdict) {
         .predicted => std.fmt.bufPrint(
             buf,
-            "This response path was not proven {s}. {s}",
+            "The compiler did not claim {s} for this response path. {s}",
             .{ chips, cause },
         ) catch "Internal Server Error",
         .soundness_incident => std.fmt.bufPrint(
             buf,
-            "Possible soundness incident: the handler faulted on a path proven {s}. " ++
-                "This should be impossible — please report it.",
+            "Possible soundness incident: the handler faulted on a path the compiler claims {s}. " ++
+                "This should be impossible; please report it.",
             .{chips},
         ) catch "Internal Server Error",
         .unmapped => "Internal Server Error",
@@ -182,7 +182,7 @@ test "diagnose: unmapped fault class is never an incident" {
 test "formatMessage: predicted names the unproven chip and the cause" {
     var buf: [256]u8 = undefined;
     const msg = formatMessage(&buf, diagnose(.{ .optional_safe = true }, .type_fault));
-    try std.testing.expect(std.mem.indexOf(u8, msg, "not proven result_safe") != null);
+    try std.testing.expect(std.mem.indexOf(u8, msg, "did not claim result_safe") != null);
     try std.testing.expect(std.mem.indexOf(u8, msg, "optional_safe") == null); // proven, not named
     try std.testing.expect(std.mem.indexOf(u8, msg, "narrowing its type") != null);
 }

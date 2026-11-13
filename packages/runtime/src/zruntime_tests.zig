@@ -909,7 +909,7 @@ test "non-Response return 500 is proof-explained against exhaustive_returns" {
 
     try std.testing.expectEqual(@as(u16, 500), response.status);
     try std.testing.expect(std.mem.indexOf(u8, response.body, "exhaustive_returns") != null);
-    try std.testing.expect(std.mem.indexOf(u8, response.body, "not proven") != null);
+    try std.testing.expect(std.mem.indexOf(u8, response.body, "did not claim exhaustive_returns") != null);
 }
 
 test "soundness incident on a proven path is written to the incident log" {

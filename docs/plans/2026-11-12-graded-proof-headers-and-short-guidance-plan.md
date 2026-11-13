@@ -22,6 +22,13 @@ attestation version.
 Decision 4 (a), approved 2026-11-13: run U1, U3, U4, and U6. U1 and U3 change
 different files, so they run in parallel with separate Zig caches.
 
+Decision 5 (a), approved 2026-11-13: the 500 bodies, the incident log line,
+and the incident-log JSON key say "claimed" instead of "proven", with a
+changelog entry.
+
+Decision 6 (a), approved 2026-11-13: the unreachable proof cache and pooling
+tiers stay recorded here. A separate plan investigates them later.
+
 ## Facts that the units depend on
 
 The server builds the `Zttp-Proofs` header in `packages/runtime/src/server.zig`
@@ -228,13 +235,14 @@ and the U2 verifier.
 - Open, with no test: the network path of `zttp verify` has no automated test.
   A fake endpoint showed exit 3 on a mismatch. The equality of the 500 body and
   the incident line rests on probes of a deployed binary and `zttp dev`.
-- Open, for the owner: the 500 body, the incident log line, and the JSON key
-  say "proven" for facts that the header grades as `claimed=`.
+- The 500 body, the incident log line, and the JSON key said "proven" for
+  facts that the header grades as `claimed=`. Decision 5 (a) changes them.
 - Observation, older than this plan: the production policy never accepts
   `deterministic`, `read_only`, or `state_isolated`, and `acceptedProperties`
   never sets `pure`. A deployed binary therefore never enables the proof cache,
   and its pooling policy is always `reuse_bounded_by_count`. The startup log of
-  the `zttp init` deploy showed exactly that.
+  the `zttp init` deploy showed exactly that. Decision 6 (a) leaves it for a
+  separate plan.
 
 ## Order
 

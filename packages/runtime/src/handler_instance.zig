@@ -1159,7 +1159,7 @@ pub const HandlerInstance = struct {
         else
             detail;
         if (!builtin.is_test) {
-            std.log.err("SOUNDNESS INCIDENT: {s} {s} faulted on a proven path ({s})", .{ method, path, full_detail });
+            std.log.err("SOUNDNESS INCIDENT: {s} {s} faulted on a path the compiler claims safe ({s})", .{ method, path, full_detail });
         }
         if (self.config.incident_log_fd) |fd| {
             incident_log.write(self.requestAllocator(), fd, method, path, chips, full_detail);
