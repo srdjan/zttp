@@ -1165,7 +1165,7 @@ fn renderGates(ctx: *Context) ![]const u8 {
             try output.writer.print("| `{s} {s}` | {s} | {s} | not measured |\n", .{ ctx.spine.runner, name, command.does, command.requiredWhen orelse "-" });
         }
     }
-    try output.writer.print("\nRun `{s} brief -- <path>` before a change. It lists the gates for that path.\n", .{ctx.spine.runner});
+    try output.writer.print("\nRun `{s} brief -- <path>` before a change. It lists the gates that the area contract, the decisions, and the notes bind to that path. `{s} brief` lists every gate and when it is required.\n", .{ ctx.spine.runner, ctx.spine.runner });
     return output.toOwnedSlice();
 }
 
@@ -1282,6 +1282,8 @@ fn writePathBrief(ctx: *Context, path: []const u8, writer: *std.Io.Writer) !void
         const command = findCommand(ctx.spine.commands, name);
         if (command) |found| try writeGate(ctx, writer, found) else try writer.print("  {s} {s}\n", .{ ctx.spine.runner, name });
     }
+    // The list above holds only the gates bound to this path.
+    try writer.print("  every gate and when it is required: {s} brief\n", .{ctx.spine.runner});
 }
 
 fn writeGate(ctx: *Context, writer: *std.Io.Writer, command: SpineCommand) !void {
@@ -1722,6 +1724,8 @@ test "public brief navigates with an empty decision ledger" {
     } }, &stdout.writer, &stderr.writer));
     try testing.expect(std.mem.indexOf(u8, stdout.written(), "AREA  core (core/AGENTS.md)") != null);
     try testing.expect(std.mem.indexOf(u8, stdout.written(), "DECISIONS\n  none\n") != null);
+    // A path brief lists only the gates bound to the path, so it names the full list.
+    try testing.expect(std.mem.endsWith(u8, stdout.written(), "  every gate and when it is required: zig build brief\n"));
     try testing.expectEqualStrings("", stderr.written());
 }
 

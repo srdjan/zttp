@@ -202,5 +202,5 @@ The native port and its limits are described in `docs/internals/agent-spine.md`.
 | `zig build test` | runs the aggregate unit and repository test graph | before any repository change is complete |
 | `zig build check-spine` | checks the installed agent spine against the live repository graph | before any repository change is complete |
 
-Run `zig build brief -- <path>` before a change. It lists the gates for that path.
+Run `zig build brief -- <path>` before a change. It lists the gates that the area contract, the decisions, and the notes bind to that path. `zig build brief` lists every gate and when it is required.
 <!-- end generated: gates -->
