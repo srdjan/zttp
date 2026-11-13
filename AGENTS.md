@@ -140,7 +140,7 @@ Run `deno task verify` before committing website changes. Commit locally and do 
 - Find missing tests with mutation tests and property-based tests. A committed mutant belongs beside its suite, as in `zig build test-proof-checker-mutants`. A property test uses a fixed `std.Random` seed and prints the seed on failure. Give each surviving mutant a test, or record why no test can kill it.
 - Test a real user flow end to end. For the CLI, use the smoke steps (`zig build smoke-v1`, `zig build smoke-getting-started`). For a browser UI, such as `../ZTTP-WEBSITE`, use Playwright MCP against the running site, and close each browser session that you open.
 - Tests live alongside code using Zig `test "..."` blocks (no separate test directory).
-- `docs/internals/testing.md` maps the build steps: what `zig build test` runs, what it leaves to `scripts/verify.sh`, and why `test-zruntime` is standalone.
+- `docs/internals/testing.md` gives the reasons behind the test step split: what `zig build test` leaves to `scripts/verify.sh`, and why `test-zruntime` is standalone. `zig build -l` lists the steps.
 - Name tests with concise behavioral descriptions (e.g., `test "runtime init and deinit"`).
 - Runtime and ZTS tests live beside the affected code in `packages/runtime/` or `packages/zts/`; run the relevant `zig build test*` step.
 - Analyzer tests parse typed TypeScript through `JsParser.initAdmission(allocator, type_allocator, source, .compile)`, the mode that production uses. Do not add a test-only parse mode.
@@ -199,82 +199,8 @@ The native port and its limits are described in `docs/internals/agent-spine.md`.
 
 | Gate | Proves | Required when |
 | --- | --- | --- |
-| `zig build test-zts` | runs all zts tier unit-test roots | after analyzer, compiler, interpreter, or binding changes |
-| `zig build test-sdk` | runs zttp-sdk tests | after SDK contract changes |
-| `zig build test-modules` | runs virtual-module implementation tests | after virtual-module behavior or binding changes |
-| `zig build test-proof-checker` | runs consumer acceptance-kernel tests | after proof-checker or certificate changes |
-| `zig build test-proof-checker-mutants` | runs committed acceptance-kernel mutants | after acceptance logic or mutation coverage changes |
-| `zig build test-proof-checker-purity` | checks the kernel leaf boundary and suite floor | after proof-checker source or dependency changes |
-| `zig build test-script-reachability` | checks that each repository script has a declared route | after script or build-graph changes |
-| `zig build test-diagnostic-producers` | checks that each advertised diagnostic has a producer | after diagnostic-registry changes |
-| `zig build test-proof-ratchet-drift` | checks the published trusted boundary against the kernel | after proof boundary or kernel changes |
-| `zig build test-residual-guards-drift` | checks residual guard catalogs, evidence, and documentation | after residual-guard changes |
-| `zig build test-proof-ratchet` | checks disclosed trust against kernel reconstruction | after proof-ratchet changes |
-| `zig build test-precompile` | runs focused precompile and CHECK behavior tests | after precompile or CHECK changes; aggregate coverage is in test-agent-protocol |
-| `zig build test-canonicalize` | runs focused canonicalize and normalize tests | after source-repair or normalization changes; aggregate coverage is in test-agent-protocol |
-| `zig build test-expert` | runs expert command contract tests | after expert command changes |
-| `zig build test-zts-cli` | runs analyzer dispatch and machine-command tests | after zts CLI changes |
-| `zig build test-deploy-manifest` | runs proven-facts extraction tests | after deploy-manifest changes |
-| `zig build test-agent-identity` | runs agent identity primitive tests | after agent identity changes |
-| `zig build test-module-graph-record` | runs module graph and digest tests | after module graph record changes |
-| `zig build test-agent-protocol` | runs agent protocol envelope tests | after agent protocol changes |
-| `zig build test-module-audit` | runs module-contract audit tests | after module-contract audit changes |
-| `zig build test-verify-paths-core` | runs behavior-path verification core tests | after verification path changes |
-| `zig build test-project-config` | runs project configuration discovery tests | after configuration discovery changes |
-| `zig build test-instruction-counter` | runs retired-instruction counter tests | after instruction counter changes |
-| `zig build test-expert-app` | runs expert loop and provider integration tests | after expert loop or provider changes |
-| `zig build test-cassette` | runs the focused offline provider cassette harness | after cassette or provider wire changes; aggregate coverage is in test-expert-app |
-| `zig build test-recorder-smoke` | runs provider-free recorder capture and replay | after recorder changes |
-| `zig build test-simulator` | runs the focused offline full-flow simulator | after simulator or fail-closed flow changes; aggregate coverage is in test-expert-app |
-| `zig build test-standin` | runs the deterministic stand-in through the expert loop | after stand-in, veto, or rule changes |
-| `zig build test-expert-mlx-e2e` | uses the operator's configured MLX server for a real model flow | only when the operator requests local model use |
-| `zig build test-diagnostic-corpus` | checks diagnostic corpus cases against committed goldens | after diagnostics or corpus changes |
-| `zig build test-flow-census` | checks leak verdicts over the generated flow census | after flow-checker or binding-label changes |
-| `zig build test-bytecode-identity` | checks emitted handler bytecode against the committed identity golden | after codegen, IR, or handler example changes |
-| `zig build test-capability-audit` | checks capability helper declarations | after capability helper changes |
-| `zig build test-native-gates` | runs native repository gate tests | after native gate changes |
-| `zig build test-evidence-publish` | runs native evidence publisher tests | after evidence publisher changes |
-| `zig build release-provenance` | validates release evidence provenance | before release readiness is claimed |
-| `zig build test-release-provenance` | runs release provenance tests | after provenance validation changes |
-| `zig build test-coverage-union` | runs coverage-union tests | after coverage-union changes |
-| `zig build release-check` | prints the repository release-readiness passport | before release readiness is claimed |
-| `zig build test-release-check` | runs release-passport tests | after release passport changes |
-| `zig build test-production-branch-metric` | tests and runs the production branch metric | after branch metric changes |
-| `zig build test-kernel-safety` | checks acceptance-kernel runtime safety under release optimization | after kernel guards or build modes change |
-| `zig build test-module-boundary` | checks consumer access to zts internals | after imports across the zts boundary change |
-| `zig build test-release-workflow` | checks release script invariants | after release script changes |
-| `zig build test-proof-swallow` | checks proof analysis for unreviewed discarded errors | after proof pipeline error handling changes |
-| `zig build test-zts-layering` | checks that zts tiers import only lower tiers | after zts imports or tier assignments change |
-| `zig build test-convergence-emitter` | checks the convergence marker producer and consumer | after convergence evidence changes |
-| `zig build test-evidence-marker` | checks evidence marker and publisher boundaries | after evidence marker or publisher changes |
-| `zig build test-docs-drift` | checks documentation against registries and build paths | after documented registries or paths change |
-| `zig build test-idiom-table` | checks the specification idiom table against the registry | after idiom or rule changes |
-| `zig build test-canonical-style` | checks canonical-style examples against the rule registry | after canonical rules or examples change |
-| `zig build test-grammar-drift` | checks specification grammar against the registry | after grammar or registry changes |
-| `zig build test-decision-registry` | checks that each published decision kind has a producer | after decision-kind changes |
-| `zig build test-meta-drift` | checks published registry hashes against their pins | after registry identity changes |
-| `zig build test-doc-links` | checks documentation links | after documentation path or link changes |
-| `zig build test-runtime-purity` | checks shipped binaries for agent and provider surfaces | after runtime, analyzer, or provider changes |
-| `zig build test-module-governance` | runs the module governance audit | after module governance changes |
-| `zig build test-contract-golden` | checks analyzer contract output against goldens | after contract output changes |
-| `zig build test-generic-intersection-cli-matrix` | runs generic-intersection rejection and contrast fixtures | after generic intersection behavior changes |
-| `zig build test-expert-golden` | checks the zts direct-tool contract against goldens | after expert tool output changes |
-| `zig build test-cli` | runs developer CLI unit tests | after CLI behavior changes |
 | `zig build test` | runs the aggregate unit and repository test graph | before any repository change is complete |
-| `zig build test-zruntime` | runs the standalone ZRuntime test root | after runtime engine or artifact activation changes |
-| `zig build test-server` | runs server and runtime facade integration tests | after server or runtime facade changes |
-| `zig build test-examples` | runs example handler suites | after examples or public handler behavior changes |
-| `zig build test-cli-abuse` | runs the built analyzer against hostile CLI input | after analyzer process or machine output changes |
-| `zig build bench-check` | compares benchmark results with the committed baseline | after performance-sensitive runtime changes |
-| `zig build test-bench-diff` | runs benchmark sampling and comparison tests | after benchmark tooling changes |
-| `zig build smoke-v1` | runs the v1 user flow in a temporary directory | after core CLI workflow changes |
-| `zig build test-module-scope-panic` | checks module authorization isolation after a recovered panic | after module authorization or panic recovery changes |
-| `zig build test-panic-isolation` | runs handler panic isolation end to end | after handler isolation or panic recovery changes |
-| `zig build smoke-getting-started` | runs the Getting Started guide in a temporary directory | after the guide or first-run workflow changes |
-| `zig build test-compile-bench` | runs compile benchmark harness tests | after compile benchmark changes |
-| `zig build test-step-coverage` | reports how the build graph reaches every build step | after build task or aggregate changes |
 | `zig build check-spine` | checks the installed agent spine against the live repository graph | before any repository change is complete |
-| `zig build test-spine` | runs agent-spine behavior tests and rejection probes | after agent-spine policy or tooling changes |
-| `zig build verify` | runs the full local gate in separate sequential processes | before the full local verification gate is claimed |
-| `zig build test-agent-determinism` | checks complete agent envelopes are deterministic | after agent wire or transport changes |
+
+Run `zig build brief -- <path>` before a change. It lists the gates for that path.
 <!-- end generated: gates -->

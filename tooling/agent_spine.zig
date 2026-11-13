@@ -1143,11 +1143,11 @@ fn renderAreas(ctx: *Context) ![]const u8 {
 
 fn renderGates(ctx: *Context) ![]const u8 {
     var output: std.Io.Writer.Allocating = .init(ctx.a());
-    // The column appears only when some gate carries a measurement. A column
-    // that reads "not measured" in every row carries no information.
+    // The column appears only when some listed gate carries a measurement. A
+    // column that reads "not measured" in every row carries no information.
     var any_measured = false;
     for (ctx.spine.commands) |command| {
-        if (command.intent == .verify and command.seconds != null) any_measured = true;
+        if ((command.always orelse false) and command.seconds != null) any_measured = true;
     }
     if (any_measured) {
         try output.writer.writeAll("| Gate | Proves | Required when | Measured |\n| --- | --- | --- | --- |\n");
@@ -1155,7 +1155,7 @@ fn renderGates(ctx: *Context) ![]const u8 {
         try output.writer.writeAll("| Gate | Proves | Required when |\n| --- | --- | --- |\n");
     }
     for (ctx.spine.commands) |command| {
-        if (command.intent != .verify) continue;
+        if (!(command.always orelse false)) continue;
         const name = try commandName(ctx.a(), command);
         if (!any_measured) {
             try output.writer.print("| `{s} {s}` | {s} | {s} |\n", .{ ctx.spine.runner, name, command.does, command.requiredWhen orelse "-" });
@@ -1165,6 +1165,7 @@ fn renderGates(ctx: *Context) ![]const u8 {
             try output.writer.print("| `{s} {s}` | {s} | {s} | not measured |\n", .{ ctx.spine.runner, name, command.does, command.requiredWhen orelse "-" });
         }
     }
+    try output.writer.print("\nRun `{s} brief -- <path>` before a change. It lists the gates for that path.\n", .{ctx.spine.runner});
     return output.toOwnedSlice();
 }
 

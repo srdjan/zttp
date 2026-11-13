@@ -31,9 +31,6 @@ pub const HostTestRoot = struct {
 // (`zts_cli`), which is never an addTest root, so no other suite collects
 // their `test {}` blocks. Rooting at the file directly is the only way they
 // run at all; see the `collected_via_named_module` note on each entry.
-//
-// scripts/check-docs-drift.sh reads the step names out of this table and
-// holds docs/internals/testing.md to them.
 const host_test_roots = [_]HostTestRoot{
     .{ .owner = .tools, .src = "src/precompile.zig", .step = "test-precompile", .desc = "Run precompile tool tests", .project_config = true, .aggregate = false },
     // collected_via_named_module: canonicalize.zig is reached only through

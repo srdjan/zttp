@@ -59,8 +59,8 @@ and superseded execution records live in the `pre-rebase` git tag, under
 - [Semantics Verification](internals/semantics-verification.md) - the four
   `spec-check` mechanisms, the soundness boundary, and the generated spec
   artifacts.
-- [Test Steps](internals/testing.md) - what `zig build test` includes and
-  excludes, and why the zruntime suite is standalone.
+- [Test Steps](internals/testing.md) - what `zig build test` excludes and
+  why the zruntime suite is standalone.
 - [Cassette Recording](internals/cassette-recording.md) - when a codegen
   cassette goes stale, how to re-record the corpus against DeepSeek or a local
   MLX server, and how to republish the convergence and

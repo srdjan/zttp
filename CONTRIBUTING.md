@@ -33,7 +33,7 @@ panic-isolation steps, and shell-driven registry gates. It includes the
 end-to-end example handlers. `scripts/verify.sh` runs the full sequence. It is
 the authoritative test command, and no workflow replaces it. A change that
 passed only `zig build test` can still fail `scripts/verify.sh`.
-[Test Steps](docs/internals/testing.md) maps which step runs what.
+[Test Steps](docs/internals/testing.md) explains which steps `zig build test` leaves out, and why.
 
 Run the relevant focused step while you work. Run `scripts/verify.sh` before
 you open a PR. You can run `scripts/test-examples.sh` by itself when you debug

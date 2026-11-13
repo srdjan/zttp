@@ -2,8 +2,10 @@
 
 `zig build test` is the aggregate unit suite. It is not the full gate.
 `scripts/verify.sh` is the full local gate. No GitHub workflow runs the test
-suite. This document says which steps each one runs, which steps `zig build
-test` deliberately leaves out, and why.
+suite. This document gives the reasons behind the step split: which steps `zig build
+test` deliberately leaves out, and why. `zig build -l` lists the steps.
+`zig build test-step-coverage` reports how the build graph reaches each step.
+`zig build brief -- <path>` lists the gates for a path.
 
 `bash scripts/verify.sh --release` adds curated release-note checks and
 `zig build release-provenance`, which checks that `docs/coverage.json` and
@@ -25,29 +27,7 @@ Two runtime test roots:
 | (no separate step) | `runtime_main_tests` (`main.zig`) | `runtime_cli`, `cli_shared`, `server`, `proof_adapter` |
 | `test-cli` | `cli_main_tests` (`cli_main.zig`) | `dev_cli` and its dependencies: deploy, pi_app wiring, `zts_cli` delegation |
 
-The host test roots, declared in the `host_test_roots` table in `build/host_tests.zig`.
-`scripts/check-docs-drift.sh` binds this table to that one, so a root added
-there without a row here fails `zig build test-docs-drift`:
-
-| Step | Root |
-|---|---|
-| `test-precompile` | `packages/tools/src/precompile.zig` |
-| `test-canonicalize` | `packages/tools/src/canonicalize.zig` |
-| `test-expert` | `packages/tools/src/expert.zig` |
-| `test-zts-cli` | `packages/tools/src/zts_cli.zig` |
-| `test-deploy-manifest` | `packages/tools/src/deploy_manifest.zig` |
-| `test-agent-identity` | `packages/tools/src/agent_identity.zig` |
-| `test-module-graph-record` | `packages/tools/src/module_graph_record.zig` |
-| `test-agent-protocol` | `packages/tools/src/agent_protocol.zig` |
-| `test-module-audit` | `packages/tools/src/module_audit.zig` |
-| `test-verify-paths-core` | `packages/tools/src/verify_paths_core.zig` |
-| `test-project-config` | `packages/tools/src/project_config.zig` |
-| `test-instruction-counter` | `packages/tools/src/instruction_counter.zig` |
-| `test-expert-app` | `packages/pi/src/tests.zig` |
-| `test-cassette` | `packages/pi/src/cassette_tests.zig` |
-| `test-recorder-smoke` | `packages/pi/src/recorder_smoke_tests.zig` |
-| `test-simulator` | `packages/pi/src/simulator_tests.zig` |
-| `test-standin` | `packages/pi/src/standin_tests.zig` |
+The host test roots are the `host_test_roots` rows in `build/host_tests.zig`. `zig build -l` lists their steps.
 
 The aggregate runs `test-agent-protocol` in place of its complete
 `test-precompile` and `test-canonicalize` subsets, and `test-expert-app` in place
@@ -146,10 +126,6 @@ pass. The count for twice the work must be between 1.5 and 2.5 times the count
 for the base work on the instruction sources. On the CPU-time fallback the test
 asserts only growth.
 
-The package suites: `test-zts`, `test-sdk`, `test-modules`,
-`test-proof-checker`, `test-release-check`, `test-server`,
-`test-compile-bench`, `test-bench-diff`.
-
 `test-server` also runs the example census in
 `packages/runtime/src/example_census_test.zig`. It serves one request per example
 handler through a pooled runtime and requires `lifetime_allocs` to stay fixed
@@ -216,17 +192,6 @@ needs one row in `allowed_rows` in that file, with a mechanism and a reason, and
 a row for a finding that is gone fails, so the list only shrinks. The gate
 asserts a floor on its rows, prints the counts per verdict on
 every run, and probes every failure kind through a small synthetic census.
-
-The audits and gates: `test-capability-audit`, `test-module-boundary`,
-`test-proof-checker-purity`, `test-kernel-safety`, `test-proof-ratchet`, `test-proof-ratchet-drift`,
-`test-residual-guards-drift`, `test-proof-swallow`,
-`test-zts-layering`, `test-module-governance`,
-`test-runtime-purity`, `test-contract-golden`, `test-expert-golden`,
-`test-docs-drift`, `test-doc-links`, `test-diagnostic-corpus`, `test-flow-census`,
-`test-bytecode-identity`,
-`test-convergence-emitter`, `test-native-gates`,
-`test-production-branch-metric`,
-`test-generic-intersection-cli-matrix`.
 
 `test-diagnostic-corpus` pins the output of the default check over the cases
 under `tests/corpus/`. Each case is a source file with a sibling `.diag` golden
@@ -327,7 +292,7 @@ Four build steps run only under `scripts/verify.sh`:
 - **`smoke-v1`**, a build step that runs the v1 user flow in a temporary
   directory.
 
-The six single-script drift gates run inside `zig build test`: `test-idiom-table`, `test-canonical-style`, `test-grammar-drift`, `test-decision-registry`, `test-meta-drift`, and `test-agent-determinism`. `test-meta-drift` also compares `describe-rule --hash` with `policy-hash.txt`.
+`test-meta-drift` also compares `describe-rule --hash` with `policy-hash.txt`.
 
 Four scripts and one command run only under `scripts/verify.sh`, with no
 build step of their own: `scripts/check-normalize-idempotent.sh`,

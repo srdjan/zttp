@@ -44,7 +44,7 @@ zig build test-zts -Dtest-filter="name"  # Edit-loop filter on a named suite; ne
 zig build test-examples                # All example handler tests
 ```
 
-`docs/internals/testing.md` maps which step runs what.
+`docs/internals/testing.md` explains which steps `zig build test` leaves out, and why. `zig build -l` lists the steps.
 
 ## Benchmarks
 
