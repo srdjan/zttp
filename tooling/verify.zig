@@ -95,5 +95,9 @@ fn appendLedgerLine(
     try cwd.createDirPath(io, ledger_dir);
     var file = try cwd.createFile(io, ledger_path, .{ .truncate = false });
     defer file.close(io);
+    // Two gate runs can share one ledger. Without the lock, both can read the
+    // same length and write their lines at the same offset.
+    try file.lock(io, .exclusive);
+    defer file.unlock(io);
     try file.writePositionalAll(io, line.written(), try file.length(io));
 }
