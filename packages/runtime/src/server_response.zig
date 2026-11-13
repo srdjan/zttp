@@ -174,15 +174,15 @@ pub fn formatWellKnownHeaders(
     if (cached) {
         const out = try std.fmt.bufPrint(
             header_buf,
-            "HTTP/1.1 304 Not Modified\r\nETag: \"{s}\"\r\nCache-Control: public, max-age={d}\r\nConnection: {s}\r\n\r\n",
-            .{ doc.etag_hex, attest_well_known.cache_max_age_seconds, conn },
+            "HTTP/1.1 304 Not Modified\r\nETag: \"{s}\"\r\nCache-Control: no-cache\r\nConnection: {s}\r\n\r\n",
+            .{ doc.etag_hex, conn },
         );
         return out.len;
     }
     const out = try std.fmt.bufPrint(
         header_buf,
-        "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nETag: \"{s}\"\r\nCache-Control: public, max-age={d}\r\nConnection: {s}\r\nContent-Length: {d}\r\n\r\n",
-        .{ attest_well_known.content_type, doc.etag_hex, attest_well_known.cache_max_age_seconds, conn, doc.body.len },
+        "HTTP/1.1 200 OK\r\nContent-Type: {s}\r\nETag: \"{s}\"\r\nCache-Control: no-cache\r\nConnection: {s}\r\nContent-Length: {d}\r\n\r\n",
+        .{ attest_well_known.content_type, doc.etag_hex, conn, doc.body.len },
     );
     return out.len;
 }

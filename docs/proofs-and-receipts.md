@@ -342,24 +342,31 @@ empty group.
 - `accepted=` lists the other properties that the checker accepted. The
   checker accepted the grade that the producer stated.
 - `claimed=` lists the compiler claims that the checker did not accept. The
-  names are the chip names of the proof card. A server without an accepted
-  certificate sends only this group.
+  names are the chip names of the proof card.
 
 A property is in the highest group that it reaches. The server orders the first
 two groups as the checker orders its properties. The server orders the
-`claimed=` group as the proof card orders its chips. Example:
+`claimed=` group as the proof card orders its chips.
+
+The production policy requires `response_total`, `results_checked`, and
+`no_secret_leakage`. The checker accepts only a property that the policy
+requires. Other claims, such as `read_only` and `deterministic`, stay in
+`claimed=`. A binary that `zttp deploy` builds from the `zttp init` template
+sends this value:
 
 ```
-Zttp-Proofs: checked=results_checked; accepted=state_isolated, deterministic, read_only; claimed=pure, idempotent
+Zttp-Proofs: checked=response_total, results_checked; accepted=no_secret_leakage; claimed=pure, read_only, stateless, retry_safe, deterministic, no_credential_leakage, input_validated, pii_contained, injection_safe, idempotent, state_isolated, fault_covered, optional_safe
 ```
 
-The server sends the header only with a verified attestation. If the server has
-no group to list, it does not send the header. The startup log prints the same
-three groups on the lines `Checked:`, `Accepted:`, and `Claimed:`.
+The server sends the header only with a verified attestation, so `zttp serve`
+and `zttp dev` do not send it. If the server has no group to list, it does not
+send the header. The startup log of a deployed binary prints the same three
+groups on the lines `Checked:`, `Accepted:`, and `Claimed:`.
 
 The `property_summary` in the signed attestation receipt is different. It is
-the claim list of the producer. The producer signs it before any checker verdict exists, so it does
-not change. The header grade is a statement of the running binary.
+the claim list of the producer. The producer signs it before any checker
+verdict exists, so it does not change. The header grade is a statement of the
+running binary.
 
 ## Proof Gate
 

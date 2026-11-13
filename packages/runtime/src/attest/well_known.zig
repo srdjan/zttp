@@ -17,8 +17,10 @@
 //! ```
 //!
 //! Content-addressed: the ETag is SHA-256 of the body. Identical builds
-//! produce identical bodies, identical ETags. Verifiers and CDNs may cache
-//! aggressively.
+//! produce identical bodies, identical ETags. The response says
+//! `Cache-Control: no-cache`: a cache must revalidate with the ETag, because
+//! each response names the current JWS by its digest. A stale copy after a
+//! redeploy makes `zttp verify` refuse a valid server.
 //!
 //! What this document is: provenance. It carries a signed claim about an
 //! artifact, including the root of that artifact's executable graph. It does
@@ -35,9 +37,6 @@ const b64 = std.base64.url_safe_no_pad;
 
 pub const route_path: []const u8 = "/.well-known/zttp-attest";
 pub const content_type: []const u8 = "application/json";
-/// One hour. The doc is content-addressed via ETag, so caches re-validate
-/// cheaply when a fresh build changes the body.
-pub const cache_max_age_seconds: u32 = 3600;
 
 pub const Doc = struct {
     body: []const u8,

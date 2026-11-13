@@ -27,6 +27,7 @@ const contract_runtime = @import("contract_runtime.zig");
 const incident_log = @import("incident_log.zig");
 const attest_header_strings = @import("attest/header_strings.zig");
 const server_response = @import("server_response.zig");
+const attest_well_known = @import("attest/well_known.zig");
 const pcc = @import("zttp_proof_checker");
 
 const Server = server.Server;
@@ -715,6 +716,7 @@ test "Zttp-Proofs grades each claim by the checker verdict" {
             .state_isolated = true,
             .idempotent = true,
             .result_safe = true,
+            .no_secret_leakage = true,
         },
     };
     defer analyzed.deinit(allocator);
@@ -722,15 +724,16 @@ test "Zttp-Proofs grades each claim by the checker verdict" {
     var validated = try contract_runtime.validate(try contract_runtime.fromHandlerContract(allocator, &analyzed), .{});
     defer validated.deinit();
 
-    // The checker accepts four properties and derives `results_checked` again.
+    // The verdicts that the production policy produces: its three required
+    // properties accepted, two of them derived again by the checker.
     var verdicts: pcc.verdict.PropertyVerdicts = .{};
-    verdicts.accept(.read_only, .translation_validated);
-    verdicts.accept(.deterministic, .translation_validated);
-    verdicts.accept(.state_isolated, .translation_validated);
-    verdicts.accept(.results_checked, .translation_validated);
+    verdicts.accept(.response_total, .trusted);
+    verdicts.accept(.results_checked, .trusted);
+    verdicts.accept(.no_secret_leakage, .tested);
+    verdicts.markConsumerChecked(.response_total);
     verdicts.markConsumerChecked(.results_checked);
     const proof = contract_runtime.promote(&validated, .{
-        .outcome = .{ .accepted = .{ .grade = .translation_validated, .development_only = false } },
+        .outcome = .{ .accepted = .{ .grade = .tested, .development_only = false } },
         .provenance = .absent,
         .work_spent = 1,
         .properties = verdicts,
@@ -738,17 +741,32 @@ test "Zttp-Proofs grades each claim by the checker verdict" {
 
     var headers = try attest_header_strings.build(allocator, validated.properties(), &proof, "jws");
     defer headers.deinit(allocator);
-    var buf: [256]u8 = undefined;
+    var buf: [512]u8 = undefined;
     const len = try server_response.appendAttestationHeaders(headers, &buf, 0);
     try std.testing.expectEqualStrings(
-        "Zttp-Proofs: checked=results_checked; accepted=state_isolated, deterministic, read_only; claimed=pure, idempotent\r\nZttp-Attest: sha256=cb5e61154f27d638402bb24f8367f22b01722e22d08225db7af30bdbffca80dc\r\n",
+        "Zttp-Proofs: checked=response_total, results_checked; accepted=no_secret_leakage; claimed=pure, read_only, deterministic, idempotent, state_isolated\r\nZttp-Attest: sha256=cb5e61154f27d638402bb24f8367f22b01722e22d08225db7af30bdbffca80dc\r\n",
         buf[0..len],
     );
 
     // The startup log prints these three lists.
     var grades = try attest_header_strings.grade(allocator, validated.properties(), &proof);
     defer grades.deinit(allocator);
-    try std.testing.expectEqualStrings("results_checked", grades.checked);
-    try std.testing.expectEqualStrings("state_isolated, deterministic, read_only", grades.accepted);
-    try std.testing.expectEqualStrings("pure, idempotent", grades.claimed);
+    try std.testing.expectEqualStrings("response_total, results_checked", grades.checked);
+    try std.testing.expectEqualStrings("no_secret_leakage", grades.accepted);
+    try std.testing.expectEqualStrings("pure, read_only, deterministic, idempotent, state_isolated", grades.claimed);
+}
+
+test "the well-known attestation document must be revalidated by a cache" {
+    const doc: attest_well_known.Doc = .{ .body = "{}", .etag_hex = @splat('a') };
+    var buf: [512]u8 = undefined;
+    const fresh = try server_response.formatWellKnownHeaders(&doc, false, true, &buf);
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nETag: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\r\nCache-Control: no-cache\r\nConnection: keep-alive\r\nContent-Length: 2\r\n\r\n",
+        buf[0..fresh],
+    );
+    const not_modified = try server_response.formatWellKnownHeaders(&doc, true, false, &buf);
+    try std.testing.expectEqualStrings(
+        "HTTP/1.1 304 Not Modified\r\nETag: \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n",
+        buf[0..not_modified],
+    );
 }

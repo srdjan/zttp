@@ -240,9 +240,11 @@ fn fetchAttestDocument(
     var client = std.http.Client{ .allocator = allocator, .io = io };
     defer client.deinit();
 
+    // A cached document from an earlier deployment would not match the digest.
     var req = try client.request(.GET, document_uri, .{
         .redirect_behavior = .unhandled,
         .keep_alive = false,
+        .extra_headers = &.{.{ .name = "cache-control", .value = "no-cache" }},
     });
     defer req.deinit();
 
