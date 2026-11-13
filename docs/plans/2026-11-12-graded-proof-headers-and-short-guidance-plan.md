@@ -98,6 +98,35 @@ attestation version.
 Decision 3 options: (a) do U2 after U1, with a new attestation version.
 (b) keep the full value in each response. Recommendation: (a).
 
+- Model: Sonnet.
+- Files: `packages/runtime/src/attest/envelope.zig`,
+  `packages/runtime/src/attest/header_strings.zig`,
+  `packages/runtime/src/server.zig`, `packages/runtime/src/server_response.zig`,
+  `packages/runtime/src/verify_cli.zig`, and the documents that name
+  `zttp-attest-v4` or describe `zttp verify`: `docs/cli.md`,
+  `docs/user-guide.md`, `docs/verification.md`, `docs/threat-model.md`,
+  `docs/internals/architecture.md`, `docs/contracts-and-sandboxing.md`.
+- Turn budget: 80.
+
+The response header becomes `Zttp-Attest: sha256=<64 lowercase hex>`. The hex
+is the SHA-256 of the compact JWS bytes. The JWS stays in the `attest` member
+of `/.well-known/zttp-attest`. `envelope.version_tag` becomes `zttp-attest-v5`.
+A `zttp-attest-v4` receipt is refused with `UnsupportedAttestationVersion`.
+
+`zttp verify <url>` reads the digest from the response to `<url>`. Then it
+fetches `/.well-known/zttp-attest` from the same origin, without redirects. It
+requires `v` to equal `envelope.version_tag` and the SHA-256 of `attest` to
+equal the header digest. Then it verifies the JWS as before. A header that
+holds a JWS, the old form, gets the existing "rebuild the artifact" message. A
+digest mismatch gets its own message and exit code 3.
+
+Acceptance check: tests with literal values for the new header line, for the
+v4 refusal, and for a pure verifier function over a header value and a
+document body. That function covers a match, a digest mismatch, the old header
+form, and a wrong `v`. Then `zig build test-server`, `zig build test-cli`, and
+`bash scripts/verify.sh` pass. The lead probes a deployed binary with
+`zttp verify <url>` and measures the header bytes of one response.
+
 ### U3: the gate table leaves the root `AGENTS.md` (E6)
 
 - Model: Sonnet.
