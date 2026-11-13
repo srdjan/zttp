@@ -3,17 +3,20 @@
 //! Precomputes the two response header values exactly once, at runtime
 //! startup, so the per-request cost is one `writer.print` per header:
 //!
-//!   Zttp-Proofs: pure, read_only, injection_safe, ...
+//!   Zttp-Proofs: checked=results_checked; accepted=read_only; claimed=pure, ...
 //!   Zttp-Attest: <compact JWS>
 //!
 //! Field set and emission order are fixed (`chip_field_names` below). Only
-//! `true` chips appear; the empty list signals "do not emit Zttp-Proofs."
+//! claimed or accepted properties appear, in three groups by checker verdict;
+//! an empty value signals "do not emit Zttp-Proofs."
 //! `has_egress` and `max_io_depth` are intentionally excluded: the header
 //! advertises positive proof claims to external consumers, not facts about
 //! the handler's I/O surface.
 
 const std = @import("std");
 const zts = @import("zts");
+const pcc = @import("zttp_proof_checker");
+const contract_runtime = @import("../contract_runtime.zig");
 
 /// Wire names for the two HTTP headers slice 1 emits. Single source of truth
 /// so the writer (`server.zig:appendAttestationHeaders`) and the reader
@@ -66,14 +69,96 @@ pub const HeaderStrings = struct {
     }
 };
 
-/// `props` must be a struct with `bool` fields matching `chip_field_names`.
-/// Missing fields are treated as `false`.
+/// The three disjoint proof groups of the `Zttp-Proofs` header and of the
+/// startup log. Each field is an owned, comma-and-space-joined name list, empty
+/// when the group has no member.
+pub const Grades = struct {
+    /// Kernel properties that the checker accepted and derived again.
+    checked: []const u8,
+    /// Kernel properties that the checker accepted without deriving them again.
+    accepted: []const u8,
+    /// Compiler claims (chip names) that the accepted chips do not hold.
+    claimed: []const u8,
+
+    pub fn deinit(self: *Grades, allocator: std.mem.Allocator) void {
+        allocator.free(self.checked);
+        allocator.free(self.accepted);
+        allocator.free(self.claimed);
+    }
+};
+
+/// Group each property by the checker verdict. `claims` is a struct with `bool`
+/// fields matching `chip_field_names`. `proof` is null when no certificate was
+/// accepted: every claim is then in `claimed`.
+pub fn grade(
+    allocator: std.mem.Allocator,
+    claims: anytype,
+    proof: ?*const contract_runtime.ProofCheckedContract,
+) !Grades {
+    var checked: std.ArrayList(u8) = .empty;
+    errdefer checked.deinit(allocator);
+    var accepted: std.ArrayList(u8) = .empty;
+    errdefer accepted.deinit(allocator);
+    var claimed: std.ArrayList(u8) = .empty;
+    errdefer claimed.deinit(allocator);
+
+    if (proof) |p| {
+        inline for (@typeInfo(pcc.proof_system.Property).@"enum".field_names) |field| {
+            const property = @field(pcc.proof_system.Property, field);
+            if (p.verdicts.accepted(property)) {
+                try appendName(allocator, if (p.verdicts.consumerChecked(property)) &checked else &accepted, field);
+            }
+        }
+    }
+    inline for (chip_field_names) |name| {
+        const held = if (proof) |p| readBoolField(p.properties, name) else false;
+        if (readBoolField(claims, name) and !held) try appendName(allocator, &claimed, name);
+    }
+
+    const checked_owned = try checked.toOwnedSlice(allocator);
+    errdefer allocator.free(checked_owned);
+    const accepted_owned = try accepted.toOwnedSlice(allocator);
+    errdefer allocator.free(accepted_owned);
+    return .{
+        .checked = checked_owned,
+        .accepted = accepted_owned,
+        .claimed = try claimed.toOwnedSlice(allocator),
+    };
+}
+
+fn appendName(allocator: std.mem.Allocator, list: *std.ArrayList(u8), name: []const u8) !void {
+    if (list.items.len > 0) try list.appendSlice(allocator, ", ");
+    try list.appendSlice(allocator, name);
+}
+
+/// `checked=...; accepted=...; claimed=...` with each empty group left out.
+/// Empty slice when all three groups are empty.
+fn formatGrades(allocator: std.mem.Allocator, grades: Grades) ![]const u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+    const labels = [_][]const u8{ "checked=", "accepted=", "claimed=" };
+    const lists = [_][]const u8{ grades.checked, grades.accepted, grades.claimed };
+    for (labels, lists) |label, list| {
+        if (list.len == 0) continue;
+        if (out.items.len > 0) try out.appendSlice(allocator, "; ");
+        try out.appendSlice(allocator, label);
+        try out.appendSlice(allocator, list);
+    }
+    return out.toOwnedSlice(allocator);
+}
+
+/// `claims` must be a struct with `bool` fields matching `chip_field_names`.
+/// Missing fields are treated as `false`. `proof` is the accepted certificate
+/// of the running artifact, or null. `proofs_value` is the graded list.
 pub fn build(
     allocator: std.mem.Allocator,
-    props: anytype,
+    claims: anytype,
+    proof: ?*const contract_runtime.ProofCheckedContract,
     jws_compact: []const u8,
 ) !HeaderStrings {
-    const proofs_value = try formatProofChips(allocator, props);
+    var grades = try grade(allocator, claims, proof);
+    defer grades.deinit(allocator);
+    const proofs_value = try formatGrades(allocator, grades);
     errdefer if (proofs_value.len > 0) allocator.free(proofs_value);
 
     const attest_value = try allocator.dupe(u8, jws_compact);
@@ -151,22 +236,22 @@ const TestProps = struct {
 
 test "all-false props produce an empty proofs value" {
     const allocator = std.testing.allocator;
-    var hs = try build(allocator, TestProps{}, "h.p.s");
+    var hs = try build(allocator, TestProps{}, null, "h.p.s");
     defer hs.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 0), hs.proofs_value.len);
     try std.testing.expectEqualStrings("h.p.s", hs.attest_value);
 }
 
-test "single true chip emits exactly that name" {
+test "single claimed chip emits exactly that name under claimed" {
     const allocator = std.testing.allocator;
-    var hs = try build(allocator, TestProps{ .injection_safe = true }, "jws");
+    var hs = try build(allocator, TestProps{ .injection_safe = true }, null, "jws");
     defer hs.deinit(allocator);
 
-    try std.testing.expectEqualStrings("injection_safe", hs.proofs_value);
+    try std.testing.expectEqualStrings("claimed=injection_safe", hs.proofs_value);
 }
 
-test "multiple chips join with comma-space in declared order" {
+test "claimed chips join with comma-space in declared order" {
     const allocator = std.testing.allocator;
     var hs = try build(
         allocator,
@@ -177,12 +262,13 @@ test "multiple chips join with comma-space in declared order" {
             .no_secret_leakage = true,
             .deterministic = true,
         },
+        null,
         "jws",
     );
     defer hs.deinit(allocator);
 
     try std.testing.expectEqualStrings(
-        "pure, read_only, deterministic, no_secret_leakage, injection_safe",
+        "claimed=pure, read_only, deterministic, no_secret_leakage, injection_safe",
         hs.proofs_value,
     );
 }
@@ -192,11 +278,12 @@ test "has_egress is excluded from the public header" {
     var hs = try build(
         allocator,
         TestProps{ .has_egress = true, .pure = true },
+        null,
         "jws",
     );
     defer hs.deinit(allocator);
 
-    try std.testing.expectEqualStrings("pure", hs.proofs_value);
+    try std.testing.expectEqualStrings("claimed=pure", hs.proofs_value);
 }
 
 test "structs missing chip fields treat them as false" {
@@ -205,16 +292,16 @@ test "structs missing chip fields treat them as false" {
         pure: bool = true,
         injection_safe: bool = true,
     };
-    var hs = try build(allocator, Partial{}, "jws");
+    var hs = try build(allocator, Partial{}, null, "jws");
     defer hs.deinit(allocator);
 
-    try std.testing.expectEqualStrings("pure, injection_safe", hs.proofs_value);
+    try std.testing.expectEqualStrings("claimed=pure, injection_safe", hs.proofs_value);
 }
 
 test "attest_value is an owned copy, not an alias" {
     const allocator = std.testing.allocator;
     var jws_buf: [16]u8 = .{ 'a', 'b', 'c', '.', 'd', 'e', 'f', '.', 'g', 'h', 'i', 0, 0, 0, 0, 0 };
-    var hs = try build(allocator, TestProps{}, jws_buf[0..11]);
+    var hs = try build(allocator, TestProps{}, null, jws_buf[0..11]);
     defer hs.deinit(allocator);
 
     @memset(jws_buf[0..11], 'X');

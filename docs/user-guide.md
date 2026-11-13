@@ -404,8 +404,11 @@ zttp verify http://127.0.0.1:8080
 ```
 
 The running server emits `Zttp-Proofs` and `Zttp-Attest` headers and serves
-`/.well-known/zttp-attest`. `zttp verify <url>` validates the signed
-attestation from another machine. Use `zttp proofs` to inspect local ledger
+`/.well-known/zttp-attest`. The `Zttp-Proofs` header grades each property by the
+verdict of the proof checker: `checked=`, `accepted=`, and `claimed=`. See
+[The Zttp-Proofs Header](proofs-and-receipts.md#the-zttp-proofs-header).
+`zttp verify <url>` validates the signed attestation from another machine.
+Use `zttp proofs` to inspect local ledger
 entries and `zttp proofs gate` for pull-request checks.
 
 A deployed artifact carries a proof certificate, and the server checks it with

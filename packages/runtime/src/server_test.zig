@@ -25,6 +25,9 @@ const engine = @import("engine_adapter.zig");
 const http_types = @import("http_types.zig");
 const contract_runtime = @import("contract_runtime.zig");
 const incident_log = @import("incident_log.zig");
+const attest_header_strings = @import("attest/header_strings.zig");
+const server_response = @import("server_response.zig");
+const pcc = @import("zttp_proof_checker");
 
 const Server = server.Server;
 const ServerConfig = server.ServerConfig;
@@ -678,4 +681,74 @@ test "a second server on a busy port fails with AddressInUse and the port reopen
 
 test {
     _ = @import("example_census_test.zig");
+}
+
+test "Zttp-Proofs grades each claim by the checker verdict" {
+    const allocator = std.testing.allocator;
+    var analyzed: engine.HandlerContract = .{
+        .handler = .{ .path = try allocator.dupe(u8, "handler.ts"), .line = 1, .column = 0 },
+        .routes = .empty,
+        .modules = .empty,
+        .functions = .empty,
+        .env = .{ .literal = .empty, .dynamic = false },
+        .egress = .{ .endpoints = .empty, .dynamic = false },
+        .cache = .{ .namespaces = .empty, .dynamic = false },
+        .sql = .{ .backend = "sqlite", .queries = .empty, .dynamic = false },
+        .api = .{
+            .schemas = .empty,
+            .requests = .{ .schema_refs = .empty, .dynamic = false },
+            .auth = .{ .bearer = false, .jwt = false },
+            .routes = .empty,
+            .schemas_dynamic = false,
+            .routes_dynamic = false,
+        },
+        .verification = null,
+        .aot = null,
+        .source_identity = engine.sourceIdentityForPath("handler.ts"),
+        .properties = .{
+            .pure = true,
+            .read_only = true,
+            .stateless = false,
+            .retry_safe = false,
+            .deterministic = true,
+            .has_egress = false,
+            .state_isolated = true,
+            .idempotent = true,
+            .result_safe = true,
+        },
+    };
+    defer analyzed.deinit(allocator);
+    contract_runtime.stampLiveHandlerForTest(&analyzed);
+    var validated = try contract_runtime.validate(try contract_runtime.fromHandlerContract(allocator, &analyzed), .{});
+    defer validated.deinit();
+
+    // The checker accepts four properties and derives `results_checked` again.
+    var verdicts: pcc.verdict.PropertyVerdicts = .{};
+    verdicts.accept(.read_only, .translation_validated);
+    verdicts.accept(.deterministic, .translation_validated);
+    verdicts.accept(.state_isolated, .translation_validated);
+    verdicts.accept(.results_checked, .translation_validated);
+    verdicts.markConsumerChecked(.results_checked);
+    const proof = contract_runtime.promote(&validated, .{
+        .outcome = .{ .accepted = .{ .grade = .translation_validated, .development_only = false } },
+        .provenance = .absent,
+        .work_spent = 1,
+        .properties = verdicts,
+    }, @as([32]u8, @splat(0))) orelse return error.TestUnexpectedResult;
+
+    var headers = try attest_header_strings.build(allocator, validated.properties(), &proof, "jws");
+    defer headers.deinit(allocator);
+    var buf: [256]u8 = undefined;
+    const len = try server_response.appendAttestationHeaders(headers, &buf, 0);
+    try std.testing.expectEqualStrings(
+        "Zttp-Proofs: checked=results_checked; accepted=state_isolated, deterministic, read_only; claimed=pure, idempotent\r\nZttp-Attest: jws\r\n",
+        buf[0..len],
+    );
+
+    // The startup log prints these three lists.
+    var grades = try attest_header_strings.grade(allocator, validated.properties(), &proof);
+    defer grades.deinit(allocator);
+    try std.testing.expectEqualStrings("results_checked", grades.checked);
+    try std.testing.expectEqualStrings("state_isolated, deterministic, read_only", grades.accepted);
+    try std.testing.expectEqualStrings("pure, idempotent", grades.claimed);
 }

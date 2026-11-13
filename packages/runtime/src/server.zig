@@ -690,7 +690,7 @@ pub const Server = struct {
         }
 
         if (self.contract) |*contract| {
-            logContractSummary(contract);
+            logContractSummary(self.allocator, contract, if (self.proof_checked) |*proof| proof else null);
 
             // Fail fast if proven env vars are missing
             if (!self.config.skip_env_check) {
@@ -781,6 +781,7 @@ pub const Server = struct {
                     self.attestation_headers = attest_header_strings.build(
                         self.allocator,
                         contract.properties(),
+                        if (self.proof_checked) |*proof| proof else null,
                         jws,
                     ) catch |err| {
                         doc.deinit(self.allocator);
@@ -1096,9 +1097,12 @@ test "server preserves either source or artifact policy-index requirement" {
     try std.testing.expect(requiresRuntimePolicyIndex(true, true));
 }
 
-fn logContractSummary(contract: *const ValidatedRuntimeContract) void {
+fn logContractSummary(
+    allocator: std.mem.Allocator,
+    contract: *const ValidatedRuntimeContract,
+    proof: ?*const contract_runtime.ProofCheckedContract,
+) void {
     const inner = contract.view();
-    const p = &inner.properties;
     std.log.info("Contract loaded: {d} env vars{s}, {d} routes{s}", .{
         inner.env_vars.len,
         if (inner.env_dynamic) @as([]const u8, " (+dynamic)") else "",
@@ -1106,24 +1110,20 @@ fn logContractSummary(contract: *const ValidatedRuntimeContract) void {
         if (inner.routes_dynamic) @as([]const u8, " (+dynamic)") else "",
     });
 
-    // Log proven properties as a separate line for clarity
-    if (p.pure or p.read_only or p.retry_safe or p.deterministic or
-        p.injection_safe or p.state_isolated or p.idempotent or
-        p.no_secret_leakage or p.fault_covered or p.result_safe)
-    {
-        std.log.info("   Proven:{s}{s}{s}{s}{s}{s}{s}{s}{s}{s}", .{
-            if (p.pure) @as([]const u8, " pure") else "",
-            if (p.read_only) @as([]const u8, " read_only") else "",
-            if (p.retry_safe) @as([]const u8, " retry_safe") else "",
-            if (p.deterministic) @as([]const u8, " deterministic") else "",
-            if (p.injection_safe) @as([]const u8, " injection_safe") else "",
-            if (p.state_isolated) @as([]const u8, " state_isolated") else "",
-            if (p.idempotent) @as([]const u8, " idempotent") else "",
-            if (p.no_secret_leakage) @as([]const u8, " no_secret_leakage") else "",
-            if (p.fault_covered) @as([]const u8, " fault_covered") else "",
-            if (p.result_safe) @as([]const u8, " result_safe") else "",
-        });
-    }
+    // Grade each property by the checker verdict, the same grouping as the
+    // Zttp-Proofs header.
+    var grades = attest_header_strings.grade(allocator, inner.properties, proof) catch |err| {
+        std.log.warn("   Proof grades unavailable: {}", .{err});
+        return;
+    };
+    defer grades.deinit(allocator);
+    std.log.info("   Checked:  {s}", .{orNone(grades.checked)});
+    std.log.info("   Accepted: {s}", .{orNone(grades.accepted)});
+    std.log.info("   Claimed:  {s}", .{orNone(grades.claimed)});
+}
+
+fn orNone(list: []const u8) []const u8 {
+    return if (list.len == 0) "none" else list;
 }
 
 // ============================================================================
@@ -2676,7 +2676,7 @@ test "source replacement keeps failed state and retires successful generations t
     try std.testing.expect(settings.cache_properties != null);
     _ = server.applyPoolingPolicy();
     server.proof_cache = proof_adapter.ProofCache.init(allocator, settings.cache_properties.?, .{});
-    server.attestation_headers = try attest_header_strings.build(allocator, settings.cache_properties.?, "old-signature");
+    server.attestation_headers = try attest_header_strings.build(allocator, settings.cache_properties.?, &server.proof_checked.?, "old-signature");
     server.well_known_doc = .{ .body = try allocator.dupe(u8, "old-document"), .etag_hex = @splat('0') };
     var old_lease = try pool.acquireWorkerRuntime();
     defer old_lease.deinit();

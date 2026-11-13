@@ -112,6 +112,9 @@ pub const ProofCheckedContract = struct {
     /// Whether any route reads request headers or body. Not a proof result, but
     /// the proof cache's key is method and URL only, so it is carried alongside.
     reads_request_state: bool,
+    /// The checker verdict for each kernel property, as the kernel produced it.
+    /// A snapshot. The header and the startup log grade each claim by it.
+    verdicts: pcc.verdict.PropertyVerdicts,
     /// The weakest edge the accepted certificate leaned on.
     grade: pcc.AssuranceGrade,
     /// The artifact declared an ephemeral identity or an unpinned runtime
@@ -158,6 +161,7 @@ pub fn promote(
 
     return .{
         .properties = acceptedProperties(validated.properties(), assessment.properties),
+        .verdicts = assessment.properties,
         .reads_request_state = validated.view().reads_request_state,
         .grade = grade,
         .development_only = accepted.development_only,
@@ -186,6 +190,7 @@ fn acceptedProperties(
 fn promotedForTest(validated: *const ValidatedRuntimeContract) ProofCheckedContract {
     return .{
         .properties = validated.properties(),
+        .verdicts = .{},
         .reads_request_state = validated.view().reads_request_state,
         .grade = .translation_validated,
         .development_only = false,

@@ -6,6 +6,7 @@ merge gate that carries the verdict into a pull request.
 
 - [Reading the Proof Card](#reading-the-proof-card)
 - [Counterexamples in the Live HUD](#counterexamples-in-the-live-hud)
+- [The Zttp-Proofs Header](#the-zttp-proofs-header)
 - [Proof Gate](#proof-gate)
 
 ## Reading the Proof Card
@@ -325,6 +326,40 @@ JSON output. The analyzer does not write witnesses to disk.
 that produces the demotions in the first place.
 [Sound Mode](typescript.md#sound-mode) covers the type-directed analyses that
 sit upstream of the flow-driven property set.
+
+## The Zttp-Proofs Header
+
+The running server sends the `Zttp-Proofs` header. The header grades each
+property by the verdict of the proof checker. The server does not print a
+compiler claim as a proof.
+
+The value has up to three groups. A semicolon and a space separate the groups.
+A comma and a space separate the names in a group. The server leaves out an
+empty group.
+
+- `checked=` lists the properties that the checker accepted and derived again
+  from the artifact. The names are the property names of `zttp proofs verify`.
+- `accepted=` lists the other properties that the checker accepted. The
+  checker accepted the grade that the producer stated.
+- `claimed=` lists the compiler claims that the checker did not accept. The
+  names are the chip names of the proof card. A server without an accepted
+  certificate sends only this group.
+
+A property is in the highest group that it reaches. The server orders the first
+two groups as the checker orders its properties. The server orders the
+`claimed=` group as the proof card orders its chips. Example:
+
+```
+Zttp-Proofs: checked=results_checked; accepted=state_isolated, deterministic, read_only; claimed=pure, idempotent
+```
+
+The server sends the header only with a verified attestation. If the server has
+no group to list, it does not send the header. The startup log prints the same
+three groups on the lines `Checked:`, `Accepted:`, and `Claimed:`.
+
+The `property_summary` in the signed `Zttp-Attest` receipt is different. It is
+the claim list of the producer. The producer signs it before any checker verdict exists, so it does
+not change. The header grade is a statement of the running binary.
 
 ## Proof Gate
 
