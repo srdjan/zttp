@@ -189,8 +189,10 @@ pub fn formatWellKnownHeaders(
 
 /// Append the precomputed `Zttp-Proofs` and `Zttp-Attest` header lines.
 /// Slice 1 of proof receipts: per-request work is two `bufPrint`s of static
-/// strings, never a parse or signature operation. `proofs_value.len == 0`
-/// signals "no chip is proven; skip the line so the header is never empty."
+/// strings, never a parse or signature operation. The `Zttp-Attest` value is the
+/// `sha256=<hex>` digest of the JWS; the JWS is at `/.well-known/zttp-attest`.
+/// `proofs_value.len == 0` signals "no chip is proven; skip the line so the
+/// header is never empty."
 pub fn appendAttestationHeaders(
     headers: ?attest_header_strings.HeaderStrings,
     buf: []u8,
@@ -258,6 +260,18 @@ test "appendAttestationHeaders: both lines written in order" {
     const out = try appendAttestationHeaders(hs, &buf, 0);
     try std.testing.expectEqualStrings(
         "Zttp-Proofs: pure, injection_safe\r\nZttp-Attest: h.p.s\r\n",
+        buf[0..out],
+    );
+}
+
+test "appendAttestationHeaders: the attestation line carries the JWS digest" {
+    const allocator = std.testing.allocator;
+    var hs = try attest_header_strings.build(allocator, struct {}{}, null, "h.p.s");
+    defer hs.deinit(allocator);
+    var buf: [256]u8 = undefined;
+    const out = try appendAttestationHeaders(hs, &buf, 0);
+    try std.testing.expectEqualStrings(
+        "Zttp-Attest: sha256=300a2664bcbaa90b9eaceffbb7e40f019a2cc9b050b7bc8d148d4cd7c28df5d9\r\n",
         buf[0..out],
     );
 }

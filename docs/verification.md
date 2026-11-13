@@ -466,7 +466,7 @@ of every module call along the enumerated paths into a per-module `CostEnvelope`
   collections on one path), carrying the offending loop's location.
 
 The envelope is written to `contract.json` under `costEnvelope` and covered by
-the `Zttp-Attest` JWS signature. `HandlerProperties.max_io_depth` is set
+the attestation JWS signature. `HandlerProperties.max_io_depth` is set
 only when the total bound is constant, else `null`.
 
 A `linear` or `unbounded` bound is dischargeable to `constant` by sizing the
@@ -752,9 +752,14 @@ artifact, so that command reports provenance and says so.
 
 Production accepts certificate schema `5` and proof system `zttp_pcc_v3 = 3`
 only. The self-extract payload is format 7, the attestation envelope is
-`zttp-attest-v4`, and the proof bundle is `zttp-bundle-3`. Every identity is
+`zttp-attest-v5`, and the proof bundle is `zttp-bundle-3`. Every identity is
 checked for equality rather than a lower bound. Schema 4 and format 6 are
 refused with a rebuild diagnostic. The runtime does not reinterpret them.
+
+The `Zttp-Attest` response header changed with `zttp-attest-v5`. It holds
+`sha256=<hex>`, the SHA-256 of the compact JWS, and no longer holds the JWS.
+The JWS is the `attest` member of `/.well-known/zttp-attest`. A reader refuses
+a `zttp-attest-v4` receipt.
 
 ## Handlers with file imports
 

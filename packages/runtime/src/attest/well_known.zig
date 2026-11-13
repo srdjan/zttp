@@ -1,10 +1,11 @@
 //! Well-known proof receipt document.
 //!
 //! Precomputes the `GET /.well-known/zttp-attest` response body once at
-//! startup. The doc carries the same JWS the runtime emits in the
-//! `Zttp-Attest` response header plus the full contract surface and the
-//! public-key JWK, so a security scanner or registry crawler can validate
-//! the attestation without issuing a request through every handler route.
+//! startup. The doc carries the compact JWS. The `Zttp-Attest` response header
+//! holds only `sha256=<hex>`, the SHA-256 of that JWS. The doc also carries the
+//! full contract surface and the public-key JWK, so a security scanner or
+//! registry crawler can validate the attestation without issuing a request
+//! through every handler route.
 //!
 //! Body shape:
 //! ```

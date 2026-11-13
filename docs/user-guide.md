@@ -404,10 +404,14 @@ zttp verify http://127.0.0.1:8080
 ```
 
 The running server emits `Zttp-Proofs` and `Zttp-Attest` headers and serves
-`/.well-known/zttp-attest`. The `Zttp-Proofs` header grades each property by the
+`/.well-known/zttp-attest`. The `Zttp-Attest` header is `sha256=<hex>`, the
+SHA-256 of the signed receipt. The receipt is the `attest` member of the
+well-known document. The `Zttp-Proofs` header grades each property by the
 verdict of the proof checker: `checked=`, `accepted=`, and `claimed=`. See
 [The Zttp-Proofs Header](proofs-and-receipts.md#the-zttp-proofs-header).
-`zttp verify <url>` validates the signed attestation from another machine.
+`zttp verify <url>` runs from another machine. It fetches the receipt from the
+well-known path, checks it against the header digest, and validates the
+signature.
 Use `zttp proofs` to inspect local ledger
 entries and `zttp proofs gate` for pull-request checks.
 
@@ -420,7 +424,7 @@ artifact never has a handler ready.
 
 Production artifacts use certificate schema `5`, proof system
 `zttp_pcc_v3 = 3`, self-extract format `7`, attestation
-`zttp-attest-v4`, and bundle format `zttp-bundle-3`. Readers require an exact
+`zttp-attest-v5`, and bundle format `zttp-bundle-3`. Readers require an exact
 match for each identity. Schema 4 and format 6 are refused with a rebuild instruction.
 Existing self-contained binaries keep their embedded runtime.
 Format 7 requires bytecode and a complete policy section.

@@ -4,7 +4,7 @@
 //! startup, so the per-request cost is one `writer.print` per header:
 //!
 //!   Zttp-Proofs: checked=results_checked; accepted=read_only; claimed=pure, ...
-//!   Zttp-Attest: <compact JWS>
+//!   Zttp-Attest: sha256=<64 lowercase hex, SHA-256 of the compact JWS>
 //!
 //! Field set and emission order are fixed (`chip_field_names` below). Only
 //! claimed or accepted properties appear, in three groups by checker verdict;
@@ -23,6 +23,9 @@ const contract_runtime = @import("../contract_runtime.zig");
 /// (`verify_cli.zig:fetchAttestHeader`) can't drift on capitalization.
 pub const header_name_proofs: []const u8 = "Zttp-Proofs";
 pub const header_name_attest: []const u8 = "Zttp-Attest";
+
+/// Prefix of the `Zttp-Attest` value, before the lowercase hex SHA-256 of the JWS.
+pub const attest_digest_prefix: []const u8 = "sha256=";
 
 pub const chip_field_names = [_][]const u8{
     "pure",
@@ -54,6 +57,15 @@ const not_chips = zts.HandlerProperties.exclusions(
 
 comptime {
     if (zts.HandlerProperties.namesCoverageProblem("header_strings.chip_field_names", &chip_field_names, &not_chips)) |problem| @compileError(problem);
+}
+
+/// The `Zttp-Attest` value: `attest_digest_prefix` and the lowercase hex SHA-256
+/// of the compact JWS. The JWS itself is served at `/.well-known/zttp-attest`.
+pub fn attestDigest(allocator: std.mem.Allocator, jws_compact: []const u8) std.mem.Allocator.Error![]u8 {
+    var digest: [32]u8 = undefined;
+    std.crypto.hash.sha2.Sha256.hash(jws_compact, &digest, .{});
+    const hex = std.fmt.bytesToHex(digest, .lower);
+    return std.fmt.allocPrint(allocator, "{s}{s}", .{ attest_digest_prefix, &hex });
 }
 
 pub const HeaderStrings = struct {
@@ -161,7 +173,7 @@ pub fn build(
     const proofs_value = try formatGrades(allocator, grades);
     errdefer if (proofs_value.len > 0) allocator.free(proofs_value);
 
-    const attest_value = try allocator.dupe(u8, jws_compact);
+    const attest_value = try attestDigest(allocator, jws_compact);
 
     return .{
         .proofs_value = proofs_value,
@@ -240,7 +252,7 @@ test "all-false props produce an empty proofs value" {
     defer hs.deinit(allocator);
 
     try std.testing.expectEqual(@as(usize, 0), hs.proofs_value.len);
-    try std.testing.expectEqualStrings("h.p.s", hs.attest_value);
+    try std.testing.expectEqualStrings("sha256=300a2664bcbaa90b9eaceffbb7e40f019a2cc9b050b7bc8d148d4cd7c28df5d9", hs.attest_value);
 }
 
 test "single claimed chip emits exactly that name under claimed" {
@@ -298,14 +310,14 @@ test "structs missing chip fields treat them as false" {
     try std.testing.expectEqualStrings("claimed=pure, injection_safe", hs.proofs_value);
 }
 
-test "attest_value is an owned copy, not an alias" {
+test "attest_value is the digest of the JWS and does not alias it" {
     const allocator = std.testing.allocator;
     var jws_buf: [16]u8 = .{ 'a', 'b', 'c', '.', 'd', 'e', 'f', '.', 'g', 'h', 'i', 0, 0, 0, 0, 0 };
     var hs = try build(allocator, TestProps{}, null, jws_buf[0..11]);
     defer hs.deinit(allocator);
 
     @memset(jws_buf[0..11], 'X');
-    try std.testing.expectEqualStrings("abc.def.ghi", hs.attest_value);
+    try std.testing.expectEqualStrings("sha256=6559e90b5dd57405bdf180f29b509053a3d36c4abf3de535ab249b54d4327234", hs.attest_value);
 }
 
 test "chip_field_names matches the public contract length" {

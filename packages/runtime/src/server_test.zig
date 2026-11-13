@@ -741,7 +741,7 @@ test "Zttp-Proofs grades each claim by the checker verdict" {
     var buf: [256]u8 = undefined;
     const len = try server_response.appendAttestationHeaders(headers, &buf, 0);
     try std.testing.expectEqualStrings(
-        "Zttp-Proofs: checked=results_checked; accepted=state_isolated, deterministic, read_only; claimed=pure, idempotent\r\nZttp-Attest: jws\r\n",
+        "Zttp-Proofs: checked=results_checked; accepted=state_isolated, deterministic, read_only; claimed=pure, idempotent\r\nZttp-Attest: sha256=cb5e61154f27d638402bb24f8367f22b01722e22d08225db7af30bdbffca80dc\r\n",
         buf[0..len],
     );
 

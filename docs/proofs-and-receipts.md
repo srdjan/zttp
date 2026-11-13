@@ -357,7 +357,7 @@ The server sends the header only with a verified attestation. If the server has
 no group to list, it does not send the header. The startup log prints the same
 three groups on the lines `Checked:`, `Accepted:`, and `Claimed:`.
 
-The `property_summary` in the signed `Zttp-Attest` receipt is different. It is
+The `property_summary` in the signed attestation receipt is different. It is
 the claim list of the producer. The producer signs it before any checker verdict exists, so it does
 not change. The header grade is a statement of the running binary.
 

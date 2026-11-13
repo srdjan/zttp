@@ -3,6 +3,10 @@
 //! against any deployed zttp endpoint to confirm the contract claims it
 //! returns are signed by whoever holds the build's private key.
 //!
+//! The `Zttp-Attest` response header holds only `sha256=<hex>`, the SHA-256 of
+//! the compact JWS. The verifier fetches the JWS from `/.well-known/zttp-attest`
+//! and checks that it matches the digest.
+//!
 //! Trust posture for slice 1: the JWS protected header carries the full
 //! Ed25519 public key. The verifier validates the signature against that
 //! embedded key, prints the key fingerprint, and (with `--trust-key <hex>`)
@@ -72,8 +76,10 @@ pub fn printHelp() !void {
     const help =
         \\zttp verify <url> [--trust-key <hex>] [--json]
         \\
-        \\Fetches the URL, reads the Zttp-Attest response header, and validates
-        \\its Ed25519 signature against the embedded public key. Prints the signed
+        \\Fetches the URL and reads the Zttp-Attest response header, a SHA-256
+        \\digest. Fetches the signed receipt from /.well-known/zttp-attest on the
+        \\same origin and checks that it matches the digest. Validates its Ed25519
+        \\signature against the embedded public key. Prints the signed
         \\contract claims on success. Without --trust-key the endpoint supplies the
         \\key, so the signer is not authenticated and the output says so.
         \\
@@ -86,9 +92,10 @@ pub fn printHelp() !void {
         \\  0  signature valid (key pinned only when --trust-key matched)
         \\  1  argument error
         \\  2  endpoint did not return Zttp-Attest header
-        \\  3  signature does not validate
+        \\  3  signature does not validate, receipt does not match the header digest,
+        \\     or receipt format is not supported
         \\  4  key fingerprint does not match --trust-key
-        \\  5  HTTP-level error (DNS, connect, status >= 400)
+        \\  5  HTTP-level error (DNS, connect, status >= 400, including the receipt fetch)
         \\
     ;
     try writeAllFd(std.c.STDOUT_FILENO, help);
@@ -98,18 +105,21 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
 
-    const attest_jws = fetchAttestHeader(allocator, io_backend.io(), opts.url) catch |err| {
-        switch (err) {
-            error.UnsupportedScheme => writeStderr("verify: only http and https URLs are supported\n"),
-            error.NotAttested => writeStderr("verify: endpoint did not return Zttp-Attest header\n"),
-            error.HttpStatus => writeStderr("verify: HTTP request returned non-2xx status\n"),
-            else => writeStderrFmt("verify: request failed: {t}\n", .{err}),
-        }
-        return switch (err) {
-            error.UnsupportedScheme => exit_arg_error,
-            error.NotAttested => exit_not_attested,
-            else => exit_http_error,
-        };
+    const uri = parseHttpUri(opts.url) catch |err| return reportFetchError(err);
+
+    const header_value = fetchAttestHeader(allocator, io_backend.io(), uri) catch |err| return reportFetchError(err);
+    defer allocator.free(header_value);
+    // The old header form holds a JWS; refuse it before the document fetch.
+    if (!std.mem.startsWith(u8, header_value, attest_header_strings.attest_digest_prefix)) {
+        writeStderr(verificationFailureMessage(error.UnsupportedAttestationVersion) orelse "verify: attestation format is not supported\n");
+        return exit_signature_invalid;
+    }
+    const document_body = fetchAttestDocument(allocator, io_backend.io(), uri) catch |err| return reportFetchError(err);
+    defer allocator.free(document_body);
+
+    const attest_jws = attestationFromDocument(allocator, header_value, document_body) catch |err| {
+        if (verificationFailureMessage(err)) |message| writeStderr(message) else writeStderrFmt("verify: {t}\n", .{err});
+        return exit_signature_invalid;
     };
     defer allocator.free(attest_jws);
 
@@ -145,26 +155,45 @@ pub fn run(allocator: std.mem.Allocator, opts: Options) !u8 {
     return exit_ok;
 }
 
-fn verificationFailureMessage(err: envelope.VerifyError) ?[]const u8 {
+fn verificationFailureMessage(err: anyerror) ?[]const u8 {
     return switch (err) {
+        error.AttestationDigestMismatch => "verify: the attestation document does not match the response header\n",
+        error.MalformedAttestationDocument => "verify: the attestation document is malformed\n",
         error.UnsupportedRuntimeAuthority => "verify: attestation claims retired runtime authority\n",
         error.UnsupportedAttestationVersion => "verify: attestation format is not supported; rebuild the artifact with this zttp version\n",
         else => null,
     };
 }
 
-/// Fetch the URL, extract the Zttp-Attest header value, return an owned
-/// copy. The response body is discarded; only headers matter for slice 1.
-fn fetchAttestHeader(
-    allocator: std.mem.Allocator,
-    io: std.Io,
-    url: []const u8,
-) ![]u8 {
+fn reportFetchError(err: anyerror) u8 {
+    switch (err) {
+        error.UnsupportedScheme => writeStderr("verify: only http and https URLs are supported\n"),
+        error.NotAttested => writeStderr("verify: endpoint did not return Zttp-Attest header\n"),
+        error.HttpStatus => writeStderr("verify: HTTP request returned non-2xx status\n"),
+        else => writeStderrFmt("verify: request failed: {t}\n", .{err}),
+    }
+    return switch (err) {
+        error.UnsupportedScheme => exit_arg_error,
+        error.NotAttested => exit_not_attested,
+        else => exit_http_error,
+    };
+}
+
+fn parseHttpUri(url: []const u8) error{UnsupportedScheme}!std.Uri {
     const uri = std.Uri.parse(url) catch return error.UnsupportedScheme;
     if (!std.mem.eql(u8, uri.scheme, "http") and !std.mem.eql(u8, uri.scheme, "https")) {
         return error.UnsupportedScheme;
     }
+    return uri;
+}
 
+/// Fetch the URL, extract the Zttp-Attest header value (`sha256=<hex>`), return
+/// an owned copy. The response body is discarded.
+fn fetchAttestHeader(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    uri: std.Uri,
+) ![]u8 {
     var client = std.http.Client{ .allocator = allocator, .io = io };
     defer client.deinit();
 
@@ -193,9 +222,72 @@ fn fetchAttestHeader(
     return error.NotAttested;
 }
 
+/// Longest `/.well-known/zttp-attest` body the verifier reads.
+const max_document_bytes: usize = 8 * 1024 * 1024;
+
+/// Fetch `/.well-known/zttp-attest` from the scheme, host, and port of `uri`,
+/// without redirects. Return the owned body.
+fn fetchAttestDocument(
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    uri: std.Uri,
+) ![]u8 {
+    var document_uri = uri;
+    document_uri.path = .{ .raw = "/.well-known/zttp-attest" };
+    document_uri.query = null;
+    document_uri.fragment = null;
+
+    var client = std.http.Client{ .allocator = allocator, .io = io };
+    defer client.deinit();
+
+    var req = try client.request(.GET, document_uri, .{
+        .redirect_behavior = .unhandled,
+        .keep_alive = false,
+    });
+    defer req.deinit();
+
+    try req.sendBodiless();
+    var response = try req.receiveHead(&.{});
+
+    const status = @backingInt(response.head.status);
+    if (status < 200 or status >= 300) return error.HttpStatus;
+
+    var body_transfer: [4096]u8 = undefined;
+    var decompress: std.http.Decompress = undefined;
+    var decompress_buf: [std.compress.flate.max_window_len]u8 = undefined;
+    var reader = response.readerDecompressing(&body_transfer, &decompress, &decompress_buf);
+    return reader.allocRemaining(allocator, .limited(max_document_bytes));
+}
+
+/// Check the well-known document against the `Zttp-Attest` digest and return an
+/// owned copy of its JWS. The header must be `sha256=<hex>`. Any other form
+/// (the old JWS header) and any document `v` other than `envelope.version_tag`
+/// is an unsupported version. The document JWS must hash to the header digest.
+pub fn attestationFromDocument(
+    allocator: std.mem.Allocator,
+    header_value: []const u8,
+    document_body: []const u8,
+) (std.mem.Allocator.Error || error{ UnsupportedAttestationVersion, AttestationDigestMismatch, MalformedAttestationDocument })![]u8 {
+    if (!std.mem.startsWith(u8, header_value, attest_header_strings.attest_digest_prefix)) return error.UnsupportedAttestationVersion;
+
+    const Document = struct { v: []const u8, attest: []const u8 };
+    var parsed = std.json.parseFromSlice(Document, allocator, document_body, .{ .ignore_unknown_fields = true }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.MalformedAttestationDocument,
+    };
+    defer parsed.deinit();
+    if (!std.mem.eql(u8, parsed.value.v, envelope.version_tag)) return error.UnsupportedAttestationVersion;
+
+    const expected = try attest_header_strings.attestDigest(allocator, parsed.value.attest);
+    defer allocator.free(expected);
+    if (!std.mem.eql(u8, expected, header_value)) return error.AttestationDigestMismatch;
+    return allocator.dupe(u8, parsed.value.attest);
+}
+
 // TODO(slice 2): add a fixture-based integration test for `run()` that spins
-// up a fake HTTP server emitting both header forms (with chips, empty chips,
-// signature-tampered, key-mismatched) and asserts on the exit codes. Slice 1
+// up a fake HTTP server emitting the digest header and the well-known document
+// (with chips, empty chips, signature-tampered, key-mismatched,
+// digest-mismatched) and asserts on the exit codes. Slice 1
 // relies on the `parseArgs` unit tests, the `envelope.verify` unit tests, and
 // manual end-to-end runs documented in the slice-1 spec.
 
@@ -593,4 +685,55 @@ test "a pinned key is reported as pinned in human and JSON output" {
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, json, .{});
     defer parsed.deinit();
     try testing.expect(parsed.value.object.get("keyPinned").?.bool);
+}
+
+const test_digest_header = "sha256=300a2664bcbaa90b9eaceffbb7e40f019a2cc9b050b7bc8d148d4cd7c28df5d9";
+
+test "attestationFromDocument returns the JWS when the digest matches" {
+    const jws = try attestationFromDocument(
+        std.testing.allocator,
+        test_digest_header,
+        "{\"v\":\"zttp-attest-v5\",\"attest\":\"h.p.s\",\"contract\":{}}",
+    );
+    defer std.testing.allocator.free(jws);
+    try std.testing.expectEqualStrings("h.p.s", jws);
+}
+
+test "attestationFromDocument refuses a digest that does not match the document" {
+    try std.testing.expectError(error.AttestationDigestMismatch, attestationFromDocument(
+        std.testing.allocator,
+        test_digest_header,
+        "{\"v\":\"zttp-attest-v5\",\"attest\":\"h.p.x\",\"contract\":{}}",
+    ));
+}
+
+test "attestationFromDocument refuses a header that holds a JWS" {
+    try std.testing.expectError(error.UnsupportedAttestationVersion, attestationFromDocument(
+        std.testing.allocator,
+        "h.p.s",
+        "{\"v\":\"zttp-attest-v5\",\"attest\":\"h.p.s\",\"contract\":{}}",
+    ));
+}
+
+test "attestationFromDocument refuses a document with another version" {
+    try std.testing.expectError(error.UnsupportedAttestationVersion, attestationFromDocument(
+        std.testing.allocator,
+        test_digest_header,
+        "{\"v\":\"zttp-attest-v4\",\"attest\":\"h.p.s\",\"contract\":{}}",
+    ));
+}
+
+test "attestationFromDocument refuses a document that is not an attestation document" {
+    try std.testing.expectError(error.MalformedAttestationDocument, attestationFromDocument(
+        std.testing.allocator,
+        test_digest_header,
+        "{\"v\":\"zttp-attest-v5\"}",
+    ));
+}
+
+test "the digest mismatch message names the response header" {
+    try std.testing.expectEqualStrings(
+        "verify: the attestation document does not match the response header\n",
+        verificationFailureMessage(error.AttestationDigestMismatch) orelse return error.TestExpectedEqual,
+    );
 }

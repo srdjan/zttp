@@ -179,8 +179,9 @@ won't boot" and "individual requests get rejected".
   runtime policy and requires exact residual-plan coverage before pool init or
   prewarm. Format 6, schema 4, or a mismatched plan produces rebuild guidance.
   The process serves nothing after these refusals.
-- Attestation envelope (`Zttp-Attest`) is materialized for
-  `GET /.well-known/zttp-attest`.
+- The attestation envelope is materialized for
+  `GET /.well-known/zttp-attest`. The `Zttp-Attest` response header holds only
+  its digest, `sha256=<hex>`.
 
 **Per request** (in the dispatch path, before any JS runs):
 - Route pre-filter: when `routes_dynamic = false`, the proven route

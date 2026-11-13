@@ -189,7 +189,7 @@ zttp verify http://127.0.0.1:8080
 default. `--no-attest` disables signing for that build.
 
 The strict artifact chain is certificate schema `5`, proof system
-`zttp_pcc_v3 = 3`, self-extract format `7`, `zttp-attest-v4`, and
+`zttp_pcc_v3 = 3`, self-extract format `7`, `zttp-attest-v5`, and
 `zttp-bundle-3`. The readers check each identity for exact equality.
 They refuse older attestation and bundle versions.
 They refuse schema 4 and format 6 with a rebuild-oriented error.
@@ -278,6 +278,14 @@ endpoint does not return the artifact, so the command reports provenance only
 and says so; its JSON carries `"assurance": "provenance_only"`. Proof and policy
 acceptance are established against the artifact, with `zttp proofs verify`.
 
+Each response of a signed server carries `Zttp-Attest: sha256=<hex>`, the
+SHA-256 of the compact JWS. The JWS is the `attest` member of
+`/.well-known/zttp-attest`. The command reads the digest from the response to
+`<url>`. Then it fetches that document from the same scheme, host, and port,
+without redirects. It requires `v` to equal `zttp-attest-v5` and the digest of
+`attest` to equal the header. Exit 3 reports a mismatch, and also a header that
+holds a JWS (the old form). Exit 5 reports a failed document fetch.
+
 The endpoint also supplies the public key that checks its own signature. Without
 `--trust-key <fingerprint>` (the 64-character SHA-256 fingerprint of the expected
 key), the command cannot know who signed, so the signer is not authenticated. It
@@ -323,7 +331,7 @@ They never carry prompt text, tool-argument text, or paths.
 
 A handler with no `Proof<T, P>` annotation activates every supported spec. The
 proven set is also written to `contract.json` under `provenSpecs` and rides
-inside the signed `Zttp-Attest` JWS, with the active set alongside it under
+inside the signed attestation JWS, with the active set alongside it under
 `declaredSpecs`, so cross-build diffs are mechanical and attestable.
 
 `zttp check` is the gate: it compiles the contract and exits 1 on an

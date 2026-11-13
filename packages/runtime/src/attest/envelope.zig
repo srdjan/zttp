@@ -16,7 +16,7 @@ const Ed25519 = std.crypto.sign.Ed25519;
 const Sha256 = std.crypto.hash.sha2.Sha256;
 const b64 = std.base64.url_safe_no_pad;
 
-pub const version_tag: []const u8 = "zttp-attest-v4";
+pub const version_tag: []const u8 = "zttp-attest-v5";
 pub const unpinned_runtime_policy_sha256: []const u8 = &@as([64:0]u8, @splat('0'));
 /// A receipt for something that is not a self-extracting artifact - a dev
 /// server, a live-reload swap - has no executable graph to commit to. It says
@@ -645,10 +645,10 @@ test "verify refuses a legacy receipt without source identity" {
 
 test "a receipt from the previous attestation version is refused, not reinterpreted" {
     const allocator = std.testing.allocator;
-    // The v3 payload is complete, well formed, and correctly signed. Its only
+    // The v4 payload is complete, well formed, and correctly signed. Its only
     // fault is naming the immediate predecessor format.
     const payload =
-        "{\"v\":\"zttp-attest-v3\"," ++
+        "{\"v\":\"zttp-attest-v4\"," ++
         "\"contractSha256\":\"" ++ &@as([64:0]u8, @splat('a')) ++ "\"," ++
         "\"bytecodeSha256\":\"" ++ &@as([64:0]u8, @splat('b')) ++ "\"," ++
         "\"policySha256\":\"" ++ &@as([64:0]u8, @splat('c')) ++ "\"," ++

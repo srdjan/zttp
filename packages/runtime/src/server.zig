@@ -2705,7 +2705,7 @@ test "source replacement keeps failed state and retires successful generations t
         try std.testing.expect(!server.contract.?.matchesRoute("GET", "/new"));
         try std.testing.expect(server.proof_checked != null);
         try std.testing.expect(server.proof_cache != null);
-        try std.testing.expectEqualStrings("old-signature", server.attestation_headers.?.attest_value);
+        try std.testing.expectEqualStrings("sha256=9593a2f2b0aea6d16686b24d70eedbcd65dc90c813af0fbedcdeb1f66c447c52", server.attestation_headers.?.attest_value);
         try std.testing.expectEqualStrings("old-document", server.well_known_doc.?.body);
         try std.testing.expect(pool.policy_generation == old_policy);
         try std.testing.expectEqual(reload_before, pool.reload_generation.load(.acquire));

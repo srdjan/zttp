@@ -120,7 +120,7 @@ repository is in scope.
   sha256. Every path segment is opened without following symlinks, so a
   component that resolves outside the bundle directory is refused rather than
   hashed.
-- Self-extract format 7, certificate schema 5, `zttp-attest-v4`, and
+- Self-extract format 7, certificate schema 5, `zttp-attest-v5`, and
   `zttp-bundle-3` are equality checks. Format 6 and schema 4 are refused with
   rebuild guidance.
 

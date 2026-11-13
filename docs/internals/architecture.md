@@ -453,15 +453,17 @@ section is refused: a section this reader does not know is a malformed artifact,
 not a future one.
 
 The certificate is schema 5 under `zttp_pcc_v3 = 3`. Attestations use
-`zttp-attest-v4`, and proof bundles use `zttp-bundle-3`.
+`zttp-attest-v5`, and proof bundles use `zttp-bundle-3`.
 The runtime refuses schema 4 and format 6 with rebuild guidance.
 An existing self-contained binary keeps the runtime that it embeds.
 
 Attestation signs the contract, bytecode, policy, and capability hashes, plus
 the root of the artifact's executable graph. The running server emits proof
-headers and serves `/.well-known/zttp-attest`; `zttp verify <url>` validates the
-receipt, and reports provenance only, because the endpoint returns a claim
-rather than the artifact.
+headers and serves `/.well-known/zttp-attest`. The `Zttp-Attest` header is
+`sha256=<hex>`, the SHA-256 of the compact JWS. The JWS is the `attest` member of
+the well-known document. `zttp verify <url>` fetches that document, checks it
+against the digest, and validates the receipt. It reports provenance only,
+because the endpoint returns a claim rather than the artifact.
 
 ## Activation
 
