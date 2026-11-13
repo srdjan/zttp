@@ -16,8 +16,7 @@ mlx_lm.server --model LiquidAI/LFM2.5-2.6B-MLX-8bit --host 127.0.0.1 --port 8080
 ```
 
 `zttp expert --provider local` then selects it for a session, and
-`ZTTP_CODEGEN_PROVIDER=local` selects it for recording, which is the recorder's
-default when the variable is unset. Local recordings land under
+`ZTTP_CODEGEN_PROVIDER=local` selects it for recording. Local recordings land under
 `packages/pi/src/simulator/testdata/empirical/local/codegen/`.
 
 DeepSeek is the one remote provider, added 2026-08-14 by explicit

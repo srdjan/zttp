@@ -9,7 +9,7 @@ Validated on Zig 0.17.1 stable. The build produces three binaries: `zttp` (devel
 local runtime entry point), `zttp-runtime` (internal runtime template wrapped by self-contained
 outputs), and `zts` (pi-free analyzer CLI for IDE and CI integrations).
 
-The four everyday commands live in the root `CLAUDE.md`: `zig build`, `zig build test`,
+The four everyday commands live in the root `AGENTS.md`: `zig build`, `zig build test`,
 `bash scripts/verify.sh`, and `zig build run -- <handler>`. Everything below is the rest.
 
 ## Build variants
