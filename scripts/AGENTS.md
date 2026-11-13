@@ -27,4 +27,6 @@ Weak assertions. A gate holding a full input can still assert something weaker t
 
 Porous gates. A gate that satisfies both rules can still be porous: its probes show that the cases their author named are caught and say nothing about the cases nobody named. Find those by applying one edit to a copy of the gate's declared inputs and running the built gate binary against the copy. A gate whose subject is an open vocabulary must say which threat it bounds instead of leaving a reader to assume it bounds every one ([a-gate-can-be-non-vacuous-and-still-porous](../docs/solutions/conventions/a-gate-can-be-non-vacuous-and-still-porous.md)).
 
+No Python. On 2026-10-21, `git ls-files '*.py'` listed no file, and no file under `scripts/`, `build/`, `tooling/`, or `packages/` invoked `python3`.
+
 Filtered runs. The aggregate `zig build test` refuses `-Dtest-filter`. A named suite whose filter selects no test fails, and a fixed filter such as the stand-in suite's gets the same check (`build/Context.zig` `addTest`, `tooling/nonempty_test_runner.zig`).

@@ -29,7 +29,7 @@ Release builds, handler precompilation (`-Dhandler` with `-Dverify` and `-Dcontr
 `zttp verify <url>` verifies provenance for a signed live-endpoint claim. It is
 distinct from `zttp proofs verify <bundle-dir>`, which checks bundle integrity
 and, when the artifact carries a certificate, runs semantic acceptance against
-the artifact itself. `edge` is removed. Hosted
+the artifact itself. Hosted
 cloud deploy and the account verbs are deferred from this beta; hosted
 control-plane, registry, and OCI image orchestration are out of core.
 
@@ -37,7 +37,7 @@ Full reference: [docs/cli.md](docs/cli.md). Semantics registry checking (`spec-c
 
 ## Architecture
 
-The interpreter is the single execution path; the tiered JIT was removed after measurement.
+The interpreter is the single execution path (D-004 in [docs/decisions.md](docs/decisions.md)).
 
 Request flow: accept connection, check the integrity-validated route table,
 check the proof cache only when an accepted certificate promoted the required
@@ -125,7 +125,7 @@ Run `deno task verify` before committing website changes. Commit locally and do 
 - All Zig. New code in Zig unless editing existing JS/TS handler examples.
 - `errdefer` on all allocations. `orelse` instead of `?` unwrap.
 - Use `zig build bench` for repository benchmarks. Do not add ad-hoc benchmark scripts.
-- No Python. This is a Zig project. Do not add a `.py` file and do not add a `python3` heredoc or `-c` invocation to a shell script. New tooling is a Zig command or a Zig build step. Measured on 2026-10-21: `git ls-files '*.py'` lists no file, and no file under `scripts/`, `build/`, `tooling/`, or `packages/` invokes `python3`. Keep it that way.
+- No Python. This is a Zig project. Do not add a `.py` file and do not add a `python3` heredoc or `-c` invocation to a shell script. New tooling is a Zig command or a Zig build step.
 - Keep APIs explicit: the engine/runtime use native Zig error unions (`!T`); `Result<T>` is a user-facing JS/verification construct in handlers, not a Zig engine pattern.
 - Shell scripts that enumerate files should use `git ls-files -z | xargs -0` for safe path handling (handles spaces and special characters).
 
