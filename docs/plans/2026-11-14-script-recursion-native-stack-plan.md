@@ -135,6 +135,14 @@ diff and runs each acceptance check again with an empty `ZIG_LOCAL_CACHE_DIR`.
   `renderNode` at its depth limit and of the JSON parser at its depth limit.
 - Acceptance: the three tests exist and fail on Debug for the reason above.
   The two leaf measurements are in the commit message.
+- Result, commit `6030aac7`: the three checks are in
+  `scripts/test-panic-isolation.sh`. Opus ran `zig build test-panic-isolation`
+  again with an empty cache. The existing panic checks passed. Each of the
+  three new checks failed: both `zttp test` runs ended with exit 134, and the
+  server process ended before it answered `/deep`. Debug estimates, one probe
+  each: `renderToString` at its limit costs 0.85 MB to 1.03 MB, and
+  `JSON.parse` at its limit costs 0.43 MB to 0.60 MB. Without a leaf, depth 192
+  passes and depth 193 crashes.
 
 ### U2: The stack floor
 
