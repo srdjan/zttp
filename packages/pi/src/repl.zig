@@ -14,6 +14,7 @@ const agent_compaction = @import("agent_compaction.zig");
 const agent_bootstrap = @import("agent_bootstrap.zig");
 const commands = @import("commands.zig");
 const loop = @import("loop.zig");
+const aggregate_proof = @import("aggregate_proof.zig");
 const gate_record = @import("gate_record.zig");
 const app = @import("app.zig");
 const ledger = @import("ledger.zig");
@@ -844,6 +845,7 @@ pub fn run(
                 .on_event = InteractiveCompactionCtx.onEvent,
             };
         }
+        const metrics_before = session.metrics;
         var outcome = processSubmit(allocator, &session, registry, line, approval_fn) catch |err| {
             session.transcript.observer = null;
             session.compaction_observer = null;
@@ -862,6 +864,9 @@ pub fn run(
                 // on screen; printing `rendered` again would duplicate it.
                 if (!stream_ctx.streamed) {
                     _ = std.c.write(std.c.STDOUT_FILENO, rendered.ptr, rendered.len);
+                }
+                if (noChangeNotice(metrics_before, session.metrics)) |notice| {
+                    _ = std.c.write(std.c.STDOUT_FILENO, notice.ptr, notice.len);
                 }
                 if (is_tty) {
                     const tok = session.token_totals;
@@ -1108,6 +1113,52 @@ fn writeResumeDisclosure(session: *const agent.AgentSession, forked: bool) void 
     }
 }
 
+/// Result card of an approval prompt: the verdict, then each lost property,
+/// each contract change, and each gained property. The verdict never claims a
+/// system proof, because the proof covers the changed files only.
+fn renderApprovalCard(w: *std.Io.Writer, preview: loop.ChangeSetApprovalPreview) !void {
+    if (preview.carried_over_diagnostics > 0) {
+        try w.print("Verdict: no new diagnostics, {d} carried over from the baseline\n", .{preview.carried_over_diagnostics});
+    } else {
+        try w.writeAll("Verdict: no new diagnostics\n");
+    }
+    for (preview.property_changes) |change| {
+        if (change.kind == .demoted) try w.print("No longer proven: {s}\n", .{change.name});
+    }
+    const kinds = [_]aggregate_proof.ContractChange.Kind{ .env, .egress, .route, .capability };
+    for (kinds) |kind| {
+        for ([_]bool{ true, false }) |added| {
+            for (preview.contract_changes) |change| {
+                if (change.added == added and change.kind == kind) {
+                    try w.print("Contract: {s} {s} {s}\n", .{ if (added) "+" else "-", @tagName(kind), change.text });
+                }
+            }
+        }
+    }
+    for (preview.property_changes) |change| {
+        if (change.kind == .promoted) try w.print("Newly proven: {s}\n", .{change.name});
+    }
+}
+
+/// Write the result card to stdout. A card that overflows the scratch buffer
+/// is cut at the buffer end.
+fn writeApprovalCard(preview: loop.ChangeSetApprovalPreview) void {
+    var buf: [8 * 1024]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    renderApprovalCard(&w, preview) catch {};
+    const out = w.buffered();
+    _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
+}
+
+/// The line that ends a model turn which proposed no change set, or null when
+/// the turn applied one, ended for another reason, or recorded no result.
+fn noChangeNotice(before: agent.SessionMetrics, after: agent.SessionMetrics) ?[]const u8 {
+    if (after.turn_count == before.turn_count) return null;
+    if (after.last_outcome != .approved) return null;
+    if (after.verified_change_set_count != before.verified_change_set_count) return null;
+    return "No change proposed.\n";
+}
+
 fn approveEdit(preview: loop.ChangeSetApprovalPreview) !bool {
     var hdr_buf: [512]u8 = undefined;
     const header = std.fmt.bufPrint(
@@ -1116,6 +1167,7 @@ fn approveEdit(preview: loop.ChangeSetApprovalPreview) !bool {
         .{ preview.changes.len, if (preview.changes.len == 1) "" else "s", preview.proof_id },
     ) catch "\nVerified change set\n";
     _ = std.c.write(std.c.STDOUT_FILENO, header.ptr, header.len);
+    writeApprovalCard(preview);
     for (preview.changes) |change| {
         const change_header = std.fmt.bufPrint(
             &hdr_buf,
@@ -2362,4 +2414,100 @@ test "approveEdit: only y or yes approves, and a line that starts with y does no
     const word_answer = approveEdit(one_line_preview);
     _ = word.end(&discard);
     try testing.expectEqual(true, try word_answer);
+}
+
+fn renderCardToBuf(buf: []u8, preview: loop.ChangeSetApprovalPreview) []const u8 {
+    var w = std.Io.Writer.fixed(buf);
+    renderApprovalCard(&w, preview) catch unreachable;
+    return w.buffered();
+}
+
+test "renderApprovalCard: a gained property shows the verdict and Newly proven" {
+    var buf: [512]u8 = undefined;
+    var preview = one_line_preview;
+    preview.property_changes = &.{.{ .name = "pure", .kind = .promoted }};
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\nNewly proven: pure\n",
+        renderCardToBuf(&buf, preview),
+    );
+}
+
+test "renderApprovalCard: a lost property shows No longer proven" {
+    var buf: [512]u8 = undefined;
+    var preview = one_line_preview;
+    preview.property_changes = &.{.{ .name = "no_secret_leakage", .kind = .demoted }};
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\nNo longer proven: no_secret_leakage\n",
+        renderCardToBuf(&buf, preview),
+    );
+}
+
+test "renderApprovalCard: an added egress host shows Contract + egress" {
+    var buf: [512]u8 = undefined;
+    var host = "api.example.com".*;
+    var preview = one_line_preview;
+    preview.contract_changes = &.{.{ .kind = .egress, .added = true, .text = &host }};
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\nContract: + egress api.example.com\n",
+        renderCardToBuf(&buf, preview),
+    );
+}
+
+test "renderApprovalCard: a removed route shows Contract - route" {
+    var buf: [512]u8 = undefined;
+    var route = "GET /health".*;
+    var preview = one_line_preview;
+    preview.contract_changes = &.{.{ .kind = .route, .added = false, .text = &route }};
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\nContract: - route GET /health\n",
+        renderCardToBuf(&buf, preview),
+    );
+}
+
+test "renderApprovalCard: carried over diagnostics, every line kind in order" {
+    var buf: [1024]u8 = undefined;
+    var env_added = "API_KEY".*;
+    var env_removed = "OLD_KEY".*;
+    var route_added = "POST /items".*;
+    var capability = "clock".*;
+    var preview = one_line_preview;
+    preview.carried_over_diagnostics = 2;
+    preview.property_changes = &.{
+        .{ .name = "pure", .kind = .promoted },
+        .{ .name = "read_only", .kind = .demoted },
+    };
+    preview.contract_changes = &.{
+        .{ .kind = .capability, .added = true, .text = &capability },
+        .{ .kind = .env, .added = false, .text = &env_removed },
+        .{ .kind = .route, .added = true, .text = &route_added },
+        .{ .kind = .env, .added = true, .text = &env_added },
+    };
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics, 2 carried over from the baseline\n" ++
+            "No longer proven: read_only\n" ++
+            "Contract: + env API_KEY\n" ++
+            "Contract: - env OLD_KEY\n" ++
+            "Contract: + route POST /items\n" ++
+            "Contract: + capability clock\n" ++
+            "Newly proven: pure\n",
+        renderCardToBuf(&buf, preview),
+    );
+}
+
+test "noChangeNotice: a turn that applied nothing and ended approved prints one line" {
+    const before: agent.SessionMetrics = .{};
+    const after: agent.SessionMetrics = .{ .turn_count = 1, .last_outcome = .approved };
+    try testing.expectEqualStrings("No change proposed.\n", noChangeNotice(before, after).?);
+}
+
+test "noChangeNotice: a turn that recorded no result prints nothing" {
+    const before: agent.SessionMetrics = .{ .turn_count = 1, .last_outcome = .approved };
+    try testing.expectEqual(@as(?[]const u8, null), noChangeNotice(before, before));
+}
+
+test "noChangeNotice: an applied turn and a denied turn print nothing" {
+    const applied: agent.SessionMetrics = .{ .turn_count = 1, .verified_change_set_count = 1, .last_outcome = .approved };
+    try testing.expectEqual(@as(?[]const u8, null), noChangeNotice(.{}, applied));
+    const denied: agent.SessionMetrics = .{ .turn_count = 1, .last_outcome = .approval_denied };
+    try testing.expectEqual(@as(?[]const u8, null), noChangeNotice(.{}, denied));
 }

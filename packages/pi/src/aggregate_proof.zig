@@ -27,6 +27,17 @@ pub const Diagnostic = struct {
     }
 };
 
+/// One surface change between the baseline and candidate contracts of the
+/// primary proof root: an env var, egress host, API route, or capability.
+pub const ContractChange = struct {
+    pub const Kind = enum { env, egress, route, capability };
+
+    kind: Kind,
+    added: bool,
+    /// Env name, egress host, `METHOD path`, or capability name. Owned.
+    text: []u8,
+};
+
 pub const AggregateProof = struct {
     proof_id: [64]u8,
     policy_hash: [64]u8,
@@ -36,12 +47,17 @@ pub const AggregateProof = struct {
     system_proven: bool,
     baseline_primary_properties: ?ui_payload.PropertiesSnapshot = null,
     primary_properties: ?ui_payload.PropertiesSnapshot = null,
+    /// Contract surface changes of the primary root. Empty when either side
+    /// has no contract.
+    contract_changes: []ContractChange = &.{},
 
     pub fn deinit(self: *AggregateProof, allocator: std.mem.Allocator) void {
         for (self.proof_roots) |root| allocator.free(root);
         allocator.free(self.proof_roots);
         for (self.diagnostics) |*diagnostic| diagnostic.deinit(allocator);
         allocator.free(self.diagnostics);
+        for (self.contract_changes) |change| allocator.free(change.text);
+        allocator.free(self.contract_changes);
         self.* = undefined;
     }
 };
@@ -124,6 +140,10 @@ pub fn prove(
 
     var baseline_primary_properties: ?ui_payload.PropertiesSnapshot = null;
     var primary_properties: ?ui_payload.PropertiesSnapshot = null;
+    var baseline_primary_contract: ?zts.HandlerContract = null;
+    defer if (baseline_primary_contract) |*contract| contract.deinit(allocator);
+    var primary_contract: ?zts.HandlerContract = null;
+    defer if (primary_contract) |*contract| contract.deinit(allocator);
     for (roots, 0..) |relative_root, root_index| {
         var baseline_has_handler = false;
         const before_path = try baseline.pathFor(allocator, relative_root);
@@ -163,12 +183,16 @@ pub fn prove(
                 before_path,
                 before_schema,
                 before_policy,
+                root_index == 0,
             ) catch |err| {
                 if (err == error.OutOfMemory) return err;
                 return rejectedFmt(allocator, "baseline_analysis_failed", "baseline analysis failed for {s}: {s}", .{ relative_root, @errorName(err) });
             };
             baseline_has_handler = collected.has_handler == true;
-            if (root_index == 0) baseline_primary_properties = collected.properties;
+            if (root_index == 0) {
+                baseline_primary_properties = collected.properties;
+                baseline_primary_contract = collected.contract;
+            }
         }
         const collected = collectCheckDiagnostics(
             allocator,
@@ -177,10 +201,13 @@ pub fn prove(
             after_path,
             after_schema,
             after_policy,
+            root_index == 0,
         ) catch |err| {
             if (err == error.OutOfMemory) return err;
             return rejectedFmt(allocator, "candidate_analysis_failed", "candidate analysis failed for {s}: {s}", .{ relative_root, @errorName(err) });
         };
+        // Take ownership first: the rejection below must still free the contract.
+        if (root_index == 0) primary_contract = collected.contract;
         // A candidate that did not parse is unknown, not handler-less.
         if (baseline_has_handler and collected.has_handler == false) {
             return rejectedFmt(allocator, "handler_export_lost", "aggregate proof rejected {s}: the candidate has no handler export", .{relative_root});
@@ -200,6 +227,8 @@ pub fn prove(
     const policy_hash = zts.policyHash();
     const read_set_digest = digestReadSet(snapshot);
     const proof_id = digestProof(prepared, snapshot, roots, false);
+    const changes = try contractChanges(allocator, baseline_primary_contract, primary_contract);
+    errdefer freeContractChanges(allocator, changes);
     const owned_diagnostics = try candidate_diagnostics.toOwnedSlice(allocator);
     roots_owned = false;
     return .{ .accepted = .{
@@ -211,6 +240,7 @@ pub fn prove(
         .system_proven = false,
         .baseline_primary_properties = baseline_primary_properties,
         .primary_properties = primary_properties,
+        .contract_changes = changes,
     } };
 }
 
@@ -415,6 +445,9 @@ fn appendUniqueOwned(allocator: std.mem.Allocator, roots: *std.ArrayList([]u8), 
 const Collected = struct {
     properties: ?ui_payload.PropertiesSnapshot,
     has_handler: ?bool,
+    /// The handler contract, moved out of the check result when the caller
+    /// asked to keep it. Owned by the caller.
+    contract: ?zts.HandlerContract = null,
 };
 
 fn collectCheckDiagnostics(
@@ -424,6 +457,7 @@ fn collectCheckDiagnostics(
     handler_path: []const u8,
     schema_path: ?[]const u8,
     policy_source: ?[]const u8,
+    keep_contract: bool,
 ) !Collected {
     var check = zts_cli.precompile.runCheckOnlyWithOptions(allocator, handler_path, .{
         .sql_schema_path = schema_path,
@@ -468,6 +502,7 @@ fn collectCheckDiagnostics(
     return .{
         .properties = if (check.properties) |properties| proof_enrichment.propertiesSnapshot(properties) else null,
         .has_handler = check.has_handler,
+        .contract = if (keep_contract) takeContract(&check) else null,
     };
 }
 
@@ -537,6 +572,81 @@ fn diagnosticEqual(left: Diagnostic, right: Diagnostic) bool {
         std.mem.eql(u8, left.code, right.code) and
         std.mem.eql(u8, left.severity, right.severity) and
         std.mem.eql(u8, left.message, right.message);
+}
+
+/// Move the contract out of a check result so `deinit` leaves it alone.
+fn takeContract(check: anytype) ?zts.HandlerContract {
+    const contract = check.contract;
+    check.contract = null;
+    return contract;
+}
+
+fn freeContractChanges(allocator: std.mem.Allocator, changes: []ContractChange) void {
+    for (changes) |change| allocator.free(change.text);
+    allocator.free(changes);
+}
+
+fn appendChange(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(ContractChange),
+    kind: ContractChange.Kind,
+    added: bool,
+    text: []const u8,
+) !void {
+    const owned = try allocator.dupe(u8, text);
+    errdefer allocator.free(owned);
+    try out.append(allocator, .{ .kind = kind, .added = added, .text = owned });
+}
+
+fn appendItemChanges(
+    allocator: std.mem.Allocator,
+    out: *std.ArrayList(ContractChange),
+    kind: ContractChange.Kind,
+    items: []const zts.contract_diff.ItemChange,
+) !void {
+    for (items) |item| switch (item.status) {
+        .added => try appendChange(allocator, out, kind, true, item.value),
+        .removed => try appendChange(allocator, out, kind, false, item.value),
+        .unchanged => {},
+    };
+}
+
+/// Env, egress, route, and capability changes between two contracts. The
+/// contract diff holds no capability list, so capabilities are compared here
+/// from the capability matrix. Either contract missing yields no changes.
+fn contractChanges(
+    allocator: std.mem.Allocator,
+    baseline: ?zts.HandlerContract,
+    candidate: ?zts.HandlerContract,
+) ![]ContractChange {
+    var out: std.ArrayList(ContractChange) = .empty;
+    errdefer {
+        for (out.items) |change| allocator.free(change.text);
+        out.deinit(allocator);
+    }
+    if (baseline) |*before| if (candidate) |*after| {
+        var diff = try zts.contract_diff.diffContracts(allocator, before, after);
+        defer diff.deinit(allocator);
+        try appendItemChanges(allocator, &out, .env, diff.env_changes.items);
+        try appendItemChanges(allocator, &out, .egress, diff.egress_changes.items);
+        for (diff.api_route_changes.items) |route| {
+            if (route.status == .unchanged) continue;
+            const text = try allocator.print("{s} {s}", .{ route.method, route.path });
+            defer allocator.free(text);
+            try appendChange(allocator, &out, .route, route.status == .added, text);
+        }
+        if (before.capabilities) |before_caps| if (after.capabilities) |after_caps| {
+            for (after_caps.slice()) |capability| {
+                if (before_caps.has(capability)) continue;
+                try appendChange(allocator, &out, .capability, true, @tagName(capability));
+            }
+            for (before_caps.slice()) |capability| {
+                if (after_caps.has(capability)) continue;
+                try appendChange(allocator, &out, .capability, false, @tagName(capability));
+            }
+        };
+    };
+    return out.toOwnedSlice(allocator);
 }
 
 fn deinitDiagnostics(allocator: std.mem.Allocator, diagnostics: *std.ArrayList(Diagnostic)) void {
@@ -805,7 +915,7 @@ fn collectForSource(allocator: std.mem.Allocator, source: []const u8, out: *std.
     defer allocator.free(root);
     const handler_path = try std.fs.path.join(allocator, &.{ root, "src/handler.ts" });
     defer allocator.free(handler_path);
-    _ = try collectCheckDiagnostics(allocator, out, root, handler_path, null, null);
+    _ = try collectCheckDiagnostics(allocator, out, root, handler_path, null, null, false);
 }
 
 test "a failed full analysis is recorded beside the fallback diagnostics" {
@@ -926,4 +1036,91 @@ test "aggregate proof reports a new module graph refusal by its workspace path" 
             "but that file cannot be read. Check the path and the file name.",
         result.rejected.message,
     );
+}
+
+test "aggregate proof reports a swapped env var as a removal and an addition" {
+    var result = try replaceHandlerAndProve(
+        "import { env } from \"zttp:env\";\n" ++
+            "export function handler(req: Request): Response {\n" ++
+            "  const greeting = env(\"OLD_NAME\");\n" ++
+            "  if (greeting !== undefined) {\n    return Response.text(\"set\");\n  }\n" ++
+            "  return Response.text(\"old\");\n}\n",
+        "import { env } from \"zttp:env\";\n" ++
+            "export function handler(req: Request): Response {\n" ++
+            "  const greeting = env(\"NEW_NAME\");\n" ++
+            "  if (greeting !== undefined) {\n    return Response.text(\"set\");\n  }\n" ++
+            "  return Response.text(\"old\");\n}\n",
+    );
+    defer result.deinit(testing.allocator);
+    const proof = result.accepted;
+    try testing.expectEqual(@as(usize, 2), proof.contract_changes.len);
+    try testing.expectEqual(ContractChange.Kind.env, proof.contract_changes[0].kind);
+    try testing.expectEqual(false, proof.contract_changes[0].added);
+    try testing.expectEqualStrings("OLD_NAME", proof.contract_changes[0].text);
+    try testing.expectEqual(ContractChange.Kind.env, proof.contract_changes[1].kind);
+    try testing.expectEqual(true, proof.contract_changes[1].added);
+    try testing.expectEqualStrings("NEW_NAME", proof.contract_changes[1].text);
+}
+
+test "aggregate proof reports a dropped env var and its capabilities as removals" {
+    var result = try replaceHandlerAndProve(
+        "import { env } from \"zttp:env\";\n" ++
+            "export function handler(req: Request): Response {\n" ++
+            "  const name = env(\"APP_NAME\");\n" ++
+            "  if (name !== undefined) {\n    return Response.text(\"named\");\n  }\n" ++
+            "  return Response.text(\"none\");\n}\n",
+        "export function handler(req: Request): Response {\n" ++
+            "  return Response.text(\"none\");\n}\n",
+    );
+    defer result.deinit(testing.allocator);
+    const changes = result.accepted.contract_changes;
+    try testing.expectEqual(@as(usize, 3), changes.len);
+    try testing.expectEqual(ContractChange.Kind.env, changes[0].kind);
+    try testing.expectEqual(false, changes[0].added);
+    try testing.expectEqualStrings("APP_NAME", changes[0].text);
+    try testing.expectEqual(ContractChange.Kind.capability, changes[1].kind);
+    try testing.expectEqual(false, changes[1].added);
+    try testing.expectEqualStrings("env", changes[1].text);
+    try testing.expectEqual(ContractChange.Kind.capability, changes[2].kind);
+    try testing.expectEqual(false, changes[2].added);
+    try testing.expectEqualStrings("policy_check", changes[2].text);
+}
+
+test "aggregate proof reports a swapped router route as a removal and an addition" {
+    var result = try replaceHandlerAndProve(
+        "import { routerMatch } from \"zttp:router\";\n" ++
+            "function getHome(req: Request): Response {\n  return Response.text(\"home\");\n}\n" ++
+            "function getOld(req: Request): Response {\n  return Response.text(\"old\");\n}\n" ++
+            "const routes = {\n  \"GET /\": getHome,\n  \"GET /old\": getOld,\n};\n" ++
+            "export function handler(req: Request): Response {\n" ++
+            "  const found = routerMatch(routes, req);\n" ++
+            "  if (found !== undefined) {\n    return found.handler(req);\n  }\n" ++
+            "  return Response.json({ error: \"Not Found\" }, { status: 404 });\n}\n",
+        "import { routerMatch } from \"zttp:router\";\n" ++
+            "function getHome(req: Request): Response {\n  return Response.text(\"home\");\n}\n" ++
+            "function getNew(req: Request): Response {\n  return Response.text(\"new\");\n}\n" ++
+            "const routes = {\n  \"GET /\": getHome,\n  \"GET /new\": getNew,\n};\n" ++
+            "export function handler(req: Request): Response {\n" ++
+            "  const found = routerMatch(routes, req);\n" ++
+            "  if (found !== undefined) {\n    return found.handler(req);\n  }\n" ++
+            "  return Response.json({ error: \"Not Found\" }, { status: 404 });\n}\n",
+    );
+    defer result.deinit(testing.allocator);
+    const changes = result.accepted.contract_changes;
+    try testing.expectEqual(@as(usize, 2), changes.len);
+    try testing.expectEqual(ContractChange.Kind.route, changes[0].kind);
+    try testing.expectEqual(false, changes[0].added);
+    try testing.expectEqualStrings("GET /old", changes[0].text);
+    try testing.expectEqual(ContractChange.Kind.route, changes[1].kind);
+    try testing.expectEqual(true, changes[1].added);
+    try testing.expectEqualStrings("GET /new", changes[1].text);
+}
+
+test "aggregate proof reports no contract change for an unchanged surface" {
+    var result = try replaceHandlerAndProve(
+        handler_without_imports,
+        "export function handler(req: Request): Response {\n  return Response.text(\"new\");\n}\n",
+    );
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(@as(usize, 0), result.accepted.contract_changes.len);
 }

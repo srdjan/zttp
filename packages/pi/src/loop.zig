@@ -77,6 +77,14 @@ pub const ChangeSetApprovalPreview = struct {
     proof_id: []const u8,
     changes: []const ChangePreview,
     system_proven: bool,
+    /// Diagnostics the candidate shares with the baseline. The proof accepted
+    /// the change set, so none of them is new.
+    carried_over_diagnostics: usize = 0,
+    /// Primary-root properties that the change set gains or loses. Empty when
+    /// either snapshot is missing. Not part of `approvalPreviewDigest`.
+    property_changes: []const ui_payload_mod.PropertiesSnapshot.Change = &.{},
+    /// Env, egress, route, and capability changes of the primary root.
+    contract_changes: []const aggregate_proof.ContractChange = &.{},
 };
 
 pub const ApprovalFn = union(enum) {
@@ -1061,6 +1069,25 @@ const ApplyState = struct {
     denied: bool = false,
 };
 
+/// The primary-root properties that the proof gains or loses, in snapshot field order.
+fn propertyChanges(
+    arena: std.mem.Allocator,
+    proof: *const aggregate_proof.AggregateProof,
+) ![]const ui_payload_mod.PropertiesSnapshot.Change {
+    const after = proof.primary_properties orelse return &.{};
+    const Visitor = struct {
+        arena: std.mem.Allocator,
+        list: std.ArrayList(ui_payload_mod.PropertiesSnapshot.Change) = .empty,
+
+        pub fn visit(self: *@This(), change: ui_payload_mod.PropertiesSnapshot.Change) !void {
+            try self.list.append(self.arena, change);
+        }
+    };
+    var visitor: Visitor = .{ .arena = arena };
+    try ui_payload_mod.PropertiesSnapshot.forEachChange(proof.baseline_primary_properties, after, *Visitor, &visitor);
+    return visitor.list.items;
+}
+
 fn applyVerifiedChangeSet(
     allocator: std.mem.Allocator,
     arena: std.mem.Allocator,
@@ -1079,10 +1106,14 @@ fn applyVerifiedChangeSet(
             .after = change.candidate,
             .rewrite_trace = change.rewrite_trace,
         };
+        const property_changes = try propertyChanges(arena, proof);
         if (!try approve.call(.{
             .proof_id = &proof.proof_id,
             .changes = previews,
             .system_proven = proof.system_proven,
+            .carried_over_diagnostics = proof.diagnostics.len,
+            .property_changes = property_changes,
+            .contract_changes = proof.contract_changes,
         })) {
             try transcript.append(allocator, .{
                 .system_note = "change set proved but was not applied by the user approval policy",
