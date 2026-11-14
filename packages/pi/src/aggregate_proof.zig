@@ -1358,6 +1358,23 @@ test "aggregate proof accepts a candidate that proves the required property" {
     try testing.expect(result == .accepted);
 }
 
+test "aggregate proof rejects a candidate with no property result when properties are required" {
+    // Both sides fail to parse in the same way, so no diagnostic is new and the
+    // primary root has no property result.
+    var result = try proveUnderConfig(
+        requires_cost_bounded,
+        null,
+        "export function handler(req: Request): Response { return Response.text(\"a\");\n",
+        "export function handler(req: Request): Response { return Response.text(\"b\");\n",
+    );
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("required_property_lost", result.rejected.code);
+    try testing.expectEqualStrings(
+        "zttp.json requiredProperties requires proven properties, but the candidate has no property result for the primary handler",
+        result.rejected.message,
+    );
+}
+
 test "aggregate proof names the nearest valid property for an unknown required name" {
     var result = try proveUnderConfig(
         "{\"entry\":\"src/handler.ts\",\"requiredProperties\":[\"cost_bound\"]}",

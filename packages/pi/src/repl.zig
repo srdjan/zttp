@@ -3531,4 +3531,25 @@ test "/contract lists the routes, env reads, egress, and a required property tha
             "Require the proven properties? [y/N] ",
         captured.stdout,
     );
+    try testing.expectEqualStrings("", captured.stderr);
+}
+
+test "/contract then y keeps a required property that is not proven" {
+    const allocator = testing.allocator;
+    var project = try ContractProject.begin(allocator, "{\"entry\":\"src/handler.ts\",\"outboundHttp\":true,\"requiredProperties\":[\"fault_covered\"]}");
+    defer project.end(allocator);
+    try project.tmp.writeFile(allocator, "src/handler.ts", routes_handler);
+    var out: [2048]u8 = undefined;
+    var err: [2048]u8 = undefined;
+    const captured = try project.repl(allocator, "/contract\ny\n/quit\n", &out, &err);
+    try testing.expectEqualStrings("", captured.stderr);
+    const after = try project.manifest(allocator);
+    defer allocator.free(after);
+    try testing.expectEqualStrings(
+        "{\n  \"entry\": \"src/handler.ts\",\n  \"outboundHttp\": true,\n  \"requiredProperties\": [\n" ++
+            "    \"fault_covered\",\n    \"deterministic\",\n    \"state_isolated\",\n    \"result_safe\",\n" ++
+            "    \"optional_safe\",\n    \"no_credential_leakage\",\n    \"input_validated\",\n    \"pii_contained\",\n" ++
+            "    \"injection_safe\",\n    \"canonical\",\n    \"cost_bounded\"\n  ]\n}\n",
+        after,
+    );
 }
