@@ -1,6 +1,7 @@
 # Expert result card and test run
 
-Status: approved plan, revision 2, 2026-11-14, at commit `07a9dad2`. The owner
+Status: approved plan, revision 2, 2026-11-14, at commit `07a9dad2`. U1 to U4 are
+complete on local `main`, not released. The owner
 answered "a" on 2026-11-14: option (a) of D3R, D4, and D6. That authorizes U1
 to U4 on local `main`, with no push, no paid model call, and no re-record. A Fable review and a Codex astra review checked revision 1. This
 revision resolves their findings.
@@ -172,7 +173,8 @@ diff line by line and runs each acceptance check again with an empty
   gates exited 0 on an empty cache. Open risk: the run has no timeout, so a
   suite that does not end would hold the approval prompt. The handler profile
   has no `while` loop, and `for...of` walks a finite array. No timeout was
-  added without evidence that a run can hang.
+  added without evidence that a run can hang. Correction from U4: a finite
+  loop can still run for minutes, so U4 added a 30 second limit.
 
 ### U3: Documentation and website
 
@@ -204,6 +206,49 @@ diff line by line and runs each acceptance check again with an empty
   ignore a missing binary path, and run the suite on the disk workspace instead
   of the overlay. Each mutant must fail a test.
 - Final gate: `env -u DEEPSEEK_API_KEY bash scripts/verify.sh`.
+
+- Result, 2026-11-14. Fable reported nine findings and Codex reported two
+  defects. None changes the proof id, the receipt, or the commit path. Fixed,
+  each with a test that failed before the fix:
+  - `/new` and `/resume` replaced the session and dropped the test binary, so
+    later cards said `Tests: none`.
+  - `test-simulator` did not install `zttp`. On a checkout without `zig-out`,
+    seven card tests failed with `ZttpBinaryMissing`.
+  - A slow candidate held the approval prompt and the workspace lock for the
+    whole run. A loop over `range(4000000000)` took 210 s in one Debug run.
+    Fable reported that the prompt never appears; that was wrong, because
+    `range()` bounds the loop. The host now stops the run after 30 seconds.
+    The bound is a choice, not a measurement.
+  - Output over 256 KiB and a run that ended on a signal both read as
+    "did not start" or "ended without an exit code". Each now has its own
+    reason.
+  - A host without the `zttp` path printed `Tests: none` for a project with a
+    suite. The card now says that the path is unknown.
+  - The card was cut at 8 KiB without a newline. It is no longer cut.
+  - A missing baseline or candidate contract, or missing properties, printed
+    nothing. The card now says `Contract: not compared` or
+    `Properties: not compared`.
+  - The no-change line said `No change proposed.` after a proposal that the
+    proof refused. It now says `No change to approve.`
+- Not changed, with the reason:
+  - An absolute `entry` in `zttp.json` makes `zttp test` read the disk
+    handler. The proof resolves the same entry outside the overlay and fails
+    with `ProofRootOutsideProject` before any card. That is an inference from
+    `discoverProofRoots`, not a probe.
+  - The verdict compares diagnostics without their location. The card states
+    the rule of the gate. A change to the gate is out of scope.
+  - Only root 0 is compared. Other roots are files that the entry does not
+    reach, so they do not change the served contract.
+  - An env read or egress host that becomes computed shows only the removed
+    literal. The access then needs a policy section. Open.
+- Mutants: six of seven failed a test. M4, which runs the suite under every
+  policy, survives. No card prints under `--yes` or `--no-edit`, so the only
+  effect is the time of one `zttp test` run. No test can observe it through
+  output.
+- Found outside this plan: a handler with unbounded recursion passes
+  `zttp check`, and `zttp test` then ends on a segmentation fault in
+  `Interpreter.dispatch` (`packages/zts/src/interpreter.zig#Interpreter`),
+  observed on a Debug build.
 
 ## Out of scope
 
