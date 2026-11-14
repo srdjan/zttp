@@ -163,7 +163,7 @@ fn flowRoot(provider: agent.Provider) []const u8 {
 }
 
 fn recordingProvider() !agent.Provider {
-    const value = envValue("ZTTP_CODEGEN_PROVIDER") orelse return .deepseek;
+    const value = envValue("ZTTP_CODEGEN_PROVIDER") orelse return models.default_provider;
     return agent.Provider.parsePublic(value) orelse error.UnsupportedRecordingProvider;
 }
 
