@@ -532,11 +532,47 @@ replay compatibility or current model quality.
    set holds the schema and not the rows, so a row write does not fail the
    commit. A draft that introduces a violation is rejected and the agent
    retries.
-5. On a pass you see every normalized diff plus one aggregate proof card and
-   approve or reject once. `--yes` approves every verified change set;
-   `--no-edit` blocks writes entirely.
+5. In an interactive session with the asking policy, you see a result card
+   before the question "Apply this change set? [y/N, d=show files]". The
+   normalized diffs follow the card. You approve or reject once. `--yes`
+   approves every verified change set and `--no-edit` blocks writes entirely.
+   Neither flag shows the card or runs tests.
 6. The host rechecks the full read set and commits under that lock and its
    crash-recovery journal. The agent never writes source files itself.
+
+The result card follows the header line of the approval prompt. Each line
+appears only when it has content:
+
+```text
+Verdict: no new diagnostics
+Test failed: <name>
+No longer proven: <property>
+Contract: + env NAME
+Newly proven: <property>
+Tests: <p> passed, <f> failed, <u> unchecked, <t> total (tests/handler.test.jsonl)
+```
+
+The `Verdict:` line reads `no new diagnostics, N carried over from the baseline`
+when the baseline already held N diagnostics. The card lists at most 20
+`Test failed:` lines, then `Test failed: N more`. A `Contract:` line starts with
+`+` or `-` and names an env variable, an egress host, a route, or a capability.
+The `Tests:` line also reads `Tests: none` when the project has no suite, or
+`Tests: could not run: <first error line>` when the run fails.
+
+Before the question, the host runs `zttp test` on `tests/handler.test.jsonl`
+against the candidate. The candidate is a temporary copy of the project with the
+proposed files and a SQLite database rebuilt from the schema without rows. A
+failing or unrunnable suite never refuses the change set and never reaches the
+model. You decide. Tests run only in the interactive session with the asking
+policy. `--yes`, `--no-edit`, `--print`, and `--goal` run no tests.
+
+The card has two limits. Contract route lines cover routes that the handler
+registers through `zttp:router`. A route that the handler matches with
+`req.path` in its own code does not appear. A suite is also only as strong as
+its rows. `zttp gen-tests` writes rows that check the status code of each
+proven path, and `zttp init` writes a starter suite at
+`tests/handler.test.jsonl`. A model turn that proposes no change set ends with
+the line `No change proposed.` The `--print` exit codes do not change.
 
 The discovery views and focused compiler projections share the
 `zts_expert_query` operation union. Normalization, proof, repair, and change-set

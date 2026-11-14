@@ -10,6 +10,12 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+### Changed
+
+- `zttp expert` now shows a result card before the question "Apply this change set? [y/N, d=show files]". The card reports the verdict, failing tests, lost and gained proof properties, and contract changes in env variables, egress hosts, routes, and capabilities. It shows only in an interactive session with the asking policy.
+- `zttp expert` now runs `zttp test` on `tests/handler.test.jsonl` against the candidate before the approval question. A failing or unrunnable suite never refuses the change set. `--yes`, `--no-edit`, `--print`, and `--goal` run no tests.
+- A model turn that proposes no change set now ends with the line `No change proposed.`
+
 ## [0.27.0] - 2026-11-13
 
 ### Highlights

@@ -540,6 +540,15 @@ zttp expert --handler src/handler.ts --goal no_secret_leakage
 | `--goal <property>` | Restrict the session to edits that achieve a named proof property. |
 | `--max-iters <n>` | Autoloop iteration budget for a `--goal` run. Defaults to 8. |
 
+In an interactive session with the asking policy, each verified change set
+shows a result card before the question to apply it. The card reports the
+verdict, failing tests, lost and gained proof properties, and contract changes.
+Before the question, the host runs `zttp test` on `tests/handler.test.jsonl`
+against a temporary copy of the project that holds the proposed files. A
+failing suite never refuses the change set. `--yes`, `--no-edit`, `--print`,
+and `--goal` run no tests. The card is described in
+[the user guide](user-guide.md#how-a-turn-runs).
+
 Interactive context commands:
 
 ```text
