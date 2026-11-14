@@ -1,7 +1,8 @@
 # Expert result card and test run
 
-Status: draft plan, revision 2, 2026-11-14, at commit `07a9dad2`. No code
-changes yet. A Fable review and a Codex astra review checked revision 1. This
+Status: approved plan, revision 2, 2026-11-14, at commit `07a9dad2`. The owner
+answered "a" on 2026-11-14: option (a) of D3R, D4, and D6. That authorizes U1
+to U4 on local `main`, with no push, no paid model call, and no re-record. A Fable review and a Codex astra review checked revision 1. This
 revision resolves their findings.
 Source: [Expert interface options](2026-11-14-expert-interface-options.md). The
 owner chose option (a) of D1 to D3 there. The review evidence below makes D3
