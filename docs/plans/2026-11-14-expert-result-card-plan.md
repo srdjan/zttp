@@ -166,6 +166,14 @@ diff line by line and runs each acceptance check again with an empty
   `hyperfine -N -i`. This includes the second analyzer run of the pre-test
   check. The result is the latency that the card adds when a suite exists.
 
+- Result, 2026-11-14: complete at `77a8494f`. The test-first test failed before the
+  change because the card ended after the verdict line. `zttp test` on a
+  `zttp init` project took 48.0 ms on average (Debug build, hyperfine). All U2
+  gates exited 0 on an empty cache. Open risk: the run has no timeout, so a
+  suite that does not end would hold the approval prompt. The handler profile
+  has no `while` loop, and `for...of` walks a finite array. No timeout was
+  added without evidence that a run can hang.
+
 ### U3: Documentation and website
 
 - Model: Sonnet. Turn budget: 25.
