@@ -739,6 +739,80 @@ fn requiredPropertyProblem(
     );
 }
 
+/// What the veto's per-root check reports for the primary root of a workspace
+/// as it stands, with the `requiredProperties` that the veto would apply.
+pub const WorkspaceContract = struct {
+    /// The `entry` of `zttp.json`, relative to the workspace root. Owned.
+    entry: []u8,
+    /// The `requiredProperties` names of `zttp.json`, owned and unchecked.
+    required: []const []const u8,
+    /// Null when the check gives no property result for the entry.
+    properties: ?ui_payload.PropertiesSnapshot,
+    /// Null when the contract analysis did not finish.
+    contract: ?zts.HandlerContract,
+
+    pub fn deinit(self: *WorkspaceContract, allocator: std.mem.Allocator) void {
+        allocator.free(self.entry);
+        for (self.required) |name| allocator.free(name);
+        allocator.free(self.required);
+        if (self.contract) |*contract| contract.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+/// Run the check that `prove` runs on the primary root, on the workspace as it
+/// stands: the same `collectCheckDiagnostics`, with the schema and policy that
+/// `zttp.json` names. The `/contract` card reads this result, so the card and
+/// the veto cannot disagree about what the handler proves.
+pub fn checkWorkspace(allocator: std.mem.Allocator, workspace_root: []const u8) !WorkspaceContract {
+    const root = try common.resolveInsideWorkspace(allocator, workspace_root, ".");
+    defer allocator.free(root);
+    const manifest_path = try std.fs.path.join(allocator, &.{ root, "zttp.json" });
+    defer allocator.free(manifest_path);
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    var config = project_config.loadAbsolute(allocator, io_backend.io(), manifest_path) catch |err| switch (err) {
+        error.SyntaxError, error.UnexpectedEndOfInput, error.InvalidProjectConfig => return error.ManifestInvalid,
+        else => return err,
+    };
+    defer config.deinit(allocator);
+    const entry_path = try config.resolvedEntry(allocator);
+    defer allocator.free(entry_path);
+    if (!fileExists(allocator, entry_path)) return error.EntryMissing;
+    if (!common.isPathInsideRoot(root, entry_path)) return error.ProofRootOutsideProject;
+
+    var paths = try zts_cli.edit_simulate.discoverProjectPaths(allocator, entry_path);
+    defer paths.deinit(allocator);
+    const policy_source: ?[]u8 = if (paths.policy) |path| try zts.file_io.readFile(allocator, path, 1024 * 1024) else null;
+    defer if (policy_source) |src| allocator.free(src);
+
+    const entry = try allocator.dupe(u8, common.relativeToRoot(root, entry_path));
+    errdefer allocator.free(entry);
+    var diagnostics: std.ArrayList(Diagnostic) = .empty;
+    defer deinitDiagnostics(allocator, &diagnostics);
+    const collected = try collectCheckDiagnostics(allocator, &diagnostics, root, entry_path, paths.sqlite, policy_source, true);
+    const required = paths.required_properties;
+    paths.required_properties = &.{};
+    return .{
+        .entry = entry,
+        .required = required,
+        .properties = collected.properties,
+        .contract = collected.contract,
+    };
+}
+
+/// The names of `v1_spec_names` that `properties` proves, in that order. The
+/// names are borrowed from `v1_spec_names`; the slice is owned.
+pub fn provenNames(allocator: std.mem.Allocator, properties: ?ui_payload.PropertiesSnapshot) ![]const []const u8 {
+    var out: std.ArrayList([]const u8) = .empty;
+    errdefer out.deinit(allocator);
+    const proven = properties orelse return try out.toOwnedSlice(allocator);
+    for (zts.v1_spec_names) |name| {
+        if (provesProperty(proven, name)) try out.append(allocator, name);
+    }
+    return try out.toOwnedSlice(allocator);
+}
+
 fn isPropertyName(name: []const u8) bool {
     for (zts.v1_spec_names) |known| {
         if (std.mem.eql(u8, known, name)) return true;

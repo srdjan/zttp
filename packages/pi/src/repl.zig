@@ -15,6 +15,7 @@ const agent_bootstrap = @import("agent_bootstrap.zig");
 const commands = @import("commands.zig");
 const loop = @import("loop.zig");
 const aggregate_proof = @import("aggregate_proof.zig");
+const contract_pin = @import("contract_pin.zig");
 const suite_run = @import("suite_run.zig");
 const project_config = @import("project_config");
 const gate_record = @import("gate_record.zig");
@@ -373,6 +374,7 @@ fn renderHelp(allocator: std.mem.Allocator, registry: *const Registry, show_tool
     try w.writeAll("Session:       /compact  /resume  /continue  /new  /fork  /tree\n");
     try w.writeAll("Views:         /ledger  /chat  /ledger export <path>\n");
     try w.writeAll("Specs:         /specs <handler.ts>   show declared Proof<T, P> obligations\n");
+    try w.writeAll("Contract:      /contract  /contract drop <name>   pin proven properties in zttp.json\n");
     try w.writeAll("Skills:        /skills  /skill:<name>\n");
     try w.writeAll("Templates:     /templates  /template:<name> [args...]\n");
 
@@ -838,6 +840,13 @@ pub fn run(
             else => return err,
         };
         const line = maybe_line orelse break;
+
+        // `/contract` reads and writes zttp.json. It adds nothing to the model transcript.
+        const trimmed_line = std.mem.trim(u8, line, " \t\r\n");
+        if (isContractCommand(trimmed_line)) {
+            runContractCommand(allocator, trimmed_line);
+            continue;
+        }
 
         // Stream entries live during interactive turns. Cleared right after so
         // session rebuilds (resume/new/fork) don't replay the restored history.
@@ -1553,6 +1562,165 @@ fn readLine(buf: []u8) !?[]const u8 {
 
 fn selectApprovalFn(policy: loop.ApprovalPolicy) loop.ApprovalFn {
     return loop.resolveApprovalFn(policy, loop.ApprovalFn.fromFn(approveEdit));
+}
+
+fn isContractCommand(trimmed: []const u8) bool {
+    return std.mem.eql(u8, trimmed, "/contract") or std.mem.startsWith(u8, trimmed, "/contract ");
+}
+
+const contract_usage = "usage: /contract  or  /contract drop <name>\n";
+
+fn writeStdout(text: []const u8) void {
+    _ = std.c.write(std.c.STDOUT_FILENO, text.ptr, text.len);
+}
+
+fn writeStderr(text: []const u8) void {
+    _ = std.c.write(std.c.STDERR_FILENO, text.ptr, text.len);
+}
+
+/// Handle `/contract` and `/contract drop <name>`. The command reads and
+/// writes `zttp.json` and never touches the model transcript.
+fn runContractCommand(allocator: std.mem.Allocator, trimmed: []const u8) void {
+    const rest = std.mem.trim(u8, trimmed["/contract".len..], " \t");
+    const result = if (rest.len == 0)
+        contractCard(allocator)
+    else if (std.mem.startsWith(u8, rest, "drop ") and std.mem.indexOfAny(u8, std.mem.trim(u8, rest["drop ".len..], " \t"), " \t") == null)
+        contractDrop(allocator, std.mem.trim(u8, rest["drop ".len..], " \t"))
+    else
+        writeStdout(contract_usage);
+    result catch |err| loop.writeTurnErrorToStderr(err);
+}
+
+/// Write one line that tells why `/contract` could not read or change `zttp.json`.
+fn reportContractFailure(allocator: std.mem.Allocator, prefix: []const u8, err: anyerror) !void {
+    if (err == error.OutOfMemory) return err;
+    const reason: []const u8 = switch (err) {
+        error.WorkspaceChangeSetActive => "another zttp session holds the workspace lock.",
+        error.ManifestInvalid => "zttp.json does not parse as a JSON object.",
+        error.FileNotFound => "zttp.json does not exist.",
+        error.EntryMissing => "the entry file of zttp.json does not exist.",
+        else => @errorName(err),
+    };
+    const text = try allocator.print("{s}: {s}\n", .{ prefix, reason });
+    defer allocator.free(text);
+    writeStderr(text);
+}
+
+fn writeNames(w: *std.Io.Writer, names: []const []const u8) !void {
+    if (names.len == 0) return w.writeAll("none");
+    for (names, 0..) |name, index| {
+        if (index > 0) try w.writeAll(", ");
+        try w.writeAll(name);
+    }
+}
+
+fn containsName(names: []const []const u8, name: []const u8) bool {
+    for (names) |listed| if (std.mem.eql(u8, listed, name)) return true;
+    return false;
+}
+
+/// The card of `/contract`, without its question.
+fn renderContractCard(
+    allocator: std.mem.Allocator,
+    w: *std.Io.Writer,
+    check: *const aggregate_proof.WorkspaceContract,
+    proven: []const []const u8,
+) !void {
+    try w.print("Contract of {s}\nRoutes: ", .{check.entry});
+    var routes: std.ArrayList(u8) = .empty;
+    defer routes.deinit(allocator);
+    var egress: std.ArrayList([]const u8) = .empty;
+    defer egress.deinit(allocator);
+    var env: std.ArrayList([]const u8) = .empty;
+    defer env.deinit(allocator);
+    if (check.contract) |contract| {
+        for (contract.api.routes.items) |route| {
+            if (routes.items.len > 0) try routes.appendSlice(allocator, ", ");
+            try routes.appendSlice(allocator, route.method);
+            try routes.append(allocator, ' ');
+            try routes.appendSlice(allocator, route.path);
+        }
+        try env.appendSlice(allocator, contract.env.literal.items);
+        try egress.appendSlice(allocator, contract.egress.endpoints.items);
+    }
+    try w.writeAll(if (routes.items.len == 0) "none" else routes.items);
+    try w.writeAll("\nProven: ");
+    try writeNames(w, proven);
+    try w.writeAll("\nRequired: ");
+    try writeNames(w, check.required);
+    var unproven: std.ArrayList([]const u8) = .empty;
+    defer unproven.deinit(allocator);
+    for (check.required) |name| {
+        if (!containsName(proven, name)) try unproven.append(allocator, name);
+    }
+    if (unproven.items.len > 0) {
+        try w.writeAll("\nRequired, not proven: ");
+        try writeNames(w, unproven.items);
+    }
+    try w.writeAll("\nEnv: ");
+    try writeNames(w, env.items);
+    try w.writeAll("\nEgress: ");
+    try writeNames(w, egress.items);
+    try w.writeAll("\n");
+}
+
+fn writeRequired(allocator: std.mem.Allocator, names: []const []const u8) !void {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try out.writer.writeAll("Required: ");
+    try writeNames(&out.writer, names);
+    try out.writer.writeAll("\n");
+    writeStdout(out.written());
+}
+
+/// Print the contract card of the workspace, then offer to require every
+/// property it proves.
+fn contractCard(allocator: std.mem.Allocator) !void {
+    var check = aggregate_proof.checkWorkspace(allocator, ".") catch |err|
+        return reportContractFailure(allocator, "Cannot read the contract", err);
+    defer check.deinit(allocator);
+    const proven = try aggregate_proof.provenNames(allocator, check.properties);
+    defer allocator.free(proven);
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    try renderContractCard(allocator, &out.writer, &check, proven);
+    var pending = false;
+    for (proven) |name| {
+        if (!containsName(check.required, name)) pending = true;
+    }
+    if (!pending) {
+        try out.writer.writeAll("All proven properties are required.\n");
+        return writeStdout(out.written());
+    }
+    try out.writer.writeAll("Require the proven properties? [y/N] ");
+    writeStdout(out.written());
+
+    var line_buf: [256]u8 = undefined;
+    const maybe_line = readLine(&line_buf) catch |err| switch (err) {
+        error.LineTooLong => return,
+        else => return err,
+    };
+    const answer = std.mem.trim(u8, maybe_line orelse return, " \t\r\n");
+    if (!std.ascii.eqlIgnoreCase(answer, "y") and !std.ascii.eqlIgnoreCase(answer, "yes")) return;
+
+    var edited = contract_pin.editRequiredProperties(allocator, ".", .{ .add = proven }) catch |err|
+        return reportContractFailure(allocator, "Cannot change zttp.json", err);
+    defer edited.deinit(allocator);
+    try writeRequired(allocator, edited.names);
+}
+
+/// Remove one name from `requiredProperties`.
+fn contractDrop(allocator: std.mem.Allocator, name: []const u8) !void {
+    var edited = contract_pin.editRequiredProperties(allocator, ".", .{ .drop = name }) catch |err|
+        return reportContractFailure(allocator, "Cannot change zttp.json", err);
+    defer edited.deinit(allocator);
+    if (!edited.changed) {
+        const text = try allocator.print("{s} is not required.\n", .{name});
+        defer allocator.free(text);
+        return writeStdout(text);
+    }
+    try writeRequired(allocator, edited.names);
 }
 
 const testing = std.testing;
@@ -2306,20 +2474,40 @@ const ReplStdio = struct {
 
     /// Restores the process descriptors and returns the captured stderr text.
     fn end(self: *ReplStdio, buf: []u8) []const u8 {
+        self.restore();
+        const text = drain(self.err_read, buf);
+        _ = std.c.close(self.out_read);
+        _ = std.c.close(self.err_read);
+        return text;
+    }
+
+    const Captured = struct { stdout: []const u8, stderr: []const u8 };
+
+    /// Restores the process descriptors and returns the captured stdout and stderr text.
+    fn endCapture(self: *ReplStdio, stdout_buf: []u8, stderr_buf: []u8) Captured {
+        self.restore();
+        const captured: Captured = .{ .stdout = drain(self.out_read, stdout_buf), .stderr = drain(self.err_read, stderr_buf) };
+        _ = std.c.close(self.out_read);
+        _ = std.c.close(self.err_read);
+        return captured;
+    }
+
+    fn restore(self: *ReplStdio) void {
         _ = std.c.dup2(self.saved_in, std.c.STDIN_FILENO);
         _ = std.c.dup2(self.saved_out, std.c.STDOUT_FILENO);
         _ = std.c.dup2(self.saved_err, std.c.STDERR_FILENO);
         _ = std.c.close(self.saved_in);
         _ = std.c.close(self.saved_out);
         _ = std.c.close(self.saved_err);
+    }
+
+    fn drain(fd: c_int, buf: []u8) []const u8 {
         var len: usize = 0;
         while (len < buf.len) {
-            const n = std.c.read(self.err_read, buf[len..].ptr, buf.len - len);
+            const n = std.c.read(fd, buf[len..].ptr, buf.len - len);
             if (n <= 0) break;
             len += @intCast(n);
         }
-        _ = std.c.close(self.out_read);
-        _ = std.c.close(self.err_read);
         return buf[0..len];
     }
 };
@@ -2597,6 +2785,7 @@ const cwd_support = @import("test_support/cwd.zig");
 const codegen_eval = @import("expert_codegen_eval.zig");
 const tools_common = @import("tools/common.zig");
 const zts_cli = @import("zts_cli");
+const change_transaction = @import("change_transaction.zig");
 
 const card_old_handler =
     "export function handler(req: Request): Proof<Response, \"state_isolated\"> { return Response.text(\"old\"); }\n";
@@ -2677,6 +2866,8 @@ const CardTurnSpec = struct {
     /// Select the real approval function of this policy, as `--yes` does for `.auto_approve`. Null
     /// keeps `CardApproval`, which records the card.
     policy: ?loop.ApprovalPolicy = null,
+    /// Run `/contract` and answer `y` in the workspace before the turn.
+    pin: bool = false,
 };
 
 const CardTurnResult = struct {
@@ -2748,6 +2939,16 @@ fn runCardTurn(allocator: std.mem.Allocator, approval: *CardApproval, spec: Card
         defer scratch.deinit();
         const parsed = try suite_run.parseOutput(scratch.allocator(), outcome.stderr);
         real_results = try allocator.dupe(u8, parsed.ran.results);
+    }
+
+    if (spec.pin) {
+        var cwd = try CwdOverride.set(allocator, workspace_abs);
+        defer cwd.restore(allocator);
+        var stdio = try ReplStdio.begin("y\n");
+        runContractCommand(allocator, "/contract");
+        var discard_out: [1024]u8 = undefined;
+        var discard_err: [1024]u8 = undefined;
+        _ = stdio.endCapture(&discard_out, &discard_err);
     }
 
     var client: CardClient = .{ .content = spec.new_handler };
@@ -3068,5 +3269,266 @@ test "the card on a project with a SQLite database shows the Results text that z
         "Verdict: no new diagnostics\n" ++
             "Tests: 1 passed, 0 failed, 0 unchecked, 1 total (tests/handler.test.jsonl)\n",
         approval.card(),
+    );
+}
+
+const init_config = "{\n  \"entry\": \"src/handler.ts\",\n  \"port\": 3000\n}";
+const init_handler =
+    "// Starter handler with author-declared specs.\n" ++
+    "// Run `zttp dev` to check every spec again on each save.\n" ++
+    "\n\n" ++
+    "structural Guardrails<T> = Proof<T,\n" ++
+    "    | \"deterministic\"\n" ++
+    "    | \"no_secret_leakage\"\n" ++
+    "    | \"injection_safe\"\n" ++
+    ">;\n" ++
+    "\n" ++
+    "function handler(req: Request): Guardrails<Response> {\n" ++
+    "    if (req.method === \"GET\" && req.path === \"/\") {\n" ++
+    "        return Response.html(\n" ++
+    "            \"<main><h1>Hello, world!</h1><p>Proven at compile time.</p></main>\"\n" ++
+    "        );\n" ++
+    "    }\n" ++
+    "    return Response.json({ error: \"not found\" }, { status: 404 });\n" ++
+    "}\n";
+
+const init_proven_names = "deterministic, read_only, retry_safe, idempotent, state_isolated, fault_covered, pure, stateless, " ++
+    "result_safe, optional_safe, no_secret_leakage, no_credential_leakage, input_validated, pii_contained, " ++
+    "injection_safe, canonical, cost_bounded";
+const init_card =
+    "Contract of src/handler.ts\n" ++
+    "Routes: none\n" ++
+    "Proven: " ++ init_proven_names ++ "\n" ++
+    "Required: none\n" ++
+    "Env: none\n" ++
+    "Egress: none\n" ++
+    "Require the proven properties? [y/N] ";
+const init_proven_lines =
+    "    \"deterministic\",\n    \"read_only\",\n    \"retry_safe\",\n    \"idempotent\",\n    \"state_isolated\",\n" ++
+    "    \"fault_covered\",\n    \"pure\",\n    \"stateless\",\n    \"result_safe\",\n    \"optional_safe\",\n" ++
+    "    \"no_secret_leakage\",\n    \"no_credential_leakage\",\n    \"input_validated\",\n    \"pii_contained\",\n" ++
+    "    \"injection_safe\",\n    \"canonical\",\n    \"cost_bounded\"\n";
+
+/// A project directory that is the working directory of the REPL while a test runs.
+const ContractProject = struct {
+    tmp: IsolatedTmp,
+    cwd: CwdOverride,
+    deepseek: EnvOverride,
+
+    fn begin(allocator: std.mem.Allocator, zttp_json: []const u8) !ContractProject {
+        var tmp = try IsolatedTmp.init(allocator, "contract");
+        errdefer tmp.cleanup(allocator);
+        try tmp.writeFile(allocator, "zttp.json", zttp_json);
+        try tmp.writeFile(allocator, "src/handler.ts", init_handler);
+        var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+        errdefer cwd.restore(allocator);
+        const deepseek = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "test-key");
+        return .{ .tmp = tmp, .cwd = cwd, .deepseek = deepseek };
+    }
+
+    fn end(self: *ContractProject, allocator: std.mem.Allocator) void {
+        self.deepseek.restore(allocator);
+        self.cwd.restore(allocator);
+        self.tmp.cleanup(allocator);
+    }
+
+    /// Run the REPL on `input` and capture what it writes to stdout and stderr.
+    fn repl(self: *ContractProject, allocator: std.mem.Allocator, input: []const u8, stdout_buf: []u8, stderr_buf: []u8) !ReplStdio.Captured {
+        _ = self;
+        var registry: Registry = .{};
+        defer registry.deinit(allocator);
+        var stdio = try ReplStdio.begin(input);
+        const run_result = run(allocator, &registry, .{ .no_context_files = true, .no_session = true }, null);
+        const captured = stdio.endCapture(stdout_buf, stderr_buf);
+        try run_result;
+        return captured;
+    }
+
+    /// Run one `/contract` line without a session, which takes the workspace lock at startup,
+    /// and capture what it writes to stdout and stderr.
+    fn command(self: *ContractProject, allocator: std.mem.Allocator, line: []const u8, input: []const u8, stdout_buf: []u8, stderr_buf: []u8) !ReplStdio.Captured {
+        _ = self;
+        var stdio = try ReplStdio.begin(input);
+        runContractCommand(allocator, line);
+        return stdio.endCapture(stdout_buf, stderr_buf);
+    }
+
+    fn manifest(self: *const ContractProject, allocator: std.mem.Allocator) ![]u8 {
+        const path = try self.tmp.childPath(allocator, "zttp.json");
+        defer allocator.free(path);
+        return zts.file_io.readFile(allocator, path, 1024 * 1024);
+    }
+};
+
+test "/contract prints the card of a zttp init project and writes nothing on N" {
+    const allocator = testing.allocator;
+    var project = try ContractProject.begin(allocator, init_config);
+    defer project.end(allocator);
+    var out: [2048]u8 = undefined;
+    var err: [2048]u8 = undefined;
+    const captured = try project.repl(allocator, "/contract\nn\n/quit\n", &out, &err);
+    try testing.expectEqualStrings(init_card, captured.stdout);
+    try testing.expectEqualStrings("", captured.stderr);
+    const after = try project.manifest(allocator);
+    defer allocator.free(after);
+    try testing.expectEqualStrings(init_config, after);
+}
+
+test "/contract then y writes the proven properties and keeps an unknown key in place" {
+    const allocator = testing.allocator;
+    var project = try ContractProject.begin(allocator, "{\"x-team\":\"web\",\"entry\":\"src/handler.ts\",\"port\":3000}");
+    defer project.end(allocator);
+    var out: [2048]u8 = undefined;
+    var err: [2048]u8 = undefined;
+    const captured = try project.repl(allocator, "/contract\ny\n/quit\n", &out, &err);
+    try testing.expectEqualStrings(
+        init_card ++ "Required: " ++ init_proven_names ++ "\n",
+        captured.stdout,
+    );
+    try testing.expectEqualStrings("", captured.stderr);
+    const after = try project.manifest(allocator);
+    defer allocator.free(after);
+    try testing.expectEqualStrings(
+        "{\n  \"x-team\": \"web\",\n  \"entry\": \"src/handler.ts\",\n  \"port\": 3000,\n  \"requiredProperties\": [\n" ++
+            init_proven_lines ++ "  ]\n}\n",
+        after,
+    );
+}
+
+test "/contract drop removes one name and keeps every other key" {
+    const allocator = testing.allocator;
+    var project = try ContractProject.begin(allocator, "{\"x-team\":\"web\",\"requiredProperties\":[\"state_isolated\",\"cost_bounded\",\"fault_covered\"],\"entry\":\"src/handler.ts\"}");
+    defer project.end(allocator);
+    var out: [2048]u8 = undefined;
+    var err: [2048]u8 = undefined;
+    const captured = try project.repl(allocator, "/contract drop cost_bounded\n/quit\n", &out, &err);
+    try testing.expectEqualStrings("Required: state_isolated, fault_covered\n", captured.stdout);
+    try testing.expectEqualStrings("", captured.stderr);
+    const after = try project.manifest(allocator);
+    defer allocator.free(after);
+    try testing.expectEqualStrings(
+        "{\n  \"x-team\": \"web\",\n  \"requiredProperties\": [\n    \"state_isolated\",\n    \"fault_covered\"\n  ],\n  \"entry\": \"src/handler.ts\"\n}\n",
+        after,
+    );
+}
+
+test "/contract drop of a name that is not listed says so and writes nothing" {
+    const allocator = testing.allocator;
+    const config = "{\"entry\":\"src/handler.ts\",\"requiredProperties\":[\"state_isolated\"]}";
+    var project = try ContractProject.begin(allocator, config);
+    defer project.end(allocator);
+    var out: [2048]u8 = undefined;
+    var err: [2048]u8 = undefined;
+    const captured = try project.repl(allocator, "/contract drop cost_bounded\n/quit\n", &out, &err);
+    try testing.expectEqualStrings("cost_bounded is not required.\n", captured.stdout);
+    try testing.expectEqualStrings("", captured.stderr);
+    const after = try project.manifest(allocator);
+    defer allocator.free(after);
+    try testing.expectEqualStrings(config, after);
+}
+
+test "/contract drop reports a zttp.json that does not parse and leaves the file" {
+    const allocator = testing.allocator;
+    var project = try ContractProject.begin(allocator, "{\"entry\": ");
+    defer project.end(allocator);
+    var out: [2048]u8 = undefined;
+    var err: [2048]u8 = undefined;
+    const captured = try project.repl(allocator, "/contract drop cost_bounded\n/quit\n", &out, &err);
+    try testing.expectEqualStrings("", captured.stdout);
+    try testing.expectEqualStrings("Cannot change zttp.json: zttp.json does not parse as a JSON object.\n", captured.stderr);
+    const after = try project.manifest(allocator);
+    defer allocator.free(after);
+    try testing.expectEqualStrings("{\"entry\": ", after);
+}
+
+test "/contract reports a zttp.json that does not parse and leaves the file" {
+    const allocator = testing.allocator;
+    var project = try ContractProject.begin(allocator, "[1, 2]");
+    defer project.end(allocator);
+    var out: [2048]u8 = undefined;
+    var err: [2048]u8 = undefined;
+    const captured = try project.repl(allocator, "/contract\n/quit\n", &out, &err);
+    try testing.expectEqualStrings("", captured.stdout);
+    try testing.expectEqualStrings("Cannot read the contract: zttp.json does not parse as a JSON object.\n", captured.stderr);
+    const after = try project.manifest(allocator);
+    defer allocator.free(after);
+    try testing.expectEqualStrings("[1, 2]", after);
+}
+
+test "/contract then y reports a held workspace lock and leaves the file" {
+    const allocator = testing.allocator;
+    var project = try ContractProject.begin(allocator, init_config);
+    defer project.end(allocator);
+    var holder = try change_transaction.RecoveredWorkspace.acquire(allocator, project.tmp.abs_path);
+    defer holder.deinit();
+    var out: [2048]u8 = undefined;
+    var err: [2048]u8 = undefined;
+    const captured = try project.command(allocator, "/contract", "y\n", &out, &err);
+    try testing.expectEqualStrings(init_card, captured.stdout);
+    try testing.expectEqualStrings("Cannot change zttp.json: another zttp session holds the workspace lock.\n", captured.stderr);
+    const after = try project.manifest(allocator);
+    defer allocator.free(after);
+    try testing.expectEqualStrings(init_config, after);
+}
+
+test "a change set that loses a property that /contract pinned is refused" {
+    var approval: CardApproval = .{ .answer = true };
+    var result = try runCardTurn(testing.allocator, &approval, .{
+        .new_handler = card_recursive_handler,
+        .pin = true,
+    });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(false, result.applied);
+    try testing.expectEqual(@as(u32, 0), approval.calls);
+    try testing.expectEqualStrings(card_old_handler, result.handler_after);
+    try testing.expectEqualStrings(
+        "The compiler rejected this edit. Fix every flagged violation below:\n\n" ++
+            "required_property_lost: zttp.json requiredProperties requires properties that the candidate does not prove: fault_covered, cost_bounded",
+        result.rejection orelse return error.TestUnexpectedResult,
+    );
+}
+
+const routes_handler =
+    "import { routerMatch } from \"zttp:router\";\n" ++
+    "import { env } from \"zttp:env\";\n" ++
+    "import { fetch } from \"zttp:fetch\";\n" ++
+    "\n" ++
+    "function list(req: Request): Response {\n" ++
+    "    return Response.json({ name: env(\"APP_NAME\") });\n" ++
+    "}\n" ++
+    "\n" ++
+    "function create(req: Request): Response {\n" ++
+    "    const upstream = fetch(\"https://api.example.com/v1/items\");\n" ++
+    "    return Response.json({ ok: true });\n" ++
+    "}\n" ++
+    "\n" ++
+    "const routes = { \"GET /\": list, \"POST /items\": create };\n" ++
+    "\n" ++
+    "function handler(req: Request): Proof<Response, \"state_isolated\"> {\n" ++
+    "    const found = routerMatch(routes, req);\n" ++
+    "    if (found !== undefined) {\n" ++
+    "        return found.handler(req);\n" ++
+    "    }\n" ++
+    "    return Response.json({ error: \"not found\" }, { status: 404 });\n" ++
+    "}\n";
+
+test "/contract lists the routes, env reads, egress, and a required property that is not proven" {
+    const allocator = testing.allocator;
+    var project = try ContractProject.begin(allocator, "{\"entry\":\"src/handler.ts\",\"outboundHttp\":true,\"requiredProperties\":[\"fault_covered\"]}");
+    defer project.end(allocator);
+    try project.tmp.writeFile(allocator, "src/handler.ts", routes_handler);
+    var out: [2048]u8 = undefined;
+    var err: [2048]u8 = undefined;
+    const captured = try project.repl(allocator, "/contract\nn\n/quit\n", &out, &err);
+    try testing.expectEqualStrings(
+        "Contract of src/handler.ts\n" ++
+            "Routes: GET /, POST /items\n" ++
+            "Proven: deterministic, state_isolated, result_safe, optional_safe, no_credential_leakage, input_validated, pii_contained, injection_safe, canonical, cost_bounded\n" ++
+            "Required: fault_covered\n" ++
+            "Required, not proven: fault_covered\n" ++
+            "Env: APP_NAME\n" ++
+            "Egress: https://api.example.com:443\n" ++
+            "Require the proven properties? [y/N] ",
+        captured.stdout,
     );
 }
