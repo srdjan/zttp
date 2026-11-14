@@ -20,6 +20,9 @@ pub const ProjectConfig = struct {
     policy: ?[]const u8 = null,
     outbound_http: bool = false,
     outbound_hosts: []const []const u8 = &.{},
+    /// Proof properties the expert holds every change set to (`requiredProperties`). The loader
+    /// checks no name; the expert proof reports an unknown one.
+    required_properties: []const []const u8 = &.{},
 
     pub fn deinit(self: *ProjectConfig, allocator: std.mem.Allocator) void {
         allocator.free(self.root_dir);
@@ -31,6 +34,8 @@ pub const ProjectConfig = struct {
         if (self.policy) |path| allocator.free(path);
         for (self.outbound_hosts) |host| allocator.free(host);
         allocator.free(self.outbound_hosts);
+        for (self.required_properties) |name| allocator.free(name);
+        allocator.free(self.required_properties);
     }
 
     pub fn resolvePath(self: *const ProjectConfig, allocator: std.mem.Allocator, path: []const u8) ![]u8 {
@@ -167,6 +172,7 @@ pub fn loadAbsolute(
         .outbound_hosts = try dupStringArrayField(allocator, obj, "outboundHosts"),
     };
     errdefer config.deinit(allocator);
+    config.required_properties = try dupStringArrayField(allocator, obj, "requiredProperties");
     if (config.static_dir == null) {
         const public_path = try std.fs.path.resolve(allocator, &.{ config.root_dir, "public" });
         defer allocator.free(public_path);
@@ -308,7 +314,8 @@ test "project config parses and defaults public directory" {
         \\  "port": 4000,
         \\  "host": "0.0.0.0",
         \\  "outboundHttp": true,
-        \\  "outboundHosts": ["api.internal"]
+        \\  "outboundHosts": ["api.internal"],
+        \\  "requiredProperties": ["state_isolated", "cost_bounded"]
         \\}
         ,
     });
@@ -331,6 +338,9 @@ test "project config parses and defaults public directory" {
     try std.testing.expect(config.outbound_http);
     try std.testing.expectEqual(@as(usize, 1), config.outbound_hosts.len);
     try std.testing.expectEqualStrings("api.internal", config.outbound_hosts[0]);
+    try std.testing.expectEqual(@as(usize, 2), config.required_properties.len);
+    try std.testing.expectEqualStrings("state_isolated", config.required_properties[0]);
+    try std.testing.expectEqualStrings("cost_bounded", config.required_properties[1]);
     try std.testing.expect(config.static_dir != null);
     try std.testing.expectEqualStrings("public", config.static_dir.?);
 }

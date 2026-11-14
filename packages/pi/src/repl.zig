@@ -2674,6 +2674,9 @@ const CardTurnSpec = struct {
     binary_path: ?[]const u8 = null,
     test_timeout_ms: u32 = suite_run.default_timeout_ms,
     answer: bool = true,
+    /// Select the real approval function of this policy, as `--yes` does for `.auto_approve`. Null
+    /// keeps `CardApproval`, which records the card.
+    policy: ?loop.ApprovalPolicy = null,
 };
 
 const CardTurnResult = struct {
@@ -2681,12 +2684,26 @@ const CardTurnResult = struct {
     handler_after: []u8,
     /// The `Results:` text of `zttp test` on the real workspace, when asked for.
     real_results: ?[]u8 = null,
+    /// The text of the first failed tool result: what the host told the model when it refused the change set.
+    rejection: ?[]u8 = null,
 
     fn deinit(self: *CardTurnResult, allocator: std.mem.Allocator) void {
         allocator.free(self.handler_after);
         if (self.real_results) |text| allocator.free(text);
+        if (self.rejection) |text| allocator.free(text);
     }
 };
+
+/// The text of the first failed tool result in `tr`, owned, or null when no tool result failed.
+fn firstFailedToolResult(allocator: std.mem.Allocator, tr: *const transcript_mod.Transcript) !?[]u8 {
+    for (0..tr.len()) |index| {
+        switch (tr.at(index).*) {
+            .tool_result => |result| if (!result.ok) return try allocator.dupe(u8, result.llm_text),
+            else => {},
+        }
+    }
+    return null;
+}
 
 /// Run one turn that proposes `card_new_handler` over `card_old_handler` and
 /// renders the approval card into `approval`.
@@ -2747,17 +2764,23 @@ fn runCardTurn(allocator: std.mem.Allocator, approval: *CardApproval, spec: Card
         "change the text",
         .{
             .workspace_root = workspace_root,
-            .approval_fn = .{ .contextual = .{ .context = approval, .func = CardApproval.approve } },
+            .approval_fn = if (spec.policy) |policy|
+                loop.resolveApprovalFn(policy, null)
+            else
+                .{ .contextual = .{ .context = approval, .func = CardApproval.approve } },
             .test_binary = binary,
             .test_timeout_ms = spec.test_timeout_ms,
         },
     );
     const handler_path = try std.fs.path.resolve(allocator, &.{ workspace_root, "src/handler.ts" });
     defer allocator.free(handler_path);
+    const rejection = try firstFailedToolResult(allocator, &tr);
+    errdefer if (rejection) |text| allocator.free(text);
     return .{
         .applied = result.applied_change_set,
         .handler_after = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024),
         .real_results = real_results,
+        .rejection = rejection,
     };
 }
 
@@ -2838,8 +2861,7 @@ test "the card shows a failed test row when the candidate recurses without bound
     // reports the request as a failed test (CallStackOverflow) and exits 1.
     var approval: CardApproval = .{ .answer = true };
     var result = try runCardTurn(testing.allocator, &approval, .{
-        .new_handler = "function down(n: number): number { return down(n + 1); }\n" ++
-            "export function handler(req: Request): Proof<Response, \"state_isolated\"> { return Response.text(String(down(0))); }\n",
+        .new_handler = card_recursive_handler,
         .suite = card_passing_suite,
     });
     defer result.deinit(testing.allocator);
@@ -2851,6 +2873,54 @@ test "the card shows a failed test row when the candidate recurses without bound
             "Tests: 0 passed, 1 failed, 0 unchecked, 1 total (tests/handler.test.jsonl)\n",
         approval.card(),
     );
+}
+
+const card_recursive_handler =
+    "function down(n: number): number { return down(n + 1); }\n" ++
+    "export function handler(req: Request): Proof<Response, \"state_isolated\"> { return Response.text(String(down(0))); }\n";
+const card_requires_cost_bounded = "{\"entry\":\"src/handler.ts\",\"requiredProperties\":[\"cost_bounded\"]}";
+const cost_bounded_refusal =
+    "The compiler rejected this edit. Fix every flagged violation below:\n\n" ++
+    "required_property_lost: zttp.json requiredProperties requires properties that the candidate does not prove: cost_bounded";
+
+test "a change set that loses a required property is refused before any card" {
+    var approval: CardApproval = .{ .answer = true };
+    var result = try runCardTurn(testing.allocator, &approval, .{
+        .zttp_json = card_requires_cost_bounded,
+        .new_handler = card_recursive_handler,
+    });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(false, result.applied);
+    try testing.expectEqual(@as(u32, 0), approval.calls);
+    try testing.expectEqualStrings("", approval.card());
+    try testing.expectEqualStrings(card_old_handler, result.handler_after);
+    try testing.expectEqualStrings(cost_bounded_refusal, result.rejection orelse return error.TestUnexpectedResult);
+}
+
+test "a change set that loses a required property is refused when --yes approves automatically" {
+    var approval: CardApproval = .{ .answer = true };
+    var result = try runCardTurn(testing.allocator, &approval, .{
+        .zttp_json = card_requires_cost_bounded,
+        .new_handler = card_recursive_handler,
+        .policy = .auto_approve,
+    });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(false, result.applied);
+    try testing.expectEqual(@as(u32, 0), approval.calls);
+    try testing.expectEqualStrings(card_old_handler, result.handler_after);
+    try testing.expectEqualStrings(cost_bounded_refusal, result.rejection orelse return error.TestUnexpectedResult);
+}
+
+test "a change set that keeps a required property is applied under --yes" {
+    var approval: CardApproval = .{ .answer = true };
+    var result = try runCardTurn(testing.allocator, &approval, .{
+        .zttp_json = card_requires_cost_bounded,
+        .policy = .auto_approve,
+    });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(true, result.applied);
+    try testing.expectEqualStrings(card_new_handler, result.handler_after);
+    try testing.expectEqual(@as(?[]u8, null), result.rejection);
 }
 
 test "the card says zttp test ended on a signal when the binary kills itself" {

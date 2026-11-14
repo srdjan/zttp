@@ -583,6 +583,34 @@ The discovery views and focused compiler projections share the
 `zts_expert_query` operation union. Normalization, proof, repair, and change-set
 application remain distinct authorities. Tests pin the exact provider serialization.
 
+### Required properties
+
+A project can pin proof properties that every change set must keep. List the
+names in `zttp.json`:
+
+```json
+{ "entry": "src/handler.ts", "requiredProperties": ["state_isolated", "cost_bounded"] }
+```
+
+Each name is a property that a `Proof<>` capsule accepts, such as
+`state_isolated` or `cost_bounded`. The list of names is in
+`packages/zts/src/spec_discharge.zig`, in `v1_spec_names`.
+
+The host refuses a change set whose candidate does not prove every listed
+property. The rule holds in every approval mode, including `--yes`. The rule
+needs no card and no question, because the host refuses the change set before
+either. The model sees the refusal text, which names each missing property.
+It cannot edit `zttp.json`, because a change set holds `.ts` files only.
+
+The rule is absolute. It tests the candidate and never compares it with the
+baseline. When the baseline already lacks a required property, the host
+refuses every change set until a candidate proves that property again. To end
+the refusals, remove the name from `requiredProperties`.
+
+A name that is not a property is also refused, with the nearest valid name.
+Only `zttp expert` reads the key. `zttp check`, `zttp dev`, `zttp build`, and
+`zttp deploy` ignore it, and so does an older zttp.
+
 ### Context compaction
 
 When a normal request crosses the soft target, expert mode summarizes safe

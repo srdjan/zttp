@@ -695,6 +695,11 @@ pub const parsePolicyJsonOrNull = handler_policy.parsePolicyJsonOrNull;
 /// The policy a source parses to, or the parse error. The expert refuses a change
 /// set when the project policy does not parse. Caller calls `deinit`.
 pub const parsePolicyJson = handler_policy.parsePolicyJson;
+/// The names a `Proof<>` capsule and `requiredProperties` in `zttp.json` accept. Each is a boolean
+/// field of `HandlerProperties`.
+pub const v1_spec_names = compiler.spec_discharge.v1_spec_names;
+/// A `did you mean` hint for an unknown property name, or a fixed fallback line. Caller frees.
+pub const suggestionForUnknownProperty = compiler.spec_discharge.suggestionForUnknown;
 pub const RuntimePolicy = handler_policy.RuntimePolicy;
 pub const PolicyInput = policy.PolicyInput;
 pub const PolicyResult = policy.PolicyResult;

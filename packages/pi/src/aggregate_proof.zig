@@ -92,10 +92,14 @@ const ContextPaths = struct {
     /// read the copy inside their own materialized snapshot rather than a path
     /// that escapes it.
     policy_relative: ?[]u8 = null,
+    /// The `requiredProperties` names of `zttp.json`, owned and unchecked.
+    required_properties: []const []const u8 = &.{},
 
     fn deinit(self: *ContextPaths, allocator: std.mem.Allocator) void {
         if (self.schema_relative) |path| allocator.free(path);
         if (self.policy_relative) |path| allocator.free(path);
+        for (self.required_properties) |name| allocator.free(name);
+        allocator.free(self.required_properties);
         self.* = .{};
     }
 };
@@ -240,6 +244,11 @@ pub fn prove(
         );
     }
 
+    if (try requiredPropertyProblem(allocator, context.required_properties, primary_properties)) |message| {
+        defer allocator.free(message);
+        return rejectedFmt(allocator, "required_property_lost", "{s}", .{message});
+    }
+
     const policy_hash = zts.policyHash();
     const read_set_digest = digestReadSet(snapshot);
     const proof_id = digestProof(prepared, snapshot, roots, false);
@@ -322,9 +331,12 @@ fn discoverConsistentContext(
         if (index == 0) {
             result.schema_relative = if (schema_relative) |path| try allocator.dupe(u8, path) else null;
             result.policy_relative = if (policy_relative) |path| try allocator.dupe(u8, path) else null;
+            result.required_properties = paths.required_properties;
+            paths.required_properties = &.{};
         } else {
             if (!optionalEqual(result.schema_relative, schema_relative)) return error.InconsistentSqlContext;
             if (!optionalEqual(result.policy_relative, policy_relative)) return error.InconsistentPolicyContext;
+            if (!namesEqual(result.required_properties, paths.required_properties)) return error.InconsistentRequiredProperties;
         }
     }
     return result;
@@ -351,6 +363,14 @@ fn relativeOptionalContext(
     const value = path orelse return null;
     if (!common.isPathInsideRoot(root, value)) return error.ProofContextOutsideProject;
     return try allocator.dupe(u8, common.relativeToRoot(root, value));
+}
+
+fn namesEqual(left: []const []const u8, right: []const []const u8) bool {
+    if (left.len != right.len) return false;
+    for (left, right) |l, r| {
+        if (!std.mem.eql(u8, l, r)) return false;
+    }
+    return true;
 }
 
 fn optionalEqual(left: ?[]const u8, right: ?[]const u8) bool {
@@ -681,6 +701,57 @@ fn mappedOptionalPath(
 
 fn fileExists(allocator: std.mem.Allocator, path: []const u8) bool {
     return zts.file_io.fileExists(allocator, path);
+}
+
+/// The reason `zttp.json` `requiredProperties` refuses a candidate, owned, or null when the candidate
+/// proves every required property. The test is absolute: the baseline is not consulted. An unknown
+/// name is reported before a missing property.
+fn requiredPropertyProblem(
+    allocator: std.mem.Allocator,
+    required: []const []const u8,
+    properties: ?ui_payload.PropertiesSnapshot,
+) !?[]u8 {
+    if (required.len == 0) return null;
+    for (required) |name| {
+        if (isPropertyName(name)) continue;
+        const hint = try zts.suggestionForUnknownProperty(allocator, name);
+        defer if (hint) |text| allocator.free(text);
+        return try allocator.print(
+            "zttp.json requiredProperties names an unknown property {s}: {s}",
+            .{ name, hint orelse "" },
+        );
+    }
+    const proven = properties orelse return try allocator.dupe(
+        u8,
+        "zttp.json requiredProperties requires proven properties, but the candidate has no property result for the primary handler",
+    );
+    var missing: std.ArrayList(u8) = .empty;
+    defer missing.deinit(allocator);
+    for (required) |name| {
+        if (provesProperty(proven, name)) continue;
+        if (missing.items.len > 0) try missing.appendSlice(allocator, ", ");
+        try missing.appendSlice(allocator, name);
+    }
+    if (missing.items.len == 0) return null;
+    return try allocator.print(
+        "zttp.json requiredProperties requires properties that the candidate does not prove: {s}",
+        .{missing.items},
+    );
+}
+
+fn isPropertyName(name: []const u8) bool {
+    for (zts.v1_spec_names) |known| {
+        if (std.mem.eql(u8, known, name)) return true;
+    }
+    return false;
+}
+
+/// Whether `properties` proves the boolean field called `name`. A name with no field is not proven.
+fn provesProperty(properties: ui_payload.PropertiesSnapshot, name: []const u8) bool {
+    inline for (@typeInfo(ui_payload.PropertiesSnapshot).@"struct".field_names) |field| {
+        if (@FieldType(ui_payload.PropertiesSnapshot, field) == bool and std.mem.eql(u8, field, name)) return @field(properties, field);
+    }
+    return false;
 }
 
 fn rejectedFmt(
@@ -1149,17 +1220,14 @@ fn envReadingHandler(comptime answer: []const u8) []const u8 {
         "  return Response.text(\"" ++ answer ++ "\");\n}\n";
 }
 
-/// Prove an edit of `src/handler.ts` in a project whose `zttp.json` names
-/// `policy.json` with the given text.
-fn proveUnderPolicy(policy_source: []const u8, baseline_source: []const u8, candidate_source: []const u8) !Result {
+/// Prove an edit of `src/handler.ts` in a project whose `zttp.json` has the given text. A non-null
+/// `policy_source` becomes `policy.json`.
+fn proveUnderConfig(zttp_json: []const u8, policy_source: ?[]const u8, baseline_source: []const u8, candidate_source: []const u8) !Result {
     var tmp = testing.tmpDir(.{});
     defer tmp.cleanup();
     try tmp.dir.createDirPath(testing.io, "src");
-    try tmp.dir.writeFile(testing.io, .{
-        .sub_path = "zttp.json",
-        .data = "{\"entry\":\"src/handler.ts\",\"policy\":\"policy.json\"}",
-    });
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "policy.json", .data = policy_source });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "zttp.json", .data = zttp_json });
+    if (policy_source) |text| try tmp.dir.writeFile(testing.io, .{ .sub_path = "policy.json", .data = text });
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/handler.ts", .data = baseline_source });
     const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
     defer testing.allocator.free(root_z);
@@ -1170,6 +1238,11 @@ fn proveUnderPolicy(policy_source: []const u8, baseline_source: []const u8, cand
     var snapshot = try workspace_snapshot.Snapshot.capture(testing.allocator, &prepared);
     defer snapshot.deinit(testing.allocator);
     return prove(testing.allocator, &prepared, &snapshot);
+}
+
+/// Prove an edit of `src/handler.ts` in a project whose `zttp.json` names `policy.json` with the given text.
+fn proveUnderPolicy(policy_source: []const u8, baseline_source: []const u8, candidate_source: []const u8) !Result {
+    return proveUnderConfig("{\"entry\":\"src/handler.ts\",\"policy\":\"policy.json\"}", policy_source, baseline_source, candidate_source);
 }
 
 test "aggregate proof rejects an env read that a valid policy forbids" {
@@ -1183,4 +1256,93 @@ test "aggregate proof rejects a change set when the policy file does not parse" 
     defer result.deinit(testing.allocator);
     try testing.expectEqualStrings("policy_context_failed", result.rejected.code);
     try testing.expectEqualStrings("capability policy policy.json does not parse: UnexpectedEndOfInput", result.rejected.message);
+}
+
+const recursive_handler_one =
+    "function down(n: number): number { return down(n + 1); }\n" ++
+    "export function handler(req: Request): Response { return Response.text(String(down(0))); }\n";
+const recursive_handler_two =
+    "function down(n: number): number { return down(n + 1); }\n" ++
+    "export function handler(req: Request): Response { return Response.text(String(down(1))); }\n";
+const plain_handler_changed =
+    "export function handler(req: Request): Response {\n  return Response.text(\"new\");\n}\n";
+const requires_cost_bounded = "{\"entry\":\"src/handler.ts\",\"requiredProperties\":[\"cost_bounded\"]}";
+
+test "aggregate proof rejects a candidate that lacks a required property the baseline also lacks" {
+    var result = try proveUnderConfig(requires_cost_bounded, null, recursive_handler_one, recursive_handler_two);
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("required_property_lost", result.rejected.code);
+    try testing.expectEqualStrings(
+        "zttp.json requiredProperties requires properties that the candidate does not prove: cost_bounded",
+        result.rejected.message,
+    );
+}
+
+test "aggregate proof accepts a candidate that proves the required property" {
+    var result = try proveUnderConfig(requires_cost_bounded, null, handler_without_imports, plain_handler_changed);
+    defer result.deinit(testing.allocator);
+    try testing.expect(result == .accepted);
+}
+
+test "aggregate proof names the nearest valid property for an unknown required name" {
+    var result = try proveUnderConfig(
+        "{\"entry\":\"src/handler.ts\",\"requiredProperties\":[\"cost_bound\"]}",
+        null,
+        handler_without_imports,
+        plain_handler_changed,
+    );
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("required_property_lost", result.rejected.code);
+    try testing.expectEqualStrings(
+        "zttp.json requiredProperties names an unknown property cost_bound: did you mean `cost_bounded`?",
+        result.rejected.message,
+    );
+}
+
+fn snapshotWith(comptime value: bool) ui_payload.PropertiesSnapshot {
+    var snapshot: ui_payload.PropertiesSnapshot = undefined;
+    inline for (@typeInfo(ui_payload.PropertiesSnapshot).@"struct".field_names) |field| {
+        @field(snapshot, field) = if (@FieldType(ui_payload.PropertiesSnapshot, field) == bool) value else null;
+    }
+    return snapshot;
+}
+
+test "every v1 spec name is a valid required property that a snapshot can prove" {
+    for (zts.v1_spec_names) |name| {
+        try testing.expectEqual(@as(?[]u8, null), try requiredPropertyProblem(testing.allocator, &.{name}, snapshotWith(true)));
+    }
+}
+
+test "every v1 spec name is named when the candidate does not prove it" {
+    for (zts.v1_spec_names) |name| {
+        const message = try requiredPropertyProblem(testing.allocator, &.{name}, snapshotWith(false)) orelse return error.TestUnexpectedResult;
+        defer testing.allocator.free(message);
+        try testing.expect(std.mem.endsWith(u8, message, name));
+    }
+}
+
+test "required properties name every missing property in file order" {
+    const message = try requiredPropertyProblem(
+        testing.allocator,
+        &.{ "state_isolated", "cost_bounded", "fault_covered" },
+        snapshotWith(false),
+    ) orelse return error.TestUnexpectedResult;
+    defer testing.allocator.free(message);
+    try testing.expectEqualStrings(
+        "zttp.json requiredProperties requires properties that the candidate does not prove: state_isolated, cost_bounded, fault_covered",
+        message,
+    );
+}
+
+test "required properties refuse a candidate that has no property result" {
+    const message = try requiredPropertyProblem(testing.allocator, &.{"cost_bounded"}, null) orelse return error.TestUnexpectedResult;
+    defer testing.allocator.free(message);
+    try testing.expectEqualStrings(
+        "zttp.json requiredProperties requires proven properties, but the candidate has no property result for the primary handler",
+        message,
+    );
+}
+
+test "an empty requiredProperties list refuses nothing" {
+    try testing.expectEqual(@as(?[]u8, null), try requiredPropertyProblem(testing.allocator, &.{}, null));
 }

@@ -238,3 +238,20 @@ Check parity, 2026-11-01: the owner opened that window, and the [check parity pl
 A handler cannot set a response header. A Response init accepts only a number `status`, and `zts check` refuses every other member with ZTS203. On 2026-11-10 the owner chose option (b) of Decision 5 of the [receipt archive plan](plans/2026-11-10-receipt-archive-and-schema-input-plan.md).
 
 Header support lands with the next re-record of the codegen corpus. That work honors `headers` in a Response init. The flow analysis treats each header value as response content, so a secret in a header is a leak. `flow_analyzer_version` moves from 10 to 11, which moves the policy hash and breaks the corpus replay. The work and the re-record therefore land together. Until then, the ZTS203 refusal stands.
+
+## Expert
+
+### D-020 Required proof properties live in zttp.json and the expert enforces them
+
+- Status: standing
+- Decided: 2026-11-14
+- Binds: packages/pi/src/aggregate_proof.zig, packages/tools/src/project_config.zig, docs/user-guide.md
+- Gate: zig build test-expert-app
+
+A project pins proof properties in `zttp.json` under `requiredProperties`, for example `["state_isolated", "cost_bounded"]`. The expert proof in `packages/pi/src/aggregate_proof.zig` enforces the pin as a host rejection with the code `required_property_lost`. The rejection comes after the diagnostic comparison and applies in every approval mode, including `--yes`. The owner chose option (a) of Decision 11 of the [expert contract card plan](plans/2026-11-14-expert-contract-card-plan.md) on 2026-11-14.
+
+The rule is absolute. The candidate must prove each named property, whatever the baseline proves. When the baseline already lacks a property, every change set is refused until a candidate proves it again or the developer removes the name. A name outside `v1_spec_names` and a missing property result are refused too.
+
+It is an expert rule only. `zttp check`, `zttp dev`, `zttp build`, and `zttp deploy` do not read the key. The model cannot edit `zttp.json`, because a change set holds `.ts` files only. The rejection is a string in `aggregate_proof.zig`: no catalog, hash, persona, tool, or recorded cassette includes it, so D-012 does not bind it, and the model sees the text only in a project that has the key.
+
+The capability policy file is not the place. A new policy section needs a new diagnostic, which moves the catalog hash and the policy hash and forces a corpus re-record. A typo in a policy section makes the policy parse fail, and the check then reports the same ZTS000 on both sides. An older zttp refuses a policy file with an unknown section, but it ignores an unknown key in `zttp.json`.

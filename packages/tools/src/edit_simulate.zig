@@ -431,10 +431,14 @@ fn writeProjectContextFailure(writer: anytype, file: []const u8) !void {
 pub const ProjectPaths = struct {
     sqlite: ?[]u8 = null,
     policy: ?[]u8 = null,
+    /// The `requiredProperties` names, unchecked, in file order.
+    required_properties: []const []const u8 = &.{},
 
     pub fn deinit(self: *ProjectPaths, allocator: std.mem.Allocator) void {
         if (self.sqlite) |p| allocator.free(p);
         if (self.policy) |p| allocator.free(p);
+        for (self.required_properties) |name| allocator.free(name);
+        allocator.free(self.required_properties);
         self.* = .{};
     }
 };
@@ -465,7 +469,23 @@ pub fn discoverProjectPaths(allocator: std.mem.Allocator, start_path: ?[]const u
     var paths: ProjectPaths = .{ .sqlite = try cfg.resolvedSqlitePath(allocator) };
     errdefer paths.deinit(allocator);
     paths.policy = try cfg.resolvedPolicyPath(allocator);
+    paths.required_properties = try dupeNames(allocator, cfg.required_properties);
     return paths;
+}
+
+/// Owned copy of `names`. A failure frees the copies made so far.
+fn dupeNames(allocator: std.mem.Allocator, names: []const []const u8) ![]const []const u8 {
+    const copy = try allocator.alloc([]const u8, names.len);
+    var done: usize = 0;
+    errdefer {
+        for (copy[0..done]) |name| allocator.free(name);
+        allocator.free(copy);
+    }
+    for (names, 0..) |name, index| {
+        copy[index] = try allocator.dupe(u8, name);
+        done = index + 1;
+    }
+    return copy;
 }
 
 /// Read the project's capability policy: the `policy` entry in the nearest
