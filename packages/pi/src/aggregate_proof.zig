@@ -181,16 +181,12 @@ pub fn prove(
         // the diagnostic comparison below would accept the edit with every
         // allow list switched off.
         if (after_policy) |src| {
-            if (zts.parsePolicyJson(allocator, src)) |parsed| {
-                var policy = parsed;
-                policy.deinit(allocator);
-            } else |err| {
-                if (err == error.OutOfMemory) return err;
+            if (try policyParseError(allocator, src)) |reason| {
                 return rejectedFmt(
                     allocator,
                     "policy_context_failed",
-                    "capability policy {s} does not parse: {s}",
-                    .{ context.policy_relative orelse "", @errorName(err) },
+                    policy_unparsable_format,
+                    .{ context.policy_relative orelse "", reason },
                 );
             }
         }
@@ -760,11 +756,40 @@ pub const WorkspaceContract = struct {
     }
 };
 
+const policy_unparsable_format = "capability policy {s} does not parse: {s}";
+
+/// The name of the error that `zts.parsePolicyJson` gives for `source`, or null when the policy parses.
+fn policyParseError(allocator: std.mem.Allocator, source: []const u8) error{OutOfMemory}!?[]const u8 {
+    var policy = zts.parsePolicyJson(allocator, source) catch |err| {
+        if (err == error.OutOfMemory) return error.OutOfMemory;
+        return @errorName(err);
+    };
+    policy.deinit(allocator);
+    return null;
+}
+
+/// The outcome of `checkWorkspace`.
+pub const WorkspaceCheck = union(enum) {
+    checked: WorkspaceContract,
+    /// The reason `prove` would reject every change set: the policy that `zttp.json` names does
+    /// not parse. Owned.
+    policy_unparsable: []u8,
+
+    pub fn deinit(self: *WorkspaceCheck, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .checked => |*check| check.deinit(allocator),
+            .policy_unparsable => |message| allocator.free(message),
+        }
+        self.* = undefined;
+    }
+};
+
 /// Run the check that `prove` runs on the primary root, on the workspace as it
 /// stands: the same `collectCheckDiagnostics`, with the schema and policy that
 /// `zttp.json` names. The `/contract` card reads this result, so the card and
-/// the veto cannot disagree about what the handler proves.
-pub fn checkWorkspace(allocator: std.mem.Allocator, workspace_root: []const u8) !WorkspaceContract {
+/// the veto cannot disagree about what the handler proves. A policy that does not
+/// parse gives `policy_unparsable`, as `prove` rejects it.
+pub fn checkWorkspace(allocator: std.mem.Allocator, workspace_root: []const u8) !WorkspaceCheck {
     const root = try common.resolveInsideWorkspace(allocator, workspace_root, ".");
     defer allocator.free(root);
     const manifest_path = try std.fs.path.join(allocator, &.{ root, "zttp.json" });
@@ -773,6 +798,8 @@ pub fn checkWorkspace(allocator: std.mem.Allocator, workspace_root: []const u8) 
     defer io_backend.deinit();
     var config = project_config.loadAbsolute(allocator, io_backend.io(), manifest_path) catch |err| switch (err) {
         error.SyntaxError, error.UnexpectedEndOfInput, error.InvalidProjectConfig => return error.ManifestInvalid,
+        error.InvalidRequiredProperties => return error.RequiredPropertiesInvalid,
+        error.DuplicateField => return error.ManifestDuplicateKey,
         else => return err,
     };
     defer config.deinit(allocator);
@@ -785,6 +812,14 @@ pub fn checkWorkspace(allocator: std.mem.Allocator, workspace_root: []const u8) 
     defer paths.deinit(allocator);
     const policy_source: ?[]u8 = if (paths.policy) |path| try zts.file_io.readFile(allocator, path, 1024 * 1024) else null;
     defer if (policy_source) |src| allocator.free(src);
+    // `prove` rejects every change set under a policy that does not parse, so no property is
+    // proven under one.
+    if (policy_source) |src| {
+        if (try policyParseError(allocator, src)) |reason| {
+            const policy_path = paths.policy orelse "";
+            return .{ .policy_unparsable = try allocator.print(policy_unparsable_format, .{ common.relativeToRoot(root, policy_path), reason }) };
+        }
+    }
 
     const entry = try allocator.dupe(u8, common.relativeToRoot(root, entry_path));
     errdefer allocator.free(entry);
@@ -793,12 +828,12 @@ pub fn checkWorkspace(allocator: std.mem.Allocator, workspace_root: []const u8) 
     const collected = try collectCheckDiagnostics(allocator, &diagnostics, root, entry_path, paths.sqlite, policy_source, true);
     const required = paths.required_properties;
     paths.required_properties = &.{};
-    return .{
+    return .{ .checked = .{
         .entry = entry,
         .required = required,
         .properties = collected.properties,
         .contract = collected.contract,
-    };
+    } };
 }
 
 /// The names of `v1_spec_names` that `properties` proves, in that order. The

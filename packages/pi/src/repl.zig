@@ -1597,6 +1597,8 @@ fn reportContractFailure(allocator: std.mem.Allocator, prefix: []const u8, err: 
     const reason: []const u8 = switch (err) {
         error.WorkspaceChangeSetActive => "another zttp session holds the workspace lock.",
         error.ManifestInvalid => "zttp.json does not parse as a JSON object.",
+        error.ManifestDuplicateKey => "zttp.json has a duplicate key.",
+        error.RequiredPropertiesInvalid => "requiredProperties in zttp.json is not a list of names.",
         error.FileNotFound => "zttp.json does not exist.",
         error.EntryMissing => "the entry file of zttp.json does not exist.",
         else => @errorName(err),
@@ -1676,9 +1678,17 @@ fn writeRequired(allocator: std.mem.Allocator, names: []const []const u8) !void 
 /// Print the contract card of the workspace, then offer to require every
 /// property it proves.
 fn contractCard(allocator: std.mem.Allocator) !void {
-    var check = aggregate_proof.checkWorkspace(allocator, ".") catch |err|
+    var outcome = aggregate_proof.checkWorkspace(allocator, ".") catch |err|
         return reportContractFailure(allocator, "Cannot read the contract", err);
-    defer check.deinit(allocator);
+    defer outcome.deinit(allocator);
+    const check = switch (outcome) {
+        .checked => |checked| checked,
+        .policy_unparsable => |message| {
+            const text = try allocator.print("Cannot read the contract: {s}\n", .{message});
+            defer allocator.free(text);
+            return writeStderr(text);
+        },
+    };
     const proven = try aggregate_proof.provenNames(allocator, check.properties);
     defer allocator.free(proven);
 
@@ -3453,6 +3463,131 @@ test "/contract reports a zttp.json that does not parse and leaves the file" {
     const after = try project.manifest(allocator);
     defer allocator.free(after);
     try testing.expectEqualStrings("[1, 2]", after);
+}
+
+test "/contract refuses a policy file that does not parse and leaves zttp.json" {
+    const allocator = testing.allocator;
+    const config = "{\"entry\":\"src/handler.ts\",\"policy\":\"policy.json\"}";
+    var project = try ContractProject.begin(allocator, config);
+    defer project.end(allocator);
+    try project.tmp.writeFile(allocator, "policy.json", "{\"env\":{\"allow\":[]}");
+    var out: [2048]u8 = undefined;
+    var err: [2048]u8 = undefined;
+    const captured = try project.repl(allocator, "/contract\n/quit\n", &out, &err);
+    try testing.expectEqualStrings("", captured.stdout);
+    try testing.expectEqualStrings("Cannot read the contract: capability policy policy.json does not parse: UnexpectedEndOfInput\n", captured.stderr);
+    const after = try project.manifest(allocator);
+    defer allocator.free(after);
+    try testing.expectEqualStrings(config, after);
+}
+
+test "/contract then y keeps the file mode of zttp.json" {
+    const allocator = testing.allocator;
+    var project = try ContractProject.begin(allocator, init_config);
+    defer project.end(allocator);
+    const path = try project.tmp.childPath(allocator, "zttp.json");
+    defer allocator.free(path);
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
+    defer allocator.free(path_z);
+    try testing.expectEqual(@as(c_int, 0), std.c.chmod(path_z, 0o644));
+    var out: [2048]u8 = undefined;
+    var err: [2048]u8 = undefined;
+    const captured = try project.repl(allocator, "/contract\ny\n/quit\n", &out, &err);
+    try testing.expectEqualStrings(init_card ++ "Required: " ++ init_proven_names ++ "\n", captured.stdout);
+    try testing.expectEqualStrings("", captured.stderr);
+    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
+    defer std.Io.Threaded.closeFd(fd);
+    const stat = try zts.file_io.fstatFd(fd);
+    try testing.expectEqual(@as(u32, 0o644), stat.mode & 0o777);
+}
+
+test "/contract then y writes through a symlinked zttp.json and keeps the link" {
+    const allocator = testing.allocator;
+    var project = try ContractProject.begin(allocator, "unused");
+    defer project.end(allocator);
+    try project.tmp.writeFile(allocator, "real.json", "{\"entry\":\"src/handler.ts\",\"port\":3000}");
+    const link_path = try project.tmp.childPath(allocator, "zttp.json");
+    defer allocator.free(link_path);
+    const link_z = try allocator.dupeSentinel(u8, link_path, 0);
+    defer allocator.free(link_z);
+    try testing.expectEqual(@as(c_int, 0), std.c.unlink(link_z));
+    try testing.expectEqual(@as(c_int, 0), std.c.symlink("real.json", link_z));
+    var out: [2048]u8 = undefined;
+    var err: [2048]u8 = undefined;
+    const captured = try project.repl(allocator, "/contract\ny\n/quit\n", &out, &err);
+    try testing.expectEqualStrings(init_card ++ "Required: " ++ init_proven_names ++ "\n", captured.stdout);
+    try testing.expectEqualStrings("", captured.stderr);
+    var target: [64]u8 = undefined;
+    try testing.expectEqual(@as(isize, 9), std.c.readlink(link_z, &target, target.len));
+    try testing.expectEqualStrings("real.json", target[0..9]);
+    const real_path = try project.tmp.childPath(allocator, "real.json");
+    defer allocator.free(real_path);
+    const real = try zts.file_io.readFile(allocator, real_path, 1024 * 1024);
+    defer allocator.free(real);
+    try testing.expectEqualStrings(
+        "{\n  \"entry\": \"src/handler.ts\",\n  \"port\": 3000,\n  \"requiredProperties\": [\n" ++
+            init_proven_lines ++ "  ]\n}\n",
+        real,
+    );
+}
+
+const not_a_list_config = "{\"entry\":\"src/handler.ts\",\"requiredProperties\":\"cost_bounded\"}";
+const duplicate_key_config = "{\"entry\":\"src/handler.ts\",\"port\":1,\"port\":2}";
+
+test "/contract says that requiredProperties is not a list of names and leaves the file" {
+    const allocator = testing.allocator;
+    var project = try ContractProject.begin(allocator, not_a_list_config);
+    defer project.end(allocator);
+    var out: [2048]u8 = undefined;
+    var err: [2048]u8 = undefined;
+    const captured = try project.repl(allocator, "/contract\n/quit\n", &out, &err);
+    try testing.expectEqualStrings("", captured.stdout);
+    try testing.expectEqualStrings("Cannot read the contract: requiredProperties in zttp.json is not a list of names.\n", captured.stderr);
+    const after = try project.manifest(allocator);
+    defer allocator.free(after);
+    try testing.expectEqualStrings(not_a_list_config, after);
+}
+
+test "/contract drop says that requiredProperties is not a list of names and leaves the file" {
+    const allocator = testing.allocator;
+    var project = try ContractProject.begin(allocator, not_a_list_config);
+    defer project.end(allocator);
+    var out: [2048]u8 = undefined;
+    var err: [2048]u8 = undefined;
+    const captured = try project.repl(allocator, "/contract drop cost_bounded\n/quit\n", &out, &err);
+    try testing.expectEqualStrings("", captured.stdout);
+    try testing.expectEqualStrings("Cannot change zttp.json: requiredProperties in zttp.json is not a list of names.\n", captured.stderr);
+    const after = try project.manifest(allocator);
+    defer allocator.free(after);
+    try testing.expectEqualStrings(not_a_list_config, after);
+}
+
+test "/contract says that zttp.json has a duplicate key and leaves the file" {
+    const allocator = testing.allocator;
+    var project = try ContractProject.begin(allocator, duplicate_key_config);
+    defer project.end(allocator);
+    var out: [2048]u8 = undefined;
+    var err: [2048]u8 = undefined;
+    const captured = try project.repl(allocator, "/contract\n/quit\n", &out, &err);
+    try testing.expectEqualStrings("", captured.stdout);
+    try testing.expectEqualStrings("Cannot read the contract: zttp.json has a duplicate key.\n", captured.stderr);
+    const after = try project.manifest(allocator);
+    defer allocator.free(after);
+    try testing.expectEqualStrings(duplicate_key_config, after);
+}
+
+test "/contract drop says that zttp.json has a duplicate key and leaves the file" {
+    const allocator = testing.allocator;
+    var project = try ContractProject.begin(allocator, duplicate_key_config);
+    defer project.end(allocator);
+    var out: [2048]u8 = undefined;
+    var err: [2048]u8 = undefined;
+    const captured = try project.repl(allocator, "/contract drop cost_bounded\n/quit\n", &out, &err);
+    try testing.expectEqualStrings("", captured.stdout);
+    try testing.expectEqualStrings("Cannot change zttp.json: zttp.json has a duplicate key.\n", captured.stderr);
+    const after = try project.manifest(allocator);
+    defer allocator.free(after);
+    try testing.expectEqualStrings(duplicate_key_config, after);
 }
 
 test "/contract then y reports a held workspace lock and leaves the file" {

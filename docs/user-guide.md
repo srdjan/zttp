@@ -634,7 +634,13 @@ The command `/contract drop <name>` removes one name from the list. It prints
 `<name> is not required.` when the name is not listed. Both commands keep every
 other key of `zttp.json` in order and write the file atomically. They refuse
 when another zttp session holds the workspace lock or when `zttp.json` does not
-parse. The commands add nothing to the model transcript.
+parse. `/contract` also refuses when the capability policy that `zttp.json`
+names does not parse. The commands add nothing to the model transcript.
+
+The writer rewrites `zttp.json` with two-space indentation. Number text can
+change form, for example `1.0` becomes `1`. A `zttp.json` in a subdirectory
+starts a separate project, so the outer pin does not hold an edit to a file
+inside that subdirectory.
 
 ### Context compaction
 

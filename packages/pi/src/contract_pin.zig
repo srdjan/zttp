@@ -5,7 +5,9 @@
 //! know. The read, the edit, and the write all happen under the workspace lock
 //! after recovery, so no change set commits at the same time and no edit works
 //! from a stale list. `file_io.writeFile` writes a temporary file in the same
-//! directory and renames it over `zttp.json`.
+//! directory and renames it over the target with mode 0600. The writer first
+//! resolves `zttp.json` to its real path, so a symlink stays a symlink and its
+//! target changes, and it gives the rewritten file the mode of the old file.
 
 const std = @import("std");
 const zts = @import("zts");
@@ -40,9 +42,10 @@ pub const Edited = struct {
 /// An existing key keeps its place. A new key goes at the end.
 ///
 /// `error.WorkspaceChangeSetActive` means another holder has the workspace
-/// lock. `error.ManifestInvalid` means `zttp.json` is not a JSON object, or its
-/// `requiredProperties` is not an array of strings. In both cases the file
-/// stays as it was.
+/// lock. `error.ManifestInvalid` means `zttp.json` is not a JSON object.
+/// `error.ManifestDuplicateKey` means a key occurs twice in it.
+/// `error.RequiredPropertiesInvalid` means its `requiredProperties` is not an
+/// array of strings. In every case the file stays as it was.
 pub fn editRequiredProperties(
     allocator: std.mem.Allocator,
     workspace_root: []const u8,
@@ -51,13 +54,16 @@ pub fn editRequiredProperties(
     var workspace = try change_transaction.RecoveredWorkspace.acquire(allocator, workspace_root);
     defer workspace.deinit();
 
-    const manifest_path = try std.fs.path.join(allocator, &.{ workspace.root(), manifest_name });
+    const link_path = try std.fs.path.join(allocator, &.{ workspace.root(), manifest_name });
+    defer allocator.free(link_path);
+    const manifest_path = try realPath(allocator, link_path);
     defer allocator.free(manifest_path);
     const bytes = try zts.file_io.readFile(allocator, manifest_path, max_manifest_bytes);
     defer allocator.free(bytes);
 
     var parsed = std.json.parseFromSlice(std.json.Value, allocator, bytes, .{}) catch |err| switch (err) {
         error.OutOfMemory => return err,
+        error.DuplicateField => return error.ManifestDuplicateKey,
         else => return error.ManifestInvalid,
     };
     defer parsed.deinit();
@@ -66,9 +72,9 @@ pub fn editRequiredProperties(
     var names: std.ArrayList([]const u8) = .empty;
     defer names.deinit(allocator);
     if (parsed.value.object.get(key)) |current| {
-        if (current != .array) return error.ManifestInvalid;
+        if (current != .array) return error.RequiredPropertiesInvalid;
         for (current.array.items) |item| {
-            if (item != .string) return error.ManifestInvalid;
+            if (item != .string) return error.RequiredPropertiesInvalid;
             try names.append(allocator, item.string);
         }
     }
@@ -84,9 +90,31 @@ pub fn editRequiredProperties(
         defer allocator.free(rendered);
         const text = try std.mem.concat(allocator, u8, &.{ rendered, "\n" });
         defer allocator.free(text);
+        const mode = try modeOf(allocator, manifest_path);
         try zts.file_io.writeFile(allocator, manifest_path, text);
+        const path_z = try allocator.dupeSentinel(u8, manifest_path, 0);
+        defer allocator.free(path_z);
+        if (std.c.chmod(path_z, @intCast(mode & 0o7777)) != 0) return error.WriteFailure;
     }
     return .{ .names = try dupeNames(allocator, names.items), .changed = changed };
+}
+
+/// The path of `path` with every symlink resolved.
+fn realPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
+    defer allocator.free(path_z);
+    var resolved: [std.c.PATH_MAX + 1]u8 = undefined;
+    const found = std.c.realpath(path_z, &resolved) orelse return error.FileNotFound;
+    return allocator.dupe(u8, std.mem.span(found));
+}
+
+/// The permission bits of the file at `path`.
+fn modeOf(allocator: std.mem.Allocator, path: []const u8) !u32 {
+    const path_z = try allocator.dupeSentinel(u8, path, 0);
+    defer allocator.free(path_z);
+    const fd = try std.posix.openatZ(std.posix.AT.FDCWD, path_z, .{ .ACCMODE = .RDONLY }, 0);
+    defer std.Io.Threaded.closeFd(fd);
+    return (try zts.file_io.fstatFd(fd)).mode;
 }
 
 /// Edit `names` in place and report whether it changed.

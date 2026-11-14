@@ -172,7 +172,10 @@ pub fn loadAbsolute(
         .outbound_hosts = try dupStringArrayField(allocator, obj, "outboundHosts"),
     };
     errdefer config.deinit(allocator);
-    config.required_properties = try dupStringArrayField(allocator, obj, "requiredProperties");
+    config.required_properties = dupStringArrayField(allocator, obj, "requiredProperties") catch |err| switch (err) {
+        error.InvalidProjectConfig => return error.InvalidRequiredProperties,
+        else => return err,
+    };
     if (config.static_dir == null) {
         const public_path = try std.fs.path.resolve(allocator, &.{ config.root_dir, "public" });
         defer allocator.free(public_path);
