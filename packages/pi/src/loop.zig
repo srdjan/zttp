@@ -81,11 +81,13 @@ pub const ChangeSetApprovalPreview = struct {
     /// Diagnostics the candidate shares with the baseline. The proof accepted
     /// the change set, so none of them is new.
     carried_over_diagnostics: usize = 0,
-    /// Primary-root properties that the change set gains or loses. Empty when
-    /// either snapshot is missing. Not part of `approvalPreviewDigest`.
-    property_changes: []const ui_payload_mod.PropertiesSnapshot.Change = &.{},
-    /// Env, egress, route, and capability changes of the primary root.
-    contract_changes: []const aggregate_proof.ContractChange = &.{},
+    /// Primary-root properties that the change set gains or loses. Null when
+    /// either snapshot is missing, so no comparison ran. Not part of
+    /// `approvalPreviewDigest`.
+    property_changes: ?[]const ui_payload_mod.PropertiesSnapshot.Change = &.{},
+    /// Env, egress, route, and capability changes of the primary root. Null
+    /// when either contract is missing.
+    contract_changes: ?[]const aggregate_proof.ContractChange = &.{},
     /// Result of the project suite run against the candidate. Shown to the
     /// developer only. Not part of `approvalPreviewDigest`.
     test_run: suite_run.TestRun = .none,
@@ -309,6 +311,8 @@ pub const RunOptions = struct {
     /// against the candidate before the approval call and puts the result on
     /// the preview. Null runs nothing.
     test_binary: ?[]const u8 = null,
+    /// Wall-time limit of that run.
+    test_timeout_ms: u32 = suite_run.default_timeout_ms,
 };
 
 /// Verification attempts granted to interactive and `--print` turns. Higher
@@ -1081,8 +1085,9 @@ const ApplyState = struct {
 fn propertyChanges(
     arena: std.mem.Allocator,
     proof: *const aggregate_proof.AggregateProof,
-) ![]const ui_payload_mod.PropertiesSnapshot.Change {
-    const after = proof.primary_properties orelse return &.{};
+) !?[]const ui_payload_mod.PropertiesSnapshot.Change {
+    const before = proof.baseline_primary_properties orelse return null;
+    const after = proof.primary_properties orelse return null;
     const Visitor = struct {
         arena: std.mem.Allocator,
         list: std.ArrayList(ui_payload_mod.PropertiesSnapshot.Change) = .empty,
@@ -1092,7 +1097,7 @@ fn propertyChanges(
         }
     };
     var visitor: Visitor = .{ .arena = arena };
-    try ui_payload_mod.PropertiesSnapshot.forEachChange(proof.baseline_primary_properties, after, *Visitor, &visitor);
+    try ui_payload_mod.PropertiesSnapshot.forEachChange(before, after, *Visitor, &visitor);
     return visitor.list.items;
 }
 
@@ -1115,7 +1120,7 @@ fn applyVerifiedChangeSet(
             .rewrite_trace = change.rewrite_trace,
         };
         const property_changes = try propertyChanges(arena, proof);
-        const test_run = try suite_run.run(allocator, arena, options.test_binary, snapshot, prepared);
+        const test_run = try suite_run.run(allocator, arena, options.test_binary, options.test_timeout_ms, snapshot, prepared);
         if (!try approve.call(.{
             .proof_id = &proof.proof_id,
             .changes = previews,

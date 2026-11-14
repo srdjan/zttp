@@ -13,11 +13,12 @@ const tools_common = @import("tools/common.zig");
 const max_kept_line_bytes: usize = 160;
 
 pub const TestRun = union(enum) {
-    /// No suite in the project, or the host did not enable the run.
+    /// The project has no suite.
     none,
     /// `zttp test` ran the suite. `results` is the text after `Results: `.
     ran: Ran,
-    /// `zttp test` could not run the suite. The payload is its first error line.
+    /// The suite gave no result. The payload is the first error line of
+    /// `zttp test`, or the reason that the host gives.
     not_runnable: []const u8,
 
     pub const Ran = struct {
@@ -26,20 +27,26 @@ pub const TestRun = union(enum) {
     };
 };
 
-/// Run `<binary> test <suite>` against the candidate overlay. A null `binary`
-/// or a project without the default suite gives `.none`. The result strings
-/// live in `arena`.
+/// Longest time the suite may run before the card says that it did not finish.
+/// A chosen bound, not a measurement: the suite of a `zttp init` project took
+/// 48 ms on a Debug build.
+pub const default_timeout_ms: u32 = 30_000;
+
+/// Run `<binary> test <suite>` against the candidate overlay. A project
+/// without the default suite gives `.none`. The result strings live in
+/// `arena`.
 pub fn run(
     allocator: std.mem.Allocator,
     arena: std.mem.Allocator,
     binary: ?[]const u8,
+    timeout_ms: u32,
     snapshot: *const workspace_snapshot.Snapshot,
     prepared: *const change_set.PreparedChangeSet,
 ) !TestRun {
-    const zttp_binary = binary orelse return .none;
     const suite_path = try std.fs.path.resolve(allocator, &.{ snapshot.project_root, project_config.default_test_suite });
     defer allocator.free(suite_path);
     if (!zts.file_io.fileExists(allocator, suite_path)) return .none;
+    const zttp_binary = binary orelse return .{ .not_runnable = "the path of the zttp executable is unknown" };
 
     var overlay = snapshot.materializeCandidate(allocator, prepared) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
@@ -47,16 +54,22 @@ pub fn run(
     };
     defer overlay.deinit();
 
-    var outcome = tools_common.runCommand(
+    var outcome = tools_common.runCommandWithin(
         allocator,
         overlay.root,
         &.{ zttp_binary, "test", suite_path },
+        timeout_ms,
     ) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
+        error.Timeout => return .{ .not_runnable = try arena.print("zttp test did not finish in {d} ms", .{timeout_ms}) },
+        error.StreamTooLong => return .{ .not_runnable = try arena.print("zttp test printed more than {d} bytes", .{tools_common.default_output_limit}) },
         else => return .{ .not_runnable = "zttp test did not start" },
     };
     defer outcome.deinit(allocator);
-    if (outcome.exit_code == null) return .{ .not_runnable = "zttp test ended without an exit code" };
+    if (outcome.exit_code == null) {
+        if (std.mem.eql(u8, outcome.term, "signal")) return .{ .not_runnable = "zttp test ended on a signal" };
+        return .{ .not_runnable = "zttp test ended without an exit code" };
+    }
 
     // `zttp test` prints to stderr; stdout is read only when stderr is empty.
     const text = if (outcome.stderr.len > 0) outcome.stderr else outcome.stdout;

@@ -233,6 +233,17 @@ pub fn runCommand(
     cwd: []const u8,
     argv: []const []const u8,
 ) !CommandOutcome {
+    return runCommandWithin(allocator, cwd, argv, null);
+}
+
+/// `runCommand` with a limit on the wall time. A child that runs past
+/// `timeout_ms` is killed, and the call returns `error.Timeout`.
+pub fn runCommandWithin(
+    allocator: std.mem.Allocator,
+    cwd: []const u8,
+    argv: []const []const u8,
+    timeout_ms: ?u32,
+) !CommandOutcome {
     var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
     defer io_backend.deinit();
     const io = io_backend.io();
@@ -261,6 +272,10 @@ pub fn runCommand(
         .cwd = .{ .path = cwd },
         .stdout_limit = .limited(default_output_limit),
         .stderr_limit = .limited(default_output_limit),
+        .timeout = if (timeout_ms) |ms|
+            (std.Io.Timeout{ .duration = .{ .raw = .fromMilliseconds(ms), .clock = .awake } }).toDeadline(io)
+        else
+            .none,
     });
     errdefer allocator.free(run_result.stdout);
     errdefer allocator.free(run_result.stderr);

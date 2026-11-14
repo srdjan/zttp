@@ -47,17 +47,16 @@ pub const AggregateProof = struct {
     system_proven: bool,
     baseline_primary_properties: ?ui_payload.PropertiesSnapshot = null,
     primary_properties: ?ui_payload.PropertiesSnapshot = null,
-    /// Contract surface changes of the primary root. Empty when either side
-    /// has no contract.
-    contract_changes: []ContractChange = &.{},
+    /// Contract surface changes of the primary root. Null when either side
+    /// has no contract, so no comparison ran.
+    contract_changes: ?[]ContractChange = &.{},
 
     pub fn deinit(self: *AggregateProof, allocator: std.mem.Allocator) void {
         for (self.proof_roots) |root| allocator.free(root);
         allocator.free(self.proof_roots);
         for (self.diagnostics) |*diagnostic| diagnostic.deinit(allocator);
         allocator.free(self.diagnostics);
-        for (self.contract_changes) |change| allocator.free(change.text);
-        allocator.free(self.contract_changes);
+        if (self.contract_changes) |changes| freeContractChanges(allocator, changes);
         self.* = undefined;
     }
 };
@@ -228,7 +227,7 @@ pub fn prove(
     const read_set_digest = digestReadSet(snapshot);
     const proof_id = digestProof(prepared, snapshot, roots, false);
     const changes = try contractChanges(allocator, baseline_primary_contract, primary_contract);
-    errdefer freeContractChanges(allocator, changes);
+    errdefer if (changes) |owned| freeContractChanges(allocator, owned);
     const owned_diagnostics = try candidate_diagnostics.toOwnedSlice(allocator);
     roots_owned = false;
     return .{ .accepted = .{
@@ -613,40 +612,40 @@ fn appendItemChanges(
 
 /// Env, egress, route, and capability changes between two contracts. The
 /// contract diff holds no capability list, so capabilities are compared here
-/// from the capability matrix. Either contract missing yields no changes.
+/// from the capability matrix. Either contract missing yields null.
 fn contractChanges(
     allocator: std.mem.Allocator,
     baseline: ?zts.HandlerContract,
     candidate: ?zts.HandlerContract,
-) ![]ContractChange {
+) !?[]ContractChange {
+    const before = baseline orelse return null;
+    const after = candidate orelse return null;
     var out: std.ArrayList(ContractChange) = .empty;
     errdefer {
         for (out.items) |change| allocator.free(change.text);
         out.deinit(allocator);
     }
-    if (baseline) |*before| if (candidate) |*after| {
-        var diff = try zts.contract_diff.diffContracts(allocator, before, after);
-        defer diff.deinit(allocator);
-        try appendItemChanges(allocator, &out, .env, diff.env_changes.items);
-        try appendItemChanges(allocator, &out, .egress, diff.egress_changes.items);
-        for (diff.api_route_changes.items) |route| {
-            if (route.status == .unchanged) continue;
-            const text = try allocator.print("{s} {s}", .{ route.method, route.path });
-            defer allocator.free(text);
-            try appendChange(allocator, &out, .route, route.status == .added, text);
+    var diff = try zts.contract_diff.diffContracts(allocator, &before, &after);
+    defer diff.deinit(allocator);
+    try appendItemChanges(allocator, &out, .env, diff.env_changes.items);
+    try appendItemChanges(allocator, &out, .egress, diff.egress_changes.items);
+    for (diff.api_route_changes.items) |route| {
+        if (route.status == .unchanged) continue;
+        const text = try allocator.print("{s} {s}", .{ route.method, route.path });
+        defer allocator.free(text);
+        try appendChange(allocator, &out, .route, route.status == .added, text);
+    }
+    if (before.capabilities) |before_caps| if (after.capabilities) |after_caps| {
+        for (after_caps.slice()) |capability| {
+            if (before_caps.has(capability)) continue;
+            try appendChange(allocator, &out, .capability, true, @tagName(capability));
         }
-        if (before.capabilities) |before_caps| if (after.capabilities) |after_caps| {
-            for (after_caps.slice()) |capability| {
-                if (before_caps.has(capability)) continue;
-                try appendChange(allocator, &out, .capability, true, @tagName(capability));
-            }
-            for (before_caps.slice()) |capability| {
-                if (after_caps.has(capability)) continue;
-                try appendChange(allocator, &out, .capability, false, @tagName(capability));
-            }
-        };
+        for (before_caps.slice()) |capability| {
+            if (after_caps.has(capability)) continue;
+            try appendChange(allocator, &out, .capability, false, @tagName(capability));
+        }
     };
-    return out.toOwnedSlice(allocator);
+    return try out.toOwnedSlice(allocator);
 }
 
 fn deinitDiagnostics(allocator: std.mem.Allocator, diagnostics: *std.ArrayList(Diagnostic)) void {
@@ -1052,14 +1051,14 @@ test "aggregate proof reports a swapped env var as a removal and an addition" {
             "  return Response.text(\"old\");\n}\n",
     );
     defer result.deinit(testing.allocator);
-    const proof = result.accepted;
-    try testing.expectEqual(@as(usize, 2), proof.contract_changes.len);
-    try testing.expectEqual(ContractChange.Kind.env, proof.contract_changes[0].kind);
-    try testing.expectEqual(false, proof.contract_changes[0].added);
-    try testing.expectEqualStrings("OLD_NAME", proof.contract_changes[0].text);
-    try testing.expectEqual(ContractChange.Kind.env, proof.contract_changes[1].kind);
-    try testing.expectEqual(true, proof.contract_changes[1].added);
-    try testing.expectEqualStrings("NEW_NAME", proof.contract_changes[1].text);
+    const changes = result.accepted.contract_changes orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), changes.len);
+    try testing.expectEqual(ContractChange.Kind.env, changes[0].kind);
+    try testing.expectEqual(false, changes[0].added);
+    try testing.expectEqualStrings("OLD_NAME", changes[0].text);
+    try testing.expectEqual(ContractChange.Kind.env, changes[1].kind);
+    try testing.expectEqual(true, changes[1].added);
+    try testing.expectEqualStrings("NEW_NAME", changes[1].text);
 }
 
 test "aggregate proof reports a dropped env var and its capabilities as removals" {
@@ -1073,7 +1072,7 @@ test "aggregate proof reports a dropped env var and its capabilities as removals
             "  return Response.text(\"none\");\n}\n",
     );
     defer result.deinit(testing.allocator);
-    const changes = result.accepted.contract_changes;
+    const changes = result.accepted.contract_changes orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 3), changes.len);
     try testing.expectEqual(ContractChange.Kind.env, changes[0].kind);
     try testing.expectEqual(false, changes[0].added);
@@ -1106,7 +1105,7 @@ test "aggregate proof reports a swapped router route as a removal and an additio
             "  return Response.json({ error: \"Not Found\" }, { status: 404 });\n}\n",
     );
     defer result.deinit(testing.allocator);
-    const changes = result.accepted.contract_changes;
+    const changes = result.accepted.contract_changes orelse return error.TestUnexpectedResult;
     try testing.expectEqual(@as(usize, 2), changes.len);
     try testing.expectEqual(ContractChange.Kind.route, changes[0].kind);
     try testing.expectEqual(false, changes[0].added);
@@ -1122,5 +1121,5 @@ test "aggregate proof reports no contract change for an unchanged surface" {
         "export function handler(req: Request): Response {\n  return Response.text(\"new\");\n}\n",
     );
     defer result.deinit(testing.allocator);
-    try testing.expectEqual(@as(usize, 0), result.accepted.contract_changes.len);
+    try testing.expectEqual(@as(usize, 0), (result.accepted.contract_changes orelse return error.TestUnexpectedResult).len);
 }

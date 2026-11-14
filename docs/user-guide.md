@@ -556,8 +556,13 @@ The `Verdict:` line reads `no new diagnostics, N carried over from the baseline`
 when the baseline already held N diagnostics. The card lists at most 20
 `Test failed:` lines, then `Test failed: N more`. A `Contract:` line starts with
 `+` or `-` and names an env variable, an egress host, a route, or a capability.
-The `Tests:` line also reads `Tests: none` when the project has no suite, or
-`Tests: could not run: <first error line>` when the run fails.
+When the baseline or the candidate has no contract or no proof properties, the
+card shows `Contract: not compared` or `Properties: not compared` instead of
+the changes. A new entry handler shows both lines. The `Tests:` line also reads
+`Tests: none` when the project has no suite. It reads
+`Tests: could not run: <reason>` when the suite cannot run, when the run does
+not finish in 30 seconds, when it prints more than 256 KiB, or when it ends on a
+signal. The host stops a run that does not finish.
 
 Before the question, the host runs `zttp test` on `tests/handler.test.jsonl`
 against the candidate. The candidate is a temporary copy of the project with the
@@ -571,8 +576,8 @@ registers through `zttp:router`. A route that the handler matches with
 `req.path` in its own code does not appear. A suite is also only as strong as
 its rows. `zttp gen-tests` writes rows that check the status code of each
 proven path, and `zttp init` writes a starter suite at
-`tests/handler.test.jsonl`. A model turn that proposes no change set ends with
-the line `No change proposed.` The `--print` exit codes do not change.
+`tests/handler.test.jsonl`. A model turn that ends without a verified change set
+prints the line `No change to approve.` The `--print` exit codes do not change.
 
 The discovery views and focused compiler projections share the
 `zts_expert_query` operation union. Normalization, proof, repair, and change-set

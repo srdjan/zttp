@@ -203,6 +203,8 @@ pub fn rebuildSession(
         const next_writer = if (next.journal_writer) |*writer| writer else return error.MissingJournalWriter;
         try session_events.JournalWriter.transferLockOwnership(current_writer, next_writer);
     }
+    // The host sets the test binary once for the process; the session borrows it.
+    next.test_binary = session.test_binary;
     session.deinit(allocator);
     session.* = next;
 }

@@ -1119,6 +1119,7 @@ fn writeResumeDisclosure(session: *const agent.AgentSession, forked: bool) void 
 
 /// Result card of an approval prompt: the verdict, each failing suite row, each
 /// lost property, each contract change, each gained property, and the test line.
+/// When a side has no properties or no contract, one line says so instead.
 /// The verdict never claims a system proof, because the proof covers the changed
 /// files only.
 fn renderApprovalCard(w: *std.Io.Writer, preview: loop.ChangeSetApprovalPreview) !void {
@@ -1128,20 +1129,28 @@ fn renderApprovalCard(w: *std.Io.Writer, preview: loop.ChangeSetApprovalPreview)
         try w.writeAll("Verdict: no new diagnostics\n");
     }
     try writeFailedTests(w, preview.test_run);
-    for (preview.property_changes) |change| {
+    const property_changes = preview.property_changes orelse blk: {
+        try w.writeAll("Properties: not compared\n");
+        break :blk &.{};
+    };
+    for (property_changes) |change| {
         if (change.kind == .demoted) try w.print("No longer proven: {s}\n", .{change.name});
     }
+    const contract_changes = preview.contract_changes orelse blk: {
+        try w.writeAll("Contract: not compared\n");
+        break :blk &.{};
+    };
     const kinds = [_]aggregate_proof.ContractChange.Kind{ .env, .egress, .route, .capability };
     for (kinds) |kind| {
         for ([_]bool{ true, false }) |added| {
-            for (preview.contract_changes) |change| {
+            for (contract_changes) |change| {
                 if (change.added == added and change.kind == kind) {
                     try w.print("Contract: {s} {s} {s}\n", .{ if (added) "+" else "-", @tagName(kind), change.text });
                 }
             }
         }
     }
-    for (preview.property_changes) |change| {
+    for (property_changes) |change| {
         if (change.kind == .promoted) try w.print("Newly proven: {s}\n", .{change.name});
     }
     switch (preview.test_run) {
@@ -1166,23 +1175,32 @@ fn writeFailedTests(w: *std.Io.Writer, test_run: suite_run.TestRun) !void {
     if (ran.failing.len > shown) try w.print("Test failed: {d} more\n", .{ran.failing.len - shown});
 }
 
-/// Write the result card to stdout. A card that overflows the scratch buffer
-/// is cut at the buffer end.
-fn writeApprovalCard(preview: loop.ChangeSetApprovalPreview) void {
-    var buf: [8 * 1024]u8 = undefined;
-    var w = std.Io.Writer.fixed(&buf);
-    renderApprovalCard(&w, preview) catch {};
-    const out = w.buffered();
-    _ = std.c.write(std.c.STDOUT_FILENO, out.ptr, out.len);
+/// The result card text. Caller frees.
+fn approvalCardText(allocator: std.mem.Allocator, preview: loop.ChangeSetApprovalPreview) ![]u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    renderApprovalCard(&out.writer, preview) catch return error.OutOfMemory;
+    return out.toOwnedSlice();
 }
 
-/// The line that ends a model turn which proposed no change set, or null when
+/// Write the result card to stdout.
+fn writeApprovalCard(preview: loop.ChangeSetApprovalPreview) void {
+    const text = approvalCardText(std.heap.smp_allocator, preview) catch {
+        const message = "Result card: not shown, out of memory\n";
+        _ = std.c.write(std.c.STDOUT_FILENO, message.ptr, message.len);
+        return;
+    };
+    defer std.heap.smp_allocator.free(text);
+    _ = std.c.write(std.c.STDOUT_FILENO, text.ptr, text.len);
+}
+
+/// The line that ends a model turn with no verified change set, or null when
 /// the turn applied one, ended for another reason, or recorded no result.
 fn noChangeNotice(before: agent.SessionMetrics, after: agent.SessionMetrics) ?[]const u8 {
     if (after.turn_count == before.turn_count) return null;
     if (after.last_outcome != .approved) return null;
     if (after.verified_change_set_count != before.verified_change_set_count) return null;
-    return "No change proposed.\n";
+    return "No change to approve.\n";
 }
 
 fn approveEdit(preview: loop.ChangeSetApprovalPreview) !bool {
@@ -2405,6 +2423,25 @@ test "rebuildSession: /resume under no_session is refused and keeps the live tra
     try testing.expectEqualStrings("live message", session.transcript.at(1).user_text);
 }
 
+test "rebuildSession: /new keeps the zttp binary that runs the suite for the card" {
+    const allocator = testing.allocator;
+    var tmp = try IsolatedTmp.init(allocator, "repl");
+    defer tmp.cleanup(allocator);
+    var cwd = try CwdOverride.set(allocator, tmp.abs_path);
+    defer cwd.restore(allocator);
+    var deepseek = try EnvOverride.set(allocator, "DEEPSEEK_API_KEY", "test-key");
+    defer deepseek.restore(allocator);
+
+    var registry: Registry = .{};
+    defer registry.deinit(allocator);
+    var session = try agent_bootstrap.initFromEnvWithSessionConfig(allocator, &registry, .{ .no_context_files = true, .no_session = true });
+    defer session.deinit(allocator);
+    session.test_binary = "/opt/zttp/bin/zttp";
+
+    try agent_fork.rebuildSession(allocator, &session, &registry, .{ .no_session = true, .no_context_files = true });
+    try testing.expectEqualStrings("/opt/zttp/bin/zttp", session.test_binary orelse "null");
+}
+
 const one_line_preview: loop.ChangeSetApprovalPreview = .{
     .proof_id = "proof",
     .changes = &.{.{ .file = "handler.ts", .after = "return 1;\n" }},
@@ -2479,6 +2516,24 @@ test "renderApprovalCard: an added egress host shows Contract + egress" {
     );
 }
 
+/// 9000 bytes of `a`, so one card line is longer than 8 KiB.
+const run_of_a: [9000]u8 = @splat('a');
+/// A test name whose PASS line alone is over the 256 KiB output limit.
+const long_test_name: [270_000]u8 = @splat('n');
+
+test "approvalCardText: a card longer than 8 KiB is not cut" {
+    const route_text = "GET /" ++ run_of_a;
+    var route = route_text.*;
+    var preview = one_line_preview;
+    preview.contract_changes = &.{.{ .kind = .route, .added = true, .text = &route }};
+    const text = try approvalCardText(testing.allocator, preview);
+    defer testing.allocator.free(text);
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\nContract: + route GET /" ++ run_of_a ++ "\nTests: none\n",
+        text,
+    );
+}
+
 test "renderApprovalCard: a removed route shows Contract - route" {
     var buf: [512]u8 = undefined;
     var route = "GET /health".*;
@@ -2523,7 +2578,7 @@ test "renderApprovalCard: carried over diagnostics, every line kind in order" {
 test "noChangeNotice: a turn that applied nothing and ended approved prints one line" {
     const before: agent.SessionMetrics = .{};
     const after: agent.SessionMetrics = .{ .turn_count = 1, .last_outcome = .approved };
-    try testing.expectEqualStrings("No change proposed.\n", noChangeNotice(before, after).?);
+    try testing.expectEqualStrings("No change to approve.\n", noChangeNotice(before, after).?);
 }
 
 test "noChangeNotice: a turn that recorded no result prints nothing" {
@@ -2606,7 +2661,8 @@ const card_sql_config = "{\"entry\":\"src/handler.ts\",\"sqlite\":\"data.db\"}";
 
 const CardTurnSpec = struct {
     zttp_json: []const u8 = card_default_config,
-    old_handler: []const u8 = card_old_handler,
+    /// Null starts the turn without `src/handler.ts`.
+    old_handler: ?[]const u8 = card_old_handler,
     new_handler: []const u8 = card_new_handler,
     /// Create `data.db` with a users table that holds one row.
     users_db: bool = false,
@@ -2614,6 +2670,7 @@ const CardTurnSpec = struct {
     real_run: bool = false,
     suite: ?[]const u8 = null,
     with_binary: bool = true,
+    test_timeout_ms: u32 = suite_run.default_timeout_ms,
     answer: bool = true,
 };
 
@@ -2636,7 +2693,7 @@ fn runCardTurn(allocator: std.mem.Allocator, approval: *CardApproval, spec: Card
     defer tmp.cleanup();
     try tmp.dir.createDirPath(testing.io, "src");
     try tmp.dir.writeFile(testing.io, .{ .sub_path = "zttp.json", .data = spec.zttp_json });
-    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/handler.ts", .data = spec.old_handler });
+    if (spec.old_handler) |source| try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/handler.ts", .data = source });
     if (spec.suite) |suite| {
         try tmp.dir.createDirPath(testing.io, "tests");
         try tmp.dir.writeFile(testing.io, .{ .sub_path = "tests/handler.test.jsonl", .data = suite });
@@ -2689,6 +2746,7 @@ fn runCardTurn(allocator: std.mem.Allocator, approval: *CardApproval, spec: Card
             .workspace_root = workspace_root,
             .approval_fn = .{ .contextual = .{ .context = approval, .func = CardApproval.approve } },
             .test_binary = binary,
+            .test_timeout_ms = spec.test_timeout_ms,
         },
     );
     const handler_path = try std.fs.path.resolve(allocator, &.{ workspace_root, "src/handler.ts" });
@@ -2745,11 +2803,76 @@ test "the card says Tests: none when the project has no suite" {
     try testing.expectEqualStrings("Verdict: no new diagnostics\nTests: none\n", approval.card());
 }
 
-test "the card says Tests: none when the host gives no zttp binary" {
+test "the card says the suite did not finish when the run passes the time limit" {
+    var approval: CardApproval = .{ .answer = true };
+    var result = try runCardTurn(testing.allocator, &approval, .{
+        .new_handler = "export function handler(req: Request): Proof<Response, \"state_isolated\"> { let n = 0; for (const i of range(4000000000)) { n = n + i; } return Response.text(String(n)); }\n",
+        .suite = card_passing_suite,
+        .test_timeout_ms = 1000,
+    });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\n" ++
+            "No longer proven: fault_covered\n" ++
+            "Tests: could not run: zttp test did not finish in 1000 ms\n",
+        approval.card(),
+    );
+}
+
+test "the card says the suite could not run when the host gives no zttp binary" {
     var approval: CardApproval = .{ .answer = true };
     var result = try runCardTurn(testing.allocator, &approval, .{ .suite = card_failing_suite, .with_binary = false });
     defer result.deinit(testing.allocator);
-    try testing.expectEqualStrings("Verdict: no new diagnostics\nTests: none\n", approval.card());
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\nTests: could not run: the path of the zttp executable is unknown\n",
+        approval.card(),
+    );
+}
+
+test "the card says zttp test ended on a signal when the candidate crashes it" {
+    // Unbounded recursion ends `zttp test` on SIGSEGV today. When the
+    // interpreter refuses deep recursion instead, this candidate needs to change.
+    var approval: CardApproval = .{ .answer = true };
+    var result = try runCardTurn(testing.allocator, &approval, .{
+        .new_handler = "function down(n: number): number { return down(n + 1); }\n" ++
+            "export function handler(req: Request): Proof<Response, \"state_isolated\"> { return Response.text(String(down(0))); }\n",
+        .suite = card_passing_suite,
+    });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\n" ++
+            "No longer proven: fault_covered\n" ++
+            "No longer proven: cost_bounded\n" ++
+            "Tests: could not run: zttp test ended on a signal\n",
+        approval.card(),
+    );
+}
+
+test "the card names the output limit when zttp test prints more than 256 KiB" {
+    var approval: CardApproval = .{ .answer = true };
+    var result = try runCardTurn(testing.allocator, &approval, .{
+        .suite = "{\"type\":\"test\",\"name\":\"" ++ long_test_name ++ "\"}\n" ++
+            "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\",\"headers\":{},\"body\":null}\n" ++
+            "{\"type\":\"expect\",\"status\":200}\n",
+    });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\nTests: could not run: zttp test printed more than 262144 bytes\n",
+        approval.card(),
+    );
+}
+
+test "the card says the contract and properties were not compared when the baseline has no handler" {
+    var approval: CardApproval = .{ .answer = true };
+    var result = try runCardTurn(testing.allocator, &approval, .{ .old_handler = null });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\n" ++
+            "Properties: not compared\n" ++
+            "Contract: not compared\n" ++
+            "Tests: none\n",
+        approval.card(),
+    );
 }
 
 test "a change set is committed when the developer approves a card with a failing test" {
