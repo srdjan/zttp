@@ -2854,9 +2854,9 @@ test "the card shows a failed test row when the candidate recurses without bound
 }
 
 test "the card says zttp test ended on a signal when the binary kills itself" {
-    // No candidate handler crashes `zttp test` on a signal today, because the
-    // interpreter refuses deep recursion first. This `zttp` is a shell script
-    // that ends itself with SIGABRT, and it stands in for a real crash source.
+    // No known candidate handler ends `zttp test` on a signal, because the
+    // interpreter now refuses deep recursion first. This `zttp` is a shell
+    // script that ends itself with SIGABRT, so it stands in for a crash source.
     var script_dir = testing.tmpDir(.{});
     defer script_dir.cleanup();
     try script_dir.dir.writeFile(testing.io, .{
