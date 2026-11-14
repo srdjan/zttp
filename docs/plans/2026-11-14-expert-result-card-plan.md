@@ -117,6 +117,13 @@ diff line by line and runs each acceptance check again with an empty
   Unfiltered `zig build test-expert-app`, `zig build test-simulator`, and
   `zig build test` pass.
 
+- Result, 2026-11-14: complete at `6667de86`. Opus review added removed
+  capabilities and a tighter no-change rule: the line prints only when the turn
+  recorded a result. A probe showed that a route matched with `req.path` in
+  handler code is not in the check-mode contract. The card therefore shows
+  router-registered routes only. `test-expert-app`, `test-simulator`,
+  `test-module-boundary`, and `zig build test` exited 0 on an empty cache.
+
 ### U2: Test run before approval
 
 - Model: Sonnet. Turn budget: 45.
