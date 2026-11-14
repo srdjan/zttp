@@ -1690,7 +1690,7 @@ fn contractCard(allocator: std.mem.Allocator) !void {
         if (!containsName(check.required, name)) pending = true;
     }
     if (!pending) {
-        try out.writer.writeAll("All proven properties are required.\n");
+        try out.writer.writeAll(if (proven.len == 0) "No property is proven.\n" else "All proven properties are required.\n");
         return writeStdout(out.written());
     }
     try out.writer.writeAll("Require the proven properties? [y/N] ");
