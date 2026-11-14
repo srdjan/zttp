@@ -692,6 +692,9 @@ pub const HandlerPolicy = handler_policy.HandlerPolicy;
 /// The policy a source parses to, or null when it does not parse. Expert tools
 /// read `env.public` from it without reaching the internal `handler_policy` module.
 pub const parsePolicyJsonOrNull = handler_policy.parsePolicyJsonOrNull;
+/// The policy a source parses to, or the parse error. The expert refuses a change
+/// set when the project policy does not parse. Caller calls `deinit`.
+pub const parsePolicyJson = handler_policy.parsePolicyJson;
 pub const RuntimePolicy = handler_policy.RuntimePolicy;
 pub const PolicyInput = policy.PolicyInput;
 pub const PolicyResult = policy.PolicyResult;

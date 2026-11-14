@@ -173,6 +173,23 @@ pub fn prove(
             );
         };
         defer if (after_policy) |src| allocator.free(src);
+        // A policy that does not parse gives the same ZTS000 on both sides, so
+        // the diagnostic comparison below would accept the edit with every
+        // allow list switched off.
+        if (after_policy) |src| {
+            if (zts.parsePolicyJson(allocator, src)) |parsed| {
+                var policy = parsed;
+                policy.deinit(allocator);
+            } else |err| {
+                if (err == error.OutOfMemory) return err;
+                return rejectedFmt(
+                    allocator,
+                    "policy_context_failed",
+                    "capability policy {s} does not parse: {s}",
+                    .{ context.policy_relative orelse "", @errorName(err) },
+                );
+            }
+        }
 
         if (fileExists(allocator, before_path)) {
             const collected = collectCheckDiagnostics(
@@ -1122,4 +1139,48 @@ test "aggregate proof reports no contract change for an unchanged surface" {
     );
     defer result.deinit(testing.allocator);
     try testing.expectEqual(@as(usize, 0), (result.accepted.contract_changes orelse return error.TestUnexpectedResult).len);
+}
+
+fn envReadingHandler(comptime answer: []const u8) []const u8 {
+    return "import { env } from \"zttp:env\";\n" ++
+        "export function handler(req: Request): Response {\n" ++
+        "  const name = env(\"APP_NAME\");\n" ++
+        "  if (name !== undefined) {\n    return Response.text(\"named\");\n  }\n" ++
+        "  return Response.text(\"" ++ answer ++ "\");\n}\n";
+}
+
+/// Prove an edit of `src/handler.ts` in a project whose `zttp.json` names
+/// `policy.json` with the given text.
+fn proveUnderPolicy(policy_source: []const u8, baseline_source: []const u8, candidate_source: []const u8) !Result {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{
+        .sub_path = "zttp.json",
+        .data = "{\"entry\":\"src/handler.ts\",\"policy\":\"policy.json\"}",
+    });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "policy.json", .data = policy_source });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/handler.ts", .data = baseline_source });
+    const root_z = try std.Io.Dir.realPathFileAlloc(tmp.dir, testing.io, ".", testing.allocator);
+    defer testing.allocator.free(root_z);
+    const root = try testing.allocator.dupe(u8, root_z);
+    defer testing.allocator.free(root);
+    var prepared = try change_set.prepare(testing.allocator, root, .{ .file = "src/handler.ts", .content = candidate_source });
+    defer prepared.deinit(testing.allocator);
+    var snapshot = try workspace_snapshot.Snapshot.capture(testing.allocator, &prepared);
+    defer snapshot.deinit(testing.allocator);
+    return prove(testing.allocator, &prepared, &snapshot);
+}
+
+test "aggregate proof rejects an env read that a valid policy forbids" {
+    var result = try proveUnderPolicy("{\"env\":{\"allow\":[]}}", handler_without_imports, envReadingHandler("none"));
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("POL001", result.rejected.code);
+}
+
+test "aggregate proof rejects a change set when the policy file does not parse" {
+    var result = try proveUnderPolicy("{\"env\":{\"allow\":[]}", envReadingHandler("none"), envReadingHandler("changed"));
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("policy_context_failed", result.rejected.code);
+    try testing.expectEqualStrings("capability policy policy.json does not parse: UnexpectedEndOfInput", result.rejected.message);
 }
