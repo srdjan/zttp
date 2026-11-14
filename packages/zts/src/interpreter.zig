@@ -3347,6 +3347,84 @@ test "the stack floor follows the stack of the thread that runs the script" {
     try std.testing.expectEqual(error.CallStackOverflow, overflows.outcome.failed);
 }
 
+/// One call of a global function on a thread that did not load the module.
+const SecondThreadCall = struct {
+    interp: *Interpreter,
+    func_val: value.JSValue,
+    func_bc: *const bytecode.FunctionBytecode,
+    arg: i32,
+    outcome: union(enum) { unset, int: i32, failed: anyerror } = .unset,
+
+    fn run(self: *SecondThreadCall) void {
+        const args = [_]value.JSValue{value.JSValue.fromInt(self.arg)};
+        const result = self.interp.callBytecodeFunction(self.func_val, self.func_bc, value.JSValue.undefined_val, &args) catch |err| {
+            self.outcome = .{ .failed = err };
+            return;
+        };
+        self.outcome = if (result.isInt()) .{ .int = result.getInt() } else .{ .failed = error.TestUnexpectedResult };
+    }
+};
+
+/// Load `module_source` on the calling thread. Then call its global function
+/// `name` with `arg` on a new thread with a 16 MiB stack, while the calling
+/// thread waits. `zttp serve` does the same when a connection worker takes a
+/// runtime that another thread loaded.
+fn callOnSecondThread(module_source: []const u8, name: []const u8, arg: i32) !@FieldType(SecondThreadCall, "outcome") {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+    const string_mod = @import("string.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+
+    var p = try @import("parser/root.zig").Parser.initTyped(allocator, allocator, module_source, &strings, &ctx.atoms);
+    defer p.deinit();
+    const code = try admittedCodeForTest(&p, allocator);
+    const shapes = p.getShapes();
+    if (shapes.len > 0) try ctx.materializeShapes(shapes);
+    var module_func = bytecode.FunctionBytecode{
+        .header = .{},
+        .name_atom = 0,
+        .arg_count = 0,
+        .local_count = p.max_local_count,
+        .stack_size = 256,
+        .flags = .{},
+        .code = code,
+        .constants = p.constants.items,
+        .source_map = null,
+        .line_table = null,
+    };
+    var interp = Interpreter.init(ctx);
+    _ = try interp.run(&module_func);
+
+    const func_val = ctx.getGlobal(try ctx.atoms.intern(name)) orelse return error.TestUnexpectedResult;
+    if (!func_val.isCallable()) return error.TestUnexpectedResult;
+    const bc_data = func_val.toPtr(object.JSObject).getBytecodeFunctionData() orelse return error.TestUnexpectedResult;
+
+    var second = SecondThreadCall{ .interp = &interp, .func_val = func_val, .func_bc = bc_data.bytecode, .arg = arg };
+    const thread = try std.Thread.spawn(.{ .stack_size = 16 * 1024 * 1024 }, SecondThreadCall.run, .{&second});
+    thread.join();
+    return second.outcome;
+}
+
+const two_thread_module = "function f(n) { if (n === 0) { return 0; } return f(n - 1) + 1; } function g(n) { return g(n + 1) + 1; }";
+
+test "a call on a thread that did not load the module uses the stack floor of its own thread" {
+    // The loading thread stays alive, so the two stacks do not overlap. A floor
+    // from the loading thread refuses the bounded call when the second stack
+    // lies below it, and misses the unbounded one when the second stack lies above.
+    const bounded = try callOnSecondThread(two_thread_module, "f", 20);
+    try std.testing.expectEqual(@as(i32, 20), bounded.int);
+    const unbounded = try callOnSecondThread(two_thread_module, "g", 0);
+    try std.testing.expectEqual(error.CallStackOverflow, unbounded.failed);
+}
+
 test "Interpreter refuses string addition in malformed bytecode" {
     const allocator = std.testing.allocator;
     const gc_mod = @import("gc.zig");
