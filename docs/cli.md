@@ -554,6 +554,8 @@ Interactive context commands:
 ```text
 /compact [instructions]
 /settings
+/contract
+/contract drop <name>
 ```
 
 `/compact` summarizes safe older context with the active model. Optional
@@ -562,6 +564,10 @@ instructions add focus but do not replace the fixed summary contract.
 order from `$HOME/.zttp/settings.json` and `<cwd>/.zttp/settings.json`; the
 project file wins. Only `compaction.enabled`, `maxInputTokens`, `reserveTokens`,
 and `keepRecentTokens` are accepted.
+
+`/contract` prints the contract card and offers to add the proven properties to
+`requiredProperties` in `zttp.json`. `/contract drop <name>` removes one name.
+See [required properties](user-guide.md#required-properties).
 
 The explicit local provider uses `LiquidAI/LFM2.5-2.6B-MLX-8bit` through
 non-streaming Chat Completions at the loopback-only `ZTTP_MLX_BASE_URL`, which defaults to

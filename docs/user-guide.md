@@ -611,6 +611,31 @@ A name that is not a property is also refused, with the nearest valid name.
 Only `zttp expert` reads the key. `zttp check`, `zttp dev`, `zttp build`, and
 `zttp deploy` ignore it, and so does an older zttp.
 
+The REPL command `/contract` pins properties without a manual edit. It prints
+a card and then asks a question:
+
+```text
+Contract of src/handler.ts
+Routes: GET /, POST /items
+Proven: deterministic, state_isolated, cost_bounded
+Required: state_isolated
+Env: APP_NAME
+Egress: https://api.example.com:443
+Require the proven properties? [y/N]
+```
+
+The card shows `Required, not proven:` after the `Required:` line when a
+required property is not proven. The question appears only when a proven
+property is not yet required. Answer `y` or `yes` to add every proven name to
+`requiredProperties`. Any other answer changes nothing. The command adds names
+and never removes one.
+
+The command `/contract drop <name>` removes one name from the list. It prints
+`<name> is not required.` when the name is not listed. Both commands keep every
+other key of `zttp.json` in order and write the file atomically. They refuse
+when another zttp session holds the workspace lock or when `zttp.json` does not
+parse. The commands add nothing to the model transcript.
+
 ### Context compaction
 
 When a normal request crosses the soft target, expert mode summarizes safe

@@ -10,6 +10,10 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ## [Unreleased]
 
+### Added
+
+- `zttp.json` now accepts `"requiredProperties": ["cost_bounded", ...]`. `zttp expert` applies no change set whose candidate fails to prove every listed property, in every approval mode including `--yes`. The rejection code is `required_property_lost`. The rule is absolute: when the workspace already lacks a required property, every change set is rejected until a candidate proves it or the name leaves the list. An unknown name rejects every change set and the message suggests the nearest valid name. Only `zttp expert` reads the key. An older zttp ignores it. The REPL command `/contract` prints a card of the entry, routes, proven and required properties, env reads, and egress hosts. It asks `Require the proven properties? [y/N]`, and `y` adds the proven names to `requiredProperties`. `/contract drop <name>` removes one name.
+
 ### Changed
 
 - `zttp expert` now shows a result card before the question "Apply this change set? [y/N, d=show files]". The card reports the verdict, failing tests, lost and gained proof properties, and contract changes in env variables, egress hosts, routes, and capabilities. It shows only in an interactive session with the asking policy.
@@ -18,6 +22,7 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 
 ### Fixed
 
+- `zttp expert` now rejects every change set with `policy_context_failed` when the capability policy file that `zttp.json` names does not parse. The message is `capability policy <file> does not parse: <error>`. Before, the expert accepted change sets with every allow list (env, egress, cache, and SQL) switched off, and printed nothing.
 - Deep or unbounded script recursion now fails the request with `CallStackOverflow` in a Debug build. Before, the native stack ran out near depth 190. `zttp test` ended on a signal, and `zttp serve` stopped. The interpreter now refuses a script call when less than 2 MiB of the thread stack remains. macOS release archives already stopped at 1024 frames and answered status 500. The default proof profile refuses recursion (ZTS500), so only a handler with a narrow `Proof` capsule could reach this.
 
 ## [0.27.0] - 2026-11-13
