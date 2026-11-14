@@ -1,6 +1,9 @@
 # Native stack limit for script recursion
 
-Status: approved plan, revision 2, 2026-11-14, at commit `2fa69e89`. A Fable
+Status: complete on 2026-11-14. U1 to U4 are done on local `main`, not
+pushed. The U4 result lists the open items.
+
+Plan history: approved plan, revision 2, 2026-11-14, at commit `2fa69e89`. A Fable
 review and a Codex astra review checked revision 1. This revision resolves
 their findings. The owner chose option (a) of D7 on 2026-11-14: write a plan,
 with a reproduction test, to limit recursion depth in the interpreter. The
@@ -218,6 +221,45 @@ diff and runs each acceptance check again with an empty `ZIG_LOCAL_CACHE_DIR`.
     uses a stale floor.
   Each mutant must fail a test.
 - Final gate: `env -u DEEPSEEK_API_KEY bash scripts/verify.sh`.
+- Result:
+  - **Fable review (mechanism):** Fable found no path to a signal on macOS
+    in Debug or ReleaseFast. Its findings are open items below.
+  - **Codex review (tests):** Codex found loose predicates in checks 1 to 4.
+    Commit `3dcb2930` requires the whole `CallStackOverflow` line with exit 1,
+    the curl exit status, and the `/ok` body. Opus rejected two findings. The
+    card test cannot name the handler error, because the card does not show
+    it. A hang in a check blocks the run and does not pass it.
+  - **Mutants 1 and 2** (no compare, headroom 0): unfiltered
+    `zig build test-zts` failed with two crashed tests, and
+    `zig build test-panic-isolation` failed 4 of 4 stack checks. The tightened
+    checks also failed 4 of 4 against the mutant 1 binary.
+  - **Mutant 3** (floor on every call) survives. The floor depends only on
+    the thread, so the value does not change. Only the cost changes, and no
+    behavior test can kill it.
+  - **Mutant 4** (floor at module load) passed both steps. A probe showed the
+    cause. The first `/deep` ran on a thread with the stack region of the
+    loading thread and got 500. A later `/deep` ran on another worker and
+    crashed the server. Check 2 sends one `/deep` only. Commit `634897c3`
+    adds a zts test that loads the module on one thread and calls on a
+    second, concurrent thread. With mutant 4, that test ended on SIGABRT in
+    unfiltered `zig build test-zts`.
+  - **Gates:** `verify.sh` exited 0 with an empty cache, at load average 4.7
+    at the start and 9.5 at the end. `zig build bench-check` exited 0:
+    geomean 1.129, regression 0.00%, at load average 20.9 and then 11.7.
+- Open items, not fixed by this plan:
+  - Recursion through a native callback, such as `map`, `reduce`, or
+    `toSorted`, ends with `NativeFunctionError`, status 500, and no signal
+    (finding 9). It logs one `Native function 'map' error` line for each
+    level: 85 for each request in Debug, 512 in ReleaseFast (Fable probe).
+  - Linux is compiled, not run. A glibc main thread follows `ulimit -s`,
+    often 8 MiB. The floor is 0, with no message, when the stack is 2 MiB or
+    less or `/proc` is not mounted. On musl the floor is probably wrong.
+    Release targets are glibc only. A Linux run of `test-zts` and
+    `test-panic-isolation` would show the actual result.
+  - Fable did not measure three native leaves against the 2 MiB headroom:
+    `fetchSync` over HTTPS, `zttp:sql`, and `decodeJson`.
+  - Fable saw `error(SafeAllocator): leaked` when it stopped `zttp serve`.
+    The cause is not known, and this plan did not check it.
 
 ## Out of scope
 
