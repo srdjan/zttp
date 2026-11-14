@@ -48,6 +48,10 @@ pub const Interpreter = struct {
     open_upvalues: ?*object.Upvalue, // Linked list of open upvalues
     state_stack: [MAX_STATE_DEPTH]SavedState,
     state_depth: usize,
+    /// Lowest native stack address at which a script call may start. 0 means no
+    /// floor. Set at the outermost script entry (`state_depth == 0`) for the
+    /// calling thread, and read by every `callBytecodeFunction`.
+    stack_floor: usize = 0,
     /// Polymorphic inline cache for property access optimization
     /// Indexed by cache_idx from get_field_ic/put_field_ic instructions
     /// Each entry can cache up to 4 (hidden_class, slot_offset) pairs
@@ -3280,6 +3284,67 @@ test "End-to-end: function declaration" {
     )) orelse return error.TestUnexpectedResult;
     try std.testing.expect(result_value.isInt());
     try std.testing.expectEqual(@as(i32, 7), result_value.getInt());
+}
+
+/// What a script run on a thread with a chosen stack size ended with.
+const ThreadRun = struct {
+    source: []const u8,
+    outcome: union(enum) { unset, int: i32, failed: anyerror } = .unset,
+
+    fn run(self: *ThreadRun) void {
+        self.outcome = if (evalGlobalResult(self.source)) |v| .{ .int = v } else |err| .{ .failed = err };
+    }
+};
+
+/// Run `source` on the calling thread and return the integer global `result`.
+fn evalGlobalResult(source: []const u8) !i32 {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+    const gc_mod = @import("gc.zig");
+    const string_mod = @import("string.zig");
+
+    var gc_state = try gc_mod.GC.init(allocator, .{ .nursery_size = 8192 });
+    defer gc_state.deinit();
+    var ctx = try context.Context.init(allocator, &gc_state, .{});
+    defer ctx.deinit();
+    var strings = string_mod.StringTable.init(allocator);
+    defer strings.deinit();
+
+    const result_value = (try runAndReadResultGlobal(allocator, ctx, &strings, source)) orelse return error.TestUnexpectedResult;
+    if (!result_value.isInt()) return error.TestUnexpectedResult;
+    return result_value.getInt();
+}
+
+/// Run `source` on a new thread whose stack has `stack_bytes` bytes. The thread
+/// stack is the bound that the interpreter reads, so each size is a different
+/// floor.
+fn evalOnThreadStack(stack_bytes: usize, source: []const u8) !ThreadRun {
+    var run = ThreadRun{ .source = source };
+    const thread = try std.Thread.spawn(.{ .stack_size = stack_bytes }, ThreadRun.run, .{&run});
+    thread.join();
+    return run;
+}
+
+const recursion_depth_100 = "function f(n) { if (n === 0) { return 0; } return f(n - 1) + 1; } let result = f(100);";
+const recursion_depth_20 = "function f(n) { if (n === 0) { return 0; } return f(n - 1) + 1; } let result = f(20);";
+const recursion_unbounded = "function f(n) { return f(n + 1) + 1; } let result = f(0);";
+
+test "script recursion at depth 100 returns the right value on a 16 MiB stack" {
+    const run = try evalOnThreadStack(16 * 1024 * 1024, recursion_depth_100);
+    try std.testing.expectEqual(@as(i32, 100), run.outcome.int);
+}
+
+test "unbounded script recursion called from module top-level code ends with CallStackOverflow" {
+    const run = try evalOnThreadStack(16 * 1024 * 1024, recursion_unbounded);
+    try std.testing.expectEqual(error.CallStackOverflow, run.outcome.failed);
+}
+
+test "the stack floor follows the stack of the thread that runs the script" {
+    const passes = try evalOnThreadStack(8 * 1024 * 1024, recursion_depth_20);
+    try std.testing.expectEqual(@as(i32, 20), passes.outcome.int);
+    const overflows = try evalOnThreadStack(8 * 1024 * 1024, recursion_unbounded);
+    try std.testing.expectEqual(error.CallStackOverflow, overflows.outcome.failed);
 }
 
 test "Interpreter refuses string addition in malformed bytecode" {

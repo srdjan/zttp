@@ -2670,6 +2670,8 @@ const CardTurnSpec = struct {
     real_run: bool = false,
     suite: ?[]const u8 = null,
     with_binary: bool = true,
+    /// Absolute path of an executable that stands in for `zttp`. Null locates the built `zttp`.
+    binary_path: ?[]const u8 = null,
     test_timeout_ms: u32 = suite_run.default_timeout_ms,
     answer: bool = true,
 };
@@ -2702,11 +2704,12 @@ fn runCardTurn(allocator: std.mem.Allocator, approval: *CardApproval, spec: Card
     defer allocator.free(workspace_root);
     const repo_root = try cwd_support.cwdPathAlloc(allocator);
     defer allocator.free(repo_root);
-    const binary: ?[]u8 = if (spec.with_binary)
+    const located: ?[]u8 = if (spec.with_binary and spec.binary_path == null)
         codegen_eval.locateZttpBinary(allocator, repo_root) orelse return error.ZttpBinaryMissing
     else
         null;
-    defer if (binary) |path| allocator.free(path);
+    defer if (located) |path| allocator.free(path);
+    const binary: ?[]const u8 = spec.binary_path orelse located;
 
     const workspace_abs = try std.fs.path.resolve(allocator, &.{ repo_root, workspace_root });
     defer allocator.free(workspace_abs);
@@ -2829,9 +2832,10 @@ test "the card says the suite could not run when the host gives no zttp binary" 
     );
 }
 
-test "the card says zttp test ended on a signal when the candidate crashes it" {
-    // Unbounded recursion ends `zttp test` on SIGSEGV today. When the
-    // interpreter refuses deep recursion instead, this candidate needs to change.
+test "the card shows a failed test row when the candidate recurses without bound" {
+    // Unbounded recursion once ended `zttp test` on a signal. The interpreter
+    // now refuses a script call below its native stack floor. `zttp test` then
+    // reports the request as a failed test (CallStackOverflow) and exits 1.
     var approval: CardApproval = .{ .answer = true };
     var result = try runCardTurn(testing.allocator, &approval, .{
         .new_handler = "function down(n: number): number { return down(n + 1); }\n" ++
@@ -2841,8 +2845,38 @@ test "the card says zttp test ended on a signal when the candidate crashes it" {
     defer result.deinit(testing.allocator);
     try testing.expectEqualStrings(
         "Verdict: no new diagnostics\n" ++
+            "Test failed: serves a text body\n" ++
             "No longer proven: fault_covered\n" ++
             "No longer proven: cost_bounded\n" ++
+            "Tests: 0 passed, 1 failed, 0 unchecked, 1 total (tests/handler.test.jsonl)\n",
+        approval.card(),
+    );
+}
+
+test "the card says zttp test ended on a signal when the binary kills itself" {
+    // No candidate handler crashes `zttp test` on a signal today, because the
+    // interpreter refuses deep recursion first. This `zttp` is a shell script
+    // that ends itself with SIGABRT, and it stands in for a real crash source.
+    var script_dir = testing.tmpDir(.{});
+    defer script_dir.cleanup();
+    try script_dir.dir.writeFile(testing.io, .{
+        .sub_path = "zttp",
+        .data = "#!/bin/sh\nkill -ABRT $$\n",
+        .flags = .{ .permissions = std.Io.File.Permissions.fromMode(0o755) },
+    });
+    const repo_root = try cwd_support.cwdPathAlloc(testing.allocator);
+    defer testing.allocator.free(repo_root);
+    const script_path = try std.fs.path.resolve(testing.allocator, &.{ repo_root, ".zig-cache/tmp", &script_dir.sub_path, "zttp" });
+    defer testing.allocator.free(script_path);
+
+    var approval: CardApproval = .{ .answer = true };
+    var result = try runCardTurn(testing.allocator, &approval, .{
+        .suite = card_passing_suite,
+        .binary_path = script_path,
+    });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\n" ++
             "Tests: could not run: zttp test ended on a signal\n",
         approval.card(),
     );

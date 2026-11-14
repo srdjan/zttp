@@ -132,8 +132,9 @@ stop_server
 
 
 # Native stack exhaustion checks. Each check runs zttp as a child process so a
-# crash fails one check and not this script. All three fail until the native
-# stack floor lands (docs/plans/2026-11-14-script-recursion-native-stack-plan.md).
+# crash fails one check and not this script. The native stack floor makes script
+# recursion return CallStackOverflow before the thread stack ends
+# (docs/plans/2026-11-14-script-recursion-native-stack-plan.md).
 STACK_FAILED=0
 
 stack_pass() { printf '[panic-isolation] PASS: %s\n' "$*"; }
@@ -142,7 +143,7 @@ stack_fail() {
     STACK_FAILED=$((STACK_FAILED + 1))
 }
 
-# make_stack_app DIR: write the project files shared by the three checks.
+# make_stack_app DIR: write the project files shared by the four checks.
 # The caller writes DIR/src/handler.ts afterwards.
 make_stack_app() {
     mkdir -p "$1/src" "$1/tests"
@@ -226,7 +227,49 @@ else
     stack_fail "json leaf: exit $STACK_RC without 'Results: 1 passed' or CallStackOverflow"
 fi
 
-[ "$STACK_FAILED" = "0" ] || fail "$STACK_FAILED of 3 native stack checks failed"
+# Check 4 runs a bounded native leaf at every level of unbounded recursion, so
+# the leaf runs just above the floor. The headroom in
+# packages/zts/src/stack_floor.zig must leave room for it. The leaves are the
+# deepest bounded native calls that were measured: JSON.stringify at nesting 500
+# (writer limit 512) and renderToString at 254 nested h() elements.
+step "stack check 4: zttp test on unbounded recursion with a native leaf at every level"
+LEVEL_FAILED=0
+# level_leaf_case NAME: read a leaf() definition from stdin, recurse with it.
+level_leaf_case() {
+    local name="$1"
+    local dir="$TMP_DIR/$name-every-level-app"
+    make_stack_app "$dir"
+    {
+        cat
+        printf '%s\n' 'function down(n: number): number { const l = leaf(); return down(n + 1) + l; }'
+        printf '%s\n' 'export function handler(req: Request): Proof<Response, "state_isolated"> { return Response.text(String(down(0))); }'
+    } > "$dir/src/handler.ts"
+    run_stack_test "$dir"
+    if [ "$STACK_RC" -ge 128 ]; then
+        printf '[panic-isolation] FAIL: %s leaf at every level: ended on a signal, exit %s\n' "$name" "$STACK_RC"
+        LEVEL_FAILED=1
+    elif [ "$STACK_RC" != "1" ] || ! printf '%s' "$STACK_OUT" | grep -q 'CallStackOverflow'; then
+        printf '[panic-isolation] FAIL: %s leaf at every level: expected exit 1 with CallStackOverflow, got exit %s\n' "$name" "$STACK_RC"
+        LEVEL_FAILED=1
+    else
+        printf '[panic-isolation] PASS: %s leaf at every level: exit 1 with CallStackOverflow\n' "$name"
+    fi
+}
+level_leaf_case json <<'LEAF'
+structural Tree = number | Tree[];
+function build(k: number): Tree { let o: Tree = 1; for (const i of range(k)) { o = [o]; } return o; }
+function leaf(): number { const t = build(500); const s = JSON.stringify(t); if (s === undefined) { return 0; } return s.length; }
+LEAF
+level_leaf_case render <<'LEAF'
+function leaf(): number { let n = h("b", null, "x"); for (const i of range(254)) { n = h("div", null, n); } const s = renderToString(n); if (s.length > 0) { return 1; } return 0; }
+LEAF
+if [ "$LEVEL_FAILED" = "0" ]; then
+    stack_pass "leaf at every level: json and render both end with CallStackOverflow"
+else
+    STACK_FAILED=$((STACK_FAILED + 1))
+fi
 
-step "PASS: handler panic was isolated, the server recovered, and native stack checks passed"
+[ "$STACK_FAILED" = "0" ] || fail "$STACK_FAILED of 4 native stack checks failed"
+
+step "PASS: handler panic was isolated, the server recovered, and the four native stack checks passed"
 exit 0

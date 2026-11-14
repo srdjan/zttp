@@ -4,6 +4,7 @@ const std = @import("std");
 const value = @import("../value.zig");
 const bytecode = @import("../bytecode.zig");
 const object = @import("../object.zig");
+const stack_floor = @import("../stack_floor.zig");
 const trace = @import("trace.zig");
 const interpreter = @import("../interpreter.zig");
 const Interpreter = interpreter.Interpreter;
@@ -128,6 +129,14 @@ pub fn callBytecodeFunction(
     this_val: value.JSValue,
     args: []const value.JSValue,
 ) InterpreterError!value.JSValue {
+    // The outermost entry reads the stack floor of the calling thread, because a
+    // runtime can serve requests on different threads. A nested entry, such as a
+    // callback from a native function, keeps it.
+    if (self.state_depth == 0) self.stack_floor = stack_floor.floor();
+    if (@frameAddress() < self.stack_floor) {
+        @branchHint(.unlikely);
+        return error.CallStackOverflow;
+    }
     if (self.ctx.deadline_ns != 0) {
         @branchHint(.unlikely);
         if (pollDeadlineAtCall(self)) return error.RequestTimeout;
