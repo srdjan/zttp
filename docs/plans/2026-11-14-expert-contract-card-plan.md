@@ -1,6 +1,9 @@
 # Expert contract card and required properties
 
-Status: approved plan, revision 2, 2026-11-14, at commit `ad289ade`. A Fable
+Status: complete on 2026-11-14. U1 to U5 are done on local `main`, not
+pushed and not released. The U5 result lists the open items.
+
+Plan history: approved plan, revision 2, 2026-11-14, at commit `ad289ade`. A Fable
 review and a Codex astra review checked revision 1. This revision resolves
 their findings, listed under "Review of revision 1". The owner answered "as
 recommended" on 2026-11-14: option (a) of D11, D12, D13, D14, and D15. That
@@ -171,6 +174,10 @@ stops and hands back its status.
 - Acceptance: unfiltered `zig build test` and
   `env -u DEEPSEEK_API_KEY zig build test-expert-app`. The second step replays
   the corpus and must pass with no cassette change.
+- Result, commit `62096d10`: `prove` rejects with `policy_context_failed`
+  when the configured policy does not parse. The test failed before the fix,
+  because the candidate was accepted. Opus reran unfiltered `zig build test` and
+  `test-expert-app` on empty caches. Both exited 0 with no cassette change.
 
 ### U2: Required properties in `zttp.json`
 
@@ -211,6 +218,12 @@ stops and hands back its status.
 - Acceptance: unfiltered `zig build test`, `zig build test-cli`, and
   `env -u DEEPSEEK_API_KEY zig build test-expert-app` with no cassette change.
   `scripts/check-meta-drift.sh` passes.
+- Result, commit `3795c418`: `requiredProperties` is a key of `zttp.json`,
+  and `prove` rejects with `required_property_lost`. D-020 records the rule.
+  The six tests failed before the change. Opus reran unfiltered `zig build
+  test`, `test-cli`, `test-expert-app`, and `test-meta-drift` on empty caches.
+  All exited 0. `scripts/check-meta-drift.sh` needs arguments, so the named
+  step `test-meta-drift` ran in its place.
 
 ### U3: The `/contract` card
 
@@ -241,6 +254,12 @@ stops and hands back its status.
 - Acceptance: unfiltered `zig build test`,
   `env -u DEEPSEEK_API_KEY zig build test-expert-app` with no cassette change,
   and `zig build smoke-v1`.
+- Result, commits `51efbe90` and `5a59f939`: `/contract` and
+  `/contract drop <name>` are in `packages/pi/src/repl.zig`. The writer is
+  `packages/pi/src/contract_pin.zig`. `5a59f939` prints "No property is
+  proven." on a card with no proven property. Opus reran unfiltered
+  `zig build test`, `test-expert-app`, and `smoke-v1` at `5a59f939` on empty
+  caches. All three exited 0.
 
 ### U4: Documentation
 
@@ -251,6 +270,10 @@ stops and hands back its status.
 - The website states the behavior that U2 and U3 checked. It says that the
   feature is in development and not released. Run `deno task verify` there,
   and commit locally.
+- Result, commit `9a66a90b`: `docs/user-guide.md` ("Required properties"),
+  `docs/cli.md`, and `CHANGELOG.md` `[Unreleased]`. The website commit is
+  `c8ffac9` in `../ZTTP-WEBSITE`. It says that the change is on `main` and not
+  released. `deno task verify` passed there. The commit is local.
 
 ### U5: Closing validation
 
@@ -268,6 +291,72 @@ stops and hands back its status.
   Each mutant must fail a test.
 - Final gate: `env -u DEEPSEEK_API_KEY bash scripts/verify.sh`, then
   `zig build bench-check` with the load stated.
+- Result of the reviews:
+  - Codex astra found two missing tests. Commit `4cffc6e8` adds them. In the
+    first, `/contract` then `y` keeps a required name that is not proven. In
+    the second, `prove` refuses a candidate with no property result.
+  - Codex astra also noted that the `--yes` test asserts `approval.calls` is 0,
+    which `--yes` makes true in every case. Opus kept the line. The
+    assertions on `applied`, the handler source, and the rejection text carry
+    that test.
+  - Fable found ten points. Commit `8574cc82` fixes three, each with a test
+    that failed first:
+    - `/contract` pinned properties when the policy did not parse. Now it
+      refuses with the same text as `prove`.
+    - The writer changed `zttp.json` to mode 0600 and replaced a symlink
+      with a regular file. Now it keeps the mode and writes to the link target.
+    - The failure messages were wrong for a `requiredProperties` value that is
+      not a list, and for a duplicate key. Now each message names its fault.
+  - `docs/user-guide.md` now states two more of the ten points. The writer
+    can change number text. A `zttp.json` in a subdirectory starts a separate
+    project.
+- Result of the mutants: each of the seven mutants above failed unfiltered
+  `env -u DEEPSEEK_API_KEY zig build test-expert-app` at `4cffc6e8`. The
+  test that killed each one:
+  - U1 mutant: "aggregate proof rejects a change set when the policy file does
+    not parse".
+  - Skipped rejection: three `repl` tests and two `aggregate_proof` tests,
+    which include "a change set that loses a required property is refused
+    before any card".
+  - Baseline comparison: the three `repl` tests of U2 and U3.
+  - Null result: "required properties refuse a candidate that has no property
+    result" and the `4cffc6e8` test.
+  - Unknown name: "aggregate proof names the nearest valid property for an
+    unknown required name".
+  - `y` drops a name: "/contract then y keeps a required property that is not
+    proven".
+  - Unknown key dropped: three `/contract` tests.
+- Final gate at `8574cc82`, each on an empty cache:
+  `env -u DEEPSEEK_API_KEY bash scripts/verify.sh` exited 0, and
+  `zig build bench-check` exited 0. bench-check compared 9 benchmarks with
+  0.00% regression, at a load average of 3.14 before and 3.01 after. It warned
+  that its baseline is from Zig 0.17.0.
+- Open items, not fixed:
+  - Two `zttp.json` files: a `zttp.json` in a subdirectory starts a separate
+    project. A pin in the outer file then does not hold an edit to a module
+    inside that subdirectory. Only the developer can make this layout, because
+    a change set holds `.ts` files only. The user guide states the effect.
+  - The primary handler falls back to a changed file: when the entry file is
+    missing, root 0 is the first changed file. A helper module can then
+    report `pure`, `read_only`, `stateless`, and `retry_safe`. The card then
+    shows them as proven for the handler. The impact is low.
+  - An answer after a refusal: when `/contract` refuses before its question,
+    a next input line such as `y` goes to the model as a prompt. An
+    interactive developer sees the refusal first. Piped input can send the
+    line to the model.
+  - A stale card: the card computes the proven list before it takes the
+    workspace lock. A change set that commits in between can make the pin
+    name a property that the new code does not prove. Each later change set
+    is then rejected until it proves that property again. The failure is in
+    the safe direction.
+  - The scratch walk: the proof scratch copy is below `/tmp`, so the upward
+    `zttp.json` search can reach `/tmp/zttp.json`. This walk existed before
+    this plan. A project that has its own `zttp.json` is not affected.
+  - `--goal`: the automatic loop does not show the rejection reason of
+    `required_property_lost`.
+  - Write failure after the write: if `chmod` fails after the new
+    `zttp.json` is in place, the command reports a failure, but the file holds
+    the new list with mode 0600.
 
 ## Measurement
 
