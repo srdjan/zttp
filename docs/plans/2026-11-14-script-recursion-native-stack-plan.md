@@ -75,9 +75,11 @@ a line says otherwise.
     1024 frames need. The crash therefore reaches developers and test suites
     today, not users of a macOS release archive. A larger `dispatch` frame
     could remove that margin without a test failing.
-11. `zttp test` stops the whole run on a handler error. It prints
-    `error: Handler execution failed: error.CallStackOverflow`, exits 1, and
-    prints no `Results:` line. This plan does not change that.
+11. On a handler error, `zttp test` prints
+    `error: Handler execution failed: error.CallStackOverflow`, a `FAIL` row
+    for the test, and `Results: 0 passed, 1 failed, 0 unchecked, 1 total`. It
+    exits 1. Correction: revision 2 said that no `Results:` line was printed.
+    That was wrong. The U2 runs and an Opus probe printed the line.
 
 ## Decision D8: the mechanism
 
@@ -164,6 +166,33 @@ diff and runs each acceptance check again with an empty `ZIG_LOCAL_CACHE_DIR`.
   `zig build test-panic-isolation` pass. A fixture that recursed between the
   new Debug limit and depth 190 would fail one of these steps.
   `zig build bench-check` passes, with the host load stated beside the result.
+- Result, commit `291567b8`, with a comment fix in `29258914`:
+  - **Floor:** the floor is stored in `Interpreter.stack_floor`.
+    `callBytecodeFunction` sets it when `state_depth` is 0 and compares
+    `@frameAddress()` with it. `packages/zts/src/stack_floor.zig#floor` reads
+    the bounds of the thread once and caches them in a `threadlocal`, because
+    glibc reads `/proc/self/maps` for the main thread. `frame.run` did not
+    change: a test shows that recursion from module top-level code gives
+    `CallStackOverflow`. `scripts/zts-tiers.allow` got a row for the new file.
+  - **Headroom:** the headroom is 2 MiB. A `JSON.stringify` leaf, nested 500
+    deep and run at every level of unbounded recursion, ended on a signal
+    with 1 MiB and passed with 1.25 MiB. The `renderToString` leaf passed
+    with 1 MiB.
+  - **Bounds:** the main thread of `zttp test` reported 16,777,216 bytes. A
+    `zttp serve` worker reported 16,789,504 bytes.
+  - **Debug limit:** on the main thread, depth 169 passes, and depth 170
+    gives `CallStackOverflow`. Opus measured this once.
+  - **Tests:** check 4 in `scripts/test-panic-isolation.sh` runs both leaves
+    at every level. Three zts tests run scripts on threads with 16 MiB and
+    8 MiB stacks. In `packages/pi/src/repl.zig`, the recursion card test now
+    expects the failed test row. A new test uses a shell script that ends
+    itself on SIGABRT.
+  - **Gates:** Sonnet ran each step with an empty cache. `zig build test`
+    passed on the second run, after the tiers row. `zig build bench-check`
+    passed on the second run. The first run failed on `intArithmetic` at
+    11.5% below the baseline, at load average 13.8. Opus ran `test-cli` and
+    `test-panic-isolation` again with empty caches, and both exited 0. The
+    other steps run again in the U4 `verify.sh`.
 
 ### U3: Changelog
 
@@ -173,6 +202,8 @@ diff and runs each acceptance check again with an empty `ZIG_LOCAL_CACHE_DIR`.
   returned status 500.
 - The website does not change, because a macOS release archive does not show
   the defect.
+- Result, commit `9c5d4807`: Opus wrote the entry, because it is a one-file
+  edit.
 
 ### U4: Closing validation
 
