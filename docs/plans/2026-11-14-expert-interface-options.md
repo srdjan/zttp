@@ -4,6 +4,12 @@ Status: proposal. No code changes. Prepared 2026-11-14 at commit `939cb2ee`.
 The owner answered "as recommended" on 2026-11-14: option (a) of D1, D2, and
 D3. The build plan for F1 and F2 in Option A follows in a separate document.
 
+Correction, 2026-11-14: step 4 of the step table below ("ask for tests") was
+never possible, because the model cannot call `workspace_gen_tests`. Today the
+flow takes 4 steps. A review also showed that D3 (a) refuses every intent that
+changes scaffolded behavior. The
+[build plan](2026-11-14-expert-result-card-plan.md) replaces D3 with D3R.
+
 ## Answer
 
 I recommend Option A, the proof loop in the terminal, as the primary interface.
