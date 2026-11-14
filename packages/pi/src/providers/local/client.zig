@@ -411,8 +411,7 @@ pub fn decodeResponse(
 /// Decode a recorded response from its request digest, reporting which change-set refusal fired
 /// through `observed`.
 ///
-/// `local` is the recorder's default provider, so this is the decode most
-/// refusals actually run. Leaving it on the unobserved path wrote
+/// Leaving the local provider on the unobserved path wrote
 /// `"change_set_rejection": null` into every local quarantine envelope and left
 /// the operator the bare `InvalidChangeSetArgs` the shape exists to replace.
 pub fn decodeResponseFromRequestDigestObserved(

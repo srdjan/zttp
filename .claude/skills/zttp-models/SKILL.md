@@ -22,7 +22,8 @@ mlx_lm.server --model LiquidAI/LFM2.5-2.6B-MLX-8bit --host 127.0.0.1 --port 8080
 DeepSeek is the one remote provider, added 2026-08-14 by explicit
 decision. `--provider deepseek` runs the expert loop against it and
 `ZTTP_CODEGEN_PROVIDER=deepseek` records a corpus into
-`packages/pi/src/simulator/testdata/empirical/deepseek/codegen/`. Both need
+`packages/pi/src/simulator/testdata/empirical/deepseek/codegen/`. The recorder
+also uses DeepSeek when `ZTTP_CODEGEN_PROVIDER` is unset. Both need
 `DEEPSEEK_API_KEY`. Handler source leaves the machine on a DeepSeek turn, which
 the destination banner states before the first turn.
 
