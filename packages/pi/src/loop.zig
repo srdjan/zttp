@@ -21,6 +21,7 @@ const compaction = @import("compaction.zig");
 const change_set = @import("change_set.zig");
 const workspace_snapshot = @import("workspace_snapshot.zig");
 const aggregate_proof = @import("aggregate_proof.zig");
+const suite_run = @import("suite_run.zig");
 const change_transaction = @import("change_transaction.zig");
 const change_set_receipt = @import("change_set_receipt.zig");
 const contract_gate = @import("contract_gate.zig");
@@ -85,6 +86,9 @@ pub const ChangeSetApprovalPreview = struct {
     property_changes: []const ui_payload_mod.PropertiesSnapshot.Change = &.{},
     /// Env, egress, route, and capability changes of the primary root.
     contract_changes: []const aggregate_proof.ContractChange = &.{},
+    /// Result of the project suite run against the candidate. Shown to the
+    /// developer only. Not part of `approvalPreviewDigest`.
+    test_run: suite_run.TestRun = .none,
 };
 
 pub const ApprovalFn = union(enum) {
@@ -301,6 +305,10 @@ pub const RunOptions = struct {
     /// Turn ordinal within the session, for the gate record. Zero when the
     /// caller does not track it.
     turn_index: u32 = 0,
+    /// Path of the `zttp` executable. When set, the host runs the project suite
+    /// against the candidate before the approval call and puts the result on
+    /// the preview. Null runs nothing.
+    test_binary: ?[]const u8 = null,
 };
 
 /// Verification attempts granted to interactive and `--print` turns. Higher
@@ -1107,6 +1115,7 @@ fn applyVerifiedChangeSet(
             .rewrite_trace = change.rewrite_trace,
         };
         const property_changes = try propertyChanges(arena, proof);
+        const test_run = try suite_run.run(allocator, arena, options.test_binary, snapshot, prepared);
         if (!try approve.call(.{
             .proof_id = &proof.proof_id,
             .changes = previews,
@@ -1114,6 +1123,7 @@ fn applyVerifiedChangeSet(
             .carried_over_diagnostics = proof.diagnostics.len,
             .property_changes = property_changes,
             .contract_changes = proof.contract_changes,
+            .test_run = test_run,
         })) {
             try transcript.append(allocator, .{
                 .system_note = "change set proved but was not applied by the user approval policy",

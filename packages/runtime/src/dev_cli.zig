@@ -95,6 +95,13 @@ fn dispatchExpert(allocator: std.mem.Allocator, expert_args: []const []const u8)
     };
     const witness_replay_lib = @import("witness_replay_lib.zig");
     pi_app.setInvocationArgv(expert_args);
+    // The interactive session runs `zttp test` before it asks for approval. A
+    // lookup failure leaves the path unset, and the card then reports no tests.
+    var io_backend = std.Io.Threaded.init(allocator, .{ .environ = .empty });
+    defer io_backend.deinit();
+    const self_path = std.process.executablePathAlloc(io_backend.io(), allocator) catch null;
+    defer if (self_path) |path| allocator.free(path);
+    if (self_path) |path| pi_app.setZttpBinary(path);
     pi_app.witness_replay.setReplayFn(witness_replay_lib.replayWitnessJsonl);
     try pi_app.run(allocator);
 }

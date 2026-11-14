@@ -271,6 +271,9 @@ pub const AgentSession = struct {
     /// Turn ordinal carried into each gate record, so a niche's turns can be
     /// ordered without re-reading the events log.
     gate_turn_index: u32 = 0,
+    /// Path of the `zttp` executable that runs the project suite before the
+    /// approval prompt. Null in every session that has no card to show it on.
+    test_binary: ?[]const u8 = null,
 
     session_id: ?[]u8 = null,
     session_dir: ?[]u8 = null,
@@ -694,6 +697,7 @@ pub fn runOneTurnWithClient(
             .max_attempts = loop.interactive_max_attempts,
             .receipt_durability = if (session.events_path == null) .workspace else .session_journal,
             .gate_sink = session.gate_sink,
+            .test_binary = session.test_binary,
             // Host-assigned, never derived by the loop. Reuses the classifier
             // the host already runs rather than inventing a second vocabulary.
             .task_class = expert_workflow.taskKindName(expert_workflow.classify(user_text).kind),

@@ -3,6 +3,10 @@ const std = @import("std");
 const zts = @import("zts");
 pub const retired_authority = @import("retired_authority.zig");
 
+/// The suite that `zttp test` runs when it receives no path, relative to the
+/// project root.
+pub const default_test_suite = "tests/handler.test.jsonl";
+
 pub const ProjectConfig = struct {
     root_dir: []const u8,
     manifest_path: []const u8,

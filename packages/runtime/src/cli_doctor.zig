@@ -121,7 +121,7 @@ pub fn doctorCommand(allocator: std.mem.Allocator, argv: []const []const u8) !vo
             printDoctorSkip("outbound", "not enabled");
         }
 
-        const tests_path = try std.fs.path.resolve(allocator, &.{ cfg.root_dir, "tests", "handler.test.jsonl" });
+        const tests_path = try std.fs.path.resolve(allocator, &.{ cfg.root_dir, project_config_mod.default_test_suite });
         defer allocator.free(tests_path);
         printDoctorOptionalPath("tests", tests_path, doctorPathExists(io, tests_path));
 

@@ -129,9 +129,18 @@ pub fn setInvocationArgv(argv: []const []const u8) void {
     captured_argv = argv;
 }
 
+var captured_zttp_binary: ?[]const u8 = null;
+
+/// Record the path of the running `zttp` executable. Only the interactive
+/// session with the asking approval policy reads it.
+pub fn setZttpBinary(path: []const u8) void {
+    captured_zttp_binary = path;
+}
+
 pub fn run(allocator: std.mem.Allocator) !void {
     const argv = captured_argv orelse &[_][]const u8{};
-    const flags = parseExpertFlags(argv) catch |err| exitWithMessage(flagErrorMessage(err), 2);
+    var flags = parseExpertFlags(argv) catch |err| exitWithMessage(flagErrorMessage(err), 2);
+    flags.zttp_binary = captured_zttp_binary;
 
     var registry = switch (flags.tools_preset) {
         .full => try buildRegistry(allocator),
@@ -411,6 +420,9 @@ pub const ExpertFlags = struct {
     model: ?[]const u8 = null,
     /// Append one gate record per turn to this path. Null disables recording.
     gate_log: ?[]const u8 = null,
+    /// Path of the running `zttp` executable. Set by the host, never by argv.
+    /// The interactive session uses it to run the project suite before approval.
+    zttp_binary: ?[]const u8 = null,
 };
 
 fn takeArg(i: *usize, argv: []const []const u8, missing: anyerror) ![]const u8 {

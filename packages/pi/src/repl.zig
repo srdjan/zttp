@@ -15,6 +15,8 @@ const agent_bootstrap = @import("agent_bootstrap.zig");
 const commands = @import("commands.zig");
 const loop = @import("loop.zig");
 const aggregate_proof = @import("aggregate_proof.zig");
+const suite_run = @import("suite_run.zig");
+const project_config = @import("project_config");
 const gate_record = @import("gate_record.zig");
 const app = @import("app.zig");
 const ledger = @import("ledger.zig");
@@ -804,6 +806,8 @@ pub fn run(
         session.stored_approval_policy orelse
         .ask;
     const approval_fn = selectApprovalFn(policy);
+    // Only the asking policy shows a result card, so only it runs the suite.
+    session.test_binary = if (policy == .ask) flags.zttp_binary else null;
 
     // Confirm a restore the user asked for (otherwise resume is silent), and
     // surface any policy-drift note that would otherwise reach only the model.
@@ -1113,15 +1117,17 @@ fn writeResumeDisclosure(session: *const agent.AgentSession, forked: bool) void 
     }
 }
 
-/// Result card of an approval prompt: the verdict, then each lost property,
-/// each contract change, and each gained property. The verdict never claims a
-/// system proof, because the proof covers the changed files only.
+/// Result card of an approval prompt: the verdict, each failing suite row, each
+/// lost property, each contract change, each gained property, and the test line.
+/// The verdict never claims a system proof, because the proof covers the changed
+/// files only.
 fn renderApprovalCard(w: *std.Io.Writer, preview: loop.ChangeSetApprovalPreview) !void {
     if (preview.carried_over_diagnostics > 0) {
         try w.print("Verdict: no new diagnostics, {d} carried over from the baseline\n", .{preview.carried_over_diagnostics});
     } else {
         try w.writeAll("Verdict: no new diagnostics\n");
     }
+    try writeFailedTests(w, preview.test_run);
     for (preview.property_changes) |change| {
         if (change.kind == .demoted) try w.print("No longer proven: {s}\n", .{change.name});
     }
@@ -1138,6 +1144,26 @@ fn renderApprovalCard(w: *std.Io.Writer, preview: loop.ChangeSetApprovalPreview)
     for (preview.property_changes) |change| {
         if (change.kind == .promoted) try w.print("Newly proven: {s}\n", .{change.name});
     }
+    switch (preview.test_run) {
+        .none => try w.writeAll("Tests: none\n"),
+        .ran => |ran| try w.print("Tests: {s} ({s})\n", .{ ran.results, project_config.default_test_suite }),
+        .not_runnable => |reason| try w.print("Tests: could not run: {s}\n", .{reason}),
+    }
+}
+
+/// Most `Test failed:` lines on one card.
+const max_failed_test_lines: usize = 20;
+
+/// One `Test failed:` line for each failing suite row, then a count of the rows
+/// beyond the cap.
+fn writeFailedTests(w: *std.Io.Writer, test_run: suite_run.TestRun) !void {
+    const ran = switch (test_run) {
+        .ran => |ran| ran,
+        .none, .not_runnable => return,
+    };
+    const shown = @min(ran.failing.len, max_failed_test_lines);
+    for (ran.failing[0..shown]) |name| try w.print("Test failed: {s}\n", .{name});
+    if (ran.failing.len > shown) try w.print("Test failed: {d} more\n", .{ran.failing.len - shown});
 }
 
 /// Write the result card to stdout. A card that overflows the scratch buffer
@@ -2427,7 +2453,7 @@ test "renderApprovalCard: a gained property shows the verdict and Newly proven" 
     var preview = one_line_preview;
     preview.property_changes = &.{.{ .name = "pure", .kind = .promoted }};
     try testing.expectEqualStrings(
-        "Verdict: no new diagnostics\nNewly proven: pure\n",
+        "Verdict: no new diagnostics\nNewly proven: pure\nTests: none\n",
         renderCardToBuf(&buf, preview),
     );
 }
@@ -2437,7 +2463,7 @@ test "renderApprovalCard: a lost property shows No longer proven" {
     var preview = one_line_preview;
     preview.property_changes = &.{.{ .name = "no_secret_leakage", .kind = .demoted }};
     try testing.expectEqualStrings(
-        "Verdict: no new diagnostics\nNo longer proven: no_secret_leakage\n",
+        "Verdict: no new diagnostics\nNo longer proven: no_secret_leakage\nTests: none\n",
         renderCardToBuf(&buf, preview),
     );
 }
@@ -2448,7 +2474,7 @@ test "renderApprovalCard: an added egress host shows Contract + egress" {
     var preview = one_line_preview;
     preview.contract_changes = &.{.{ .kind = .egress, .added = true, .text = &host }};
     try testing.expectEqualStrings(
-        "Verdict: no new diagnostics\nContract: + egress api.example.com\n",
+        "Verdict: no new diagnostics\nContract: + egress api.example.com\nTests: none\n",
         renderCardToBuf(&buf, preview),
     );
 }
@@ -2459,7 +2485,7 @@ test "renderApprovalCard: a removed route shows Contract - route" {
     var preview = one_line_preview;
     preview.contract_changes = &.{.{ .kind = .route, .added = false, .text = &route }};
     try testing.expectEqualStrings(
-        "Verdict: no new diagnostics\nContract: - route GET /health\n",
+        "Verdict: no new diagnostics\nContract: - route GET /health\nTests: none\n",
         renderCardToBuf(&buf, preview),
     );
 }
@@ -2489,7 +2515,7 @@ test "renderApprovalCard: carried over diagnostics, every line kind in order" {
             "Contract: - env OLD_KEY\n" ++
             "Contract: + route POST /items\n" ++
             "Contract: + capability clock\n" ++
-            "Newly proven: pure\n",
+            "Newly proven: pure\nTests: none\n",
         renderCardToBuf(&buf, preview),
     );
 }
@@ -2510,4 +2536,310 @@ test "noChangeNotice: an applied turn and a denied turn print nothing" {
     try testing.expectEqual(@as(?[]const u8, null), noChangeNotice(.{}, applied));
     const denied: agent.SessionMetrics = .{ .turn_count = 1, .last_outcome = .approval_denied };
     try testing.expectEqual(@as(?[]const u8, null), noChangeNotice(.{}, denied));
+}
+
+const cwd_support = @import("test_support/cwd.zig");
+const codegen_eval = @import("expert_codegen_eval.zig");
+const tools_common = @import("tools/common.zig");
+const zts_cli = @import("zts_cli");
+
+const card_old_handler =
+    "export function handler(req: Request): Proof<Response, \"state_isolated\"> { return Response.text(\"old\"); }\n";
+const card_new_handler =
+    "export function handler(req: Request): Proof<Response, \"state_isolated\"> { return Response.text(\"new\"); }\n";
+const card_default_config = "{\"entry\":\"src/handler.ts\"}";
+const card_failing_suite =
+    "{\"type\":\"test\",\"name\":\"serves the old text\"}\n" ++
+    "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\",\"headers\":{},\"body\":null}\n" ++
+    "{\"type\":\"expect\",\"status\":200,\"bodyContains\":\"old\"}\n";
+const card_passing_suite =
+    "{\"type\":\"test\",\"name\":\"serves a text body\"}\n" ++
+    "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\",\"headers\":{},\"body\":null}\n" ++
+    "{\"type\":\"expect\",\"status\":200}\n";
+
+const CardApproval = struct {
+    buf: [4096]u8 = undefined,
+    len: usize = 0,
+    calls: u32 = 0,
+    answer: bool,
+
+    fn approve(context: *anyopaque, preview: loop.ChangeSetApprovalPreview) anyerror!bool {
+        const self: *CardApproval = @ptrCast(@alignCast(context));
+        self.calls += 1;
+        var w = std.Io.Writer.fixed(&self.buf);
+        try renderApprovalCard(&w, preview);
+        self.len = w.buffered().len;
+        return self.answer;
+    }
+
+    fn card(self: *const CardApproval) []const u8 {
+        return self.buf[0..self.len];
+    }
+};
+
+const CardClient = struct {
+    content: []const u8,
+
+    fn request(
+        context: *anyopaque,
+        arena: std.mem.Allocator,
+        transcript: *const transcript_mod.Transcript,
+        extra_user_text: ?[]const u8,
+    ) anyerror!loop.ModelCallResult {
+        _ = arena;
+        _ = transcript;
+        _ = extra_user_text;
+        const self: *CardClient = @ptrCast(@alignCast(context));
+        return .{ .reply = .{ .response = .{ .change_set = .{ .file = "src/handler.ts", .content = self.content } } } };
+    }
+};
+
+const card_sql_old_handler =
+    "import { sql, sqlMany } from \"zttp:sql\";\n" ++
+    "sql(\"listUsers\", \"SELECT id, name FROM users ORDER BY id ASC\");\n" ++
+    "export function handler(req: Request): Proof<Response, \"state_isolated\"> { return Response.json({ users: sqlMany(\"listUsers\") }); }\n";
+const card_sql_new_handler =
+    "import { sql, sqlMany } from \"zttp:sql\";\n" ++
+    "sql(\"listUsers\", \"SELECT id, name FROM users ORDER BY id ASC\");\n" ++
+    "export function handler(req: Request): Proof<Response, \"state_isolated\"> { return Response.json({ users: sqlMany(\"listUsers\"), version: 2 }); }\n";
+const card_sql_config = "{\"entry\":\"src/handler.ts\",\"sqlite\":\"data.db\"}";
+
+const CardTurnSpec = struct {
+    zttp_json: []const u8 = card_default_config,
+    old_handler: []const u8 = card_old_handler,
+    new_handler: []const u8 = card_new_handler,
+    /// Create `data.db` with a users table that holds one row.
+    users_db: bool = false,
+    /// Run `zttp test` on the real workspace before the turn.
+    real_run: bool = false,
+    suite: ?[]const u8 = null,
+    with_binary: bool = true,
+    answer: bool = true,
+};
+
+const CardTurnResult = struct {
+    applied: bool,
+    handler_after: []u8,
+    /// The `Results:` text of `zttp test` on the real workspace, when asked for.
+    real_results: ?[]u8 = null,
+
+    fn deinit(self: *CardTurnResult, allocator: std.mem.Allocator) void {
+        allocator.free(self.handler_after);
+        if (self.real_results) |text| allocator.free(text);
+    }
+};
+
+/// Run one turn that proposes `card_new_handler` over `card_old_handler` and
+/// renders the approval card into `approval`.
+fn runCardTurn(allocator: std.mem.Allocator, approval: *CardApproval, spec: CardTurnSpec) !CardTurnResult {
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try tmp.dir.createDirPath(testing.io, "src");
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "zttp.json", .data = spec.zttp_json });
+    try tmp.dir.writeFile(testing.io, .{ .sub_path = "src/handler.ts", .data = spec.old_handler });
+    if (spec.suite) |suite| {
+        try tmp.dir.createDirPath(testing.io, "tests");
+        try tmp.dir.writeFile(testing.io, .{ .sub_path = "tests/handler.test.jsonl", .data = suite });
+    }
+    const workspace_root = try allocator.print(".zig-cache/tmp/{s}", .{tmp.sub_path});
+    defer allocator.free(workspace_root);
+    const repo_root = try cwd_support.cwdPathAlloc(allocator);
+    defer allocator.free(repo_root);
+    const binary: ?[]u8 = if (spec.with_binary)
+        codegen_eval.locateZttpBinary(allocator, repo_root) orelse return error.ZttpBinaryMissing
+    else
+        null;
+    defer if (binary) |path| allocator.free(path);
+
+    const workspace_abs = try std.fs.path.resolve(allocator, &.{ repo_root, workspace_root });
+    defer allocator.free(workspace_abs);
+    if (spec.users_db) {
+        const db_path = try std.fs.path.join(allocator, &.{ workspace_abs, "data.db" });
+        defer allocator.free(db_path);
+        try zts_cli.precompile_sql.execSqlite(
+            allocator,
+            db_path,
+            "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT); INSERT INTO users(name) VALUES ('a')",
+        );
+    }
+    var real_results: ?[]u8 = null;
+    errdefer if (real_results) |text| allocator.free(text);
+    if (spec.real_run) {
+        var outcome = try tools_common.runCommand(allocator, workspace_abs, &.{ binary orelse return error.ZttpBinaryMissing, "test" });
+        defer outcome.deinit(allocator);
+        var scratch = std.heap.ArenaAllocator.init(allocator);
+        defer scratch.deinit();
+        const parsed = try suite_run.parseOutput(scratch.allocator(), outcome.stderr);
+        real_results = try allocator.dupe(u8, parsed.ran.results);
+    }
+
+    var client: CardClient = .{ .content = spec.new_handler };
+    var tr: transcript_mod.Transcript = .{};
+    defer tr.deinit(allocator);
+    var registry: registry_mod.Registry = .{};
+    defer registry.deinit(allocator);
+    approval.answer = spec.answer;
+    const result = try loop.runTurnWith(
+        allocator,
+        .{ .context = &client, .request_fn = CardClient.request },
+        &registry,
+        &tr,
+        "change the text",
+        .{
+            .workspace_root = workspace_root,
+            .approval_fn = .{ .contextual = .{ .context = approval, .func = CardApproval.approve } },
+            .test_binary = binary,
+        },
+    );
+    const handler_path = try std.fs.path.resolve(allocator, &.{ workspace_root, "src/handler.ts" });
+    defer allocator.free(handler_path);
+    return .{
+        .applied = result.applied_change_set,
+        .handler_after = try zts.file_io.readFile(allocator, handler_path, 1024 * 1024),
+        .real_results = real_results,
+    };
+}
+
+test "the card shows a failing suite row before approval" {
+    var approval: CardApproval = .{ .answer = true };
+    var result = try runCardTurn(testing.allocator, &approval, .{ .suite = card_failing_suite });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(@as(u32, 1), approval.calls);
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\n" ++
+            "Test failed: serves the old text\n" ++
+            "Tests: 0 passed, 1 failed, 0 unchecked, 1 total (tests/handler.test.jsonl)\n",
+        approval.card(),
+    );
+}
+
+test "the card ends with the suite result line when the suite passes" {
+    var approval: CardApproval = .{ .answer = true };
+    var result = try runCardTurn(testing.allocator, &approval, .{ .suite = card_passing_suite });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\n" ++
+            "Tests: 1 passed, 0 failed, 0 unchecked, 1 total (tests/handler.test.jsonl)\n",
+        approval.card(),
+    );
+}
+
+test "the card says the suite could not run and gives the first error line" {
+    var approval: CardApproval = .{ .answer = true };
+    var result = try runCardTurn(testing.allocator, &approval, .{
+        .zttp_json = "{\"entry\":\"src/handler.ts\",\"outboundHosts\":[\"a.example.com\",\"b.example.com\"]}",
+        .suite = card_passing_suite,
+    });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\n" ++
+            "Tests: could not run: zttp test cannot run with multiple outboundHosts; current runtime accepts one.\n",
+        approval.card(),
+    );
+}
+
+test "the card says Tests: none when the project has no suite" {
+    var approval: CardApproval = .{ .answer = true };
+    var result = try runCardTurn(testing.allocator, &approval, .{});
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("Verdict: no new diagnostics\nTests: none\n", approval.card());
+}
+
+test "the card says Tests: none when the host gives no zttp binary" {
+    var approval: CardApproval = .{ .answer = true };
+    var result = try runCardTurn(testing.allocator, &approval, .{ .suite = card_failing_suite, .with_binary = false });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("Verdict: no new diagnostics\nTests: none\n", approval.card());
+}
+
+test "a change set is committed when the developer approves a card with a failing test" {
+    var approval: CardApproval = .{ .answer = true };
+    var result = try runCardTurn(testing.allocator, &approval, .{ .suite = card_failing_suite });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(true, result.applied);
+    try testing.expectEqualStrings(card_new_handler, result.handler_after);
+}
+
+test "a change set is not committed when the developer declines a card with a failing test" {
+    var approval: CardApproval = .{ .answer = false };
+    var result = try runCardTurn(testing.allocator, &approval, .{ .suite = card_failing_suite, .answer = false });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqual(false, result.applied);
+    try testing.expectEqualStrings(card_old_handler, result.handler_after);
+}
+
+test "renderApprovalCard: failing rows come right after the verdict and the test line ends the card" {
+    var buf: [1024]u8 = undefined;
+    var preview = one_line_preview;
+    preview.property_changes = &.{
+        .{ .name = "pure", .kind = .promoted },
+        .{ .name = "read_only", .kind = .demoted },
+    };
+    preview.test_run = .{ .ran = .{
+        .results = "1 passed, 2 failed, 0 unchecked, 3 total",
+        .failing = &.{ "first row", "second row" },
+    } };
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\n" ++
+            "Test failed: first row\n" ++
+            "Test failed: second row\n" ++
+            "No longer proven: read_only\n" ++
+            "Newly proven: pure\n" ++
+            "Tests: 1 passed, 2 failed, 0 unchecked, 3 total (tests/handler.test.jsonl)\n",
+        renderCardToBuf(&buf, preview),
+    );
+}
+
+test "renderApprovalCard: more than 20 failing rows show 20 lines and a count" {
+    var buf: [2048]u8 = undefined;
+    var preview = one_line_preview;
+    preview.test_run = .{ .ran = .{
+        .results = "0 passed, 22 failed, 0 unchecked, 22 total",
+        .failing = &.{
+            "t01", "t02", "t03", "t04", "t05", "t06", "t07", "t08", "t09", "t10", "t11",
+            "t12", "t13", "t14", "t15", "t16", "t17", "t18", "t19", "t20", "t21", "t22",
+        },
+    } };
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\n" ++
+            "Test failed: t01\nTest failed: t02\nTest failed: t03\nTest failed: t04\n" ++
+            "Test failed: t05\nTest failed: t06\nTest failed: t07\nTest failed: t08\n" ++
+            "Test failed: t09\nTest failed: t10\nTest failed: t11\nTest failed: t12\n" ++
+            "Test failed: t13\nTest failed: t14\nTest failed: t15\nTest failed: t16\n" ++
+            "Test failed: t17\nTest failed: t18\nTest failed: t19\nTest failed: t20\n" ++
+            "Test failed: 2 more\n" ++
+            "Tests: 0 passed, 22 failed, 0 unchecked, 22 total (tests/handler.test.jsonl)\n",
+        renderCardToBuf(&buf, preview),
+    );
+}
+
+test "renderApprovalCard: a suite that could not run shows the reason and no failing rows" {
+    var buf: [512]u8 = undefined;
+    var preview = one_line_preview;
+    preview.test_run = .{ .not_runnable = "Handler not found: /x/src/handler.ts" };
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\nTests: could not run: Handler not found: /x/src/handler.ts\n",
+        renderCardToBuf(&buf, preview),
+    );
+}
+
+test "the card on a project with a SQLite database shows the Results text that zttp test gives on disk" {
+    var approval: CardApproval = .{ .answer = true };
+    var result = try runCardTurn(testing.allocator, &approval, .{
+        .zttp_json = card_sql_config,
+        .old_handler = card_sql_old_handler,
+        .new_handler = card_sql_new_handler,
+        .suite = "{\"type\":\"test\",\"name\":\"lists users\"}\n" ++
+            "{\"type\":\"request\",\"method\":\"GET\",\"url\":\"/\",\"headers\":{},\"body\":null}\n" ++
+            "{\"type\":\"expect\",\"status\":200}\n",
+        .users_db = true,
+        .real_run = true,
+    });
+    defer result.deinit(testing.allocator);
+    try testing.expectEqualStrings("1 passed, 0 failed, 0 unchecked, 1 total", result.real_results.?);
+    try testing.expectEqualStrings(
+        "Verdict: no new diagnostics\n" ++
+            "Tests: 1 passed, 0 failed, 0 unchecked, 1 total (tests/handler.test.jsonl)\n",
+        approval.card(),
+    );
 }

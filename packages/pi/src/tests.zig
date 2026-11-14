@@ -37,6 +37,7 @@ comptime {
     _ = @import("change_set.zig");
     _ = @import("workspace_snapshot.zig");
     _ = @import("aggregate_proof.zig");
+    _ = @import("suite_run.zig");
     _ = @import("change_transaction.zig");
     _ = @import("change_set_receipt.zig");
     _ = @import("test_support/prove_probe.zig");

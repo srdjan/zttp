@@ -40,7 +40,7 @@ pub fn testCommand(allocator: std.mem.Allocator, argv: []const []const u8) !void
     const test_path = if (explicit_test_path) |path|
         try allocator.dupe(u8, path)
     else
-        try std.fs.path.resolve(allocator, &.{ cfg.root_dir, "tests", "handler.test.jsonl" });
+        try std.fs.path.resolve(allocator, &.{ cfg.root_dir, project_config_mod.default_test_suite });
     defer allocator.free(test_path);
 
     if (!doctorPathExists(io, test_path)) {
