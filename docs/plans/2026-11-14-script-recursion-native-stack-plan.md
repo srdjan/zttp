@@ -1,10 +1,12 @@
 # Native stack limit for script recursion
 
-Status: draft plan, revision 2, 2026-11-14, at commit `2fa69e89`. A Fable
+Status: approved plan, revision 2, 2026-11-14, at commit `2fa69e89`. A Fable
 review and a Codex astra review checked revision 1. This revision resolves
 their findings. The owner chose option (a) of D7 on 2026-11-14: write a plan,
-with a reproduction test, to limit recursion depth in the interpreter. This
-plan asks D8 and D9. It authorizes no code.
+with a reproduction test, to limit recursion depth in the interpreter. The
+owner answered "yes, approved" on 2026-11-14: option (a) of D8 and D9. That
+authorizes U1 to U4 on local `main`, with no push, no paid model call, and no
+re-record.
 Source: U4 of [Expert result card and test run](2026-11-14-expert-result-card-plan.md).
 
 ## Goal
