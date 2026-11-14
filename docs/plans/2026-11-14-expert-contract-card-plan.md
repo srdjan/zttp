@@ -1,8 +1,11 @@
 # Expert contract card and required properties
 
-Status: draft plan, revision 2, 2026-11-14. No code changes yet. A Fable
+Status: approved plan, revision 2, 2026-11-14, at commit `ad289ade`. A Fable
 review and a Codex astra review checked revision 1. This revision resolves
-their findings, listed under "Review of revision 1".
+their findings, listed under "Review of revision 1". The owner answered "as
+recommended" on 2026-11-14: option (a) of D11, D12, D13, D14, and D15. That
+authorizes U1 to U5 on local `main`, with no push, no paid model call, and no
+re-record.
 Source: F2 of [Expert interface options](2026-11-14-expert-interface-options.md).
 The owner chose option (a) of D10 on 2026-11-14: plan F2, have Fable and
 Codex astra review the plan, and bring it for approval.
