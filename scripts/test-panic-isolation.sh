@@ -160,6 +160,9 @@ run_stack_test() {
     STACK_OUT=$(cd "$1" && "$ZTTP" test "$1/tests/handler.test.jsonl" 2>&1 < /dev/null) || STACK_RC=$?
 }
 
+# zttp test prints this whole line when the interpreter refuses a script call.
+OVERFLOW_LINE='error: Handler execution failed: error.CallStackOverflow'
+
 step "stack check 1: zttp test on unbounded recursion ends with CallStackOverflow"
 UNBOUNDED_DIR="$TMP_DIR/unbounded-app"
 make_stack_app "$UNBOUNDED_DIR"
@@ -172,8 +175,8 @@ if [ "$STACK_RC" -ge 128 ]; then
     stack_fail "unbounded recursion: zttp test ended on a signal, exit $STACK_RC"
 elif [ "$STACK_RC" != "1" ]; then
     stack_fail "unbounded recursion: expected exit 1, got $STACK_RC"
-elif ! printf '%s' "$STACK_OUT" | grep -q 'CallStackOverflow'; then
-    stack_fail "unbounded recursion: exit 1 without CallStackOverflow in the output"
+elif ! printf '%s\n' "$STACK_OUT" | grep -qxF "$OVERFLOW_LINE"; then
+    stack_fail "unbounded recursion: exit 1 without the line '$OVERFLOW_LINE'"
 else
     stack_pass "unbounded recursion: exit 1 with CallStackOverflow"
 fi
@@ -195,15 +198,19 @@ SRV_PID=$!
 if ! wait_for_server "$DEEP_PORT"; then
     stack_fail "serve recursion: server did not become ready on :$DEEP_PORT"
 else
+    deep_curl=0
     deep_status=$(/usr/bin/curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
-        "http://127.0.0.1:$DEEP_PORT/deep" < /dev/null) || true
+        "http://127.0.0.1:$DEEP_PORT/deep" < /dev/null) || deep_curl=$?
     if kill -0 "$SRV_PID" 2>/dev/null; then deep_alive=alive; else deep_alive=gone; fi
-    ok_status=$(/usr/bin/curl -s -o /dev/null -w "%{http_code}" --max-time 10 \
-        "http://127.0.0.1:$DEEP_PORT/ok" < /dev/null) || true
-    if [ "$deep_status" = "500" ] && [ "$deep_alive" = "alive" ] && [ "$ok_status" = "200" ]; then
-        stack_pass "serve recursion: /deep 500, server alive, /ok 200"
+    ok_curl=0
+    ok_status=$(/usr/bin/curl -s -o "$TMP_DIR/ok-body" -w "%{http_code}" --max-time 10 \
+        "http://127.0.0.1:$DEEP_PORT/ok" < /dev/null) || ok_curl=$?
+    ok_body=$(cat "$TMP_DIR/ok-body" 2>/dev/null) || ok_body=""
+    if [ "$deep_curl" = "0" ] && [ "$deep_status" = "500" ] && [ "$deep_alive" = "alive" ] \
+        && [ "$ok_curl" = "0" ] && [ "$ok_status" = "200" ] && [ "$ok_body" = "ok" ]; then
+        stack_pass "serve recursion: /deep 500, server alive, /ok 200 with body ok"
     else
-        stack_fail "serve recursion: /deep status ${deep_status:-none}, server $deep_alive, /ok status ${ok_status:-none}"
+        stack_fail "serve recursion: /deep status ${deep_status:-none} curl $deep_curl, server $deep_alive, /ok status ${ok_status:-none} curl $ok_curl body '${ok_body}'"
     fi
 fi
 stop_server
@@ -221,10 +228,14 @@ HANDLER
 run_stack_test "$LEAF_DIR"
 if [ "$STACK_RC" -ge 128 ]; then
     stack_fail "json leaf: zttp test ended on a signal, exit $STACK_RC"
-elif printf '%s' "$STACK_OUT" | grep -q -e 'Results: 1 passed' -e 'CallStackOverflow'; then
-    stack_pass "json leaf: no signal, exit $STACK_RC"
+elif [ "$STACK_RC" = "1" ] && printf '%s\n' "$STACK_OUT" | grep -qxF "$OVERFLOW_LINE"; then
+    # Debug: the floor refuses the call before depth 185.
+    stack_pass "json leaf: exit 1 with CallStackOverflow"
+elif [ "$STACK_RC" = "0" ] && printf '%s\n' "$STACK_OUT" | grep -qxF 'Results: 1 passed, 0 failed, 0 unchecked, 1 total'; then
+    # A release build has room for depth 185 and the leaf.
+    stack_pass "json leaf: exit 0, the test passed"
 else
-    stack_fail "json leaf: exit $STACK_RC without 'Results: 1 passed' or CallStackOverflow"
+    stack_fail "json leaf: exit $STACK_RC without the CallStackOverflow line or a full pass"
 fi
 
 # Check 4 runs a bounded native leaf at every level of unbounded recursion, so
@@ -248,7 +259,7 @@ level_leaf_case() {
     if [ "$STACK_RC" -ge 128 ]; then
         printf '[panic-isolation] FAIL: %s leaf at every level: ended on a signal, exit %s\n' "$name" "$STACK_RC"
         LEVEL_FAILED=1
-    elif [ "$STACK_RC" != "1" ] || ! printf '%s' "$STACK_OUT" | grep -q 'CallStackOverflow'; then
+    elif [ "$STACK_RC" != "1" ] || ! printf '%s\n' "$STACK_OUT" | grep -qxF "$OVERFLOW_LINE"; then
         printf '[panic-isolation] FAIL: %s leaf at every level: expected exit 1 with CallStackOverflow, got exit %s\n' "$name" "$STACK_RC"
         LEVEL_FAILED=1
     else
