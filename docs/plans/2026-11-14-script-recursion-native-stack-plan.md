@@ -251,11 +251,18 @@ diff and runs each acceptance check again with an empty `ZIG_LOCAL_CACHE_DIR`.
     `toSorted`, ends with `NativeFunctionError`, status 500, and no signal
     (finding 9). It logs one `Native function 'map' error` line for each
     level: 85 for each request in Debug, 512 in ReleaseFast (Fable probe).
-  - Linux is compiled, not run. A glibc main thread follows `ulimit -s`,
-    often 8 MiB. The floor is 0, with no message, when the stack is 2 MiB or
-    less or `/proc` is not mounted. On musl the floor is probably wrong.
-    Release targets are glibc only. A Linux run of `test-zts` and
-    `test-panic-isolation` would show the actual result.
+  - Linux run, after U4, in the arm64 release image
+    `zttp-release-linux:0.17.1-arm64` (glibc, `ulimit -s` 8192): commit
+    `439824bd` passed `zig build test-zts` and `zig build test-panic-isolation`.
+    With a Debug `zttp test`, depth 169 passed and depth 185 to unbounded gave
+    `CallStackOverflow`. The floor follows `ulimit -s`. At 8192 and 16384,
+    depth 185 with the JSON leaf gave `CallStackOverflow`. At 65536 and
+    unlimited, depth 400 with the leaf passed. No run ended on a signal. Check 3
+    passed with exit 0 under `zig build`. The probable cause is a higher stack
+    limit for its children, and that limit was not read.
+  - Not run: a Linux stack of 2 MiB or less, or no `/proc`, where the floor is
+    0 with no message, and musl, where the floor is probably wrong. Release
+    targets are glibc only.
   - Fable did not measure three native leaves against the 2 MiB headroom:
     `fetchSync` over HTTPS, `zttp:sql`, and `decodeJson`.
   - Fable saw `error(SafeAllocator): leaked` when it stopped `zttp serve`.
