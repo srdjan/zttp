@@ -6,6 +6,7 @@ index when a plan starts, closes, or moves to the archive.
 
 | Document | Role and status | Work authority |
 |---|---|---|
+| [Expert contract card and required properties, 2026-11-14](2026-11-14-expert-contract-card-plan.md) | Draft revision 2, 2026-11-14, after a Fable and a Codex astra review: F2 as a `requiredProperties` pin in `zttp.json`, held by the expert proof, and a `/contract` card | None yet: waits for the owner on D11 to D15 |
 | [Native stack limit for script recursion, 2026-11-14](2026-11-14-script-recursion-native-stack-plan.md) | Complete on 2026-11-14: a Debug-build crash on deep recursion, fixed by a native stack floor at each script call | U1 to U4 done on local main, not pushed; open items in the U4 result |
 | [Expert result card and test run, 2026-11-14](2026-11-14-expert-result-card-plan.md) | Approved revision 2, 2026-11-14, after a Fable and a Codex astra review: units U1 to U4 complete on local main, not released | Owner answered "a" on 2026-11-14: option (a) of D3R, D4, and D6; commit on local main, no push |
 | [Expert interface options, 2026-11-14](2026-11-14-expert-interface-options.md) | Proposal 2026-11-14: the proof loop (F1 to F6), four surface options (A to D), and the place of Pi Durable; no code changes | Owner answered "as recommended" on 2026-11-14: option (a) of D1 to D3. It authorizes no code; the F1 and F2 build plan follows |
