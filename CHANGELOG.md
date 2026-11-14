@@ -16,6 +16,10 @@ For releases prior to v0.16 see git tags and [RELEASE_CHECKLIST.md](RELEASE_CHEC
 - `zttp expert` now runs `zttp test` on `tests/handler.test.jsonl` against the candidate before the approval question. A failing or unrunnable suite never refuses the change set. The host stops a run after 30 seconds. `--yes`, `--no-edit`, `--print`, and `--goal` run no tests.
 - A model turn that ends without a verified change set now prints the line `No change to approve.`
 
+### Fixed
+
+- Deep or unbounded script recursion now fails the request with `CallStackOverflow` in a Debug build. Before, the native stack ran out near depth 190. `zttp test` ended on a signal, and `zttp serve` stopped. The interpreter now refuses a script call when less than 2 MiB of the thread stack remains. macOS release archives already stopped at 1024 frames and answered status 500. The default proof profile refuses recursion (ZTS500), so only a handler with a narrow `Proof` capsule could reach this.
+
 ## [0.27.0] - 2026-11-13
 
 ### Highlights
