@@ -1,6 +1,8 @@
 # Expert interface options
 
 Status: proposal. No code changes. Prepared 2026-11-14 at commit `939cb2ee`.
+The owner answered "as recommended" on 2026-11-14: option (a) of D1, D2, and
+D3. The build plan for F1 and F2 in Option A follows in a separate document.
 
 ## Answer
 
@@ -344,6 +346,11 @@ keeps the Zig change-set transaction as the only writer of source. The current
 `--print --mode json` is not enough, because it cannot pause (see "What zttp
 has today").
 
+Correction, 2026-11-14: the first version of this proposal missed standing
+decision D-003 in `docs/decisions.md`. D-003 says that RPC mode stays removed.
+Plan 005 removed it on 2026-10-11. Option A does not need RPC mode. Options B,
+C, and D, and the companion in D2 (a), need the owner to supersede D-003 first.
+
 ## Where Pi Durable fits
 
 Pi Durable adds three things that the Zig expert does not have today. It keeps
@@ -369,9 +376,37 @@ Evidence limits for Pi Durable: the prototype tested a kill during a faux model
 request only. A kill during a DeepSeek request, a host crash, compaction,
 several clients, and long runs are not tested.
 
+## Baseline, 2026-11-14
+
+The recorded codegen corpus gives an offline baseline at no cost. The source is
+the 2026-11-13 row of `docs/convergence.md` (commit `68b95296`,
+`deepseek-v4-flash`, 13 cases) and the case manifests.
+
+| Measure | Value |
+|---|---|
+| First-attempt green | 9 of 13 |
+| Applied change sets | 10 of 13 |
+| Intent tests pass | 10 of 13 |
+| Median round trips | 5 |
+
+The three cases that fail their intent tests applied no change set.
+`weather-egress` ended on `veto_exhausted`, and `sibling-helper-holes` ended on
+`budget_tool_calls`. `sibling-helper` ended with a text answer and an empty
+approvals list, but its turn outcome reads `approved`.
+
+Two facts follow. First, every applied change set in the corpus passes its
+intent tests. The corpus therefore cannot show the effect of the D3 test gate,
+so the gate needs a deterministic test of its own. Second, `TurnEndReason` has
+no member for a turn that proposes no change set. Such a turn reads `approved`,
+and `--print` exits 0. The F1 card must name this case.
+
+A live baseline of steps and time needs a DeepSeek key or a local MLX server.
+Neither is configured on this machine.
+
 ## Measurement plan
 
-No baseline exists, so I will measure before any build.
+The offline baseline above covers loop quality. Steps and time still need a
+live run.
 
 1. Baseline: run the current REPL on a small fixed set of real intents. Record
    the steps, the time to a first tested green change, and `zttp ledger stats`.
