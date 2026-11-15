@@ -33,9 +33,7 @@ Three layers report restrictions, in this order:
 3. The strict checker reports `ZTS6xx` codes for the canonical profile.
 
 A layer runs only when the layers before it pass. For example, a `ZTS204`
-type error hides a `ZTS624` strict error in the same function. The text output
-of `zts check` omits the code for a type-stripper error. Use `--json` to see
-the code.
+type error hides a `ZTS624` strict error in the same function.
 
 ## Source Files And Modules
 

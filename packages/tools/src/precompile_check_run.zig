@@ -730,10 +730,11 @@ fn appendCheckAdmissionDiagnostic(
     const projected = json_diag.fromAdmissionError(source, diagnostic, handler_path);
     result.json_diagnostics.append(allocator, projected) catch {};
     if (!builtin.is_test) {
-        debugPrint("{s}:{d}:{d}: {s}{s}{s}\n", .{
+        debugPrint("{s}:{d}:{d}: error[{s}]: {s}{s}{s}\n", .{
             handler_path,
             projected.line,
             projected.column,
+            projected.code,
             projected.message,
             if (projected.suggestion != null) "; " else "",
             projected.suggestion orelse "",

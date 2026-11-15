@@ -115,6 +115,7 @@ const cases = [_]Case{
     .{ .name = "normalize write failure emits one json document", .command = "normalize", .input = .readonly_file, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS000" },
     .{ .name = "gen-tests source refusal is not an internal error", .command = "gen-tests", .input = .deep_nesting, .mode = .text, .exit_code = 1, .stderr_excludes = "ZTS000" },
     .{ .name = "compile source refusal is not an internal error", .command = "compile", .input = .admission_refusal, .mode = .text, .exit_code = 1, .stderr_excludes = "ZTS000" },
+    .{ .name = "check source refusal names its code, text", .input = .admission_refusal, .mode = .text, .exit_code = 1, .stderr_contains = "admission.ts:1:14: error[ZTS041]: 'any' type is not supported" },
     .{ .name = "compile analyzer failure reports ZTS000", .command = "compile", .input = .unmapped_type, .mode = .text, .exit_code = 1, .stderr_contains = "ZTS000" },
     .{ .name = "deep clean expression proves through the public CLI", .input = .deep_clean, .mode = .json, .exit_code = 0, .success = true },
     .{ .name = "deep secret expression is refused through the public CLI", .input = .deep_leak, .mode = .json, .exit_code = 1, .diagnostic_code = "ZTS400" },
