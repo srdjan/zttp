@@ -173,7 +173,7 @@ pub const ErrorList = struct {
     fn defaultSuggestion(kind: ErrorKind) ?[]const u8 {
         return switch (kind) {
             .unexpected_token => "Write a complete expression or statement at this position.",
-            .invalid_number => "Write decimal digits, or 0x, 0o, 0b with digits. Use no underscore and no leading zero. Give an exponent a digit.",
+            .invalid_number => "Write decimal digits, or 0x with digits. Use no underscore, no leading zero, and a digit before the point. Give an exponent a digit.",
             .invalid_escape_sequence => "Replace the escape with a supported one, or remove the backslash.",
             .string_line_continuation => "Join the string onto one line, or write the newline as \\n.",
             .missing_semicolon => "Add a semicolon at the end of the statement.",

@@ -190,6 +190,7 @@ const block_import_message = "`import` and `export` are not supported inside a b
 const late_import_message = "an `import` after a declaration is not supported; move each `import` above the first declaration";
 const module_specifier_message = "a module specifier must be a string literal, such as \"./lib.ts\"";
 const nested_type_message = "a `structural` or `nominal` declaration is not supported inside a block; declare the type at the top level";
+const bitwise_message = "bitwise operators are not supported; use arithmetic or a comparison";
 
 pub const Parser = struct {
     allocator: std.mem.Allocator,
@@ -4643,7 +4644,11 @@ pub const Parser = struct {
 
             // Unary operators
             .bang => self.parseUnaryOp(.not),
-            .tilde => self.parseUnaryOp(.bit_not),
+            .tilde => {
+                if (self.expression_profile) return self.parseUnaryOp(.bit_not);
+                self.errors.addErrorAt(.unsupported_feature, self.current, bitwise_message);
+                return error.ParseError;
+            },
             .plus => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "unary `+` is not supported; remove it from a number expression, or use an admitted boundary parser for text");
                 return error.ParseError;
@@ -4726,12 +4731,12 @@ pub const Parser = struct {
             .pipe_pipe,
             .question_question,
             => {
-                // In JavaScript, a unary operator on the left of ** is a syntax
-                // error (e.g. -3**2 is ambiguous). Require parentheses.
-                if (!self.expression_profile and op_tok.type == .star_star and self.nodes.getTag(left) == .unary_op) {
-                    self.errors.addErrorAt(.unsupported_feature, op_tok, "unary operator before '**' requires parentheses: (-3)**2 or -(3**2)");
+                // `**` and the bitwise operators belong to the internal
+                // expression profile only.
+                if (!self.expression_profile) if (programOperatorRefusal(op_tok.type)) |message| {
+                    self.errors.addErrorAt(.unsupported_feature, op_tok, message);
                     return error.ParseError;
-                }
+                };
                 self.advance();
                 const right_prec = if (op_tok.type == .star_star)
                     @as(Precedence, @fromBackingInt(@intCast(@backingInt(prec) - 1))) // Right associative
@@ -5048,31 +5053,36 @@ pub const Parser = struct {
         return self.parseExpressionNumber(loc, text);
     }
 
+    fn programOperatorRefusal(op: TokenType) ?[]const u8 {
+        return switch (op) {
+            .star_star => "`**` is not supported; use `Math.pow(a, b)`",
+            .ampersand, .pipe, .caret, .lt_lt, .gt_gt, .gt_gt_gt => bitwise_message,
+            else => null,
+        };
+    }
+
     /// The message for a malformed numeric literal, or null when the text is a
     /// form this profile admits. Reads the token's own bytes, which is where
     /// the fault lives: the tokenizer scans a radix prefix and an exponent
     /// marker whether or not digits follow them.
     fn numericFault(text: []const u8) ?[]const u8 {
+        if (text.len > 0 and text[0] == '.') return "a number literal needs a digit before the point, such as `0.5`";
         if (text.len >= 2 and text[0] == '0') {
             const marker = text[1];
             const radix_digits = text[2..];
+            // A hexadecimal literal has no exponent, so the scan below does not apply.
             if (marker == 'x' or marker == 'X') {
-                if (radix_digits.len == 0) return "hexadecimal literal has no digits after `0x`";
-            } else if (marker == 'b' or marker == 'B') {
-                if (radix_digits.len == 0) return "binary literal has no digits after `0b`";
-            } else if (marker == 'o' or marker == 'O') {
-                if (radix_digits.len == 0) return "octal literal has no digits after `0o`";
-            } else if (std.ascii.isDigit(marker)) {
+                return if (radix_digits.len == 0) "hexadecimal literal has no digits after `0x`" else null;
+            }
+            if (marker == 'b' or marker == 'B') return "binary literals are not supported; write a decimal or `0x` literal";
+            if (marker == 'o' or marker == 'O') return "octal literals are not supported; write a decimal or `0x` literal";
+            if (std.ascii.isDigit(marker)) {
                 // Legacy octal. `0755` is 493 to a reader who knows the C
                 // convention and 755 to everyone else, which is why the form is
                 // refused rather than assigned one of the two meanings. The
                 // code is `invalid_number`; this message is what names the
                 // fault, since the code is shared with the cases above.
-                return "legacy octal literals are not supported; write `0o755` for octal, or drop the leading zero for decimal";
-            }
-            // A radix literal has no exponent, so the scan below does not apply.
-            if (marker == 'x' or marker == 'X' or marker == 'b' or marker == 'B' or marker == 'o' or marker == 'O') {
-                return null;
+                return "legacy octal literals are not supported; drop the leading zero for decimal, or write a `0x` literal";
             }
         }
 
@@ -8792,7 +8802,7 @@ test "a legacy octal literal is refused, and the message names it" {
 test "the legal numeric forms still parse" {
     // The floor under all three refusals above.
     const allocator = std.testing.allocator;
-    const legal = "const a = 0; const b = 0x1F; const c = 0b1010; const d = 0o17; " ++
+    const legal = "const a = 0; const b = 0x1F; " ++
         "const e = 1e3; const f = 1.5e-3; const g = 0.5; const h = 42;";
     var parser = try Parser.initAdmission(allocator, allocator, legal, .compile);
     defer parser.deinit();
@@ -8800,15 +8810,15 @@ test "the legal numeric forms still parse" {
     try std.testing.expect(!parser.hasErrors());
 }
 
-test "a radix literal above i32 keeps its value" {
-    // `parseFloat` reads only base 10 and 16, so `0b` and `0o` literals above
-    // i32 must not become 0.0 with no diagnostic. The pool dedups the hex value.
+test "a hexadecimal literal above i32 keeps its value" {
+    // The i32 parse fails above i32, so the literal must not become 0.0 with
+    // no diagnostic.
     const allocator = std.testing.allocator;
-    var parser = try Parser.initAdmission(allocator, allocator, "const a = 0b100000000000000000000000000000000; const b = 0o100000000000; const c = 0x100000000;", .compile);
+    var parser = try Parser.initAdmission(allocator, allocator, "const c = 0x100000000;", .compile);
     defer parser.deinit();
     _ = try parser.parse();
     try std.testing.expect(!parser.hasErrors());
-    try std.testing.expectEqualSlices(f64, &.{ 4294967296.0, 8589934592.0 }, parser.constants.floats.items);
+    try std.testing.expectEqualSlices(f64, &.{4294967296.0}, parser.constants.floats.items);
 }
 
 test "get and set before a key without a parenthesis are refused" {
@@ -11694,7 +11704,7 @@ test "a parse refusal carries a fixed help string" {
     const Case = struct { source: []const u8, help: []const u8 };
     const cases = [_]Case{
         .{ .source = "const x = ;", .help = "Write a complete expression or statement at this position." },
-        .{ .source = "const x = 0x;", .help = "Write decimal digits, or 0x, 0o, 0b with digits. Use no underscore and no leading zero. Give an exponent a digit." },
+        .{ .source = "const x = 0x;", .help = "Write decimal digits, or 0x with digits. Use no underscore, no leading zero, and a digit before the point. Give an exponent a digit." },
         .{ .source = "const s = \"a\\qb\";", .help = "Replace the escape with a supported one, or remove the backslash." },
         .{ .source = "const s = \"a\\\nb\";", .help = "Join the string onto one line, or write the newline as \\n." },
         .{ .source = "const x = 1\nconst y = 2;", .help = "Add a semicolon at the end of the statement." },

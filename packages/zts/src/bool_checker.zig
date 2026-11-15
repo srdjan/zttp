@@ -2561,10 +2561,6 @@ test "sound: number % number passes" {
     try checkSource("const r = 10 % 3;", 0);
 }
 
-test "sound: number ** number passes" {
-    try checkSource("const r = 2 ** 3;", 0);
-}
-
 test "sound: string in subtraction fails" {
     try checkSource("const r = \"hello\" - 1;", 1);
 }

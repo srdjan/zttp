@@ -5104,9 +5104,6 @@ const GenericRuntimeCase = enum {
     call_projection_cap,
     spaced_call_comparison,
     logical_comparison_control,
-    shift_control,
-    comparison_shift_control,
-    comparison_unsigned_shift_control,
 };
 
 const generic_runtime_fixtures = [_]struct {
@@ -5135,9 +5132,6 @@ const generic_runtime_fixtures = [_]struct {
     .{ .case = .call_projection_cap, .source = "const seed: number = 1; const id=<T>(value)=>value; const result=id<A,B,C,D,E,F,G,H,I>(seed);" },
     .{ .case = .spaced_call_comparison, .source = "const seed: number = 1; const id=<T>(value)=>value; const result=id<string> (seed);" },
     .{ .case = .logical_comparison_control, .source = "const seed: number = 1; const result=seed < value && other > (seed);" },
-    .{ .case = .shift_control, .source = "const seed: number = 1; const result=seed << 1;" },
-    .{ .case = .comparison_shift_control, .source = "const seed: number = 1; const result=seed < other >> 1;" },
-    .{ .case = .comparison_unsigned_shift_control, .source = "const seed: number = 1; const result=seed < other >>> 1;" },
 };
 
 test "generic runtime syntax census observes every case" {
@@ -5323,9 +5317,6 @@ test "generic runtime syntax census observes every case" {
             .missing_call_closer,
             .spaced_call_comparison,
             .logical_comparison_control,
-            .shift_control,
-            .comparison_shift_control,
-            .comparison_unsigned_shift_control,
             => {
                 try std.testing.expectEqual(
                     @as(usize, 0),
@@ -5908,7 +5899,26 @@ test "explicit call depth exclusion does not fall back to comparison admission" 
     try std.testing.expectError(error.AdmissionRefused, parser.parse());
     try std.testing.expectEqual(@as(usize, 0), parser.type_store.explicit_call_arguments.items.len);
 
-    try expectDirectAccepted("const seed: number = 1; const result=seed << 1;");
+    try expectDirectAccepted("const seed: number = 1; const result=seed < 1;");
+}
+
+test "a shift after a name or a comparison is refused at the shift" {
+    // The `<` of `seed < other >> 1` must not open a type argument list.
+    const cases = [_]struct { source: []const u8, offset: u32 }{
+        .{ .source = "const seed: number = 1; const result=seed << 1;", .offset = 42 },
+        .{ .source = "const seed: number = 1; const result=seed < other >> 1;", .offset = 50 },
+        .{ .source = "const seed: number = 1; const result=seed < other >>> 1;", .offset = 50 },
+    };
+    for (cases) |case| {
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
+        defer parser.deinit();
+        try std.testing.expectError(error.ParseError, parser.parse());
+        const errors = parser.errors.getErrors();
+        try std.testing.expectEqual(@as(usize, 1), errors.len);
+        try std.testing.expectEqual(engine.parser.ErrorKind.unsupported_feature, errors[0].kind);
+        try std.testing.expectEqual(case.offset, errors[0].location.offset);
+        try std.testing.expectEqual(@as(usize, 0), parser.type_store.explicit_call_arguments.items.len);
+    }
 }
 
 test "function bounds stop at the compact parameter count" {

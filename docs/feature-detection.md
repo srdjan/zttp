@@ -34,9 +34,11 @@ Each of these was accepted silently before and is now refused with a location.
 |---|---|---|
 | `"a\qb"` - an escape outside the closed set | ZTS013 | The set is `\n \r \t \b \f \v \0 \\ \' \" \` \$ \xNN \uNNNN \u{N..}`, in quoted strings and template literals alike |
 | A backslash before a real newline | ZTS045 | Join the lines, or write the newline as `\n` |
-| `0x`, `0b`, `0o` with no digits | ZTS012 | Write the digits |
+| `0x` with no digits | ZTS012 | Write the digits |
+| `0b101` and `0o17` - a binary or octal literal | ZTS012 | A decimal or `0x` literal |
+| `.5` - a number with no digit before the point | ZTS012 | `0.5` |
 | `1e`, `1e+` with no exponent digits | ZTS012 | Write the exponent |
-| `0755` - a legacy octal literal | ZTS012 | `0o755` for octal, or drop the leading zero for decimal |
+| `0755` - a legacy octal literal | ZTS012 | Drop the leading zero for decimal, or write a `0x` literal |
 | A character above ASCII outside a string or comment | ZTS046 | The message names the first character by code point. The span covers that character alone. Suggestions give an ASCII replacement for recognized lookalikes. Invalid UTF-8 is reported as the byte. |
 | A statement with no `;` | ZTS047 | Write the terminator; this profile has no automatic semicolon insertion |
 

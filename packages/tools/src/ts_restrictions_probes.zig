@@ -202,19 +202,30 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(body("  const s = \"abc\";")),
     },
     .{
-        .key = "`0x`, `0b`, or `0o` with no digits, and `1e` with no exponent digits",
+        .key = "`0x` with no digits, and `1e` with no exponent digits",
         .refused = &.{
             r("0x", body("  const n = 0x;")),
-            r("0b", body("  const n = 0b;")),
-            r("0o", body("  const n = 0o;")),
             r("1e", body("  const n = 1e;")),
         },
         .clean = c(body("  const n = 0x1f;")),
     },
     .{
+        .key = "A binary or octal literal, such as `0b101` and `0o17`",
+        .refused = &.{
+            r("0b101", body("  const n = 0b101;")),
+            r("0o17", body("  const n = 0o17;")),
+        },
+        .clean = c(body("  const n = 0x1f;")),
+    },
+    .{
+        .key = "A number with no digit before the point, such as `.5`",
+        .refused = &.{r(".5", body("  const n = .5;"))},
+        .clean = c(body("  const n = 0.5;")),
+    },
+    .{
         .key = "A legacy octal literal such as `0755`",
         .refused = &.{r("0755", body("  const n = 0755;"))},
-        .clean = c(body("  const n = 0o755;")),
+        .clean = c(body("  const n = 493;")),
     },
     .{
         .key = "A numeric separator such as `1_000`",
@@ -558,6 +569,24 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(body("  let x = true;\n  x = x && false;")),
     },
     .{
+        .key = "Bitwise operators `&`, `|`, `^`, `~`, `<<`, `>>`, and `>>>`",
+        .refused = &.{
+            r("&", body("  const a = 6 & 3;")),
+            r("|", body("  const a = 6 | 3;")),
+            r("^", body("  const a = 6 ^ 3;")),
+            r("~", body("  const a = ~6;")),
+            r("<<", body("  const a = 6 << 1;")),
+            r(">>", body("  const a = 6 >> 1;")),
+            r(">>>", body("  const a = 6 >>> 1;")),
+        },
+        .clean = c(body("  const a = 6 % 4;")),
+    },
+    .{
+        .key = "The `**` operator",
+        .refused = &.{r("**", body("  const a = 2 ** 3;"))},
+        .clean = c(body("  const a = Math.pow(2, 3);")),
+    },
+    .{
         .key = "`instanceof`",
         .refused = &.{r("instanceof", body("  const a = req instanceof Request;"))},
         .clean = c(top(command_type ++ "function f(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n  };\n}")),
@@ -614,13 +643,12 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(body("  const o: number | undefined = undefined;\n  const n = (o ?? 0) + 1;")),
     },
     .{
-        .key = "`-`, `*`, `/`, `%`, `**`, or unary `-` on a non-number",
+        .key = "`-`, `*`, `/`, `%`, or unary `-` on a non-number",
         .refused = &.{
             r("-", body("  const a = \"a\" - 1;")),
             r("*", body("  const a = \"a\" * 1;")),
             r("/", body("  const a = \"a\" / 1;")),
             r("%", body("  const a = \"a\" % 1;")),
-            r("**", body("  const a = \"a\" ** 1;")),
             r("-", body("  const a = -\"a\";")),
         },
         .clean = c(body("  const a = 2 * 3 - 1;")),

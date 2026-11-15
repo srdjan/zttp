@@ -3689,8 +3689,6 @@ test "constant folding matches runtime arithmetic and preserves short circuit ef
         .{ .expression = "-0.0 / 2", .dynamic = "const a = -0.0; return a / 2;", .expected = -0.0 },
         .{ .expression = "1 / 0", .dynamic = "const a = 1; const b = 0; return a / b;", .expected = std.math.inf(f64) },
         .{ .expression = "1 % 0", .dynamic = "const a = 1; const b = 0; return a % b;", .expected = std.math.nan(f64) },
-        .{ .expression = "1 << 33", .dynamic = "const a = 1; const b = 33; return a << b;", .expected = 2 },
-        .{ .expression = "~5", .dynamic = "const a = 5; return ~a;", .expected = -6 },
     };
     for (cases) |case| {
         var arena = std.heap.ArenaAllocator.init(std.testing.allocator);

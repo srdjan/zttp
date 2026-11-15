@@ -668,16 +668,15 @@ predicate callbacks face the same rule at runtime.
 | `undefined` | undefined |
 | `{}`, `[]` | object |
 | `() => ...`, `function() {}` | function |
-| `===`, `!==`, `<`, `>`, `<=`, `>=`, `in` | boolean |
+| `===`, `!==`, `<`, `>`, `<=`, `>=` | boolean |
 | `A && B`, `A \|\| B` | boolean |
 | non-nullable `A ?? B` | `A` |
 | `(T \| undefined) ?? B` | `T \| B` |
 | `undefined ?? B` | `B` |
 | `+` (number + number) | number |
-| `-`, `*`, `/`, `%`, `**` | number |
-| `&`, `\|`, `^`, `<<`, `>>`, `>>>` | number |
+| `-`, `*`, `/`, `%` | number |
 | `!` | boolean |
-| `-x`, `+x`, `~x` | number |
+| `-x` | number |
 | `typeof` | string |
 | `const x = expr; ... x` | same as expr |
 | reassigned `let x = expr; ... x` | same as expr until reassignment invalidates it |
@@ -694,7 +693,7 @@ predicate callbacks face the same rule at runtime.
 
 ### Type-Directed Arithmetic Safety
 
-Arithmetic operators (`-`, `*`, `/`, `%`, `**`) and the unary `-` require numeric operands. An operand whose type is not assignable to `number` gets ZTS104. The compiler reads the type with the narrowing that reaches the operand, so a value that a guard proves to be a number is accepted.
+Arithmetic operators (`-`, `*`, `/`, `%`) and the unary `-` require numeric operands. An operand whose type is not assignable to `number` gets ZTS104. The compiler reads the type with the narrowing that reaches the operand, so a value that a guard proves to be a number is accepted.
 
 An operand that the type checker does not type is refused too: ZTS104, or ZTS106 in `+`, says "operand has no known type". A member read on `unknown`, such as `u.n` with `u: unknown`, has no type. Annotate the value or its source, or narrow it with `typeof` first. Two operands are left to another rule: a read that gets ZTS309, such as `ps[0].age` on an empty array, and a parameter of a function that ZTS601 refuses.
 

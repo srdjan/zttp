@@ -70,8 +70,10 @@ pure.
 | An escape outside the closed set, such as `"a\qb"` | ZTS013 | One of `\n \r \t \b \f \v \0 \\ \' \" \` \$ \xNN \uNNNN \u{N..}` |
 | A backslash before a real newline | ZTS045 | Join the lines, or write `\n` |
 | A string literal that reaches the end of its line | ZTS008 | Close the quote, or write `\n` |
-| `0x`, `0b`, or `0o` with no digits, and `1e` with no exponent digits | ZTS012 | Write the digits |
-| A legacy octal literal such as `0755` | ZTS012 | `0o755`, or remove the leading zero |
+| `0x` with no digits, and `1e` with no exponent digits | ZTS012 | Write the digits |
+| A binary or octal literal, such as `0b101` and `0o17` | ZTS012 | A decimal or `0x` literal |
+| A number with no digit before the point, such as `.5` | ZTS012 | `0.5` |
+| A legacy octal literal such as `0755` | ZTS012 | A decimal or `0x` literal |
 | A bigint literal, such as `10n` | ZTS012 | The profile has no bigint. Write a `number` literal |
 | A numeric separator such as `1_000` | ZTS012 | `1000` |
 | A character above ASCII in an identifier | ZTS046 | An ASCII identifier |
@@ -160,6 +162,8 @@ no user-defined iterator protocol.
 | `++` and `--`, prefix and postfix | ZTS001 | `x = x + 1` |
 | Compound assignment: `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `&=`, `\|=`, `^=`, `<<=`, `>>=`, `>>>=` | ZTS613 | `x = x + e` |
 | Logical assignment: `&&=`, `\|\|=`, `??=` | ZTS001 | `x = x && value` |
+| Bitwise operators `&`, `\|`, `^`, `~`, `<<`, `>>`, and `>>>` | ZTS001 | Arithmetic or a comparison. The profile has no bit operations |
+| The `**` operator | ZTS001 | `Math.pow(a, b)` |
 | `instanceof` | ZTS001 | A discriminated union with a tag field |
 | The `in` operator | ZTS001 | The predicate for the value kind, such as `dictHas` |
 | Unary `+` | ZTS001 | Remove it from a number, or parse text with `parseInt` or `parseFloat` |
@@ -171,7 +175,7 @@ no user-defined iterator protocol.
 | Template interpolation `` `n=${n}` `` | ZTS001 | `["n=", String(n)].join("")`. A backtick literal with no interpolation is permitted |
 | `+` with a string operand | ZTS105 | `[a, String(b)].join("")` |
 | `+` with a boolean, optional, or untyped operand | ZTS106 | Narrow or convert the operand first |
-| `-`, `*`, `/`, `%`, `**`, or unary `-` on a non-number | ZTS104 | Narrow the operand to `number` first |
+| `-`, `*`, `/`, `%`, or unary `-` on a non-number | ZTS104 | Narrow the operand to `number` first |
 | A non-boolean condition in `if`, `assert`, or `?:` | ZTS100 | A boolean expression, such as `x !== undefined` or `n > 0` |
 | A non-boolean operand of `&&`, `\|\|`, or `!` | ZTS101, ZTS102 | A boolean expression |
 | `\|>` | ZTS001 | A direct call `f(a)`. Run guards by early return |
