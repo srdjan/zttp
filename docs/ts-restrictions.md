@@ -54,6 +54,9 @@ the code.
 | A handler that writes to a module-scope variable | ZTS310 | Function-local state |
 | An unknown `zttp:` module, or a name that the module does not export | ZTS206, ZTS207 | A module and an export from `packages/zts/src/builtin_modules.zig` |
 | `namespace` and `module` declarations | ZTS001 | ES modules |
+| An `import` after a declaration | ZTS002 | Move each `import` above the first declaration |
+| An `import` or `export` inside a function body | ZTS002 | Move the `import` or `export` to the top level |
+| `import type X from "./x.ts";` | ZTS002 | `import type { X } from "./x.ts";` |
 
 A module specifier must be a string literal. Relative modules and registered
 `zttp:*` or `zttp-ext:*` modules are permitted. Module initialization must be
@@ -68,6 +71,7 @@ pure.
 | A string literal that reaches the end of its line | ZTS008 | Close the quote, or write `\n` |
 | `0x`, `0b`, or `0o` with no digits, and `1e` with no exponent digits | ZTS012 | Write the digits |
 | A legacy octal literal such as `0755` | ZTS012 | `0o755`, or remove the leading zero |
+| A bigint literal, such as `10n` | ZTS012 | The profile has no bigint. Write a `number` literal |
 | A numeric separator such as `1_000` | ZTS012 | `1000` |
 | A character above ASCII in an identifier | ZTS046 | An ASCII identifier |
 | A statement with no `;` | ZTS047 | Write the `;`. The profile has no automatic semicolon insertion |
@@ -79,6 +83,8 @@ pure.
 | `var` | ZTS001 | `const`, or `let` when the binding is reassigned |
 | A `let` that is never reassigned | ZTS604 | `const` |
 | Object or array declaration destructuring, and destructuring renames | ZTS001 | Bind the source to one name, then read each member into a `const` |
+| A declaration with no initializer, such as `let a: number;` and `const a: number;` | ZTS021 | Write `const a: number = 1;`, or give the `let` an initializer |
+| A declaration that binds two names, such as `const a = 1, b = 2;` | ZTS001 | Write one `const` for each name |
 | `class` declarations and `class` expressions | ZTS001 | Plain records and functions |
 | `enum` and `const enum` | ZTS001 | A literal union or a discriminated union |
 | Decorators (`@decorator`) | ZTS001 | Function composition |
@@ -134,6 +140,7 @@ expression statement, `if`/`else`, `for...of`, `assert`, `return`, `break`,
 | A fallback `assert` form | ZTS002 | `if (!predicate) { return fallback; }` |
 | A `for...of` body that mutates the collection that it iterates | ZTS622 | Read one collection and build the changed one separately |
 | `range(n).map(f)` and other array members on `range(n)` | ZTS201 | `for (const i of range(n))` |
+| Destructuring in a `for...of` head | ZTS001 | Bind the element to one name, then read each member in the body |
 
 `for...of` evaluates its iterable once and iterates a snapshot. The admitted
 iterables are arrays, tuples, strings, `range(n)`, and `Dict` entries. There is
@@ -167,6 +174,8 @@ no user-defined iterator protocol.
 | An effectful arm in `a ? b : c` | ZTS612 | Bind the call to a `const` first, or use `match` over the condition |
 | A conditional expression as an arm of another conditional | ZTS621 | `match` over one scrutinee, or `if`/`else` |
 | A boolean compared to a boolean literal, such as `x === true` | ZTS620 | `x`, or `!x` for `=== false` |
+| Assignment in expression position, such as `const m = (n = 2);`, `a = b = 3;`, and `(a = 2);` | ZTS001 | Write the assignment as its own statement |
+| An assignment target that is not a name, a member path, or an index, such as `(n) = 2;` and `o.a?.a = 1;` | ZTS016 | Assign to a name, a member path, or an index |
 
 There is no truthiness conversion. A value of type `unknown` cannot enter a
 boolean context. `String(value)` is the only conversion from a number or a
@@ -319,7 +328,6 @@ against the compiler.
 
 | Form | Observed result | Required |
 |---|---|---|
-| Assignment in expression position, such as `const m = (n = 2);` | Accepted | ZTS001. Write the assignment as its own statement |
 | Generic defaults, such as `function f<T = string>(a: T): T` | Accepted, exit 0 | A targeted refusal. Pass the type argument at each use |
 | Index signatures, such as `{ [k: string]: number }` | Accepted, exit 0, also when used in a signature | A targeted refusal. Write `Dict<string, number>` |
 | `JSON.parse` and `JSON.stringify` | Accepted | ZTS629. Use `parseJson` or `stringifyJson` from `zttp:json`, or `decodeJson` from `zttp:decode` |
@@ -341,15 +349,7 @@ against the compiler.
 | A write to a `readonly` field | Refused with ZTS200 | ZTS215. Write a new record |
 | A `match` that does not cover every case, in a statement or a `const` | Refused with ZTS603 | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |
-| `let` with no initializer, such as `let a: number;` | Accepted, exit 0. A `let` with no initializer and no later assignment reports ZTS604 | ZTS021. Write `const a: number = 1;`, or give the `let` an initializer |
 | A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | Accepted, exit 0 | A targeted refusal. Write the body as a block |
-| An `import` after a declaration | Accepted, exit 0 | ZTS002. Move each `import` above the first declaration |
-| An `import` or `export` inside a function body | Accepted, exit 0 | ZTS002. Move the `import` or `export` to the top level |
-| `import type X from "./x.ts";` | Accepted, exit 0 | ZTS002. Write `import type { X } from "./x.ts";` |
-| One `const` that binds two names, such as `const a = 1, b = 2;` | Refused with ZTS047, "statement is not terminated" | ZTS001. Write one `const` for each name |
-| Destructuring in a `for...of` head | Refused with ZTS003, "unexpected token" | ZTS001. Bind the element to one name, then read each member in the body |
-| An assignment target that is not a name, a member path, or an index, such as `(n) = 2;` and `o.a?.a = 1;` | Accepted, exit 0 | ZTS016. Assign to a name, a member path, or an index |
-| A bigint literal, such as `10n` | Refused with ZTS047, "statement is not terminated" | ZTS012. The profile has no bigint. Write a `number` literal |
 | A module specifier that is not a string literal, such as `import { ok } from m;` | Refused with ZTS003, "unexpected token" | A targeted refusal. Write the specifier as a string literal |
 | A `structural` or `nominal` declaration inside a function | Refused with ZTS047, "statement is not terminated" | A targeted refusal. Declare the type at the top level |
 | Type parameters on an arrow, such as `<T>(x: T) => x` | Accepted, exit 0 | ZTS001. Write the callback without type parameters |

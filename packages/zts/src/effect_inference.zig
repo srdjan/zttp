@@ -4128,7 +4128,7 @@ test "router dispatch joins deterministic effect rows" {
         \\const routes = { "GET /clock": clock };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     );
@@ -4155,7 +4155,7 @@ test "router dispatch joins read only effect rows" {
         \\const routes = { "POST /write": write };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     );
@@ -4175,7 +4175,7 @@ test "router dispatch adds route effects to the dispatching function" {
         \\const routes = { "POST /write": write };
         \\function dispatch(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
         \\function handler(req) { return Response.text("ok"); }
@@ -4209,7 +4209,7 @@ test "clean router dispatch keeps effect properties" {
         \\const routes = { "GET /clean": clean };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     );
@@ -4226,7 +4226,7 @@ test "unresolved router dispatch leaves the effect row a lower bound" {
         \\function handler(req) {
         \\  const routes = { "GET /clean": clean };
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     );
@@ -4240,13 +4240,13 @@ test "recursive inline route dispatch fails closed without recursing the analyze
         \\const routes = {
         \\  "GET /loop": (req) => {
         \\    const found = routerMatch(routes, req);
-        \\    if (found === undefined) return Response.text("not found", { status: 404 });
+        \\    if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\    return found.handler(req);
         \\  }
         \\};
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     );

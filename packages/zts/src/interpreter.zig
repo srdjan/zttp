@@ -4516,12 +4516,17 @@ test "End-to-end: a record pattern matches only a record, at every depth" {
         \\let empty_lengthy = { v: { length: 0 } };
         \\let a1 = match (empty_str) { when { v: [] }: "empty" default: "other" };
         \\let a2 = match (empty_lengthy) { when { v: [] }: "empty" default: "other" };
-        \\let a3 = match ("") { when []: "empty" default: "other" };
-        \\let a4 = match ([]) { when []: "empty" default: "other" };
-        \\let a5 = match ({ v: [] }) { when { v: [] }: "empty" default: "other" };
+        \\let empty_text = "";
+        \\let a3 = match (empty_text) { when []: "empty" default: "other" };
+        \\let empty_arr = [];
+        \\let a4 = match (empty_arr) { when []: "empty" default: "other" };
+        \\let empty_field = { v: [] };
+        \\let a5 = match (empty_field) { when { v: [] }: "empty" default: "other" };
         \\let a6 = match (lengthy) { when [_, _, _]: "array" default: "other" };
-        \\let a7 = match ("abc") { when [_, _, _]: "array" default: "other" };
-        \\let a8 = match ([1, 2, 3]) { when [_, _, _]: "array" default: "other" };
+        \\let abc = "abc";
+        \\let a7 = match (abc) { when [_, _, _]: "array" default: "other" };
+        \\let three = [1, 2, 3];
+        \\let a8 = match (three) { when [_, _, _]: "array" default: "other" };
     ;
     try runMatchProgram(source, struct {
         fn check(ctx: *context.Context) anyerror!void {
@@ -4569,8 +4574,10 @@ test "End-to-end: a record field underscore is a presence check and a binding is
         \\let u4 = match (undef) { when { a: _ }: "present" default: "other" };
         \\let b1 = match (absent) { when { a }: "bound" default: "other" };
         \\let b2 = match (undef) { when { a }: "bound" default: "other" };
-        \\let w1 = match ([undefined, 2]) { when [_, 2]: "wild" default: "other" };
-        \\let w2 = match ([1, 3]) { when [_, 2]: "wild" default: "other" };
+        \\let wild_a = [undefined, 2];
+        \\let wild_b = [1, 3];
+        \\let w1 = match (wild_a) { when [_, 2]: "wild" default: "other" };
+        \\let w2 = match (wild_b) { when [_, 2]: "wild" default: "other" };
     ;
     try runMatchProgram(source, struct {
         fn check(ctx: *context.Context) anyerror!void {

@@ -2360,7 +2360,7 @@ pub const HandlerVerifier = struct {
                 .kind = .unchecked_optional_access,
                 .node = read,
                 .message = "read on a value that may be undefined, without checking for undefined",
-                .help = "check before use: if (val === undefined) return ...; or use optional chaining val?.prop, or a fallback val ?? fallback",
+                .help = "check before use: if (val === undefined) { return ...; } or use optional chaining val?.prop, or a fallback val ?? fallback",
                 .repair_intent = .insert_guard_before_line,
             });
         }
@@ -2911,18 +2911,18 @@ test "a member or index write through a builtin or module-scope binding breaks s
 test "response total checks routerMatch route functions" {
     const direct = try routeVerifierCounts(
         \\function handler(req) {
-        \\  if (req.method === "GET") return Response.text("ok");
+        \\  if (req.method === "GET") { return Response.text("ok"); }
         \\}
     );
     const routed = try routeVerifierCounts(
         \\import { routerMatch } from "zttp:router";
         \\function route(req) {
-        \\  if (req.method === "GET") return Response.text("ok");
+        \\  if (req.method === "GET") { return Response.text("ok"); }
         \\}
         \\const routes = { "GET /": route };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found !== undefined) return found.handler(req);
+        \\  if (found !== undefined) { return found.handler(req); }
         \\  return Response.text("not found", { status: 404 });
         \\}
     );
@@ -2932,7 +2932,7 @@ test "response total checks routerMatch route functions" {
         \\const routes = { "GET /": route };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found !== undefined) return found.handler(req);
+        \\  if (found !== undefined) { return found.handler(req); }
         \\  return Response.text("not found", { status: 404 });
         \\}
     );
@@ -2961,7 +2961,7 @@ test "result safety checks routerMatch route functions" {
         \\const routes = { "GET /": route };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found !== undefined) return found.handler(req);
+        \\  if (found !== undefined) { return found.handler(req); }
         \\  return Response.text("not found", { status: 404 });
         \\}
     );
@@ -2970,13 +2970,13 @@ test "result safety checks routerMatch route functions" {
         \\import { routerMatch } from "zttp:router";
         \\function route(req) {
         \\  const result = jwtVerify("token", "key");
-        \\  if (!result.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!result.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  return Response.json({ value: result.value });
         \\}
         \\const routes = { "GET /": route };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found !== undefined) return found.handler(req);
+        \\  if (found !== undefined) { return found.handler(req); }
         \\  return Response.text("not found", { status: 404 });
         \\}
     );
@@ -3005,7 +3005,7 @@ test "optional safety checks routerMatch route functions" {
         \\const routes = { "GET /": route };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found !== undefined) return found.handler(req);
+        \\  if (found !== undefined) { return found.handler(req); }
         \\  return Response.text("not found", { status: 404 });
         \\}
     );
@@ -3014,13 +3014,13 @@ test "optional safety checks routerMatch route functions" {
         \\import { routerMatch } from "zttp:router";
         \\function route(req) {
         \\  const value = env("HOME");
-        \\  if (value === undefined) return Response.text("missing");
+        \\  if (value === undefined) { return Response.text("missing"); }
         \\  return Response.json({ length: value.length });
         \\}
         \\const routes = { "GET /": route };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found !== undefined) return found.handler(req);
+        \\  if (found !== undefined) { return found.handler(req); }
         \\  return Response.text("not found", { status: 404 });
         \\}
     );
@@ -3049,7 +3049,7 @@ test "state isolation checks routerMatch route functions" {
         \\const routes = { "GET /": route };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found !== undefined) return found.handler(req);
+        \\  if (found !== undefined) { return found.handler(req); }
         \\  return Response.text("not found", { status: 404 });
         \\}
     );
@@ -3059,7 +3059,7 @@ test "state isolation checks routerMatch route functions" {
         \\const routes = { "GET /": route };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found !== undefined) return found.handler(req);
+        \\  if (found !== undefined) { return found.handler(req); }
         \\  return Response.text("not found", { status: 404 });
         \\}
     );
@@ -3126,7 +3126,7 @@ test "reading routerMatch params does not make a stable dispatch unresolved" {
         \\  const found = routerMatch(routes, req);
         \\  if (found !== undefined) {
         \\    const params = found.params;
-        \\    if (params.id === "") return Response.text("bad", { status: 400 });
+        \\    if (params.id === "") { return Response.text("bad", { status: 400 }); }
         \\    return found.handler(req);
         \\  }
         \\  return Response.text("not found", { status: 404 });
@@ -3225,7 +3225,7 @@ test "a table that is only tested or dropped stays resolved" {
         ,
         \\const routes = { "GET /": getHome };
         \\function handler(req) {
-        \\  if (routes === undefined) return Response.text("x");
+        \\  if (routes === undefined) { return Response.text("x"); }
         ,
         \\const routes = { "GET /": getHome };
         \\function handler(req) {
@@ -3571,7 +3571,7 @@ test "ZTS303 guard inside a nested block does not clear the code after the block
     const bare = try routeVerifierCounts(result_import ++
         \\function handler(req) {
         \\  const result = jwtVerify("token", "key");
-        \\  if (req.method === "GET") if (!result.ok) return Response.text("no");
+        \\  if (req.method === "GET") { if (!result.ok) return Response.text("no"); }
         \\  return Response.text(String(result.value));
         \\}
     );

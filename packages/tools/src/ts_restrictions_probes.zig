@@ -933,6 +933,72 @@ pub const refusal_rows = [_]RefusalRow{
         },
         .clean = c(top("import { dictGet } from \"zttp:collections\";\nfunction g(req: Request): unknown {\n  const j = requestJson(req);\n  if (j.ok) {\n    const v: unknown = j.value;\n    if (isDict(v)) {\n      return dictGet(v, \"name\");\n    }\n  }\n  return undefined;\n}")),
     },
+    // ----- U2a rows -----
+    .{
+        .key = "Assignment in expression position, such as `const m = (n = 2);`, `a = b = 3;`, and `(a = 2);`",
+        .refused = &.{
+            r("const m = (n = 2);", body("  let n = 1;\n  const m = (n = 2);")),
+            r("a = b = 3;", body("  let a = 1;\n  let b = 2;\n  a = b = 3;")),
+            r("(a = 2);", body("  let a = 1;\n  (a = 2);")),
+        },
+        .clean = c(body("  let n = 1;\n  n = 2;\n  const m = n;")),
+    },
+    .{
+        .key = "A declaration with no initializer, such as `let a: number;` and `const a: number;`",
+        .refused = &.{
+            r("let a: number;", top("function g(): number {\n  let a: number;\n  a = 1;\n  return a;\n}")),
+            r("const a: number;", top("function g(): number {\n  const a: number;\n  return a;\n}")),
+        },
+        .clean = c(top("function g(): number {\n  const a: number = 1;\n  return a;\n}")),
+    },
+    .{
+        .key = "An `import` after a declaration",
+        .refused = &.{
+            r("import", top("const a = 1;\nimport { dictEmpty } from \"zttp:collections\";\nfunction g(): Dict<string, number> {\n  return dictEmpty();\n}")),
+            r("import", top("const a = 1;\nimport type { X } from \"./x.ts\";")),
+        },
+        .clean = c(top("import { dictEmpty } from \"zttp:collections\";\nconst a = 1;\nfunction g(): Dict<string, number> {\n  return dictEmpty();\n}")),
+    },
+    .{
+        .key = "An `import` or `export` inside a function body",
+        .refused = &.{
+            r("import", top("function f(): Dict<string, number> {\n  import { dictEmpty } from \"zttp:collections\";\n  return dictEmpty();\n}")),
+            r("export", top("function f(): number {\n  export const q = 1;\n  return q;\n}")),
+            r("import", top("function f<T>(value: string): string {import type { X } from \"./x.ts\";return value;}")),
+        },
+        .clean = c(top("import { dictEmpty } from \"zttp:collections\";\nexport const q: number = 1;\nfunction f(): Dict<string, number> {\n  return dictEmpty();\n}")),
+    },
+    .{
+        .key = "`import type X from \"./x.ts\";`",
+        .refused = &.{r("import type X from \"./x.ts\";", top("import type X from \"./x.ts\";"))},
+        .clean = c(top("import type { X } from \"./x.ts\";")),
+    },
+    .{
+        .key = "A declaration that binds two names, such as `const a = 1, b = 2;`",
+        .refused = &.{r("const a = 1, b = 2;", body("  const a = 1, b = 2;"))},
+        .clean = c(body("  const a = 1;\n  const b = 2;")),
+    },
+    .{
+        .key = "Destructuring in a `for...of` head",
+        .refused = &.{
+            r("for...of", top("function g(xs: number[][]): number {\n  for (const [a, b] of xs) {\n  }\n  return 1;\n}")),
+            r("for...of", top("function g(xs: { a: number }[]): number {\n  for (const { a } of xs) {\n  }\n  return 1;\n}")),
+        },
+        .clean = c(top("function g(xs: { a: number }[]): number {\n  for (const x of xs) {\n    const a = x.a;\n  }\n  return 1;\n}")),
+    },
+    .{
+        .key = "An assignment target that is not a name, a member path, or an index, such as `(n) = 2;` and `o.a?.a = 1;`",
+        .refused = &.{
+            r("(n) = 2;", top("function g(): number {\n  let n = 1;\n  (n) = 2;\n  return n;\n}")),
+            r("o.a?.a = 1;", top("function g(): number {\n  const o = { a: { a: 1 } };\n  o.a?.a = 1;\n  return 1;\n}")),
+        },
+        .clean = c(top("function g(): number {\n  let n = 1;\n  n = 2;\n  const o = { a: { a: 1 } };\n  o.a.a = 3;\n  return n;\n}")),
+    },
+    .{
+        .key = "A bigint literal, such as `10n`",
+        .refused = &.{r("10n", body("  const a = 10n;"))},
+        .clean = c(body("  const a = 10;")),
+    },
 };
 
 // ---------------------------------------------------------------------------
@@ -940,10 +1006,6 @@ pub const refusal_rows = [_]RefusalRow{
 // ---------------------------------------------------------------------------
 
 pub const gap_rows = [_]GapRow{
-    .{
-        .key = "Assignment in expression position, such as `const m = (n = 2);`",
-        .sources = &.{c(body("  let n = 1;\n  const m = (n = 2);"))},
-    },
     .{
         .key = "Generic defaults, such as `function f<T = string>(a: T): T`",
         .sources = &.{c(top("function f<T = string>(a: T): T {\n  return a;\n}"))},
@@ -1077,53 +1139,12 @@ pub const gap_rows = [_]GapRow{
     },
     // ----- U1b rows, in the order of the row assignment of the plan -----
     .{
-        .key = "`let` with no initializer, such as `let a: number;`",
-        .sources = &.{c(top("function g(): number {\n  let a: number;\n  a = 1;\n  return a;\n}"))},
-    },
-    .{
         .key = "A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();`",
         .sources = &.{
             c(top(g_fn ++ "function h(c: boolean): number {\n  if (c) g();\n  return 2;\n}")),
             c(top(g_fn ++ "function h(c: boolean): number {\n  if (c) {\n    return 1;\n  } else g();\n  return 2;\n}")),
             c(top(g_fn ++ "function h(xs: number[]): number {\n  for (const k of xs) g();\n  return 2;\n}")),
         },
-    },
-    .{
-        .key = "An `import` after a declaration",
-        .sources = &.{c(top("const a = 1;\nimport { dictEmpty } from \"zttp:collections\";\nfunction g(): Dict<string, number> {\n  return dictEmpty();\n}"))},
-    },
-    .{
-        .key = "An `import` or `export` inside a function body",
-        .sources = &.{
-            c(top("function f(): Dict<string, number> {\n  import { dictEmpty } from \"zttp:collections\";\n  return dictEmpty();\n}")),
-            c(top("function f(): number {\n  export const q = 1;\n  return q;\n}")),
-        },
-    },
-    .{
-        .key = "`import type X from \"./x.ts\";`",
-        .sources = &.{c(top("import type X from \"./x.ts\";"))},
-    },
-    .{
-        .key = "One `const` that binds two names, such as `const a = 1, b = 2;`",
-        .sources = &.{c(body("  const a = 1, b = 2;"))},
-    },
-    .{
-        .key = "Destructuring in a `for...of` head",
-        .sources = &.{
-            c(top("function g(xs: number[][]): number {\n  for (const [a, b] of xs) {\n  }\n  return 1;\n}")),
-            c(top("function g(xs: { a: number }[]): number {\n  for (const { a } of xs) {\n  }\n  return 1;\n}")),
-        },
-    },
-    .{
-        .key = "An assignment target that is not a name, a member path, or an index, such as `(n) = 2;` and `o.a?.a = 1;`",
-        .sources = &.{
-            c(top("function g(): number {\n  let n = 1;\n  (n) = 2;\n  return n;\n}")),
-            c(top("function g(): number {\n  const o = { a: { a: 1 } };\n  o.a?.a = 1;\n  return 1;\n}")),
-        },
-    },
-    .{
-        .key = "A bigint literal, such as `10n`",
-        .sources = &.{c(body("  const a = 10n;"))},
     },
     .{
         .key = "A module specifier that is not a string literal, such as `import { ok } from m;`",

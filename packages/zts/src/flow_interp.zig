@@ -4465,14 +4465,14 @@ test "logical operators join both operands and keep the right operand's write" {
 
     // The write sits in the right operand and the left operand may skip it,
     // so the exit state holds it on the joined path.
-    const write = "function f(a, s) { const h = {}; a && (h.x = s); return h; }";
+    const write = "function f(a, s) { const h = {}; a && (() => { h.x = s; return true; })(); return h; }";
     const r = try analyzeSource(write, "f", &.{ Value.clean, secret_value });
     defer r.deinit();
     try testing.expect(!r.result.cleared);
     const seen = try r.harness.interp.readAll(r.result.exit, r.result.returned.?);
     try testing.expect(seen.labels.secret);
 
-    const clean_write = "function f(a, s) { const h = {}; a && (h.x = \"c\"); return h; }";
+    const clean_write = "function f(a, s) { const h = {}; a && (() => { h.x = \"c\"; return true; })(); return h; }";
     const c = try analyzeSource(clean_write, "f", &.{ Value.clean, secret_value });
     defer c.deinit();
     const unseen = try c.harness.interp.readAll(c.result.exit, c.result.returned.?);
@@ -4487,9 +4487,9 @@ test "a ternary carries a secret from either arm and from either arm's write" {
     try expectSecret(source, &arm_b, true);
     try expectSecret(source, &.{ Value.clean, Value.clean, Value.clean }, false);
 
-    const then_write = "function f(c, s) { const h = {}; c ? (h.x = s) : (h.y = \"k\"); return h; }";
-    const else_write = "function f(c, s) { const h = {}; c ? (h.x = \"k\") : (h.y = s); return h; }";
-    const both_clean = "function f(c, s) { const h = {}; c ? (h.x = \"k\") : (h.y = \"j\"); return h; }";
+    const then_write = "function f(c, s) { const h = {}; c ? (() => { h.x = s; return 0; })() : (() => { h.y = \"k\"; return 0; })(); return h; }";
+    const else_write = "function f(c, s) { const h = {}; c ? (() => { h.x = \"k\"; return 0; })() : (() => { h.y = s; return 0; })(); return h; }";
+    const both_clean = "function f(c, s) { const h = {}; c ? (() => { h.x = \"k\"; return 0; })() : (() => { h.y = \"j\"; return 0; })(); return h; }";
     inline for (.{ then_write, else_write, both_clean }, .{ true, true, false }) |src, leaks| {
         const r = try analyzeSource(src, "f", &.{ Value.clean, secret_value });
         defer r.deinit();
@@ -4644,7 +4644,7 @@ test "the receiver is evaluated before a right side that reassigns it" {
     const a: Value = .{ .origins = &site_a };
     const b: Value = .{ .origins = &site_b };
     const params = [_]Value{ a, b, secret_value };
-    const body = "let o = a; o.x = ((o = b) === b ? s : 0); ";
+    const body = "let o = a; o.x = (() => { o = b; return s; })(); ";
     // The write lands on the receiver the left side named.
     try expectSecret("function f(a, b, s) { " ++ body ++ "return a.x; }", &params, true);
     try expectSecret("function f(a, b, s) { " ++ body ++ "return b.x; }", &params, false);
@@ -4834,7 +4834,7 @@ test "a hole and a literal element bind nothing and the arm still evaluates" {
 }
 
 test "a binding declared without an initializer is clean" {
-    const source = "function f(s, c) { if (c) { const a = s; } if (c) { let b; return b; } return \"end\"; }";
+    const source = "function f(s, c) { if (c) { const a = s; } if (c) { let b = undefined; return b; } return \"end\"; }";
     const r = try analyzeSource(source, "f", &.{ secret_value, Value.clean });
     defer r.deinit();
     try testing.expect(!r.result.cleared);
@@ -5340,12 +5340,12 @@ test "two activations of a captured parameter share one weak cell" {
 
 test "a captured match binding lives in its cell" {
     try expectSecret(
-        "function f(s) { return match ({ text: s }) { when { text }: (() => text)() default: \"c\" }; }",
+        "function f(s) { const o = { text: s }; return match (o) { when { text }: (() => text)() default: \"c\" }; }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function f(s) { return match ({ text: \"d\" }) { when { text }: (() => text)() default: \"c\" }; }",
+        "function f(s) { const o = { text: \"d\" }; return match (o) { when { text }: (() => text)() default: \"c\" }; }",
         &.{secret_value},
         false,
     );
@@ -5368,12 +5368,12 @@ test "a capture follows the parser's binding, not the name" {
     // secret written to the second never reaches it. A scan by name would join
     // the two.
     try expectSecret(
-        "function f(c, s) { let x = \"c\"; if (c) let x = s; return (() => x)(); }",
+        "function f(c, s) { let x = \"c\"; if (c) { let x = s; } return (() => x)(); }",
         &c_secret,
         false,
     );
     try expectSecret(
-        "function f(c, s) { let x = s; if (c) let x = \"c\"; return (() => x)(); }",
+        "function f(c, s) { let x = s; if (c) { let x = \"c\"; } return (() => x)(); }",
         &c_secret,
         true,
     );
@@ -5513,12 +5513,12 @@ test "a capture written in one recursive pass is read in a later one" {
 
 test "mutual recursion through a captured binding converges" {
     try expectSecret(
-        "function f(s) { let b; function a(n, x) { if (n) { return x; } return b(true, s); } b = (n, x) => a(n, x); return a(false, \"c\"); }",
+        "function f(s) { let b = undefined; function a(n, x) { if (n) { return x; } return b(true, s); } b = (n, x) => a(n, x); return a(false, \"c\"); }",
         &.{secret_value},
         true,
     );
     try expectSecret(
-        "function f(s) { let b; function a(n, x) { if (n) { return x; } return b(true, \"d\"); } b = (n, x) => a(n, x); return a(false, \"c\"); }",
+        "function f(s) { let b = undefined; function a(n, x) { if (n) { return x; } return b(true, \"d\"); } b = (n, x) => a(n, x); return a(false, \"c\"); }",
         &.{secret_value},
         false,
     );
@@ -5633,16 +5633,16 @@ test "call-site spread is refused by the strict checker" {
     try expectSecret("function f(xs) { function id(y) { return y; } return id(xs); }", &.{Value.clean}, false);
 
     const later = try analyzeSource(
-        "function f(s) { let x = s; function g(a, b) { return 0; } g(...[], (x = \"c\")); return x; }",
+        "function f(s) { let x = \"c\"; function g(a, b) { return 0; } g(...[], (() => { x = s; return \"c\"; })()); return x; }",
         "f",
         &.{secret_value},
     );
     defer later.deinit();
     try expectUnresolved(later.result, .spread, .refused_by_strict);
-    try testing.expect(!later.returnedLabels().secret);
+    try testing.expect(later.returnedLabels().secret);
 
     const optional = try analyzeSource(
-        "function f(s) { let x = s; const o = { slice: () => \"c\" }; o?.slice(...[], (x = \"c\")); return x; }",
+        "function f(s) { let x = \"c\"; const o = { slice: () => \"c\" }; o?.slice(...[], (() => { x = s; return \"c\"; })()); return x; }",
         "f",
         &.{secret_value},
     );
@@ -6007,26 +6007,6 @@ test "a call through a dynamic method key is an unknown callee" {
     const index = try analyzeSource("function f(o) { return o[0](); }", "f", &.{Value.clean});
     defer index.deinit();
     try expectUnresolved(index.result, .call, .unknown_callee);
-}
-
-// P5 specification test 15.
-test "an optional call keeps the state of the skip path" {
-    try expectSecret(
-        "function f(s) { let x = s; const o = { slice: () => \"c\" }; o?.slice((x = \"c\")); return x; }",
-        &.{secret_value},
-        true,
-    );
-    // The contrast: the same call without the optional chain always assigns.
-    try expectSecret(
-        "function f(s) { let x = s; const o = { slice: () => \"c\" }; o.slice((x = \"c\")); return x; }",
-        &.{secret_value},
-        false,
-    );
-    try expectSecret(
-        "function f(s) { const box = { x: s }; const o = { slice: () => \"c\" }; o?.slice((box.x = \"c\")); return box.x; }",
-        &.{secret_value},
-        true,
-    );
 }
 
 // P5 specification test 16.
@@ -7914,7 +7894,7 @@ const Census = struct {
 /// reads only its parameters and its own locals, so a handled tag that records
 /// an unresolved entry here is a rule that does not do what `tagPlan` says.
 const resolved_corpus = [_][]const u8{
-    "function f(p, q) { const a = 1; const b = 1.5; const c = \"s\"; const d = true; const e = null; const u = undefined; let g; return a; }",
+    "function f(p, q) { const a = 1; const b = 1.5; const c = \"s\"; const d = true; const e = null; const u = undefined; let g = undefined; return a; }",
     "function f(p, q) { return -p + (p && q) + (p || q) + (p ?? q); }",
     "function f(p, q) { return p ? p.x : q[\"y\"]; }",
     "function f(p, q) { let x = p?.x; x = q; p.k = x; p[q] = x; p.k += 1; return p; }",
@@ -8271,7 +8251,7 @@ const DeepExpressionShape = enum { unary, member, array, short_circuit, mixed, c
 fn deepHandlerSource(allocator: std.mem.Allocator, shape: DeepExpressionShape, first: []const u8, depth: usize) ![]u8 {
     var source: std.Io.Writer.Allocating = .init(allocator);
     errdefer source.deinit();
-    try source.writer.writeAll("import { env } from \"zttp:env\"; function id(x) { return x; } function handler(req) { return Response.json(");
+    try source.writer.writeAll("import { env } from \"zttp:env\"; function id(x) { return x; } function handler(req) { const m = \"a\"; return Response.json(");
     switch (shape) {
         .unary => for (0..depth) |_| try source.writer.writeAll("!"),
         .array => for (0..depth) |_| try source.writer.writeAll("["),
@@ -8279,7 +8259,7 @@ fn deepHandlerSource(allocator: std.mem.Allocator, shape: DeepExpressionShape, f
         .call => for (0..depth) |_| try source.writer.writeAll("id("),
         .ternary => for (0..depth) |_| try source.writer.writeAll("true ? "),
         .object => for (0..depth) |_| try source.writer.writeAll("{v:"),
-        .match => for (0..depth) |_| try source.writer.writeAll("match (\"a\") { default: "),
+        .match => for (0..depth) |_| try source.writer.writeAll("match (m) { default: "),
         .member, .short_circuit => {},
     }
     try source.writer.writeAll(first);
@@ -8384,7 +8364,7 @@ test "log sink observations occur during conditions and callbacks" {
     try testing.expect(!direct.cleared);
     try testing.expect(!direct.properties.no_secret_leakage);
     try testing.expectEqual(report_types.DiagnosticKind.secret_in_log, direct.first_kind.?);
-    const in_condition = try probeReport("function f(r) { console.log(r.headers.authorization); return true; } function handler(req) { if (f(req)) return \"a\"; return \"b\"; }");
+    const in_condition = try probeReport("function f(r) { console.log(r.headers.authorization); return true; } function handler(req) { if (f(req)) { return \"a\"; } return \"b\"; }");
     try testing.expect(!in_condition.cleared);
     try testing.expect(!in_condition.properties.no_credential_leakage);
     const callback = try probeReport("function handler(req) { [req].forEach((r) => console.log(r.headers.authorization)); return \"public\"; }");
@@ -9059,7 +9039,7 @@ test "routerMatch keeps handler identity and passes the original request explici
     const clean = try probeReport("import { routerMatch } from \"zttp:router\"; function publicRoute(req) { return Response.text(\"public\"); } const routes = { \"GET /\": publicRoute }; function handler(req) { const found = routerMatch(routes, req); if (found) { req.params = found.params; return found.handler(req); } return Response.text(\"missing\"); }");
     try testing.expect(!clean.cleared);
     inline for (@typeInfo(report_types.FlowProperties).@"struct".field_names) |field| try testing.expect(@field(clean.properties, field));
-    const leaked = try probeReport("import { routerMatch } from \"zttp:router\"; function privateRoute(req) { return req.headers.authorization; } const routes = { \"GET /\": privateRoute }; function handler(req) { const found = routerMatch(routes, req); if (found) return found.handler(req); return \"missing\"; }");
+    const leaked = try probeReport("import { routerMatch } from \"zttp:router\"; function privateRoute(req) { return req.headers.authorization; } const routes = { \"GET /\": privateRoute }; function handler(req) { const found = routerMatch(routes, req); if (found) { return found.handler(req); } return \"missing\"; }");
     try testing.expect(!leaked.cleared);
     try testing.expect(!leaked.properties.no_credential_leakage);
     const discarded = try probeReport("import { routerMatch } from \"zttp:router\"; import { env } from \"zttp:env\"; function privateRoute(req) { console.log(env(\"SECRET_KEY\")); return req.headers.authorization; } const routes = { \"GET /\": privateRoute }; function handler(req) { routerMatch(routes, req); return \"public\"; }");
@@ -9129,7 +9109,7 @@ test "object-valued selection cannot revalidate a raw key through a schema view"
 }
 
 test "Dict entry reconstruction returns native arrays without invoking entry values" {
-    const p = try probeReport("import { dictEntries, dictFromEntries } from \"zttp:collections\"; function handler(req) { const built = dictFromEntries([[\"a\", 1], [\"b\", 2]]); if (!built.ok) return Response.json({error:\"bad\"}); const d = built.value; if (!isDict(d)) return Response.json({error:\"not-dict\"}); const doubled = dictFromEntries(dictEntries(d).map((p) => [p[0], p[1] * 2])); return Response.json({ok:doubled.ok}); }");
+    const p = try probeReport("import { dictEntries, dictFromEntries } from \"zttp:collections\"; function handler(req) { const built = dictFromEntries([[\"a\", 1], [\"b\", 2]]); if (!built.ok) { return Response.json({error:\"bad\"}); } const d = built.value; if (!isDict(d)) { return Response.json({error:\"not-dict\"}); } const doubled = dictFromEntries(dictEntries(d).map((p) => [p[0], p[1] * 2])); return Response.json({ok:doubled.ok}); }");
     try testing.expect(!p.cleared);
     try testing.expect(p.properties.no_credential_leakage);
     try testing.expect(p.properties.no_secret_leakage);
@@ -9191,7 +9171,7 @@ test "short circuit sink witness constrains the request before its I O" {
 }
 
 test "imprecise request selection never supplies exact witness provenance" {
-    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; function handler(req) { const fields = [req.path]; const p = fields[req.url.length + 1]; if (p === \"/leak\") console.log(env(\"API_TOKEN\")); return \"public\"; }");
+    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; function handler(req) { const fields = [req.path]; const p = fields[req.url.length + 1]; if (p === \"/leak\") { console.log(env(\"API_TOKEN\")); } return \"public\"; }");
     defer h.destroy();
     const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
     try testing.expect(!report.properties.no_secret_leakage);
@@ -9224,7 +9204,7 @@ test "guard cards follow a common guard and decline conflicting guard names" {
         try testing.expectEqualStrings("escapeHtml", path.guard_func.?);
     };
     try testing.expect(found);
-    const other = try Harness.create(testing.allocator, prefix ++ "function handler(req) { let safe = escapeHtml(req.url); if (req.method === \"POST\") safe = escapeHtml(req.body); return Response.html(safe); }");
+    const other = try Harness.create(testing.allocator, prefix ++ "function handler(req) { let safe = escapeHtml(req.url); if (req.method === \"POST\") { safe = escapeHtml(req.body); } return Response.html(safe); }");
     defer other.destroy();
     const joined = try other.interp.analyzeHandlerReport(try other.find("handler"));
     try testing.expect(joined.properties.injection_safe);
@@ -9316,7 +9296,7 @@ test "an unchanged request authorization read retains its replay witness" {
 }
 
 test "pure AND predicates retain a constrained constructive branch" {
-    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; function handler(req) { const secret = env(\"API_TOKEN\"); if (req.method === \"POST\" && secret !== undefined) return Response.text(secret); return \"public\"; }");
+    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; function handler(req) { const secret = env(\"API_TOKEN\"); if (req.method === \"POST\" && secret !== undefined) { return Response.text(secret); } return \"public\"; }");
     defer h.destroy();
     const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
     var found = false;
@@ -9329,7 +9309,7 @@ test "pure AND predicates retain a constrained constructive branch" {
 }
 
 test "short circuit writes cannot lend another branch their data witness" {
-    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; function handler(req) { let value = \"public\"; const ignored = req.method === \"POST\" && (value = env(\"API_TOKEN\")); if (req.method !== \"POST\") return Response.text(value); return \"public\"; }");
+    const h = try Harness.create(testing.allocator, "import { env } from \"zttp:env\"; function handler(req) { let value = \"public\"; const ignored = req.method === \"POST\" && (() => { value = env(\"API_TOKEN\"); return true; })(); if (req.method !== \"POST\") return Response.text(value); return \"public\"; }");
     defer h.destroy();
     const report = try h.interp.analyzeHandlerReport(try h.find("handler"));
     try testing.expect(!report.properties.no_secret_leakage);

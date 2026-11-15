@@ -473,7 +473,7 @@ test "fault coverage checks routerMatch route functions" {
         \\import { jwtVerify } from "zttp:auth";
         \\function handler(req) {
         \\  const auth = jwtVerify("token", "secret");
-        \\  if (!auth.ok) return Response.text("accepted");
+        \\  if (!auth.ok) { return Response.text("accepted"); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -482,13 +482,13 @@ test "fault coverage checks routerMatch route functions" {
         \\import { routerMatch } from "zttp:router";
         \\function route(req) {
         \\  const auth = jwtVerify("token", "secret");
-        \\  if (!auth.ok) return Response.text("accepted");
+        \\  if (!auth.ok) { return Response.text("accepted"); }
         \\  return Response.text("ok");
         \\}
         \\const routes = { "GET /probe": route };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -497,13 +497,13 @@ test "fault coverage checks routerMatch route functions" {
         \\import { routerMatch } from "zttp:router";
         \\function route(req) {
         \\  const auth = jwtVerify("token", "secret");
-        \\  if (!auth.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!auth.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  return Response.text("ok");
         \\}
         \\const routes = { "GET /probe": route };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -524,7 +524,7 @@ test "fault coverage fails closed for unresolved routerMatch dispatch" {
         \\import { routerMatch } from "zttp:router";
         \\function handler(req) {
         \\  const found = routerMatch(req.routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -545,9 +545,9 @@ test "a routed call site cannot borrow fault coverage from the handler" {
         \\const routes = { "GET /probe": route };
         \\function handler(req) {
         \\  const auth = jwtVerify("handler-token", "secret");
-        \\  if (!auth.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!auth.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -563,13 +563,13 @@ test "fault coverage fails closed when the handler discards a route response" {
         \\import { routerMatch } from "zttp:router";
         \\function route(req) {
         \\  const auth = jwtVerify("token", "secret");
-        \\  if (!auth.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!auth.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  return Response.text("ok");
         \\}
         \\const routes = { "GET /probe": route };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  found.handler(req);
         \\  return Response.text("discarded route response");
         \\}
@@ -620,23 +620,23 @@ const fault_probes = [_]FaultProbe{
     .{ .name = "one checked call", .clean = true, .source = probe_prefix ++
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
-        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  return Response.text("ok");
         \\}
     },
     .{ .name = "two calls, both checked", .clean = true, .source = probe_prefix ++
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
-        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  const b = jwtVerify("t2", "secret");
-        \\  if (!b.ok) return Response.text("forbidden", { status: 403 });
+        \\  if (!b.ok) { return Response.text("forbidden", { status: 403 }); }
         \\  return Response.text("ok");
         \\}
     },
     .{ .name = "optional read answered by ??", .clean = true, .source = probe_prefix ++
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
-        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  const name = env("NAME") ?? "anon";
         \\  return Response.text(name);
         \\}
@@ -646,14 +646,14 @@ const fault_probes = [_]FaultProbe{
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
         \\  const b = jwtVerify("t2", "secret");
-        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  return Response.text("ok");
         \\}
     },
     .{ .name = "second call in a nested function (f1)", .clean = false, .source = probe_prefix ++
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
-        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  function check() {
         \\    return jwtVerify("t2", "secret");
         \\  }
@@ -664,7 +664,7 @@ const fault_probes = [_]FaultProbe{
     .{ .name = "second call inline (f2)", .clean = false, .source = probe_prefix ++
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
-        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  return Response.text(jwtVerify("t2", "secret").error);
         \\}
     },
@@ -675,16 +675,17 @@ const fault_probes = [_]FaultProbe{
         \\}
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
-        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  const b = load();
         \\  return Response.json({ b: b });
         \\}
     },
-    .{ .name = "second call as a match scrutinee (f6)", .clean = false, .source = probe_prefix ++
+    .{ .name = "second call bound then matched (f6)", .clean = false, .source = probe_prefix ++
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
-        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
-        \\  return match (jwtVerify("t2", "secret").ok) {
+        \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
+        \\  const b = jwtVerify("t2", "secret");
+        \\  return match (b.ok) {
         \\    when true: Response.text("ok")
         \\    when false: Response.text("forbidden", { status: 403 })
         \\  };
@@ -693,7 +694,7 @@ const fault_probes = [_]FaultProbe{
     .{ .name = "second call as an argument (f12)", .clean = false, .source = probe_prefix ++
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
-        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  const b = wrap(jwtVerify("t2", "secret"));
         \\  return Response.json({ b: b });
         \\}
@@ -701,7 +702,7 @@ const fault_probes = [_]FaultProbe{
     .{ .name = "second call in a branch that does not return (f14)", .clean = false, .source = probe_prefix ++
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
-        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  if (req.method === "POST") {
         \\    const b = jwtVerify("t2", "secret");
         \\    logInfo(b.error, {});
@@ -712,7 +713,7 @@ const fault_probes = [_]FaultProbe{
     .{ .name = "failable export held in a const and called later", .clean = false, .source = probe_prefix ++
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
-        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  const verify = jwtVerify;
         \\  const b = verify("t2", "secret");
         \\  return Response.json({ b: b });
@@ -721,7 +722,7 @@ const fault_probes = [_]FaultProbe{
     .{ .name = "failable export passed as a callback", .clean = false, .source = probe_prefix ++
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
-        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  const rows = ["t2"].map(jwtVerify);
         \\  return Response.json({ rows: rows });
         \\}
@@ -730,7 +731,7 @@ const fault_probes = [_]FaultProbe{
         \\function handler(req) {
         \\  for (const i of range(2)) {
         \\    const a = jwtVerify("t1", "secret");
-        \\    if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\    if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  }
         \\  return Response.text("ok");
         \\}
@@ -740,7 +741,7 @@ const fault_probes = [_]FaultProbe{
         \\function handler(req) {
         \\  const r = jwtVerify("t1", "secret");
         \\  const r2 = r;
-        \\  if (!r2.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!r2.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  return Response.text("ok");
         \\}
     },
@@ -1004,9 +1005,9 @@ test "a handler root counts each call to one function as its own site" {
         \\import { jwtVerify } from "zttp:auth";
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
-        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  const b = jwtVerify("t2", "secret");
-        \\  if (!b.ok) return Response.text("forbidden", { status: 403 });
+        \\  if (!b.ok) { return Response.text("forbidden", { status: 403 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -1066,7 +1067,7 @@ const routed_tail =
     \\const routes = { "GET /data": getData, "GET /health": getHealth };
     \\function handler(req) {
     \\  const found = routerMatch(routes, req);
-    \\  if (found === undefined) return Response.text("not found", { status: 404 });
+    \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
     \\  return found.handler(req);
     \\}
 ;
@@ -1078,14 +1079,14 @@ const fetch_probes = [_]FaultProbe{
     .{ .name = "p1 one fetch, !res.ok returns 502", .clean = true, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/data");
-        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
+        \\  if (!res.ok) { return Response.text("upstream failed", { status: 502 }); }
         \\  return Response.text("ok");
         \\}
     },
     .{ .name = "p2 fetch with an init object", .clean = true, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/data", { method: "POST", body: "x" });
-        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
+        \\  if (!res.ok) { return Response.text("upstream failed", { status: 502 }); }
         \\  return Response.text("ok");
         \\}
     },
@@ -1099,73 +1100,73 @@ const fetch_probes = [_]FaultProbe{
         \\function handler(req) {
         \\  const a = fetch("https://api.example.com/a");
         \\  const b = fetch("https://api.example.com/b");
-        \\  if (!a.ok) return Response.text("upstream failed", { status: 502 });
+        \\  if (!a.ok) { return Response.text("upstream failed", { status: 502 }); }
         \\  return Response.text(b.body);
         \\}
     },
     .{ .name = "p5 two fetches, both checked", .clean = true, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const a = fetch("https://api.example.com/a");
-        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  if (!a.ok) { return Response.text("a failed", { status: 502 }); }
         \\  const b = fetch("https://api.example.com/b");
-        \\  if (!b.ok) return Response.text("b failed", { status: 503 });
+        \\  if (!b.ok) { return Response.text("b failed", { status: 503 }); }
         \\  return Response.text("ok");
         \\}
     },
     .{ .name = "p6 !res.ok returns a 2xx fallback", .clean = true, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/data");
-        \\  if (!res.ok) return Response.text("fallback", { status: 200 });
+        \\  if (!res.ok) { return Response.text("fallback", { status: 200 }); }
         \\  return Response.text("ok");
         \\}
     },
     .{ .name = "p7 !== 200 is the complement of ok", .clean = true, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/data");
-        \\  if (res.status !== 200) return Response.text("upstream failed", { status: 502 });
+        \\  if (res.status !== 200) { return Response.text("upstream failed", { status: 502 }); }
         \\  return Response.text("ok");
         \\}
     },
     .{ .name = "p7b === 200 with the success branch first", .clean = true, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/data");
-        \\  if (res.status === 200) return Response.text("ok");
+        \\  if (res.status === 200) { return Response.text("ok"); }
         \\  return Response.text("upstream failed", { status: 502 });
         \\}
     },
     .{ .name = "p7c a literal on the left", .clean = true, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/data");
-        \\  if (200 !== res.status) return Response.text("upstream failed", { status: 502 });
+        \\  if (200 !== res.status) { return Response.text("upstream failed", { status: 502 }); }
         \\  return Response.text("ok");
         \\}
     },
     .{ .name = "p7d >= 300 leaves 1xx on the success side", .clean = false, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/data");
-        \\  if (res.status >= 300) return Response.text("upstream failed", { status: 502 });
+        \\  if (res.status >= 300) { return Response.text("upstream failed", { status: 502 }); }
         \\  return Response.text("ok");
         \\}
     },
     .{ .name = "p7e >= 400 leaves 3xx on the success side", .clean = false, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/data");
-        \\  if (res.status >= 400) return Response.text("upstream failed", { status: 502 });
+        \\  if (res.status >= 400) { return Response.text("upstream failed", { status: 502 }); }
         \\  return Response.text("ok");
         \\}
     },
     .{ .name = "p7f === 404 alone is not a fork", .clean = false, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/data");
-        \\  if (res.status === 404) return Response.text("missing", { status: 404 });
+        \\  if (res.status === 404) { return Response.text("missing", { status: 404 }); }
         \\  return Response.text("ok");
         \\}
     },
     .{ .name = "p7g === 404 then !res.ok", .clean = true, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/data");
-        \\  if (res.status === 404) return Response.text("missing", { status: 404 });
-        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
+        \\  if (res.status === 404) { return Response.text("missing", { status: 404 }); }
+        \\  if (!res.ok) { return Response.text("upstream failed", { status: 502 }); }
         \\  return Response.text("ok");
         \\}
     },
@@ -1173,7 +1174,7 @@ const fetch_probes = [_]FaultProbe{
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/data");
         \\  const s = res.status;
-        \\  if (s !== 200) return Response.text("upstream failed", { status: 502 });
+        \\  if (s !== 200) { return Response.text("upstream failed", { status: 502 }); }
         \\  return Response.text("ok");
         \\}
     },
@@ -1184,14 +1185,14 @@ const fetch_probes = [_]FaultProbe{
         \\    const res = "shadow";
         \\    return Response.text(res);
         \\  }
-        \\  if (res.status !== 200) return Response.text("upstream failed", { status: 502 });
+        \\  if (res.status !== 200) { return Response.text("upstream failed", { status: 502 }); }
         \\  return Response.text("ok");
         \\}
     },
     .{ .name = "p7j a status test on a Result export", .clean = false, .source = and_prefix ++
         \\function handler(req) {
         \\  const auth = jwtVerify("t", "secret");
-        \\  if (auth.status !== 200) return Response.text("unauthorized", { status: 401 });
+        \\  if (auth.status !== 200) { return Response.text("unauthorized", { status: 401 }); }
         \\  return Response.text("ok");
         \\}
     },
@@ -1205,7 +1206,7 @@ const fetch_probes = [_]FaultProbe{
     .{ .name = "p10 routed, the route function checks its fetch", .clean = true, .source = fetch_prefix ++
         \\function getData(req) {
         \\  const res = fetch("https://api.example.com/data");
-        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
+        \\  if (!res.ok) { return Response.text("upstream failed", { status: 502 }); }
         \\  return Response.text(res.body);
         \\}
         \\
@@ -1213,7 +1214,7 @@ const fetch_probes = [_]FaultProbe{
     .{ .name = "f1 second fetch in a nested function", .clean = false, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const a = fetch("https://api.example.com/a");
-        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  if (!a.ok) { return Response.text("a failed", { status: 502 }); }
         \\  function load() {
         \\    return fetch("https://api.example.com/b", {});
         \\  }
@@ -1224,7 +1225,7 @@ const fetch_probes = [_]FaultProbe{
     .{ .name = "f2 second fetch inline", .clean = false, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const a = fetch("https://api.example.com/a");
-        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  if (!a.ok) { return Response.text("a failed", { status: 502 }); }
         \\  return Response.text(fetch("https://api.example.com/b").body);
         \\}
     },
@@ -1235,16 +1236,17 @@ const fetch_probes = [_]FaultProbe{
         \\}
         \\function handler(req) {
         \\  const a = fetch("https://api.example.com/a");
-        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  if (!a.ok) { return Response.text("a failed", { status: 502 }); }
         \\  const b = load();
         \\  return Response.json({ b: b });
         \\}
     },
-    .{ .name = "f6 second fetch as a match scrutinee", .clean = false, .source = fetch_prefix ++
+    .{ .name = "f6 second fetch bound then matched", .clean = false, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const a = fetch("https://api.example.com/a");
-        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
-        \\  return match (fetch("https://api.example.com/b").ok) {
+        \\  if (!a.ok) { return Response.text("a failed", { status: 502 }); }
+        \\  const b = fetch("https://api.example.com/b");
+        \\  return match (b.ok) {
         \\    when true: Response.text("ok")
         \\    when false: Response.text("b failed", { status: 502 })
         \\  };
@@ -1253,7 +1255,7 @@ const fetch_probes = [_]FaultProbe{
     .{ .name = "f12 second fetch as an argument", .clean = false, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const a = fetch("https://api.example.com/a");
-        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  if (!a.ok) { return Response.text("a failed", { status: 502 }); }
         \\  const b = wrap(fetch("https://api.example.com/b"));
         \\  return Response.json({ b: b });
         \\}
@@ -1261,7 +1263,7 @@ const fetch_probes = [_]FaultProbe{
     .{ .name = "f14 second fetch in a branch that does not return", .clean = false, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const a = fetch("https://api.example.com/a");
-        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  if (!a.ok) { return Response.text("a failed", { status: 502 }); }
         \\  if (req.method === "POST") {
         \\    const b = fetch("https://api.example.com/b");
         \\    logInfo(b.body, {});
@@ -1272,7 +1274,7 @@ const fetch_probes = [_]FaultProbe{
     .{ .name = "a fetch held in a const and called later", .clean = false, .source = fetch_prefix ++
         \\function handler(req) {
         \\  const a = fetch("https://api.example.com/a");
-        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  if (!a.ok) { return Response.text("a failed", { status: 502 }); }
         \\  const grab = fetch;
         \\  const b = grab("https://api.example.com/b");
         \\  return Response.json({ b: b });
@@ -1401,7 +1403,7 @@ test "a second check inside an && can fail while the first passes" {
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
         \\  const b = jwtVerify("t2", "secret");
-        \\  if (!a.ok && !b.ok) return Response.text("both failed", { status: 401 });
+        \\  if (!a.ok && !b.ok) { return Response.text("both failed", { status: 401 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -1429,7 +1431,7 @@ test "an && that guards no failable call leaves a covered handler clean" {
     const source = and_prefix ++
         \\function handler(req) {
         \\  const auth = jwtVerify("t", "secret");
-        \\  if (!auth.ok) return Response.json({ error: "unauthorized" }, { status: 401 });
+        \\  if (!auth.ok) { return Response.json({ error: "unauthorized" }, { status: 401 }); }
         \\  if (req.headers["x"] === "y" && req.headers["z"] === "w") {
         \\    return Response.json({ error: "bad request" }, { status: 400 });
         \\  }
@@ -1556,7 +1558,7 @@ test "an explicit Result guard gives the failable call its failure path" {
         \\import { jwtVerify } from "zttp:auth";
         \\function handler(req) {
         \\  const result = jwtVerify("t", "secret");
-        \\  if (!result.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!result.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  return Response.text("ok");
         \\}
     ;

@@ -526,8 +526,8 @@ const t_import_fn_lib =
     \\}
 ;
 const t_import_fn =
-    \\@PRE@
     \\import { helper } from "./@LIBA@";
+    \\@PRE@
     \\function handler(req: Request): Claim<Response> {
     \\  const s = @SRC@;
     \\  @USE{helper(s)}USE@
@@ -713,8 +713,8 @@ const t_import2_lib_a =
     \\}
 ;
 const t_import2 =
-    \\@PRE@
     \\import { helper } from "./@LIBA@";
+    \\@PRE@
     \\function handler(req: Request): Claim<Response> {
     \\  const s = @SRC@;
     \\  @USE{helper(s)}USE@

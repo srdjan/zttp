@@ -3036,7 +3036,7 @@ test "top-level registration does not demote handler request properties" {
         \\schemaCompile("todo", "{\"type\":\"object\"}");
         \\function handler(req) {
         \\  const parsed = validateJson("todo", req.body);
-        \\  if (!parsed.ok) return Response.json({ error: "invalid" }, { status: 400 });
+        \\  if (!parsed.ok) { return Response.json({ error: "invalid" }, { status: 400 }); }
         \\  return Response.json(parsed.value);
         \\}
     ;
@@ -3084,7 +3084,7 @@ test "routed writes match direct handler properties" {
         \\const routes = { "POST /write": write };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -3247,7 +3247,7 @@ test "clean routed handler keeps effect-derived properties" {
         \\const routes = { "GET /clean": clean };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -3268,7 +3268,7 @@ test "unresolved routed effect summary fails closed" {
         \\function handler(req) {
         \\  const routes = { "GET /clean": clean };
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -3289,7 +3289,7 @@ test "unstable routed dispatch fails closed with resolvable roots" {
         \\const routes = { "GET /clean": clean };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  found.handler = clean;
         \\  return found.handler(req);
         \\}
@@ -3330,7 +3330,7 @@ test "routed cache reads and egress contribute their summary facts" {
         \\const routes = { "GET /read": read };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -3341,7 +3341,7 @@ test "routed cache reads and egress contribute their summary facts" {
         \\const routes = { "GET /fetch": fetchRoute };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -3582,7 +3582,7 @@ test "a literal rateCheck key becomes the rate-limit namespace" {
         \\import { rateCheck } from "zttp:ratelimit";
         \\function handler(req) {
         \\  const allowed = rateCheck("login-attempts", 5, 60);
-        \\  if (!allowed.ok) return Response.json({ error: "slow down" }, { status: 429 });
+        \\  if (!allowed.ok) { return Response.json({ error: "slow down" }, { status: 429 }); }
         \\  return Response.json({ ok: true });
         \\}
     ;
@@ -3602,7 +3602,7 @@ test "a computed rateCheck key still detects rate limiting, with no namespace" {
         \\function handler(req) {
         \\  const key = req.headers["x-forwarded-for"] ?? "anon";
         \\  const allowed = rateCheck(key, 5, 60);
-        \\  if (!allowed.ok) return Response.json({ error: "slow down" }, { status: 429 });
+        \\  if (!allowed.ok) { return Response.json({ error: "slow down" }, { status: 429 }); }
         \\  return Response.json({ ok: true });
         \\}
     ;
@@ -3641,7 +3641,7 @@ test "post_only is proven for static POST-only routerMatch tables" {
         \\};
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found !== undefined) return found.handler(req);
+        \\  if (found !== undefined) { return found.handler(req); }
         \\  return Response.json({ error: "not found" }, { status: 404 });
         \\}
     ;
@@ -3662,7 +3662,7 @@ test "post_only is not proven when a static routerMatch table mixes methods" {
         \\};
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found !== undefined) return found.handler(req);
+        \\  if (found !== undefined) { return found.handler(req); }
         \\  return Response.json({ error: "not found" }, { status: 404 });
         \\}
     ;

@@ -3061,12 +3061,6 @@ test "ternary with a call arm fires impure diagnostic" {
     try expectKind(&checker, .canonical_ternary_impure);
 }
 
-test "ternary with an assignment arm fires impure diagnostic" {
-    var checker = try checkSource("function handler(req) { let n = 0; const x = req.method === 'GET' ? (n = 1) : 500; return Response.json({ x: x, n: n }); }");
-    defer checker.deinit();
-    try expectKind(&checker, .canonical_ternary_impure);
-}
-
 test "ternary over pure composite arms is admitted" {
     // Array, object, and template arms are pure when every part is pure, so
     // the recursion must reach into them rather than defaulting to pure.
@@ -3712,22 +3706,6 @@ test "a let that nothing reassigns is still flagged next to a closure" {
     );
     defer checker.deinit();
     try expectKind(&checker, .avoidable_let);
-}
-
-test "a let reassigned inside an array spread operand is not flagged avoidable" {
-    var checker = try checkSource(
-        "function wrap(n) { return [n]; } function handler(req) { let v = 1; const a = [...wrap((v = 2))]; return Response.json({ v: v, a: a }); }",
-    );
-    defer checker.deinit();
-    try expectNoKind(&checker, .avoidable_let);
-}
-
-test "a let reassigned in a ternary arm is not flagged avoidable" {
-    var checker = try checkSource(
-        "function handler(req) { let v = 1; const n = req.method === \"GET\" ? (v = 2) : 0; return Response.json({ v: v, n: n }); }",
-    );
-    defer checker.deinit();
-    try expectNoKind(&checker, .avoidable_let);
 }
 
 test "mutable_live_iteration fires when the push sits in an array spread operand" {

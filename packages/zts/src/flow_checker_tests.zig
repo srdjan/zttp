@@ -1106,7 +1106,7 @@ test "value combinations cannot borrow validation from another contributor" {
             \\import {{ escapeHtml }} from "zttp:text";
             \\import {{ dictEmpty, dictSet, dictGet }} from "zttp:collections";
             \\function choose(raw, safe) {{
-            \\  if (raw === "") return safe;
+            \\  if (raw === "") {{ return safe; }}
             \\  return raw;
             \\}}
             \\function handler(req) {{
@@ -2209,7 +2209,7 @@ test "FlowChecker checks each flow property inside routerMatch route functions" 
             \\const routes = { "GET /leak": leak };
             \\function handler(req) {
             \\  const found = routerMatch(routes, req);
-            \\  if (found === undefined) return Response.json({ error: "not found" });
+            \\  if (found === undefined) { return Response.json({ error: "not found" }); }
             \\  return found.handler(req);
             \\}
             ,
@@ -2231,7 +2231,7 @@ test "FlowChecker checks each flow property inside routerMatch route functions" 
             \\const routes = { "GET /leak": leak };
             \\function handler(req) {
             \\  const found = routerMatch(routes, req);
-            \\  if (found === undefined) return Response.json({ error: "not found" });
+            \\  if (found === undefined) { return Response.json({ error: "not found" }); }
             \\  return found.handler(req);
             \\}
             ,
@@ -2255,7 +2255,7 @@ test "FlowChecker checks each flow property inside routerMatch route functions" 
             \\const routes = { "POST /send": send };
             \\function handler(req) {
             \\  const found = routerMatch(routes, req);
-            \\  if (found === undefined) return Response.json({ error: "not found" });
+            \\  if (found === undefined) { return Response.json({ error: "not found" }); }
             \\  return found.handler(req);
             \\}
             ,
@@ -2279,7 +2279,7 @@ test "FlowChecker checks each flow property inside routerMatch route functions" 
             \\const routes = { "POST /send": send };
             \\function handler(req) {
             \\  const found = routerMatch(routes, req);
-            \\  if (found === undefined) return Response.json({ error: "not found" });
+            \\  if (found === undefined) { return Response.json({ error: "not found" }); }
             \\  return found.handler(req);
             \\}
             ,
@@ -2295,7 +2295,7 @@ test "FlowChecker checks each flow property inside routerMatch route functions" 
             \\const routes = { "GET /show": show };
             \\function handler(req) {
             \\  const found = routerMatch(routes, req);
-            \\  if (found === undefined) return Response.json({ error: "not found" });
+            \\  if (found === undefined) { return Response.json({ error: "not found" }); }
             \\  return found.handler(req);
             \\}
             ,
@@ -2311,7 +2311,7 @@ test "FlowChecker checks each flow property inside routerMatch route functions" 
             \\const routes = { "GET /clock": clock };
             \\function handler(req) {
             \\  const found = routerMatch(routes, req);
-            \\  if (found === undefined) return Response.json({ error: "not found" });
+            \\  if (found === undefined) { return Response.json({ error: "not found" }); }
             \\  return found.handler(req);
             \\}
             ,
@@ -2342,7 +2342,7 @@ test "FlowChecker checks egress headers inside routerMatch route functions" {
         \\const routes = { "POST /send": send };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -2796,7 +2796,7 @@ test "FlowChecker checks sinks on return paths, concise bodies, and nested expre
         .{ .name = "nested in an if condition", .source = head ++
             \\function handler(req) {
             \\  const t = env("API_TOKEN") ?? "";
-            \\  if (fetch("https://api.example.com/x", { method: "POST", body: t }).ok) return Response.json({ ok: 1 });
+            \\  if (fetch("https://api.example.com/x", { method: "POST", body: t }).ok) { return Response.json({ ok: 1 }); }
             \\  return Response.json({ ok: 0 });
             \\}
         },
@@ -3189,7 +3189,7 @@ test "FlowChecker keeps a property for a module-level clean constant or function
         \\const routes = { "GET /show": show };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -3219,7 +3219,7 @@ test "FlowChecker keeps a property for a module-level clean constant or function
 
     // A let without an initializer starts empty.
     const uninitialized =
-        \\let count;
+        \\let count = undefined;
         \\function handler(req) {
         \\  return Response.json({ n: count });
         \\}
@@ -3720,7 +3720,7 @@ test "FlowChecker keeps a routed sink's single report and actual callsite help" 
         \\const routes = { "GET /leak": leak };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -3764,7 +3764,7 @@ test "FlowChecker unions routerMatch route return labels at dispatch" {
         \\const routes = { "GET /clean": clean, "GET /tainted": tainted };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  const result = found.handler(req);
         \\  fetch("https://api.example.com/collect", { body: JSON.stringify(result) });
         \\  return Response.json({ ok: true });
@@ -3783,7 +3783,7 @@ test "FlowChecker proves every flow property for clean routerMatch routes" {
         \\let routes = { "GET /first": first, "GET /second": second };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  req.params = found.params;
         \\  return found.handler(req);
         \\}
@@ -3841,7 +3841,7 @@ test "FlowChecker isolates route witness IO from other roots" {
         \\const routes = { "GET /second": second };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -4004,7 +4004,7 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\Array.isArray(routes);
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  return found.handler(req);
         \\}
         ,
@@ -4016,7 +4016,7 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\alias["GET /probe"] = () => Response.html("changed");
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  return found.handler(req);
         \\}
         ,
@@ -4026,7 +4026,7 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\const routes = { "GET /probe": clean };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  const selected = [found][0];
         \\  selected.handler = () => Response.html("changed");
         \\  return found.handler(req);
@@ -4041,7 +4041,7 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\routes["GET /probe"] = leak;
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  return found.handler(req);
         \\}
         ,
@@ -4055,7 +4055,7 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\alias["GET /probe"] = leak;
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  return found.handler(req);
         \\}
         ,
@@ -4066,7 +4066,7 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\const routes = { "GET /probe": clean };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  found.handler = () => Response.json({ key: env("SECRET_KEY") });
         \\  return found.handler(req);
         \\}
@@ -4084,7 +4084,7 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\routes = { "POST /send": clean };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  return found.handler(req);
         \\}
         ,
@@ -4098,7 +4098,7 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\box.table["GET /probe"] = leak;
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  return found.handler(req);
         \\}
         ,
@@ -4112,7 +4112,7 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\mutate(routes);
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  return found.handler(req);
         \\}
         ,
@@ -4123,7 +4123,7 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\const routes = { "GET /probe": clean };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  const selected = found;
         \\  selected.handler = () => Response.json({ key: env("SECRET_KEY") });
         \\  return found.handler(req);
@@ -4139,7 +4139,7 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\const routes = { "GET /probe": route };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  return found.handler(req);
         \\}
         ,
@@ -4149,7 +4149,7 @@ test "FlowChecker follows actual mutations and local routerMatch tables" {
         \\function handler(req) {
         \\  const routes = { "GET /probe": clean };
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  return found.handler(req);
         \\}
         ,
@@ -4197,7 +4197,7 @@ test "FlowChecker preserves known request string and rawJson calls" {
         \\const routes = { "POST /preview": preview };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -4256,7 +4256,7 @@ test "FlowChecker preserves known request string and rawJson calls" {
         \\const routes = { "GET /raw": raw };
         \\function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ error: "not found" });
+        \\  if (found === undefined) { return Response.json({ error: "not found" }); }
         \\  return found.handler(req);
         \\}
     ;

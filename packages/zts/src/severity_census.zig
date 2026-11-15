@@ -478,9 +478,9 @@ fn probeSource(
     shape: Shape,
 ) ![]u8 {
     const test_line: []const u8 = switch (shape) {
-        .result_ok, .ok_record => "if (!r.ok) return Response.text(\"failed\", { status: 502 });",
-        .optional_absent, .undefined_sentinel => "if (r === undefined) return Response.text(\"failed\", { status: 502 });",
-        .boolean_falsy => "if (!r) return Response.text(\"failed\", { status: 502 });",
+        .result_ok, .ok_record => "if (!r.ok) { return Response.text(\"failed\", { status: 502 }); }",
+        .optional_absent, .undefined_sentinel => "if (r === undefined) { return Response.text(\"failed\", { status: 502 }); }",
+        .boolean_falsy => "if (!r) { return Response.text(\"failed\", { status: 502 }); }",
     };
     return allocator.print("import {{ {s} }} from \"{s}\";\nfunction handler(req) {{\n  const r = {s}(\"a\");\n  {s}\n  return Response.text(\"ok\");\n}}\n", .{ func, specifier, func, test_line });
 }

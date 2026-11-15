@@ -182,6 +182,13 @@ const SourceObservationContext = struct {
     }
 };
 
+/// Where an assignment may stand. Only the outermost expression of an
+/// expression statement may be an assignment (spec 5.5).
+const AssignmentPosition = enum { refused, statement, statement_paren };
+
+const block_import_message = "`import` and `export` are not supported inside a block; move them to the top level of the module";
+const late_import_message = "an `import` after a declaration is not supported; move each `import` above the first declaration";
+
 pub const Parser = struct {
     allocator: std.mem.Allocator,
     tokenizer: Tokenizer,
@@ -238,6 +245,13 @@ pub const Parser = struct {
     /// lowers to a narrowing test over it (spec 5.5), so the pattern parser
     /// needs the node the arms are selecting on.
     current_match_scrutinee: NodeIndex = null_node,
+    /// Where an assignment may stand. Only the outermost expression of an
+    /// expression statement may be an assignment; `parseExpression` takes this
+    /// value and clears it, so every nested expression refuses assignment.
+    assignment_position: AssignmentPosition = .refused,
+    /// Set once the program has parsed a statement or type declaration that is
+    /// not an import. An `import` after that point is refused (spec 5.5).
+    declaration_seen: bool = false,
 
     // Recursive-descent depth, shared across statement and expression nesting.
     // Bounds stack growth so pathological input (minified/generated JS with
@@ -686,10 +700,18 @@ pub const Parser = struct {
                 if (collector.shouldStop()) return error.AdmissionRefused;
             }
             if (try self.tryConsumeTypeOnlyModule()) continue;
-            if (try self.tryConsumeAdmissionDeclaration()) continue;
-            if (try self.tryConsumeTypeDeclaration()) continue;
+            if (try self.tryConsumeAdmissionDeclaration()) {
+                self.declaration_seen = true;
+                continue;
+            }
+            if (try self.tryConsumeTypeDeclaration()) {
+                self.declaration_seen = true;
+                continue;
+            }
             const statement_start = self.current.start;
+            const is_import = self.check(.kw_import);
             if (self.parseStatement()) |stmt| {
+                if (!is_import) self.declaration_seen = true;
                 try stmts.append(stmt);
             } else |err| {
                 if (self.first_statement_failure_nodes == null) {
@@ -1199,10 +1221,33 @@ pub const Parser = struct {
         return if (self.expression_profile) 64 else max_recursion_depth;
     }
 
+    /// True for `import type` followed by a name and `from`, as in `import type X from`.
+    fn importTypeLacksBraces(self: *const Parser) bool {
+        var pos: usize = self.current.start + self.current.len;
+        while (pos < self.source.len and std.ascii.isWhitespace(self.source[pos])) pos += 1;
+        const word = "type";
+        if (pos + word.len > self.source.len or !std.mem.eql(u8, self.source[pos .. pos + word.len], word)) return false;
+        pos += word.len;
+        if (pos < self.source.len and (std.ascii.isAlphanumeric(self.source[pos]) or self.source[pos] == '_' or self.source[pos] == '$')) return false;
+        while (pos < self.source.len and std.ascii.isWhitespace(self.source[pos])) pos += 1;
+        if (pos >= self.source.len) return false;
+        const next = self.source[pos];
+        if (!(std.ascii.isAlphabetic(next) or next == '_' or next == '$')) return false;
+        while (pos < self.source.len and (std.ascii.isAlphanumeric(self.source[pos]) or self.source[pos] == '_' or self.source[pos] == '$')) pos += 1;
+        while (pos < self.source.len and std.ascii.isWhitespace(self.source[pos])) pos += 1;
+        const from = "from";
+        if (pos + from.len > self.source.len or !std.mem.eql(u8, self.source[pos .. pos + from.len], from)) return false;
+        const end = pos + from.len;
+        return end >= self.source.len or !(std.ascii.isAlphanumeric(self.source[end]) or self.source[end] == '_' or self.source[end] == '$');
+    }
+
     fn tryConsumeTypeOnlyModule(self: *Parser) !bool {
         if (self.admissionCoveredByRecovery(self.current.start)) return false;
         if (self.admission == null or !self.isTypeDeclarationBoundary()) return false;
         if (self.current.type != .kw_import and self.current.type != .kw_export) return false;
+        // `import type X from` is not a type-only module: leave it to the
+        // import parser, which refuses it.
+        if (self.current.type == .kw_import and self.importTypeLacksBraces()) return false;
 
         const cursor_checkpoint = self.cursorCheckpoint();
         const store_checkpoint = self.type_store.checkpoint();
@@ -1270,6 +1315,12 @@ pub const Parser = struct {
             cursor_checkpoint.previous,
         );
         self.last_erased_type_span = module.raw_span;
+        // The scan runs first, so a retired module keeps its own refusal.
+        if (self.brace_depth > 0) {
+            self.errors.addErrorAt(.unexpected_token, keyword, block_import_message);
+        } else if (keyword.type == .kw_import and self.declaration_seen) {
+            self.errors.addErrorAt(.unexpected_token, keyword, late_import_message);
+        }
         return true;
     }
 
@@ -1813,8 +1864,20 @@ pub const Parser = struct {
                 self.advance();
                 return error.ParseError;
             },
-            .kw_import => self.parseImportDeclaration(),
-            .kw_export => self.parseExportDeclaration(),
+            .kw_import, .kw_export => {
+                if (self.brace_depth > 0) {
+                    self.errors.addErrorAt(.unexpected_token, self.current, block_import_message);
+                    self.advance();
+                    return error.ParseError;
+                }
+                if (self.current.type == .kw_export) return self.parseExportDeclaration();
+                if (self.declaration_seen) {
+                    self.errors.addErrorAt(.unexpected_token, self.current, late_import_message);
+                    self.advance();
+                    return error.ParseError;
+                }
+                return self.parseImportDeclaration();
+            },
             .lbrace => self.parseBlock(),
             .semicolon => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "empty statements are not supported; remove the standalone `;`");
@@ -1923,7 +1986,15 @@ pub const Parser = struct {
         if (self.match(.assign)) {
             init_node = try self.parseExpression(.assignment);
         } else if (kind == .@"const") {
-            self.errorAtCurrent("const declarations must have an initializer");
+            self.errors.addErrorAt(.const_without_initializer, self.current, "const declarations must have an initializer");
+        } else {
+            self.errors.addErrorAt(.const_without_initializer, self.current, "a `let` with no initializer is not supported; write `const a: T = value;`, or give the `let` an initializer");
+            return error.ParseError;
+        }
+
+        if (self.check(.comma)) {
+            self.errors.addErrorAt(.unsupported_feature, self.current, "one declaration that binds two names is not supported; write one `const` or `let` for each name");
+            return error.ParseError;
         }
 
         try self.expectSemicolon();
@@ -3449,6 +3520,11 @@ pub const Parser = struct {
                 };
                 self.advance();
 
+                if (self.check(.lbracket) or self.check(.lbrace)) {
+                    self.errors.addErrorAt(.unsupported_feature, self.current, "destructuring in a `for...of` head is not supported; bind the element to one name, then read each member in the body");
+                    self.scopes.popScope();
+                    return error.ParseError;
+                }
                 const name = try self.expectIdentifier("variable name");
                 const name_atom = try self.addAtom(name.text(self.source));
                 const binding = self.scopes.declareBinding(
@@ -4094,6 +4170,10 @@ pub const Parser = struct {
                 self.errorAt(loc, "'import * as X' namespace imports are not supported; use named imports: import { x } from \"module\"");
                 return error.ParseError;
             }
+            if (std.mem.eql(u8, self.current.text(self.source), "type")) {
+                self.errorAt(loc, "'import type X from' is not supported; write 'import type { X } from \"module\"'");
+                return error.ParseError;
+            }
             // Assume default import attempt
             self.errorAt(loc, "'import X from' default imports are not supported; use named imports: import { x } from \"module\"");
             return error.ParseError;
@@ -4313,6 +4393,7 @@ pub const Parser = struct {
 
     fn parseExpressionStatement(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
+        self.assignment_position = if (self.check(.lparen)) .statement_paren else .statement;
         const expr = try self.parseExpression(.none);
         try self.expectSemicolon();
         return try self.nodes.addOptValue(.expr_stmt, loc, expr);
@@ -4348,6 +4429,8 @@ pub const Parser = struct {
             return error.ParseError;
         }
 
+        const assignment_position = self.assignment_position;
+        self.assignment_position = .refused;
         const parent_chain_depth = self.expression_chain_depth;
         const has_parent_expression = self.expression_frames > 0;
         self.expression_frames += 1;
@@ -4404,7 +4487,7 @@ pub const Parser = struct {
                 self.advance();
                 left = try self.parseCallArgs(left, loc, pending);
             } else {
-                left = try self.parseInfixExpr(left, prec);
+                left = try self.parseInfixExpr(left, prec, assignment_position);
             }
             chain_depth = @max(chain_depth, self.expression_chain_depth) + 1;
             if (chain_depth > self.recursionLimit()) {
@@ -4526,7 +4609,7 @@ pub const Parser = struct {
         };
     }
 
-    fn parseInfixExpr(self: *Parser, left: NodeIndex, prec: Precedence) anyerror!NodeIndex {
+    fn parseInfixExpr(self: *Parser, left: NodeIndex, prec: Precedence, assignment_position: AssignmentPosition) anyerror!NodeIndex {
         const op_tok = self.current;
         const loc = op_tok.location();
 
@@ -4611,6 +4694,7 @@ pub const Parser = struct {
 
             // Simple assignment only
             .assign => {
+                try self.checkAssignment(left, op_tok, assignment_position);
                 self.advance();
                 const right = try self.parseExpression(@fromBackingInt(@intCast(@backingInt(prec) - 1)));
                 return try self.nodes.addAssignment(loc, .{
@@ -4635,6 +4719,7 @@ pub const Parser = struct {
             .gt_gt_gt_assign,
             => {
                 const binary_op = self.tokenToBinaryOp(op_tok.type);
+                try self.checkAssignment(left, op_tok, assignment_position);
                 self.advance();
                 const right = try self.parseExpression(@fromBackingInt(@intCast(@backingInt(prec) - 1)));
                 return try self.nodes.addAssignment(loc, .{
@@ -4765,6 +4850,39 @@ pub const Parser = struct {
         };
     }
 
+    /// An assignment is a statement (spec 5.5): its place is the outermost
+    /// expression of an expression statement, and its target is a name, a
+    /// member path, or an index.
+    fn checkAssignment(self: *Parser, target: NodeIndex, op_tok: Token, position: AssignmentPosition) anyerror!void {
+        if (position == .refused) {
+            self.errors.addErrorAt(.unsupported_feature, op_tok, "an assignment in expression position is not supported; write the assignment as its own statement");
+            return error.ParseError;
+        }
+        if (position == .statement_paren or !self.isAssignmentTarget(target)) {
+            self.errors.addErrorAt(.invalid_assignment_target, op_tok, "an assignment target must be a name, a member path, or an index; write `x = value`, `o.a = value`, or `xs[i] = value`, with no parentheses or `?.`");
+            return error.ParseError;
+        }
+    }
+
+    fn isAssignmentTarget(self: *Parser, target: NodeIndex) bool {
+        switch (self.nodes.getTag(target)) {
+            .identifier, .member_access, .computed_access => {},
+            else => return false,
+        }
+        const view = ir.IrView.fromIRStore(&self.nodes, &self.constants);
+        var current = target;
+        while (true) {
+            switch (self.nodes.getTag(current)) {
+                .member_access, .computed_access => {
+                    const member = view.getMember(current) orelse return false;
+                    current = member.object;
+                },
+                .optional_chain => return false,
+                else => return true,
+            }
+        }
+    }
+
     fn parseCallArgs(
         self: *Parser,
         callee: NodeIndex,
@@ -4829,6 +4947,14 @@ pub const Parser = struct {
 
         if (self.expression_profile) {
             return self.parseExpressionNumber(loc, text);
+        }
+
+        // `10n` lexes as the number `10` and the name `n`, with no gap.
+        if (self.current.type == .identifier and self.current.start == loc.offset + text.len and
+            std.mem.eql(u8, self.current.text(self.source), "n"))
+        {
+            self.errors.addError(.invalid_number, loc, "bigint literals are not supported; write a `number` literal");
+            return error.InvalidNumber;
         }
 
         // Numeric separators belong to the internal expression profile only.
@@ -8395,7 +8521,7 @@ test "labeled break rejected" {
 }
 
 test "break with conditional" {
-    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "for (const x of arr) { if (x === 3) break; }", .compile);
+    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, "for (const x of arr) { if (x === 3) { break; } }", .compile);
     defer parser.deinit();
 
     const result = parser.parse() catch {
@@ -10570,72 +10696,6 @@ test "nested type-only module refusal removes enclosing type syntax" {
         try std.testing.expectEqual(@as(usize, 0), parser.errors.getErrors().len);
         try parser.type_store.validate();
     }
-}
-
-test "later wrapper failures remove nested type-only module records" {
-    const cases = [_]struct { tail: []const u8, closing: []const u8, signatures: usize }{
-        .{ .tail = "function helper<T>(value: string): string {import type { A } from \"./a\";return value;", .closing = "}", .signatures = 1 },
-        .{ .tail = "const helper=<T>(value)=>{import type { A } from \"./a\";return value;", .closing = "};", .signatures = 0 },
-        .{ .tail = "export const helper=<T>(value)=>{import type { A } from \"./a\";return value;", .closing = "};", .signatures = 0 },
-    };
-    for (cases) |case| {
-        const control_source = try std.mem.concat(
-            std.testing.allocator,
-            u8,
-            &.{ "const seed: number = 1;", case.tail, case.closing },
-        );
-        defer std.testing.allocator.free(control_source);
-        var control_atoms = atom_table.AtomTable.init(std.testing.allocator);
-        defer control_atoms.deinit();
-        var control = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, control_source, .compile);
-        defer control.deinit();
-        control.setAtomTable(&control_atoms);
-        _ = try control.parse();
-        try std.testing.expectEqual(@as(usize, 0), control.errors.getErrors().len);
-        try std.testing.expectEqual(@as(usize, 1), control.type_store.type_only_modules.items.len);
-        try std.testing.expectEqualStrings(
-            "import type { A } from \"./a\";",
-            control.type_store.type_only_modules.items[0].raw_span.text(control_source),
-        );
-        try std.testing.expectEqual(@as(usize, 1), control.type_store.generic_owners.items.len);
-        try std.testing.expectEqual(case.signatures, control.type_store.function_signatures.items.len);
-        try control.type_store.validateRuntimeOwners(
-            std.testing.allocator,
-            ir.IrView.fromIRStore(&control.nodes, &control.constants),
-        );
-        const source = try std.mem.concat(
-            std.testing.allocator,
-            u8,
-            &.{ "const seed: number = 1;", case.tail },
-        );
-        defer std.testing.allocator.free(source);
-        var atoms = atom_table.AtomTable.init(std.testing.allocator);
-        defer atoms.deinit();
-        var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-        defer parser.deinit();
-        parser.setAtomTable(&atoms);
-        try std.testing.expectError(error.UnexpectedToken, parser.parse());
-        try std.testing.expectEqual(TokenType.eof, parser.current.type);
-        try std.testing.expectEqual(@as(usize, 1), parser.errors.getErrors().len);
-        const diagnostic = parser.errors.getErrors()[0];
-        try std.testing.expectEqual(error_mod.ErrorKind.expected_token, diagnostic.kind);
-        try std.testing.expectEqualStrings("'}'", diagnostic.expected orelse return error.TestUnexpectedResult);
-        try std.testing.expectEqual(@as(u32, @intCast(source.len)), diagnostic.location.offset);
-        try std.testing.expectEqual(@as(u32, @intCast(source.len)), diagnostic.location.end_offset);
-        try std.testing.expectEqual(@as(u32, 1), diagnostic.location.line);
-        try std.testing.expectEqual(@as(u32, @intCast(source.len + 1)), diagnostic.location.column);
-        try std.testing.expect(parser.type_only_module_refusal == null);
-        var expected = std.mem.zeroes(type_syntax.Store.Checkpoint);
-        expected.nodes = 1;
-        expected.annotations = 1;
-        try std.testing.expect(std.meta.eql(expected, parser.type_store.checkpoint()));
-        try std.testing.expectEqualStrings(
-            "number",
-            parser.type_store.annotations.items[0].raw_span.text(source),
-        );
-        try parser.type_store.validate();
-    }
-    try std.testing.expectEqual(@as(usize, 3), cases.len);
 }
 
 test "admission keeps original spans and measured parameter presentation" {

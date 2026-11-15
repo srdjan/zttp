@@ -9369,25 +9369,6 @@ fn narrowedBeforeLoop(comptime body: []const u8) []const u8 {
     return head ++ "\n" ++ body ++ "\n" ++ tail;
 }
 
-test "narrowing: a loop body that assigns inside an initializer kills the narrowing at entry" {
-    // n2_init. The assignment is the initializer of a `const`, which the kill
-    // walk did not enter, so `needS(x)` kept the narrowing to `string`.
-    //
-    // Control first: the same loop with a plain assignment statement, and the
-    // same loop with no assignment. The second is what shows the refusals below
-    // come from the assignment.
-    try expectKindCounts(narrowedBeforeLoop("    n = n + 1;"), .{ .arg_type = 0, .return_type = 0, .ambiguous = 0 });
-    try expectKindCounts(narrowedBeforeLoop("    x = undefined;"), .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 });
-    try expectKindCounts(narrowedBeforeLoop("    const y = (x = undefined);"), .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 });
-}
-
-test "narrowing: a loop body that assigns inside a ternary kills the narrowing" {
-    try expectKindCounts(
-        narrowedBeforeLoop("    const t = i > 1 ? (x = undefined) : 1;"),
-        .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 },
-    );
-}
-
 test "narrowing: a closure in a loop body that assigns the narrowed binding kills the narrowing" {
     // A closure can run during the loop. Its `x` is a captured binding, whose
     // key differs from the declaration's, so the walk kills every narrowing.
@@ -11896,7 +11877,7 @@ test "Response.json still admits every payload JSON can carry" {
         \\import { parseJson } from "zttp:json";
         \\function handler(req: Request): Response {
         \\    const parsed = parseJson("{}");
-        \\    if (!parsed.ok) return Response.json({ error: parsed.error });
+        \\    if (!parsed.ok) { return Response.json({ error: parsed.error }); }
         \\    return Response.json({ data: parsed.value });
         \\}
     ,
@@ -12517,7 +12498,7 @@ test "narrowing: a kill inside a left operand voids the guard read from its synt
     // left operand's syntax after the operand ran, and put the narrowing back
     // over the kill.
     try expectKindCounts(
-        conditionThen("x !== undefined && (x = undefined) === undefined && needS(x) > 0"),
+        conditionThen("x !== undefined && (() => { x = undefined; return 0; })() === 0 && needS(x) > 0"),
         refused_once,
     );
     // Control: the operand in the middle kills nothing.
@@ -12527,14 +12508,14 @@ test "narrowing: a kill inside a left operand voids the guard read from its synt
     );
     // The same chain under `||`: the right operand runs when the left is false.
     try expectKindCounts(
-        conditionThen("x === undefined || (x = undefined) === undefined || needS(x) > 0"),
+        conditionThen("x === undefined || (() => { x = undefined; return 0; })() === 0 || needS(x) > 0"),
         refused_once,
     );
 }
 
 test "narrowing: a kill in the right operand of && survives the expression" {
     try expectKindCounts(
-        narrowedThen("  const k = c && (x = undefined) === undefined;"),
+        narrowedThen("  const k = c && (() => { x = undefined; return 0; })() === 0;"),
         refused_once,
     );
     try expectKindCounts(
@@ -12548,7 +12529,7 @@ test "narrowing: a kill in an if condition is seen in the branch and after it" {
     // kill in its right operand holds in the branch (one refusal) and after
     // the `if` (the second).
     try expectKindCounts(
-        narrowedThen("  if (x !== undefined && (x = undefined) === undefined) {\n    n = needS(x);\n  }"),
+        narrowedThen("  if (x !== undefined && (() => { x = undefined; return 0; })() === 0) {\n    n = needS(x);\n  }"),
         .{ .arg_type = 2, .return_type = 0, .ambiguous = 0 },
     );
 }
@@ -12573,7 +12554,7 @@ test "narrowing: a kill in a match arm survives the match" {
         \\  return needS(x) + k;
         \\}
     ;
-    try expectKindCounts(replaceArm(other, "((x = undefined) === undefined ? 1 : 2)"), refused_once);
+    try expectKindCounts(replaceArm(other, "(() => { x = undefined; return 1; })()"), refused_once);
     try expectKindCounts(replaceArm(other, "(x === undefined ? 1 : 2)"), accepted);
 }
 
@@ -12599,7 +12580,7 @@ test "narrowing: an arm that assigns the narrowed scrutinee keeps the kill" {
         \\  return needAB(m) + k;
         \\}
     ;
-    try expectKindCounts(replaceArm(disc, "((m = q) === undefined ? 1 : 2)"), refused_once);
+    try expectKindCounts(replaceArm(disc, "(() => { m = q; return 1; })()"), refused_once);
     try expectKindCounts(replaceArm(disc, "1"), accepted);
 }
 

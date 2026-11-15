@@ -1922,7 +1922,7 @@ test "every compile stage releases what it allocated at any failure index" {
         \\import { sha256 } from "zttp:crypto";
         \\function handler(req) {
         \\  const make = () => sha256("x");
-        \\  if (req.url === "/a") return Response.json({ hash: make() });
+        \\  if (req.url === "/a") { return Response.json({ hash: make() }); }
         \\  return Response.text("ok");
         \\}
         \\
@@ -2229,7 +2229,7 @@ test "a request header read inside a spread operand is a header parameter of the
         "const routes = { \"GET /a\": getA };\n" ++
         "function handler(req: Request): Response {\n" ++
         "  const found = routerMatch(routes, req);\n" ++
-        "  if (found === undefined) return Response.text(\"nf\");\n" ++
+        "  if (found === undefined) { return Response.text(\"nf\"); }\n" ++
         "  return found.handler(req);\n}";
     try withSession(testing.allocator, source, struct {
         fn run(session: Session) anyerror!void {

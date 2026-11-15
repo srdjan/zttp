@@ -1034,7 +1034,7 @@ test "graph build allocation failure cannot select raw" {
 }
 
 test "selected discovery parser distinguishes initialization and parse allocation failures" {
-    const source = "structural Label = string;\nconst label: Label = \"ready\";\nimport { value } from \"./dep.ts\";\n";
+    const source = "import { value } from \"./dep.ts\";\nstructural Label = string;\nconst label: Label = \"ready\";\n";
     const allocator = std.testing.allocator;
     var calibration = std.testing.FailingAllocator.init(allocator, .{});
     var module: Module = .{ .path = "entry.ts", .source = source, .dependencies = &.{}, .state = .unvisited };

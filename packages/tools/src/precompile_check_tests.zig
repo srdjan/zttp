@@ -3666,14 +3666,15 @@ const fault_sibling_handler =
     \\
 ;
 
-const fault_unchecked_helper =
-    \\import { fetch } from "zttp:fetch";
+const fault_unchecked_import = "import { fetch } from \"zttp:fetch\";\n";
+const fault_unchecked_enrich =
     \\export function enrich(): string {
     \\  const res = fetch("https://api.example.com/b");
     \\  return res.body;
     \\}
     \\
 ;
+const fault_unchecked_helper = fault_unchecked_import ++ fault_unchecked_enrich;
 
 fn faultCovered(result: *const CheckResult) !bool {
     return (result.contract orelse return error.TestExpectedEqual).properties.?.fault_covered;
@@ -4058,7 +4059,7 @@ test "CHECK reads a shared dependency once in the graph and once in the fault sc
         parent,
         "export function inner(): string { return \"first\"; }\n",
         parent,
-        "export function inner(): string { return \"second\"; }\n" ++ fault_unchecked_helper,
+        fault_unchecked_import ++ "export function inner(): string { return \"second\"; }\n" ++ fault_unchecked_enrich,
     };
     var reader: TracingImportReader = .{ .sources = &sources };
     defer reader.deinit(allocator);
@@ -4093,9 +4094,10 @@ test "CHECK keeps the reader trace for two names imported from one file" {
     // reused the first read would fail the unseen-call assertion.
     const reader_sources = [_][]const u8{
         "import { cacheSet } from \"zttp:cache\";\n" ++
+            fault_unchecked_import ++
             "export function first(): string { cacheSet(\"n\", \"k\", \"v\"); return \"first\"; }\n" ++
             "export function second(): string { return \"second\"; }\n" ++
-            fault_unchecked_helper,
+            fault_unchecked_enrich,
         "export function first(): string { return \"first\"; }\n" ++
             "export function second(): string { return \"second\"; }\n",
     };
@@ -4831,7 +4833,7 @@ test "CHECK preserves compound root admission parse diagnostics" {
     const expected_stages = StageSet.initMany(&.{ .strip, .parse });
     const expected = [_]CompoundDiagnostic{
         .{
-            .code = "ZTS002",
+            .code = "ZTS021",
             .message = "const declarations must have an initializer",
             .line = 2,
             .column = 14,
@@ -4879,7 +4881,7 @@ test "CHECK preserves compound unclosed syntax diagnostics" {
     const expected_stages = StageSet.initMany(&.{ .strip, .parse });
     const expected = [_]CompoundDiagnostic{
         .{
-            .code = "ZTS002",
+            .code = "ZTS021",
             .message = "const declarations must have an initializer",
             .line = 5,
             .column = 1,
@@ -5782,7 +5784,7 @@ test "CHECK preserves generic admission and projection outcomes" {
         .{ .name = "method_call", .source = "const object = { id: <T>(value: T): T => value };\nconst probe: number = object.id<string>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.json({ now: Date.now() });\n}\n", .stage = .contract, .diagnostics = &.{.{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 3, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: cost_bounded, deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\">`." }} },
         .{ .name = "triple_closer", .source = "structural Box<T> = { value: T };\nconst probe: Box<Box<Box<string>>> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: { value: { value: string } } }'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "application_missing_comma", .source = "structural Box<T> = { value: T };\nconst probe: Box<string number> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Box<string, number>'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "application_missing_close", .source = "structural Box<T> = { value: T };\nconst probe: Box<string = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{ .{ .code = "ZTS002", .message = "const declarations must have an initializer", .line = 6, .column = 1, .suggestion = null }, .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 2, .column = 7, .suggestion = null } } },
+        .{ .name = "application_missing_close", .source = "structural Box<T> = { value: T };\nconst probe: Box<string = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{ .{ .code = "ZTS021", .message = "const declarations must have an initializer", .line = 6, .column = 1, .suggestion = null }, .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 2, .column = 7, .suggestion = null } } },
         .{ .name = "call_missing_comma", .source = "function id<T>(value: T): T { return value; }\nconst probe: number = id<string number>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "call_missing_close", .source = "function id<T>(value: T): T { return value; }\nconst probe: number = id<string(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'boolean' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "user_alias_too_few", .source = "structural Duo<A,B> = { first: A; second: B };\nconst probe: Duo<string> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Duo<string>'", .line = 2, .column = 1, .suggestion = null }} },
@@ -6396,12 +6398,12 @@ test "CHECK preserves type-only module admission and refusal diagnostics" {
     const proof_diagnostic: CompoundDiagnostic = .{ .code = "ZTS500", .message = "handler returns no Proof<T, P> capsule; the default proof profile demands a property this handler does not hold", .line = 2, .column = 17, .suggestion = "this handler returns no Proof<T, P> capsule, so the compiler must prove the full default profile, but it does not hold: deterministic, idempotent, pure. Return a narrow Proof capsule with only the properties it holds, e.g. `function handler(req: Request): Proof<Response, \"read_only\" | \"retry_safe\" | \"state_isolated\" | \"fault_covered\" | \"stateless\" | \"result_safe\" | \"optional_safe\" | \"no_secret_leakage\" | \"no_credential_leakage\" | \"input_validated\" | \"pii_contained\" | \"injection_safe\" | \"canonical\" | \"cost_bounded\">`." };
     const cases = [_]struct { source: []const u8, stage: FailureStage, diagnostic: CompoundDiagnostic }{
         .{ .source = "import type { A } from \"./a\";\nexport type { B }\nexport structural Shape = { value: string };\nexport nominal Id = string;\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 6, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
-        .{ .source = "function helper(): number { import type { A } from \"./a\"; return 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import X from' default imports are not supported; use named imports: import { x } from \"module\"", .line = 1, .column = 29, .suggestion = null } },
-        .{ .source = "function helper(): number { export type { A }; return 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'export' must be followed by 'function', 'const', or 'let'", .line = 1, .column = 29, .suggestion = null } },
-        .{ .source = "{ import type { A } from \"./a\"; const live = 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import X from' default imports are not supported; use named imports: import { x } from \"module\"", .line = 1, .column = 3, .suggestion = null } },
+        .{ .source = "function helper(): number { import type { A } from \"./a\"; return 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 29, .suggestion = null } },
+        .{ .source = "function helper(): number { export type { A }; return 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 29, .suggestion = null } },
+        .{ .source = "{ import type { A } from \"./a\"; const live = 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 3, .suggestion = null } },
         .{ .source = "import type { A } from \"./a;b\";\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 3, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
         .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 24, .suggestion = null } },
-        .{ .source = "import /* gap */ type { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import X from' default imports are not supported; use named imports: import { x } from \"module\"", .line = 1, .column = 1, .suggestion = null } },
+        .{ .source = "import /* gap */ type { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import type X from' is not supported; write 'import type { X } from \"module\"'", .line = 1, .column = 1, .suggestion = null } },
         .{ .source = "import type { Spec } from \"zttp:types\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .strip, .diagnostic = .{ .code = "ZTS053", .message = "`zttp:types` is not a module in this profile", .line = 1, .column = 1, .suggestion = "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names" } },
         .{ .source = "import type { A } /* \"zttp:types\" */ from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .strip, .diagnostic = .{ .code = "ZTS053", .message = "`zttp:types` is not a module in this profile", .line = 1, .column = 1, .suggestion = "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names" } },
         .{ .source = "export type { Spec } from \"zttp:types\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 2, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
@@ -6410,18 +6412,18 @@ test "CHECK preserves type-only module admission and refusal diagnostics" {
         .{ .source = "import\ntype { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 3, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
         .{ .source = "import type nonsense;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 2, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
         .{ .source = "export type { broken nonsense };\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 2, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
-        .{ .source = "function helper(): number {\n  import type { A } from \"./a\";\n  return 1;\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import X from' default imports are not supported; use named imports: import { x } from \"module\"", .line = 2, .column = 3, .suggestion = null } },
-        .{ .source = "function helper(): number {\n  export type { A };\n  return 1;\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'export' must be followed by 'function', 'const', or 'let'", .line = 2, .column = 3, .suggestion = null } },
-        .{ .source = "{\n  import type { A } from \"./a\";\n  const live = 1;\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import X from' default imports are not supported; use named imports: import { x } from \"module\"", .line = 2, .column = 3, .suggestion = null } },
-        .{ .source = "{import type { A } from \"./a\";}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 2, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
-        .{ .source = "function helper(): number {import type { A } from \"./a\";return 1;}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 2, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
-        .{ .source = "function helper(): number {export type { A };return 1;}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 2, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
-        .{ .source = "{\nimport type { A } from \"./a\";\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 4, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
-        .{ .source = "function helper(): number {\nimport type { A } from \"./a\";\nreturn 1;\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 5, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
-        .{ .source = "function helper(): number {\nexport type { A };\nreturn 1;\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 5, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
-        .{ .source = " import type { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import X from' default imports are not supported; use named imports: import { x } from \"module\"", .line = 1, .column = 2, .suggestion = null } },
-        .{ .source = "const live: number = 1;import type { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 2, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
-        .{ .source = "const live: number = 1; import type { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import X from' default imports are not supported; use named imports: import { x } from \"module\"", .line = 1, .column = 25, .suggestion = null } },
+        .{ .source = "function helper(): number {\n  import type { A } from \"./a\";\n  return 1;\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 3, .suggestion = null } },
+        .{ .source = "function helper(): number {\n  export type { A };\n  return 1;\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 3, .suggestion = null } },
+        .{ .source = "{\n  import type { A } from \"./a\";\n  const live = 1;\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 3, .suggestion = null } },
+        .{ .source = "{import type { A } from \"./a\";}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 2, .suggestion = null } },
+        .{ .source = "function helper(): number {import type { A } from \"./a\";return 1;}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 28, .suggestion = null } },
+        .{ .source = "function helper(): number {export type { A };return 1;}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 28, .suggestion = null } },
+        .{ .source = "{\nimport type { A } from \"./a\";\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 1, .suggestion = null } },
+        .{ .source = "function helper(): number {\nimport type { A } from \"./a\";\nreturn 1;\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 1, .suggestion = null } },
+        .{ .source = "function helper(): number {\nexport type { A };\nreturn 1;\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 1, .suggestion = null } },
+        .{ .source = " import type { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import type X from' is not supported; write 'import type { X } from \"module\"'", .line = 1, .column = 2, .suggestion = null } },
+        .{ .source = "const live: number = 1;import type { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "an `import` after a declaration is not supported; move each `import` above the first declaration", .line = 1, .column = 24, .suggestion = null } },
+        .{ .source = "const live: number = 1; import type { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "an `import` after a declaration is not supported; move each `import` above the first declaration", .line = 1, .column = 25, .suggestion = null } },
         .{ .source = "import type { A } from \"./a\";export type { B };\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'export' must be followed by 'function', 'const', or 'let'", .line = 1, .column = 30, .suggestion = null } },
     };
     var observed: usize = 0;
@@ -7027,7 +7029,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .source = "const x: /* closed */ any = 1;\n",
             .parser_stage = true,
             .diagnostics = &.{
-                .{ .code = "ZTS002", .message = "const declarations must have an initializer", .line = 1, .column = 8 },
+                .{ .code = "ZTS021", .message = "const declarations must have an initializer", .line = 1, .column = 8 },
                 .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 7 },
             },
         },
@@ -7631,7 +7633,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .source = "const f: () =>\r () =>\r any = value;\n",
             .parser_stage = true,
             .diagnostics = &.{
-                .{ .code = "ZTS002", .message = "const declarations must have an initializer", .line = 1, .column = 20 },
+                .{ .code = "ZTS021", .message = "const declarations must have an initializer", .line = 1, .column = 20 },
                 .{ .code = "ZTS047", .message = "statement is not terminated; this profile has no automatic semicolon insertion", .line = 1, .column = 7 },
             },
         },
@@ -7899,14 +7901,17 @@ test "CHECK preserves raw module recovery and the complete nested parser batch" 
             .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 14, .suggestion = "use specific types (string, number, object) or union types instead" },
         } },
         .{ .source = "function f() {\nimport type { A } /* ; */ from \"./a\";\nconst live = 1;\n}\n", .parser_stage = true, .diagnostics = &.{
+            .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 1, .suggestion = null },
             .{ .code = "ZTS002", .message = "expected expression", .line = 2, .column = 24, .suggestion = null },
             .{ .code = "ZTS003", .message = "unexpected token", .line = 5, .column = 1, .suggestion = "'}'" },
         } },
         .{ .source = "function f() {\nimport type { A } /* ; */ from \"./a\";\nconst live: \"const\" = 1;\n}\n", .parser_stage = true, .diagnostics = &.{
+            .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 1, .suggestion = null },
             .{ .code = "ZTS002", .message = "expected expression", .line = 2, .column = 24, .suggestion = null },
             .{ .code = "ZTS003", .message = "unexpected token", .line = 5, .column = 1, .suggestion = "'}'" },
         } },
         .{ .source = "function f() {\nimport type { A } /* ; */ from \"./a\";\nconst live: \"return\" = 1;\n}\n", .parser_stage = true, .diagnostics = &.{
+            .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 1, .suggestion = null },
             .{ .code = "ZTS002", .message = "expected expression", .line = 2, .column = 24, .suggestion = null },
             .{ .code = "ZTS003", .message = "unexpected token", .line = 5, .column = 1, .suggestion = "'}'" },
         } },
@@ -10684,7 +10689,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  let p: P | undefined = ps[0];
-    \\  const a: number = p !== undefined && (p = ps[1]) !== undefined ? p.age : 0;
+    \\  const a: number = p !== undefined && (() => { p = ps[1]; return 0; })() === 0 ? p.age : 0;
     \\  return Response.json({ a: a });
     \\}
     },
@@ -10709,7 +10714,7 @@ const absent_read_refused = [_]AbsentReadCase{
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  let p: P | undefined = ps[0];
-    \\  const a: number = p !== undefined && (p = ps[1]) === undefined ? p.age : 0;
+    \\  const a: number = p !== undefined && (() => { p = ps[1]; return p; })() === undefined ? p.age : 0;
     \\  return Response.json({ a: a });
     \\}
     },

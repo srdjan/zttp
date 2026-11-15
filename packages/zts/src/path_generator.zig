@@ -3970,7 +3970,7 @@ test "generate fails closed when handler binding allocation fails" {
     try expectGenerationFailsOnFirstAllocation(
         \\export function handler(req) {
         \\  const method = req.method;
-        \\  if (method === "POST") return Response.json(true);
+        \\  if (method === "POST") { return Response.json(true); }
         \\  return Response.json(false);
         \\}
     );
@@ -4166,7 +4166,7 @@ test "behavior path conversion cleans every allocation failure" {
         \\import { env } from "zttp:env";
         \\export function handler(req) {
         \\  const value = env("NAME");
-        \\  if (value !== undefined) return Response.json(true);
+        \\  if (value !== undefined) { return Response.json(true); }
         \\  return Response.json(false);
         \\}
     ;
@@ -4190,7 +4190,7 @@ test "route roots stay internal to analysis outputs" {
         \\const routes = { "POST /probe": route };
         \\export function handler(req) {
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -4547,7 +4547,7 @@ test "routerMatch cost composes handler and route calls" {
         \\function handler(req) {
         \\  const handler_value = cacheGet("probe", "handler");
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.json({ value: handler_value }, { status: 404 });
+        \\  if (found === undefined) { return Response.json({ value: handler_value }, { status: 404 }); }
         \\  return found.handler(req);
         \\}
     ;
@@ -4577,8 +4577,8 @@ test "repeated routerMatch dispatch makes cost unbounded" {
         \\function handler(req) {
         \\  const first = routerMatch(routes, req);
         \\  const second = routerMatch(routes, req);
-        \\  if (first === undefined) return Response.text("not found", { status: 404 });
-        \\  if (second === undefined) return Response.text("not found", { status: 404 });
+        \\  if (first === undefined) { return Response.text("not found", { status: 404 }); }
+        \\  if (second === undefined) { return Response.text("not found", { status: 404 }); }
         \\  const ignored = first.handler(req);
         \\  return second.handler(req);
         \\}
@@ -4767,7 +4767,7 @@ test "validated field with maxItems discharges to constant ceiling" {
         \\schemaCompile("payload", "{\"type\":\"object\",\"properties\":{\"items\":{\"type\":\"array\",\"maxItems\":2}}}");
         \\export function handler(req) {
         \\  const parsed = validateJson("payload", req.body);
-        \\  if (!parsed.ok) return Response.json({}, { status: 400 });
+        \\  if (!parsed.ok) { return Response.json({}, { status: 400 }); }
         \\  for (const item of parsed.value.items) {
         \\    sqlOne("row");
         \\  }
@@ -4795,7 +4795,7 @@ test "validated field without maxItems stays linear" {
         \\schemaCompile("payload", "{\"type\":\"object\",\"properties\":{\"items\":{\"type\":\"array\"}}}");
         \\export function handler(req) {
         \\  const parsed = validateJson("payload", req.body);
-        \\  if (!parsed.ok) return Response.json({}, { status: 400 });
+        \\  if (!parsed.ok) { return Response.json({}, { status: 400 }); }
         \\  for (const item of parsed.value.items) {
         \\    sqlOne("row");
         \\  }
@@ -4895,9 +4895,9 @@ test "a path that checks two calls to one function stubs each call by its own co
         \\import { jwtVerify } from "zttp:auth";
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
-        \\  if (!a.ok) return Response.text("a failed", { status: 401 });
+        \\  if (!a.ok) { return Response.text("a failed", { status: 401 }); }
         \\  const b = jwtVerify("t2", "secret");
-        \\  if (!b.ok) return Response.text("b failed", { status: 403 });
+        \\  if (!b.ok) { return Response.text("b failed", { status: 403 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -4972,7 +4972,7 @@ test "the scan lists nothing for a recorded call or a call answered by ??" {
         \\import { env } from "zttp:env";
         \\function handler(req) {
         \\  const a = jwtVerify("t", "secret");
-        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  return Response.text(env("NAME") ?? "anon");
         \\}
     ;
@@ -5004,7 +5004,7 @@ const sibling_import_handler =
     \\import { helper } from "./dep.ts";
     \\function handler(req) {
     \\  const a = jwtVerify("t", "secret");
-    \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+    \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
     \\  return Response.text(helper());
     \\}
 ;
@@ -5063,7 +5063,7 @@ test "a handler with only builtin imports needs no import scan" {
         \\import { jwtVerify } from "zttp:auth";
         \\function handler(req) {
         \\  const a = jwtVerify("t", "secret");
-        \\  if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -5195,7 +5195,7 @@ test "the file scan lists a failable call, a failable value use, and nothing els
         \\import { jwtVerify } from "zttp:auth";
         \\export function check(t) {
         \\  const a = jwtVerify(t, "secret");
-        \\  if (!a.ok) return "no";
+        \\  if (!a.ok) { return "no"; }
         \\  return "yes";
         \\}
     ));
@@ -5228,7 +5228,7 @@ test "a summarized path set is not a complete fault analysis" {
         \\function handler(req) {
         \\  for (const i of range(2)) {
         \\    const a = jwtVerify("t", "secret");
-        \\    if (!a.ok) return Response.text("unauthorized", { status: 401 });
+        \\    if (!a.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  }
         \\  return Response.text("ok");
         \\}
@@ -5248,7 +5248,7 @@ test "fetch and fetchWithRetry fork on ok" {
         \\import { fetch } from "zttp:fetch";
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/data");
-        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
+        \\  if (!res.ok) { return Response.text("upstream failed", { status: 502 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -5256,7 +5256,7 @@ test "fetch and fetchWithRetry fork on ok" {
         \\import { fetchWithRetry } from "zttp:fetch";
         \\function handler(req) {
         \\  const res = fetchWithRetry("https://api.example.com/data");
-        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
+        \\  if (!res.ok) { return Response.text("upstream failed", { status: 502 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -5280,9 +5280,9 @@ test "a failing fetch path stubs a response the replay reads as a 503" {
         \\import { fetch } from "zttp:fetch";
         \\function handler(req) {
         \\  const a = fetch("https://api.example.com/a");
-        \\  if (!a.ok) return Response.text("a failed", { status: 502 });
+        \\  if (!a.ok) { return Response.text("a failed", { status: 502 }); }
         \\  const b = fetch("https://api.example.com/b");
-        \\  if (!b.ok) return Response.text("b failed", { status: 504 });
+        \\  if (!b.ok) { return Response.text("b failed", { status: 504 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -5340,9 +5340,9 @@ test "a Result export keeps its Result stubs beside a fetch" {
         \\import { jwtVerify } from "zttp:auth";
         \\function handler(req) {
         \\  const auth = jwtVerify("t", "secret");
-        \\  if (!auth.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!auth.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  const res = fetch("https://api.example.com/a");
-        \\  if (!res.ok) return Response.text("upstream failed", { status: 502 });
+        \\  if (!res.ok) { return Response.text("upstream failed", { status: 502 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -5413,7 +5413,7 @@ test "an && of two checks enumerates each short-circuit case" {
         \\function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
         \\  const b = jwtVerify("t2", "secret");
-        \\  if (!a.ok && !b.ok) return Response.text("both failed", { status: 401 });
+        \\  if (!a.ok && !b.ok) { return Response.text("both failed", { status: 401 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -5500,7 +5500,7 @@ test "short-circuit enumeration that passes MAX_PATHS reports truncation" {
     defer source_buf.deinit(allocator);
     try source_buf.appendSlice(allocator, "import { jwtVerify } from \"zttp:auth\";\nfunction handler(req) {\n");
     for (0..12) |i| {
-        const guard = try allocator.print("  const a{d} = jwtVerify(\"t\", \"secret\");\n  if (!a{d}.ok && req.headers[\"x\"] === \"y\") return Response.text(\"no\", {{ status: 401 }});\n", .{ i, i });
+        const guard = try allocator.print("  const a{d} = jwtVerify(\"t\", \"secret\");\n  if (!a{d}.ok && req.headers[\"x\"] === \"y\") {{ return Response.text(\"no\", {{ status: 401 }}); }}\n", .{ i, i });
         defer allocator.free(guard);
         try source_buf.appendSlice(allocator, guard);
     }
@@ -5543,7 +5543,7 @@ test "generate cleans every fatal allocation failure through short-circuit cases
         \\export function handler(req) {
         \\  const a = jwtVerify("t1", "secret");
         \\  const b = jwtVerify("t2", "secret");
-        \\  if (!a.ok && !b.ok && req.headers["x"] === "y") return Response.text("no", { status: 401 });
+        \\  if (!a.ok && !b.ok && req.headers["x"] === "y") { return Response.text("no", { status: 401 }); }
         \\  if (!a.ok && req.headers["x"] === "y") {
         \\    return Response.text("no", { status: 403 });
         \\  } else {
@@ -5599,7 +5599,7 @@ test "a status !== 200 test forks the fetch like !res.ok" {
     const source = status_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/a");
-        \\  if (res.status !== 200) return Response.json({ error: "upstream" }, { status: 502 });
+        \\  if (res.status !== 200) { return Response.json({ error: "upstream" }, { status: 502 }); }
         \\  return Response.json({ a: res.body });
         \\}
     ;
@@ -5620,7 +5620,7 @@ test "a status === 200 test forks the fetch with the success branch first" {
     const source = status_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/a");
-        \\  if (res.status === 200) return Response.json({ a: res.body });
+        \\  if (res.status === 200) { return Response.json({ a: res.body }); }
         \\  return Response.json({ error: "upstream" }, { status: 502 });
         \\}
     ;
@@ -5638,21 +5638,21 @@ test "a literal on the left and a negation fork the same way" {
         status_prefix ++
             \\function handler(req) {
             \\  const res = fetch("https://api.example.com/a");
-            \\  if (200 !== res.status) return Response.text("up", { status: 502 });
+            \\  if (200 !== res.status) { return Response.text("up", { status: 502 }); }
             \\  return Response.text("ok");
             \\}
         ,
         status_prefix ++
             \\function handler(req) {
             \\  const res = fetch("https://api.example.com/a");
-            \\  if (!(res.status === 200)) return Response.text("up", { status: 502 });
+            \\  if (!(res.status === 200)) { return Response.text("up", { status: 502 }); }
             \\  return Response.text("ok");
             \\}
         ,
         status_prefix ++
             \\function handler(req) {
             \\  const res = fetch("https://api.example.com/a");
-            \\  if (res.status !== 200.0) return Response.text("up", { status: 502 });
+            \\  if (res.status !== 200.0) { return Response.text("up", { status: 502 }); }
             \\  return Response.text("ok");
             \\}
         ,
@@ -5709,8 +5709,8 @@ test "a status test before an ok test stubs each branch with a status that takes
     const source = status_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/a");
-        \\  if (res.status === 404) return Response.json({ error: "missing" }, { status: 404 });
-        \\  if (!res.ok) return Response.json({ error: "upstream" }, { status: 502 });
+        \\  if (res.status === 404) { return Response.json({ error: "missing" }, { status: 404 }); }
+        \\  if (!res.ok) { return Response.json({ error: "upstream" }, { status: 502 }); }
         \\  return Response.json({ a: res.body });
         \\}
     ;
@@ -5745,7 +5745,7 @@ test "a status test under a forked status test picks a status in the failed rang
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/a");
         \\  if (res.status !== 200) {
-        \\    if (res.status === 404) return Response.json({ error: "missing" }, { status: 404 });
+        \\    if (res.status === 404) { return Response.json({ error: "missing" }, { status: 404 }); }
         \\    return Response.json({ error: "upstream" }, { status: 502 });
         \\  }
         \\  return Response.json({ a: res.body });
@@ -5772,7 +5772,7 @@ test "a status read into a const is not a status test" {
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/a");
         \\  const s = res.status;
-        \\  if (s !== 200) return Response.text("up", { status: 502 });
+        \\  if (s !== 200) { return Response.text("up", { status: 502 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -5792,8 +5792,8 @@ test "a status test on a call that is not an ok-record export adds no constraint
         \\function handler(req) {
         \\  const auth = jwtVerify("t", "secret");
         \\  const plain = { status: 1 };
-        \\  if (auth.status !== 200) return Response.text("a", { status: 401 });
-        \\  if (plain.status !== 200) return Response.text("b", { status: 402 });
+        \\  if (auth.status !== 200) { return Response.text("a", { status: 401 }); }
+        \\  if (plain.status !== 200) { return Response.text("b", { status: 402 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -5834,7 +5834,7 @@ test "a shadowed res keeps the status fork of the outer fetch" {
         \\    const res = cacheGet("ns", "k") ?? "none";
         \\    return Response.json({ cached: res });
         \\  }
-        \\  if (res.status !== 200) return Response.json({ error: "upstream" }, { status: 502 });
+        \\  if (res.status !== 200) { return Response.json({ error: "upstream" }, { status: 502 }); }
         \\  return Response.json({ a: res.body });
         \\}
     ;
@@ -5864,7 +5864,7 @@ test "a direct req.method comparison constrains the request method" {
     const allocator = std.testing.allocator;
     const source =
         \\function handler(req) {
-        \\  if (req.method === "POST") return Response.text("created", { status: 201 });
+        \\  if (req.method === "POST") { return Response.text("created", { status: 201 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -5887,7 +5887,7 @@ test "a method read into a const constrains the request method" {
     const source =
         \\function handler(req) {
         \\  const m = req.method;
-        \\  if (m === "DELETE") return Response.text("gone", { status: 204 });
+        \\  if (m === "DELETE") { return Response.text("gone", { status: 204 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -5936,9 +5936,9 @@ test "a !== method guard sends POST on every path after it and another method on
     const source =
         \\import { jwtVerify } from "zttp:auth";
         \\function handler(req) {
-        \\  if (req.method !== "POST") return Response.text("no", { status: 405 });
+        \\  if (req.method !== "POST") { return Response.text("no", { status: 405 }); }
         \\  const r = jwtVerify("t", "s");
-        \\  if (!r.ok) return Response.text("no", { status: 401 });
+        \\  if (!r.ok) { return Response.text("no", { status: 401 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -5974,7 +5974,7 @@ test "a !== GET guard sends a method other than GET on the guard path" {
     const allocator = std.testing.allocator;
     const source =
         \\function handler(req) {
-        \\  if (req.method !== "GET") return Response.text("no", { status: 405 });
+        \\  if (req.method !== "GET") { return Response.text("no", { status: 405 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -5996,8 +5996,8 @@ test "the fall-through of two method tests sends a method that is neither" {
     const allocator = std.testing.allocator;
     const source =
         \\function handler(req) {
-        \\  if (req.method === "GET") return Response.text("a", { status: 201 });
-        \\  if (req.method === "POST") return Response.text("b", { status: 202 });
+        \\  if (req.method === "GET") { return Response.text("a", { status: 201 }); }
+        \\  if (req.method === "POST") { return Response.text("b", { status: 202 }); }
         \\  return Response.text("c", { status: 203 });
         \\}
     ;
@@ -6020,7 +6020,7 @@ test "a !== url guard sends a url other than the compared one" {
     const allocator = std.testing.allocator;
     const source =
         \\function handler(req) {
-        \\  if (req.url !== "/") return Response.text("no", { status: 404 });
+        \\  if (req.url !== "/") { return Response.text("no", { status: 404 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -6045,8 +6045,8 @@ test "a path no status can satisfy is not emitted and is not a truncation" {
     const source = status_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/a");
-        \\  if (!res.ok) return Response.json({ error: "upstream" }, { status: 502 });
-        \\  if (res.status === 404) return Response.json({ error: "gone" }, { status: 404 });
+        \\  if (!res.ok) { return Response.json({ error: "upstream" }, { status: 502 }); }
+        \\  if (res.status === 404) { return Response.json({ error: "gone" }, { status: 404 }); }
         \\  return Response.json({ a: res.body });
         \\}
     ;
@@ -6075,7 +6075,7 @@ test "two status tests that exclude each other leave no then-path" {
     const source = status_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/a");
-        \\  if (res.status === 404 && res.status === 500) return Response.text("both", { status: 418 });
+        \\  if (res.status === 404 && res.status === 500) { return Response.text("both", { status: 418 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -6092,7 +6092,7 @@ test "one call that must be both ok and not ok leaves no path" {
     const source = status_prefix ++
         \\function handler(req) {
         \\  const res = fetch("https://api.example.com/a");
-        \\  if (!res.ok && res.status === 200) return Response.text("both", { status: 418 });
+        \\  if (!res.ok && res.status === 200) { return Response.text("both", { status: 418 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -6108,8 +6108,8 @@ test "two method tests that exclude each other leave no then-path" {
     const allocator = std.testing.allocator;
     const source =
         \\function handler(req) {
-        \\  if (req.method === "GET" && req.method === "POST") return Response.text("both", { status: 418 });
-        \\  if (req.method === "GET" && req.method !== "GET") return Response.text("neither", { status: 419 });
+        \\  if (req.method === "GET" && req.method === "POST") { return Response.text("both", { status: 418 }); }
+        \\  if (req.method === "GET" && req.method !== "GET") { return Response.text("neither", { status: 419 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -6128,7 +6128,7 @@ test "two url tests keep the last url: req.url and req.path are distinct operand
     const allocator = std.testing.allocator;
     const source =
         \\function handler(req) {
-        \\  if (req.url === "/a" && req.path === "/b") return Response.text("both", { status: 418 });
+        \\  if (req.url === "/a" && req.path === "/b") { return Response.text("both", { status: 418 }); }
         \\  return Response.text("ok");
         \\}
     ;
@@ -6267,7 +6267,7 @@ test "assert in an unbraced branch body gets its failure path" {
         \\function handler(req) {
         \\  const post = req.method === "POST";
         \\  const ready = req.url === "/ready";
-        \\  if (post) assert ready;
+        \\  if (post) { assert ready; }
         \\  return Response.text("ok");
         \\}
     ;
@@ -6370,12 +6370,13 @@ test "a nested returned match forks again" {
     try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 405));
 }
 
-test "a module call in the returned match discriminant is on every arm path and an arm call on its own" {
+test "a module call bound before the returned match is on every arm path and an arm call on its own" {
     const allocator = std.testing.allocator;
     const source =
         \\import { sha256 } from "zttp:crypto";
         \\function handler(req) {
-        \\  return match (sha256(req.url)) {
+        \\  const digest = sha256(req.url);
+        \\  return match (digest) {
         \\    when "x": Response.text(sha256("arm"))
         \\    default: Response.text("other", { status: 405 })
         \\  };

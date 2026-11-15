@@ -662,9 +662,9 @@ test "routed Result violation cannot borrow a handler counterexample" {
         \\const routes = { "GET /probe": route };
         \\function handler(req) {
         \\  const own = jwtVerify("handler-token", "secret");
-        \\  if (!own.ok) return Response.text("unauthorized", { status: 401 });
+        \\  if (!own.ok) { return Response.text("unauthorized", { status: 401 }); }
         \\  const found = routerMatch(routes, req);
-        \\  if (found === undefined) return Response.text("not found", { status: 404 });
+        \\  if (found === undefined) { return Response.text("not found", { status: 404 }); }
         \\  return found.handler(req);
         \\}
     ;

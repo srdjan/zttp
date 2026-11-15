@@ -235,29 +235,6 @@ test "a failed assert without a message answers without the frame's values" {
     try std.testing.expect(std.mem.indexOf(u8, resp.body, "held-in-a-local") == null);
 }
 
-test "let without an initializer reads undefined, not a reused slot" {
-    // Sibling blocks share local slots. Before the fix `let b;` emitted no
-    // store, so `b` read the value the first block left in the shared slot.
-    const allocator = std.heap.c_allocator;
-    var pool = try HandlerPool.init(
-        allocator,
-        .{},
-        "function handler(req) { if (req.method === 'GET') { const a = 'held-in-a-slot'; } if (req.method === 'GET') { let b; return Response.text(b ?? 'none'); } return Response.text('end'); }",
-        "<server-test>",
-        1,
-        0,
-    );
-    defer pool.deinit();
-
-    var req = try getRequest(allocator, "/");
-    defer req.deinit(allocator);
-
-    var resp = try pool.executeHandler(req.asView());
-    defer resp.deinit();
-    try std.testing.expectEqual(@as(u16, 200), resp.status);
-    try std.testing.expectEqualStrings("none", resp.body);
-}
-
 test "a closure that escapes a block keeps its binding, not a reused slot" {
     // A closed block gave its slots to later bindings even when a closure
     // still held an open upvalue on one, so the closure read the later value.

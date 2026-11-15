@@ -1462,28 +1462,32 @@ test "type-only module matrix preserves public runtime admission and exact recor
         .{
             .source = "{import type { A } from \"./a\";}\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-            .modules = &.{.{ .kind = .import_type, .raw = "import type { A } from \"./a\";" }},
-            .runtime_success = true,
+            .modules = &.{},
+            .runtime_success = false,
+            .rejected_at = "import",
         },
         .{
             .source = "function helper(): number {import type { A } from \"./a\";return 1;}\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-            .modules = &.{.{ .kind = .import_type, .raw = "import type { A } from \"./a\";" }},
-            .runtime_success = true,
+            .modules = &.{},
+            .runtime_success = false,
+            .rejected_at = "import",
         },
         .{
             .source = "function helper(): number {export type { A };return 1;}\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-            .modules = &.{.{ .kind = .export_type, .raw = "export type { A };" }},
-            .runtime_success = true,
+            .modules = &.{},
+            .runtime_success = false,
+            .rejected_at = "export",
         },
         .{
             .source = "{\n" ++
                 "import type { A } from \"./a\";\n" ++
                 "}\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-            .modules = &.{.{ .kind = .import_type, .raw = "import type { A } from \"./a\";" }},
-            .runtime_success = true,
+            .modules = &.{},
+            .runtime_success = false,
+            .rejected_at = "import",
         },
         .{
             .source = "function helper(): number {\n" ++
@@ -1491,8 +1495,9 @@ test "type-only module matrix preserves public runtime admission and exact recor
                 "return 1;\n" ++
                 "}\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-            .modules = &.{.{ .kind = .import_type, .raw = "import type { A } from \"./a\";" }},
-            .runtime_success = true,
+            .modules = &.{},
+            .runtime_success = false,
+            .rejected_at = "import",
         },
         .{
             .source = "function helper(): number {\n" ++
@@ -1500,8 +1505,9 @@ test "type-only module matrix preserves public runtime admission and exact recor
                 "return 1;\n" ++
                 "}\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
-            .modules = &.{.{ .kind = .export_type, .raw = "export type { A };" }},
-            .runtime_success = true,
+            .modules = &.{},
+            .runtime_success = false,
+            .rejected_at = "export",
         },
         .{
             .source = " import type { A } from \"./a\";\n" ++
@@ -1514,7 +1520,8 @@ test "type-only module matrix preserves public runtime admission and exact recor
             .source = "const live: number = 1;import type { A } from \"./a\";\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{.{ .kind = .import_type, .raw = "import type { A } from \"./a\";" }},
-            .runtime_success = true,
+            .runtime_success = false,
+            .rejected_at = "import",
         },
         .{
             .source = "const live: number = 1; import type { A } from \"./a\";\n" ++
@@ -7552,8 +7559,9 @@ test "direct parser reports missing and unmatched primitive locations" {
         source: []const u8,
         errors: []const Expected,
     }{
-        .{ .source = "let n: (number;", .errors = &.{
-            .{ .kind = .missing_semicolon, .offset = 4, .end_offset = 5 },
+        .{ .source = "const n: (number;", .errors = &.{
+            .{ .kind = .const_without_initializer, .offset = 17, .end_offset = 17 },
+            .{ .kind = .missing_semicolon, .offset = 6, .end_offset = 7 },
         } },
     };
     for (cases) |case| {
@@ -7596,7 +7604,7 @@ test "direct type depth admits 512 and refuses opener 513" {
 }
 
 test "direct parser keeps the binding token for a missing semicolon" {
-    const source = "let value: string";
+    const source = "const value: string";
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     var atoms = AtomTable.init(std.testing.allocator);
@@ -7604,10 +7612,11 @@ test "direct parser keeps the binding token for a missing semicolon" {
     parser.setAtomTable(&atoms);
     try std.testing.expectError(error.MissingSemicolon, parser.parse());
     const errors = parser.errors.getErrors();
-    try std.testing.expectEqual(@as(usize, 1), errors.len);
-    try std.testing.expectEqual(engine.parser.ErrorKind.missing_semicolon, errors[0].kind);
-    try std.testing.expectEqual(@as(u32, 4), errors[0].location.offset);
-    try std.testing.expectEqual(@as(u32, 9), errors[0].location.end_offset);
+    try std.testing.expectEqual(@as(usize, 2), errors.len);
+    try std.testing.expectEqual(engine.parser.ErrorKind.const_without_initializer, errors[0].kind);
+    try std.testing.expectEqual(engine.parser.ErrorKind.missing_semicolon, errors[1].kind);
+    try std.testing.expectEqual(@as(u32, 6), errors[1].location.offset);
+    try std.testing.expectEqual(@as(u32, 11), errors[1].location.end_offset);
 }
 
 test "runtime any and quoted names are admitted while unary void is refused" {
