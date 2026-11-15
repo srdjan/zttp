@@ -276,6 +276,24 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(body("  const x: number | undefined = 1;\n  const b = x ?? 0;")),
     },
     .{
+        .key = "A function overload, which is a signature with no body",
+        .refused = &.{r("", top("function f(a: number): number;\nfunction f(a: string): string;\nfunction f(a: unknown): unknown {\n  return a;\n}"))},
+        .clean = c(top("function f(a: number | string): number | string {\n  return a;\n}")),
+    },
+    .{
+        .key = "A comma expression, such as `(1, 2)` and `f(), g();`",
+        .refused = &.{
+            r("(1, 2)", body("  const a = (1, 2);")),
+            r("f(), g();", top("function f(): number {\n  return 1;\n}\nfunction g(): number {\n  return 2;\n}\nfunction h(): number {\n  f(), g();\n  return 0;\n}")),
+        },
+        .clean = c(body("  const a = 2;")),
+    },
+    .{
+        .key = "A tagged template, which is a template literal after an expression",
+        .refused = &.{r("", body("  const a = String`x`;"))},
+        .clean = c(body("  const a = String(\"x\");")),
+    },
+    .{
         .key = "`enum` and `const enum`",
         .refused = &.{
             r("enum", top("enum E {\n  A,\n}")),
@@ -576,11 +594,6 @@ pub const refusal_rows = [_]RefusalRow{
             r("RegExp", body("  const re = RegExp(\"a\");")),
         },
         .clean = c(body("  const s = \"abc\";\n  const b = s.includes(\"a\");")),
-    },
-    .{
-        .key = "Comma and sequence expressions",
-        .refused = &.{r("", body("  const a = (1, 2);"))},
-        .clean = c(body("  const a = 2;")),
     },
     .{
         .key = "Template interpolation `` `n=${n}` ``",
@@ -1064,17 +1077,6 @@ pub const gap_rows = [_]GapRow{
             c(top("function g(a: string extends string ? number : string): number {\n  return a;\n}")),
             c(top("const v = 1;\nfunction g(a: typeof v): string {\n  return a;\n}")),
         },
-    },
-    .{
-        .key = "Overload declarations and comma expressions",
-        .sources = &.{
-            c(top("function f(a: number): number;\nfunction f(a: string): string;\nfunction f(a: unknown): unknown {\n  return a;\n}")),
-            c(body("  const a = (1, 2);")),
-        },
-    },
-    .{
-        .key = "Tagged templates",
-        .sources = &.{c(body("  const a = String`x`;"))},
     },
     .{
         .key = "The angle-bracket assertion `<number>x`",

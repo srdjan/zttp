@@ -89,6 +89,8 @@ pure.
 | `declare` declarations | ZTS001 | Import the value from a module |
 | `abstract class` | ZTS001 | Plain records and functions |
 | The non-null assertion `x!` | ZTS001 | Check for `undefined` first, or use `??` |
+| A function overload, which is a signature with no body | ZTS001 | One function whose parameter type is a union |
+| A tagged template, which is a template literal after an expression | ZTS001 | Call the function with a string argument |
 | `enum` and `const enum` | ZTS001 | A literal union or a discriminated union |
 | Decorators (`@decorator`) | ZTS001 | Function composition |
 | `implements` and access modifiers (`public`, `private`, `protected`) | ZTS001 | Remove them |
@@ -164,7 +166,7 @@ no user-defined iterator protocol.
 | `delete` | ZTS001 | A new object literal with only the keys that you keep |
 | `new` | ZTS001 | A factory function or an object literal |
 | Regex literals and the `RegExp` global | ZTS001 | String methods such as `includes` and `startsWith` |
-| Comma and sequence expressions | ZTS003 | Separate statements |
+| A comma expression, such as `(1, 2)` and `f(), g();` | ZTS001 | Write each expression as its own statement |
 | Template interpolation `` `n=${n}` `` | ZTS001 | `["n=", String(n)].join("")`. A backtick literal with no interpolation is permitted |
 | `+` with a string operand | ZTS105 | `[a, String(b)].join("")` |
 | `+` with a boolean, optional, or untyped operand | ZTS106 | Narrow or convert the operand first |
@@ -338,8 +340,6 @@ against the compiler.
 | `for...of` over a fixed record | Accepted by the type and strict checks | A targeted refusal. Iterate an array, such as `Object.keys(r)` |
 | `keyof`, mapped types, conditional types, and type-position `typeof`, when unused | Accepted, exit 0 | A targeted refusal. Write the type explicitly |
 | `keyof`, mapped types, conditional types, and type-position `typeof`, when used in a signature | Unrelated errors ZTS201, ZTS203, or ZTS204 | A targeted refusal. Write the type explicitly |
-| Overload declarations and comma expressions | Refused with ZTS003, "unexpected token" | ZTS001 with a message that names the form |
-| Tagged templates | Refused with ZTS047, "statement is not terminated" | ZTS001 with a message that names the form |
 | The angle-bracket assertion `<number>x` | Refused with ZTS002, "raw JSX is not supported". The registry names ZTS042 | ZTS042, as for `x as T` |
 | A generic declaration with nine type parameters | Refused with ZTS203 on the ninth argument, not with a limit diagnostic | A limit diagnostic. The `meta` limits publish the limit |
 | Array members `forEach`, `pop`, `shift`, `unshift`, `splice` | Accepted | ZTS201. Write `for...of`, `slice`, or spread |

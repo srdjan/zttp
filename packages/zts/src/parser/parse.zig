@@ -3432,6 +3432,12 @@ pub const Parser = struct {
             });
         }
 
+        if (self.check(.semicolon)) {
+            self.errors.addErrorAt(.unsupported_feature, self.current, "a function overload, which is a signature with no body, is not supported; write one function whose parameter type is a union");
+            self.advance();
+            return error.ParseError;
+        }
+
         // Parse body
         const body = try self.parseBlock();
         if (!self.typeSyntaxPublicationHealthy(signature_publication_checkpoint)) {
@@ -4408,6 +4414,7 @@ pub const Parser = struct {
         const loc = self.current.location();
         self.assignment_position = if (self.check(.lparen)) .statement_paren else .statement;
         const expr = try self.parseExpression(.none);
+        try self.refuseCommaExpression();
         try self.expectSemicolon();
         return try self.nodes.addOptValue(.expr_stmt, loc, expr);
     }
@@ -4480,9 +4487,15 @@ pub const Parser = struct {
         while (true) {
             progress.iteration(self);
             if (try self.tryConsumeAdmissionAssertion()) continue;
-            // After an operand, `!` can only be the non-null assertion `x!`.
+            // After an operand, `!` can only be the non-null assertion `x!`, and
+            // a template literal can only be a tagged template.
             if (self.current.type == .bang) {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "the non-null assertion `x!` is not supported; check for `undefined` first, or use `??`");
+                self.advance();
+                return error.ParseError;
+            }
+            if (self.current.type == .template_literal or self.current.type == .template_head) {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "a tagged template is not supported; call the function with a string argument");
                 self.advance();
                 return error.ParseError;
             }
@@ -5237,9 +5250,17 @@ pub const Parser = struct {
         }
 
         const expr = try self.parseExpression(.none);
+        try self.refuseCommaExpression();
         try self.expect(.rparen, "')'");
 
         return expr;
+    }
+
+    fn refuseCommaExpression(self: *Parser) anyerror!void {
+        if (!self.check(.comma)) return;
+        self.errors.addErrorAt(.unsupported_feature, self.current, "a comma expression is not supported; write each expression as its own statement");
+        self.advance();
+        return error.ParseError;
     }
 
     fn parseArrayLiteral(self: *Parser) anyerror!NodeIndex {
