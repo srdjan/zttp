@@ -266,11 +266,9 @@ if (isString(val)) {
 
 assert isString(val);
 val.toUpperCase();       // narrowed from here forward
-
-assert isString(name), Response.json({ error: "name required" }, { status: 400 });
 ```
 
-When `assert` fails with no error expression, the handler halts. With an explicit error expression, that value is returned.
+When `assert` fails, the handler halts.
 
 The checker reads the body of a type guard before it uses the guard. A guard narrows only when all of these are true:
 

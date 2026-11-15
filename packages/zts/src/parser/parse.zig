@@ -3575,16 +3575,15 @@ pub const Parser = struct {
 
         const condition = try self.parseExpression(.none);
 
-        // Optional comma-separated error expression: assert expr, errorExpr;
-        var error_expr: NodeIndex = null_node;
-        if (self.match(.comma)) {
-            error_expr = try self.parseExpression(.none);
+        if (self.check(.comma)) {
+            self.errorAtCurrent("fallback `assert` is not supported; use `if` plus `return`");
+            return error.ParseError;
         }
 
         try self.expectSemicolon();
         return try self.nodes.addAssert(loc, .{
             .condition = condition,
-            .error_expr = error_expr,
+            .error_expr = null_node,
         });
     }
 
@@ -8321,17 +8320,6 @@ test "unsupported: switch statement" {
 test "assert statement parses" {
     const allocator = std.testing.allocator;
     var parser = try Parser.initAdmission(allocator, allocator, "assert isString(val);", .compile);
-    defer parser.deinit();
-    _ = parser.parse() catch {
-        try std.testing.expect(false);
-        return;
-    };
-    try std.testing.expect(!parser.hasErrors());
-}
-
-test "assert statement with error expression parses" {
-    const allocator = std.testing.allocator;
-    var parser = try Parser.initAdmission(allocator, allocator, "assert isString(val), Response.json({ error: 'bad' });", .compile);
     defer parser.deinit();
     _ = parser.parse() catch {
         try std.testing.expect(false);

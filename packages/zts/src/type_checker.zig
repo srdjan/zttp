@@ -9381,13 +9381,9 @@ test "narrowing: a loop body that assigns inside an initializer kills the narrow
     try expectKindCounts(narrowedBeforeLoop("    const y = (x = undefined);"), .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 });
 }
 
-test "narrowing: a loop body that assigns inside a ternary or an assert kills the narrowing" {
+test "narrowing: a loop body that assigns inside a ternary kills the narrowing" {
     try expectKindCounts(
         narrowedBeforeLoop("    const t = i > 1 ? (x = undefined) : 1;"),
-        .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 },
-    );
-    try expectKindCounts(
-        narrowedBeforeLoop("    assert i > 0, (x = undefined);"),
         .{ .arg_type = 1, .return_type = 0, .ambiguous = 0 },
     );
 }
@@ -9471,17 +9467,6 @@ test "callback return type: a return inside a for...of joins the callback type" 
             \\    for (const z of [y]) {
             \\      return z;
             \\    }
-            \\    return "s";
-        ),
-        .{ .arg_type = 1, .return_type = 1, .ambiguous = 0 },
-    );
-}
-
-test "callback return type: an assert error expression joins the callback type" {
-    // A failed `assert c, e` returns `e` from the callback.
-    try expectKindCounts(
-        callbackReturning(
-            \\    assert y > 1, y;
             \\    return "s";
         ),
         .{ .arg_type = 1, .return_type = 1, .ambiguous = 0 },
@@ -9608,48 +9593,6 @@ test "callback return type: a covering return keeps an if from adding undefined"
         ),
         .{ .arg_type = 0, .return_type = 1, .ambiguous = 0 },
     );
-}
-
-test "assert error expression: it must match the declared return type" {
-    // A failed `assert c, e` returns `e`, so `e` answers the declared return
-    // type the way `return e` does.
-    try expectKindCounts(
-        \\function f(c: boolean): string {
-        \\  assert c, 5;
-        \\  return "ok";
-        \\}
-    , .{ .arg_type = 0, .return_type = 1, .ambiguous = 0 });
-    try expectKindCounts(
-        \\function f(c: boolean): string {
-        \\  assert c, "no";
-        \\  return "ok";
-        \\}
-    , .{ .arg_type = 0, .return_type = 0, .ambiguous = 0 });
-    try expectKindCounts(
-        \\export function handler(req: Request): Response {
-        \\  const c = req.method === "GET";
-        \\  assert c, Response.text("no");
-        \\  return Response.text("ok");
-        \\}
-    , .{ .arg_type = 0, .return_type = 0, .ambiguous = 0 });
-}
-
-test "assert error expression: a Proof capsule return type adds no ZTS204" {
-    // cap_base. The declared type is a capsule over `Response`, and the
-    // `Response` the assert returns matches it as the final `return` does.
-    try expectKindCounts(
-        \\import { cacheSet } from "zttp:cache";
-        \\structural RetryProof<T> = Proof<T, "retry_safe" | "idempotent">;
-        \\function save(): boolean {
-        \\  cacheSet("items", "key", "value", 60);
-        \\  return true;
-        \\}
-        \\function handler(req: Request): RetryProof<Response> {
-        \\  const ok = save();
-        \\  assert ok, Response.text("no");
-        \\  return Response.text("ok");
-        \\}
-    , .{ .arg_type = 0, .return_type = 0, .ambiguous = 0 });
 }
 
 test "the join asks for structural identity, not the same pool index" {

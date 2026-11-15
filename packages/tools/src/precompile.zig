@@ -2824,7 +2824,7 @@ test "compileHandler graph refuses an invalid virtual import in a dependency" {
 
 test "compileHandler graph refuses a top-level assert in a dependency" {
     var fixture = try graphDependencyFixture(
-        \\assert 1 === 1, "boot";
+        \\assert 1 === 1;
         \\export function value(): number {
         \\  return 1;
         \\}
@@ -2837,7 +2837,7 @@ test "compileHandler graph refuses a top-level assert in a dependency" {
 test "compileHandler graph refuses an assert nested in a top-level block of a dependency" {
     var fixture = try graphDependencyFixture(
         \\if (1 === 1) {
-        \\  assert 1 === 1, "boot";
+        \\  assert 1 === 1;
         \\}
         \\export function value(): number {
         \\  return 1;
@@ -2851,7 +2851,7 @@ test "compileHandler graph refuses an assert nested in a top-level block of a de
 test "compileHandler graph accepts an assert inside a dependency function" {
     var fixture = try graphDependencyFixture(
         \\export function value(): string {
-        \\  assert 1 === 1, "inside";
+        \\  assert 1 === 1;
         \\  return "ok";
         \\}
         \\
@@ -3485,7 +3485,7 @@ const parity_refused_rows = [_]ParityRow{
     .{
         .label = "dependency top-level assert",
         .entry = parityEntry("result_safe"),
-        .files = &.{.{ .name = "lib.ts", .source = "assert 1 === 1, \"boot\";\nexport function f(): string {\n  return \"x\";\n}\n" }},
+        .files = &.{.{ .name = "lib.ts", .source = "assert 1 === 1;\nexport function f(): string {\n  return \"x\";\n}\n" }},
         .code = "ZTS063",
         .file = "lib.ts",
     },

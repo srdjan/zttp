@@ -276,22 +276,22 @@ pub const fixtures = [_]Fixture{
     \\  return Response.text("ok");
     \\}
     },
-    // -- An `assert` whose message is a secret.
-    // runtime: known-limits row "An assert whose message is a secret": a failed assert returns the message as the body
+    // Historical fallback-assert seed, expressed as an early return.
+    // The fixture retains the secret response and its original identity.
     .{ .name = "assert_message_secret_in_handler", .property = .no_secret_leakage, .source =
     \\import { env } from "zttp:env";
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
     \\  const s: string = env("SECRET_KEY") ?? "";
-    \\  assert req.url.length > 100, Response.text(s);
+    \\  if (req.url.length <= 100) { return Response.text(s); }
     \\  return Response.text("ok");
     \\}
     },
-    // runtime: known-limits row "An assert whose message is a secret ... in a helper it calls"
+    // Historical fallback-assert seed, expressed as a helper return.
+    // The fixture retains the secret return and its original identity.
     .{ .name = "assert_message_secret_in_helper", .property = .no_secret_leakage, .source =
     \\import { env } from "zttp:env";
     \\function value(): string {
-    \\  assert false, env("SECRET_KEY") ?? "";
-    \\  return "";
+    \\  return env("SECRET_KEY") ?? "";
     \\}
     \\export function handler(req: Request): Proof<Response, "no_secret_leakage"> {
     \\  return Response.text(value());

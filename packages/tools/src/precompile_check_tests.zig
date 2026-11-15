@@ -9003,22 +9003,6 @@ test "diffContractsFromSources keeps the strict reading when the handler imports
     try std.testing.expectEqual(zts.contract_diff.Classification.breaking, diff.behavioralVerdict());
 }
 
-const assert_error_a =
-    \\export function handler(req: Request): Response {
-    \\  const ok = req.method === "GET";
-    \\  assert ok, Response.text("no");
-    \\  return Response.text("ok");
-    \\}
-;
-
-const assert_error_b =
-    \\export function handler(req: Request): Response {
-    \\  const ok = req.method === "GET";
-    \\  assert ok, Response.text("changed", { status: 500 });
-    \\  return Response.text("ok");
-    \\}
-;
-
 const if_error_a =
     \\export function handler(req: Request): Response {
     \\  const ok = req.method === "GET";
@@ -9039,33 +9023,28 @@ const if_error_b =
     \\}
 ;
 
-test "prove-behavior: changing the status of an assert error response is breaking" {
-    const outcome = try proveBehaviorOutcome(std.testing.allocator, assert_error_a, assert_error_b);
-    try std.testing.expectEqual(zts.contract_diff.Classification.breaking, outcome.verdict);
-}
-
 test "prove-behavior: changing the status of an if error response stays breaking" {
     const outcome = try proveBehaviorOutcome(std.testing.allocator, if_error_a, if_error_b);
     try std.testing.expectEqual(zts.contract_diff.Classification.breaking, outcome.verdict);
 }
 
-test "prove-behavior: handlers with an assert diff equivalent with themselves" {
-    const sources = [_][]const u8{ assert_error_a, assert_error_b, if_error_a };
+test "prove-behavior: handlers with explicit guards diff equivalent with themselves" {
+    const sources = [_][]const u8{ if_error_a, if_error_b };
     for (sources) |source| {
         const outcome = try proveBehaviorOutcome(std.testing.allocator, source, source);
         try std.testing.expectEqual(zts.contract_diff.Classification.equivalent, outcome.verdict);
     }
 }
 
-test "prove-behavior: changing the status of an assert error response reports one changed response" {
+test "prove-behavior: changing the status of an explicit guard response reports one changed response" {
     const allocator = std.testing.allocator;
-    var before = try runCheckOnlyFromSourceWithOptions(allocator, assert_error_a, "handler.ts", .{ .json_mode = true });
+    var before = try runCheckOnlyFromSourceWithOptions(allocator, if_error_a, "handler.ts", .{ .json_mode = true });
     defer before.deinit(allocator);
-    var after = try runCheckOnlyFromSourceWithOptions(allocator, assert_error_b, "handler.ts", .{ .json_mode = true });
+    var after = try runCheckOnlyFromSourceWithOptions(allocator, if_error_b, "handler.ts", .{ .json_mode = true });
     defer after.deinit(allocator);
     const before_contract = before.contract orelse return error.NoContractFromBefore;
     const after_contract = after.contract orelse return error.NoContractFromAfter;
-    var diff = try zts.contract_diff.diffContractsFromSources(allocator, &before_contract, &after_contract, assert_error_a, assert_error_b);
+    var diff = try zts.contract_diff.diffContractsFromSources(allocator, &before_contract, &after_contract, if_error_a, if_error_b);
     defer diff.deinit(allocator);
     const bd = diff.behavior_diff orelse return error.NoBehaviorDiff;
     try std.testing.expectEqual(@as(u32, 1), bd.response_changed);
@@ -11165,7 +11144,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  const p = ps[0];
-    \\  assert p !== undefined, Response.json({ error: "none" }, { status: 404 });
+    \\  assert p !== undefined;
     \\  return Response.json({ a: p.age });
     \\}
     },

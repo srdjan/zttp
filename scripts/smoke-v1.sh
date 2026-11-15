@@ -339,7 +339,7 @@ export function value(): number {
 TS
 dep_check_case virtual-import "import error: module 'zttp:sql' does not export 'definitelyMissing'"
 cat > "$TMP_DIR/dep-check-app/dep.ts" <<'TS'
-assert 1 === 1, "boot";
+assert 1 === 1;
 export function value(): number {
   return 1;
 }

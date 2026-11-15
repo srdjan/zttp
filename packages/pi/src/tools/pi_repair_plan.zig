@@ -930,7 +930,7 @@ test "repair plan: a closure read gets a check inside the closure" {
 
 test "repair plan: a read inside an assert gets a check before the statement" {
     try expectFirstPlan(plan_head ++
-        \\  assert r.value !== undefined, Response.text("no");
+        \\  assert r.value !== undefined;
         \\  return Response.text("ok");
         \\}
     , "Check result.ok in an if statement before the assert, throw, switch, or try statement that reads the Result.", shape_guard);

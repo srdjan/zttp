@@ -42,7 +42,9 @@ function optionalProbe() {
 }
 
 function assertProbe(req) {
-  assert req.headers.authorization !== undefined, Response.json({ error: "authorization required" }, { status: 400 });
+  if (req.headers.authorization === undefined) {
+    return Response.json({ error: "authorization required" }, { status: 400 });
+  }
   return Response.json({ authorization: req.headers.authorization });
 }
 

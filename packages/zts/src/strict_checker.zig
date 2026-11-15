@@ -3625,7 +3625,7 @@ test "a call under an array spread makes the ternary arm impure" {
 
 test "a ternary inside an assert is checked for purity" {
     var checker = try checkSource(
-        "function pick(n) { return [n]; } function handler(req) { assert (req.method === \"GET\" ? pick(1) : []).length > 0, Response.text(\"no\"); return Response.text(\"yes\"); }",
+        "function pick(n) { return [n]; } function handler(req) { assert (req.method === \"GET\" ? pick(1) : []).length > 0; return Response.text(\"yes\"); }",
     );
     defer checker.deinit();
     try expectKind(&checker, .canonical_ternary_impure);
@@ -3789,7 +3789,7 @@ test "canonical_redundant_bool_compare fires inside an arrow callback" {
 
 test "canonical_redundant_bool_compare fires inside an assert condition" {
     var h = try checkSourceTyped(
-        "function handler(req) { const ready = req.method === \"GET\"; assert ready === true, Response.text(\"no\"); return Response.text(\"yes\"); }",
+        "function handler(req) { const ready = req.method === \"GET\"; assert ready === true; return Response.text(\"yes\"); }",
     );
     defer h.deinit();
     try expectKind(&h.checker, .canonical_redundant_bool_compare);

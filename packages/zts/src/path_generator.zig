@@ -6243,24 +6243,6 @@ fn countStatus(tests: []const GeneratedTest, status: u16) usize {
     return n;
 }
 
-test "assert with an error expression forks a failure path with the status of that expression" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\function handler(req) {
-        \\  const ok = req.method === "GET";
-        \\  assert ok, Response.text("no", { status: 405 });
-        \\  return Response.text("ok");
-        \\}
-    ;
-    var fixture = try generateFixture(allocator, source);
-    defer fixture.deinit();
-
-    const tests = fixture.generator.getTests();
-    try std.testing.expectEqual(@as(usize, 2), tests.len);
-    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 405));
-    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 200));
-}
-
 test "assert without an error expression fails with status 500" {
     const allocator = std.testing.allocator;
     const source =
@@ -6285,7 +6267,7 @@ test "assert in an unbraced branch body gets its failure path" {
         \\function handler(req) {
         \\  const post = req.method === "POST";
         \\  const ready = req.url === "/ready";
-        \\  if (post) assert ready, Response.text("not ready", { status: 503 });
+        \\  if (post) assert ready;
         \\  return Response.text("ok");
         \\}
     ;
@@ -6294,7 +6276,7 @@ test "assert in an unbraced branch body gets its failure path" {
 
     const tests = fixture.generator.getTests();
     try std.testing.expectEqual(@as(usize, 2), tests.len);
-    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 503));
+    try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 500));
     try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 200));
 }
 
@@ -6302,7 +6284,7 @@ test "assert on a conjunction forks one failure path for each way it is false" {
     const allocator = std.testing.allocator;
     const source =
         \\function handler(req) {
-        \\  assert req.method === "GET" && req.url === "/x", Response.text("no", { status: 400 });
+        \\  assert req.method === "GET" && req.url === "/x";
         \\  return Response.text("ok");
         \\}
     ;
@@ -6310,32 +6292,8 @@ test "assert on a conjunction forks one failure path for each way it is false" {
     defer fixture.deinit();
 
     const tests = fixture.generator.getTests();
-    try std.testing.expectEqual(@as(usize, 2), countStatus(tests, 400));
+    try std.testing.expectEqual(@as(usize, 2), countStatus(tests, 500));
     try std.testing.expectEqual(@as(usize, 1), countStatus(tests, 200));
-}
-
-test "a module call in the assert error expression is on the failure path only" {
-    const allocator = std.testing.allocator;
-    const source =
-        \\import { sha256 } from "zttp:crypto";
-        \\function handler(req) {
-        \\  const ok = req.method === "GET";
-        \\  assert ok, Response.text(sha256("denied"), { status: 403 });
-        \\  return Response.text("ok");
-        \\}
-    ;
-    var fixture = try generateFixture(allocator, source);
-    defer fixture.deinit();
-
-    const tests = fixture.generator.getTests();
-    try std.testing.expectEqual(@as(usize, 2), tests.len);
-    for (tests) |t| {
-        if (t.expected_status.isKnown(403)) {
-            try std.testing.expectEqual(@as(usize, 1), t.io_stubs.items.len);
-        } else {
-            try std.testing.expectEqual(@as(usize, 0), t.io_stubs.items.len);
-        }
-    }
 }
 
 test "a module call in the assert condition is on both paths" {
@@ -6343,7 +6301,7 @@ test "a module call in the assert condition is on both paths" {
     const source =
         \\import { sha256 } from "zttp:crypto";
         \\function handler(req) {
-        \\  assert sha256(req.url) === req.method, Response.text("no", { status: 400 });
+        \\  assert sha256(req.url) === req.method;
         \\  return Response.text("ok");
         \\}
     ;

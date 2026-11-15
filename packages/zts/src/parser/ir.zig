@@ -2567,11 +2567,7 @@ test "expressionChildren of a return statement is its value" {
     try expectChildrenOf("function f() { return; }", .return_stmt, 0, &.{});
 }
 
-test "expressionChildren of an assert are the condition then the error expression" {
-    try expectChildrenOf("assert a, 7;", .assert_stmt, 0, &.{
-        .{ .tag = .identifier },
-        .{ .tag = .lit_int, .int = 7 },
-    });
+test "expressionChildren of an assert contains its condition" {
     try expectChildrenOf("assert a;", .assert_stmt, 0, &.{.{ .tag = .identifier }});
 }
 
@@ -2707,9 +2703,9 @@ test "subtreeContains finds a node inside an object spread operand" {
     try std.testing.expect(view.subtreeContains(root, target));
 }
 
-test "subtreeContains finds a node inside an assert condition and an assert error expression" {
+test "subtreeContains finds a node inside an assert condition" {
     const allocator = std.testing.allocator;
-    var parser = try @import("parse.zig").Parser.initAdmission(allocator, allocator, "assert a, b;", .compile);
+    var parser = try @import("parse.zig").Parser.initAdmission(allocator, allocator, "assert a;", .compile);
     defer parser.deinit();
     const root = try parser.parse();
     const view = IrView.fromIRStore(&parser.nodes, &parser.constants);
@@ -2721,6 +2717,4 @@ test "subtreeContains finds a node inside an assert condition and an assert erro
     try std.testing.expect(assert_node != null_node);
     const stmt = view.getAssertStmt(assert_node).?;
     try std.testing.expect(view.subtreeContains(root, stmt.condition));
-    try std.testing.expect(view.subtreeContains(root, stmt.error_expr));
-    try std.testing.expect(!view.subtreeContains(stmt.condition, stmt.error_expr));
 }

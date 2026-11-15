@@ -191,15 +191,12 @@ test "pool occupancy is zero before and after a completed request" {
 // Handler execution: error paths
 // ===========================================================================
 
-test "assert guard rejection short-circuits with the guard response" {
+test "an early return guard answers with the guard response" {
     const allocator = std.heap.c_allocator;
-    // `assert cond, response` is the supported statement form: on a failed
-    // condition the handler returns the guard response instead of falling
-    // through. This is the documented error path for declarative guards.
     var pool = try HandlerPool.init(
         allocator,
         .{},
-        "function handler(req) { assert req.method === 'POST', Response.text('method not allowed', { status: 405 }); return Response.text('ok'); }",
+        "function handler(req) { if (req.method !== 'POST') { return Response.text('method not allowed', { status: 405 }); } return Response.text('ok'); }",
         "<server-test>",
         1,
         0,

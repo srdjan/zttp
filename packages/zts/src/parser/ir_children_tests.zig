@@ -83,7 +83,7 @@ fn decision(comptime tag: NodeTag) Row {
         .if_stmt => yields("if (a) { f(); } else { g(); }", &.{ .identifier, .block, .block }),
         .for_of_stmt => yields("for (const x of xs) { f(x); }", &.{ .identifier, .block }),
         .return_stmt => yields("function f() { return a; }", &.{.identifier}),
-        .assert_stmt => yields("assert a, b;", &.{ .identifier, .identifier }),
+        .assert_stmt => yields("assert a;", &.{.identifier}),
         .break_stmt => leafOf("a jump holds no expression", "function g(xs) { for (const x of xs) { break; } }"),
         .continue_stmt => leafOf("a jump holds no expression", "function g(xs) { for (const x of xs) { continue; } }"),
         .block => yields("function f() { g(); return 1; }", &.{ .expr_stmt, .return_stmt }),

@@ -3199,16 +3199,7 @@ fn expectWriteHandlerProperties(handler_source: []const u8) !void {
 test "a write inside an assert condition fails the handler properties closed" {
     try expectWriteHandlerProperties(
         \\function handler(req) {
-        \\  assert save(), Response.text("no");
-        \\  return Response.text("ok");
-        \\}
-    );
-}
-
-test "a write inside an assert error expression fails the handler properties closed" {
-    try expectWriteHandlerProperties(
-        \\function handler(req) {
-        \\  assert req.method === "GET", Response.text(String(save()));
+        \\  assert save();
         \\  return Response.text("ok");
         \\}
     );
@@ -3237,7 +3228,7 @@ test "a write bound before an assert still fails the handler properties closed" 
     try expectWriteHandlerProperties(
         \\function handler(req) {
         \\  const ok = save();
-        \\  assert ok, Response.text("no");
+        \\  assert ok;
         \\  return Response.text("ok");
         \\}
     );

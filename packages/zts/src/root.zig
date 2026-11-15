@@ -634,6 +634,30 @@ test "stable source identity uses core grammar and semantics" {
     ));
 }
 
+test "direct check rejects fallback assert at the comma" {
+    const source =
+        \\function positive(n: number): number {
+        \\  assert n > 0, 0;
+        \\  return n;
+        \\}
+    ;
+    var owner: DirectCheckSource = undefined;
+    try owner.initCompileInPlace(
+        std.testing.allocator,
+        std.testing.allocator,
+        source,
+        "handler.ts",
+    );
+    defer owner.deinit();
+
+    const errors = owner.parserErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqualStrings("ZTS002", DiagnosticCatalog.parserCode(errors[0].kind));
+    try std.testing.expectEqual(@as(u32, 2), errors[0].location.line);
+    try std.testing.expectEqual(@as(u32, 15), errors[0].location.column);
+    try std.testing.expectEqual(@as(u32, 53), errors[0].location.offset);
+}
+
 /// The canonical type serialization's published identity: what a client needs
 /// to know before it caches a type digest and compares it to a later one. The
 /// digest itself is `typeDigest` above.

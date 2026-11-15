@@ -726,7 +726,7 @@ const admitted_surface =
     \\  };
     \\  const flag = sum > 0 ? true : false;
     \\  const merged = { ...orders[0], kind: kind };
-    \\  assert sum >= 0, "sum is not negative";
+    \\  assert sum >= 0;
     \\  if (flag) {
     \\    return Response.json({ labels: labels, merged: merged, json: json });
     \\  }

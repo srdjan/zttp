@@ -3794,7 +3794,7 @@ test "ZTS303 reports an unchecked Result read inside an assert condition" {
     const source = result_import ++
         \\function handler(req) {
         \\  const result = jwtVerify("token", "key");
-        \\  assert result.value !== undefined, Response.text("no");
+        \\  assert result.value !== undefined;
         \\  return Response.text("ok");
         \\}
     ;
@@ -4607,7 +4607,7 @@ test "ZTS303 shape: a closure reads a Result without its own check" {
 
 test "ZTS303 shape: a read inside an assert statement" {
     const first = try firstResultShape(shape_head ++
-        \\  assert r.value !== undefined, Response.text("no");
+        \\  assert r.value !== undefined;
         \\  return Response.text("ok");
         \\}
     );

@@ -4650,18 +4650,7 @@ test "the receiver is evaluated before a right side that reassigns it" {
     try expectSecret("function f(a, b, s) { " ++ body ++ "return b.x; }", &params, false);
 }
 
-test "an assert message is a completion and a bare assert halts with clean" {
-    const with_message = try analyzeSource("function f(c, s) { assert c, s; return \"ok\"; }", "f", &.{ Value.clean, secret_value });
-    defer with_message.deinit();
-    try testing.expect(!with_message.result.cleared);
-    try testing.expect(with_message.returnedLabels().secret);
-    try testing.expectEqual(@as(usize, 2), with_message.result.completions.len);
-    try testing.expectEqual(CompletionKind.assert_message, with_message.result.completions[0].kind);
-
-    const clean_message = try analyzeSource("function f(c, s) { assert c, \"no\"; return \"ok\"; }", "f", &.{ Value.clean, secret_value });
-    defer clean_message.deinit();
-    try testing.expect(clean_message.returnedLabels().isEmpty());
-
+test "a bare assert halts with clean" {
     const bare = try analyzeSource("function f(c, s) { assert c; return \"ok\"; }", "f", &.{ Value.clean, secret_value });
     defer bare.deinit();
     try testing.expect(!bare.result.cleared);
@@ -4935,23 +4924,6 @@ test "a return in a later pass is kept with the first pass's completion" {
         &.{secret_value},
         false,
     );
-
-    // The same through an assert message.
-    const asserts = "function f(s) { let r = \"c\"; for (const stop of [false, true]) { assert !stop, r; r = s; } return \"c\"; }";
-    const a = try analyzeSource(asserts, "f", &.{secret_value});
-    defer a.deinit();
-    try testing.expect(!a.result.cleared);
-    try testing.expectEqual(@as(usize, 3), a.result.completions.len);
-    try testing.expectEqual(CompletionKind.assert_message, a.result.completions[0].kind);
-    try testing.expect(a.result.completions[0].value.?.labels.isEmpty());
-    try testing.expect(a.result.completions[1].value.?.labels.secret);
-    try testing.expect(a.returnedLabels().secret);
-
-    const clean_asserts = "function f(s) { let r = \"c\"; for (const stop of [false, true]) { assert !stop, r; r = \"d\"; } return \"c\"; }";
-    const c = try analyzeSource(clean_asserts, "f", &.{secret_value});
-    defer c.deinit();
-    try testing.expect(!c.result.cleared);
-    try testing.expect(c.returnedLabels().isEmpty());
 }
 
 test "a labelled primitive iterable labels the loop variable" {
@@ -5299,22 +5271,7 @@ test "a callee that falls off its end returns to the caller" {
     );
 }
 
-test "a helper assert returns its message to the caller and not to the root" {
-    try expectSecret("function f(c, s) { function g() { assert c, s; return \"c\"; } return g(); }", &c_secret, true);
-    try expectSecret("function f(c, s) { function g() { assert c, \"m\"; return \"c\"; } return g(); }", &c_secret, false);
-
-    // The root's own completions do not include the helper's failed assert.
-    const helper_only = try analyzeSource(
-        "function f(c, s) { function g() { assert c, s; return \"c\"; } g(); return \"ok\"; }",
-        "f",
-        &c_secret,
-    );
-    defer helper_only.deinit();
-    try testing.expect(!helper_only.result.cleared);
-    try testing.expect(helper_only.returnedLabels().isEmpty());
-    try testing.expectEqual(@as(usize, 1), helper_only.result.completions.len);
-
-    // A bare assert in a helper returns `undefined`, which is clean.
+test "a bare helper assert returns clean undefined to the caller" {
     try expectSecret("function f(c, s) { function g() { assert c; return s; } return g(); }", &c_secret, true);
     try expectSecret("function f(c, s) { function g() { assert c; return \"c\"; } return g(); }", &c_secret, false);
 }
@@ -7964,7 +7921,7 @@ const resolved_corpus = [_][]const u8{
     "function f(p, q) { const a = [p, ...q]; const o = { k: p, ...q }; return o.k; }",
     "function f(p, q) { const g = () => p; const h = (z) => q; function inner() { return 1; } return inner; }",
     "function f(p, q) { if (p) { return 1; } else { return 2; } }",
-    "function f(p, q) { assert p, \"no\"; assert q; return 1; }",
+    "function f(p, q) { assert p; assert q; return 1; }",
     "function f(p, q) { return match (p) { when { kind: \"a\", text }: text when \"x\": q when string: q default: 0 }; }",
     "function f(p, q) { return match (p) { when [{ k: v }, , \"a\"]: v when { a: [{ b: w }] }: w when { c: { d: z } }: z default: 0 }; }",
     "function f(p, q) { p; return; }",
@@ -8422,18 +8379,6 @@ test "HTML construction reports injection only when returned to the handler call
     try testing.expect(!returned.properties.injection_safe);
 }
 
-test "assertion messages become root response completions through helper calls" {
-    const direct = try probeReport("import { env } from \"zttp:env\"; function handler(req) { assert req.url, env(\"SECRET_KEY\"); return \"public\"; }");
-    try testing.expect(!direct.cleared);
-    try testing.expect(!direct.properties.no_secret_leakage);
-    const helper = try probeReport("import { env } from \"zttp:env\"; function f(r) { assert r.url, env(\"SECRET_KEY\"); return \"public\"; } function handler(req) { return f(req); }");
-    try testing.expect(!helper.cleared);
-    try testing.expect(!helper.properties.no_secret_leakage);
-    const contained = try probeReport("import { env } from \"zttp:env\"; function f(r) { assert r.url, env(\"SECRET_KEY\"); return \"public\"; } function handler(req) { f(req); return \"public\"; }");
-    try testing.expect(!contained.cleared);
-    try testing.expect(contained.properties.no_secret_leakage);
-}
-
 test "log sink observations occur during conditions and callbacks" {
     const direct = try probeReport("import { env } from \"zttp:env\"; function handler(req) { console.log(env(\"SECRET_KEY\")); return \"public\"; }");
     try testing.expect(!direct.cleared);
@@ -8569,25 +8514,16 @@ test "request local scalars reset and persistent initialization runs in source o
     try testing.expect(before.cleared);
 }
 
-test "persistent heap includes writes before assertion and the pass cap fails closed" {
-    const asserted = try probeReport("let prior = \"public\"; function handler(req) { const old = prior; prior = req.headers.authorization; assert req.method === \"POST\", old; return \"public\"; }");
-    try testing.expect(!asserted.cleared);
-    try testing.expect(!asserted.properties.no_credential_leakage);
+test "persistent heap includes writes before an early return and the pass cap fails closed" {
+    const returned = try probeReport("let prior = \"public\"; function handler(req) { const old = prior; prior = req.headers.authorization; if (req.method !== \"POST\") { return old; } return \"public\"; }");
+    try testing.expect(!returned.cleared);
+    try testing.expect(!returned.properties.no_credential_leakage);
     const h = try Harness.create(testing.allocator, "let prior = \"public\"; function handler(req) { const old = prior; prior = req.headers.authorization; return old; }");
     defer h.destroy();
     h.interp.max_persistence_passes = 1;
     const capped = try h.interp.analyzeHandlerReport(try h.find("handler"));
     try testing.expect(capped.evaluation.cleared);
     try testing.expect(!capped.properties.no_credential_leakage);
-}
-
-test "initializer assertion return preserves heap but discards its response value" {
-    const poisoned = try probeReport("import { env } from \"zttp:env\"; let saved = \"public\"; function handler(req) { return saved; } function poison() { saved = env(\"SECRET_KEY\"); return \"blocked\"; } assert false, poison();");
-    try testing.expect(!poisoned.cleared);
-    try testing.expect(!poisoned.properties.no_secret_leakage);
-    const discarded = try probeReport("import { env } from \"zttp:env\"; function handler(req) { return \"public\"; } assert false, env(\"SECRET_KEY\");");
-    try testing.expect(!discarded.cleared);
-    try testing.expect(discarded.properties.no_secret_leakage);
 }
 
 /// The source lines of the persistent writes that `analyzeHandler` reports for
