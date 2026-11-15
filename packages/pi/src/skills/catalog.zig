@@ -110,3 +110,132 @@ test "skills steer coding tasks through compiler-native expert tools" {
     try testing.expect(std.mem.indexOf(u8, sql.body, "named SQL parameters") != null);
     try testing.expect(std.mem.indexOf(u8, sql.body, "WHERE id = ?") == null);
 }
+
+/// Census of the TypeScript in the skill files, which the model copies. Every
+/// `ts` block runs through the real check as a module and must produce no
+/// error and no warning. A block that opens with `// before` pairs a refused
+/// form with its replacement: the census checks the replacement, the text after
+/// the `// after` line. Blocks are numbered from 0 per skill, in file order.
+/// A block that fails today sits in `census_known_failures` with the codes it
+/// fails with and the reason. The list ratchets: a listed block that checks
+/// clean, or fails with a code outside its row, fails the census.
+const CensusFailure = struct {
+    skill: []const u8,
+    block: usize,
+    codes: []const []const u8,
+    reason: []const u8,
+};
+
+const census_known_failures = [_]CensusFailure{
+    .{ .skill = "route-table", .block = 0, .codes = &.{"ZTS500"}, .reason = "finding: the handler declares no Proof capsule, so the default proof profile refuses the example" },
+    .{ .skill = "sql-query", .block = 0, .codes = &.{"check:MissingSqlSchema"}, .reason = "needs a project input: SQL verification requires a configured sqlite schema that the block cannot carry" },
+    .{ .skill = "canonical-style", .block = 0, .codes = &.{"ZTS002"}, .reason = "fragment: a statement list with a top-level return" },
+    .{ .skill = "canonical-style", .block = 1, .codes = &.{ "ZTS600", "ZTS629" }, .reason = "fragment: calls makeUser, which the block does not declare" },
+    .{ .skill = "canonical-style", .block = 3, .codes = &.{ "ZTS600", "ZTS629" }, .reason = "fragment: uses load, pickStatus, ready, and fallback, which the block does not declare" },
+    .{ .skill = "canonical-style", .block = 4, .codes = &.{"ZTS629"}, .reason = "fragment: uses a and b, which the block does not declare" },
+    .{ .skill = "canonical-style", .block = 5, .codes = &.{ "ZTS106", "ZTS629" }, .reason = "fragment: uses count, which the block does not declare" },
+    .{ .skill = "canonical-style", .block = 6, .codes = &.{"ZTS629"}, .reason = "fragment: uses base, which the block does not declare" },
+    .{ .skill = "canonical-style", .block = 7, .codes = &.{ "ZTS600", "ZTS629" }, .reason = "fragment: uses send and args, which the block does not declare" },
+    .{ .skill = "canonical-style", .block = 8, .codes = &.{"ZTS500"}, .reason = "finding: a complete module without a handler is refused with ZTS500" },
+    .{ .skill = "canonical-style", .block = 9, .codes = &.{ "ZTS600", "ZTS629" }, .reason = "fragment: uses payload, items, and use, which the block does not declare" },
+    .{ .skill = "canonical-style", .block = 10, .codes = &.{"ZTS002"}, .reason = "fragment: elided `{ ... }` body" },
+    .{ .skill = "canonical-style", .block = 11, .codes = &.{"ZTS002"}, .reason = "fragment: a statement list with a top-level return" },
+    .{ .skill = "canonical-style", .block = 12, .codes = &.{"ZTS002"}, .reason = "fragment: a statement list with a top-level return" },
+    .{ .skill = "canonical-style", .block = 13, .codes = &.{"ZTS002"}, .reason = "fragment: a statement list with a top-level return" },
+};
+
+const census_block_count = 16;
+
+const CensusNoSiblings = struct {
+    fn read(_: *anyopaque, _: std.mem.Allocator, _: []const u8) anyerror![]u8 {
+        return error.FileNotFound;
+    }
+};
+
+/// The codes of every error and warning diagnostic the real check reports for
+/// `source`. An analyzer failure counts as the code `analyzer:<error name>`. A check that fails to run counts as `check:<error name>`.
+fn censusCodes(arena: std.mem.Allocator, label: []const u8, source: []const u8) ![]const []const u8 {
+    const precompile = @import("zts_cli").precompile;
+    var context: u8 = 0;
+    const path = try std.fmt.allocPrint(arena, "/skill-census/{s}.ts", .{label});
+    var result = precompile.runCheckOnlyFromSourceWithOptions(arena, source, path, .{
+        .json_mode = true,
+        .import_reader = .{ .context = &context, .read = CensusNoSiblings.read },
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {
+            const code = try std.fmt.allocPrint(arena, "check:{s}", .{@errorName(err)});
+            return try arena.dupe([]const u8, &.{code});
+        },
+    };
+    defer result.deinit(arena);
+    var codes: std.ArrayList([]const u8) = .empty;
+    if (result.analyzer_error) |err| {
+        const code = try std.fmt.allocPrint(arena, "analyzer:{s}", .{@errorName(err)});
+        try codes.append(arena, code);
+    }
+    for (result.json_diagnostics.items) |d| {
+        const blocking = std.mem.eql(u8, d.severity, "error") or std.mem.eql(u8, d.severity, "warning");
+        if (!blocking) continue;
+        try codes.append(arena, try arena.dupe(u8, d.code));
+    }
+    return codes.items;
+}
+
+/// The text the census checks for one fenced block: the whole block, or the
+/// text after the `// after` line when the block opens with `// before`.
+fn censusSource(block: []const u8) []const u8 {
+    if (!std.mem.startsWith(u8, block, "// before")) return block;
+    var offset: usize = 0;
+    var lines = std.mem.splitScalar(u8, block, '\n');
+    while (lines.next()) |line| {
+        offset += line.len + 1;
+        if (std.mem.startsWith(u8, line, "// after")) return block[@min(offset, block.len)..];
+    }
+    return block;
+}
+
+test "skill ts blocks pass the real check with no error and no warning" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var checked: usize = 0;
+    var failed = false;
+    for (&catalog) |*skill| {
+        var block_index: usize = 0;
+        var cursor: usize = 0;
+        while (std.mem.indexOfPos(u8, skill.body, cursor, "```ts\n")) |open| {
+            const start = open + "```ts\n".len;
+            const close = std.mem.indexOfPos(u8, skill.body, start, "```") orelse return error.TestUnexpectedResult;
+            cursor = close + 3;
+            const label = try std.fmt.allocPrint(arena, "{s}-{d}", .{ skill.name, block_index });
+            const codes = try censusCodes(arena, label, censusSource(skill.body[start..close]));
+            checked += 1;
+            var row: ?CensusFailure = null;
+            for (census_known_failures) |known| {
+                if (std.mem.eql(u8, known.skill, skill.name) and known.block == block_index) row = known;
+            }
+            if (row) |known| {
+                if (codes.len == 0) {
+                    std.debug.print("skill census: {s} is listed as failing and now passes\n", .{label});
+                    failed = true;
+                }
+                for (codes) |code| {
+                    var listed = false;
+                    for (known.codes) |k| listed = listed or std.mem.eql(u8, k, code);
+                    if (!listed) {
+                        std.debug.print("skill census: {s} fails with unlisted code {s}\n", .{ label, code });
+                        failed = true;
+                    }
+                }
+            } else if (codes.len != 0) {
+                for (codes) |code| std.debug.print("skill census: {s} fails with {s}\n", .{ label, code });
+                failed = true;
+            }
+            block_index += 1;
+        }
+    }
+    try testing.expectEqual(@as(usize, census_block_count), checked);
+    try testing.expect(!failed);
+}

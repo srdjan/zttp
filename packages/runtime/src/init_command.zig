@@ -1059,3 +1059,93 @@ test "initCommand writes template-specific starter README files" {
     try testing.expect(std.mem.indexOf(u8, api_readme, "# zttp API app") != null);
     try testing.expect(std.mem.indexOf(u8, api_readme, "curl http://127.0.0.1:3000/health") != null);
 }
+
+/// Census of the TypeScript that `zttp init` writes: each source runs through
+/// the real check and must produce no error and no warning. A source that
+/// fails today sits in `census_known_failures` with the codes it fails with.
+/// The list ratchets: a listed source that passes, or fails with a code outside
+/// its row, fails the census.
+const CensusMember = struct { name: []const u8, path: []const u8, template: []const u8 };
+const CensusFailure = struct { name: []const u8, codes: []const []const u8 };
+
+// The extension handler returns a plain `Response`, with no `Proof` capsule
+// (ZTS500). Its `greet` result reaches the response body as credential data
+// (ZTS401). `zts compile --module-manifest zttp-module.json handler.ts` on a
+// fresh `zttp init --extension demo` reports the same ZTS401, so the missing
+// manifest is not its cause.
+const census_known_failures = [_]CensusFailure{
+    .{ .name = "extension_handler_ts_template", .codes = &.{ "ZTS401", "ZTS500" } },
+};
+
+const CensusNoSiblings = struct {
+    fn read(_: *anyopaque, _: std.mem.Allocator, _: []const u8) anyerror![]u8 {
+        return error.FileNotFound;
+    }
+};
+
+/// The codes of every error and warning diagnostic the real check reports for
+/// `source`. An analyzer failure counts as the code `analyzer:<error name>`.
+fn censusCodes(arena: std.mem.Allocator, member: CensusMember, source: []const u8) ![]const []const u8 {
+    const precompile = @import("zts_cli").precompile;
+    var context: u8 = 0;
+    const path = try std.fs.path.join(arena, &.{ "/init-census", member.path });
+    var result = try precompile.runCheckOnlyFromSourceWithOptions(arena, source, path, .{
+        .json_mode = true,
+        .import_reader = .{ .context = &context, .read = CensusNoSiblings.read },
+    });
+    defer result.deinit(arena);
+    var codes: std.ArrayList([]const u8) = .empty;
+    if (result.analyzer_error) |err| {
+        const code = try arena.print("analyzer:{s}", .{@errorName(err)});
+        try codes.append(arena, code);
+    }
+    for (result.json_diagnostics.items) |d| {
+        const blocking = std.mem.eql(u8, d.severity, "error") or std.mem.eql(u8, d.severity, "warning");
+        if (!blocking) continue;
+        try codes.append(arena, try arena.dupe(u8, d.code));
+    }
+    return codes.items;
+}
+
+test "init scaffolds pass the real check with no error and no warning" {
+    const testing = std.testing;
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const members = [_]CensusMember{
+        .{ .name = "basicHandler", .path = "src/handler.ts", .template = basicHandler },
+        .{ .name = "apiHandler", .path = "src/handler.ts", .template = apiHandler },
+        .{ .name = "extension_handler_ts_template", .path = "handler.ts", .template = extension_handler_ts_template },
+    };
+    var checked: usize = 0;
+    var failed = false;
+    for (members) |member| {
+        const source = try std.mem.replaceOwned(u8, arena, member.template, "{{name}}", "demo");
+        const codes = try censusCodes(arena, member, source);
+        checked += 1;
+        var row: ?CensusFailure = null;
+        for (census_known_failures) |known| {
+            if (std.mem.eql(u8, known.name, member.name)) row = known;
+        }
+        if (row) |known| {
+            if (codes.len == 0) {
+                std.debug.print("init census: {s} is listed as failing and now passes\n", .{member.name});
+                failed = true;
+            }
+            for (codes) |code| {
+                var listed = false;
+                for (known.codes) |k| listed = listed or std.mem.eql(u8, k, code);
+                if (!listed) {
+                    std.debug.print("init census: {s} fails with unlisted code {s}\n", .{ member.name, code });
+                    failed = true;
+                }
+            }
+        } else if (codes.len != 0) {
+            for (codes) |code| std.debug.print("init census: {s} fails with {s}\n", .{ member.name, code });
+            failed = true;
+        }
+    }
+    try testing.expectEqual(@as(usize, 3), checked);
+    try testing.expect(!failed);
+}
