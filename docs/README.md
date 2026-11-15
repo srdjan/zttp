@@ -39,6 +39,8 @@ and superseded execution records live in the `pre-rebase` git tag, under
   features.
 - [Restrictions to Proofs](restrictions-to-proofs.md) - why each language cut
   exists.
+- [TypeScript Restrictions](ts-restrictions.md) - every source-profile
+  restriction, its diagnostic code, and its replacement form.
 - [Sound Mode](typescript.md#sound-mode) - boolean-only control flow, arithmetic, and
   comparison diagnostics.
 - [Canonicalize And Normalize](cli.md#canonicalize-and-normalize) - canonical
