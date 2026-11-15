@@ -1,6 +1,7 @@
 # TS Restrictions Enforcement Plan
 
-Status: draft revision 3, 2026-11-15. Decisions 1 and 2 wait for the owner.
+Status: revision 4, 2026-11-15. The owner approved Decision 1 (a) and every
+recommendation of Decision 2 on 2026-11-15. Execution has started.
 
 ## Goal
 
@@ -75,6 +76,8 @@ re-record window. The research found these effects:
 G4 forces a re-record in any case, because the recorded `validate-body`
 handler uses `JSON.stringify`.
 
+Owner decision, 2026-11-15: option (a).
+
 ### Decision 2: new restrictions
 
 Each candidate changes the spec, because the spec admits the form today. The
@@ -103,6 +106,9 @@ corpus outputs. Revision 2 of this table folds in the Fable review.
 
 U0 measures each "not measured" count before U6 starts.
 
+Owner decision, 2026-11-15: adopt N1 to N5, N7, N8, and N10 to N16. Defer N6,
+N9, and N17.
+
 ## Units
 
 Every fix unit follows the bug rule of AGENTS.md. First it moves the gap row
@@ -127,8 +133,10 @@ unset, and `zig build test` with an empty `ZIG_LOCAL_CACHE_DIR`.
   `packages/pi/src/simulator/testdata/empirical/deepseek/codegen/`. Record
   which gap fix and which candidate would refuse each draft.
 
-Output: the extended gap table and a ledger file
-`docs/plans/2026-11-15-ts-restrictions-sweep.md`. I commit both.
+Output: the ledger file `docs/plans/2026-11-15-ts-restrictions-sweep.md`. U0
+runs in parallel with U1, so U0 does not edit `docs/ts-restrictions.md`. After
+U1 lands, I move each new gap row of the ledger into the gap table, with its
+U1 probe, and I commit the ledger.
 
 ### U1: the restriction gate (Sonnet, 100 turns)
 
@@ -310,3 +318,9 @@ later.
   literal", have no probe.
 - Codex marked the zero-use counts as text searches, not a semantic census.
   U0 measures them with the checker.
+- `docs/plans/2026-11-15-typescript-syntax-design.md` (option A, accepted as
+  direction, migration not authorized) needs `declare const b: unique symbol;`
+  and `typeof b` inside `Nominal<...>`. G8 refuses `declare`, and G3 refuses
+  type-position `typeof`. This plan follows the current
+  `docs/ts-restrictions.md`. The option A migration must carve out those two
+  narrow forms, with owner approval of the file change.
