@@ -245,19 +245,35 @@ list yet.
 Acceptance: `test-ts-restrictions` passes. The allowlist loses one row for
 each kind that gains a refusal row.
 
-### U1c: generated-code census (Sonnet, 60 turns, no compiler change)
+### U1c: generated-code census (Sonnet, two parts, no compiler change)
 
 The compiler emits source that it must itself admit. U2a found two exceptions:
-the repair templates write an `if` body that is not a block, and the ZTS612
-and ZTS621 exact repair writes `match (!!(cond))`. Add a census to
-`ts_restrictions_gate.zig`: run each compiler-emitted source through the real
-check and require no error. The inputs are each canonical rewrite output of
-`canonicalize.zig`, each repair template of `repair_plan.zig` and
-`pi_repair_plan.zig` inside a handler, each `good_draft` and `seed_source` of
-`packages/pi/src/standin/`, each `zttp init` scaffold, and each "after" block
-of `packages/pi/src/skills/*.md`. Assert a floor on the count of each input
-kind. When a unit moves a row to a refusal table, this census fails before the
-implementer starts if generated code uses the form.
+the repair templates write an `if` body that is not a block, and the ZTS621
+exact repair writes `match (!!(cond))`. The census runs each emitted source
+through the real check and requires no diagnostic at error or warning
+severity. A census test lives beside each emitter, because pi depends on tools
+and `ts_restrictions_gate.zig` cannot reach the pi sources. Each test asserts a
+floor on its member count.
+
+A read-only survey on 2026-11-15 found the existing coverage. `test-standin`
+already proves each `seed_source` clean and each `good_draft` accepted after
+normalization, so the census leaves the seeds to it. No test checks the other
+kinds for zero errors.
+
+- U1c-1, tools and pi: each canonical rewrite of `canonicalize.zig` (the seven
+  line intents, the ZTS621 span rewrite, and the layout printer), and each
+  code template of `repair_plan.zig` and `pi_repair_plan.zig`, applied to a
+  fixture that triggers it.
+- U1c-2, runtime and pi: each TypeScript scaffold of `zttp init`
+  (`basicHandler`, `apiHandler`, `extension_handler_ts_template`), and each
+  `// after` block of `packages/pi/src/skills/*.md`. A block that cannot be a
+  module, such as an elided fragment, is named in the test with its reason.
+
+A member that fails today is a finding. It goes in a known-failure list in its
+test, with the observed codes, and the list ratchets: a listed member that
+passes fails the test. The census does not change emitted text, because
+repair templates and skills are model-visible. When a unit adds a refusal,
+the census names each emitted source that uses the form in `zig build test`.
 
 ### Unit size
 
@@ -272,7 +288,7 @@ dispatches. Bulk rewrite scripts are not allowed.
 | Unit | Rows |
 |---|---|
 | U2a | G1, `let` without an initializer, X3, X4, X5, X7, X8, X17, X32 |
-| U1c | The generated-code census (below), before U2b |
+| U1c | The generated-code census (U1c-1 and U1c-2, above), before U2b |
 | U2b | G8, G9, G10, X6, X9, X11, X12, N1, N2, N7, N14 |
 | U3 | G2, G3, G7, G11, X16 (type keys), X26, X27, X28, N8 |
 | U4a | The array set (`forEach`, `pop`, `shift`, `unshift`, `splice`), X23, X24, X25, X31, N4, N13, Decision 7 |
@@ -436,3 +452,22 @@ later.
   of the HEAD binary can confirm it. Second, a top-level `import type` with
   one leading space is refused, which the file admits. The type-only module
   matrix in `typed_frontend_tests.zig` asserts that refusal.
+- The U1c census found six emitted sources that fail the check today. Each
+  is a known-failure row in its census test. The model sees the skill files
+  and the repair templates, so a change to them waits for the re-record
+  window.
+  - The `route-table` skill example fails ZTS500. The `sql-query` example
+    needs a SQL schema, so the census cannot check it.
+  - Skill block `canonical-style-8` is a complete module with no handler, and
+    the check refuses it with ZTS500.
+  - The `zttp init --extension` handler fails ZTS500, and its `greet` call
+    gets ZTS401. `zts compile --module-manifest` reports the same ZTS401.
+  - The `replace_export_arrow_with_function` rewrite of an exported arrow
+    with a `string` parameter writes a function that ZTS061 refuses. The
+    probable cause is that ZTS061 does not check an exported arrow. A probe
+    of the arrow form can confirm it.
+  - The `redact_sensitive_sink` template inserts a `return` before the sink,
+    which leaves unreachable code (ZTS304). `candidateFromSource` refuses that
+    candidate.
+  - 12 of the 16 skill blocks are fragments. Each one that stops at ZTS002
+    shows no checker code, so a later refusal does not reach it.
