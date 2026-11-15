@@ -3884,3 +3884,191 @@ test "rewrite rows join in either order" {
     // boundary and proof-swallow allowlists follow.
     try std.testing.expect(matched_known >= known_non_joining.len);
 }
+
+// ---------------------------------------------------------------------------
+// Census: the source that the normalizer emits passes the real check
+// ---------------------------------------------------------------------------
+
+/// A census member that fails the check today, with the codes it fails with.
+/// The census ratchets on these rows: a listed member that passes, or that
+/// fails with a code outside its row, fails the census.
+const EmittedKnownFailure = struct { name: []const u8, codes: []const []const u8 };
+
+/// Check one emitted source with the real check. Returns the number of
+/// problems: a failure not listed, a listed member that passes, or a listed
+/// member that fails with a code outside its row. Prints each unlisted failing
+/// code and message, so a later unit sees which emitted source uses a refused form.
+fn emittedSourceProblems(
+    allocator: std.mem.Allocator,
+    member: []const u8,
+    source: []const u8,
+    known: []const EmittedKnownFailure,
+) !usize {
+    var check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, source, "handler.ts", .{
+        .json_mode = true,
+    });
+    defer check.deinit(allocator);
+    if (check.analyzer_error) |err| {
+        std.debug.print("[emitted census] {s}: analyzer error {s}\n", .{ member, @errorName(err) });
+        return 1;
+    }
+    var row: ?EmittedKnownFailure = null;
+    for (known) |candidate| {
+        if (std.mem.eql(u8, candidate.name, member)) row = candidate;
+    }
+    var failing: usize = 0;
+    var problems: usize = 0;
+    for (check.json_diagnostics.items) |diag| {
+        if (!std.mem.eql(u8, diag.severity, "error") and !std.mem.eql(u8, diag.severity, "warning")) continue;
+        failing += 1;
+        var listed = false;
+        if (row) |r| {
+            for (r.codes) |code| {
+                if (std.mem.eql(u8, code, diag.code)) listed = true;
+            }
+        }
+        if (!listed) {
+            std.debug.print("[emitted census] {s}: {s} {s}: {s}\n", .{ member, diag.code, diag.severity, diag.message });
+            problems += 1;
+        }
+    }
+    if (row != null and failing == 0) {
+        std.debug.print("[emitted census] {s}: listed as a known failure and now passes\n", .{member});
+        problems += 1;
+    }
+    return problems;
+}
+
+/// One census member for each (intent, stage) pair. Stage `rewrite` is the
+/// output of the rewrite loop, and stage `printer` is the production output,
+/// which adds the layout pass of `zts.printer.print`.
+fn emittedMemberName(allocator: std.mem.Allocator, intent: RepairIntent, stage: []const u8) ![]u8 {
+    return allocator.print("{s}/{s}", .{ @tagName(intent), stage });
+}
+
+test "census: the source that the normalizer emits passes the real check" {
+    const allocator = std.testing.allocator;
+
+    // One fixture for each intent that `normalizeSource` applies: six of the
+    // `rewrite_row_intents` and the ZTS621 chained ternary. The capability
+    // alias row is planned, so `selectValidated` drops it: its census follows.
+    // The ZTS612 rewrite is not a member. Its row is planned too, and no output
+    // reaches its text: `collectFromSource` builds line repairs only, the
+    // normalizer drops the repair, and `applyStatementIntent` refuses it.
+    const fixtures = [_]struct { intent: RepairIntent, source: []const u8 }{
+        .{ .intent = .replace_let_with_const, .source =
+        \\function handler(req: Request): Response {
+        \\  let count = 1;
+        \\  return Response.json({ count: count });
+        \\}
+        },
+        .{ .intent = .canonicalize_for_of_const, .source =
+        \\function handler(req: Request): Proof<Response, "deterministic"> {
+        \\  const items = [1, 2];
+        \\  for (let item of items) {
+        \\    Response.json({ item: item });
+        \\  }
+        \\  return Response.json({ ok: true });
+        \\}
+        },
+        .{ .intent = .replace_compound_assign_with_explicit, .source =
+        \\function handler(req: Request): Response {
+        \\  let total = 10;
+        \\  total -= 2 + 3;
+        \\  return Response.json({ total: total });
+        \\}
+        },
+        .{ .intent = .replace_arrow_with_function, .source =
+        \\const parse = (x: number): number => x;
+        \\function handler(req: Request): Response {
+        \\  const a = parse(1);
+        \\  const b = parse(2);
+        \\  return Response.json({ a: a, b: b });
+        \\}
+        },
+        .{ .intent = .replace_export_arrow_with_function, .source =
+        \\export const load = (id: string): Response => Response.text(id);
+        \\function handler(req: Request): Response {
+        \\  return load("x");
+        \\}
+        },
+        .{ .intent = .drop_redundant_bool_compare, .source =
+        \\function handler(req: Request): Response {
+        \\  const ready = true;
+        \\  if (ready === true) { return Response.json({ ok: true }); }
+        \\  return Response.json({ ok: false });
+        \\}
+        },
+        .{ .intent = .replace_chained_ternary_with_match, .source =
+        \\function handler(req: Request): Response {
+        \\  const a = req.method === "GET";
+        \\  const b = req.method === "POST";
+        \\  const status = a ? 200 : b ? 201 : 500;
+        \\  return Response.json({ status: status });
+        \\}
+        },
+    };
+    const alias_source =
+        \\import { env } from "zttp:env";
+        \\function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+        \\  let key = "API_KEY";
+        \\  const value = env(key);
+        \\  if (value === undefined) {
+        \\    return Response.text("missing");
+        \\  }
+        \\  return Response.text("configured");
+        \\}
+    ;
+
+    // Finding: the exported arrow rewrite emits `export function load(id: string)`,
+    // and ZTS061 refuses a raw `string` parameter on an exported function. A
+    // non-raw parameter type did not help: the exported helper then gets ZTS611, or
+    // the rewrite is not applied at all.
+    const known = [_]EmittedKnownFailure{
+        .{ .name = "replace_export_arrow_with_function/rewrite", .codes = &.{"ZTS061"} },
+        .{ .name = "replace_export_arrow_with_function/printer", .codes = &.{"ZTS061"} },
+    };
+
+    var checked: usize = 0;
+    var problems: usize = 0;
+    for (fixtures) |fixture| {
+        inline for (.{ false, true }) |layout| {
+            var nr = try normalizeSourceWithOptions(allocator, fixture.source, "handler.ts", .{ .layout = layout });
+            defer nr.deinit(allocator);
+            const member = try emittedMemberName(allocator, fixture.intent, if (layout) "printer" else "rewrite");
+            defer allocator.free(member);
+
+            var applied = false;
+            for (nr.rewrite_trace.items) |intent| {
+                if (intent == fixture.intent) applied = true;
+            }
+            if (!applied) {
+                std.debug.print("[emitted census] {s}: the fixture did not trigger its rewrite\n", .{member});
+                problems += 1;
+            }
+            problems += try emittedSourceProblems(allocator, member, nr.canonical_source, &known);
+            checked += 1;
+        }
+    }
+
+    // The capability alias: the expert tools show the candidate from
+    // `collectFromSource` and apply it through `applyRepairs`.
+    {
+        var preview = try collectFromSource(allocator, alias_source, "handler.ts");
+        defer preview.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), preview.repairs.items.len);
+        try std.testing.expectEqual(RepairIntent.canonicalize_capability_key_alias, preview.repairs.items[0].intent);
+        const rewritten = try applyRepairs(allocator, alias_source, preview.repairs.items);
+        defer allocator.free(rewritten);
+        problems += try emittedSourceProblems(allocator, "canonicalize_capability_key_alias/rewrite", rewritten, &known);
+        checked += 1;
+
+        var nr = try normalizeSourceWithOptions(allocator, rewritten, "handler.ts", .{});
+        defer nr.deinit(allocator);
+        problems += try emittedSourceProblems(allocator, "canonicalize_capability_key_alias/printer", nr.canonical_source, &known);
+        checked += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), problems);
+    try std.testing.expectEqual(@as(usize, 16), checked);
+}

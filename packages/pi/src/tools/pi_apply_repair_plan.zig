@@ -672,3 +672,188 @@ test "execute reports a manual_edit help plan as unsupported" {
     try testing.expect(std.mem.indexOf(u8, result.llm_text, "pi_apply_repair_plan has no apply step for this edit intent kind") != null);
     try testing.expect(result.ui_payload == null);
 }
+
+// ---------------------------------------------------------------------------
+// Census: the source that a repair template yields passes the real check
+// ---------------------------------------------------------------------------
+
+/// A census member that fails the check today, with the codes it fails with.
+/// A listed member that passes, or that fails with a code outside its row,
+/// fails the census.
+const TemplateKnownFailure = struct { name: []const u8, codes: []const []const u8 };
+
+test "census: the source that a repair template yields passes the real check" {
+    const allocator = testing.allocator;
+    const goal_candidate = @import("pi_goal_candidate.zig");
+    const precompile = @import("zts_cli").precompile;
+
+    // One fixture for each template that yields code: the default result guard,
+    // the `error_on_ok_path` guard, the named optional guard (all three from
+    // `concreteTemplate`), the trailing fallback return, and the redacting
+    // return. The prose template `validate_before_sink`, the empty templates,
+    // the comment templates, and the unnamed optional template are not members:
+    // the first is no code, and `concreteTemplate` replaces the last with a
+    // comment.
+    const members = [_]struct {
+        name: []const u8,
+        source: []const u8,
+        goals: []const []const u8,
+        inserted: []const u8,
+        direct_line: u32 = 0,
+    }{
+        .{
+            .name = "check_result_before_value/default_guard",
+            .goals = &.{},
+            .inserted = "if (!result.ok) return Response.json({ error: result.error }, { status: 400 });",
+            .source =
+            \\import { parseJson } from "zttp:json";
+            \\
+            \\function handler(req: Request): Proof<Response, "deterministic"> {
+            \\  const result = parseJson("1");
+            \\  const data = result.value;
+            \\  return Response.json({ data: data });
+            \\}
+            ,
+        },
+        .{
+            .name = "check_result_before_value/error_on_ok_path",
+            .goals = &.{},
+            .inserted = "if (r.ok) return Response.json({ ok: true });",
+            .source =
+            \\import { parseJson } from "zttp:json";
+            \\
+            \\function handler(req: Request): Proof<Response, "deterministic"> {
+            \\  const r = parseJson("1");
+            \\  if (r.ok) {
+            \\    return Response.json({ e: r.error });
+            \\  }
+            \\  return Response.text("no");
+            \\}
+            ,
+        },
+        .{
+            .name = "narrow_optional_before_use/named_guard",
+            .goals = &.{},
+            .inserted = "if (first === undefined) return Response.json({ error: \"missing value\" }, { status: 400 });",
+            .source =
+            \\function handler(req: Request): Proof<Response, "deterministic"> {
+            \\  const xs: string[] = ["a"];
+            \\  const first = xs[0];
+            \\  return Response.json({ n: first.length });
+            \\}
+            ,
+        },
+        .{
+            .name = "add_fallback_response/trailing_return",
+            .goals = &.{},
+            .inserted = "return Response.text(\"Not Found\", { status: 404 });",
+            .source =
+            \\function handler(req: Request): Proof<Response, "deterministic"> {
+            \\  if (req.method === "GET") {
+            \\    return Response.text("a");
+            \\  }
+            \\}
+            ,
+        },
+        .{
+            .name = "redact_sensitive_sink/redacting_return",
+            .direct_line = 8,
+            .goals = &.{"no_secret_leakage"},
+            .inserted = "return Response.json({ error: \"redacted to preserve no_secret_leakage\" }, { status: 500 });",
+            .source =
+            \\import { env } from "zttp:env";
+            \\
+            \\function handler(req: Request): Proof<Response, "no_secret_leakage"> {
+            \\  const key = env("API_KEY");
+            \\  if (key === undefined) {
+            \\    return Response.text("missing");
+            \\  }
+            \\  return Response.json({ key: key });
+            \\}
+            ,
+        },
+    };
+
+    // Finding: the redacting template is a `return` inserted before the sink line, so
+    // the sink `return` that follows is unreachable (ZTS304 warning). The goal
+    // candidate refuses the repair for the same reason.
+    const known = [_]TemplateKnownFailure{
+        .{ .name = "redact_sensitive_sink/redacting_return", .codes = &.{"ZTS304"} },
+    };
+
+    var checked: usize = 0;
+    var problems: usize = 0;
+    for (members) |member| {
+        var cand = try goal_candidate.candidateFromSource(allocator, member.source, "handler.ts", member.goals, 4);
+        defer cand.deinit(allocator);
+        // The goal candidate keeps only a repair that adds no diagnostic. A
+        // member with `direct_line` is a repair that the simulation refuses:
+        // its plan is applied through `executeSemanticPlan`, which still
+        // returns the edited source, and the census checks that source.
+        var direct: ?std.json.Parsed(std.json.Value) = null;
+        defer if (direct) |*d| d.deinit();
+        var direct_result: ?registry_mod.ToolResult = null;
+        defer if (direct_result) |*r| r.deinit(allocator);
+        var repaired: []const u8 = undefined;
+        if (cand.verified()) {
+            repaired = cand.proposed_content.?;
+        } else if (member.direct_line != 0) {
+            const args_json = try std.json.Stringify.valueAlloc(allocator, .{
+                .path = "handler.ts",
+                .source = member.source,
+                .plan = .{ .id = "rp_001", .edit_intent = .{
+                    .kind = "insert_guard_before_line",
+                    .line = member.direct_line,
+                    .column = 1,
+                    .template = member.inserted,
+                } },
+            }, .{});
+            defer allocator.free(args_json);
+            direct_result = try executeSemanticPlan(allocator, &.{args_json});
+            direct = try std.json.parseFromSlice(std.json.Value, allocator, direct_result.?.llm_text, .{});
+            repaired = direct.?.value.object.get("proposed_content").?.string;
+        } else {
+            std.debug.print("[template census] {s}: no verified candidate: {s}\n", .{ member.name, cand.reason });
+            problems += 1;
+            continue;
+        }
+        if (std.mem.indexOf(u8, repaired, member.inserted) == null) {
+            std.debug.print("[template census] {s}: the template text is not in the result:\n{s}\n", .{ member.name, repaired });
+            problems += 1;
+        }
+
+        var check = try precompile.runCheckOnlyFromSourceWithOptions(allocator, repaired, "handler.ts", .{ .json_mode = true });
+        defer check.deinit(allocator);
+        if (check.analyzer_error) |err| {
+            std.debug.print("[template census] {s}: analyzer error {s}\n", .{ member.name, @errorName(err) });
+            problems += 1;
+            continue;
+        }
+        var row: ?TemplateKnownFailure = null;
+        for (known) |candidate_row| {
+            if (std.mem.eql(u8, candidate_row.name, member.name)) row = candidate_row;
+        }
+        var failing: usize = 0;
+        for (check.json_diagnostics.items) |diag| {
+            if (!std.mem.eql(u8, diag.severity, "error") and !std.mem.eql(u8, diag.severity, "warning")) continue;
+            failing += 1;
+            var listed = false;
+            if (row) |r| {
+                for (r.codes) |code| {
+                    if (std.mem.eql(u8, code, diag.code)) listed = true;
+                }
+            }
+            if (!listed) {
+                std.debug.print("[template census] {s}: {s} {s}: {s}\n", .{ member.name, diag.code, diag.severity, diag.message });
+                problems += 1;
+            }
+        }
+        if (row != null and failing == 0) {
+            std.debug.print("[template census] {s}: listed as a known failure and now passes\n", .{member.name});
+            problems += 1;
+        }
+        checked += 1;
+    }
+    try testing.expectEqual(@as(usize, 0), problems);
+    try testing.expectEqual(@as(usize, 5), checked);
+}
