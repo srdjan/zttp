@@ -1,6 +1,6 @@
 # TypeScript-compatible syntax design
 
-Status: design proposal, 2026-11-15. The owner has not approved a syntax change.
+Status: option A accepted as the design direction, 2026-11-15. The source migration is not authorized.
 
 ## Authority and scope
 
@@ -314,13 +314,14 @@ The original probe accepted both plain and fallback assertions with exit status 
 Before the repair, the parser read the optional fallback expression.
 The restriction reference requires ZTS002 for that form.
 
-Decision 1 remains open.
-Option A, recommended: use the declarations and recognized calls in this proposal.
-Option B: use native control flow and give up the direct pattern expression surface.
+The owner selected option A for Decision 1 on 2026-11-15.
+Option A, accepted: use the declarations and recognized calls in this proposal.
+Option B, not selected: use native control flow and give up the direct pattern expression surface.
 Acceptance of the design does not by itself authorize a source migration.
 
 ## Next action
 
 The repair is committed as `5707ae91` on local `main`.
 The canonical gate and TypeScript prototype checks passed within their stated scopes.
-The owner will choose Decision 1 after reviewing the proposed surface.
+I will use option A when preparing the implementation plan.
+The plan must preserve the migration constraints stated above.
