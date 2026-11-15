@@ -1,0 +1,49 @@
+# Source-refusing diagnostic kinds that no probe of `zig build test-ts-restrictions` observes.
+#
+# The gate runs the probes of the rows of docs/ts-restrictions.md. It lists the
+# kinds of the parser, the type stripper, the type checker, and the strict
+# checker from the diagnostic catalog, and it requires each code to be observed
+# in a probe of a refusal row or of a gap row, or to have a row here that says
+# why it is not.
+#
+# One row per code: the code, then the reason. The gate enforces both
+# directions: a code that no probe observes and no row lists fails, and a row
+# for a code that a probe now observes fails. The list only ratchets down.
+#
+ZTS004 malformed source, not a form of the profile: no row of docs/ts-restrictions.md can name it
+ZTS005 malformed source, not a form of the profile: no row of docs/ts-restrictions.md can name it
+ZTS006 malformed source, not a form of the profile: no row of docs/ts-restrictions.md can name it
+ZTS007 malformed source, not a form of the profile: no row of docs/ts-restrictions.md can name it
+ZTS009 malformed source, not a form of the profile: no row of docs/ts-restrictions.md can name it
+ZTS010 malformed source, not a form of the profile: no row of docs/ts-restrictions.md can name it
+ZTS011 malformed source, not a form of the profile: no row of docs/ts-restrictions.md can name it
+ZTS014 malformed source, not a form of the profile: no row of docs/ts-restrictions.md can name it
+ZTS015 malformed source, not a form of the profile: no row of docs/ts-restrictions.md can name it
+ZTS040 malformed source, not a form of the profile: no row of docs/ts-restrictions.md can name it
+ZTS028 a compiler resource limit that the meta payload does not publish: the Limits table lists only published limits
+ZTS029 a compiler resource limit that the meta payload does not publish: the Limits table lists only published limits
+ZTS030 a compiler resource limit that the meta payload does not publish: the Limits table lists only published limits
+ZTS031 a compiler resource limit that the meta payload does not publish: the Limits table lists only published limits
+ZTS032 a compiler resource limit that the meta payload does not publish: the Limits table lists only published limits
+ZTS016 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS017 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS018 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS019 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS020 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS021 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS024 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS025 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS026 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS027 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS037 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS038 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS039 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS208 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS214 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS611 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS627 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS628 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS022 no code path emits it: a break outside a loop reports ZTS002, as the gap table says
+ZTS023 no code path emits it: a continue outside a loop reports ZTS002, as the gap table says
+ZTS044 nesting limit of the parser: docs/ts-restrictions.md names it only in prose under Limits, with no row
+ZTS215 reported for a mutating method on a readonly array; the only row that names it describes a field write, which reports ZTS200 (gap table)

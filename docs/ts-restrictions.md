@@ -52,7 +52,6 @@ the code.
 | `export let x = ...` (mutable top-level export) | ZTS057 | `export const`. Keep reassignment inside a function |
 | A top-level `let` that is never reassigned | ZTS604 | `const` |
 | A handler that writes to a module-scope variable | ZTS310 | Function-local state |
-| `import { ... } from "zttp:types"` | ZTS053 | Write `Proof<T, P>` or `Effects<T, R>` directly. Both are ambient |
 | An unknown `zttp:` module, or a name that the module does not export | ZTS206, ZTS207 | A module and an export from `packages/zts/src/builtin_modules.zig` |
 | `namespace` and `module` declarations | ZTS001 | ES modules |
 
@@ -69,6 +68,7 @@ pure.
 | A string literal that reaches the end of its line | ZTS008 | Close the quote, or write `\n` |
 | `0x`, `0b`, or `0o` with no digits, and `1e` with no exponent digits | ZTS012 | Write the digits |
 | A legacy octal literal such as `0755` | ZTS012 | `0o755`, or remove the leading zero |
+| A numeric separator such as `1_000` | ZTS012 | `1000` |
 | A character above ASCII in an identifier | ZTS046 | An ASCII identifier |
 | A statement with no `;` | ZTS047 | Write the `;`. The profile has no automatic semicolon insertion |
 
@@ -123,10 +123,7 @@ expression statement, `if`/`else`, `for...of`, `assert`, `return`, `break`,
 |---|---|---|
 | `switch` / `case` | ZTS001 | `match` |
 | `while` and `do...while` | ZTS001 | `for...of` over a finite collection |
-| C-style `for (;;)` | ZTS001 | `for (const i of range(n))` |
 | `for...in` | ZTS001 | `for (const k of Object.keys(obj))` |
-| Labeled `break` and `continue` | ZTS001 | A conditional |
-| `break` or `continue` outside a loop | ZTS022, ZTS023 | Move the statement into a `for...of` body |
 | `throw`, `try`, `catch`, and `finally` | ZTS001 | Return a `Result` or an error `Response` |
 | `debugger;` | ZTS001 | Remove the statement |
 | An empty statement `;` | ZTS001 | Remove the standalone semicolon |
@@ -160,7 +157,7 @@ no user-defined iterator protocol.
 | `-`, `*`, `/`, `%`, `**`, or unary `-` on a non-number | ZTS104 | Narrow the operand to `number` first |
 | A non-boolean condition in `if`, `assert`, or `?:` | ZTS100 | A boolean expression, such as `x !== undefined` or `n > 0` |
 | A non-boolean operand of `&&`, `\|\|`, or `!` | ZTS101, ZTS102 | A boolean expression |
-| `\|>`, `pipe()`, and `guard()` | ZTS001 | A direct call `f(a)`. Run guards by early return |
+| `\|>` | ZTS001 | A direct call `f(a)`. Run guards by early return |
 | Optional call `f?.()` | ZTS001 | Check for `undefined`, then call `f()` |
 | Optional computed access `xs?.[i]` | ZTS001 | Check for `undefined`, then read `xs[i]` |
 | An effectful arm in `a ? b : c` | ZTS612 | Bind the call to a `const` first, or use `match` over the condition |
@@ -187,7 +184,6 @@ boolean to text.
 | A member call on `unknown` or on a value with no known type | ZTS201 | Narrow with `typeof` or `isDict` first |
 | A container write whose value does not fit the slot type | ZTS200 | A value of the slot type |
 | `push`, `pop`, `shift`, `unshift`, `splice`, or a `length` write on a tuple | ZTS200 | Annotate the binding as an array |
-| A write to a `readonly` field | ZTS215 | A new record |
 
 Record shapes are fixed after allocation. `items.push(value)` is the one
 growth operation for arrays. An index write past the current length is a
@@ -213,10 +209,12 @@ absence handling.
 | A `default` arm before a `when` arm, or a second `default` arm | ZTS062 | One `default`, after every `when` arm |
 | A type-test name below the top level of a pattern, such as `when { v: string }` | ZTS001 | Bind the field and match it in a nested `match` |
 | `when _:` | ZTS001 | `default:` |
-| A `match` that does not cover every case | ZTS205, ZTS603 | Cover each member, or add `default` for an open domain |
 | A `default` arm on a closed union that is already covered | ZTS216 (warning) | Remove the `default` arm |
-| A rename to the same name, such as `{ text: text }` in a pattern | ZTS625 | `{ text }` |
-| An arm that reads a field off the scrutinee | ZTS626 | Bind the field in the pattern |
+| A rename to the same name, such as `{ text: text }` in a pattern | ZTS625 (advisory) | `{ text }` |
+| An arm that reads a field off the scrutinee | ZTS626 (advisory) | Bind the field in the pattern |
+
+An advisory names a better form for code that is already correct. An advisory
+never fails a build (spec section 4.2.1).
 
 Patterns are literals, fixed record patterns, array patterns, and six type
 tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
@@ -227,7 +225,7 @@ tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
 | Refused form | Code | Write instead |
 |---|---|---|
 | `any` in any position | ZTS041 | `unknown` with narrowing, or a precise type |
-| `x as T` and `<T>x` | ZTS042 | Narrow with `typeof`, a type predicate, or a decoder |
+| `x as T` | ZTS042 | Narrow with `typeof`, a type predicate, or a decoder |
 | `x satisfies T` | ZTS043 | An annotation on the declaration |
 | `Array<T>` | ZTS058 | `T[]` |
 | `ReadonlyArray<T>` | ZTS059 | `readonly T[]` |
@@ -244,6 +242,14 @@ index signatures, type-position `typeof`, conditional types, mapped types,
 `infer`, overloads, ambient declarations, generic defaults, and variance
 annotations. `zts check` gives none of them a targeted diagnostic. The gap
 section below gives the observed behavior.
+
+## Admitted Members
+
+The type checker admits these members on an array and on a string. Each line names one scope. The members are in sorted order. The members `forEach`, `pop`, `shift`, `unshift`, and `splice` are also admitted, but the specification excludes them. The gap table lists them.
+
+`Array.prototype`: `concat`, `every`, `filter`, `find`, `findIndex`, `includes`, `indexOf`, `join`, `length`, `map`, `push`, `reduce`, `slice`, `some`, `toReversed`, `toSorted`
+
+`String.prototype`: `charAt`, `charCodeAt`, `concat`, `endsWith`, `includes`, `indexOf`, `lastIndexOf`, `length`, `padEnd`, `padStart`, `repeat`, `replace`, `replaceAll`, `slice`, `split`, `startsWith`, `substring`, `toLowerCase`, `toUpperCase`, `trim`, `trimEnd`, `trimStart`
 
 ## Ambient Names And Effects
 
@@ -299,19 +305,36 @@ Each row is a probe that ran on 2026-11-15. Each probe was one small handler
 file. The specification excludes each form, but `zts check` did not refuse it
 with a targeted diagnostic.
 
-| Form | Observed result |
-|---|---|
-| Assignment in expression position, such as `const m = (n = 2);` | Accepted, exit 0 |
-| Generic defaults, such as `function f<T = string>(a: T): T` | Accepted, exit 0 |
-| Index signatures, such as `{ [k: string]: number }` | Accepted, exit 0, also when used in a signature |
-| `JSON.parse` and `JSON.stringify` | Accepted, exit 0 |
-| `match` on a call, such as `match (g()) { ... }` | Accepted, exit 0. The specification requires an identifier or a member path |
-| `for...of` over a fixed record | Accepted by the type and strict checks |
-| `keyof`, mapped types, conditional types, and type-position `typeof` | Accepted when unused. When used in a signature, they cause unrelated ZTS201, ZTS203, or ZTS204 errors |
-| `declare`, `abstract class`, and the non-null assertion `x!` | Refused with ZTS047, "statement is not terminated" |
-| Overload declarations, tagged templates, and comma expressions | Refused with ZTS003, "unexpected token" |
-| The angle-bracket assertion `<number>x` | Refused with ZTS002, "raw JSX is not supported". The registry names ZTS042 |
-| A generic declaration with nine type parameters | Refused with ZTS203 on the ninth argument, not with a limit diagnostic |
+The table also lists each form for which an earlier version of this file gave a
+code that the compiler does not report. The Required column gives the code and
+the form that the compiler must give. When a fix lands, the row moves to a
+refusal table. The gate `zig build test-ts-restrictions` checks each row
+against the compiler.
+
+| Form | Observed result | Required |
+|---|---|---|
+| Assignment in expression position, such as `const m = (n = 2);` | Accepted, exit 0 | ZTS001. Write the assignment as its own statement |
+| Generic defaults, such as `function f<T = string>(a: T): T` | Accepted, exit 0 | A targeted refusal. Pass the type argument at each use |
+| Index signatures, such as `{ [k: string]: number }` | Accepted, exit 0, also when used in a signature | A targeted refusal. Write `Dict<string, number>` |
+| `JSON.parse` and `JSON.stringify` | Accepted, exit 0 | ZTS629. Use `parseJson` or `stringifyJson` from `zttp:json`, or `decodeJson` from `zttp:decode` |
+| `match` on a call, such as `match (g()) { ... }` | Accepted, exit 0. The specification requires an identifier or a member path | A targeted refusal. Bind the value to a `const` first |
+| `for...of` over a fixed record | Accepted by the type and strict checks | A targeted refusal. Iterate an array, such as `Object.keys(r)` |
+| `keyof`, mapped types, conditional types, and type-position `typeof`, when unused | Accepted, exit 0 | A targeted refusal. Write the type explicitly |
+| `keyof`, mapped types, conditional types, and type-position `typeof`, when used in a signature | Unrelated errors ZTS201, ZTS203, or ZTS204 | A targeted refusal. Write the type explicitly |
+| `declare`, `abstract class`, and the non-null assertion `x!` | Refused with ZTS047, "statement is not terminated" | ZTS001 with a message that names the form |
+| Overload declarations and comma expressions | Refused with ZTS003, "unexpected token" | ZTS001 with a message that names the form |
+| Tagged templates | Refused with ZTS047, "statement is not terminated" | ZTS001 with a message that names the form |
+| The angle-bracket assertion `<number>x` | Refused with ZTS002, "raw JSX is not supported". The registry names ZTS042 | ZTS042, as for `x as T` |
+| A generic declaration with nine type parameters | Refused with ZTS203 on the ninth argument, not with a limit diagnostic | A limit diagnostic. The `meta` limits publish the limit |
+| Array members `forEach`, `pop`, `shift`, `unshift`, `splice` | Accepted, exit 0 | ZTS201. Write `for...of`, `slice`, or spread |
+| `import { ... } from "zttp:types"` | Refused with ZTS206 for a value import, and with ZTS053 for `import type` | ZTS053 for both. Write `Proof<T, P>` or `Effects<T, R>` directly. Both are ambient |
+| C-style `for (;;)` | Refused with ZTS001 and ZTS002 | ZTS001 only. Write `for (const i of range(n))` |
+| Labeled `break` and `continue` | Refused with ZTS001 and ZTS047 | ZTS001 only. Write a conditional |
+| `break` or `continue` outside a loop | Refused with ZTS002. The probes do not report ZTS022 or ZTS023 | ZTS022 for `break`, ZTS023 for `continue`. Move the statement into a `for...of` body |
+| `pipe()` and `guard()` | Refused with ZTS600 and ZTS629 | ZTS001. Write a direct call `f(a)`. Run guards by early return |
+| A write to a `readonly` field | Refused with ZTS200 | ZTS215. Write a new record |
+| A `match` that does not cover every case, in a statement or a `const` | Refused with ZTS603 | The same refusal in every position. Cover each member, or add `default` for an open domain |
+| A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |
 
 The specification also requires that the subexpressions of an assignment
 target are pure. The probes did not test that rule.
