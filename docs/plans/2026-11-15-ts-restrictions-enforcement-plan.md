@@ -131,6 +131,22 @@ The owner chose option (a) for each of these decisions on 2026-11-15:
 The other 27 rows are forms that the spec excludes and the file does not
 admit. They are gaps under the original request.
 
+### Decision 8: the `match (!!(cond))` repair under G5
+
+The ZTS612 and ZTS621 exact repairs write `match (!!(cond))`. G5 refuses each
+`match` scrutinee that is not a name path. The owner chose option (a) on
+2026-11-15: G5 stays strict, and `match` keeps one scrutinee form.
+
+The repair binds the condition first, as `const c = !!(cond);`, and then
+writes `match (c)`. The repair is exact only where the conditional is a
+`const` initializer or a `return` operand. In each other position, a new
+statement would change the evaluation order, so the diagnostic gives the
+rewrite as a proposal. U1c counts the conditionals in the other positions
+before U4e starts.
+
+The rejected options were (b), which admits `match (!!(e))` as a second
+scrutinee form, and (c), which drops the exact repair.
+
 ## Units
 
 Every fix unit follows the bug rule of AGENTS.md. First it moves the gap row
@@ -229,16 +245,40 @@ list yet.
 Acceptance: `test-ts-restrictions` passes. The allowlist loses one row for
 each kind that gains a refusal row.
 
+### U1c: generated-code census (Sonnet, 60 turns, no compiler change)
+
+The compiler emits source that it must itself admit. U2a found two exceptions:
+the repair templates write an `if` body that is not a block, and the ZTS612
+and ZTS621 exact repair writes `match (!!(cond))`. Add a census to
+`ts_restrictions_gate.zig`: run each compiler-emitted source through the real
+check and require no error. The inputs are each canonical rewrite output of
+`canonicalize.zig`, each repair template of `repair_plan.zig` and
+`pi_repair_plan.zig` inside a handler, each `good_draft` and `seed_source` of
+`packages/pi/src/standin/`, each `zttp init` scaffold, and each "after" block
+of `packages/pi/src/skills/*.md`. Assert a floor on the count of each input
+kind. When a unit moves a row to a refusal table, this census fails before the
+implementer starts if generated code uses the form.
+
+### Unit size
+
+U2a overran two 70-call budgets on test fallout, not on the parser change.
+Each later unit takes one to three rows. Before each dispatch, I run the U1c
+census and a search for the form in tests, fixtures, and examples, and I put
+the file list in the brief. A refusal and its fixture migration are separate
+dispatches. Bulk rewrite scripts are not allowed.
+
 ### Row assignment
 
 | Unit | Rows |
 |---|---|
-| U2a | G1, G5, `let` without an initializer, X19 and `if` without a block, X3, X4, X5, X7, X8, X17, X32 |
+| U2a | G1, `let` without an initializer, X3, X4, X5, X7, X8, X17, X32 |
+| U1c | The generated-code census (below), before U2b |
 | U2b | G8, G9, G10, X6, X9, X11, X12, N1, N2, N7, N14 |
 | U3 | G2, G3, G7, G11, X16 (type keys), X26, X27, X28, N8 |
 | U4a | The array set (`forEach`, `pop`, `shift`, `unshift`, `splice`), X23, X24, X25, X31, N4, N13, Decision 7 |
 | U4b | X13, X14, X15, X16 (record keys), X18, `r["a"]`, G12 with N16, N11, N12 |
-| U4c | Callback purity, Decision 3, Decision 4, X2, N10 |
+| U4c | Callback purity, Decision 3, Decision 4, X2, N10, X19 with the `if` without a block. X19 also changes the repair templates of `repair_plan.zig` and `pi_repair_plan.zig`, which write `if (!result.ok) return ...;` and are model-visible |
+| U4e | G5 with Decision 8 (a). The ZTS612 and ZTS621 exact repair in `canonicalize.zig` binds `const c = !!(cond);` and writes `match (c)` |
 | U4d | G6 with X21, X22, Decision 5, N3, N5, N15 |
 | U5 | G4 |
 | U6 | The spec text for Decisions 3, 4, 6, and 7, and for N1 to N16 |
@@ -363,6 +403,13 @@ Codex fact-checked revision 1 on 2026-11-15. I accepted its five corrections:
 the `JSON.stringify` counts, the visibility of `proof_id`, the location of the
 check function, `Boolean(x)` at runtime, and the semantics of `substring`.
 
+Fable advised on the U2a overruns on 2026-11-15. I accepted its four points:
+keep the U2a tree and move G5 to the window; add the generated-code census
+(U1c); delete a test only when no admitted form reaches its behavior, so
+seven deleted tests return in the called-closure form; and size later units
+by measured fallout. I changed one point: the U2a refusals and the test
+deletions land in one commit, because the refusals alone leave tests red.
+
 I rejected one part of finding 11. Fable recommends deferring N1 until a
 module offers bit operations. I keep "Adopt", because no example and no
 recorded draft uses a bitwise operator, and a module can add the operations
@@ -382,3 +429,10 @@ later.
   type-position `typeof`. This plan follows the current
   `docs/ts-restrictions.md`. The option A migration must carve out those two
   narrow forms, with owner approval of the file change.
+- The U2a review found two import defects that U2a does not fix. First,
+  `zts check` on a module that imports a `structural` type with
+  `import type { T } from "./t.ts";` reports ZTS200 for a matching record.
+  The probable cause is that `zts check` does not resolve type imports. A run
+  of the HEAD binary can confirm it. Second, a top-level `import type` with
+  one leading space is refused, which the file admits. The type-only module
+  matrix in `typed_frontend_tests.zig` asserts that refusal.
