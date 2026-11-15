@@ -86,6 +86,9 @@ pure.
 | A declaration with no initializer, such as `let a: number;` and `const a: number;` | ZTS021 | Write `const a: number = 1;`, or give the `let` an initializer |
 | A declaration that binds two names, such as `const a = 1, b = 2;` | ZTS001 | Write one `const` for each name |
 | `class` declarations and `class` expressions | ZTS001 | Plain records and functions |
+| `declare` declarations | ZTS001 | Import the value from a module |
+| `abstract class` | ZTS001 | Plain records and functions |
+| The non-null assertion `x!` | ZTS001 | Check for `undefined` first, or use `??` |
 | `enum` and `const enum` | ZTS001 | A literal union or a discriminated union |
 | Decorators (`@decorator`) | ZTS001 | Function composition |
 | `implements` and access modifiers (`public`, `private`, `protected`) | ZTS001 | Remove them |
@@ -335,7 +338,6 @@ against the compiler.
 | `for...of` over a fixed record | Accepted by the type and strict checks | A targeted refusal. Iterate an array, such as `Object.keys(r)` |
 | `keyof`, mapped types, conditional types, and type-position `typeof`, when unused | Accepted, exit 0 | A targeted refusal. Write the type explicitly |
 | `keyof`, mapped types, conditional types, and type-position `typeof`, when used in a signature | Unrelated errors ZTS201, ZTS203, or ZTS204 | A targeted refusal. Write the type explicitly |
-| `declare`, `abstract class`, and the non-null assertion `x!` | Refused with ZTS047, "statement is not terminated" | ZTS001 with a message that names the form |
 | Overload declarations and comma expressions | Refused with ZTS003, "unexpected token" | ZTS001 with a message that names the form |
 | Tagged templates | Refused with ZTS047, "statement is not terminated" | ZTS001 with a message that names the form |
 | The angle-bracket assertion `<number>x` | Refused with ZTS002, "raw JSX is not supported". The registry names ZTS042 | ZTS042, as for `x as T` |

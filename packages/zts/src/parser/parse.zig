@@ -1898,6 +1898,19 @@ pub const Parser = struct {
                         self.advance();
                         return error.ParseError;
                     }
+                    // `declare x` and `abstract class`: a name that is followed by
+                    // a name or a keyword starts no expression statement.
+                    const modifier_message: ?[]const u8 = if (std.mem.eql(u8, name, "declare"))
+                        "`declare` is not supported; import the value from a module"
+                    else if (std.mem.eql(u8, name, "abstract"))
+                        "`abstract class` is not supported; use plain records and functions"
+                    else
+                        null;
+                    if (modifier_message) |message| if (self.peekIsNameOrKeyword()) {
+                        self.errors.addErrorAt(.unsupported_feature, self.current, message);
+                        self.advance();
+                        return error.ParseError;
+                    };
                 }
                 return self.parseExpressionStatement();
             },
@@ -4467,6 +4480,12 @@ pub const Parser = struct {
         while (true) {
             progress.iteration(self);
             if (try self.tryConsumeAdmissionAssertion()) continue;
+            // After an operand, `!` can only be the non-null assertion `x!`.
+            if (self.current.type == .bang) {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "the non-null assertion `x!` is not supported; check for `undefined` first, or use `??`");
+                self.advance();
+                return error.ParseError;
+            }
             var pending_call: ?type_syntax.PendingExplicitCall = null;
             var prec = self.getInfixPrecedence(self.current.type);
             if (type_syntax.tokenStartsGenericList(self.source, self.current) and
@@ -5930,6 +5949,13 @@ pub const Parser = struct {
         }
         self.errors.addExpectedError(self.current, ctx_label);
         return error.UnexpectedToken;
+    }
+
+    fn peekIsNameOrKeyword(self: *Parser) bool {
+        const state = self.tokenizer.saveState();
+        const tok = self.tokenizer.next();
+        self.tokenizer.restoreState(state);
+        return tok.type == .identifier or self.isKeyword(tok.type);
     }
 
     fn peekIsPropertyName(self: *Parser) bool {

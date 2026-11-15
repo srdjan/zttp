@@ -261,6 +261,21 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(top("structural A = { a: number };")),
     },
     .{
+        .key = "`declare` declarations",
+        .refused = &.{r("declare", top("declare const a: number;"))},
+        .clean = c(top("const a: number = 1;")),
+    },
+    .{
+        .key = "`abstract class`",
+        .refused = &.{r("abstract class", top("abstract class A {\n}"))},
+        .clean = c(top("structural A = { a: number };")),
+    },
+    .{
+        .key = "The non-null assertion `x!`",
+        .refused = &.{r("x!", body("  const x: number | undefined = 1;\n  const b = x!;"))},
+        .clean = c(body("  const x: number | undefined = 1;\n  const b = x ?? 0;")),
+    },
+    .{
         .key = "`enum` and `const enum`",
         .refused = &.{
             r("enum", top("enum E {\n  A,\n}")),
@@ -1048,14 +1063,6 @@ pub const gap_rows = [_]GapRow{
             c(top("function g(a: { [K in \"a\"]: number }): number {\n  return a.a;\n}")),
             c(top("function g(a: string extends string ? number : string): number {\n  return a;\n}")),
             c(top("const v = 1;\nfunction g(a: typeof v): string {\n  return a;\n}")),
-        },
-    },
-    .{
-        .key = "`declare`, `abstract class`, and the non-null assertion `x!`",
-        .sources = &.{
-            c(top("declare const a: number;")),
-            c(top("abstract class A {\n}")),
-            c(body("  const a: number | undefined = 1;\n  const b = a!;")),
         },
     },
     .{
