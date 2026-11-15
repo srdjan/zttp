@@ -124,6 +124,7 @@ pub fn driverCode(kind: DriverKind) []const u8 {
 pub fn parserCode(kind: ParserKind) []const u8 {
     return switch (kind) {
         .unsupported_feature => "ZTS001",
+        .type_assertion => "ZTS042",
         .unexpected_token => "ZTS002",
         .expected_token => "ZTS003",
         .expected_expression => "ZTS004",
@@ -358,6 +359,7 @@ fn parserMetadata(kind: ParserKind) Metadata {
         .code = parserCode(kind),
         .family = switch (kind) {
             .unsupported_feature,
+            .type_assertion,
             .string_line_continuation,
             .non_ascii_identifier,
             .missing_semicolon,
@@ -606,8 +608,9 @@ test "only explicitly shared semantic faults have multiple producers" {
     // anything: no code path built the three verifier variants, so the second
     // producer was declared and never wired. ZTS008 is shared by the parser
     // and type-position admission. ZTS044 is shared by the compatibility
-    // diagnostic family and the parser's depth check.
-    const shared_codes = [_][]const u8{ "ZTS008", "ZTS044" };
+    // diagnostic family and the parser's depth check. ZTS042 is shared by the
+    // admission of `x as T` and the parser's refusal of `<T>x`.
+    const shared_codes = [_][]const u8{ "ZTS008", "ZTS042", "ZTS044" };
     var duplicate_count: usize = 0;
     for (all_entries, 0..) |entry, index| {
         for (all_entries[index + 1 ..]) |other| {

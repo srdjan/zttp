@@ -4628,9 +4628,10 @@ pub const Parser = struct {
                 return error.ParseError;
             },
 
-            // A leading `<` is never a core expression.
+            // A generic arrow is parsed before this arm, so a leading `<` here
+            // opens an angle-bracket type assertion.
             .lt => {
-                self.errorAtCurrent(raw_jsx_message);
+                self.errors.addErrorAt(.type_assertion, self.current, "the angle-bracket type assertion `<T>x` is not supported; narrow with `typeof`, a type predicate, or a decoder");
                 return error.UnexpectedToken;
             },
 

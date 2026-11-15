@@ -73,6 +73,7 @@ pub const ErrorKind = enum {
 
     // Unsupported features
     unsupported_feature,
+    type_assertion,
 };
 
 /// A single parse error

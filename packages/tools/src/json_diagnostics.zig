@@ -102,7 +102,7 @@ fn parserErrorCode(kind: ErrorKind) []const u8 {
 // Conversion helpers
 // -------------------------------------------------------------------------
 
-/// Extract suggestion from unsupported_feature and misplaced_default_arm
+/// Extract suggestion from unsupported_feature, type_assertion, and misplaced_default_arm
 /// parser errors. These follow the pattern: "'X' is not supported; use Y instead"
 fn splitSuggestion(message: []const u8) struct { msg: []const u8, suggestion: ?[]const u8 } {
     if (std.mem.indexOf(u8, message, "; ")) |sep| {
@@ -117,7 +117,7 @@ fn splitSuggestion(message: []const u8) struct { msg: []const u8, suggestion: ?[
 pub fn fromParseError(err: ParseError, file: []const u8) JsonDiagnostic {
     const code = parserErrorCode(err.kind);
 
-    if (err.kind == .unsupported_feature or err.kind == .misplaced_default_arm) {
+    if (err.kind == .unsupported_feature or err.kind == .type_assertion or err.kind == .misplaced_default_arm) {
         const parts = splitSuggestion(err.message);
         return .{
             .code = code,
@@ -1257,8 +1257,11 @@ test "every diagnostic code names exactly one diagnostic" {
     // `unterminated_string`: type-position admission and runtime parsing both
     // report ZTS008 for the same unterminated literal.
     // `nesting_too_deep`: type syntax and expression syntax both report ZTS044.
+    // `type_assertion` and `as_assertion`: the parser's refusal of `<T>x` and the
+    // admission of `x as T` both report ZTS042 for a type assertion.
     const shared_codes = [_]struct { code: []const u8, kinds: [2][]const u8 }{
         .{ .code = "ZTS008", .kinds = .{ "unterminated_string", "unterminated_string" } },
+        .{ .code = "ZTS042", .kinds = .{ "type_assertion", "as_assertion" } },
         .{ .code = "ZTS044", .kinds = .{ "nesting_too_deep", "nesting_too_deep" } },
     };
 

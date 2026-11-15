@@ -1583,7 +1583,7 @@ test "runCheckOnlyFromSource refuses unsupported source extensions with ZTS052" 
     }
 }
 
-test "runCheckOnlyFromSource refuses raw JSX in TypeScript with ZTS002" {
+test "runCheckOnlyFromSource refuses an element in TypeScript as a type assertion with ZTS042" {
     const source =
         \\function handler(req: Request): Response {
         \\  return Response.html(<main>hello</main>);
@@ -1596,17 +1596,17 @@ test "runCheckOnlyFromSource refuses raw JSX in TypeScript with ZTS002" {
 
     try std.testing.expectEqual(@as(u32, 1), result.parse_errors);
     try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
-    try std.testing.expectEqualStrings("ZTS002", result.json_diagnostics.items[0].code);
+    try std.testing.expectEqualStrings("ZTS042", result.json_diagnostics.items[0].code);
     try std.testing.expect(result.contract == null);
 }
 
-test "CHECK refuses an erased type prefix with ZTS002 at the angle bracket" {
+test "CHECK refuses an erased type prefix at the angle bracket" {
     const allocator = std.testing.allocator;
     const cases = [_]struct { source: []const u8, diagnostic: CompoundDiagnostic }{
-        .{ .source = "const x = <T>(1);\n", .diagnostic = .{ .code = "ZTS002", .message = "raw JSX is not supported; use ordinary TypeScript expressions", .line = 1, .column = 11 } },
-        .{ .source = "const x = <T> { id: 1 };\n", .diagnostic = .{ .code = "ZTS002", .message = "raw JSX is not supported; use ordinary TypeScript expressions", .line = 1, .column = 11 } },
-        .{ .source = "<T> { const a = 1; }\n", .diagnostic = .{ .code = "ZTS002", .message = "raw JSX is not supported; use ordinary TypeScript expressions", .line = 1, .column = 1 } },
-        .{ .source = "const x = (<T>(1));\n", .diagnostic = .{ .code = "ZTS002", .message = "raw JSX is not supported; use ordinary TypeScript expressions", .line = 1, .column = 12 } },
+        .{ .source = "const x = <T>(1);\n", .diagnostic = .{ .code = "ZTS042", .message = "the angle-bracket type assertion `<T>x` is not supported", .suggestion = "narrow with `typeof`, a type predicate, or a decoder", .line = 1, .column = 11 } },
+        .{ .source = "const x = <T> { id: 1 };\n", .diagnostic = .{ .code = "ZTS042", .message = "the angle-bracket type assertion `<T>x` is not supported", .suggestion = "narrow with `typeof`, a type predicate, or a decoder", .line = 1, .column = 11 } },
+        .{ .source = "<T> { const a = 1; }\n", .diagnostic = .{ .code = "ZTS042", .message = "the angle-bracket type assertion `<T>x` is not supported", .suggestion = "narrow with `typeof`, a type predicate, or a decoder", .line = 1, .column = 1 } },
+        .{ .source = "const x = (<T>(1));\n", .diagnostic = .{ .code = "ZTS042", .message = "the angle-bracket type assertion `<T>x` is not supported", .suggestion = "narrow with `typeof`, a type predicate, or a decoder", .line = 1, .column = 12 } },
         .{ .source = "const f = <T>(value /* ( */): number => value;\n", .diagnostic = .{ .code = "ZTS002", .message = "raw JSX is not supported; use ordinary TypeScript expressions", .line = 1, .column = 11 } },
     };
     for (cases) |case| {
@@ -6205,11 +6205,11 @@ test "CHECK preserves adjacent generic prefix refusals" {
         try std.testing.expect(result.contract == null);
         try std.testing.expectEqual(@as(usize, 1), result.json_diagnostics.items.len);
         try expectCompoundDiagnostic(result.json_diagnostics.items[0], .{
-            .code = "ZTS002",
-            .message = "raw JSX is not supported; use ordinary TypeScript expressions",
+            .code = "ZTS042",
+            .message = "the angle-bracket type assertion `<T>x` is not supported",
             .line = 1,
             .column = case.column,
-            .suggestion = null,
+            .suggestion = "narrow with `typeof`, a type predicate, or a decoder",
         });
     }
     try std.testing.expectEqual(@as(usize, 5), cases.len);

@@ -246,6 +246,7 @@ tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
 |---|---|---|
 | `any` in any position | ZTS041 | `unknown` with narrowing, or a precise type |
 | `x as T` | ZTS042 | Narrow with `typeof`, a type predicate, or a decoder |
+| The angle-bracket assertion `<T>x` | ZTS042 | Narrow with `typeof`, a type predicate, or a decoder |
 | `x satisfies T` | ZTS043 | An annotation on the declaration |
 | `Array<T>` | ZTS058 | `T[]` |
 | `ReadonlyArray<T>` | ZTS059 | `readonly T[]` |
@@ -340,7 +341,6 @@ against the compiler.
 | `for...of` over a fixed record | Accepted by the type and strict checks | A targeted refusal. Iterate an array, such as `Object.keys(r)` |
 | `keyof`, mapped types, conditional types, and type-position `typeof`, when unused | Accepted, exit 0 | A targeted refusal. Write the type explicitly |
 | `keyof`, mapped types, conditional types, and type-position `typeof`, when used in a signature | Unrelated errors ZTS201, ZTS203, or ZTS204 | A targeted refusal. Write the type explicitly |
-| The angle-bracket assertion `<number>x` | Refused with ZTS002, "raw JSX is not supported". The registry names ZTS042 | ZTS042, as for `x as T` |
 | A generic declaration with nine type parameters | Refused with ZTS203 on the ninth argument, not with a limit diagnostic | A limit diagnostic. The `meta` limits publish the limit |
 | Array members `forEach`, `pop`, `shift`, `unshift`, `splice` | Accepted | ZTS201. Write `for...of`, `slice`, or spread |
 | `import { ... } from "zttp:types"` | Refused with ZTS206 for a value import, and with ZTS053 for `import type` | ZTS053 for both. Write `Proof<T, P>` or `Effects<T, R>` directly. Both are ambient |

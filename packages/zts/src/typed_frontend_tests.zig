@@ -1302,7 +1302,7 @@ test "adjacent erased prefix lists remain outside direct admission" {
             return error.TestUnexpectedResult);
         const errors = direct.errors.getErrors();
         try std.testing.expectEqual(@as(usize, if (case.second_error == null) 1 else 2), errors.len);
-        try std.testing.expectEqual(engine.parser.ErrorKind.unexpected_token, errors[0].kind);
+        try std.testing.expectEqual(engine.parser.ErrorKind.type_assertion, errors[0].kind);
         try std.testing.expectEqual(first_list, errors[0].location.offset);
         if (case.second_error) |offset| {
             try std.testing.expectEqual(engine.parser.ErrorKind.unexpected_token, errors[1].kind);

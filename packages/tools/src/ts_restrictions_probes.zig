@@ -854,6 +854,11 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(body("  const v: unknown = 1;\n  if (typeof v === \"number\") {\n    const n: number = v;\n  }")),
     },
     .{
+        .key = "The angle-bracket assertion `<T>x`",
+        .refused = &.{r("<T>x", body("  const v: unknown = 1;\n  const n = <number>v;"))},
+        .clean = c(body("  const v: unknown = 1;\n  if (typeof v === \"number\") {\n    const n: number = v;\n  }")),
+    },
+    .{
         .key = "`x satisfies T`",
         .refused = &.{r("x satisfies T", body("  const n = 1 satisfies number;"))},
         .clean = c(body("  const n: number = 1;")),
@@ -1077,10 +1082,6 @@ pub const gap_rows = [_]GapRow{
             c(top("function g(a: string extends string ? number : string): number {\n  return a;\n}")),
             c(top("const v = 1;\nfunction g(a: typeof v): string {\n  return a;\n}")),
         },
-    },
-    .{
-        .key = "The angle-bracket assertion `<number>x`",
-        .sources = &.{c(body("  const v: unknown = 1;\n  const n = <number>v;"))},
     },
     .{
         .key = "A generic declaration with nine type parameters",

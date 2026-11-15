@@ -353,13 +353,13 @@ test "Parser API getImports returns imported names" {
     try std.testing.expectEqualStrings("base64Encode", imports[0].specifier_names[1]);
 }
 
-test "core parser rejects raw JSX element syntax" {
+test "core parser refuses an element as an angle-bracket type assertion" {
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, "const view = <div />;", .compile);
     defer parser.deinit();
 
     try std.testing.expectError(error.UnexpectedToken, parser.parse());
     try std.testing.expect(parser.hasErrors());
-    try std.testing.expectEqual(ErrorKind.unexpected_token, parser.getErrors()[0].kind);
+    try std.testing.expectEqual(ErrorKind.type_assertion, parser.getErrors()[0].kind);
 }
 
 test "var keyword is rejected with helpful error" {
