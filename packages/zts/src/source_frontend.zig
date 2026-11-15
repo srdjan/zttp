@@ -791,7 +791,7 @@ test "DirectCheckSource validates runtime owners before publication" {
 }
 
 test "direct source distinguishes signatures and shadowed binding annotations" {
-    const source = "function outer(value: number): number { const convert = (value: string): string => value; const item: number = value; { const item: string = convert(\"x\"); } return value; } function next(value: boolean): boolean { return value; }";
+    const source = "function outer(value: number): number { const convert = (value: string): string => value; const item: number = value; if (value > 0) { const item: string = convert(\"x\"); } return value; } function next(value: boolean): boolean { return value; }";
     var owner: DirectCheckSource = undefined;
     try owner.initCompileInPlace(std.testing.allocator, std.testing.allocator, source, "signatures.ts");
     defer owner.deinit();

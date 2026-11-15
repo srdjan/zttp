@@ -1359,7 +1359,7 @@ test "type-only module matrix preserves public runtime admission and exact recor
             .rejected_at = "export",
         },
         .{
-            .source = "{ import type { A } from \"./a\"; const live = 1; }\n" ++
+            .source = "if (true) { import type { A } from \"./a\"; const live = 1; }\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{},
             .runtime_success = false,
@@ -1450,7 +1450,7 @@ test "type-only module matrix preserves public runtime admission and exact recor
             .rejected_at = "export",
         },
         .{
-            .source = "{\n" ++
+            .source = "if (true) {\n" ++
                 "  import type { A } from \"./a\";\n" ++
                 "  const live = 1;\n" ++
                 "}\n" ++
@@ -1460,7 +1460,7 @@ test "type-only module matrix preserves public runtime admission and exact recor
             .rejected_at = "import",
         },
         .{
-            .source = "{import type { A } from \"./a\";}\n" ++
+            .source = "if (true) {import type { A } from \"./a\";}\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
             .modules = &.{},
             .runtime_success = false,
@@ -1481,7 +1481,7 @@ test "type-only module matrix preserves public runtime admission and exact recor
             .rejected_at = "export",
         },
         .{
-            .source = "{\n" ++
+            .source = "if (true) {\n" ++
                 "import type { A } from \"./a\";\n" ++
                 "}\n" ++
                 "function handler(req: Request): Response { return Response.text(\"ok\"); }\n",
@@ -11695,7 +11695,6 @@ fn expectDirectConsumerMatrixCase(
 
 const LookupConsumerCase = enum {
     forward_repeated,
-    repeated_predicates,
     return_fallback,
     untyped_shadow_gap,
     shadowed_capture,
@@ -11735,34 +11734,6 @@ test "direct consumers preserve measured lookup winners shadows and captures" {
             },
         },
         .{
-            .case = .repeated_predicates,
-            .source =
-            \\{
-            \\  function isText(value: string | number): value is string {
-            \\    return typeof value === "string";
-            \\  }
-            \\  const raw: string | number = "first";
-            \\  if (isText(raw)) { const text: string = raw; }
-            \\}
-            \\{
-            \\  function isText(skip: number, value: string | number): value is string {
-            \\    return typeof value === "string";
-            \\  }
-            \\  const raw: string | number = "second";
-            \\  if (isText(0, raw)) { const text: string = raw; }
-            \\}
-            \\export function handler(req: Request): Response {
-            \\  return Response.json({ ok: true });
-            \\}
-            \\
-            ,
-            .type_diagnostics = &.{
-                .{ .kind = .invalid_type_predicate, .line = 9, .column = 3 },
-                .{ .kind = .type_mismatch, .line = 13, .column = 25 },
-            },
-            .strict_diagnostics = &.{},
-        },
-        .{
             .case = .return_fallback,
             .source =
             \\function numericValue(): number {
@@ -11800,7 +11771,7 @@ test "direct consumers preserve measured lookup winners shadows and captures" {
             \\const item: number = 1;
             \\function readItem(): string {
             \\  const item = "inferred";
-            \\  {
+            \\  if (true) {
             \\    const item: string = "typed";
             \\    return item;
             \\  }
@@ -11819,7 +11790,7 @@ test "direct consumers preserve measured lookup winners shadows and captures" {
             \\function compute(): number {
             \\  const value: number = 1;
             \\  const readOuter = (): number => value;
-            \\  {
+            \\  if (true) {
             \\    const value: string = "inner";
             \\    const readInner = (): string => value;
             \\    const outerResult: number = readOuter();
@@ -11841,7 +11812,7 @@ test "direct consumers preserve measured lookup winners shadows and captures" {
             \\const item: number = 1;
             \\function readItem(): string {
             \\  const item = "inferred";
-            \\  {
+            \\  if (true) {
             \\    const item: string = 2;
             \\    return item;
             \\  }
@@ -11860,7 +11831,7 @@ test "direct consumers preserve measured lookup winners shadows and captures" {
             \\function compute(): number {
             \\  const value: number = 1;
             \\  const readOuter = (): number => value;
-            \\  {
+            \\  if (true) {
             \\    const value: string = "inner";
             \\    const readInner = (): number => value;
             \\    const outerResult: number = readOuter();
@@ -12203,7 +12174,7 @@ fn expectDirectFunctionCapsules(source: []const u8) !void {
     const direct_selected = direct_capsules.byName("helper") orelse
         return error.TestUnexpectedResult;
     try std.testing.expect(direct_selected == &direct_capsules.capsules.items[0]);
-    try std.testing.expectEqual(@as(u32, 4), direct_selected.line);
+    try std.testing.expectEqual(@as(u32, 3), direct_selected.line);
     try std.testing.expectEqual(@as(usize, 0), direct_selected.declared.items.len);
     try std.testing.expect(direct_selected.proven.total);
     try std.testing.expect(!direct_selected.proven.pure);
@@ -12217,8 +12188,8 @@ fn expectDirectFunctionCapsules(source: []const u8) !void {
     try std.testing.expect(direct_selected.effectDischarged());
 
     const direct_second = &direct_capsules.capsules.items[1];
-    try std.testing.expectEqualStrings("helper", direct_second.name);
-    try std.testing.expectEqual(@as(u32, 8), direct_second.line);
+    try std.testing.expectEqualStrings("other", direct_second.name);
+    try std.testing.expectEqual(@as(u32, 4), direct_second.line);
     try std.testing.expectEqual(@as(usize, 0), direct_second.declared.items.len);
     try std.testing.expect(direct_second.proven.total);
     try std.testing.expect(direct_second.proven.pure);
@@ -12233,18 +12204,12 @@ fn expectDirectFunctionCapsules(source: []const u8) !void {
     try direct_env.ensureHealthy();
 }
 
-test "direct function specifications preserve nonempty effects and repeated helper selection" {
+test "direct function specifications preserve nonempty effects and helper selection by name" {
     const source =
         \\import { sha256 } from "zttp:crypto";
         \\structural Text = string;
-        \\{
-        \\  function helper(value: Text): Effects<Text, "crypto"> { return sha256(value); }
-        \\  helper("first");
-        \\}
-        \\{
-        \\  function helper(value: Text): Effects<Text, "clock"> { return value; }
-        \\  helper("second");
-        \\}
+        \\function helper(value: Text): Effects<Text, "crypto"> { return sha256(value); }
+        \\function other(value: Text): Effects<Text, "clock"> { return value; }
         \\
     ;
     try expectDirectFunctionCapsules(source);

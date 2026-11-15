@@ -3402,7 +3402,7 @@ test "an imported helper whose file will not parse is refused under that file" {
         \\
     );
     defer fixture.deinit();
-    try fixture.add("dep.ts", "export function logIt(x: string): number {{{\n");
+    try fixture.add("dep.ts", "export function logIt(x: string): number {\n");
     var result = try fixture.check();
     defer result.deinit(std.testing.allocator);
     try expectRefusedAt(&fixture, &result, "ZTS003", "dep.ts");
@@ -6400,7 +6400,7 @@ test "CHECK preserves type-only module admission and refusal diagnostics" {
         .{ .source = "import type { A } from \"./a\";\nexport type { B }\nexport structural Shape = { value: string };\nexport nominal Id = string;\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 6, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
         .{ .source = "function helper(): number { import type { A } from \"./a\"; return 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 29, .suggestion = null } },
         .{ .source = "function helper(): number { export type { A }; return 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 29, .suggestion = null } },
-        .{ .source = "{ import type { A } from \"./a\"; const live = 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 3, .suggestion = null } },
+        .{ .source = "if (true) { import type { A } from \"./a\"; const live = 1; }\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 13, .suggestion = null } },
         .{ .source = "import type { A } from \"./a;b\";\nconst live: number = 1;\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 3, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
         .{ .source = "import type { A } /* ; */ from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "expected expression", .line = 1, .column = 24, .suggestion = null } },
         .{ .source = "import /* gap */ type { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import type X from' is not supported; write 'import type { X } from \"module\"'", .line = 1, .column = 1, .suggestion = null } },
@@ -6414,11 +6414,11 @@ test "CHECK preserves type-only module admission and refusal diagnostics" {
         .{ .source = "export type { broken nonsense };\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .contract, .diagnostic = .{ .code = proof_diagnostic.code, .message = proof_diagnostic.message, .line = 2, .column = proof_diagnostic.column, .suggestion = proof_diagnostic.suggestion } },
         .{ .source = "function helper(): number {\n  import type { A } from \"./a\";\n  return 1;\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 3, .suggestion = null } },
         .{ .source = "function helper(): number {\n  export type { A };\n  return 1;\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 3, .suggestion = null } },
-        .{ .source = "{\n  import type { A } from \"./a\";\n  const live = 1;\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 3, .suggestion = null } },
-        .{ .source = "{import type { A } from \"./a\";}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 2, .suggestion = null } },
+        .{ .source = "if (true) {\n  import type { A } from \"./a\";\n  const live = 1;\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 3, .suggestion = null } },
+        .{ .source = "if (true) {import type { A } from \"./a\";}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 12, .suggestion = null } },
         .{ .source = "function helper(): number {import type { A } from \"./a\";return 1;}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 28, .suggestion = null } },
         .{ .source = "function helper(): number {export type { A };return 1;}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 1, .column = 28, .suggestion = null } },
-        .{ .source = "{\nimport type { A } from \"./a\";\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 1, .suggestion = null } },
+        .{ .source = "if (true) {\nimport type { A } from \"./a\";\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 1, .suggestion = null } },
         .{ .source = "function helper(): number {\nimport type { A } from \"./a\";\nreturn 1;\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 1, .suggestion = null } },
         .{ .source = "function helper(): number {\nexport type { A };\nreturn 1;\n}\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 1, .suggestion = null } },
         .{ .source = " import type { A } from \"./a\";\nfunction handler(req: Request): Response { return Response.json({ now: Date.now() }); }\n", .stage = .parse, .diagnostic = .{ .code = "ZTS002", .message = "'import type X from' is not supported; write 'import type { X } from \"module\"'", .line = 1, .column = 2, .suggestion = null } },
@@ -6714,8 +6714,6 @@ test "CHECK preserves measured lookup winners shadows and captures" {
     const ambient_suggestion =
         "Import a published virtual-module capability or use an ambient name listed by " ++
         "meta.ambient_names.";
-    const predicate_suggestion =
-        "Return one admitted narrowing test over the named parameter, combined with &&, || or !.";
     const return_suggestion =
         "the enclosing function's declared return type is what this value must match; " ++
         "when it comes back from a virtual-module call, wrap it rather than returning it directly";
@@ -6770,35 +6768,6 @@ test "CHECK preserves measured lookup winners shadows and captures" {
         },
         .{
             .source =
-            \\{
-            \\  function isText(value: string | number): value is string {
-            \\    return typeof value === "string";
-            \\  }
-            \\  const raw: string | number = "first";
-            \\  if (isText(raw)) { const text: string = raw; }
-            \\}
-            \\{
-            \\  function isText(skip: number, value: string | number): value is string {
-            \\    return typeof value === "string";
-            \\  }
-            \\  const raw: string | number = "second";
-            \\  if (isText(0, raw)) { const text: string = raw; }
-            \\}
-            \\export function handler(req: Request): Response {
-            \\  return Response.json({ ok: true });
-            \\}
-            \\
-            ,
-            .type_errors = 2,
-            .strict_errors = 0,
-            .has_contract = false,
-            .diagnostics = &.{
-                .{ .code = "ZTS211", .message = "type predicate 'isText' is not verified by its body", .line = 9, .column = 3, .suggestion = predicate_suggestion },
-                .{ .code = "ZTS200", .message = "type 'string | number' is not assignable to type 'string'", .line = 13, .column = 25 },
-            },
-        },
-        .{
-            .source =
             \\function numericValue(): number {
             \\  const value: number = make();
             \\  function make(): number { return 1; }
@@ -6827,7 +6796,7 @@ test "CHECK preserves measured lookup winners shadows and captures" {
             \\const item: number = 1;
             \\function readItem(): string {
             \\  const item = "inferred";
-            \\  {
+            \\  if (true) {
             \\    const item: string = "typed";
             \\    return item;
             \\  }
@@ -6853,7 +6822,7 @@ test "CHECK preserves measured lookup winners shadows and captures" {
             \\function compute(): number {
             \\  const value: number = 1;
             \\  const readOuter = (): number => value;
-            \\  {
+            \\  if (true) {
             \\    const value: string = "inner";
             \\    const readInner = (): string => value;
             \\    const outerResult: number = readOuter();
@@ -6905,7 +6874,7 @@ test "CHECK preserves measured lookup winners shadows and captures" {
             \\const item: number = 1;
             \\function readItem(): string {
             \\  const item = "inferred";
-            \\  {
+            \\  if (true) {
             \\    const item: string = 2;
             \\    return item;
             \\  }
@@ -6930,7 +6899,7 @@ test "CHECK preserves measured lookup winners shadows and captures" {
             \\function compute(): number {
             \\  const value: number = 1;
             \\  const readOuter = (): number => value;
-            \\  {
+            \\  if (true) {
             \\    const value: string = "inner";
             \\    const readInner = (): number => value;
             \\    const outerResult: number = readOuter();
@@ -6978,7 +6947,7 @@ test "CHECK preserves measured lookup winners shadows and captures" {
         try std.testing.expectEqual(case.has_contract, result.contract != null);
         observed += 1;
     }
-    try std.testing.expectEqual(@as(usize, 7), cases.len);
+    try std.testing.expectEqual(@as(usize, 6), cases.len);
     try std.testing.expectEqual(cases.len, observed);
 }
 

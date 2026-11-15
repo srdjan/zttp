@@ -133,9 +133,10 @@ is the only arity flexibility in the profile.
 
 ## Statements And Control Flow
 
-The statement set is: block, `const`, necessary `let`, plain assignment,
-expression statement, `if`/`else`, `for...of`, `assert`, `return`, `break`,
-`continue`, and local function declaration.
+The statement set is: `const`, necessary `let`, plain assignment, expression
+statement, `if`/`else`, `for...of`, `assert`, `return`, `break`, `continue`,
+and local function declaration. A block is only the body of a function, `if`,
+`else`, or `for...of`.
 
 | Refused form | Code | Write instead |
 |---|---|---|
@@ -145,6 +146,8 @@ expression statement, `if`/`else`, `for...of`, `assert`, `return`, `break`,
 | `throw`, `try`, `catch`, and `finally` | ZTS001 | Return a `Result` or an error `Response` |
 | `debugger;` | ZTS001 | Remove the statement |
 | An empty statement `;` | ZTS001 | Remove the standalone semicolon |
+| A bare block statement, such as `{ const a = 1; }` | ZTS001 | Put its statements in the enclosing block |
+| An empty body of `if`, `else`, or `for...of`, such as `if (c) {}` | ZTS001 | Remove the statement, or invert the condition and drop the empty branch |
 | A fallback `assert` form | ZTS002 | `if (!predicate) { return fallback; }` |
 | A `for...of` body that mutates the collection that it iterates | ZTS622 | Read one collection and build the changed one separately |
 | `range(n).map(f)` and other array members on `range(n)` | ZTS201 | `for (const i of range(n))` |
@@ -381,7 +384,7 @@ against the compiler.
 | A string-literal read of an identifier key, such as `r["a"]` | Accepted, exit 0 | ZTS605. Write `r.a` |
 | A call in an assignment target, such as `mk().n = 2` | Accepted, exit 0 | A targeted refusal. Bind the call result to a `const` first |
 | A higher-order callback that calls `push`, or that assigns a captured binding | Accepted, exit 0 | A targeted refusal. Build the result with `for...of` |
-| A top-level statement other than a registration call, such as `f();` and `if (c) { }` | Accepted, exit 0 | A targeted refusal. Move the statement into a function. A bare `schemaCompile(...)` or `sql(...)` call with literal arguments stays admitted |
+| A top-level statement other than a registration call, such as `f();` and `if (c) { f(); }` | Accepted, exit 0 | A targeted refusal. Move the statement into a function. A bare `schemaCompile(...)` or `sql(...)` call with literal arguments stays admitted |
 | An arrow outside a callback argument: a `const`-bound arrow, a returned arrow, an arrow in a record field, an immediately called arrow, and an arrow as a `?:` arm | Accepted, exit 0. ZTS608 refuses only a reused helper | A targeted refusal. Write a module-level `function` |
 | A top-level initializer with an effect, such as `const t: number = Date.now();` | Accepted, exit 0 | A targeted refusal. Compute the value inside a function |
 | `for...of` over a number, such as `for (const k of 5)` | Accepted, exit 0 | A targeted refusal. Iterate an array, a string, or `range(n)` |

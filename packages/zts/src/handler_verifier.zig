@@ -3187,7 +3187,7 @@ test "a table stored or iterated through a value position is unresolved" {
         // for...of iterable
         \\const routes = { "GET /": getHome };
         \\function handler(req) {
-        \\  for (const k of routes) {}
+        \\  for (const k of routes) { k; }
         ,
         // array element in a discarded expression
         \\const routes = { "GET /": getHome };

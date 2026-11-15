@@ -476,12 +476,12 @@ pub const refusal_rows = [_]RefusalRow{
             r("while", body("  while (false) {\n  }")),
             r("do...while", body("  do {\n  } while (false);")),
         },
-        .clean = c(body("  for (const i of range(3)) {\n  }")),
+        .clean = c(body("  for (const i of range(3)) {\n    const y = i;\n  }")),
     },
     .{
         .key = "`for...in`",
         .refused = &.{r("for...in", body("  const o = { a: 1 };\n  for (const k in o) {\n  }"))},
-        .clean = c(body("  const o = { a: 1 };\n  for (const k of Object.keys(o)) {\n  }")),
+        .clean = c(body("  const o = { a: 1 };\n  for (const k of Object.keys(o)) {\n    const y = k;\n  }")),
     },
     .{
         .key = "`throw`, `try`, `catch`, and `finally`",
@@ -504,6 +504,21 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(body("  const x = 1;")),
     },
     .{
+        .key = "A bare block statement, such as `{ const a = 1; }`",
+        .refused = &.{r("{ const a = 1; }", body("  { const a = 1; }"))},
+        .clean = c(body("  const a = 1;")),
+    },
+    .{
+        .key = "An empty body of `if`, `else`, or `for...of`, such as `if (c) {}`",
+        .refused = &.{
+            r("if", body("  const c = req.method === \"GET\";\n  if (c) {}")),
+            r("else", body("  const c = req.method === \"GET\";\n  if (c) {\n    return Response.text(\"get\");\n  } else {}")),
+            r("for...of", body("  for (const x of [1, 2]) {}")),
+            r("if (c) {}", body("  const c = req.method === \"GET\";\n  if (c) {}")),
+        },
+        .clean = c(body("  const c = req.method === \"GET\";\n  if (c) {\n    return Response.text(\"get\");\n  }")),
+    },
+    .{
         .key = "A fallback `assert` form",
         .refused = &.{r("assert", body("  assert 1 === 1, Response.text(\"no\");"))},
         .clean = c(body("  if (1 !== 1) {\n    return Response.text(\"no\");\n  }")),
@@ -519,7 +534,7 @@ pub const refusal_rows = [_]RefusalRow{
             r("range(n).map(f)", body("  const ys = range(3).map((i: number): number => i);")),
             r("range(n)", body("  const ys = range(3).filter((i: number): boolean => i > 0);")),
         },
-        .clean = c(body("  for (const i of range(3)) {\n  }")),
+        .clean = c(body("  for (const i of range(3)) {\n    const y = i;\n  }")),
     },
 
     // ----- Operators And Expressions -----
@@ -656,11 +671,11 @@ pub const refusal_rows = [_]RefusalRow{
     .{
         .key = "A non-boolean condition in `if`, `assert`, or `?:`",
         .refused = &.{
-            r("if", body("  const n = 1;\n  if (n) {\n  }")),
+            r("if", body("  const n = 1;\n  if (n) {\n    const y = n;\n  }")),
             r("assert", body("  const n = 1;\n  assert n;")),
             r("?:", body("  const n = 1;\n  const a = n ? 1 : 2;")),
         },
-        .clean = c(body("  const n = 1;\n  if (n > 0) {\n  }")),
+        .clean = c(body("  const n = 1;\n  if (n > 0) {\n    const y = n;\n  }")),
     },
     .{
         .key = "A non-boolean operand of `&&`, `||`, or `!`",
@@ -1108,7 +1123,7 @@ pub const gap_rows = [_]GapRow{
     },
     .{
         .key = "`for...of` over a fixed record",
-        .sources = &.{c(body("  const o = { a: 1 };\n  for (const v of o) {\n  }"))},
+        .sources = &.{c(body("  const o = { a: 1 };\n  for (const v of o) {\n    const y = v;\n  }"))},
     },
     .{
         .key = "`keyof`, mapped types, conditional types, and type-position `typeof`, when unused",
@@ -1345,10 +1360,10 @@ pub const gap_rows = [_]GapRow{
         },
     },
     .{
-        .key = "A top-level statement other than a registration call, such as `f();` and `if (c) { }`",
+        .key = "A top-level statement other than a registration call, such as `f();` and `if (c) { f(); }`",
         .sources = &.{
             c(top("function f(): number {\n  return 1;\n}\nf();")),
-            c(top("if (true) {\n}")),
+            c(top("if (true) {\n  const y = 1;\n}")),
         },
     },
     .{
@@ -1367,7 +1382,7 @@ pub const gap_rows = [_]GapRow{
     },
     .{
         .key = "`for...of` over a number, such as `for (const k of 5)`",
-        .sources = &.{c(top("function g(): number {\n  for (const k of 5) {\n  }\n  return 1;\n}"))},
+        .sources = &.{c(top("function g(): number {\n  for (const k of 5) {\n    const y = k;\n  }\n  return 1;\n}"))},
     },
     .{
         .key = "`stringifyJson` of a value that JSON cannot carry, such as a function or a `Dict<number, string>`",

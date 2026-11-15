@@ -1904,7 +1904,10 @@ pub const Parser = struct {
                 }
                 return self.parseImportDeclaration();
             },
-            .lbrace => self.parseBlock(),
+            .lbrace => {
+                self.errors.addErrorAt(.unsupported_feature, self.current, "a bare block statement is not supported; put its statements in the enclosing block");
+                return self.parseBlock();
+            },
             .semicolon => {
                 self.errors.addErrorAt(.unsupported_feature, self.current, "empty statements are not supported; remove the standalone `;`");
                 self.advance();
@@ -3506,6 +3509,19 @@ pub const Parser = struct {
         };
     }
 
+    /// The body of `if`, `else`, or `for...of`. A block is admitted only here
+    /// and as a function body, and it must hold a statement.
+    fn parseStatementBody(self: *Parser) anyerror!NodeIndex {
+        if (!self.check(.lbrace)) return self.parseStatement();
+        const state = self.tokenizer.saveState();
+        const next = self.tokenizer.next();
+        self.tokenizer.restoreState(state);
+        if (next.type == .rbrace) {
+            self.errors.addErrorAt(.unsupported_feature, self.current, "an empty block is not supported; remove the statement, or invert the condition and drop the empty branch");
+        }
+        return self.parseBlock();
+    }
+
     fn parseIfStatement(self: *Parser) anyerror!NodeIndex {
         const loc = self.current.location();
         self.advance(); // consume 'if'
@@ -3514,11 +3530,11 @@ pub const Parser = struct {
         const condition = try self.parseExpression(.none);
         try self.expect(.rparen, "')'");
 
-        const then_branch = try self.parseStatement();
+        const then_branch = try self.parseStatementBody();
 
         var else_branch: NodeIndex = null_node;
         if (self.match(.kw_else)) {
-            else_branch = try self.parseStatement();
+            else_branch = try self.parseStatementBody();
         }
 
         return try self.nodes.addIf(loc, .{
@@ -3600,7 +3616,7 @@ pub const Parser = struct {
 
                     const was_in_loop = self.in_loop;
                     self.in_loop = true;
-                    const body = try self.parseStatement();
+                    const body = try self.parseStatementBody();
                     self.in_loop = was_in_loop;
 
                     self.scopes.popScope();

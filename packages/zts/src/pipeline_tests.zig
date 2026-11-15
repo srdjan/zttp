@@ -190,16 +190,6 @@ fn extractSessionContractForTest(
     };
 }
 
-fn hasSpecDiagnosticKind(
-    contract: *const HandlerContract,
-    kind: handler_contract_mod.SpecDiagnostic.Kind,
-) bool {
-    for (contract.spec_diagnostics.items) |diagnostic| {
-        if (diagnostic.kind == kind) return true;
-    }
-    return false;
-}
-
 fn expectStringSlices(expected: []const []const u8, actual: []const []const u8) !void {
     try testing.expectEqual(expected.len, actual.len);
     for (expected, actual) |expected_item, actual_item| {
@@ -604,54 +594,6 @@ test "ModuleAnalysisSession publishes owned exports for both extraction profiles
             .data, .blocked => return error.CallableExportExpected,
         }
     }
-}
-
-test "contract summary keeps selected handler separate from first named effect row" {
-    const allocator = testing.allocator;
-    const source =
-        \\import { cacheSet } from "zttp:cache";
-        \\{
-        \\  function handler(req) { return Response.text("local"); }
-        \\}
-        \\function handler(req): Effects<Response, "clock"> {
-        \\  cacheSet("state", "key", "value", 10);
-        \\  return Response.text("global");
-        \\}
-    ;
-    var frontend: source_frontend_mod.DirectCheckSource = undefined;
-    try frontend.initCompileInPlace(allocator, allocator, source, "duplicate-handler.ts");
-    defer frontend.deinit();
-    const accepted = frontend.acceptedCapabilities() orelse return error.TestUnexpectedResult;
-    var analysis: ModuleAnalysisSession = .{};
-    try analysis.initFull(allocator, ParsedModule.fromTypedExisting(
-        accepted.ir_view,
-        accepted.root,
-        accepted.atoms,
-        accepted.type_store,
-    ), .{
-        .source_types = .direct,
-        .strict = false,
-    });
-    defer analysis.deinit();
-    try analysis.complete();
-    var result = try analysis.extractContract("duplicate-handler.ts");
-    defer result.deinit(allocator);
-
-    const contract = &result;
-    const props = contract.properties orelse return error.MissingProperties;
-    try testing.expect(!props.pure);
-    try testing.expect(!props.read_only);
-    try testing.expect(!props.stateless);
-    try testing.expect(!props.retry_safe);
-    try testing.expect(props.deterministic);
-    try testing.expect(!props.has_egress);
-    try testing.expect(!props.idempotent);
-
-    try testing.expect(contract.effect_analysis_complete);
-    try testing.expect(contract.capability_budget.has(.clock));
-    try testing.expect(!contract.capability_budget.has(.policy_check));
-    try testing.expect(!hasSpecDiagnosticKind(contract, .budget_exceeded));
-    try testing.expect(!hasSpecDiagnosticKind(contract, .helper_budget_exceeded));
 }
 
 test "ambient egress summary follows inline callbacks but not named callback values" {

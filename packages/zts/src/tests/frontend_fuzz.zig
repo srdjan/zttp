@@ -795,8 +795,7 @@ const value_shapes = [_]Shape{
     .{ .name = "arrow", .prefix = "const x = ", .open = "() => ", .core = "1", .close = "", .suffix = ";" },
     .{ .name = "unary", .prefix = "const x = ", .open = "!", .core = "1", .close = "", .suffix = ";" },
     .{ .name = "ternary", .prefix = "const x = ", .open = "a ? b : ", .core = "1", .close = "", .suffix = ";" },
-    .{ .name = "block", .open = "{ ", .core = "", .close = "}" },
-    .{ .name = "if", .open = "if (a) { ", .core = "", .close = "}" },
+    .{ .name = "if", .open = "if (a) { ", .core = "a;", .close = "}" },
     .{ .name = "function", .open = "function f() { ", .core = "", .close = "}" },
     .{ .name = "template", .prefix = "const x = ", .open = "`${", .core = "1", .close = "}`", .suffix = ";" },
     .{ .name = "match", .prefix = "const x = ", .open = "match (a) { when 1: ", .core = "1", .close = " default: 2 }", .suffix = ";" },
@@ -882,7 +881,7 @@ fn expectTypedValueNesting(owner: *const source_frontend.DirectCheckSource) !voi
 
 test "nesting: direct admission survives every value shape and guards tracked depth" {
     const allocator = std.testing.allocator;
-    try std.testing.expectEqual(@as(usize, 14), value_shapes.len);
+    try std.testing.expectEqual(@as(usize, 13), value_shapes.len);
     for ([_]TypeSyntax.AdmissionMode{ .compile, .collect }) |mode| {
         var stats: Stats = .{};
         for (value_shapes) |shape| {

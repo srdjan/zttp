@@ -289,8 +289,8 @@ dispatches. Bulk rewrite scripts are not allowed.
 |---|---|
 | U2a | G1, `let` without an initializer, X3, X4, X5, X7, X8, X17, X32 |
 | U1c | The generated-code census (U1c-1 and U1c-2, above), before U2b |
-| U2b | G8, G9, G10, X6, X9, X11, N1, N2, N7, N14 |
-| U3 | G2, G3, G7, G11, X12, X16 (type keys), X26, X27, X28, N8 |
+| U2b | G8, G9, G10, X6, X9, N1, N2, N7, N14 |
+| U3 | G2, G3, G7, G11, X11, X12, X16 (type keys), X26, X27, X28, N8 |
 | U4a | The array set (`forEach`, `pop`, `shift`, `unshift`, `splice`), X23, X24, X25, X31, N4, N13, Decision 7 |
 | U4b | X13, X14, X15, X16 (record keys), X18, `r["a"]`, G12 with N16, N11, N12 |
 | U4c | Callback purity, Decision 3, Decision 4, X2, N10, X19 with the `if` without a block. X19 also changes the repair templates of `repair_plan.zig` and `pi_repair_plan.zig`, which write `if (!result.ok) return ...;` and are model-visible |
@@ -487,3 +487,13 @@ later.
 - Before X9, a `structural` declaration at column 1 inside a function was
   admitted and reached the type checker. The census case
   `block_left_aligned` asserted that. X9 refuses both columns.
+- X11 moved from U2b to U3. A refusal of `<T>(x: T) => x` at the `<`, before
+  `tryReserveArrowGenericOwner` reserves an owner, passes the restriction
+  gate. It breaks 40 tests in `zig build test-zts` and `test-precompile`.
+  Most of them test the generic arrow machinery itself: owner reservation,
+  projection windows, and allocation-failure restore. After the refusal no
+  input reaches that machinery. U3 must delete those tests and the machinery
+  together, and rewrite each test that uses a generic arrow only
+  incidentally. That deletion is a refactor, so U3 needs owner approval
+  first. A refusal that still parses the arrow keeps the machinery running
+  on refused input with no tests, so U3 must not use it.
