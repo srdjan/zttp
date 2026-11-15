@@ -1,7 +1,8 @@
 # TS Restrictions Enforcement Plan
 
-Status: revision 4, 2026-11-15. The owner approved Decision 1 (a) and every
-recommendation of Decision 2 on 2026-11-15. Execution has started.
+Status: revision 5, 2026-11-15. The owner approved Decision 1 (a), every
+recommendation of Decision 2, and option (a) of Decisions 3 to 7. U0 and U1
+are done. Execution continues with U1b.
 
 ## Goal
 
@@ -109,6 +110,27 @@ U0 measures each "not measured" count before U6 starts.
 Owner decision, 2026-11-15: adopt N1 to N5, N7, N8, and N10 to N16. Defer N6,
 N9, and N17.
 
+### Decisions 3 to 7: conflicts found by the U0 sweep
+
+The ledger `2026-11-15-ts-restrictions-sweep.md` lists each row X1 to X32.
+The owner chose option (a) for each of these decisions on 2026-11-15:
+
+- Decision 3 (X1, top-level statements): refuse every top-level statement
+  except a bare registration call (`schemaCompile(...)`, `sql(...)`) with
+  literal arguments. Spec 5.1 admits that one form.
+- Decision 4 (X10, arrows outside a callback argument): follow spec 5.2. A
+  module-level `function` is the one form of a named function. The ZTS001 row
+  for object methods changes its replacement. Migrate the 20 tracked files.
+- Decision 5 (X20, a `default` arm on a covered union, and a duplicate arm):
+  ZTS216 becomes an error.
+- Decision 6 (X29, `nominal` over `boolean`): the spec admits `boolean`. The
+  compiler does not change.
+- Decision 7 (X30, `Object` members): admit only `keys`, `values`, and
+  `entries`. Refuse each other member with ZTS201.
+
+The other 27 rows are forms that the spec excludes and the file does not
+admit. They are gaps under the original request.
+
 ## Units
 
 Every fix unit follows the bug rule of AGENTS.md. First it moves the gap row
@@ -187,6 +209,40 @@ Acceptance: the gate passes on the current file. Each of these mutants makes
 the gate fail: one code changed in one row, one probe deleted, one admitted
 member removed from the file, one ambient name added to the file.
 
+Result, 2026-11-15: committed as `825c69ca`. The gap table gained a Required
+column. Eight refusal rows whose code the compiler does not report moved to
+the gap table. 18 allowlisted kinds are profile rules that the file does not
+list yet.
+
+### U1b: complete the file (Sonnet, 80 turns, no compiler change)
+
+- Add a gap row, with probes and a Required cell, for each of the 27 sweep
+  rows, for Decisions 3, 4, 5, and 7, and for the known gaps that have no row:
+  `let` without an initializer, `if` without a block, an impure higher-order
+  callback, `r["a"]`, and `mk().n = 2`.
+- Move `toReversed` from Admitted Members to a gap row (spec 6.5).
+- Add a refusal row for each of the 18 allowlisted profile kinds that a probe
+  reaches, and delete its allowlist row. A kind that no source form reaches
+  keeps its row, with the probe result as its reason.
+- Decision 4: change the replacement of the object-method row.
+
+Acceptance: `test-ts-restrictions` passes. The allowlist loses one row for
+each kind that gains a refusal row.
+
+### Row assignment
+
+| Unit | Rows |
+|---|---|
+| U2a | G1, G5, `let` without an initializer, X19 and `if` without a block, X3, X4, X5, X7, X8, X17, X32 |
+| U2b | G8, G9, G10, X6, X9, X11, X12, N1, N2, N7, N14 |
+| U3 | G2, G3, G7, G11, X16 (type keys), X26, X27, X28, N8 |
+| U4a | The array set (`forEach`, `pop`, `shift`, `unshift`, `splice`), X23, X24, X25, X31, N4, N13, Decision 7 |
+| U4b | X13, X14, X15, X16 (record keys), X18, `r["a"]`, G12 with N16, N11, N12 |
+| U4c | Callback purity, Decision 3, Decision 4, X2, N10 |
+| U4d | G6 with X21, X22, Decision 5, N3, N5, N15 |
+| U5 | G4 |
+| U6 | The spec text for Decisions 3, 4, 6, and 7, and for N1 to N16 |
+
 ### U2: parser refusals that move no hash (Sonnet, 3 sequential parts)
 
 The parts touch `packages/zts/src/parser/parse.zig`, so they run in order.
@@ -225,7 +281,9 @@ Files: `packages/zts/src/parser/type_syntax_parser.zig`,
 `packages/zts/src/source_diagnostics.zig`, `diagnostic_catalog.zig`,
 `type_env.zig`, and `agent_protocol_meta.zig`.
 
-### U4: checker refusals (Sonnet, 100 turns, in the window)
+### U4: checker refusals (Sonnet, four parts U4a to U4d of 80 turns each, in the window)
+
+The parts follow the row assignment above.
 
 - G6 refuses `for...of` over a value that is not an admitted iterable, in
   `type_checker.zig#TypeChecker.bindForOfElement`.
