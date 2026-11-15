@@ -58,6 +58,10 @@ For the module list and every export, read `packages/zts/src/builtin_modules.zig
 
 ## JavaScript Subset
 
+`docs/ts-restrictions.md` is the authoritative list of source-profile restrictions. The compiler must refuse each listed form with the listed code. When the compiler and that file disagree, fix the compiler. Change the file only with owner approval.
+
+The goal is the smallest light functional dialect that can still express standard handlers and CLI apps. When a form duplicates another form, or no handler or CLI app needs it, propose a restriction for it to the owner.
+
 ES5 + arrow functions, template literals without interpolation, leading object and array spread, `for...of` (arrays), optional chaining, nullish coalescing, `match` expression, `assert` statement, array HOFs, `Object.keys/values/entries`, `range()`.
 
 The model-minimal profile refuses several forms an ES2015 author reaches for. Declaration destructuring is refused at the parser boundary: bind the source to one name, then read each member with explicit `const` bindings. Template interpolation is refused; build a string array with explicit `String(...)` conversions and call `.join("")`. The pipe operator, `pipe()`, and `guard()` report ZTS001, and object literal shorthand does too. Compound assignment is ZTS613: write `x = x + 1`. Non-leading object spread is ZTS614 and call-site spread is ZTS616.
@@ -113,6 +117,7 @@ Run `deno task verify` before committing website changes. Commit locally and do 
 | `docs/performance.md` | Benchmarks, cold starts, optimizations, deployment patterns |
 | `docs/internals/api-reference.md` | Zig embedding API, extending with native functions |
 | `docs/typescript.md` | Type stripping, type checking, sound mode (type-directed analysis across operators), compile-time evaluation (`comptime()`) |
+| `docs/ts-restrictions.md` | Authoritative list of source-profile restrictions, with diagnostic codes and replacement forms |
 | `docs/feature-detection.md` | Unsupported feature detection matrix |
 | `docs/verification.md` | `-Dverify` compile-time proof of handler correctness |
 | `docs/roadmap.md` | What is deferred from the current beta and what comes next |
