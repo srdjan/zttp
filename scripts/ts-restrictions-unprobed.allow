@@ -25,25 +25,18 @@ ZTS029 a compiler resource limit that the meta payload does not publish: the Lim
 ZTS030 a compiler resource limit that the meta payload does not publish: the Limits table lists only published limits
 ZTS031 a compiler resource limit that the meta payload does not publish: the Limits table lists only published limits
 ZTS032 a compiler resource limit that the meta payload does not publish: the Limits table lists only published limits
-ZTS016 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS017 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS018 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS019 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS020 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS021 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS024 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS025 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS026 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS027 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS037 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS038 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS039 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS208 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS214 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS611 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS627 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
-ZTS628 a source-profile rule with no row in docs/ts-restrictions.md yet: the next restriction unit adds its row and probe
+ZTS016 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `(n) = 2;` and `o.a?.a = 1;` report no error (gap table)
+ZTS017 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `const [a, b] = [1, 2];` reports ZTS001
+ZTS018 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `function f(a: number, a: number)` reports no error
+ZTS019 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `const a = 1; const a = 2;` reports no error (gap table)
+ZTS020 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `const a = zzz;` reports ZTS629
+ZTS021 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `const a: number;` reports ZTS002, and `let a: number;` reports ZTS604 or no error (gap table)
+ZTS024 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `return 1;` at the top level reports ZTS002
+ZTS025 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `yield 1;` reports ZTS001
+ZTS027 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `super.x;` reports ZTS001
+ZTS037 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `import { x } from ;` reports ZTS003
+ZTS038 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `export { x };` of an undeclared name reports ZTS002
+ZTS039 no emit site: the kind is declared in packages/zts/src/parser/error.zig and mapped in packages/zts/src/diagnostic_catalog.zig, and no parser, checker, or tool source emits it; probe `export const a = 1;` twice reports no error
 ZTS022 no code path emits it: a break outside a loop reports ZTS002, as the gap table says
 ZTS023 no code path emits it: a continue outside a loop reports ZTS002, as the gap table says
 ZTS044 nesting limit of the parser: docs/ts-restrictions.md names it only in prose under Limits, with no row
-ZTS215 reported for a mutating method on a readonly array; the only row that names it describes a field write, which reports ZTS200 (gap table)

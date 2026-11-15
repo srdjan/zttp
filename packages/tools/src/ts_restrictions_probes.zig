@@ -77,7 +77,25 @@ fn cf(comptime text: []const u8, comptime files: []const File) Source {
 
 const mod_file: []const File = &.{.{ .name = "mod.ts", .text = "export function x(): number {\n  return 1;\n}\n" }};
 
+const g_fn = "function g(): number {\n  return 1;\n}\n";
+
+/// A function whose one parameter has the type text `t`.
+fn param(comptime t: []const u8) Source {
+    return c(top("function g(a: " ++ t ++ "): number {\n  return 1;\n}"));
+}
+
+/// A function that returns the array expression `e` over a `number[]` named `xs`.
+fn arr_call(comptime e: []const u8) Source {
+    return c(top("function g(xs: number[]): unknown {\n  return " ++ e ++ ";\n}"));
+}
+
 const boundary_proof = "structural Boundary<T> = Proof<T, \"deterministic\" | \"read_only\">;\n";
+
+const dict_round_trip = "import { dictEmpty, dictSet, dictEntries, dictFromEntries } from \"zttp:collections\";\nfunction g(): boolean {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const pairs = dictEntries(d).map((p) => [p[0], p[1] * 2]);\n  const rebuilt = dictFromEntries(pairs);\n  return rebuilt.ok;\n}\n" ++ tail;
+
+const dict_reduce = "import { dictEmpty, dictSet, dictEntries } from \"zttp:collections\";\nfunction g(): number {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  return dictEntries(d).reduce((acc, p) => acc + p[1], 0);\n}\n" ++ tail;
+
+const dict_bulk = "import { dictEmpty, dictSet, dictMapValues, dictFilter, dictFold } from \"zttp:collections\";\nfunction g(): number {\n  const d = dictSet(dictEmpty(), \"a\", 1);\n  const m = dictMapValues(d, (v, k) => v * 2);\n  const f = dictFilter(m, (v, k) => v > 0);\n  return dictFold(f, (acc, v, k) => acc + v, 0);\n}\n" ++ tail;
 
 const command_type = "structural Cmd = { kind: \"a\", text: string } | { kind: \"b\", text: string };\n";
 
@@ -300,6 +318,11 @@ pub const refusal_rows = [_]RefusalRow{
         .refused = &.{r("const", top("export const f = (x: number): number => x;"))},
         .clean = c(top("nominal N = number;\n" ++ boundary_proof ++ "export function f(x: N): Boundary<N> {\n  return x;\n}")),
     },
+    .{
+        .key = "A nominal type called as a function, such as `Id(\"a\")`",
+        .refused = &.{r("Id(\"a\")", top("nominal Id = string;\nfunction g(): string {\n  const x = Id(\"a\");\n  return x;\n}"))},
+        .clean = c(top("nominal Id = string;\nfunction g(): string {\n  const x: Id = \"a\";\n  return x;\n}")),
+    },
 
     // ----- Functions And Parameters -----
     .{
@@ -377,6 +400,21 @@ pub const refusal_rows = [_]RefusalRow{
         .key = "A module-internal function that declares an `Effects<...>` ceiling",
         .refused = &.{r("Effects<...>", top("function f(): Effects<string, \"env\"> {\n  return \"a\";\n}"))},
         .clean = c(top("function f(): string {\n  return \"a\";\n}")),
+    },
+    .{
+        .key = "An `await` outside an async function",
+        .refused = &.{r("await", body("  const a = await 1;"))},
+        .clean = c(top("function g(): number {\n  return 1;\n}")),
+    },
+    .{
+        .key = "A generic call in which no argument fixes a type parameter",
+        .refused = &.{r("", top("function f<T>(): number {\n  return 1;\n}\nfunction g(): number {\n  return f();\n}"))},
+        .clean = c(top("function f<T>(): number {\n  return 1;\n}\nfunction g(): number {\n  return f<number>();\n}")),
+    },
+    .{
+        .key = "An exported helper with no `Proof<...>` capsule, when the handler declares a proof spec",
+        .refused = &.{r("Proof<...>", "nominal Id = string;\nexport function helper(a: Id): Id {\n  return a;\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"ok\");\n}\n")},
+        .clean = c("nominal Id = string;\nexport function helper(a: Id): Proof<Id, \"deterministic\"> {\n  return a;\n}\nexport function handler(req: Request): Proof<Response, \"deterministic\"> {\n  return Response.text(\"ok\");\n}\n"),
     },
 
     // ----- Statements And Control Flow -----
@@ -621,7 +659,7 @@ pub const refusal_rows = [_]RefusalRow{
             r("", body("  const o = {\n    get a() {\n      return 1;\n    },\n  };")),
             r("", body("  const o = {\n    set a(v: number) {\n    },\n  };")),
         },
-        .clean = c(body("  const o = { m: (): number => 1 };")),
+        .clean = c(top("function m(): number {\n  return 1;\n}")),
     },
     .{
         .key = "A computed record key `{ [k]: v }`",
@@ -690,6 +728,27 @@ pub const refusal_rows = [_]RefusalRow{
         },
         .clean = c(body("  const t: number[] = [1, 2];\n  t.push(3);")),
     },
+    .{
+        .key = "A mutating method on a `readonly` array",
+        .refused = &.{r("readonly", top("function g(xs: readonly number[]): number {\n  xs.push(1);\n  return 1;\n}"))},
+        .clean = c(top("function g(xs: readonly number[]): number[] {\n  const ys: number[] = xs.slice(0, 1);\n  ys.push(1);\n  return ys;\n}")),
+    },
+    .{
+        .key = "A `dictEntries` round trip through `dictFromEntries` that changes only values or drops entries",
+        .refused = &.{
+            r("dictEntries", dict_round_trip),
+            r("dictFromEntries", dict_round_trip),
+        },
+        .clean = c(dict_bulk),
+    },
+    .{
+        .key = "A `reduce` over `dictEntries(d)`",
+        .refused = &.{
+            r("reduce", dict_reduce),
+            r("dictEntries(d)", dict_reduce),
+        },
+        .clean = c(dict_bulk),
+    },
 
     // ----- Null, Undefined, And Absence -----
     .{
@@ -743,11 +802,6 @@ pub const refusal_rows = [_]RefusalRow{
         .key = "`when _:`",
         .refused = &.{r("when _:", top("function g(n: number): number {\n  return match (n) {\n    when _: 0\n  };\n}"))},
         .clean = c(top("function g(n: number): number {\n  return match (n) {\n    default: 0\n  };\n}")),
-    },
-    .{
-        .key = "A `default` arm on a closed union that is already covered",
-        .refused = &.{r("default", top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n    default: \"\"\n  };\n}"))},
-        .clean = c(top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n  };\n}")),
     },
     .{
         .key = "A rename to the same name, such as `{ text: text }` in a pattern",
@@ -1020,5 +1074,248 @@ pub const gap_rows = [_]GapRow{
     .{
         .key = "A `match` that does not cover every case, as the return value",
         .sources = &.{c(top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n  };\n}"))},
+    },
+    // ----- U1b rows, in the order of the row assignment of the plan -----
+    .{
+        .key = "`let` with no initializer, such as `let a: number;`",
+        .sources = &.{c(top("function g(): number {\n  let a: number;\n  a = 1;\n  return a;\n}"))},
+    },
+    .{
+        .key = "A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();`",
+        .sources = &.{
+            c(top(g_fn ++ "function h(c: boolean): number {\n  if (c) g();\n  return 2;\n}")),
+            c(top(g_fn ++ "function h(c: boolean): number {\n  if (c) {\n    return 1;\n  } else g();\n  return 2;\n}")),
+            c(top(g_fn ++ "function h(xs: number[]): number {\n  for (const k of xs) g();\n  return 2;\n}")),
+        },
+    },
+    .{
+        .key = "An `import` after a declaration",
+        .sources = &.{c(top("const a = 1;\nimport { dictEmpty } from \"zttp:collections\";\nfunction g(): Dict<string, number> {\n  return dictEmpty();\n}"))},
+    },
+    .{
+        .key = "An `import` or `export` inside a function body",
+        .sources = &.{
+            c(top("function f(): Dict<string, number> {\n  import { dictEmpty } from \"zttp:collections\";\n  return dictEmpty();\n}")),
+            c(top("function f(): number {\n  export const q = 1;\n  return q;\n}")),
+        },
+    },
+    .{
+        .key = "`import type X from \"./x.ts\";`",
+        .sources = &.{c(top("import type X from \"./x.ts\";"))},
+    },
+    .{
+        .key = "One `const` that binds two names, such as `const a = 1, b = 2;`",
+        .sources = &.{c(body("  const a = 1, b = 2;"))},
+    },
+    .{
+        .key = "Destructuring in a `for...of` head",
+        .sources = &.{
+            c(top("function g(xs: number[][]): number {\n  for (const [a, b] of xs) {\n  }\n  return 1;\n}")),
+            c(top("function g(xs: { a: number }[]): number {\n  for (const { a } of xs) {\n  }\n  return 1;\n}")),
+        },
+    },
+    .{
+        .key = "An assignment target that is not a name, a member path, or an index, such as `(n) = 2;` and `o.a?.a = 1;`",
+        .sources = &.{
+            c(top("function g(): number {\n  let n = 1;\n  (n) = 2;\n  return n;\n}")),
+            c(top("function g(): number {\n  const o = { a: { a: 1 } };\n  o.a?.a = 1;\n  return 1;\n}")),
+        },
+    },
+    .{
+        .key = "A bigint literal, such as `10n`",
+        .sources = &.{c(body("  const a = 10n;"))},
+    },
+    .{
+        .key = "A module specifier that is not a string literal, such as `import { ok } from m;`",
+        .sources = &.{c(top("import { ok } from m;"))},
+    },
+    .{
+        .key = "A `structural` or `nominal` declaration inside a function",
+        .sources = &.{
+            c(top("function g(): number {\n  structural L = number;\n  return 1;\n}")),
+            c(top("function g(): number {\n  nominal L = number;\n  return 1;\n}")),
+        },
+    },
+    .{
+        .key = "Type parameters on an arrow, such as `<T>(x: T) => x`",
+        .sources = &.{c(top("function g(): number[] {\n  return [1].map(<T>(x: T) => x);\n}"))},
+    },
+    .{
+        .key = "A type-parameter modifier (`in`, `const`) and an `asserts` return type",
+        .sources = &.{
+            c(top("function f<in T>(a: T): T {\n  return a;\n}")),
+            c(top("function f<const T>(a: T): T {\n  return a;\n}")),
+            c(top("function f(x: unknown): asserts x is string {\n}")),
+        },
+    },
+    .{
+        .key = "A quoted key in a record type, such as `{ \"a\": number }`, when unused",
+        .sources = &.{c(top("structural R = { \"a\": number };"))},
+    },
+    .{
+        .key = "A quoted key in a record type, such as `{ \"a\": number }`, when read",
+        .sources = &.{c(top("structural R = { \"a\": number };\nfunction g(r: R): number {\n  return r.a;\n}"))},
+    },
+    .{
+        .key = "A type name outside the admitted types, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error`",
+        .sources = &.{
+            param("Record<string, number>"),
+            param("Map<string, number>"),
+            param("Set<number>"),
+            param("bigint"),
+            param("symbol"),
+            param("Function"),
+            param("{}"),
+            param("Exclude<string, number>"),
+            param("NonNullable<string>"),
+            param("Date"),
+            param("RegExp"),
+            param("Error"),
+        },
+    },
+    .{
+        .key = "A type form outside the admitted grammar, such as `new () => T`, `unique symbol`, `[string?]`, `[a: string]`, `[...string[]]`, `readonly { a: number }`, a rest parameter in a function type, a method signature, a call signature, and a record type with comma separators",
+        .sources = &.{
+            param("new () => string"),
+            param("unique symbol"),
+            param("[string?]"),
+            param("[a: string]"),
+            param("[...string[]]"),
+            param("readonly { a: number }"),
+            param("(...a: string[]) => number"),
+            param("{ m(): number }"),
+            param("{ (): number }"),
+            param("{ a: number, b: string }"),
+        },
+    },
+    .{
+        .key = "A `Dict` key type other than `string` or `number`, such as `Dict<boolean, string>`",
+        .sources = &.{
+            param("Dict<boolean, string>"),
+            param("Dict<{ a: number }, string>"),
+        },
+    },
+    .{
+        .key = "`toReversed`, `Array.from`, `Array.of`, and a write to `xs.length`",
+        .sources = &.{
+            c(top("function g(xs: number[]): number[] {\n  return xs.toReversed();\n}")),
+            c(top("function g(xs: number[]): number[] {\n  return Array.from(xs);\n}")),
+            c(top("function g(): number[] {\n  return Array.of(1);\n}")),
+            c(top("function g(xs: number[]): number {\n  xs.length = 0;\n  return 1;\n}")),
+        },
+    },
+    .{
+        .key = "An array member call with an argument list that spec 6.5 does not give, such as `xs.slice(1)`, `xs.slice()`, `xs.toSorted()`, `xs.join()`, `xs.reduce(f)`, `xs.indexOf(v, i)`, and a three-parameter `map` callback",
+        .sources = &.{
+            arr_call("xs.slice(1)"),
+            arr_call("xs.slice()"),
+            arr_call("xs.toSorted()"),
+            arr_call("xs.indexOf(1, 0)"),
+            arr_call("xs.includes(1, 0)"),
+            arr_call("xs.reduce((a: number, b: number): number => a)"),
+            arr_call("xs.map((x: number, i: number, all: number[]): number => x)"),
+            c(top("function g(xs: string[]): string {\n  return xs.join();\n}")),
+        },
+    },
+    .{
+        .key = "`join` on an array of non-strings, such as `[1, 2].join(\"\")`",
+        .sources = &.{c(top("function g(): string {\n  return [1, 2].join(\"\");\n}"))},
+    },
+    .{
+        .key = "An index read or a `length` read on `Bytes`",
+        .sources = &.{
+            c(top("function g(b: Bytes): number {\n  return b[0];\n}")),
+            c(top("function g(b: Bytes): number {\n  return b.length;\n}")),
+        },
+    },
+    .{
+        .key = "`Object` members other than `keys`, `values`, and `entries`, such as `Object.create`, `Object.defineProperty`, and `Object.fromEntries`",
+        .sources = &.{
+            c(top("function g(): unknown {\n  return Object.create(null);\n}")),
+            c(top("function g(): unknown {\n  const o = { a: 1 };\n  Object.defineProperty(o, \"a\", 1);\n  return o;\n}")),
+            c(top("function g(): unknown {\n  return Object.fromEntries([[\"a\", 1]]);\n}")),
+        },
+    },
+    .{
+        .key = "A write to a field that the record type does not declare, such as `o.z = 1`",
+        .sources = &.{c(top("function g(): number {\n  const o = { a: 1 };\n  o.z = 1;\n  return o.a;\n}"))},
+    },
+    .{
+        .key = "A second `const` of the same name in one scope",
+        .sources = &.{c(top("function g(): number {\n  const a = 1;\n  const a = 2;\n  return a;\n}"))},
+    },
+    .{
+        .key = "A duplicate parameter name, such as `function f(a: number, a: number)`",
+        .sources = &.{c(top("function f(a: number, a: number): number {\n  return a;\n}"))},
+    },
+    .{
+        .key = "A duplicate type parameter, such as `function f<T, T>(a: T): T`",
+        .sources = &.{c(top("function f<T, T>(a: T): T {\n  return a;\n}\nfunction g(): string {\n  return String(f(1));\n}"))},
+    },
+    .{
+        .key = "An assignment to a `const`, such as `const n: number = 1; n = 2;`",
+        .sources = &.{c(top("function g(): number {\n  const n: number = 1;\n  n = 2;\n  return n;\n}"))},
+    },
+    .{
+        .key = "A quoted key in a record literal, such as `{ \"a\": 1 }`",
+        .sources = &.{c(top("function g(): number {\n  const o = { \"a\": 1 };\n  return o.a;\n}"))},
+    },
+    .{
+        .key = "A spread with no explicit field after it, such as `{ ...o }`",
+        .sources = &.{c(top("function g(): number {\n  const o = { a: 1 };\n  const p = { ...o };\n  return p.a;\n}"))},
+    },
+    .{
+        .key = "A string-literal read of an identifier key, such as `r[\"a\"]`",
+        .sources = &.{c(top("function g(): number {\n  const r = { a: 1 };\n  return r[\"a\"];\n}"))},
+    },
+    .{
+        .key = "A call in an assignment target, such as `mk().n = 2`",
+        .sources = &.{c(top("function mk(): { n: number } {\n  return { n: 1 };\n}\nfunction g(): number {\n  mk().n = 2;\n  return 1;\n}"))},
+    },
+    .{
+        .key = "A higher-order callback that calls `push`, or that assigns a captured binding",
+        .sources = &.{
+            c(top("function g(xs: number[]): number[] {\n  const out: number[] = [];\n  const ys = xs.map((x: number): number => out.push(x));\n  return out;\n}")),
+            c(top("function g(xs: number[]): number {\n  let t = 0;\n  const ys = xs.map((x: number): number => {\n    t = x;\n    return x;\n  });\n  return t;\n}")),
+        },
+    },
+    .{
+        .key = "A top-level statement other than a registration call, such as `f();` and `if (c) { }`",
+        .sources = &.{
+            c(top("function f(): number {\n  return 1;\n}\nf();")),
+            c(top("if (true) {\n}")),
+        },
+    },
+    .{
+        .key = "An arrow outside a callback argument: a `const`-bound arrow, a returned arrow, an arrow in a record field, an immediately called arrow, and an arrow as a `?:` arm",
+        .sources = &.{
+            c(top("function g(): number {\n  const f = (x: number): number => x;\n  return f(1);\n}")),
+            c(top("function g(): (x: number) => number {\n  return (x: number): number => x;\n}")),
+            c(top("function g(): number {\n  const o = { f: (x: number): number => x };\n  return o.f(1);\n}")),
+            c(top("function g(): number {\n  return ((x: number): number => x)(1);\n}")),
+            c(top("function g(c: boolean): number {\n  const f = c ? (x: number): number => x : (x: number): number => x + 1;\n  return f(1);\n}")),
+        },
+    },
+    .{
+        .key = "A top-level initializer with an effect, such as `const t: number = Date.now();`",
+        .sources = &.{c(top("const t: number = Date.now();"))},
+    },
+    .{
+        .key = "`for...of` over a number, such as `for (const k of 5)`",
+        .sources = &.{c(top("function g(): number {\n  for (const k of 5) {\n  }\n  return 1;\n}"))},
+    },
+    .{
+        .key = "`stringifyJson` of a value that JSON cannot carry, such as a function or a `Dict<number, string>`",
+        .sources = &.{
+            c(top("import { stringifyJson } from \"zttp:json\";\nimport { dictEmpty } from \"zttp:collections\";\nfunction g(): boolean {\n  const d: Dict<number, string> = dictEmpty();\n  const s = stringifyJson(d);\n  return s.ok;\n}")),
+            c(top("import { stringifyJson } from \"zttp:json\";\nfunction f(x: number): number {\n  return x;\n}\nfunction g(): boolean {\n  const s = stringifyJson(f);\n  return s.ok;\n}")),
+        },
+    },
+    .{
+        .key = "A `default` arm on a closed union that is already covered, or a duplicate `when` arm",
+        .sources = &.{
+            c(top(command_type ++ "function g(c: Cmd): string {\n  return match (c) {\n    when { kind: \"a\", text }: text\n    when { kind: \"b\", text }: text\n    default: \"\"\n  };\n}")),
+            c(top("function g(n: number): number {\n  return match (n) {\n    when 1: 1\n    when 1: 2\n    default: 0\n  };\n}")),
+        },
     },
 };

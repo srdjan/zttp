@@ -89,6 +89,7 @@ pure.
 | A `nominal` type over a record, tuple, union, or function | ZTS048 | `nominal` over `string`, `number`, or `boolean`. Use `structural` for other shapes |
 | A reused arrow helper, such as `const double = (x) => x * 2;` | ZTS608 | A named `function` declaration |
 | An exported function-valued `const` | ZTS609 | `export function name(...) { ... }` |
+| A nominal type called as a function, such as `Id("a")` | ZTS214 | An annotated declaration: `const x: Id = "a";` |
 
 Declaration merging, open interfaces, and inheritance are excluded.
 
@@ -108,6 +109,9 @@ Declaration merging, open interfaces, and inheritance are excluded.
 | `this` and `super` | ZTS001 | Pass the context as an explicit parameter |
 | An exported function that reaches a capability with no `Effects<...>` return ceiling | ZTS610 | Declare `Effects<T, R>` on the return type |
 | A module-internal function that declares an `Effects<...>` ceiling | ZTS623 | Remove the ceiling |
+| An `await` outside an async function | ZTS026 | A direct call. Use `fetch` from `zttp:fetch` for outbound I/O |
+| A generic call in which no argument fixes a type parameter | ZTS208 | Name the type argument at the call site, such as `f<number>()` |
+| An exported helper with no `Proof<...>` capsule, when the handler declares a proof spec | ZTS611 | Declare `Proof<T, "...">` as the return type of the helper |
 
 A direct arrow callback can infer its types from a typed callback position. It
 can also declare a leading prefix of the callback parameters. This prefix rule
@@ -173,21 +177,24 @@ boolean to text.
 | Refused form | Code | Write instead |
 |---|---|---|
 | Object literal shorthand `{ value }` | ZTS001 | `{ value: value }` |
-| Object methods, getters, and setters | ZTS001 | A field that holds an arrow, or an explicit function |
+| Object methods, getters, and setters | ZTS001 | A module-level function |
 | A computed record key `{ [k]: v }` | ZTS001 | A literal field name, or a `Dict` for dynamic keys |
 | A numeric record key `{ 1: "a" }` | ZTS001 | A string key, or an array for dense indices |
 | An object spread after an explicit key, or a second spread | ZTS614 | One leading spread: `{ ...base, x: 1 }` |
-| Dynamic property access `obj[key]` | ZTS605 | A typed field, a literal key, or a `Dict` |
+| Dynamic property access `obj[key]` | ZTS605 | A typed field, such as `obj.a`, or a `Dict` read with `dictGet` |
 | `Object.assign`, `Object.freeze`, and `Object.isFrozen` | ZTS001 | Object spread |
 | A member that the runtime does not hold, such as `n.toFixed(2)` or `n.toString()` | ZTS201 | `String(n)` |
 | A numeric index read on a string, such as `s[0]` | ZTS201 | `s.charAt(i)` or `s.slice(i, i + 1)` |
 | A member call on `unknown` or on a value with no known type | ZTS201 | Narrow with `typeof` or `isDict` first |
 | A container write whose value does not fit the slot type | ZTS200 | A value of the slot type |
 | `push`, `pop`, `shift`, `unshift`, `splice`, or a `length` write on a tuple | ZTS200 | Annotate the binding as an array |
+| A mutating method on a `readonly` array | ZTS215 | A new array, or remove `readonly` from the type |
+| A `dictEntries` round trip through `dictFromEntries` that changes only values or drops entries | ZTS627 (advisory) | `dictMapValues(d, f)` or `dictFilter(d, p)` |
+| A `reduce` over `dictEntries(d)` | ZTS628 (advisory) | `dictFold(d, f, init)` |
 
 Record shapes are fixed after allocation. `items.push(value)` is the one
 growth operation for arrays. An index write past the current length is a
-bounds fault, not growth.
+bounds fault, not growth. The two `dictEntries` rows are advisories. An advisory never fails a build.
 
 ## Null, Undefined, And Absence
 
@@ -209,7 +216,6 @@ absence handling.
 | A `default` arm before a `when` arm, or a second `default` arm | ZTS062 | One `default`, after every `when` arm |
 | A type-test name below the top level of a pattern, such as `when { v: string }` | ZTS001 | Bind the field and match it in a nested `match` |
 | `when _:` | ZTS001 | `default:` |
-| A `default` arm on a closed union that is already covered | ZTS216 (warning) | Remove the `default` arm |
 | A rename to the same name, such as `{ text: text }` in a pattern | ZTS625 (advisory) | `{ text }` |
 | An arm that reads a field off the scrutinee | ZTS626 (advisory) | Bind the field in the pattern |
 
@@ -245,9 +251,9 @@ section below gives the observed behavior.
 
 ## Admitted Members
 
-The type checker admits these members on an array and on a string. Each line names one scope. The members are in sorted order. The members `forEach`, `pop`, `shift`, `unshift`, and `splice` are also admitted, but the specification excludes them. The gap table lists them.
+The type checker admits these members on an array and on a string. Each line names one scope. The members are in sorted order. The members `forEach`, `pop`, `shift`, `unshift`, `splice`, and `toReversed` are also admitted, but the specification excludes them. The gap table lists them.
 
-`Array.prototype`: `concat`, `every`, `filter`, `find`, `findIndex`, `includes`, `indexOf`, `join`, `length`, `map`, `push`, `reduce`, `slice`, `some`, `toReversed`, `toSorted`
+`Array.prototype`: `concat`, `every`, `filter`, `find`, `findIndex`, `includes`, `indexOf`, `join`, `length`, `map`, `push`, `reduce`, `slice`, `some`, `toSorted`
 
 `String.prototype`: `charAt`, `charCodeAt`, `concat`, `endsWith`, `includes`, `indexOf`, `lastIndexOf`, `length`, `padEnd`, `padStart`, `repeat`, `replace`, `replaceAll`, `slice`, `split`, `startsWith`, `substring`, `toLowerCase`, `toUpperCase`, `trim`, `trimEnd`, `trimStart`
 
@@ -313,10 +319,10 @@ against the compiler.
 
 | Form | Observed result | Required |
 |---|---|---|
-| Assignment in expression position, such as `const m = (n = 2);` | Accepted, exit 0 | ZTS001. Write the assignment as its own statement |
+| Assignment in expression position, such as `const m = (n = 2);` | Accepted | ZTS001. Write the assignment as its own statement |
 | Generic defaults, such as `function f<T = string>(a: T): T` | Accepted, exit 0 | A targeted refusal. Pass the type argument at each use |
 | Index signatures, such as `{ [k: string]: number }` | Accepted, exit 0, also when used in a signature | A targeted refusal. Write `Dict<string, number>` |
-| `JSON.parse` and `JSON.stringify` | Accepted, exit 0 | ZTS629. Use `parseJson` or `stringifyJson` from `zttp:json`, or `decodeJson` from `zttp:decode` |
+| `JSON.parse` and `JSON.stringify` | Accepted | ZTS629. Use `parseJson` or `stringifyJson` from `zttp:json`, or `decodeJson` from `zttp:decode` |
 | `match` on a call, such as `match (g()) { ... }` | Accepted, exit 0. The specification requires an identifier or a member path | A targeted refusal. Bind the value to a `const` first |
 | `for...of` over a fixed record | Accepted by the type and strict checks | A targeted refusal. Iterate an array, such as `Object.keys(r)` |
 | `keyof`, mapped types, conditional types, and type-position `typeof`, when unused | Accepted, exit 0 | A targeted refusal. Write the type explicitly |
@@ -326,7 +332,7 @@ against the compiler.
 | Tagged templates | Refused with ZTS047, "statement is not terminated" | ZTS001 with a message that names the form |
 | The angle-bracket assertion `<number>x` | Refused with ZTS002, "raw JSX is not supported". The registry names ZTS042 | ZTS042, as for `x as T` |
 | A generic declaration with nine type parameters | Refused with ZTS203 on the ninth argument, not with a limit diagnostic | A limit diagnostic. The `meta` limits publish the limit |
-| Array members `forEach`, `pop`, `shift`, `unshift`, `splice` | Accepted, exit 0 | ZTS201. Write `for...of`, `slice`, or spread |
+| Array members `forEach`, `pop`, `shift`, `unshift`, `splice` | Accepted | ZTS201. Write `for...of`, `slice`, or spread |
 | `import { ... } from "zttp:types"` | Refused with ZTS206 for a value import, and with ZTS053 for `import type` | ZTS053 for both. Write `Proof<T, P>` or `Effects<T, R>` directly. Both are ambient |
 | C-style `for (;;)` | Refused with ZTS001 and ZTS002 | ZTS001 only. Write `for (const i of range(n))` |
 | Labeled `break` and `continue` | Refused with ZTS001 and ZTS047 | ZTS001 only. Write a conditional |
@@ -335,6 +341,42 @@ against the compiler.
 | A write to a `readonly` field | Refused with ZTS200 | ZTS215. Write a new record |
 | A `match` that does not cover every case, in a statement or a `const` | Refused with ZTS603 | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |
-
-The specification also requires that the subexpressions of an assignment
-target are pure. The probes did not test that rule.
+| `let` with no initializer, such as `let a: number;` | Accepted, exit 0. A `let` with no initializer and no later assignment reports ZTS604 | ZTS021. Write `const a: number = 1;`, or give the `let` an initializer |
+| A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | Accepted, exit 0 | A targeted refusal. Write the body as a block |
+| An `import` after a declaration | Accepted, exit 0 | ZTS002. Move each `import` above the first declaration |
+| An `import` or `export` inside a function body | Accepted, exit 0 | ZTS002. Move the `import` or `export` to the top level |
+| `import type X from "./x.ts";` | Accepted, exit 0 | ZTS002. Write `import type { X } from "./x.ts";` |
+| One `const` that binds two names, such as `const a = 1, b = 2;` | Refused with ZTS047, "statement is not terminated" | ZTS001. Write one `const` for each name |
+| Destructuring in a `for...of` head | Refused with ZTS003, "unexpected token" | ZTS001. Bind the element to one name, then read each member in the body |
+| An assignment target that is not a name, a member path, or an index, such as `(n) = 2;` and `o.a?.a = 1;` | Accepted, exit 0 | ZTS016. Assign to a name, a member path, or an index |
+| A bigint literal, such as `10n` | Refused with ZTS047, "statement is not terminated" | ZTS012. The profile has no bigint. Write a `number` literal |
+| A module specifier that is not a string literal, such as `import { ok } from m;` | Refused with ZTS003, "unexpected token" | A targeted refusal. Write the specifier as a string literal |
+| A `structural` or `nominal` declaration inside a function | Refused with ZTS047, "statement is not terminated" | A targeted refusal. Declare the type at the top level |
+| Type parameters on an arrow, such as `<T>(x: T) => x` | Accepted, exit 0 | ZTS001. Write the callback without type parameters |
+| A type-parameter modifier (`in`, `const`) and an `asserts` return type | Accepted, exit 0 | A targeted refusal. Remove the modifier. Write `x is T` or `boolean` as the return type |
+| A quoted key in a record type, such as `{ "a": number }`, when unused | Accepted, exit 0 | ZTS001. Write `{ a: number }` |
+| A quoted key in a record type, such as `{ "a": number }`, when read | Refused with ZTS201, "property does not exist on type" | ZTS001 on the declaration. Write `{ a: number }` |
+| A type name outside the admitted types, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error` | Accepted, exit 0 | A targeted refusal. Use an admitted type from section 5.7 of the specification |
+| A type form outside the admitted grammar, such as `new () => T`, `unique symbol`, `[string?]`, `[a: string]`, `[...string[]]`, `readonly { a: number }`, a rest parameter in a function type, a method signature, a call signature, and a record type with comma separators | Accepted, exit 0 | A targeted refusal. Write an admitted type form. A record type separates its fields with `;` |
+| A `Dict` key type other than `string` or `number`, such as `Dict<boolean, string>` | Accepted, exit 0 | ZTS209. Use `string` or `number` as the key type |
+| `toReversed`, `Array.from`, `Array.of`, and a write to `xs.length` | Accepted, exit 0 | ZTS201 for the members and ZTS200 for the `length` write. Build a new array with `for...of` |
+| An array member call with an argument list that spec 6.5 does not give, such as `xs.slice(1)`, `xs.slice()`, `xs.toSorted()`, `xs.join()`, `xs.reduce(f)`, `xs.indexOf(v, i)`, and a three-parameter `map` callback | Accepted, exit 0. A four-parameter callback reports ZTS203 | ZTS202. Pass the arguments that the specification gives |
+| `join` on an array of non-strings, such as `[1, 2].join("")` | Accepted, exit 0 | ZTS203. Convert each element with `String` first |
+| An index read or a `length` read on `Bytes` | Accepted, exit 0 | ZTS201. Write `byteAt(value, index)` or `bytesLength(value)` from `zttp:bytes` |
+| `Object` members other than `keys`, `values`, and `entries`, such as `Object.create`, `Object.defineProperty`, and `Object.fromEntries` | Accepted, exit 0 | ZTS201. Write `Object.keys`, `Object.values`, `Object.entries`, or object spread |
+| A write to a field that the record type does not declare, such as `o.z = 1` | Accepted, exit 0. The read `o.z` reports ZTS201 | ZTS201. Declare the field in the record type, or build a new record with spread |
+| A second `const` of the same name in one scope | Accepted, exit 0 | ZTS019. Write a different name |
+| A duplicate parameter name, such as `function f(a: number, a: number)` | Accepted, exit 0 | ZTS018. Write a different name |
+| A duplicate type parameter, such as `function f<T, T>(a: T): T` | Refused with ZTS208, "no argument determines type parameter" | A targeted refusal. Write a different name |
+| An assignment to a `const`, such as `const n: number = 1; n = 2;` | Refused with ZTS200, "type '2' is not assignable to type '1'" | A targeted refusal that names `const`. Write `let`, or bind a new name |
+| A quoted key in a record literal, such as `{ "a": 1 }` | Accepted, exit 0 | ZTS001. Write `{ a: 1 }` |
+| A spread with no explicit field after it, such as `{ ...o }` | Accepted, exit 0 | ZTS614. Use `o` itself, or add an explicit field after the spread |
+| A string-literal read of an identifier key, such as `r["a"]` | Accepted, exit 0 | ZTS605. Write `r.a` |
+| A call in an assignment target, such as `mk().n = 2` | Accepted, exit 0 | A targeted refusal. Bind the call result to a `const` first |
+| A higher-order callback that calls `push`, or that assigns a captured binding | Accepted, exit 0 | A targeted refusal. Build the result with `for...of` |
+| A top-level statement other than a registration call, such as `f();` and `if (c) { }` | Accepted, exit 0 | A targeted refusal. Move the statement into a function. A bare `schemaCompile(...)` or `sql(...)` call with literal arguments stays admitted |
+| An arrow outside a callback argument: a `const`-bound arrow, a returned arrow, an arrow in a record field, an immediately called arrow, and an arrow as a `?:` arm | Accepted, exit 0. ZTS608 refuses only a reused helper | A targeted refusal. Write a module-level `function` |
+| A top-level initializer with an effect, such as `const t: number = Date.now();` | Accepted, exit 0 | A targeted refusal. Compute the value inside a function |
+| `for...of` over a number, such as `for (const k of 5)` | Accepted, exit 0 | A targeted refusal. Iterate an array, a string, or `range(n)` |
+| `stringifyJson` of a value that JSON cannot carry, such as a function or a `Dict<number, string>` | Accepted, exit 0. `Response.json` refuses the same payload with ZTS213 | ZTS213. Pass a string-keyed payload |
+| A `default` arm on a closed union that is already covered, or a duplicate `when` arm | Accepted, exit 2. The check reports ZTS216 as a warning | ZTS216 as an error. Remove the `default` arm or the duplicate arm |
