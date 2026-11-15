@@ -1007,6 +1007,23 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(top("import type { X } from \"./x.ts\";")),
     },
     .{
+        .key = "A module specifier that is not a string literal, such as `import { ok } from m;` and `import type { T } from m;`",
+        .refused = &.{
+            r("import { ok } from m;", top("import { ok } from m;")),
+            r("import type { T } from m;", top("import type { T } from m;")),
+        },
+        .clean = c(top("import { ok } from \"zttp:result\";")),
+    },
+    .{
+        .key = "A `structural` or `nominal` declaration inside a function",
+        .refused = &.{
+            r("structural", top("function g(): number {\n  structural L = number;\n  return 1;\n}")),
+            r("structural", top("function g(): number {\nstructural L = number;\n  return 1;\n}")),
+            r("nominal", top("function g(): number {\n  nominal L = number;\n  return 1;\n}")),
+        },
+        .clean = c(top("structural L = number;\nfunction g(x: L): L {\n  return x;\n}")),
+    },
+    .{
         .key = "A declaration that binds two names, such as `const a = 1, b = 2;`",
         .refused = &.{r("const a = 1, b = 2;", body("  const a = 1, b = 2;"))},
         .clean = c(body("  const a = 1;\n  const b = 2;")),
@@ -1154,17 +1171,6 @@ pub const gap_rows = [_]GapRow{
             c(top(g_fn ++ "function h(c: boolean): number {\n  if (c) g();\n  return 2;\n}")),
             c(top(g_fn ++ "function h(c: boolean): number {\n  if (c) {\n    return 1;\n  } else g();\n  return 2;\n}")),
             c(top(g_fn ++ "function h(xs: number[]): number {\n  for (const k of xs) g();\n  return 2;\n}")),
-        },
-    },
-    .{
-        .key = "A module specifier that is not a string literal, such as `import { ok } from m;`",
-        .sources = &.{c(top("import { ok } from m;"))},
-    },
-    .{
-        .key = "A `structural` or `nominal` declaration inside a function",
-        .sources = &.{
-            c(top("function g(): number {\n  structural L = number;\n  return 1;\n}")),
-            c(top("function g(): number {\n  nominal L = number;\n  return 1;\n}")),
         },
     },
     .{

@@ -289,8 +289,8 @@ dispatches. Bulk rewrite scripts are not allowed.
 |---|---|
 | U2a | G1, `let` without an initializer, X3, X4, X5, X7, X8, X17, X32 |
 | U1c | The generated-code census (U1c-1 and U1c-2, above), before U2b |
-| U2b | G8, G9, G10, X6, X9, X11, X12, N1, N2, N7, N14 |
-| U3 | G2, G3, G7, G11, X16 (type keys), X26, X27, X28, N8 |
+| U2b | G8, G9, G10, X6, X9, X11, N1, N2, N7, N14 |
+| U3 | G2, G3, G7, G11, X12, X16 (type keys), X26, X27, X28, N8 |
 | U4a | The array set (`forEach`, `pop`, `shift`, `unshift`, `splice`), X23, X24, X25, X31, N4, N13, Decision 7 |
 | U4b | X13, X14, X15, X16 (record keys), X18, `r["a"]`, G12 with N16, N11, N12 |
 | U4c | Callback purity, Decision 3, Decision 4, X2, N10, X19 with the `if` without a block. X19 also changes the repair templates of `repair_plan.zig` and `pi_repair_plan.zig`, which write `if (!result.ok) return ...;` and are model-visible |
@@ -471,3 +471,19 @@ later.
     candidate.
   - 12 of the 16 skill blocks are fragments. Each one that stops at ZTS002
     shows no checker code, so a later refusal does not reach it.
+- X12 moved from U2b to U3. Its modifiers `in` and `const` sit in the generic
+  parameter recognizer of `type_syntax_parser.zig`, which G2 also changes.
+  Its `asserts` return type is also type syntax.
+- The U2b work found three type syntax defects. X6 fixes the first. U3 owns
+  the other two.
+  - The parser erases a type-only import as raw text, so `import type { T }
+    from m;` passed `zts check`. X6 now refuses that specifier.
+  - A type-only import that puts `from` on its own line, such as
+    `import type { T }` and then `from "./a.ts";`, is refused with ZTS002
+    "expected expression". The probable cause is that the raw module scan
+    ends the statement at the line break. A test of the scan can confirm it.
+  - A top-level `structural L = ;` passes `zts check`. G3 and G7 refuse type
+    text that the parser does not admit, and must cover this form.
+- Before X9, a `structural` declaration at column 1 inside a function was
+  admitted and reached the type checker. The census case
+  `block_left_aligned` asserted that. X9 refuses both columns.

@@ -188,6 +188,8 @@ const AssignmentPosition = enum { refused, statement, statement_paren };
 
 const block_import_message = "`import` and `export` are not supported inside a block; move them to the top level of the module";
 const late_import_message = "an `import` after a declaration is not supported; move each `import` above the first declaration";
+const module_specifier_message = "a module specifier must be a string literal, such as \"./lib.ts\"";
+const nested_type_message = "a `structural` or `nominal` declaration is not supported inside a block; declare the type at the top level";
 
 pub const Parser = struct {
     allocator: std.mem.Allocator,
@@ -1259,6 +1261,7 @@ pub const Parser = struct {
 
         const presentation_origin = self.admission_presentation;
         const keyword = self.current;
+        const after_keyword = type_syntax.Cursor.afterCurrent(self.tokenizer);
         const scan = try type_syntax.scanTypeOnlyModule(self.type_store.allocator, .{
             .source = self.source,
             .keyword = self.current,
@@ -1321,11 +1324,33 @@ pub const Parser = struct {
         } else if (keyword.type == .kw_import and self.declaration_seen) {
             self.errors.addErrorAt(.unexpected_token, keyword, late_import_message);
         }
+        if (tokenAfterFrom(after_keyword, module.raw_span.end)) |specifier| if (specifier.type != .string_literal) {
+            self.errors.addErrorAt(.expected_token, specifier, module_specifier_message);
+        };
         return true;
+    }
+
+    /// The token after the first `from` outside braces, or null when no
+    /// `from` comes before `end`.
+    fn tokenAfterFrom(start: type_syntax.Cursor, end: u32) ?Token {
+        var cursor = start;
+        var depth: u32 = 0;
+        while (cursor.current.type != .eof and cursor.current.start < end) : (cursor.advance()) switch (cursor.current.type) {
+            .lbrace => depth += 1,
+            .rbrace => depth -|= 1,
+            .kw_from => if (depth == 0) {
+                cursor.advance();
+                return cursor.current;
+            },
+            else => {},
+        };
+        return null;
     }
 
     fn tryConsumeTypeDeclaration(self: *Parser) !bool {
         if (self.admissionCoveredByRecovery(self.current.start)) return false;
+        // A nested declaration falls through to parseStatement, which refuses it.
+        if (self.brace_depth > 0) return false;
         if (self.admission == null or !self.isTypeDeclarationBoundary()) return false;
         const publication_checkpoint = self.typePublicationCheckpoint();
         const store_checkpoint = self.type_store.checkpoint();
@@ -1911,6 +1936,13 @@ pub const Parser = struct {
                         self.advance();
                         return error.ParseError;
                     };
+                    // The top level consumes a type declaration before this arm.
+                    const type_keyword = std.mem.eql(u8, name, "structural") or std.mem.eql(u8, name, "nominal");
+                    if (type_keyword and self.brace_depth > 0 and self.peekIsNameOrKeyword()) {
+                        self.errors.addErrorAt(.unexpected_token, self.current, nested_type_message);
+                        self.advance();
+                        return error.ParseError;
+                    }
                 }
                 return self.parseExpressionStatement();
             },
@@ -4254,9 +4286,8 @@ pub const Parser = struct {
         try self.expect(.rbrace, "'}'");
         try self.expect(.kw_from, "'from'");
 
-        // Parse module specifier string
         if (!self.check(.string_literal)) {
-            self.errors.addExpectedError(self.current, "module specifier string");
+            self.errors.addErrorAt(.expected_token, self.current, module_specifier_message);
             return error.UnexpectedToken;
         }
         const module_token = self.current;
@@ -6689,27 +6720,6 @@ pub const Parser = struct {
 };
 
 // ============ Tests ============
-
-test "typed block consumes a declaration without a runtime node" {
-    const source =
-        "{\n" ++
-        "structural Alias = number;\n" ++
-        "const value: Alias = 1;\n" ++
-        "}";
-    var parser = try Parser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
-    defer parser.deinit();
-    _ = try parser.parse();
-
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
-    try std.testing.expectEqual(@as(u16, 1), parser.type_store.declarations.items[0].authored_scope);
-    var variable_count: usize = 0;
-    const declaration_offset: u32 = @intCast(std.mem.indexOf(u8, source, "structural").?);
-    for (parser.nodes.tags.items, 0..) |tag, index| {
-        if (tag == .var_decl) variable_count += 1;
-        try std.testing.expect(parser.nodes.getLoc(@intCast(index)).offset != declaration_offset);
-    }
-    try std.testing.expectEqual(@as(usize, 1), variable_count);
-}
 
 fn expectAdmissionKindFromSource(
     source: []const u8,

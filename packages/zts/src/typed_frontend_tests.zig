@@ -2933,7 +2933,7 @@ const declaration_fixtures = [_]DeclarationFixture{
     .{ .case = .root_leading_space_refusal, .source = " structural Alias = number;", .probe = .parser_refused },
     .{ .case = .after_newline_refusal, .source = "const first = 1;\n  structural Alias = number;", .probe = .parser_refused },
     .{ .case = .after_semicolon_refusal, .source = "const first = 1; structural Alias = number;", .probe = .parser_refused },
-    .{ .case = .block_left_aligned, .source = "function outer() {\nstructural Alias = number;\nreturn 1;\n}", .probe = .{ .retained_declarations = 1 } },
+    .{ .case = .block_left_aligned, .source = "function outer() {\nstructural Alias = number;\nreturn 1;\n}", .probe = .{ .retained_declarations = 0 } },
     .{ .case = .block_indented_refusal, .source = "function outer() {\n  structural Alias = number;\nreturn 1;\n}", .probe = .{ .retained_declarations = 0 } },
     .{ .case = .runtime_structural_collision, .source = "structural Alias = number; function Alias() { return 1; }", .probe = .{ .retained_declarations = 1 } },
     .{ .case = .runtime_nominal_collision, .source = "nominal Alias = number; function Alias() { return 1; }", .probe = .{ .retained_declarations = 1 } },
@@ -6646,10 +6646,6 @@ test "declaration semantic census observes every case" {
                 );
                 defer parser.deinit();
                 switch (fixture.case) {
-                    .block_left_aligned => {
-                        _ = try parser.parse();
-                        try assertRetainedRuntimeFunction(&parser, fixture.source, .structural, 2);
-                    },
                     .runtime_structural_collision => {
                         _ = try parser.parse();
                         try assertRetainedRuntimeFunction(&parser, fixture.source, .structural, 0);
@@ -6658,12 +6654,12 @@ test "declaration semantic census observes every case" {
                         _ = try parser.parse();
                         try assertRetainedRuntimeFunction(&parser, fixture.source, .nominal, 0);
                     },
-                    .block_indented_refusal => {
+                    .block_left_aligned, .block_indented_refusal => {
                         try std.testing.expectError(error.ParseError, parser.parse());
                         try std.testing.expectEqual(@as(usize, 0), parser.type_store.declarations.items.len);
                         const errors = parser.errors.getErrors();
                         try std.testing.expectEqual(@as(usize, 1), errors.len);
-                        try std.testing.expectEqual(engine.parser.ErrorKind.missing_semicolon, errors[0].kind);
+                        try std.testing.expectEqual(engine.parser.ErrorKind.unexpected_token, errors[0].kind);
                         const structural = std.mem.indexOf(u8, fixture.source, "structural") orelse
                             return error.TestUnexpectedResult;
                         try std.testing.expectEqual(@as(u32, @intCast(structural)), errors[0].location.offset);

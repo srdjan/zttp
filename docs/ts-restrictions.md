@@ -57,6 +57,7 @@ the code.
 | An `import` after a declaration | ZTS002 | Move each `import` above the first declaration |
 | An `import` or `export` inside a function body | ZTS002 | Move the `import` or `export` to the top level |
 | `import type X from "./x.ts";` | ZTS002 | `import type { X } from "./x.ts";` |
+| A module specifier that is not a string literal, such as `import { ok } from m;` and `import type { T } from m;` | ZTS003 | A string literal, such as `"./lib.ts"` |
 
 A module specifier must be a string literal. Relative modules and registered
 `zttp:*` or `zttp-ext:*` modules are permitted. Module initialization must be
@@ -255,14 +256,16 @@ tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
 | A recursive alias with a cycle that does not pass through a record, tuple, array, or `Dict` | ZTS212 | Put the cycle under one of those constructors |
 | A type predicate whose body does not prove the predicate | ZTS211 | A predicate body that checks the claimed type |
 | A wrong number of explicit type arguments, or a violated constraint | ZTS210, ZTS209 | Match the declaration |
+| A `structural` or `nominal` declaration inside a function | ZTS002 | Declare the type at the top level |
 
 The admitted types are listed in section 5.7 of the
 [specification](spec/zts-model-1.md). The specification also excludes these
 type features: higher-rank function types, `keyof`, indexed-access types,
 index signatures, type-position `typeof`, conditional types, mapped types,
 `infer`, overloads, ambient declarations, generic defaults, and variance
-annotations. `zts check` gives none of them a targeted diagnostic. The gap
-section below gives the observed behavior.
+annotations. The Declarations And Bindings table gives the refusals of
+overloads and of `declare`. `zts check` gives the other features no targeted
+diagnostic. The gap section below gives the observed behavior.
 
 ## Admitted Members
 
@@ -352,8 +355,6 @@ against the compiler.
 | A `match` that does not cover every case, in a statement or a `const` | Refused with ZTS603 | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | Accepted, exit 0 | A targeted refusal. Write the body as a block |
-| A module specifier that is not a string literal, such as `import { ok } from m;` | Refused with ZTS003, "unexpected token" | A targeted refusal. Write the specifier as a string literal |
-| A `structural` or `nominal` declaration inside a function | Refused with ZTS047, "statement is not terminated" | A targeted refusal. Declare the type at the top level |
 | Type parameters on an arrow, such as `<T>(x: T) => x` | Accepted, exit 0 | ZTS001. Write the callback without type parameters |
 | A type-parameter modifier (`in`, `const`) and an `asserts` return type | Accepted, exit 0 | A targeted refusal. Remove the modifier. Write `x is T` or `boolean` as the return type |
 | A quoted key in a record type, such as `{ "a": number }`, when unused | Accepted, exit 0 | ZTS001. Write `{ a: number }` |
