@@ -7340,7 +7340,7 @@ test "ModuleAnalysisSession freezes writes_module_state in imported effects" {
 
 test "array suffix after a generic application is an array of the application" {
     try expectNoTypeDiagnostic("function f(x: Dict<string, number>[]): number { return x.length; }");
-    try expectNoTypeDiagnostic("function f(x: Result<number, string>[]): number { return x.length; }");
+    try expectNoTypeDiagnostic("structural Result<T, E> = { ok: T; error: E };\nfunction f(x: Result<number, string>[]): number { return x.length; }");
     try expectNoTypeDiagnostic("function f(x: Dict<string, number>[][]): number { return x[0].length; }");
 }
 

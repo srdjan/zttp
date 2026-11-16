@@ -11107,3 +11107,49 @@ test "eight type parameters parse, and a comma inside a constraint is not a sepa
     try expectParsesClean("structural Many<A, B, C, D, E, F, G, H> = H;\n");
     try expectParsesClean("function f<A extends Dict<string, number>, B, C, D, E, F, G, H>(a: A): A { return a; }\n");
 }
+
+fn expectNamesResolve(source: []const u8) !void {
+    var frontend: engine.source_frontend.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(std.testing.allocator, std.testing.allocator, source, "names.ts");
+    defer frontend.deinit();
+    try std.testing.expectEqual(@as(usize, 0), frontend.parserErrors().len);
+    try std.testing.expect(frontend.acceptedCapabilities() != null);
+}
+
+fn expectUndeclaredNameAt(source: []const u8, offset: u32, message: []const u8, suggestion: []const u8) !void {
+    var frontend: engine.source_frontend.DirectCheckSource = undefined;
+    try frontend.initCompileInPlace(std.testing.allocator, std.testing.allocator, source, "names.ts");
+    defer frontend.deinit();
+    const errors = frontend.parserErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(engine.parser.ErrorKind.undeclared_type_name, errors[0].kind);
+    try std.testing.expectEqual(offset, errors[0].location.offset);
+    try std.testing.expectEqualStrings(message, errors[0].message);
+    try std.testing.expectEqualStrings(suggestion, errors[0].suggestion orelse return error.TestUnexpectedResult);
+    try std.testing.expect(frontend.acceptedCapabilities() == null);
+}
+
+test "a type name that a later declaration binds resolves" {
+    try expectNamesResolve("function g(a: Later): number { return 1; }\nstructural Later = { id: number };\n");
+}
+
+test "a type parameter of a generic function resolves" {
+    try expectNamesResolve("function g<T>(a: T): T { return a; }\n");
+}
+
+test "a readonly array type resolves" {
+    try expectNamesResolve("function g(a: readonly number[]): number { return 1; }\n");
+}
+
+test "a user declaration of a utility name binds that name" {
+    try expectNamesResolve("structural Partial<T> = { v: T };\nfunction g(a: Partial<number>): number { return 1; }\n");
+}
+
+test "an undeclared type name is refused at the name" {
+    try expectUndeclaredNameAt(
+        "function g(a: Widget): number { return 1; }\n",
+        14,
+        "type name `Widget` is not declared",
+        "declare it with `structural`, import it, or use a type name from `meta` ambient_names",
+    );
+}

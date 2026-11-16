@@ -152,6 +152,7 @@ pub fn parserCode(kind: ParserKind) []const u8 {
         .invalid_await => "ZTS026",
         .invalid_super => "ZTS027",
         .too_many_parameters => "ZTS028",
+        .undeclared_type_name => "ZTS065",
         .too_many_locals => "ZTS029",
         .too_many_upvalues => "ZTS030",
         .too_many_constants => "ZTS031",

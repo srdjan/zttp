@@ -432,7 +432,7 @@ test "inline preparation never turns an allocation failure into a different sour
 test "inline refusal line carries the eval name, position, and message" {
     const allocator = std.testing.allocator;
     const cases = [_]struct { source: []const u8, line: []const u8 }{
-        .{ .source = "function handler(req: any): Response { return Response.text(\"ok\"); }", .line = "<eval>:1:23: 'any' type is not supported; use specific types (string, number, object) or union types instead" },
+        .{ .source = "function handler(req: any): Response { return Response.text(\"ok\"); }", .line = "<eval>:1:23: 'any' type is not supported; use specific types (string, number, a record type) or union types instead" },
         .{ .source = "function handler(req: Request): Response { return Response.text(\"ok\"); } /* open", .line = "TypeScript strip error in <eval>: error.UnterminatedComment" },
         .{ .source = "const s = \"open\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }", .line = "<eval>:1:16: unterminated string literal; close the quote, or write the newline as \\n" },
     };

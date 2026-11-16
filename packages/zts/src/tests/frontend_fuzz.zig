@@ -780,11 +780,11 @@ fn buildNested(allocator: std.mem.Allocator, shape: Shape, depth: usize) !std.Ar
 
 const type_shapes = [_]Shape{
     .{ .name = "tuple", .prefix = "structural Deep = ", .open = "[", .core = "string", .close = "]", .suffix = ";" },
-    .{ .name = "generic", .prefix = "structural Deep = ", .open = "Box<", .core = "string", .close = ">", .suffix = ";" },
+    .{ .name = "generic", .prefix = "structural Box<T> = T;\nstructural Deep = ", .open = "Box<", .core = "string", .close = ">", .suffix = ";" },
     .{ .name = "object", .prefix = "structural Deep = ", .open = "{ a: ", .core = "string", .close = "}", .suffix = ";" },
     .{ .name = "paren", .prefix = "structural Deep = ", .open = "(", .core = "string", .close = ")", .suffix = ";" },
     .{ .name = "function type", .prefix = "structural Deep = ", .open = "(a: ", .core = "string", .close = ") => string", .suffix = ";" },
-    .{ .name = "annotation", .prefix = "const x: ", .open = "Box<", .core = "string", .close = ">", .suffix = " = [];" },
+    .{ .name = "annotation", .prefix = "structural Box<T> = T;\nconst x: ", .open = "Box<", .core = "string", .close = ">", .suffix = " = [];" },
 };
 
 const value_shapes = [_]Shape{

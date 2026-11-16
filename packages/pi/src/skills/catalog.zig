@@ -130,7 +130,7 @@ const census_known_failures = [_]CensusFailure{
     .{ .skill = "route-table", .block = 0, .codes = &.{"ZTS500"}, .reason = "finding: the handler declares no Proof capsule, so the default proof profile refuses the example" },
     .{ .skill = "sql-query", .block = 0, .codes = &.{"check:MissingSqlSchema"}, .reason = "needs a project input: SQL verification requires a configured sqlite schema that the block cannot carry" },
     .{ .skill = "canonical-style", .block = 0, .codes = &.{"ZTS002"}, .reason = "fragment: a statement list with a top-level return" },
-    .{ .skill = "canonical-style", .block = 1, .codes = &.{ "ZTS600", "ZTS629" }, .reason = "fragment: calls makeUser, which the block does not declare" },
+    .{ .skill = "canonical-style", .block = 1, .codes = &.{"ZTS065"}, .reason = "fragment: names the types Input and User and calls makeUser, which the block does not declare" },
     .{ .skill = "canonical-style", .block = 3, .codes = &.{ "ZTS600", "ZTS629" }, .reason = "fragment: uses load, pickStatus, ready, and fallback, which the block does not declare" },
     .{ .skill = "canonical-style", .block = 4, .codes = &.{"ZTS629"}, .reason = "fragment: uses a and b, which the block does not declare" },
     .{ .skill = "canonical-style", .block = 5, .codes = &.{ "ZTS106", "ZTS629" }, .reason = "fragment: uses count, which the block does not declare" },

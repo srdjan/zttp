@@ -601,3 +601,21 @@ later.
     distinction, so removing it needs its own unit, like X11.
   - A Dict key that is an intersection or an uninstantiated generic
     application is admitted by the key check.
+- U3e-2 refuses a type name that is not declared, imported, ambient, or a
+  type parameter in scope, with the new parser code ZTS065, at the name.
+  `type_names.zig` walks the type store after the parse, and
+  `known_types.zig` holds the admitted names. This closes X26, and it
+  refuses the utility types `Partial`, `Required`, `Pick`, `Omit`, and
+  `Readonly` (N8). It also refuses `object`, which compiled only because an
+  unresolved name read as an opaque type, and `any` in a generic bound or
+  type argument, which the stripper did not reach. ZTS629 was not reused,
+  because one code must name one diagnostic. These findings stay open:
+  - The utility transforms in `type_env.zig` are now dead from source. A
+    later unit deletes them and their tests.
+  - `FetchOptions` and `DictKey` resolve with no import and have no `meta`
+    row. docs/ts-restrictions.md lists both as gaps. The spec names a
+    module type through `import type`, and `zttp:fetch` exports no type.
+  - A function type parameter is in scope for the whole file in the name
+    walk, so a stray `T` outside its function passes the walk. The checker
+    then reads it as an opaque type, which fails closed.
+  - `any` in a generic bound gets ZTS065, not ZTS041.

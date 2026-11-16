@@ -1101,6 +1101,29 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(top("structural L = number;\nfunction g(x: L): L {\n  return x;\n}")),
     },
     .{
+        .key = "A type name that is not declared, imported, or ambient, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error`, `object`, and the utility types `Partial<T>`, `Required<T>`, `Pick<T, K>`, `Omit<T, K>`, and `Readonly<T>`",
+        .refused = &.{
+            r("Record<K, V>", paramText("Record<string, number>")),
+            r("Map", paramText("Map<string, number>")),
+            r("Set", paramText("Set<number>")),
+            r("bigint", paramText("bigint")),
+            r("symbol", paramText("symbol")),
+            r("Function", paramText("Function")),
+            r("Exclude", paramText("Exclude<string, number>")),
+            r("NonNullable", paramText("NonNullable<string>")),
+            r("Date", paramText("Date")),
+            r("RegExp", paramText("RegExp")),
+            r("Error", paramText("Error")),
+            r("object", paramText("object")),
+            r("Partial<T>", top("structural U = { id: number };\nfunction g(a: Partial<U>): number {\n  return 1;\n}")),
+            r("Required<T>", top("structural U = { id?: number };\nfunction g(a: Required<U>): number {\n  return 1;\n}")),
+            r("Pick<T, K>", top("structural U = { id: number; name: string };\nfunction g(a: Pick<U, \"id\">): number {\n  return 1;\n}")),
+            r("Omit<T, K>", top("structural U = { id: number; name: string };\nfunction g(a: Omit<U, \"id\">): number {\n  return 1;\n}")),
+            r("Readonly<T>", top("structural U = { id: number };\nfunction g(a: Readonly<U>): number {\n  return 1;\n}")),
+        },
+        .clean = c(top("structural Item = { id: number };\nstructural Partial<T> = { v: T };\nfunction g<T>(a: T, b: Item, c: readonly Item[], d: Later, e: Partial<number>): T {\n  return a;\n}\nstructural Later = { v: number };")),
+    },
+    .{
         .key = "A generic default, such as `function f<T = string>(a: T): T`",
         .refused = &.{
             r("function f<T = string>(a: T): T", top("function f<T = string>(a: T): T {\n  return a;\n}")),
@@ -1327,23 +1350,6 @@ pub const gap_rows = [_]GapRow{
         },
     },
     .{
-        .key = "A type name outside the admitted types, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error`",
-        .sources = &.{
-            param("Record<string, number>"),
-            param("Map<string, number>"),
-            param("Set<number>"),
-            param("bigint"),
-            param("symbol"),
-            param("Function"),
-            param("{}"),
-            param("Exclude<string, number>"),
-            param("NonNullable<string>"),
-            param("Date"),
-            param("RegExp"),
-            param("Error"),
-        },
-    },
-    .{
         .key = "`toReversed`, `Array.from`, `Array.of`, and a write to `xs.length`",
         .sources = &.{
             c(top("function g(xs: number[]): number[] {\n  return xs.toReversed();\n}")),
@@ -1403,6 +1409,14 @@ pub const gap_rows = [_]GapRow{
     .{
         .key = "A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };`",
         .sources = &.{c(top("structural Box<T extends string> = { value: T };\nfunction g(b: Box<number>): number {\n  return b.value;\n}"))},
+    },
+    .{
+        .key = "`FetchOptions` with no import",
+        .sources = &.{c(top("function g(o: FetchOptions): number {\n  return 1;\n}"))},
+    },
+    .{
+        .key = "`DictKey` with no import, such as `<K extends DictKey>`",
+        .sources = &.{c(top("function f<K extends DictKey>(k: K): K {\n  return k;\n}"))},
     },
     .{
         .key = "An assignment to a `const`, such as `const n: number = 1; n = 2;`",

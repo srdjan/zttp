@@ -1612,7 +1612,7 @@ pub const seeds = [_]DefectSeed{
         .class = .model_retry,
         .seed_source = clean_exported_only_handler,
         .bad_draft =
-        \\export function widen(x: object): object {
+        \\export function widen(x: string): string {
         \\  return x;
         \\}
         \\

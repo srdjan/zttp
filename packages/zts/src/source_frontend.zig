@@ -6,6 +6,7 @@
 const std = @import("std");
 const atom_table = @import("atom_table.zig");
 const parser = @import("parser/root.zig");
+const type_names = @import("type_names.zig");
 const source_diagnostics = @import("zts-base").source_diagnostics;
 
 pub const SourceKind = enum {
@@ -248,6 +249,7 @@ pub const DirectCheckSource = struct {
                 );
                 if (view.getTag(root) != .program) return error.InvalidDirectSourceRoot;
                 try self.parser.type_store.validateRuntimeOwners(type_allocator, view);
+                if (try self.refuseUndeclaredTypeNames(type_allocator, view, root)) return;
             },
             .recovered_admission_refused,
             .parser_refused,
@@ -255,6 +257,35 @@ pub const DirectCheckSource = struct {
             => {},
         }
         self.parse_outcome = parse_outcome;
+    }
+
+    /// Refuse each type name that resolves to nothing (ZTS065), at the name.
+    /// Returns true after it sets the outcome to a parser refusal.
+    fn refuseUndeclaredTypeNames(
+        self: *DirectCheckSource,
+        allocator: std.mem.Allocator,
+        view: parser.IrView,
+        root: parser.NodeIndex,
+    ) !bool {
+        const refusals = try type_names.undeclared(allocator, &self.parser.type_store, view, root, &self.atoms);
+        defer allocator.free(refusals);
+        if (refusals.len == 0) return false;
+        for (refusals) |refusal| {
+            const token = parser.type_syntax.tokenAtOffset(self.source, refusal.offset);
+            self.parser.errors.addErrorFmt(
+                .undeclared_type_name,
+                token.location(),
+                "type name `{s}` is not declared",
+                .{refusal.name},
+                type_names.repairFor(refusal.name),
+            );
+        }
+        if (self.parser.errors.outOfMemory()) return error.OutOfMemory;
+        self.parse_outcome = .{ .parser_refused = .{
+            .first_error = error.ParseError,
+            .projected_error_count = self.parser.getProjectedErrors().len,
+        } };
+        return true;
     }
 
     pub fn deinit(self: *DirectCheckSource) void {

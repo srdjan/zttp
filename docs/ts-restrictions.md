@@ -280,6 +280,7 @@ tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
 | An unrecognized type, such as `number number`, an empty type, such as `structural L = ;`, a field with no type, such as `{ x: }`, a missing separator, such as `{ x: number y: string }`, `(x: number y: string) => number`, `B<string number>`, and `[number string]`, a function type with no return type, such as `(x: number) =>`, an unclosed bracket, such as `number [`, an explicit call type argument, such as `f<number number>(1)`, and a generic constraint, such as `T extends number string` | ZTS001 | An admitted type from section 5.7 of the specification |
 | A record type with comma separators, such as `{ a: number, b: string }` | ZTS001 | `{ a: number; b: string }` |
 | `readonly` on a record type, such as `readonly { a: number }` | ZTS001 | The record type |
+| A type name that is not declared, imported, or ambient, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error`, `object`, and the utility types `Partial<T>`, `Required<T>`, `Pick<T, K>`, `Omit<T, K>`, and `Readonly<T>` | ZTS065 | A declared or imported type, or an ambient type from `meta` |
 
 The admitted types are listed in section 5.7 of the
 [specification](spec/zts-model-1.md). The specification also excludes these
@@ -377,7 +378,6 @@ against the compiler.
 | A `match` that does not cover every case, in a statement or a `const` | Refused with ZTS603 | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | Accepted, exit 0 | A targeted refusal. Write the body as a block |
-| A type name outside the admitted types, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error` | Accepted, exit 0 | A targeted refusal. Use an admitted type from section 5.7 of the specification |
 | `toReversed`, `Array.from`, `Array.of`, and a write to `xs.length` | Accepted, exit 0 | ZTS201 for the members and ZTS200 for the `length` write. Build a new array with `for...of` |
 | An array member call with an argument list that spec 6.5 does not give, such as `xs.slice(1)`, `xs.slice()`, `xs.toSorted()`, `xs.join()`, `xs.reduce(f)`, `xs.indexOf(v, i)`, and a three-parameter `map` callback | Accepted, exit 0. A four-parameter callback reports ZTS203 | ZTS202. Pass the arguments that the specification gives |
 | `join` on an array of non-strings, such as `[1, 2].join("")` | Accepted, exit 0 | ZTS203. Convert each element with `String` first |
@@ -388,6 +388,8 @@ against the compiler.
 | A duplicate parameter name, such as `function f(a: number, a: number)` | Accepted, exit 0 | ZTS018. Write a different name |
 | A duplicate type parameter, such as `function f<T, T>(a: T): T` | Refused with ZTS208, "no argument determines type parameter" | A targeted refusal. Write a different name |
 | A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };` | Accepted, exit 0 | ZTS209. Pass a type argument that satisfies the constraint |
+| `FetchOptions` with no import | Accepted, exit 0. The specification names a module type through `import type` from its module, and `zttp:fetch` exports no type | An `import type` from `zttp:fetch` |
+| `DictKey` with no import, such as `<K extends DictKey>` | Accepted, exit 0. The `meta` ambient names do not list it | A published ambient name, or `string \| number` |
 | An assignment to a `const`, such as `const n: number = 1; n = 2;` | Refused with ZTS200, "type '2' is not assignable to type '1'" | A targeted refusal that names `const`. Write `let`, or bind a new name |
 | A quoted key in a record literal, such as `{ "a": 1 }` | Accepted, exit 0 | ZTS001. Write `{ a: 1 }` |
 | A spread with no explicit field after it, such as `{ ...o }` | Accepted, exit 0 | ZTS614. Use `o` itself, or add an explicit field after the spread |

@@ -17,7 +17,7 @@ The parser checks these features in TypeScript type positions.
 
 | Feature | Error Type | Suggested Alternative |
 |---------|------------|----------------------|
-| `any` type (all positions: annotations, assertions, nested) | UnsupportedAnyType | Use specific types (string, number, object) or union types |
+| `any` type (all positions: annotations, assertions, nested) | UnsupportedAnyType | Use specific types (string, number, a record type) or union types |
 | `as` type assertion (e.g., `x as string`) | UnsupportedAssertion | Use explicit type narrowing with typeof guards or undefined checks |
 | `satisfies` operator (e.g., `x satisfies T`) | UnsupportedAssertion | Use explicit type annotations on declarations |
 | A string literal that reaches the end of its line | UnterminatedString | Close the quote, or write the newline as `\n` |

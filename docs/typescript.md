@@ -52,11 +52,11 @@ Generic type aliases like `structural Result<T> = { ok: boolean; value: T }` are
 structural Result<T> = { ok: boolean; value: T; error: string };
 structural Pair<A, B> = { first: A; second: B };
 
-const auth: Result<object> = jwtVerify(token, secret);  // checked as { ok: boolean; value: object; error: string }
+const auth: Result<string> = { ok: true, value: "id", error: "" };  // checked as { ok: boolean; value: string; error: string }
 const pair: Pair<string, number> = { first: "a", second: 1 };
 ```
 
-Up to 8 type parameters per alias are supported.
+Up to 8 type parameters per alias are supported. A ninth is refused with ZTS028.
 
 **Ambient `Proof<T, P>` for proof obligations:**
 
@@ -333,27 +333,19 @@ cfg.host = "other";  // OK
 cfg.port = 8080;     // ERROR: cannot assign to readonly property
 ```
 
-`Readonly<T>` marks all fields readonly.
+The profile has no `Readonly<T>`. Mark each field `readonly`, or write
+`readonly T[]` for an array.
 
-### Utility Types
+### No Utility Types
 
-The object-deriving utility types build a new record type from an existing one,
-so a field stays declared in a single source type instead of being copied into
-hand-written aliases that drift:
+The profile has no utility types. `Pick`, `Omit`, `Partial`, `Required`, and
+`Readonly` are refused with ZTS065. Declare each shape with `structural`:
 
 ```typescript
 structural User = { id: number; name: string; email: string };
-
-structural Summary = Pick<User, "id" | "name">; // keep only id and name
-structural Safe = Omit<User, "email">;          // drop email
-structural UserPatch = Partial<User>;           // every field optional
-structural FullUser = Required<UserPatch>;      // every field required again
+structural Summary = { id: number; name: string };
+structural UserPatch = { id?: number; name?: string; email?: string };
 ```
-
-`Pick<T, Keys>` and `Omit<T, Keys>` filter fields by a string-literal key (or a
-union of them); `Partial<T>` makes every field optional and `Required<T>` makes
-every field required. They resolve structurally against a named source type or
-an inline object literal, alongside `Readonly<T>`.
 
 ### Template Literal Types
 
@@ -849,7 +841,7 @@ proof it buys, see [Restrictions to Proofs](restrictions-to-proofs.md).
 | 6 | Exhaustive checks with `never` | Adapted (native) | `match` exhaustiveness is native with a required `default` arm; the `never`-helper is unneeded -> [discriminated-union-match.ts](../examples/patterns/discriminated-union-match.ts) |
 | 7 | `as const` for config and constants | Adapted | `const` bindings preserve literals automatically; no `as const` -> [literal-types-no-enum.ts](../examples/patterns/literal-types-no-enum.ts) |
 | 8 | Type predicates for reusable narrowing | Direct fit | `x is T` guards; pairs with `assert` -> [unknown-and-guards.ts](../examples/patterns/unknown-and-guards.ts) |
-| 9 | Build new types from existing (`Pick`/`Omit`/`Partial`) | Direct fit | `Pick`/`Omit`/`Partial`/`Required` derive shapes from a source type, joining `Readonly<T>` -> [derive-types.ts](../examples/patterns/derive-types.ts) |
+| 9 | Build new types from existing (`Pick`/`Omit`/`Partial`) | Adapted | the profile has no utility types (ZTS065); declare each shape with `structural` -> [derive-types.ts](../examples/patterns/derive-types.ts) |
 | 10 | Validate external data at runtime | Direct fit (built-in) | `zttp:validate` plus `zttp:decode` replace Zod -> [validate-external.ts](../examples/patterns/validate-external.ts) |
 | 11 | Avoid `enum` | Enforced | `enum` is a hard error; literal unions only -> [literal-types-no-enum.ts](../examples/patterns/literal-types-no-enum.ts) |
 | 12 | Generics that infer automatically | Direct fit | generics plus inference (up to 8 params) -> [infer-and-generics.ts](../examples/patterns/infer-and-generics.ts) |
@@ -1032,28 +1024,6 @@ intent, enforced). Excerpted from
 [literal-types-no-enum.ts](../examples/patterns/literal-types-no-enum.ts); see
 also "Template Literal Types" in [TypeScript](typescript.md).
 
-#### 9. Build new types from existing (`Pick`/`Omit`/`Partial`/`Required`)
-
-Idiom: the utility-type family derives a related shape from one source type, so
-each field stays declared in a single place.
-
-`Pick<T, Keys>` keeps only the named fields, `Omit<T, Keys>` drops them,
-`Partial<T>` makes every field optional, and `Required<T>` makes every field
-required. They resolve structurally and work against a named source type, not
-just an inline object, joining the already-supported `Readonly<T>` (see
-"Readonly Fields" in [TypeScript](typescript.md)).
-
-```typescript
-structural User = { id: number; name: string; email: string; age: number };
-structural Summary = Pick<User, "id" | "name">; // { id: number; name: string }
-structural Safe = Omit<User, "email">;          // id, name, age
-structural UserPatch = Partial<User>;           // every field optional
-```
-
-See [derive-types.ts](../examples/patterns/derive-types.ts). Intersection (`&`)
-still composes narrower types where a utility does not fit:
-`structural WithMeta = Base & { createdAt: string }`.
-
 ### Adapted
 
 These tips map to a different construct, because the canonical TypeScript
@@ -1150,6 +1120,24 @@ Annotation Semantics" in [TypeScript](typescript.md)), so the `as const`
 assertion has nothing to add and is rejected along with the other assertions.
 Excerpted from
 [literal-types-no-enum.ts](../examples/patterns/literal-types-no-enum.ts).
+
+#### 9. Build new types from existing (`Pick`/`Omit`/`Partial`/`Required`)
+
+Idiom: the utility-type family derives a related shape from one source type, so
+each field stays declared in a single place.
+
+The profile has no utility types. `Pick`, `Omit`, `Partial`, `Required`, and
+`Readonly` are refused with ZTS065. Declare each shape with `structural`, so
+that each type that a reader sees is written out in full:
+
+```typescript
+structural User = { id: number; name: string; email: string; age: number };
+structural Summary = { id: number; name: string };
+structural UserPatch = { id?: number; name?: string; email?: string; age?: number };
+```
+
+See [derive-types.ts](../examples/patterns/derive-types.ts). Intersection (`&`)
+composes a narrower type: `structural WithMeta = Base & { createdAt: string }`.
 
 #### 13. Strict compiler options
 

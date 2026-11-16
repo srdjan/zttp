@@ -50,7 +50,7 @@ pub const StripDiagnosticKind = enum {
 
     pub fn message(self: StripDiagnosticKind) []const u8 {
         return switch (self) {
-            .any_type => "'any' type is not supported; use specific types (string, number, object) or union types instead",
+            .any_type => "'any' type is not supported; use specific types (string, number, a record type) or union types instead",
             .as_assertion => "'as' type assertion is not supported; use type-safe patterns instead",
             .satisfies_assertion => "'satisfies' type assertion is not supported; use type-safe patterns instead",
             .unterminated_string => "unterminated string literal; close the quote, or write the newline as \\n",

@@ -1,5 +1,5 @@
 // Proves: an exported function that exposes a raw built-in open type is refused (ZTS061).
-export function widen(x: object): object {
+export function widen(x: string): string {
     return x;
 }
 

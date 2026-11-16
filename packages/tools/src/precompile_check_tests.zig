@@ -4979,7 +4979,7 @@ test "CHECK preserves compound unclosed syntax diagnostics" {
 
 test "CHECK preserves preparation diagnostics and recovery boundaries" {
     const allocator = std.testing.allocator;
-    const any_suggestion = "use specific types (string, number, object) or union types instead";
+    const any_suggestion = "use specific types (string, number, a record type) or union types instead";
     const cases = [_]struct {
         annotation: []const u8,
         diagnostics: []const CompoundDiagnostic,
@@ -5661,7 +5661,7 @@ test "CHECK preserves declaration suffix refusals and empty bodies" {
         strip_refusal: bool,
         diagnostic: CompoundDiagnostic,
     }{
-        .{ .source = "structural Alias = number any;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, object) or union types instead" } },
+        .{ .source = "structural Alias = number any;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, a record type) or union types instead" } },
         .{ .source = "structural Alias = number void;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 27, .suggestion = "write `undefined`" } },
         .{ .source = "structural Alias = number Array<string>;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS058", .message = "`Array<T>` is not a type spelling in this profile", .line = 1, .column = 27, .suggestion = "write `T[]`" } },
         .{ .source = "structural Alias = number ReadonlyArray<string>;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS059", .message = "`ReadonlyArray<T>` is not a type spelling in this profile", .line = 1, .column = 27, .suggestion = "write `readonly T[]`" } },
@@ -5729,7 +5729,7 @@ test "CHECK preserves nominal refusals and keyword alias names" {
         .{ .source = "nominal Bad = Array<string>;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
         .{ .source = "nominal Bad = ReadonlyArray<string>;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
         .{ .source = "nominal Bad = (x?: number) => number;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
-        .{ .source = "nominal Bad = any;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 15, .suggestion = "use specific types (string, number, object) or union types instead" } },
+        .{ .source = "nominal Bad = any;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 15, .suggestion = "use specific types (string, number, a record type) or union types instead" } },
         .{ .source = "nominal Bad = ;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
         .{ .source = "nominal Bad;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 12, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
         .{ .source = "nominal Bad   ;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .strip_refusal = true, .diagnostic = .{ .code = "ZTS048", .message = "a nominal declaration carries scalar identity only", .line = 1, .column = 15, .suggestion = "its base must be `string`, `number`, or `boolean`" } },
@@ -5783,7 +5783,7 @@ test "CHECK retains distinct nominal any and scalar refusal positions" {
             .message = "'any' type is not supported",
             .line = 1,
             .column = 22,
-            .suggestion = "use specific types (string, number, object) or union types instead",
+            .suggestion = "use specific types (string, number, a record type) or union types instead",
         },
         .{
             .code = "ZTS048",
@@ -5881,7 +5881,7 @@ test "CHECK preserves generic admission and projection outcomes" {
         .{ .name = "application_array", .source = "structural Box<T> = { value: T };\nconst probe: Box<string>[] = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Box<string>[]'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "grouped_application_array", .source = "structural Box<T> = { value: T };\nconst probe: (Box<string>)[] = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Box<string>[]'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "nested_application", .source = "structural Box<T> = { value: T };\nconst probe: Box<Box<string>> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: { value: string } }'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "readonly_application", .source = "structural Box<T> = { value: T };\nconst probe: Readonly<Box<string>> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: string }'", .line = 2, .column = 1, .suggestion = null }} },
+        .{ .name = "readonly_application", .source = "structural Box<T> = { value: T };\nconst probe: Readonly<Box<string>> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Readonly` is not declared", .line = 2, .column = 14, .suggestion = "write the type itself, or `readonly T[]` for an array" }} },
         .{ .name = "union_application", .source = "structural Box<T> = { value: T };\nconst probe: Box<string> | number = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ value: string } | number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "record_application", .source = "structural Box<T> = { value: T };\nconst probe: { field: Box<string> } = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ field: Box<string> }'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "tuple_application", .source = "structural Box<T> = { value: T };\nconst probe: [Box<string>] = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '[Box<string>]'", .line = 2, .column = 1, .suggestion = null }} },
@@ -5898,16 +5898,16 @@ test "CHECK preserves generic admission and projection outcomes" {
         .{ .name = "call_missing_close", .source = "function id<T>(value: T): T { return value; }\nconst probe: number = id<string(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'boolean' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "user_alias_too_few", .source = "structural Duo<A,B> = { first: A; second: B };\nconst probe: Duo<string> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Duo<string>'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "user_alias_too_many", .source = "structural Duo<A,B> = { first: A; second: B };\nconst probe: Duo<string,number,boolean> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Duo<string, number, boolean>'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "partial_surplus", .source = "structural User = { id: number };\nconst probe: Partial<User,string> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ id?: number }'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "partial_missing", .source = "structural User = { id: number };\nconst probe: Partial<> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Partial<>'", .line = 2, .column = 1, .suggestion = null }} },
+        .{ .name = "partial_surplus", .source = "structural User = { id: number };\nconst probe: Partial<User,string> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Partial` is not declared", .line = 2, .column = 14, .suggestion = "declare the record type with `structural`" }} },
+        .{ .name = "partial_missing", .source = "structural User = { id: number };\nconst probe: Partial<> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Partial` is not declared", .line = 2, .column = 14, .suggestion = "declare the record type with `structural`" }} },
         .{ .name = "dict_one", .source = "const probe: Dict<string> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Dict<string>'", .line = 1, .column = 1, .suggestion = null }} },
         .{ .name = "dict_three", .source = "const probe: Dict<string,number,boolean> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type 'Dict<string, number, boolean>'", .line = 1, .column = 1, .suggestion = null }} },
         .{ .name = "proof_replacement", .source = "structural Proof<T,P> = T;\nconst probe: Proof<number,\"pure\"> = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "effects_replacement", .source = "structural Effects<T,E> = T;\nconst probe: Effects<number,\"env\"> = \"x\";\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "forward_constraint", .source = "function f<T,U extends T>(a: T,b: U): U { return b; }\nconst probe: string = f(1,2);\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS209", .message = "type argument 2 for 'U' does not satisfy constraint T", .line = 2, .column = 24, .suggestion = null }, .{ .code = "ZTS200", .message = "type 'U' is not assignable to type 'string'", .line = 2, .column = 1, .suggestion = null } } },
-        .{ .name = "nested_comma_constraint", .source = "function f<T extends Record<string,number>>(value: T): T { return value; }\nconst probe: number = f({ id: \"x\" });\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS209", .message = "type argument { id: \"x\" } for 'T' does not satisfy constraint Record<string, number>", .line = 2, .column = 24, .suggestion = null }, .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } } },
-        .{ .name = "removed_constraint", .source = "function f<T extends any>(value: T): T { return value; }\nconst probe: number = f(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS209", .message = "type argument \"x\" for 'T' does not satisfy constraint any", .line = 2, .column = 24, .suggestion = null }, .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } } },
-        .{ .name = "removed_call_argument", .source = "function id<T>(value: T): T { return value; }\nconst probe: number = id<any>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS203", .message = "argument type does not match parameter type: expected any, got \"x\"", .line = 2, .column = 31, .suggestion = null }, .{ .code = "ZTS200", .message = "type 'any' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } } },
+        .{ .name = "nested_comma_constraint", .source = "function f<T extends Dict<string,number>>(value: T): T { return value; }\nconst probe: number = f({ id: \"x\" });\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS209", .message = "type argument { id: \"x\" } for 'T' does not satisfy constraint Dict<string, number>", .line = 2, .column = 24, .suggestion = null }, .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } } },
+        .{ .name = "removed_constraint", .source = "function f<T extends any>(value: T): T { return value; }\nconst probe: number = f(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `any` is not declared", .line = 1, .column = 22, .suggestion = "write `unknown` and narrow it, or write a precise type" }} },
+        .{ .name = "removed_call_argument", .source = "function id<T>(value: T): T { return value; }\nconst probe: number = id<any>(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `any` is not declared", .line = 2, .column = 26, .suggestion = "write `unknown` and narrow it, or write a precise type" }} },
         .{ .name = "unclosed_function_angles", .source = "function f<T(value: T): T { return value; }\nconst probe: number = f(\"x\");\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS003", .message = "unexpected token", .line = 1, .column = 11, .suggestion = "'('" }} },
         .{ .name = "utility_collision", .source = "structural Partial<T> = number;\nstructural User = { id: string };\nconst probe: Partial<User> = undefined;\nfunction handler(req: Request): Response {\n  return Response.text(\"ok\");\n}\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ id?: string }'", .line = 3, .column = 1, .suggestion = null }} },
         .{ .name = "void_constraint", .source = "function f<T extends void>(value: T): T { return value; }\nconst probe: number = f(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .strip, .diagnostics = &.{.{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 22, .suggestion = "write `undefined`" }} },
@@ -5918,8 +5918,6 @@ test "CHECK preserves generic admission and projection outcomes" {
         .{ .name = "comment_parameters", .source = "function f<T /* , */ ,U>(x: T,y: U): T { return x; }\nconst probe: number = f(\"x\",1);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "quoted_comma_constraint", .source = "function f<T extends \"a,b\">(a: T): T { return a; }\nconst probe: number = f(\"a,b\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type '\"a,b\"' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "dictkey_constraint", .source = "function f<T extends DictKey>(x: T): T { return x; }\nconst probe: string = f(1);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'number' is not assignable to type 'string'", .line = 2, .column = 1, .suggestion = null }} },
-        .{ .name = "readonly_inline_record", .source = "const probe: { field: Readonly<{ id: number }> } = undefined;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '{ field: { id: number } }'", .line = 1, .column = 1, .suggestion = null }} },
-        .{ .name = "readonly_inline_tuple", .source = "const probe: [Readonly<{ id: number }>] = undefined;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'undefined' is not assignable to type '[{ id: number }]'", .line = 1, .column = 1, .suggestion = null }} },
         .{ .name = "name32_root", .source = "function f<TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT>(x: TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT): TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT { return x; }\nconst probe: number = f(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "name33_root", .source = "function f<TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT>(x: TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT): TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT { return x; }\nconst probe: number = f(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null }} },
         .{ .name = "name32_array", .source = "function f<TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT>(x: TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT[]): TTTTTTTTTTTTTTTTTTTTTTTTTTTTTTTT[] { return x; }\nconst probe: number[] = f([\"x\"]);\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{.{ .code = "ZTS200", .message = "type 'string[]' is not assignable to type 'number[]'", .line = 2, .column = 1, .suggestion = null }} },
@@ -5927,6 +5925,12 @@ test "CHECK preserves generic admission and projection outcomes" {
         .{ .name = "constraint_control", .source = "function f<T extends number>(x: T): T { return x; }\nconst probe: number = f(\"x\");\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS209", .message = "type argument \"x\" for 'T' does not satisfy constraint number", .line = 2, .column = 24, .suggestion = null }, .{ .code = "ZTS200", .message = "type 'T' is not assignable to type 'number'", .line = 2, .column = 1, .suggestion = null } } },
         .{ .name = "empty_alias_parameters", .source = "structural Box<> = number;\nconst bare: Box = \"x\";\nconst applied: Box<> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .types, .diagnostics = &.{ .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'Box'", .line = 2, .column = 1, .suggestion = null }, .{ .code = "ZTS200", .message = "type '\"x\"' is not assignable to type 'number'", .line = 3, .column = 1, .suggestion = null } } },
         .{ .name = "empty_generic_alias_body", .source = "structural Box<> = ;\nconst bare: Box = \"x\";\nconst applied: Box<> = \"x\";\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS001", .message = "this type syntax is not supported", .line = 1, .column = 20, .suggestion = "write an admitted type from section 5.7 of the specification" }} },
+        .{ .name = "undeclared_name", .source = "function g(a: Widget): number { return 1; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Widget` is not declared", .line = 1, .column = 15, .suggestion = "declare it with `structural`, import it, or use a type name from `meta` ambient_names" }} },
+        .{ .name = "undeclared_record", .source = "function g(a: Record<string, number>): number { return 1; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Record` is not declared", .line = 1, .column = 15, .suggestion = "write `Dict<K, V>`" }} },
+        .{ .name = "undeclared_readonly", .source = "structural U = { id: number };\nfunction g(a: Readonly<U>): number { return 1; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Readonly` is not declared", .line = 2, .column = 15, .suggestion = "write the type itself, or `readonly T[]` for an array" }} },
+        .{ .name = "undeclared_bigint", .source = "function g(a: bigint): number { return 1; }\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `bigint` is not declared", .line = 1, .column = 15, .suggestion = "write `number`" }} },
+        .{ .name = "readonly_inline_record", .source = "const probe: { field: Readonly<{ id: number }> } = undefined;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Readonly` is not declared", .line = 1, .column = 23, .suggestion = "write the type itself, or `readonly T[]` for an array" }} },
+        .{ .name = "readonly_inline_tuple", .source = "const probe: [Readonly<{ id: number }>] = undefined;\nfunction handler(req: Request): Response { return Response.text(\"ok\"); }\n", .stage = .parse, .diagnostics = &.{.{ .code = "ZTS065", .message = "type name `Readonly` is not declared", .line = 1, .column = 15, .suggestion = "write the type itself, or `readonly T[]` for an array" }} },
     };
     const types_stages = StageSet.initMany(&.{ .strip, .parse, .imports, .boolean, .types, .strict });
     const full_stages = StageSet.initMany(&.{
@@ -5975,7 +5979,7 @@ test "CHECK preserves generic admission and projection outcomes" {
         }
         observed += 1;
     }
-    try std.testing.expectEqual(@as(usize, 64), cases.len);
+    try std.testing.expectEqual(@as(usize, 68), cases.len);
     try std.testing.expectEqual(cases.len, observed);
 }
 
@@ -6057,7 +6061,7 @@ test "CHECK preserves the any suffix refusal in a generic alias name" {
         .message = "'any' type is not supported",
         .line = 2,
         .column = 15,
-        .suggestion = "use specific types (string, number, object) or union types instead",
+        .suggestion = "use specific types (string, number, a record type) or union types instead",
     });
 }
 
@@ -6676,7 +6680,7 @@ test "CHECK preserves nominal generic diagnostic order before scalar refusal" {
         } },
         .{ .source = "nominal Id<T extends void> = any;", .diagnostics = &.{
             .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 22, .suggestion = "write `undefined`" },
-            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 30, .suggestion = "use specific types (string, number, object) or union types instead" },
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 30, .suggestion = "use specific types (string, number, a record type) or union types instead" },
         } },
     };
     var observed: usize = 0;
@@ -6944,7 +6948,7 @@ test "CHECK preserves measured lookup winners shadows and captures" {
 test "CHECK preserves measured recovery contexts and raw recognition guards" {
     const allocator = std.testing.allocator;
     const any_message = "'any' type is not supported";
-    const any_suggestion = "use specific types (string, number, object) or union types instead";
+    const any_suggestion = "use specific types (string, number, a record type) or union types instead";
     const namespace_message = "'import * as X' namespace imports are not supported; use named imports: import { x } from \"module\"";
     const type_diagnostic: CompoundDiagnostic = .{
         .code = "ZTS050",
@@ -7139,30 +7143,30 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .parser_stage = false,
             .diagnostics = &.{
                 .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 18, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f({ x }: any = {}, y: any) { return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 19, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 19, .suggestion = "use specific types (string, number, a record type) or union types instead" },
                 .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 23, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 32, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 32, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f({ x }: /* closed */ any, y: any) { return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 42, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 42, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f({ x }: Box<number, string>, y: any) { return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 43, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 43, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7170,7 +7174,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .parser_stage = false,
             .diagnostics = &.{
                 .{ .code = "ZTS008", .message = "unterminated string literal", .line = 1, .column = 24, .suggestion = "close the quote, or write the newline as \\n" },
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 6, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 6, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7179,7 +7183,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .diagnostics = &.{
                 .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 14, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
                 .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 18, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7189,7 +7193,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
                 .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 14, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
                 .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 18, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
                 .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 19, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7197,7 +7201,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .parser_stage = false,
             .diagnostics = &.{
                 .{ .code = "ZTS055", .message = "optional parameter shorthand is not part of this profile", .line = 1, .column = 17, .suggestion = "replace `name?: T` with `name: T | undefined`" },
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 31, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 31, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7220,21 +7224,21 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .source = "function outer(): number { function inner({ x }) { return 1; } const later: any = 1; return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 77, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 77, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f(x: /* closed */ any, y: any) { return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 38, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 38, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f({ x }:\n /* closed */ any, y: any) { return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 3, .column = 1, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 3, .column = 1, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7248,7 +7252,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .source = "function f({ x }:\n /* closed */ any,\n y: any) { return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 4, .column = 1, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 4, .column = 1, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7262,21 +7266,21 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .source = "function f(x:\t/* closed */ any, y: any) { return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 38, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 38, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f(x:\r /* closed */ any, y: any) { return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 39, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 39, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f(x: /* closed */ any, y: /* closed */ any, z: any) { return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 61, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 61, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7290,35 +7294,35 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .source = "const x:\n /* closed */ number = 1; const y: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 36, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 36, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f():\n /* closed */ number { return 1; } const y: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 45, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 45, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f(x:\r any) { return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 15, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 15, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "const x:\r any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 10, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 10, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f():\r any { return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 15, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 15, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7326,42 +7330,42 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .parser_stage = false,
             .diagnostics = &.{
                 .{ .code = "ZTS055", .message = "optional parameter shorthand is not part of this profile", .line = 1, .column = 13, .suggestion = "replace `name?: T` with `name: T | undefined`" },
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 16, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 16, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f(x:\r number, y: any) { return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 26, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 26, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "const x:\r /* closed */ number = 1; const y: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 45, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 45, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f():\r /* closed */ number { return 1; } const y: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 58, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 58, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "const seed =\r 1; const later: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 30, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 30, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "const seed = 1 ===\r 1; const later: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 36, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 36, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7369,98 +7373,98 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .parser_stage = false,
             .diagnostics = &.{
                 .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 14, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 23, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 23, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function\r f(x: any) { return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 15, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 15, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f\r(x: any) { return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 15, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 15, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "const f = function\r (x: any) { return 1; };\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 24, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 24, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f<T>\r(x: any) { return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 18, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 18, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f<T>\r; const later: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 29, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 29, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "const f = <T>\r(x: any) => x;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 18, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 18, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "const f = <T>\r value; const later: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 36, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 36, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "const f = id<T>\r(1); const later: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 35, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 35, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "structural\r X = number; const later: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 37, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 37, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "structural X\r = number; const later: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 37, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 37, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "structural X<T>\r = number; const later: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 40, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 40, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "structural X =\r number; const later: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 37, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 37, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "structural X = number\n\r; const later: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 16, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 16, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7474,14 +7478,14 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .source = "nominal N =\r any;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 13, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 13, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "interface X extends\r any {};\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 21, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 21, .suggestion = "use specific types (string, number, a record type) or union types instead" },
                 .{ .code = "ZTS049", .message = "`interface` is not a declaration form in this profile", .line = 1, .column = 1, .suggestion = "write `structural Name = { ... };`" },
             },
         },
@@ -7489,21 +7493,21 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .source = "import\r type { X } from './x.ts'; const later: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 47, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 47, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "export\r type { X } from './x.ts'; const later: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 47, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 47, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "export\r structural X = number; const later: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 44, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 44, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7511,7 +7515,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .parser_stage = false,
             .diagnostics = &.{
                 .{ .code = "ZTS056", .message = "default exports are not part of this profile", .line = 1, .column = 1, .suggestion = "write a named export, for example `export function handler(...) { ... }`" },
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 32, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 32, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7519,7 +7523,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .parser_stage = false,
             .diagnostics = &.{
                 .{ .code = "ZTS057", .message = "mutable exports are not part of this profile", .line = 1, .column = 1, .suggestion = "use `export const` for module values and keep reassignment inside a function activation" },
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 19, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 19, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7540,29 +7544,29 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .source = "const seed: () =>\r any = value;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 19, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 19, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f(): () =>\r any { return value; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 21, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 21, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f(x: () =>\r any) { return 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 22, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 22, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "const f: (x: any) =>\r any = value;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 14, .suggestion = "use specific types (string, number, object) or union types instead" },
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 22, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 14, .suggestion = "use specific types (string, number, a record type) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 22, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7576,7 +7580,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .source = "const f: (x: void) =>\r any = value;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 23, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 23, .suggestion = "use specific types (string, number, a record type) or union types instead" },
                 .{ .code = "ZTS060", .message = "`void` is not a type spelling in this profile", .line = 1, .column = 14, .suggestion = "write `undefined`" },
             },
         },
@@ -7585,7 +7589,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .parser_stage = false,
             .diagnostics = &.{
                 .{ .code = "ZTS008", .message = "unterminated string literal", .line = 1, .column = 19, .suggestion = "close the quote, or write the newline as \\n" },
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 6, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 6, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7601,7 +7605,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .source = "interface X extends () =>\r any {};\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 28, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 28, .suggestion = "use specific types (string, number, a record type) or union types instead" },
                 .{ .code = "ZTS049", .message = "`interface` is not a declaration form in this profile", .line = 1, .column = 1, .suggestion = "write `structural Name = { ... };`" },
             },
         },
@@ -7610,7 +7614,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .parser_stage = false,
             .diagnostics = &.{
                 .{ .code = "ZTS042", .message = "'as' type assertion is not supported", .line = 1, .column = 20, .suggestion = "use type-safe patterns instead" },
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 27, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7680,21 +7684,21 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .source = "function f<T>\r; const seed =\r1; const later: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 44, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 44, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f(x: number) { const seed =\r1; const later: any = 1; }\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 53, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 53, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "function f(x: /* gap */ number) {} const seed =\r1; const later: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 66, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 66, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7709,7 +7713,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .parser_stage = false,
             .diagnostics = &.{
                 .{ .code = "ZTS055", .message = "optional parameter shorthand is not part of this profile", .line = 1, .column = 21, .suggestion = "replace `name?: T` with `name: T | undefined`" },
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 24, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 24, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7717,21 +7721,21 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .parser_stage = false,
             .diagnostics = &.{
                 .{ .code = "ZTS054", .message = "default parameters are not part of this profile", .line = 1, .column = 22, .suggestion = "replace `name: T = value` with `name: T | undefined`, then resolve `const resolved = name ?? value;` at the start of the body" },
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 30, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 30, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "const f = function<T>\r(x: any) { return 1; };\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 26, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 26, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
             .source = "const f = function g<T>\r(x: any) { return 1; };\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 28, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 28, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7745,7 +7749,7 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .source = "function f<T as number>\r; const later: any = 1;\n",
             .parser_stage = false,
             .diagnostics = &.{
-                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 39, .suggestion = "use specific types (string, number, object) or union types instead" },
+                .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 39, .suggestion = "use specific types (string, number, a record type) or union types instead" },
             },
         },
         .{
@@ -7761,14 +7765,14 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
             .diagnostics = &.{},
         },
         .{ .source = "import\r { value } from './x.ts'; const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
-            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 47, .suggestion = "use specific types (string, number, object) or union types instead" },
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 47, .suggestion = "use specific types (string, number, a record type) or union types instead" },
         } },
         .{ .source = "export type\r { X }; const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
-            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 34, .suggestion = "use specific types (string, number, object) or union types instead" },
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 34, .suggestion = "use specific types (string, number, a record type) or union types instead" },
         } },
         .{ .source = "import\r type { X } from \"open\nconst later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
             .{ .code = "ZTS008", .message = "unterminated string literal", .line = 1, .column = 29, .suggestion = "close the quote, or write the newline as \\n" },
-            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 14, .suggestion = "use specific types (string, number, object) or union types instead" },
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 14, .suggestion = "use specific types (string, number, a record type) or union types instead" },
         } },
         .{ .source = "const seed =\r1;import\r type { X } from 'zttp:types';\n", .parser_stage = false, .diagnostics = &.{
             .{ .code = "ZTS053", .message = "`zttp:types` is not a module in this profile", .line = 1, .column = 15, .suggestion = "remove this import because `Proof<T, P>` and `Effects<T, R>` are ambient type names" },
@@ -7778,13 +7782,13 @@ test "CHECK preserves measured recovery contexts and raw recognition guards" {
         } },
         .{ .source = "const seed =\r1;export\r default\r 1; const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
             .{ .code = "ZTS056", .message = "default exports are not part of this profile", .line = 1, .column = 15, .suggestion = "write a named export, for example `export function handler(...) { ... }`" },
-            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 46, .suggestion = "use specific types (string, number, object) or union types instead" },
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 46, .suggestion = "use specific types (string, number, a record type) or union types instead" },
         } },
         .{ .source = "export\r const seed = 1; const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
-            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 38, .suggestion = "use specific types (string, number, object) or union types instead" },
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 38, .suggestion = "use specific types (string, number, a record type) or union types instead" },
         } },
         .{ .source = "const value = <T>\r extends Missing; const later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
-            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 49, .suggestion = "use specific types (string, number, object) or union types instead" },
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 1, .column = 49, .suggestion = "use specific types (string, number, a record type) or union types instead" },
         } },
     };
     try std.testing.expectEqual(@as(usize, 123), cases.len);
@@ -7851,7 +7855,7 @@ test "CHECK preserves raw module recovery and the complete nested parser batch" 
             .{ .code = "ZTS008", .message = "unterminated string literal", .line = 2, .column = 20, .suggestion = "close the quote, or write the newline as \\n" },
         } },
         .{ .source = "import type { A } /* ; */ from \"./a\";\nconst later: any = 1;\n", .parser_stage = false, .diagnostics = &.{
-            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 14, .suggestion = "use specific types (string, number, object) or union types instead" },
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 14, .suggestion = "use specific types (string, number, a record type) or union types instead" },
         } },
         .{ .source = "function f() {\nimport type { A } /* ; */ from \"./a\";\nconst live = 1;\n}\n", .parser_stage = true, .diagnostics = &.{
             .{ .code = "ZTS002", .message = "`import` and `export` are not supported inside a block; move them to the top level of the module", .line = 2, .column = 1, .suggestion = null },
@@ -7906,7 +7910,7 @@ test "CHECK observes every admission kind after the measured recovery divergence
     const Kind = zts.parser.type_syntax.AdmissionKind;
     const cases = [_]struct { source: []const u8, kind: ?Kind, diagnostics: []const CompoundDiagnostic }{
         .{ .source = "import type { A } /* ; */ from \"./a\";\nconst value: any = 1;\n", .kind = .any_type, .diagnostics = &.{
-            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 14, .suggestion = "use specific types (string, number, object) or union types instead" },
+            .{ .code = "ZTS041", .message = "'any' type is not supported", .line = 2, .column = 14, .suggestion = "use specific types (string, number, a record type) or union types instead" },
         } },
         .{ .source = "import type { A } /* ; */ from \"./a\";\nconst value = source as string;\n", .kind = .as_assertion, .diagnostics = &.{
             .{ .code = "ZTS042", .message = "'as' type assertion is not supported", .line = 2, .column = 25, .suggestion = "use type-safe patterns instead" },

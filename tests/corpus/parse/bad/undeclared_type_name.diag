@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS065","severity":"error","message":"type name `Widget` is not declared","file":"parse/bad/undeclared_type_name.ts","line":2,"column":23,"suggestion":"declare it with `structural`, import it, or use a type name from `meta` ambient_names","repair_intent":null}

@@ -1336,7 +1336,7 @@ test "admission diagnostics preserve byte coordinates and static text" {
     try std.testing.expectEqual(@as(u32, 3), diagnostic.column);
     try std.testing.expectEqualStrings("'any' type is not supported", diagnostic.message);
     try std.testing.expectEqualStrings(
-        "use specific types (string, number, object) or union types instead",
+        "use specific types (string, number, a record type) or union types instead",
         diagnostic.suggestion.?,
     );
     try std.testing.expectEqual(@as(u32, 0), diagnostic.start_offset);

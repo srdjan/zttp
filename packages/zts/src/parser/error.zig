@@ -74,6 +74,9 @@ pub const ErrorKind = enum {
     // Unsupported features
     unsupported_feature,
     type_assertion,
+
+    // Name resolution
+    undeclared_type_name,
 };
 
 /// A single parse error

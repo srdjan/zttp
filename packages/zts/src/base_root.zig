@@ -34,6 +34,9 @@ pub const profile_identity = @import("profile_identity.zig");
 /// The JavaScript global names the analyzer treats as known.
 pub const known_globals = @import("known_globals.zig");
 
+/// The ambient type names that the parser-tier name check admits.
+pub const known_types = @import("known_types.zig");
+
 /// The capability enum a virtual module declares, and its canonical hash.
 pub const module_authorization = @import("module_authorization.zig");
 

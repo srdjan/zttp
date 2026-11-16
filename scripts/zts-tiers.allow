@@ -13,6 +13,7 @@ zts-base identifier.zig
 zts-base json_utils.zig
 zts-base json_wire.zig
 zts-base known_globals.zig
+zts-base known_types.zig
 zts-base module_authorization.zig
 zts-base module_slots.zig
 zts-base module_specifier.zig
@@ -123,6 +124,7 @@ zts tests/frontend_fuzz.zig
 zts tests/opcode_parity.zig
 zts translation_witness.zig
 zts trace.zig
+zts type_names.zig
 zts value.zig
 
 zts-compiler abi_types.zig

@@ -1,8 +1,6 @@
-// Derive related shapes from one source type with the utility-type family:
-// Pick, Omit, Partial, Required. zts resolves these structurally - a named
-// source type is looked up and transformed - so each field stays declared in
-// exactly one place instead of being copied into hand-written aliases that can
-// drift.
+// Declare each related shape as its own `structural` record. The profile has
+// no utility types (`Pick`, `Omit`, `Partial`, `Required`, `Readonly`): write
+// each derived shape out.
 
 
 structural Guardrails<T> = Proof<T,
@@ -23,19 +21,17 @@ structural User = {
     age: number;
 };
 
-// Pick: a public summary that carries only id and name.
-structural Summary = Pick<User, "id" | "name">;
+// A public summary that carries only id and name.
+structural Summary = { id: number; name: string };
 
-// Omit: the same record without the sensitive email.
-structural Safe = Omit<User, "email">;
+// The same record without the sensitive email.
+structural Safe = { id: number; name: string; age: number };
 
-// Partial: every field optional, for a patch payload.
-structural UserPatch = Partial<User>;
+// Every field optional, for a patch payload.
+structural UserPatch = { id?: number; name?: string; email?: string; age?: number };
 
-// Required: force every optional field present, deriving a fully-specified
-// config from a loosely-typed source.
-structural RawConfig = { host?: string; port?: number };
-structural Config = Required<RawConfig>;
+// A fully-specified config.
+structural Config = { host: string; port: number };
 
 const summary: Summary = { id: 1, name: "Ada" };
 const safe: Safe = { id: 2, name: "Grace", age: 36 };

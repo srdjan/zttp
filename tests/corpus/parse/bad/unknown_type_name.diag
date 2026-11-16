@@ -1,0 +1,2 @@
+stages: strip,parse
+{"code":"ZTS065","severity":"error","message":"type name `Missing` is not declared","file":"parse/bad/unknown_type_name.ts","line":3,"column":14,"suggestion":"declare it with `structural`, import it, or use a type name from `meta` ambient_names","repair_intent":null}

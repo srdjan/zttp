@@ -3157,8 +3157,8 @@ test "TypeEnv generic type alias Result<string>" {
     defer env.deinit();
 
     // Simulate: structural Result<T> = { ok: boolean; value: T; error: string }
-    //           const auth: Result<object> = jwtVerify(token, secret);
-    const source = "structural Result<T> = { ok: boolean; value: T; error: string };const auth: Result<object> = jwtVerify();";
+    //           const auth: Result<unknown> = jwtVerify(token, secret);
+    const source = "structural Result<T> = { ok: boolean; value: T; error: string };const auth: Result<unknown> = jwtVerify();";
     try populateTestSource(&env, source);
 
     // "Result" should be in generic_aliases, not type_aliases
@@ -3175,7 +3175,7 @@ test "TypeEnv generic type alias Result<string>" {
 
     // ok: boolean
     try std.testing.expectEqual(pool.idx_boolean, fields[0].type_idx);
-    // value: should be a ref("object"), not a generic param
+    // value: should be the argument type, not a generic param
     try std.testing.expect(pool.getTag(fields[1].type_idx) != .t_generic_param);
     // error: string
     try std.testing.expectEqual(pool.idx_string, fields[2].type_idx);
@@ -3362,7 +3362,7 @@ test "TypeEnv intersection alias type AB = A & B" {
     // Names A and B stay as t_ref inside the intersection (resolveType only
     // substitutes alias names when the entire annotation text matches; nested
     // identifiers in compound expressions remain refs - same behaviour as union).
-    const source = "structural AB = A & B;";
+    const source = "structural A = { a: number };\nstructural B = { b: number };\nstructural AB = A & B;";
     try populateTestSource(&env, source);
 
     const ab_idx = env.getTypeAlias("AB");
@@ -3390,7 +3390,7 @@ test "TypeEnv return-type intersection X & Y" {
     env.type_aliases.put(allocator, owned_y, pool.idx_number) catch {};
 
     // function f(): X & Y { ... }
-    const source = "function f(): X & Y { return null; }";
+    const source = "structural X = string;\nstructural Y = number;\nfunction f(): X & Y { return null; }";
     try populateTestSource(&env, source);
 
     const sig = env.getSourceFnSigByName("f");
@@ -3901,7 +3901,7 @@ test "a generic alias instantiates through direct syntax" {
 test "direct generic signatures preserve nested bounds and identifier names" {
     const allocator = std.testing.allocator;
     const source =
-        "function comma<T, U extends Record<string, number>>(a: T, b: U): T { return a; }\n" ++
+        "function comma<T, U extends Dict<string, number>>(a: T, b: U): T { return a; }\n" ++
         "function named<Textends>(a: Textends): Textends { return a; }\n" ++
         "function arrow<T extends (s: string) => number, U>(a: T, b: U): T { return a; }\n";
     var pool = TypePool.init(allocator);
@@ -3930,11 +3930,9 @@ test "direct generic signatures preserve nested bounds and identifier names" {
 
     const comma = env.getSourceFnSigByName("comma").?;
     try std.testing.expectEqual(null_type_idx, comma.type_params[0].constraint);
-    try std.testing.expectEqual(type_pool_mod.TypeTag.t_generic_app, pool.getTag(comma.type_params[1].constraint).?);
-    const record = pool.getGenericAppInfo(comma.type_params[1].constraint);
-    try std.testing.expectEqual(type_pool_mod.TypeTag.t_ref, pool.getTag(record.base).?);
-    try std.testing.expectEqualStrings("Record", pool.getRefName(record.base));
-    try std.testing.expectEqualSlices(TypeIndex, &.{ pool.idx_string, pool.idx_number }, record.args);
+    try std.testing.expectEqual(type_pool_mod.TypeTag.t_dict, pool.getTag(comma.type_params[1].constraint).?);
+    try std.testing.expectEqual(pool.idx_string, pool.getDictKey(comma.type_params[1].constraint));
+    try std.testing.expectEqual(pool.idx_number, pool.getDictValue(comma.type_params[1].constraint));
 
     const named = env.getSourceFnSigByName("named").?;
     try std.testing.expectEqual(null_type_idx, named.type_params[0].constraint);
@@ -3973,7 +3971,7 @@ test "an explicit type argument carrying a comma is one argument" {
     // `make<Record<string, number>>(1)` split on every comma read as two
     // arguments and the call was refused for the wrong arity.
     const allocator = std.testing.allocator;
-    const source = "function make<T>(n: number): T {\n  return hole();\n}\nconst v = make<Record<string, number>>(1);\n";
+    const source = "function make<T>(n: number): T {\n  return hole();\n}\nconst v = make<Dict<string, number>>(1);\n";
 
     var pool = TypePool.init(allocator);
     defer pool.deinit(allocator);

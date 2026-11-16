@@ -2,7 +2,7 @@
 
 export structural GreetingName = string;
 export structural GreetingText = string;
-export structural JsonData = object;
+export structural JsonData = { greeting: GreetingText; status: string };
 export structural JsonText = string;
 
 export function greet(name: GreetingName): GreetingText {

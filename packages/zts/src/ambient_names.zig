@@ -294,3 +294,15 @@ test "the value names are the known-globals list itself, not a copy of it" {
         try testing.expect(known_globals.isKnownGlobalFunction(name));
     }
 }
+
+test "the type names are the closed list that the parser-tier name check admits" {
+    const known_types = @import("zts-base").known_types;
+    try testing.expectEqual(known_types.ambient.len, types.len);
+    for (types) |row| {
+        var found = false;
+        for (known_types.ambient) |name| {
+            if (std.mem.eql(u8, name, row.name)) found = true;
+        }
+        try testing.expect(found);
+    }
+}
