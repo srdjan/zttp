@@ -711,11 +711,13 @@ pub const TypeChecker = struct {
         });
     }
 
-    /// Refuse an index read whose operand is a `string`. The interpreter's
-    /// `get_elem` yields `undefined` for every string receiver, so a read such
-    /// as `s[0]` never gives a character. A union with a string member is not
-    /// refused here: `inferIndexReadType` adds `undefined` to its read type.
-    fn reportStringIndexRead(self: *TypeChecker, read: NodeIndex, operand: NodeIndex) void {
+    /// Refuse an index read whose operand is a `string` or `Bytes`. The
+    /// interpreter's `get_elem` yields `undefined` for every string receiver,
+    /// so a read such as `s[0]` never gives a character. `Bytes` has no
+    /// elements to read: `byteAt` from `zttp:bytes` reads a byte. A union
+    /// with a string member is not refused here: `inferIndexReadType` adds
+    /// `undefined` to its read type.
+    fn reportScalarIndexRead(self: *TypeChecker, read: NodeIndex, operand: NodeIndex) void {
         if (read == null_node or operand == null_node) return;
         const previous = self.report_inference_diagnostics;
         self.report_inference_diagnostics = false;
@@ -725,19 +727,20 @@ pub const TypeChecker = struct {
         const pool = self.env.pool;
         const t = pool.unwrapNominal(self.env.resolveRef(operand_type));
         const tag = pool.getTag(t) orelse return;
-        switch (tag) {
-            .t_string, .t_literal_string, .t_template_literal => {},
-            // exhaustive: only a string receiver makes every index read
-            // `undefined`. A union with a string member gets `undefined` in
-            // `inferIndexReadType`, and the other receivers are typed there.
+        const message: []const u8, const help: []const u8 = switch (tag) {
+            .t_string, .t_literal_string, .t_template_literal => .{ "an index read on a string yields undefined", "use s.charAt(i) or s.slice(i, i + 1)" },
+            .t_bytes => .{ "an index read on Bytes yields undefined", "read a byte with byteAt(b, i) from zttp:bytes" },
+            // exhaustive: only a string or a Bytes receiver makes every index
+            // read `undefined`. A union with a string member gets `undefined`
+            // in `inferIndexReadType`, and the other receivers are typed there.
             else => return,
-        }
+        };
         self.addDiagnostic(.{
             .severity = .err,
             .kind = .missing_field,
             .node = read,
-            .message = "an index read on a string yields undefined",
-            .help = "use s.charAt(i) or s.slice(i, i + 1)",
+            .message = message,
+            .help = help,
         });
     }
 
@@ -755,9 +758,9 @@ pub const TypeChecker = struct {
         return if (installed) .present else .absent;
     }
 
-    /// The members of a `number`, a `boolean`, a `string`, an array, or a
-    /// tuple. A `number` and a `boolean` have no prototype. A `string` and an
-    /// array have the members that `builtins/root.zig` installs, which
+    /// The members of a `number`, a `boolean`, `Bytes`, a `string`, an array,
+    /// or a tuple. A `number`, a `boolean`, and `Bytes` have no prototype. A
+    /// `string` and an array have the members that `builtins/root.zig` installs, which
     /// `builtin_results.installsMember` reads from the census-checked tables.
     /// Every other type, a record included, is `unmodeled` here.
     fn primitiveMemberPresence(self: *const TypeChecker, raw: TypeIndex, name: []const u8) MemberPresence {
@@ -765,7 +768,7 @@ pub const TypeChecker = struct {
         const t = pool.unwrapNominal(self.env.resolveRef(raw));
         const tag = pool.getTag(t) orelse return .unmodeled;
         return switch (tag) {
-            .t_number, .t_literal_number, .t_boolean, .t_literal_bool => .absent,
+            .t_number, .t_literal_number, .t_boolean, .t_literal_bool, .t_bytes => .absent,
             .t_string, .t_literal_string, .t_template_literal => presenceOf(builtin_results.installsMember("String.prototype", name)),
             .t_array, .t_tuple => presenceOf(builtin_results.installsMember("Array.prototype", name)),
             // exhaustive: any other type is not one of the receivers whose
@@ -843,7 +846,7 @@ pub const TypeChecker = struct {
             .kind = .missing_field,
             .node = read,
             .message = "member does not exist on this type at runtime",
-            .help = "number and boolean values have no members; strings and arrays have only the methods that docs/typescript.md lists",
+            .help = "number, boolean, and Bytes values have no members; read Bytes with byteAt and bytesLength from zttp:bytes; strings and arrays have only the methods that docs/typescript.md lists",
         });
     }
 
@@ -1962,7 +1965,7 @@ pub const TypeChecker = struct {
                 self.walkExpr(member.object);
                 self.walkExpr(member.computed);
                 self.reportDictEntryRead(node, member.object);
-                if (tag == .computed_access) self.reportStringIndexRead(node, member.object);
+                if (tag == .computed_access) self.reportScalarIndexRead(node, member.object);
                 self.reportNonRecordMemberRead(node);
                 self.reportAmbientMemberRead(node);
                 if (tag != .optional_chain) self.recordAbsentReceiver(node, member.object);
@@ -4162,8 +4165,9 @@ pub const TypeChecker = struct {
                     // there yields `undefined`.
                     field_types[count] = self.env.pool.idx_undefined;
                 } else if (self.primitiveMemberPresence(member_type, prop_name) == .absent) {
-                    // A number, a boolean, a string, an array, or a tuple that
-                    // the runtime gives no such member reads `undefined` too.
+                    // A number, a boolean, `Bytes`, a string, an array, or a
+                    // tuple that the runtime gives no such member reads
+                    // `undefined` too.
                     field_types[count] = self.env.pool.idx_undefined;
                 } else {
                     return null_type_idx;

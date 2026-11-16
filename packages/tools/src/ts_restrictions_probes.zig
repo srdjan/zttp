@@ -845,6 +845,16 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(body("  const s = \"abc\";\n  const c = s.charAt(0);")),
     },
     .{
+        .key = "An index read or a `length` read on `Bytes`, such as `b[0]` and `b.length`",
+        .refused = &.{
+            r("b[0]", top("function g(b: Bytes): number {\n  return b[0];\n}")),
+            r("b.length", top("function g(b: Bytes): number {\n  return b.length;\n}")),
+            r("length", top("function g(b: Bytes | string): number {\n  return b.length;\n}")),
+            r("Bytes", body("  const b = requestBody(req);\n  const x = b[1];")),
+        },
+        .clean = c(top("import { byteAt, bytesLength } from \"zttp:bytes\";\nfunction g(b: Bytes): number {\n  return bytesLength(b) + (byteAt(b, 0) ?? 0);\n}")),
+    },
+    .{
         .key = "A member call on `unknown` or on a value with no known type",
         .refused = &.{r("unknown", top("function g(v: unknown): string {\n  return v.toUpperCase();\n}"))},
         .clean = c(top("function g(v: unknown): string {\n  if (typeof v === \"string\") {\n    return v.toUpperCase();\n  }\n  return \"\";\n}")),
@@ -1391,13 +1401,6 @@ pub const gap_rows = [_]GapRow{
             c(top(g_fn ++ "function h(c: boolean): number {\n  if (c) g();\n  return 2;\n}")),
             c(top(g_fn ++ "function h(c: boolean): number {\n  if (c) {\n    return 1;\n  } else g();\n  return 2;\n}")),
             c(top(g_fn ++ "function h(xs: number[]): number {\n  for (const k of xs) g();\n  return 2;\n}")),
-        },
-    },
-    .{
-        .key = "An index read or a `length` read on `Bytes`",
-        .sources = &.{
-            c(top("function g(b: Bytes): number {\n  return b[0];\n}")),
-            c(top("function g(b: Bytes): number {\n  return b.length;\n}")),
         },
     },
     .{

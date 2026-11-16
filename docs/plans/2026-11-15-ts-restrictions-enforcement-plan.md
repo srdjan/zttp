@@ -679,3 +679,12 @@ later.
   - `join` on an array whose element type is not inferred, such as the
     result of an untyped function, is admitted. The runtime writes a number
     or a boolean element as text and skips `null` and `undefined`.
+- U4a-4 refuses an index read and every member read on `Bytes`, such as
+  `b[0]` and `b.length`, with ZTS201. Before U4a-4, both reads on a
+  request body of two bytes gave `undefined` at run time. `byteAt` and
+  `bytesLength` from `zttp:bytes` replace them. This finding stays open:
+  - A member read on a union of `Bytes` and a record, such as `v.length`
+    on `{ length: number } | Bytes`, is not refused. The checker types the
+    read as `number | undefined`, which is the rule for any union with a
+    record, so `v.length ?? 0` passes and `v.length` as a `number` gets
+    ZTS204.

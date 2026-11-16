@@ -4311,7 +4311,7 @@ test "string index: an index read on a union of string and string array is strin
 }
 
 const non_record_member_message = "member does not exist on this type at runtime";
-const non_record_member_help = "number and boolean values have no members; strings and arrays have only the methods that docs/typescript.md lists";
+const non_record_member_help = "number, boolean, and Bytes values have no members; read Bytes with byteAt and bytesLength from zttp:bytes; strings and arrays have only the methods that docs/typescript.md lists";
 const unknown_member_message = "a member read on an unknown value; narrow it first";
 const unknown_member_help = "check the value with typeof, isDict, or a match arm before you read a member";
 const union_call_message = "a member that some union member does not have is called; narrow the union first";

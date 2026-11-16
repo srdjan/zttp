@@ -211,6 +211,7 @@ boolean to text.
 | An array member call with an argument list that spec 6.5 does not give, such as `xs.slice(1)`, `xs.slice()`, `xs.toSorted()`, `xs.join()`, `xs.reduce(f)`, or `xs.indexOf(v, i)`, and a callback with a third parameter, such as `xs.map((x, i, all) => x)` | ZTS202 | The arguments of spec 6.5: `xs.slice(start, end)`, `xs.reduce(f, init)`, and a callback `(value, index)` or `(acc, value, index)` |
 | `join` on an array of non-strings, such as `[1, 2].join("")` | ZTS203 | Convert each element with `String` first |
 | A numeric index read on a string, such as `s[0]` | ZTS201 | `s.charAt(i)` or `s.slice(i, i + 1)` |
+| An index read or a `length` read on `Bytes`, such as `b[0]` and `b.length` | ZTS201 | `byteAt(b, i)` or `bytesLength(b)` from `zttp:bytes` |
 | A member call on `unknown` or on a value with no known type | ZTS201 | Narrow with `typeof` or `isDict` first |
 | A container write whose value does not fit the slot type | ZTS200 | A value of the slot type |
 | `push` on a tuple | ZTS200 | Annotate the binding as an array |
@@ -398,7 +399,6 @@ against the compiler.
 | A `match` that does not cover every case, in a statement or a `const` | Refused with ZTS603 | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | Accepted, exit 0 | A targeted refusal. Write the body as a block |
-| An index read or a `length` read on `Bytes` | Accepted, exit 0 | ZTS201. Write `byteAt(value, index)` or `bytesLength(value)` from `zttp:bytes` |
 | A write to a field that the record type does not declare, such as `o.z = 1` | Accepted, exit 0. The read `o.z` reports ZTS201 | ZTS201. Declare the field in the record type, or build a new record with spread |
 | A second `const` of the same name in one scope | Accepted, exit 0 | ZTS019. Write a different name |
 | A duplicate parameter name, such as `function f(a: number, a: number)` | Accepted, exit 0 | ZTS018. Write a different name |
