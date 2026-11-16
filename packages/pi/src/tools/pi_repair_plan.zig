@@ -1007,7 +1007,7 @@ test "repair plan: a Result in an object asks for result.value" {
 
 test "repair plan: a spread Result asks for result.value" {
     try expectFirstPlan(plan_head ++
-        \\  const box = { ...r };
+        \\  const box = { ...r, tag: 1 };
         \\  return Response.text("ok");
         \\}
     , "Check result.ok in this function, then store result.value, not the Result.", shape_guard);

@@ -992,6 +992,15 @@ pub const StrictChecker = struct {
                                 .help = "reorder so the spread is first: `{...base, x: 1}` instead of `{x: 1, ...base}`. Later keys still override.",
                                 .repair_intent = if (self.canLeadLiteralSpread(node, i)) .lead_with_spread else null,
                             });
+                        } else if (obj.properties_count == 1) {
+                            self.addDiagnostic(.{
+                                .severity = self.canonicalSeverity(),
+                                .kind = .canonical_non_leading_spread,
+                                .node = prop_idx,
+                                .message = "an object spread with no explicit field after it only copies the record",
+                                .help = "use the record itself, or add an explicit field after the spread: `{...base, x: 1}`",
+                                .repair_intent = null,
+                            });
                         }
                         if (self.ir_view.getOptValue(prop_idx)) |value| self.walkExpr(value);
                         continue;

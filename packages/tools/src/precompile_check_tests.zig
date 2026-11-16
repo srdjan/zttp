@@ -9213,7 +9213,6 @@ test "contract: the status of a returned value follows the runtime rules" {
         .{ .body = "  return Response.json({ a: 1 }, { status: 599 });\n}", .expected = .{ .known = 599 } },
         .{ .body = "  const s = 404;\n  return Response.json({ a: 1 }, { status: s });\n}", .expected = .unknown },
         .{ .body = "  const o = { status: 404 };\n  return Response.json({ a: 1 }, o);\n}", .expected = .unknown },
-        .{ .body = "  const b = { status: 404 };\n  return Response.json({ a: 1 }, { ...b });\n}", .expected = .unknown },
         .{ .body = "  const b = { status: 404 };\n  return Response.json({ a: 1 }, { ...b, status: 201 });\n}", .expected = .{ .known = 201 } },
         .{ .body = "  const r = Response.json({ a: 1 }, { status: 404 });\n  return r;\n}", .expected = .unknown },
         .{ .body = "  return;\n}", .expected = .{ .known = 500 } },

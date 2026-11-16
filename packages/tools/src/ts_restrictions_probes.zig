@@ -788,6 +788,13 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(body("  const base = { a: 1 };\n  const o = { ...base, x: 1 };")),
     },
     .{
+        .key = "An object spread with no explicit field after it, such as `{ ...o }`",
+        .refused = &.{
+            r("{ ...o }", body("  const o = { a: 1 };\n  const p = { ...o };")),
+        },
+        .clean = c(body("  const o = { a: 1 };\n  const p = { ...o, a: 2 };")),
+    },
+    .{
         .key = "Dynamic property access `obj[key]`",
         .refused = &.{r("obj[key]", top("function g(obj: { a: number }, key: string): number {\n  return obj[key];\n}"))},
         .clean = c(top("function g(obj: { a: number }): number {\n  return obj.a;\n}")),
@@ -1476,10 +1483,6 @@ pub const gap_rows = [_]GapRow{
     .{
         .key = "`DictKey` with no import, such as `<K extends DictKey>`",
         .sources = &.{c(top("function f<K extends DictKey>(k: K): K {\n  return k;\n}"))},
-    },
-    .{
-        .key = "A spread with no explicit field after it, such as `{ ...o }`",
-        .sources = &.{c(top("function g(): number {\n  const o = { a: 1 };\n  const p = { ...o };\n  return p.a;\n}"))},
     },
     .{
         .key = "A call in an assignment target, such as `mk().n = 2`",

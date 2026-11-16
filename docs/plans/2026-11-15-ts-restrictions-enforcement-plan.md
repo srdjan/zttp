@@ -780,3 +780,13 @@ later.
   `const` that is declared later in the file gets ZTS629, because the parser
   has not declared the name yet. U4b-4 moves two fixtures to legal forms: the
   IR identity mutation of a binding keyword, and one flow collision case.
+- U4b-5 refuses an object literal whose only member is a spread, such as
+  `{ ...o }`, with ZTS614 in the strict checker. The message says that the
+  spread only copies the record, and the help says to use the record itself
+  or to add an explicit field after the spread. The rule registry text of
+  ZTS614 stays as it was, because a change to it moves the policy hash, the
+  expert goldens, and the frozen expert-query bytes. Two fixtures that
+  spread a Result now add a field after the spread, and one contract-status
+  row for the refused `{ ...b }` is deleted. This finding stays open:
+  - `zttp describe-rule ZTS614` does not name the `{ ...o }` case. U6
+    updates the registry text when it moves the hashes.

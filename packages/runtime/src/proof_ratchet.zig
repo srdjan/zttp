@@ -548,7 +548,7 @@ const false_proofs = [_]FalseProof{
     .{
         .name = "p_spread",
         .body = "  const r = validateJson(\"todo\", \"{}\");\n" ++
-            "  const box = { ...r };\n" ++
+            "  const box = { ...r, tag: 1 };\n" ++
             "  return Response.json({ v: box.value });\n",
     },
     .{

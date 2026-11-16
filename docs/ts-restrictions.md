@@ -207,6 +207,7 @@ boolean to text.
 | A numeric record key `{ 1: "a" }` | ZTS001 | A string key, or an array for dense indices |
 | A quoted record key that is a name, such as `{ "a": 1 }` | ZTS001 | `{ a: 1 }`. A key that is not a name, such as `"Content-Type"`, stays quoted |
 | An object spread after an explicit key, or a second spread | ZTS614 | One leading spread: `{ ...base, x: 1 }` |
+| An object spread with no explicit field after it, such as `{ ...o }` | ZTS614 | Use `o` itself, or add an explicit field after the spread |
 | Dynamic property access `obj[key]` | ZTS605 | A typed field, such as `obj.a`, or a `Dict` read with `dictGet` |
 | A string-literal read of a key that is a name, such as `r["a"]` | ZTS605 | `r.a` |
 | `Object.assign`, `Object.freeze`, and `Object.isFrozen` | ZTS001 | Object spread |
@@ -409,7 +410,6 @@ against the compiler.
 | A generic alias argument that breaks the constraint of its parameter, such as `Box<number>` for `structural Box<T extends string> = { value: T };` | Accepted, exit 0 | ZTS209. Pass a type argument that satisfies the constraint |
 | `FetchOptions` with no import | Accepted, exit 0. The specification names a module type through `import type` from its module, and `zttp:fetch` exports no type | An `import type` from `zttp:fetch` |
 | `DictKey` with no import, such as `<K extends DictKey>` | Accepted, exit 0. The `meta` ambient names do not list it | A published ambient name, or `string \| number` |
-| A spread with no explicit field after it, such as `{ ...o }` | Accepted, exit 0 | ZTS614. Use `o` itself, or add an explicit field after the spread |
 | A call in an assignment target, such as `mk().n = 2` | Accepted, exit 0 | A targeted refusal. Bind the call result to a `const` first |
 | A higher-order callback that calls `push`, or that assigns a captured binding | Accepted, exit 0 | A targeted refusal. Build the result with `for...of` |
 | A top-level statement other than a registration call, such as `f();` and `if (c) { f(); }` | Accepted, exit 0 | A targeted refusal. Move the statement into a function. A bare `schemaCompile(...)` or `sql(...)` call with literal arguments stays admitted |
