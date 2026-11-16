@@ -40,7 +40,6 @@ const Binding = scope_mod.Binding;
 const ErrorList = error_mod.ErrorList;
 
 const generic_arrow_message = "type parameters on an arrow are not supported; write the arrow without them, or a module-level generic function";
-const raw_jsx_message = "raw JSX is not supported; use ordinary TypeScript expressions";
 
 pub const AdmissionFailure = union(enum) {
     diagnostic: type_syntax.AdmissionDiagnostic,
@@ -2617,13 +2616,8 @@ pub const Parser = struct {
         };
     }
 
-    const ArrowGenericOwnerProbe = union(enum) {
-        not_generic,
-        reserved: type_syntax.PendingGenericOwner,
-    };
-
     const GenericSourceSelection = struct {
-        options: type_syntax.GenericOwnerOptions,
+        list_span: type_syntax.Span,
         cursor: type_syntax.Cursor,
         previous: Token,
     };
@@ -2633,20 +2627,17 @@ pub const Parser = struct {
         selected: GenericSourceSelection,
     };
 
-    fn tryReserveArrowGenericOwner(self: *Parser) !ArrowGenericOwnerProbe {
+    /// A generic arrow is refused in every profile. The expression profile has
+    /// no admission collector, so `selectArrowGeneric` never selects there.
+    fn refuseGenericArrow(self: *Parser) !void {
         const opener = self.current;
-        return switch (try self.selectArrowGeneric()) {
-            .not_generic => .not_generic,
-            .selected => |selected| blk: {
-                if (!self.expression_profile) {
-                    self.errors.addErrorAt(.unsupported_feature, opener, generic_arrow_message);
-                    return error.ParseError;
-                }
-                const pending = try self.type_store.reserveGenericOwner(selected.options);
-                self.adoptAdmissionCursor(selected.cursor, selected.previous);
-                break :blk .{ .reserved = pending };
+        switch (try self.selectArrowGeneric()) {
+            .not_generic => {},
+            .selected => {
+                self.errors.addErrorAt(.unsupported_feature, opener, generic_arrow_message);
+                return error.ParseError;
             },
-        };
+        }
     }
 
     fn selectArrowGeneric(self: *Parser) !ArrowGenericSelection {
@@ -2711,40 +2702,20 @@ pub const Parser = struct {
 
         const dedicated_header = has_dedicated_window and
             std.mem.indexOfScalar(u8, gap, '\r') == null;
-        const OwnerReservation = struct {
-            policy: type_syntax.GenericOwnerPolicy,
-            capture_spans: type_syntax.GenericCaptureSpans,
-        };
-        const reservation: OwnerReservation = if (has_dedicated_window and
-            (!self.source_only or dedicated_header))
-            .{ .policy = .callable, .capture_spans = .{
-                .actual_erased_span = scanned.span,
-                .recorded_span = .{
-                    .start = scanned.span.start + 1,
-                    .end = scanned.span.end - 1,
-                },
-            } }
+        const erase_to_list_end = has_dedicated_window and (!self.source_only or dedicated_header);
+        const erased_span: type_syntax.Span = if (erase_to_list_end)
+            scanned.span
         else
-            .{ .policy = .callable, .capture_spans = .{
-                .actual_erased_span = .{
-                    .start = scanned.span.start,
-                    .end = cursor.current.start,
-                },
-                .recorded_span = .{
-                    .start = scanned.span.start + 1,
-                    .end = cursor.current.start - 1,
-                },
-            } };
-        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
-        const options: type_syntax.GenericOwnerOptions = .{
-            .list_span = scanned.span,
-            .capture_spans = reservation.capture_spans,
-            .policy = reservation.policy,
+            .{ .start = scanned.span.start, .end = cursor.current.start };
+        const recorded_span: type_syntax.Span = .{
+            .start = scanned.span.start + 1,
+            .end = erased_span.end - 1,
         };
-        try self.recordRecoveryErasure(options.capture_spans.actual_erased_span);
-        try self.recordPrintableRegion(.{ .recorded_generic = options.capture_spans.recorded_span });
+        self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(scanned.span.end);
+        try self.recordRecoveryErasure(erased_span);
+        try self.recordPrintableRegion(.{ .recorded_generic = recorded_span });
         accepted = true;
-        return .{ .selected = .{ .options = options, .cursor = cursor, .previous = previous } };
+        return .{ .selected = .{ .list_span = scanned.span, .cursor = cursor, .previous = previous } };
     }
 
     const ExplicitCallSelection = struct {
@@ -4569,18 +4540,11 @@ pub const Parser = struct {
                 0;
         }
 
-        const generic_opener = self.current;
-        switch (try self.tryReserveArrowGenericOwner()) {
-            .not_generic => {},
-            .reserved => |pending_value| {
-                var pending = pending_value;
-                return self.parseArrowFunction(&pending, generic_opener);
-            },
-        }
+        try self.refuseGenericArrow();
 
         // Check for arrow function
         if (self.isArrowFunction()) {
-            return self.parseArrowFunction(null, generic_opener);
+            return self.parseArrowFunction();
         }
 
         var left = try self.parsePrefixExpr();
@@ -5582,36 +5546,21 @@ pub const Parser = struct {
         return self.tokenizer.next().type == .arrow;
     }
 
-    fn parseArrowFunction(
-        self: *Parser,
-        pending_owner: ?*type_syntax.PendingGenericOwner,
-        generic_opener: Token,
-    ) anyerror!NodeIndex {
+    fn parseArrowFunction(self: *Parser) anyerror!NodeIndex {
         const publication_checkpoint = self.typePublicationCheckpoint();
-        errdefer if (pending_owner) |pending| self.type_store.cancelGenericOwner(pending);
         const loc = self.current.location();
         var flags = FunctionFlags{ .is_arrow = true };
         const parameter_opener: ?u32 = if (self.check(.lparen)) self.current.start else null;
         var typed_header = self.admission != null and
             !self.admissionCoveredByRecovery(self.current.start) and parameter_opener != null;
         if (typed_header) {
-            const generic_span = if (pending_owner) |pending| pending.list_span else null;
             const dedicated = type_syntax.hasDedicatedAssignmentArrowWindow(
                 self.source,
                 self.previous,
-                if (generic_span) |span| span.start else self.current.start,
-            ) and (if (generic_span) |span|
-                std.mem.indexOfScalar(u8, self.source[span.end..self.current.start], '\r') == null
-            else
-                true);
+                self.current.start,
+            );
             typed_header = try self.observeSourceHeader(if (dedicated) .return_colon else .arrow);
             if (!typed_header and !self.isRuntimeArrowFunction()) {
-                if (pending_owner != null) {
-                    // A comment in the parameters can hide the typed header from
-                    // the source probe. The errdefer above cancels the owner.
-                    self.errors.addErrorAt(.unexpected_token, generic_opener, raw_jsx_message);
-                    return error.UnexpectedToken;
-                }
                 return self.parseGroupedOrArrowParams();
             }
         }
@@ -5719,19 +5668,6 @@ pub const Parser = struct {
                 arrow,
                 ir.IrView.fromIRStore(&self.nodes, &self.constants),
             );
-        }
-        if (pending_owner) |pending| {
-            if (!self.typeSyntaxPublicationHealthy(publication_checkpoint)) {
-                self.type_store.cancelGenericOwner(pending);
-            } else {
-                try self.type_store.finishGenericOwner(
-                    pending,
-                    .{ .runtime = .{
-                        .owner = arrow,
-                        .view = ir.IrView.fromIRStore(&self.nodes, &self.constants),
-                    } },
-                );
-            }
         }
         return arrow;
     }
@@ -6499,8 +6435,8 @@ pub const Parser = struct {
                     type_syntax.hasDedicatedAssignmentArrowWindow(
                         self.source,
                         selected.previous,
-                        selected.options.list_span.start,
-                    ) and std.mem.indexOfScalar(u8, self.source[selected.options.list_span.end..selected.cursor.current.start], '\r') == null;
+                        selected.list_span.start,
+                    ) and std.mem.indexOfScalar(u8, self.source[selected.list_span.end..selected.cursor.current.start], '\r') == null;
                 self.adoptAdmissionCursor(selected.cursor, selected.previous);
                 if (!self.source_only or try self.observeSourceHeader(if (dedicated) .return_colon else .arrow)) {
                     try self.observeRecoveryHeader(.arrow);
@@ -8094,10 +8030,7 @@ test "failed generic speculation restores the complete parser cursor" {
         try std.testing.expectEqual(TokenType.lt, parser.current.type);
         const cursor_before = parser.cursorCheckpoint();
         const store_before = parser.type_store.checkpoint();
-        switch (try parser.tryReserveArrowGenericOwner()) {
-            .not_generic => {},
-            .reserved => return error.TestUnexpectedResult,
-        }
+        try parser.refuseGenericArrow();
         try std.testing.expect(std.meta.eql(cursor_before, parser.cursorCheckpoint()));
         try std.testing.expect(std.meta.eql(store_before, parser.type_store.checkpoint()));
     }

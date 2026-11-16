@@ -638,8 +638,6 @@ pub const RecognizedGenericParameter = struct {
     name_span: Span,
     extends_span: ?Span,
     constraint_span: ?Span,
-    equals_span: ?Span,
-    default_span: ?Span,
 };
 
 pub const AuthoredGenericParameter = struct {
@@ -666,7 +664,6 @@ pub const GenericOwnerIdentity = union(enum) {
     structural_declaration: u32,
     nominal_declaration: u32,
     function: ir.NodeIndex,
-    arrow: ir.NodeIndex,
 };
 
 pub const GenericOwnerCompatibility = union(enum) {
@@ -1028,11 +1025,10 @@ pub const Store = struct {
                 const tag = runtime.view.getTag(runtime.owner) orelse return error.InvalidGenericOwner;
                 break :blk switch (pending.policy) {
                     .structural => return error.InvalidGenericOwner,
-                    .callable => switch (tag) {
-                        .function_expr => .{ .function = runtime.owner },
-                        .arrow_function => .{ .arrow = runtime.owner },
-                        else => return error.InvalidGenericOwner,
-                    },
+                    .callable => if (tag == .function_expr)
+                        .{ .function = runtime.owner }
+                    else
+                        return error.InvalidGenericOwner,
                     .ignored => if (tag == .function_expr)
                         .{ .function = runtime.owner }
                     else
@@ -1284,7 +1280,6 @@ pub const Store = struct {
             const runtime_owner = switch (owner.identity) {
                 .structural_declaration, .nominal_declaration => continue,
                 .function => |runtime_node| runtime_node,
-                .arrow => |runtime_node| runtime_node,
             };
             if (@as(usize, runtime_owner) >= generic_owners.len or
                 generic_owners[runtime_owner] != 0)
@@ -1523,7 +1518,7 @@ pub const Store = struct {
             return true;
         }
         for (self.generic_owners.items) |owner| switch (owner.identity) {
-            .function, .arrow => return true,
+            .function => return true,
             .structural_declaration, .nominal_declaration => {},
         };
         for (self.annotations.items) |annotation| {
@@ -2037,7 +2032,7 @@ pub const Store = struct {
     ) !void {
         try self.validateSpan(parameter.name_span);
         if (!spanContains(owner, parameter.name_span)) return error.InvalidTypeSpan;
-        inline for (.{ parameter.extends_span, parameter.constraint_span, parameter.equals_span, parameter.default_span }) |maybe_span| {
+        inline for (.{ parameter.extends_span, parameter.constraint_span }) |maybe_span| {
             if (maybe_span) |span| {
                 try self.validateSpan(span);
                 if (!spanContains(owner, span)) return error.InvalidTypeSpan;
@@ -2145,19 +2140,6 @@ pub const Store = struct {
                     if (!std.meta.eql(fragment.raw_span, bound_span)) return error.InvalidGenericOwner;
                 };
             },
-            .arrow => {
-                if (std.meta.activeTag(owner.compatibility) == .ignored_declaration_parameters) {
-                    return error.InvalidGenericOwner;
-                }
-                for (projected) |parameter| if (parameter.bound_fragment) |fragment_index| {
-                    if (@as(usize, fragment_index) >= self.semantic_fragments.items.len) {
-                        return error.InvalidTypeRange;
-                    }
-                    const fragment = self.semantic_fragments.items[fragment_index];
-                    const bound_span = parameter.bound_span orelse return error.InvalidGenericOwner;
-                    if (!std.meta.eql(fragment.raw_span, bound_span)) return error.InvalidGenericOwner;
-                };
-            },
         }
     }
 
@@ -2171,7 +2153,6 @@ pub const Store = struct {
         const runtime_owner, const expected_tag = switch (owner.identity) {
             .structural_declaration, .nominal_declaration => return,
             .function => |runtime_node| .{ runtime_node, ir.NodeTag.function_expr },
-            .arrow => |runtime_node| .{ runtime_node, ir.NodeTag.arrow_function },
         };
         const tag = view.getTag(runtime_owner) orelse return error.InvalidGenericOwner;
         if (tag != expected_tag) return error.InvalidGenericOwner;
@@ -2188,7 +2169,7 @@ pub const Store = struct {
                     .block_comment, .line_comment => true,
                     .whitespace, .forbidden => false,
                 },
-            .structural_declaration, .nominal_declaration, .arrow => false,
+            .structural_declaration, .nominal_declaration => false,
         };
         if (@as(usize, location.offset) >= self.source.len or self.source[location.offset] != '(' or
             location.offset < owner.list_span.end or

@@ -782,14 +782,8 @@ pub fn appendProjectedParametersWithBounds(
     try appendProjectedGenericParametersFromSpan(store, body);
     const parameter_end = store.projected_generic_parameters.items.len;
     if (with_bounds) {
-        const start = parameter_start_index;
-        var compact_count: usize = 0;
-        for (store.projected_generic_parameters.items[start..parameter_end]) |parameter| {
-            if (parameter.name_span.start != parameter.name_span.end) compact_count += 1;
-        }
-        var index = start;
+        var index = parameter_start_index;
         while (index < parameter_end) : (index += 1) {
-            if (index - start >= compact_count) break;
             const bound_span = store.projected_generic_parameters.items[index].bound_span orelse
                 continue;
             const fragment_index = try parseSemanticFragmentAndStore(store, bound_span);
@@ -860,8 +854,6 @@ fn recognizeAuthoredGenericParameter(
         .name_span = projected.name_span,
         .extends_span = null,
         .constraint_span = null,
-        .equals_span = null,
-        .default_span = null,
     };
     var offset = projected.name_span.end;
     offset = skipWhitespaceWithin(source, offset, span.end);
@@ -874,12 +866,10 @@ fn recognizeAuthoredGenericParameter(
         recognized.constraint_span = trimSpan(source, .{ .start = offset, .end = constraint_end });
         offset = constraint_end;
     }
-    if (offset < span.end and source[offset] == '=') {
-        recognized.equals_span = .{ .start = offset, .end = offset + 1 };
-        recognized.default_span = trimSpan(source, .{ .start = offset + 1, .end = span.end });
-    } else if (recognized.extends_span == null and offset != span.end) {
-        return null;
-    }
+    // A default after the name or constraint is refused by the parser, so the
+    // store keeps no span for it.
+    const has_default = offset < span.end and source[offset] == '=';
+    if (!has_default and recognized.extends_span == null and offset != span.end) return null;
     return recognized;
 }
 

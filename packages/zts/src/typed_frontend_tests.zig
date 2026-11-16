@@ -4172,7 +4172,6 @@ const NominalGenericExpectation = struct {
     list: []const u8,
     base: TypeSyntax.Primitive,
     constraint: ?[]const u8 = null,
-    authored_default: ?[]const u8 = null,
     projected_bound: ?[]const u8 = null,
 };
 
@@ -4212,12 +4211,6 @@ fn expectNominalGenericOwner(
         try std.testing.expectEqualStrings(constraint, span.text(store.source));
     } else {
         try std.testing.expect(recognized.constraint_span == null);
-    }
-    if (expected.authored_default) |authored_default| {
-        const span = recognized.default_span orelse return error.TestUnexpectedResult;
-        try std.testing.expectEqualStrings(authored_default, span.text(store.source));
-    } else {
-        try std.testing.expect(recognized.default_span == null);
     }
     if (expected.projected_bound) |projected_bound| {
         const span = projected[0].bound_span orelse return error.TestUnexpectedResult;
@@ -7966,7 +7959,7 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
                 .function => |node| if (std.meta.activeTag(owner.compatibility) == .declaration_parameters) {
                     outer_owner = node;
                 },
-                .structural_declaration, .nominal_declaration, .arrow => {},
+                .structural_declaration, .nominal_declaration => {},
             };
             const owner = outer_owner orelse return error.TestUnexpectedResult;
             const reference = direct_env.functionTypeRef(direct_view, owner) orelse

@@ -789,20 +789,11 @@ pub const TypeEnv = struct {
         callable_sets: *DirectGenericSets,
     ) !void {
         for (input.store.generic_owners.items) |owner| {
-            const is_callable = switch (owner.identity) {
-                .function, .arrow => true,
-                .structural_declaration, .nominal_declaration => false,
-            };
-            if (!is_callable or
-                std.meta.activeTag(owner.compatibility) != .declaration_parameters)
-            {
-                continue;
-            }
             const owner_node = switch (owner.identity) {
                 .function => |node| node,
-                .arrow => |node| node,
-                .structural_declaration, .nominal_declaration => return error.InvalidGenericOwner,
+                .structural_declaration, .nominal_declaration => continue,
             };
+            if (std.meta.activeTag(owner.compatibility) != .declaration_parameters) continue;
             if (try self.populateDirectGenericProjection(
                 input.store,
                 application_bases,
