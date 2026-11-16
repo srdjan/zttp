@@ -1691,8 +1691,9 @@ pub fn containsOnlyTypeWhitespace(source: []const u8, start: u32, end: u32) bool
 pub fn looksLikeTypeStart(source: []const u8, start: u32) bool {
     if (@as(usize, start) >= source.len) return false;
     const byte = source[start];
-    return isIdentifierStart(byte) or byte == '{' or byte == '(' or byte == '[' or
-        byte == '<' or byte == '\'' or byte == '"' or byte == '`';
+    if (byte == '-') return @as(usize, start) + 1 < source.len and std.ascii.isDigit(source[start + 1]);
+    return isIdentifierStart(byte) or std.ascii.isDigit(byte) or byte == '{' or byte == '(' or
+        byte == '[' or byte == '<' or byte == '\'' or byte == '"' or byte == '`';
 }
 
 fn isObjectTypeBraceStart(source: []const u8, raw_start: u32, brace: usize) bool {

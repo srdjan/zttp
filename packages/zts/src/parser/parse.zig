@@ -1173,7 +1173,8 @@ pub const Parser = struct {
         }) pos += 1;
         if (pos == self.source.len) return false;
         const byte = self.source[pos];
-        return isAsciiIdentifierStart(byte) or switch (byte) {
+        if (byte == '-') return pos + 1 < self.source.len and std.ascii.isDigit(self.source[pos + 1]);
+        return isAsciiIdentifierStart(byte) or std.ascii.isDigit(byte) or switch (byte) {
             '{', '(', '[', '<', '\'', '"', '`' => true,
             else => false,
         };

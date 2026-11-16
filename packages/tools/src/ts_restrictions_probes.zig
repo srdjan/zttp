@@ -1139,7 +1139,7 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(top("structural R = { a: number };")),
     },
     .{
-        .key = "A type form outside the admitted grammar, such as `new () => T`, `unique symbol`, `[string?]`, `[a: string]`, `[...string[]]`, a rest parameter in a function type such as `(...a: string[]) => number`, a method signature such as `{ m(): number }`, and a call signature such as `{ (): number }`",
+        .key = "A type form outside the admitted grammar, such as `new () => T`, `unique symbol`, `[string?]`, `[a: string]`, `[...string[]]`, a rest parameter in a function type such as `(...a: string[]) => number`, a method signature such as `{ m(): number }`, a call signature such as `{ (): number }`, and an empty parenthesized type with no arrow, such as `Outer<()>` and `structural E = ();`",
         .refused = &.{
             r("new () => T", paramText("new () => string")),
             r("unique symbol", paramText("unique symbol")),
@@ -1149,6 +1149,8 @@ pub const refusal_rows = [_]RefusalRow{
             r("(...a: string[]) => number", paramText("(...a: string[]) => number")),
             r("{ m(): number }", paramText("{ m(): number }")),
             r("{ (): number }", paramText("{ (): number }")),
+            r("Outer<()>", top("structural Outer<T> = { v: T };\nfunction g(a: Outer<()>): number {\n  return 1;\n}")),
+            r("structural E = ();", top("structural E = ();")),
         },
         .clean = c(top("function g(a: [string]): number {\n  return 1;\n}")),
     },
@@ -1167,7 +1169,7 @@ pub const refusal_rows = [_]RefusalRow{
             r("f<number number>(1)", top("function f<T>(a: T): T {\n  return a;\n}\nfunction g(): number {\n  return f<number number>(1);\n}")),
             r("T extends number string", top("function f<T extends number string>(a: T): T {\n  return a;\n}")),
         },
-        .clean = c(top("structural L = { x: number; y: string };\nstructural B<T> = { v: T };\nfunction f<T extends string>(a: T): T {\n  return a;\n}\nfunction g(a: B<string>, h: (x: number, y: string) => number, t: [number, string], xs: number[]): number {\n  return f<string>(\"a\") === \"a\" ? 1 : 2;\n}")),
+        .clean = c(top("structural L = { x: number; y: string };\nstructural B<T> = { v: T };\nfunction f<T extends string>(a: T): T {\n  return a;\n}\nfunction g(a: B<string>, h: (x: number, y: string) => number, t: [number, string], xs: number[]): number {\n  return f<string>(\"a\") === \"a\" ? 1 : 2;\n}\nfunction k(n: 400, m: -1, s: \"a\" | 0x10): string {\n  return f<\"a,b\">(\"a,b\");\n}\nfunction w(): string {\n  return f</* x, y */ string>(\"s\");\n}")),
     },
     .{
         .key = "A record type with comma separators, such as `{ a: number, b: string }`",

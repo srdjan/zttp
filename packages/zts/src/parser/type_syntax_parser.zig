@@ -732,6 +732,26 @@ pub fn appendAuthoredCallArguments(store: *Store, list_span: Span) !void {
     }
 }
 
+/// Returns the offset after the string literal or comment that starts at `pos`, or null.
+fn skipLiteralOrComment(source: []const u8, pos: usize, end: u32) ?usize {
+    const byte = source[pos];
+    if (byte == '"' or byte == '\'' or byte == '`') {
+        return switch (scanTypeQuoted(source, pos, byte)) {
+            .end => |stop| @min(stop, @as(usize, end)),
+            else => end,
+        };
+    }
+    if (byte != '/' or pos + 1 >= end) return null;
+    var after = pos + 2;
+    if (source[pos + 1] == '/') {
+        while (after < end and source[after] != '\n') after += 1;
+        return after;
+    }
+    if (source[pos + 1] != '*') return null;
+    while (after + 1 < end and !(source[after] == '*' and source[after + 1] == '/')) after += 1;
+    return @min(after + 2, @as(usize, end));
+}
+
 pub fn appendProjectedCallFragments(store: *Store, projected_span: Span) !void {
     const body = projectedListBody(store.source, projected_span);
     if (body.start == body.end) return;
@@ -742,6 +762,10 @@ pub fn appendProjectedCallFragments(store: *Store, projected_span: Span) !void {
     var count: usize = 0;
     while (pos <= body.end) : (pos += 1) {
         const at_end = pos == body.end;
+        if (!at_end) if (skipLiteralOrComment(store.source, pos, body.end)) |after| {
+            pos = after - 1;
+            continue;
+        };
         const byte = if (at_end) ',' else store.source[pos];
         switch (byte) {
             '<' => angle_depth += 1,
@@ -820,6 +844,10 @@ fn appendProjectedGenericParametersFromSpan(store: *Store, body: Span) !void {
     var count: usize = 0;
     while (pos <= body.end) : (pos += 1) {
         const at_end = pos == body.end;
+        if (!at_end) if (skipLiteralOrComment(store.source, pos, body.end)) |after| {
+            pos = after - 1;
+            continue;
+        };
         const byte = if (at_end) ',' else store.source[pos];
         switch (byte) {
             '<' => angle_depth += 1,
@@ -1779,7 +1807,10 @@ const SyntaxParser = struct {
                 if (self.pos < self.end and self.source[self.pos] == '[') {
                     const close: u32 = @intCast(skipTrivia(self.source, self.pos + 1, self.end));
                     if (close >= self.end or self.source[close] != ']') {
-                        self.flag(if (close >= self.end) .unsupported else .indexed_access, self.pos);
+                        const indexed = close < self.end and
+                            (isIdentifierStart(self.source[close]) or std.ascii.isDigit(self.source[close]) or
+                                self.source[close] == '"' or self.source[close] == '\'');
+                        self.flag(if (indexed) .indexed_access else .unsupported, self.pos);
                         return self.complete(frame.base);
                     }
                     self.pos = close + 1;
@@ -2006,6 +2037,7 @@ const SyntaxParser = struct {
                             .last_end = self.pos,
                         } });
                     } else if (frame.params.items.len == 0) {
+                        self.flag(.unsupported, frame.start);
                         var grouped = try self.makeNode(
                             frame.start,
                             close_end,

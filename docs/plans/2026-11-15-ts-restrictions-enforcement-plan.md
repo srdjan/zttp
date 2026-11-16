@@ -531,7 +531,7 @@ later.
 - A numeric literal type at the start of an annotation does not parse:
   `x: 400` gets ZTS003, and `const v: 400 = 5;` gets ZTS021. The probable
   cause is that a type start does not include a digit. This fails closed.
-  U3c owns it.
+  U3c did not fix it. U3d fixes it.
 - The leftover check of U3b sees text after the whole type only. Inside a
   record, a parameter list, or a type argument list, malformed text is still
   admitted: `{ x: }` reads as `{ x: unknown }`, `(x: number) =>` reads as a
@@ -560,3 +560,21 @@ later.
     probable cause is that the splitter does not skip quotes and comments.
     A test of `f<"a,b">` against a matching declaration can confirm it.
   - An unclosed `number [` still gets the indexed access message.
+
+  U3d fixes these three findings and the numeric literal type start.
+- U3d also refuses `()` as a type when no `=>` follows it. Before U3d,
+  `structural Empty = ();` read as a type that accepts any value. This
+  failed open. Three robustness tests used `structural Empty<T> = ();` to
+  stop the analyzer with ZTS000. They now use the type `` `` `` (an empty
+  template literal), which also stops the analyzer with ZTS000. A fourth
+  test used that type before U3d. That is a fail-closed gap of the same
+  class. When a unit refuses that type, these four tests need a different
+  trigger: `canonicalize.zig#repair APIs refuse an
+  analyzer failure`, `edit_simulate.zig#simulate reports type resolution
+  failures as ZTS000`, the `unmapped.ts` input of `cli_abuse_check.zig`,
+  and `precompile_check_tests.zig#CHECK reports absent compound analysis
+  failures as ZTS000`.
+- A call of a tuple element, such as `d[0]()` with `d: [() => number]`,
+  gets ZTS106 "operand has no known type". HEAD before U3d gives the same
+  result. This fails closed. The probable cause is that a tuple index read
+  does not carry the element type to a call. A checker probe can confirm it.

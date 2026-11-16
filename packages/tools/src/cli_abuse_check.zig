@@ -272,8 +272,7 @@ fn populate(gpa: std.mem.Allocator, io: Io, work: []const u8) !void {
     for (1..add_chain_terms) |_| try add.appendSlice(gpa, "+1");
     try add.appendSlice(gpa, ";\n  return Response.json({ x: x, now: Date.now() });\n}\n");
     try writeInput(gpa, io, work, "add-chain.ts", add.items);
-    try writeInput(gpa, io, work, "unmapped.ts", "structural Empty<T> = ();\n" ++
-        "const value: Empty<string> = \"x\";\n" ++
+    try writeInput(gpa, io, work, "unmapped.ts", "const value: `` = \"x\";\n" ++
         "function handler(req: Request): Response { return Response.text(\"ok\"); }\n");
     const readonly_path = try std.fs.path.join(gpa, &.{ work, "readonly" });
     defer gpa.free(readonly_path);

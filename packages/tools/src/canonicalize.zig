@@ -2319,8 +2319,7 @@ fn collectAndWriteJson(source: []const u8) !struct { json: []u8, file: []const u
 
 test "repair APIs refuse an analyzer failure" {
     const source =
-        \\structural Empty<T> = ();
-        \\const value: Empty<string> = "x";
+        \\const value: `` = "x";
         \\function handler(req: Request): Response { return Response.text("ok"); }
     ;
     try std.testing.expectError(error.UnresolvedTypeBinding, collectFromSource(std.testing.allocator, source, "handler.ts"));

@@ -894,8 +894,7 @@ test "simulate reports an unmapped analyzer failure as ZTS000" {
 
 test "simulate reports type resolution failures as ZTS000" {
     const source =
-        \\structural Empty<T> = ();
-        \\const value: Empty<string> = "x";
+        \\const value: `` = "x";
         \\function handler(req: Request): Response { return Response.text("ok"); }
     ;
     var result = try simulate(std.testing.allocator, .{

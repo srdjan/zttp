@@ -2590,8 +2590,6 @@ fn expectDirectAbsentPrefix(annotation: []const u8, expected_prefix: []const u8)
 const ApplicationCase = enum {
     ambient_proof,
     nested_closers,
-    absent_first_before_close,
-    absent_later_before_close,
     dict_exact_arity,
     dict_wrong_arity,
     readonly_record_nested,
@@ -2608,8 +2606,6 @@ const ApplicationFixture = struct {
 const application_fixtures = [_]ApplicationFixture{
     .{ .case = .ambient_proof, .source = "const value: Proof<Response, \"pure\"> = undefined;" },
     .{ .case = .nested_closers, .source = "const value: Outer<Middle<Inner<string>>> = undefined;" },
-    .{ .case = .absent_first_before_close, .source = "const value: Outer<()> = undefined;" },
-    .{ .case = .absent_later_before_close, .source = "const value: Outer<string, ()> = undefined;" },
     .{ .case = .dict_exact_arity, .source = "const value: Dict<string, number> = undefined;" },
     .{ .case = .dict_wrong_arity, .source = "const value: Dict<string> = undefined;" },
     .{
@@ -2627,7 +2623,6 @@ const application_fixtures = [_]ApplicationFixture{
 const GenericAliasCase = enum {
     spaced_list,
     empty_list,
-    present_null_body,
     ignored_constraint,
     eight_item_projection,
     ninth_item_unprojected,
@@ -2654,7 +2649,6 @@ const GenericAliasFixture = struct {
 const generic_alias_fixtures = [_]GenericAliasFixture{
     .{ .case = .spaced_list, .source = "structural Box <T> = { value: T };\nconst value: Box<number> = undefined;" },
     .{ .case = .empty_list, .source = "structural Box<> = number;\nconst value: Box<> = undefined;" },
-    .{ .case = .present_null_body, .source = "structural Empty<T> = ();" },
     .{ .case = .ignored_constraint, .source = "structural Box<T extends string> = { value: T };\nconst value: Box<number> = undefined;" },
     .{ .case = .eight_item_projection, .source = "structural Wide<A,B,C,D,E,F,G,H> = H;\nconst value: Wide<string,string,string,string,string,string,string,number> = undefined;" },
     .{ .case = .ninth_item_unprojected, .source = "structural Many<A,B,C,D,E,F,G,H,I> = I;" },
@@ -2735,7 +2729,6 @@ const DeclarationCase = enum {
     block_indented_refusal,
     runtime_structural_collision,
     runtime_nominal_collision,
-    present_absent_body_null_alias,
     exact_eager_alias,
     forward_deferred_ref,
     nested_deferred_ref,
@@ -2814,7 +2807,6 @@ const declaration_fixtures = [_]DeclarationFixture{
     .{ .case = .block_indented_refusal, .source = "function outer() {\n  structural Alias = number;\nreturn 1;\n}", .probe = .{ .retained_declarations = 0 } },
     .{ .case = .runtime_structural_collision, .source = "structural Alias = number; function Alias() { return 1; }", .probe = .{ .retained_declarations = 1 } },
     .{ .case = .runtime_nominal_collision, .source = "nominal Alias = number; function Alias() { return 1; }", .probe = .{ .retained_declarations = 1 } },
-    .{ .case = .present_absent_body_null_alias, .source = "structural Empty = ();", .probe = .equivalent },
     .{ .case = .exact_eager_alias, .source = "structural A = string;\nstructural B = A;\nstructural A = number;", .probe = .equivalent },
     .{ .case = .forward_deferred_ref, .source = "structural B = A;\nstructural A = string;\nstructural A = number;", .probe = .equivalent },
     .{ .case = .nested_deferred_ref, .source = "structural B = { value: A };\nstructural A = number;", .probe = .equivalent },
@@ -3012,26 +3004,6 @@ fn assertApplicationSemanticProperty(case: ApplicationCase, source: []const u8) 
             try expectPoolGenericApplication(&pool, middle_pool.args[0], "Inner", 1);
             try std.testing.expectEqual(pool.idx_string, pool.getGenericAppInfo(middle_pool.args[0]).args[0]);
         },
-        .absent_first_before_close, .absent_later_before_close => {
-            const retained: usize = switch (case) {
-                .absent_first_before_close => 0,
-                else => 1,
-            };
-            _ = try expectSyntaxApplication(&parser.type_store, annotation.root, "Outer", retained);
-            try expectPoolGenericApplication(&pool, lowered, "Outer", retained);
-            if (retained == 1) {
-                try std.testing.expectEqual(pool.idx_string, pool.getGenericAppInfo(lowered).args[0]);
-            }
-            const expected = switch (case) {
-                .absent_first_before_close => "Outer<()>",
-                .absent_later_before_close => "Outer<string, ()>",
-                else => return error.TestUnexpectedResult,
-            };
-            try std.testing.expectEqualStrings(
-                expected,
-                source[annotation.raw_span.start..annotation.semantic_prefix_end],
-            );
-        },
         .dict_exact_arity => {
             _ = try expectSyntaxApplication(&parser.type_store, annotation.root, "Dict", 2);
             try std.testing.expectEqual(
@@ -3162,10 +3134,6 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
             try std.testing.expectEqual(@as(u8, 0), alias.param_count);
             try std.testing.expectEqual(pool.idx_number, value_type orelse return error.TestUnexpectedResult);
         },
-        .present_null_body => {
-            const alias = env.generic_aliases.get("Empty") orelse return error.TestUnexpectedResult;
-            try std.testing.expectEqual(null_type_idx, alias.body);
-        },
         .eight_item_projection => {
             const alias = env.generic_aliases.get("Wide") orelse return error.TestUnexpectedResult;
             try std.testing.expectEqual(@as(u8, 8), alias.param_count);
@@ -3277,12 +3245,11 @@ fn assertGenericProjectionProperty(case: GenericProjectionCase, source: []const 
         },
         .quoted_comma => {
             try std.testing.expectEqual(@as(usize, 1), authored.len);
-            try std.testing.expectEqual(@as(usize, 2), projected.len);
+            try std.testing.expectEqual(@as(usize, 1), projected.len);
         },
         .comment_comma => {
             try std.testing.expectEqual(@as(usize, 1), authored.len);
-            try std.testing.expectEqual(@as(usize, 2), projected.len);
-            try std.testing.expectEqualStrings("*/", projected[1].name_span.text(source));
+            try std.testing.expectEqual(@as(usize, 1), projected.len);
         },
         .authored_empty_piece => {
             try std.testing.expectEqual(@as(usize, 3), authored.len);
@@ -3433,11 +3400,6 @@ fn assertDeclarationSemanticProperty(case: DeclarationCase, source: []const u8) 
         .exported_structural_alias => {
             try std.testing.expect(parser.type_store.declarations.items[0].export_span != null);
             try std.testing.expectEqual(pool.idx_number, try requireAlias(&env, "Alias"));
-        },
-        .present_absent_body_null_alias => {
-            const alias = env.getTypeAlias("Empty");
-            try std.testing.expect(alias != null);
-            try std.testing.expectEqual(null_type_idx, alias.?);
         },
         .exact_eager_alias => {
             try std.testing.expectEqual(pool.idx_number, try requireAlias(&env, "A"));
@@ -4496,7 +4458,6 @@ const GenericRuntimeCase = enum {
     explicit_call_combined_opener,
     nested_call_closers,
     missing_call_closer,
-    call_semantic_absence_first,
     call_projection_cap,
     spaced_call_comparison,
     logical_comparison_control,
@@ -4511,7 +4472,6 @@ const generic_runtime_fixtures = [_]struct {
     .{ .case = .explicit_call_combined_opener, .source = "const seed: number = 1; const result=id<<string>>(seed);" },
     .{ .case = .nested_call_closers, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<Outer<Inner<string>>>(seed);" },
     .{ .case = .missing_call_closer, .source = "const seed: number = 1; const result=id<string(seed);" },
-    .{ .case = .call_semantic_absence_first, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<(),string>(seed);" },
     .{ .case = .call_projection_cap, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<A,B,C,D,E,F,G,H,I>(seed);" },
     .{ .case = .spaced_call_comparison, .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<string> (seed);" },
     .{ .case = .logical_comparison_control, .source = "const seed: number = 1; const result=seed < value && other > (seed);" },
@@ -4588,20 +4548,6 @@ test "generic runtime syntax census observes every case" {
                 const root = parser.type_store.node(try syntaxChildIndex(fragments[0].root)) orelse
                     return error.TestUnexpectedResult;
                 try std.testing.expectEqual(TypeSyntax.NodeTag.generic_application, root.tag);
-            },
-            .call_semantic_absence_first => {
-                const call = parser.type_store.explicit_call_arguments.items[0];
-                const fragments = parser.type_store.semanticFragmentSlice(call.semantic_fragments) orelse
-                    return error.TestUnexpectedResult;
-                try std.testing.expectEqual(@as(usize, 2), fragments.len);
-                const group = parser.type_store.node(try syntaxChildIndex(fragments[0].root)) orelse
-                    return error.TestUnexpectedResult;
-                try std.testing.expectEqual(TypeSyntax.NodeTag.group, group.tag);
-                switch (group.data.group.child) {
-                    .absent => {},
-                    .present => return error.TestUnexpectedResult,
-                }
-                try std.testing.expectEqualStrings("string", fragments[1].raw_span.text(fixture.source));
             },
             .call_projection_cap => {
                 const call = parser.type_store.explicit_call_arguments.items[0];
@@ -5294,7 +5240,7 @@ test "generic parameter projection retains u32 depth arithmetic" {
     try parser.type_store.validate();
     const owner = parser.type_store.generic_owners.items[0];
     try std.testing.expectEqual(@as(u32, 1), owner.authored_parameters.count);
-    try std.testing.expectEqual(@as(u32, 0), owner.projected_parameters.count);
+    try std.testing.expectEqual(@as(u32, 1), owner.projected_parameters.count);
     try expectDirectAccepted(source.items);
 }
 
@@ -5447,22 +5393,20 @@ test "type text left after the type parser stops is refused with ZTS001" {
         .{ .source = "structural Empty =;", .offset = 18 },
         .{ .source = "structural A = number = >\nconst value = 1;", .offset = 22 },
         .{ .source = "structural A = string;\nstructural B = A tolerated_suffix;\nstructural A = number;", .offset = 40 },
-        .{ .source = "const value: Outer<(), string> = undefined;", .offset = 21 },
-        .{ .source = "const value: Outer<string, (), number> = undefined;", .offset = 29 },
+        .{ .source = "const value: Outer<(), string> = undefined;", .offset = 19 },
+        .{ .source = "const value: Outer<string, (), number> = undefined;", .offset = 27 },
         .{ .source = "const value: (number: string | boolean, number) = undefined;", .offset = 20 },
         .{ .source = "const value: number | | string = undefined;", .offset = 20 },
         .{ .source = "const value: Outer<string number> = undefined;", .offset = 26 },
         .{ .source = "const value: { x }[] = undefined;", .offset = 17 },
         .{ .source = "const value: { outer: { x }[]; tail: number }[] = undefined;", .offset = 26 },
-        .{ .source = "const value: {value:();tail:number} = undefined;", .offset = 22 },
-        .{ .source = "const value: (value:())=>number = undefined;", .offset = 22 },
+        .{ .source = "const value: {value:();tail:number} = undefined;", .offset = 20 },
+        .{ .source = "const value: (value:())=>number = undefined;", .offset = 20 },
         .{ .source = "const value: { x: } = undefined;", .offset = 18 },
         .{ .source = "const value: { x: number y: string } = undefined;", .offset = 25 },
         .{ .source = "const value: (x: number y: string) => number = undefined;", .offset = 24 },
         .{ .source = "const value: (x: number) => = undefined;", .offset = 13 },
         .{ .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<string number>(seed);", .offset = 87 },
-        .{ .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<\"a,b\">(seed);", .offset = 85 },
-        .{ .source = "const seed: number = 1; function id<T>(value) { return value; } const result=id<string /*,*/>(seed);", .offset = 92 },
     };
     for (cases) |case| {
         var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
@@ -5484,6 +5428,72 @@ fn expectParsesClean(source: []const u8) !void {
     defer parser.deinit();
     _ = try parser.parse();
     try std.testing.expectEqual(@as(usize, 0), parser.errors.getErrors().len);
+}
+
+fn expectRefusedAt(source: []const u8, offset: u32, message: []const u8) !void {
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
+    defer parser.deinit();
+    try std.testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.errors.getErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(engine.parser.ErrorKind.unsupported_feature, errors[0].kind);
+    try std.testing.expectEqual(offset, errors[0].location.offset);
+    try std.testing.expectEqualStrings(message, errors[0].message);
+}
+
+test "a numeric literal type at the start of an annotation parses" {
+    try expectParsesClean("function g(x: 400): number { return 1; }\n");
+    try expectParsesClean("function g(x: -1): number { return 1; }\n");
+    try expectParsesClean("function g(x: 0x10): number { return 1; }\n");
+    try expectParsesClean("function g(x: \"a\" | 400): number { return 1; }\n");
+    try expectParsesClean("const v: 400 = 400;\n");
+    try expectParsesClean("function g(): 400 { return 400; }\n");
+    try expectParsesClean("structural Box<T> = { v: T };\nfunction g(a: Box<400>): number { return 1; }\n");
+}
+
+test "an empty parenthesized type is refused where a closing bracket follows it" {
+    const message = "this type syntax is not supported; write an admitted type from section 5.7 of the specification";
+    try expectRefusedAt("structural Outer<T> = { v: T };\nfunction g(a: Outer<()>): number { return 1; }\n", 52, message);
+    try expectRefusedAt("function g(a: [()][]): number { return 1; }\n", 15, message);
+}
+
+test "an empty parameter list with an arrow is a function type" {
+    try expectParsesClean("function g(a: () => number): number { return a(); }\n");
+    try expectParsesClean("structural Outer<T> = { v: T };\nfunction g(a: Outer<() => number>): number { return 1; }\n");
+}
+
+test "a comma inside a string literal or comment in an explicit call type argument is not a separator" {
+    try expectParsesClean("function f<T>(a: T): T { return a; }\nfunction g(): string { return f<\"a,b\">(\"a,b\"); }\n");
+    try expectParsesClean("function f<T>(a: T): T { return a; }\nfunction g(): string { return f</* x, y */ string>(\"s\"); }\n");
+    try expectParsesClean("function f<T>(a: T): T { return a; }\nfunction g(): string { return f<string /* , */>(\"s\"); }\n");
+}
+
+test "an unclosed bracket after a type reports an unsupported type, not an indexed access" {
+    const message = "this type syntax is not supported; write an admitted type from section 5.7 of the specification";
+    try expectRefusedAt("function g(a: number [): number { return 1; }\n", 21, message);
+    try expectRefusedAt("function g(a: number [;): number { return 1; }\n", 21, message);
+    try expectRefusedAt(
+        "function g(a: number [x): number { return 1; }\n",
+        21,
+        "an indexed access type is not supported; write the field type",
+    );
+}
+
+test "an empty parenthesized type with no arrow is refused at the opening parenthesis" {
+    const message = "this type syntax is not supported; write an admitted type from section 5.7 of the specification";
+    try expectRefusedAt("structural Empty = ();\nfunction g(a: Empty): number {\n  return a;\n}\n", 19, message);
+    try expectRefusedAt("function g(a: ()): number { return 1; }\n", 14, message);
+    try expectRefusedAt("const v: () = 1;\n", 9, message);
+}
+
+test "a comma inside a string literal in a generic constraint does not declare a parameter" {
+    const source = "function f<T extends \"a,b\">(a: T): T { return a; }\n";
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
+    defer parser.deinit();
+    _ = try parser.parse();
+    const owner = parser.type_store.generic_owners.items[0];
+    try std.testing.expectEqual(@as(u32, 1), owner.authored_parameters.count);
+    try std.testing.expectEqual(@as(u32, 1), owner.projected_parameters.count);
 }
 
 test "array brackets admit trivia between them" {
@@ -5517,6 +5527,14 @@ test "a fraction literal type is refused at the literal" {
     try std.testing.expectEqual(@as(usize, 1), errors.len);
     try std.testing.expectEqual(engine.parser.ErrorKind.unsupported_feature, errors[0].kind);
     try std.testing.expectEqual(@as(u32, 41), errors[0].location.offset);
+}
+
+test "an exponent literal type is refused at the literal" {
+    try expectRefusedAt(
+        "function f(): number { const v: string | 1e3 = \"a\"; return 1; }\n",
+        41,
+        "this type syntax is not supported; write an admitted type from section 5.7 of the specification",
+    );
 }
 
 test "a comment between a predicate target and is is admitted" {
@@ -5838,8 +5856,6 @@ test "direct compound boundaries preserve ordered structure before key compariso
     for ([_][]const u8{
         "const value: undefined | undefined = undefined;",
         "const value: (undefined & undefined) | string = undefined;",
-        "const value: [()][] = undefined;",
-        "const value: [[()]][] = undefined;",
     }) |source| try expectDirectAccepted(source);
 }
 
@@ -6730,14 +6746,9 @@ test "direct admission keeps unsupported annotation roots in source" {
     const roots = [_][]const u8{
         "| number | string",
         "& { x: number }",
-        "1.5",
-        "0x10",
-        "1e3",
-        "1_000",
-        "32768",
         "/*c*/ number",
     };
-    try std.testing.expectEqual(@as(usize, 8), roots.len);
+    try std.testing.expectEqual(@as(usize, 3), roots.len);
     for (roots) |root| {
         const source = try directAnnotationSource(std.testing.allocator, root);
         defer std.testing.allocator.free(source);
@@ -7843,14 +7854,14 @@ fn expectDirectCallConsumer(source: []const u8, case: DirectCallConsumerCase) !v
             const after = direct.type_store.explicit_call_arguments.items[2];
             try std.testing.expectEqualStrings("<string>", before.list_span.text(source));
             try std.testing.expectEqualStrings("<>", empty.list_span.text(source));
-            try std.testing.expectEqualStrings("<(),number>", after.list_span.text(source));
+            try std.testing.expectEqualStrings("<string,number>", after.list_span.text(source));
             try std.testing.expect(direct_env.getCallTypeArgsForCall(direct_view, empty.owner) == null);
             const after_arguments = direct_env.getCallTypeArgsForCall(
                 direct_view,
                 after.owner,
             ) orelse return error.TestUnexpectedResult;
             try std.testing.expectEqual(@as(u8, 2), after_arguments.count);
-            try std.testing.expectEqual(null_type_idx, after_arguments.args[0]);
+            try std.testing.expectEqual(direct_pool.idx_string, after_arguments.args[0]);
             try std.testing.expectEqual(direct_pool.idx_number, after_arguments.args[1]);
             for (direct.type_store.generic_owners.items) |owner| {
                 try std.testing.expectEqual(
@@ -7971,7 +7982,7 @@ test "direct phase three preserves actual call construction" {
                 "function /* gap */ identity<T>(value) { return value; }\n" ++
                 "const empty = identity<>(\"e\");\n" ++
                 "function /* gap */ empty_owner<>(value) { return value; }\n" ++
-                "const after = identity<(),number>(\"b\");",
+                "const after = identity<string,number>(\"b\");",
             .case = .interleaved,
         },
         .{
