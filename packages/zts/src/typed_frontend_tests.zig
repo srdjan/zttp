@@ -53,30 +53,23 @@ const CompoundFamily = enum {
 };
 
 const SemanticQuirk = enum {
-    quoted_record_prefix,
-    missing_record_colon_prefix,
     missing_record_type_absent,
     record_comment_prefix,
     record_comment_after_field,
     omitted_record_separator,
     readonly_optional_fields,
     mutable_repeated_arrays,
-    separated_array_brackets,
     comment_before_array,
     readonly_array_flag,
     tuple_trailing_comma,
     readonly_tuple_erasure,
     grouped_leading_union,
-    trailing_union_prefix,
-    trailing_intersection_prefix,
     intersection_precedence,
     nullable_shorthand,
     wider_undefined_union,
-    numeric_token_prefix,
     nested_optional_parameter,
     any_member_key,
     missing_function_comma,
-    missing_function_arrow,
     missing_function_return,
     named_function_parameters,
     escaped_template_slot,
@@ -2686,8 +2679,6 @@ const ApplicationCase = enum {
     ambient_proof,
     nested_closers,
     optional_comma,
-    absent_first_argument,
-    absent_later_argument,
     absent_first_before_close,
     absent_later_before_close,
     dict_exact_arity,
@@ -2707,8 +2698,6 @@ const application_fixtures = [_]ApplicationFixture{
     .{ .case = .ambient_proof, .source = "const value: Proof<Response, \"pure\"> = undefined;" },
     .{ .case = .nested_closers, .source = "const value: Outer<Middle<Inner<string>>> = undefined;" },
     .{ .case = .optional_comma, .source = "const value: Outer<string number> = undefined;" },
-    .{ .case = .absent_first_argument, .source = "const value: Outer<(), string> = undefined;" },
-    .{ .case = .absent_later_argument, .source = "const value: Outer<string, (), number> = undefined;" },
     .{ .case = .absent_first_before_close, .source = "const value: Outer<()> = undefined;" },
     .{ .case = .absent_later_before_close, .source = "const value: Outer<string, ()> = undefined;" },
     .{ .case = .dict_exact_arity, .source = "const value: Dict<string, number> = undefined;" },
@@ -2729,7 +2718,6 @@ const GenericAliasCase = enum {
     spaced_list,
     empty_list,
     present_null_body,
-    absent_body,
     ignored_constraint,
     eight_item_projection,
     ninth_item_unprojected,
@@ -2757,7 +2745,6 @@ const generic_alias_fixtures = [_]GenericAliasFixture{
     .{ .case = .spaced_list, .source = "structural Box <T> = { value: T };\nconst value: Box<number> = undefined;" },
     .{ .case = .empty_list, .source = "structural Box<> = number;\nconst value: Box<> = undefined;" },
     .{ .case = .present_null_body, .source = "structural Empty<T> = ();" },
-    .{ .case = .absent_body, .source = "structural Empty<T> =;" },
     .{ .case = .ignored_constraint, .source = "structural Box<T extends string> = { value: T };\nconst value: Box<number> = undefined;" },
     .{ .case = .eight_item_projection, .source = "structural Wide<A,B,C,D,E,F,G,H> = H;\nconst value: Wide<string,string,string,string,string,string,string,number> = undefined;" },
     .{ .case = .ninth_item_unprojected, .source = "structural Many<A,B,C,D,E,F,G,H,I> = I;" },
@@ -2806,7 +2793,7 @@ const generic_projection_fixtures = [_]GenericProjectionFixture{
 const GenericFragmentCase = enum {
     exact_dict_key,
     default_suffixed_dict_key,
-    numeric_prefix,
+    decimal_literal,
     leading_union,
     leading_intersection,
     any_name,
@@ -2817,7 +2804,7 @@ const GenericFragmentCase = enum {
 const generic_fragment_fixtures = [_]struct { case: GenericFragmentCase, source: []const u8 }{
     .{ .case = .exact_dict_key, .source = "DictKey" },
     .{ .case = .default_suffixed_dict_key, .source = "DictKey = string" },
-    .{ .case = .numeric_prefix, .source = "1.5" },
+    .{ .case = .decimal_literal, .source = "1.5" },
     .{ .case = .leading_union, .source = "| number" },
     .{ .case = .leading_intersection, .source = "& number" },
     .{ .case = .any_name, .source = "any" },
@@ -2838,12 +2825,10 @@ const DeclarationCase = enum {
     block_indented_refusal,
     runtime_structural_collision,
     runtime_nominal_collision,
-    empty_body_no_alias,
     present_absent_body_null_alias,
     exact_eager_alias,
     forward_deferred_ref,
     nested_deferred_ref,
-    suffixed_deferred_ref,
     last_write_alias,
     builtin_before_source,
     abi_before_source,
@@ -2857,7 +2842,7 @@ const DeclarationCase = enum {
     readonly_named_nullable,
     readonly_named_record_terminal,
     readonly_named_tuple_terminal,
-    named_array_one_suffix,
+    named_array_repeated_suffix,
     grouped_named_array_repeated_suffix,
     nominal_same_name_same_base,
     nominal_different_name_same_base,
@@ -2919,12 +2904,10 @@ const declaration_fixtures = [_]DeclarationFixture{
     .{ .case = .block_indented_refusal, .source = "function outer() {\n  structural Alias = number;\nreturn 1;\n}", .probe = .{ .retained_declarations = 0 } },
     .{ .case = .runtime_structural_collision, .source = "structural Alias = number; function Alias() { return 1; }", .probe = .{ .retained_declarations = 1 } },
     .{ .case = .runtime_nominal_collision, .source = "nominal Alias = number; function Alias() { return 1; }", .probe = .{ .retained_declarations = 1 } },
-    .{ .case = .empty_body_no_alias, .source = "structural Empty =;", .probe = .equivalent },
     .{ .case = .present_absent_body_null_alias, .source = "structural Empty = ();", .probe = .equivalent },
     .{ .case = .exact_eager_alias, .source = "structural A = string;\nstructural B = A;\nstructural A = number;", .probe = .equivalent },
     .{ .case = .forward_deferred_ref, .source = "structural B = A;\nstructural A = string;\nstructural A = number;", .probe = .equivalent },
     .{ .case = .nested_deferred_ref, .source = "structural B = { value: A };\nstructural A = number;", .probe = .equivalent },
-    .{ .case = .suffixed_deferred_ref, .source = "structural A = string;\nstructural B = A tolerated_suffix;\nstructural A = number;", .probe = .equivalent },
     .{ .case = .last_write_alias, .source = "structural A = string;\nstructural A = number;", .probe = .equivalent },
     .{ .case = .builtin_before_source, .source = "structural Copy = FetchOptions;", .probe = .equivalent },
     .{ .case = .abi_before_source, .source = "structural Copy = Request;", .probe = .equivalent },
@@ -2938,7 +2921,7 @@ const declaration_fixtures = [_]DeclarationFixture{
     .{ .case = .readonly_named_nullable, .source = "structural Items = string[];\nstructural View = readonly Items | undefined;", .probe = .equivalent },
     .{ .case = .readonly_named_record_terminal, .source = "structural Items = string[];\nstructural View = { field: readonly Items };", .probe = .equivalent },
     .{ .case = .readonly_named_tuple_terminal, .source = "structural Items = string[];\nstructural View = [readonly Items];", .probe = .equivalent },
-    .{ .case = .named_array_one_suffix, .source = "structural Alias = string;\nstructural View = Alias[][];", .probe = .equivalent },
+    .{ .case = .named_array_repeated_suffix, .source = "structural Alias = string;\nstructural View = Alias[][];", .probe = .equivalent },
     .{ .case = .grouped_named_array_repeated_suffix, .source = "structural Alias = string;\nstructural View = (Alias)[][];", .probe = .equivalent },
     .{ .case = .nominal_same_name_same_base, .source = "nominal Id = string;\nnominal Id = string;", .probe = .equivalent },
     .{ .case = .nominal_different_name_same_base, .source = "nominal Left = string;\nnominal Right = string;", .probe = .equivalent },
@@ -3140,9 +3123,9 @@ fn assertApplicationSemanticProperty(case: ApplicationCase, source: []const u8) 
                 lowered_application.args,
             );
         },
-        .absent_first_argument, .absent_later_argument, .absent_first_before_close, .absent_later_before_close => {
+        .absent_first_before_close, .absent_later_before_close => {
             const retained: usize = switch (case) {
-                .absent_first_argument, .absent_first_before_close => 0,
+                .absent_first_before_close => 0,
                 else => 1,
             };
             _ = try expectSyntaxApplication(&parser.type_store, annotation.root, "Outer", retained);
@@ -3151,8 +3134,6 @@ fn assertApplicationSemanticProperty(case: ApplicationCase, source: []const u8) 
                 try std.testing.expectEqual(pool.idx_string, pool.getGenericAppInfo(lowered).args[0]);
             }
             const expected = switch (case) {
-                .absent_first_argument => "Outer<()",
-                .absent_later_argument => "Outer<string, ()",
                 .absent_first_before_close => "Outer<()>",
                 .absent_later_before_close => "Outer<string, ()>",
                 else => return error.TestUnexpectedResult,
@@ -3219,13 +3200,14 @@ fn assertApplicationSemanticProperty(case: ApplicationCase, source: []const u8) 
             try std.testing.expect(inner_fields[0].readonly);
         },
         .ungrouped_array_suffix => {
-            _ = try expectSyntaxApplication(&parser.type_store, annotation.root, "Outer", 1);
-            try expectPoolGenericApplication(&pool, lowered, "Outer", 1);
+            const array = parser.type_store.node(try syntaxChildIndex(annotation.root)) orelse
+                return error.TestUnexpectedResult;
+            try std.testing.expectEqual(TypeSyntax.NodeTag.array, array.tag);
+            _ = try expectSyntaxApplication(&parser.type_store, array.data.array, "Outer", 1);
+            try std.testing.expectEqual(TypeTag.t_array, pool.getTag(lowered).?);
+            try expectPoolGenericApplication(&pool, pool.getArrayElement(lowered), "Outer", 1);
             try std.testing.expectEqualStrings("Outer<string>[]", annotation.raw_span.text(source));
-            try std.testing.expectEqualStrings(
-                "Outer<string>",
-                source[annotation.raw_span.start..annotation.semantic_prefix_end],
-            );
+            try std.testing.expectEqual(annotation.raw_span.end, annotation.semantic_prefix_end);
         },
         .grouped_array_suffix => {
             const array = parser.type_store.node(try syntaxChildIndex(annotation.root)) orelse
@@ -3295,7 +3277,6 @@ fn assertGenericAliasSemanticProperty(case: GenericAliasCase, source: []const u8
             const alias = env.generic_aliases.get("Empty") orelse return error.TestUnexpectedResult;
             try std.testing.expectEqual(null_type_idx, alias.body);
         },
-        .absent_body => try std.testing.expect(env.generic_aliases.get("Empty") == null),
         .eight_item_projection => {
             const alias = env.generic_aliases.get("Wide") orelse return error.TestUnexpectedResult;
             try std.testing.expectEqual(@as(u8, 8), alias.param_count);
@@ -3499,12 +3480,12 @@ fn assertGenericFragmentProperty(case: GenericFragmentCase, source: []const u8) 
     switch (case) {
         .exact_dict_key => try std.testing.expectEqual(TypeTag.t_union, pool.getTag(lowered).?),
         .default_suffixed_dict_key => try expectRefName(&pool, lowered, "DictKey"),
-        .numeric_prefix => {
+        .decimal_literal => {
             try std.testing.expectEqualStrings(
-                "1",
+                "1.5",
                 owned_source[fragment.raw_span.start..fragment.semantic_prefix_end],
             );
-            try std.testing.expectEqual(TypeTag.t_literal_number, pool.getTag(lowered).?);
+            try std.testing.expectEqual(pool.idx_number, lowered);
         },
         .leading_union => try std.testing.expectEqual(pool.idx_number, lowered),
         .leading_intersection => try std.testing.expectEqual(pool.idx_number, lowered),
@@ -3564,7 +3545,6 @@ fn assertDeclarationSemanticProperty(case: DeclarationCase, source: []const u8) 
             try std.testing.expect(parser.type_store.declarations.items[0].export_span != null);
             try std.testing.expectEqual(pool.idx_number, try requireAlias(&env, "Alias"));
         },
-        .empty_body_no_alias => try std.testing.expect(env.getTypeAlias("Empty") == null),
         .present_absent_body_null_alias => {
             const alias = env.getTypeAlias("Empty");
             try std.testing.expect(alias != null);
@@ -3574,7 +3554,7 @@ fn assertDeclarationSemanticProperty(case: DeclarationCase, source: []const u8) 
             try std.testing.expectEqual(pool.idx_number, try requireAlias(&env, "A"));
             try std.testing.expectEqual(pool.idx_string, try requireAlias(&env, "B"));
         },
-        .forward_deferred_ref, .suffixed_deferred_ref => {
+        .forward_deferred_ref => {
             const alias = try requireAlias(&env, "B");
             try expectRefName(&pool, alias, "A");
             try std.testing.expectEqual(pool.idx_number, env.resolveRef(alias));
@@ -3652,12 +3632,14 @@ fn assertDeclarationSemanticProperty(case: DeclarationCase, source: []const u8) 
             try std.testing.expectEqual(@as(usize, 1), elements.len);
             try expectImplicitReadonlyApp(&pool, elements[0]);
         },
-        .named_array_one_suffix => {
+        .named_array_repeated_suffix => {
             const view = try requireAlias(&env, "View");
             try std.testing.expectEqual(TypeTag.t_array, pool.getTag(view) orelse return error.TestUnexpectedResult);
-            try expectRefName(&pool, pool.getArrayElement(view), "Alias");
+            const inner = pool.getArrayElement(view);
+            try std.testing.expectEqual(TypeTag.t_array, pool.getTag(inner) orelse return error.TestUnexpectedResult);
+            try expectRefName(&pool, pool.getArrayElement(inner), "Alias");
             const body = parser.type_store.declarations.items[1].body.present;
-            try std.testing.expectEqualStrings("Alias[]", source[body.raw_span.start..body.semantic_prefix_end]);
+            try std.testing.expectEqual(body.raw_span.end, body.semantic_prefix_end);
         },
         .grouped_named_array_repeated_suffix => {
             const outer = try requireAlias(&env, "View");
@@ -6489,24 +6471,76 @@ test "declaration bodies admit numeric leading and blank-line continuations" {
     }
 }
 
-test "spaced function arrow continuation absorbs the next runtime line" {
-    const source = "structural A = number = >\nconst value = 1;";
+test "type text left after the type parser stops is refused with ZTS001" {
+    const Case = struct { source: []const u8, offset: u32 };
+    const cases = [_]Case{
+        .{ .source = "structural Empty<T> =;", .offset = 21 },
+        .{ .source = "structural Empty =;", .offset = 18 },
+        .{ .source = "structural A = number = >\nconst value = 1;", .offset = 22 },
+        .{ .source = "structural A = string;\nstructural B = A tolerated_suffix;\nstructural A = number;", .offset = 40 },
+        .{ .source = "const value: Outer<(), string> = undefined;", .offset = 21 },
+        .{ .source = "const value: Outer<string, (), number> = undefined;", .offset = 29 },
+        .{ .source = "const value: (number: string | boolean, number) = undefined;", .offset = 20 },
+        .{ .source = "const value: number | | string = undefined;", .offset = 20 },
+    };
+    for (cases) |case| {
+        var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, case.source, .compile);
+        defer parser.deinit();
+        try std.testing.expectError(error.ParseError, parser.parse());
+        const errors = parser.errors.getErrors();
+        try std.testing.expectEqual(@as(usize, 1), errors.len);
+        try std.testing.expectEqual(engine.parser.ErrorKind.unsupported_feature, errors[0].kind);
+        try std.testing.expectEqual(case.offset, errors[0].location.offset);
+        try std.testing.expectEqualStrings(
+            "this type syntax is not supported; write an admitted type from section 5.7 of the specification",
+            errors[0].message,
+        );
+    }
+}
 
+fn expectParsesClean(source: []const u8) !void {
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
     defer parser.deinit();
     _ = try parser.parse();
-    try std.testing.expectEqual(@as(usize, 1), parser.type_store.declarations.items.len);
-    const body = switch (parser.type_store.declarations.items[0].body) {
-        .absent => return error.TestUnexpectedResult,
-        .present => |present| present,
-    };
-    try std.testing.expectEqualStrings("number = >\nconst value = 1", body.raw_span.text(source));
-    try std.testing.expectEqualStrings(source, parser.type_store.declarations.items[0].full_span.text(source));
-    var runtime_variables: usize = 0;
-    for (parser.nodes.tags.items) |tag| if (tag == .var_decl) {
-        runtime_variables += 1;
-    };
-    try std.testing.expectEqual(@as(usize, 0), runtime_variables);
+    try std.testing.expectEqual(@as(usize, 0), parser.errors.getErrors().len);
+}
+
+test "array brackets admit trivia between them" {
+    try expectParsesClean("function f(x: number[ ]): number { return x.length; }\n");
+    try expectParsesClean("function f(x: number[/* c */]): number { return x.length; }\n");
+}
+
+test "a hexadecimal literal type is read in full" {
+    try expectParsesClean("function f(): number { const v: string | 0x10 = \"a\"; return 1; }\n");
+}
+
+test "numeric separator in a literal type is refused at the literal" {
+    const source = "function f(): number { const v: string | 1_000 = \"a\"; return 1; }\n";
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
+    defer parser.deinit();
+    try std.testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.errors.getErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(engine.parser.ErrorKind.unsupported_feature, errors[0].kind);
+    try std.testing.expectEqual(@as(u32, 41), errors[0].location.offset);
+}
+
+test "a fraction literal type is refused at the literal" {
+    // The type store holds integer literals only. Reading 1.5 as number would
+    // admit 5 for the type "a" | 1.5.
+    const source = "function f(): number { const v: string | 1.5 = \"a\"; return 1; }\n";
+    var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
+    defer parser.deinit();
+    try std.testing.expectError(error.ParseError, parser.parse());
+    const errors = parser.errors.getErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(engine.parser.ErrorKind.unsupported_feature, errors[0].kind);
+    try std.testing.expectEqual(@as(u32, 41), errors[0].location.offset);
+}
+
+test "a comment between a predicate target and is is admitted" {
+    try expectParsesClean("function isText(v: string | number): v /* c */ is string { return typeof v === \"string\"; }\n");
+    try expectParsesClean("function isText(v: string | number): v is /* c */ string { return typeof v === \"string\"; }\n");
 }
 
 test "comment-separated declaration terminator remains a runtime semicolon" {
@@ -6732,8 +6766,6 @@ test "direct compound families and semantic quirks match ordered types" {
         quirk: SemanticQuirk,
     };
     const fixtures = [_]Fixture{
-        .{ .annotation = "{ \"x\": number }", .quirk = .quoted_record_prefix },
-        .{ .annotation = "{ x number }", .quirk = .missing_record_colon_prefix },
         .{ .annotation = "{ x: }", .quirk = .missing_record_type_absent },
         .{ .annotation = "{ /*c*/ x: number }", .quirk = .record_comment_prefix },
         .{ .annotation = "{ x: number /*c*/ }", .quirk = .record_comment_after_field },
@@ -6744,14 +6776,11 @@ test "direct compound families and semantic quirks match ordered types" {
             .quirk = .readonly_optional_fields,
         },
         .{ .annotation = "number[][]", .family = .array, .quirk = .mutable_repeated_arrays },
-        .{ .annotation = "number [ ]", .quirk = .separated_array_brackets },
         .{ .annotation = "number /*c*/ []", .quirk = .comment_before_array },
         .{ .annotation = "readonly number[]", .quirk = .readonly_array_flag },
         .{ .annotation = "[string, number,]", .family = .tuple, .quirk = .tuple_trailing_comma },
         .{ .annotation = "readonly [string, number]", .quirk = .readonly_tuple_erasure },
         .{ .annotation = "(| number | string)", .family = .union_type, .quirk = .grouped_leading_union },
-        .{ .annotation = "number |", .quirk = .trailing_union_prefix },
-        .{ .annotation = "{ x: number } &", .quirk = .trailing_intersection_prefix },
         .{
             .annotation = "string | number & boolean",
             .family = .intersection,
@@ -6759,11 +6788,9 @@ test "direct compound families and semantic quirks match ordered types" {
         },
         .{ .annotation = "string | undefined", .quirk = .nullable_shorthand },
         .{ .annotation = "string | number | undefined", .quirk = .wider_undefined_union },
-        .{ .annotation = "string | 1.5", .quirk = .numeric_token_prefix },
         .{ .annotation = "{ cb: (x?: number) => number }", .quirk = .nested_optional_parameter },
         .{ .annotation = "{ any: number }", .quirk = .any_member_key },
         .{ .annotation = "(x: number y: string) => number", .quirk = .missing_function_comma },
-        .{ .annotation = "(x: number) number", .quirk = .missing_function_arrow },
         .{ .annotation = "(x: number) =>", .quirk = .missing_function_return },
         .{
             .annotation = "(left: string, right: number) => boolean",
@@ -6804,8 +6831,6 @@ test "direct compound families and semantic quirks match ordered types" {
     for ([_][]const u8{
         "number [] []",
         "string | 200",
-        "string | 0x10",
-        "string | 1_000",
         "(200)",
         "true",
     }) |annotation| {
@@ -6836,9 +6861,6 @@ test "direct compound boundaries preserve ordered structure before key compariso
     for ([_][]const u8{
         "const value: undefined | undefined = undefined;",
         "const value: (undefined & undefined) | string = undefined;",
-        "const value: number | | string = undefined;",
-        "const value: number | | | string = undefined;",
-        "const value: number & & string = undefined;",
         "const value: [()][] = undefined;",
         "const value: { x }[] = undefined;",
         "const value: [[()]][] = undefined;",
@@ -7130,13 +7152,6 @@ test "function backtracking retains completed parameter syntax" {
     try std.testing.expectEqual(pool.idx_string, lowered_members[0]);
     try std.testing.expectEqual(pool.idx_boolean, lowered_members[1]);
     try pool.ensureHealthy();
-    try expectDirectAccepted("const value: (number: string | boolean, number) = undefined;");
-    var direct_pool = TypePool.init(std.testing.allocator);
-    defer direct_pool.deinit(std.testing.allocator);
-    try std.testing.expectEqual(
-        direct_pool.idx_number,
-        try parseDirectAnnotation(&direct_pool, "(number: string | boolean, number)"),
-    );
 }
 
 test "compound syntax keeps complete field and parameter spans" {
@@ -7278,8 +7293,8 @@ test "bare groups keep consumed spans and lower as absent children" {
     try std.testing.expectEqual(null_type_idx, lowered_info.params[0].type_idx);
 }
 
-test "direct primitive slice binds a grouped and suffixed annotation" {
-    const source = "const text: (((string))) tolerated_suffix = input;";
+test "direct primitive slice binds a grouped annotation" {
+    const source = "const text: (((string))) = input;";
     try expectDirectAccepted(source);
 
     var parser = try JsParser.initAdmission(std.testing.allocator, std.testing.allocator, source, .compile);
@@ -7313,6 +7328,7 @@ test "direct parser reports missing and unmatched primitive locations" {
         errors: []const Expected,
     }{
         .{ .source = "const n: (number;", .errors = &.{
+            .{ .kind = .unsupported_feature, .offset = 16, .end_offset = 17 },
             .{ .kind = .const_without_initializer, .offset = 17, .end_offset = 17 },
             .{ .kind = .missing_semicolon, .offset = 6, .end_offset = 7 },
         } },
@@ -7867,27 +7883,18 @@ fn expectLiteralNumber(pool: *const TypePool, idx: TypeIndex, value: i16) !void 
 
 test "direct compound parsing preserves exact admitted type text" {
     const annotations = [_][]const u8{
-        "{ \"x\": number }",
-        "{ x number }",
         "{ x: }",
         "{ /*c*/ x: number }",
         "{ x: number /*c*/ }",
         "{ x: number y: string }",
-        "number |",
-        "{ x: number } &",
         "(x: number y: string) => number",
-        "(x: number) number",
         "(x: number) =>",
         "(number)",
         "() => number",
-        "number [ ]",
         "number /*c*/ []",
         "{ cb: (x?: number) => number }",
         "{ any: number }",
         "string | 200",
-        "string | 1.5",
-        "string | 0x10",
-        "string | 1_000",
         "true",
         "`\\${string}`",
         "`x${}`",
@@ -7899,7 +7906,7 @@ test "direct compound parsing preserves exact admitted type text" {
         "readonly [string, number]",
         "``",
     };
-    try std.testing.expectEqual(@as(usize, 31), annotations.len);
+    try std.testing.expectEqual(@as(usize, 22), annotations.len);
     var observed: usize = 0;
     for (annotations) |annotation| {
         try expectDirectTypeText(annotation);
@@ -7915,17 +7922,6 @@ test "direct compound family and semantic quirk census is exhaustive" {
     var families = std.EnumSet(CompoundFamily).empty;
     var quirks = std.EnumSet(SemanticQuirk).empty;
 
-    const quoted = try parseDirectAnnotation(&pool, "{ \"x\": number }");
-    try expectTag(&pool, quoted, .t_record);
-    try std.testing.expectEqual(@as(usize, 0), pool.getRecordFields(quoted).len);
-    try std.testing.expectEqualStrings("R0", try type_key.typeKey(&pool, allocator, quoted));
-    quirks.insert(.quoted_record_prefix);
-
-    const missing_colon = try parseDirectAnnotation(&pool, "{ x number }");
-    try expectTag(&pool, missing_colon, .t_record);
-    try std.testing.expectEqual(@as(usize, 0), pool.getRecordFields(missing_colon).len);
-    quirks.insert(.missing_record_colon_prefix);
-
     const missing_type = try parseDirectAnnotation(&pool, "{ x: }");
     const missing_fields = pool.getRecordFields(missing_type);
     try std.testing.expectEqual(@as(usize, 1), missing_fields.len);
@@ -7935,8 +7931,10 @@ test "direct compound family and semantic quirk census is exhaustive" {
     quirks.insert(.missing_record_type_absent);
 
     const comment_prefix = try parseDirectAnnotation(&pool, "{ /*c*/ x: number }");
-    try expectTag(&pool, comment_prefix, .t_record);
-    try std.testing.expectEqual(@as(usize, 0), pool.getRecordFields(comment_prefix).len);
+    const comment_prefix_fields = pool.getRecordFields(comment_prefix);
+    try std.testing.expectEqual(@as(usize, 1), comment_prefix_fields.len);
+    try std.testing.expectEqualStrings("x", pool.getName(comment_prefix_fields[0].name_start, comment_prefix_fields[0].name_len));
+    try std.testing.expectEqual(pool.idx_number, comment_prefix_fields[0].type_idx);
     quirks.insert(.record_comment_prefix);
 
     const comment_after = try parseDirectAnnotation(&pool, "{ x: number /*c*/ }");
@@ -7983,9 +7981,9 @@ test "direct compound family and semantic quirk census is exhaustive" {
     families.insert(.array);
     quirks.insert(.mutable_repeated_arrays);
 
-    try std.testing.expectEqual(pool.idx_number, try parseDirectAnnotation(&pool, "number [ ]"));
-    quirks.insert(.separated_array_brackets);
-    try std.testing.expectEqual(pool.idx_number, try parseDirectAnnotation(&pool, "number /*c*/ []"));
+    const commented_array = try parseDirectAnnotation(&pool, "number /*c*/ []");
+    try expectTag(&pool, commented_array, .t_array);
+    try std.testing.expectEqual(pool.idx_number, pool.getArrayElement(commented_array));
     quirks.insert(.comment_before_array);
 
     const readonly_array = try parseDirectAnnotation(&pool, "readonly number[]");
@@ -8022,16 +8020,6 @@ test "direct compound family and semantic quirk census is exhaustive" {
     );
     quirks.insert(.grouped_leading_union);
 
-    try std.testing.expectEqual(pool.idx_number, try parseDirectAnnotation(&pool, "number |"));
-    quirks.insert(.trailing_union_prefix);
-
-    const trailing_intersection = try parseDirectAnnotation(&pool, "{ x: number } &");
-    const trailing_fields = pool.getRecordFields(trailing_intersection);
-    try std.testing.expectEqual(@as(usize, 1), trailing_fields.len);
-    try std.testing.expectEqualStrings("x", pool.getName(trailing_fields[0].name_start, trailing_fields[0].name_len));
-    try std.testing.expectEqual(pool.idx_number, trailing_fields[0].type_idx);
-    quirks.insert(.trailing_intersection_prefix);
-
     const mixed = try parseDirectAnnotation(&pool, "string | number & boolean");
     try expectTag(&pool, mixed, .t_union);
     const mixed_members = pool.getUnionMembers(mixed);
@@ -8063,24 +8051,6 @@ test "direct compound family and semantic quirk census is exhaustive" {
     );
     quirks.insert(.wider_undefined_union);
 
-    const numeric_cases = [_]struct { annotation: []const u8, value: i16 }{
-        .{ .annotation = "string | 200", .value = 200 },
-        .{ .annotation = "string | 1.5", .value = 1 },
-        .{ .annotation = "string | 0x10", .value = 0 },
-        .{ .annotation = "string | 1_000", .value = 1 },
-    };
-    var numeric_count: usize = 0;
-    for (numeric_cases) |case| {
-        const numeric = try parseDirectAnnotation(&pool, case.annotation);
-        const numeric_members = pool.getUnionMembers(numeric);
-        try std.testing.expectEqual(@as(usize, 2), numeric_members.len);
-        try std.testing.expectEqual(pool.idx_string, numeric_members[0]);
-        try expectLiteralNumber(&pool, numeric_members[1], case.value);
-        numeric_count += 1;
-    }
-    try std.testing.expectEqual(@as(usize, 4), numeric_count);
-    quirks.insert(.numeric_token_prefix);
-
     const nested_optional = try parseDirectAnnotation(&pool, "{ cb: (x?: number) => number }");
     const nested_fields = pool.getRecordFields(nested_optional);
     try std.testing.expectEqual(@as(usize, 1), nested_fields.len);
@@ -8108,12 +8078,6 @@ test "direct compound family and semantic quirk census is exhaustive" {
     try std.testing.expectEqual(pool.idx_string, comma_info.params[1].type_idx);
     try std.testing.expectEqual(pool.idx_number, comma_info.ret);
     quirks.insert(.missing_function_comma);
-
-    const missing_arrow = try parseDirectAnnotation(&pool, "(x: number) number");
-    try expectTag(&pool, missing_arrow, .t_function);
-    try std.testing.expectEqual(null_type_idx, pool.getFunctionInfo(missing_arrow).ret);
-    try std.testing.expectError(error.AbsentType, type_key.typeKey(&pool, allocator, missing_arrow));
-    quirks.insert(.missing_function_arrow);
 
     const missing_return = try parseDirectAnnotation(&pool, "(x: number) =>");
     try expectTag(&pool, missing_return, .t_function);
@@ -8188,7 +8152,7 @@ test "direct compound family and semantic quirk census is exhaustive" {
 
     try pool.ensureHealthy();
     try std.testing.expectEqual(@as(usize, 8), @typeInfo(CompoundFamily).@"enum".field_names.len);
-    try std.testing.expectEqual(@as(usize, 31), @typeInfo(SemanticQuirk).@"enum".field_names.len);
+    try std.testing.expectEqual(@as(usize, 24), @typeInfo(SemanticQuirk).@"enum".field_names.len);
     inline for (@typeInfo(CompoundFamily).@"enum".field_names) |field| {
         const family: CompoundFamily = @fromBackingInt(@intCast(@backingInt(@field(CompoundFamily, field))));
         try std.testing.expect(families.contains(family));
@@ -10680,7 +10644,6 @@ test "direct declaration consumer preserves repeated global bindings" {
 const GenericDeclarationFactCase = enum {
     combined,
     collision,
-    absent_body,
     empty_parameters,
 };
 
@@ -10731,10 +10694,6 @@ fn expectDirectGenericDeclarationFacts(
             try std.testing.expectEqualStrings("T", box.param_names[0]);
             try std.testing.expectEqual(TypeTag.t_record, pool.getTag(box.body).?);
         },
-        .absent_body => {
-            try std.testing.expect(env.getTypeAlias("Empty") == null);
-            try std.testing.expect(env.generic_aliases.get("Empty") == null);
-        },
         .empty_parameters => {
             const unit = env.generic_aliases.get("Unit") orelse return error.TestUnexpectedResult;
             try std.testing.expectEqual(@as(u8, 0), unit.param_count);
@@ -10763,7 +10722,6 @@ test "direct generic declarations preserve aliases and empty distinctions" {
                 "const generic: Box<string> = { value: \"ok\" };",
             .case = .collision,
         },
-        .{ .source = "structural Empty<T> =;", .case = .absent_body },
         .{
             .source = "structural Unit<> = number;\n" ++
                 "const value: Unit<> = 1;",
@@ -10779,7 +10737,7 @@ test "direct generic declarations preserve aliases and empty distinctions" {
     try std.testing.expectEqual(@typeInfo(GenericDeclarationFactCase).@"enum".field_names.len, seen.count());
 }
 
-test "parsed declaration helper retains operational failure and checks absent health" {
+test "parsed declaration helper retains operational failure" {
     const record_source = "structural Record = { id: string };";
     var record_atoms = AtomTable.init(std.testing.allocator);
     defer record_atoms.deinit();
@@ -10829,60 +10787,6 @@ test "parsed declaration helper retains operational failure and checks absent he
     try std.testing.expectEqual(setup_allocations, failing.alloc_index);
     try record_pool.ensureHealthy();
     try std.testing.expectError(error.OutOfMemory, record_env.ensureHealthy());
-
-    const empty_source = "structural Empty =;";
-    var empty_atoms = AtomTable.init(std.testing.allocator);
-    defer empty_atoms.deinit();
-    var empty_parser = try JsParser.initAdmission(
-        std.testing.allocator,
-        std.testing.allocator,
-        empty_source,
-        .compile,
-    );
-    defer empty_parser.deinit();
-    empty_parser.setAtomTable(&empty_atoms);
-    _ = try empty_parser.parse();
-    var empty_plan = try empty_parser.type_store.planApplicationBasesWithIr(
-        std.testing.allocator,
-        parserIrView(&empty_parser),
-    );
-    defer empty_plan.deinit();
-    const empty_lowered = try std.testing.allocator.alloc(
-        TypeIndex,
-        empty_parser.type_store.nodes.items.len,
-    );
-    defer std.testing.allocator.free(empty_lowered);
-    @memset(empty_lowered, null_type_idx);
-    var empty_pool = TypePool.init(std.testing.allocator);
-    defer empty_pool.deinit(std.testing.allocator);
-    var empty_env = TypeEnv.init(std.testing.allocator, &empty_pool);
-    defer empty_env.deinit();
-    try std.testing.expectEqual(
-        std.meta.Tag(TypeSyntax.DeclarationBody).absent,
-        std.meta.activeTag(empty_parser.type_store.declarations.items[0].body),
-    );
-    empty_pool.failure = error.TypePoolCapacityExceeded;
-    try std.testing.expectError(
-        error.TypePoolCapacityExceeded,
-        empty_env.populateParsedDeclaration(
-            &empty_parser.type_store,
-            &empty_plan,
-            empty_lowered,
-            0,
-        ),
-    );
-    empty_pool.failure = null;
-    empty_env.markAllocationFailure();
-    try std.testing.expectError(
-        error.OutOfMemory,
-        empty_env.populateParsedDeclaration(
-            &empty_parser.type_store,
-            &empty_plan,
-            empty_lowered,
-            0,
-        ),
-    );
-    try empty_pool.ensureHealthy();
 }
 
 test "parsed generic declaration helper restores scope and retains failure" {

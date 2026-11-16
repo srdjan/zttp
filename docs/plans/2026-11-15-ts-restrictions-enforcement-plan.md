@@ -147,6 +147,19 @@ before U4e starts.
 The rejected options were (b), which admits `match (!!(e))` as a second
 scrutinee form, and (c), which drops the exact repair.
 
+### Decision 9: the machinery behind a refused form
+
+X11 refuses a generic arrow, and G2 refuses a generic default. After each
+refusal, parser code for the form still runs on refused input, and no test
+covers it. The owner chose option (a) on 2026-11-15. One U3 unit refuses
+`<T>(x: T) => x` at the `<`. The same unit deletes the generic-arrow machinery
+and the default handling of the generic list, with the tests whose subject is
+that code. It rewrites each test that uses a generic arrow only incidentally.
+
+The rejected options were (b), which admits generic arrows in
+`docs/ts-restrictions.md`, and (c), which refuses the arrow but keeps the
+machinery.
+
 ## Units
 
 Every fix unit follows the bug rule of AGENTS.md. First it moves the gap row
@@ -494,13 +507,41 @@ later.
   projection windows, and allocation-failure restore. After the refusal no
   input reaches that machinery. U3 must delete those tests and the machinery
   together, and rewrite each test that uses a generic arrow only
-  incidentally. That deletion is a refactor, so U3 needs owner approval
-  first. A refusal that still parses the arrow keeps the machinery running
-  on refused input with no tests, so U3 must not use it.
+  incidentally. Decision 9 (a) approves that deletion. A refusal that still
+  parses the arrow keeps the machinery running on refused input with no
+  tests, so U3 must not use it.
 - G2 leaves default handling in the generic list code. The recorded
   `equals_span` and `default_span`, the empty-name projection, and the
   `compact_count` bound in `appendProjectedParametersWithBounds` now run only
   on a source that the parser refuses with ZTS001. The parser keeps parsing
-  after the refusal, so that code still runs, and no test covers it. The X11
-  decision covers the same shape, so the deletion of both waits for that
-  decision.
+  after the refusal, so that code still runs, and no test covers it.
+  Decision 9 (a) deletes it in the X11 unit.
+- U3b found that the type parser dropped admitted type text in three ways.
+  Each one predates this plan, and U3b fixes each one. First, a comment
+  inside a type cut the type: `number /* c */ | string` was checked as
+  `number`, and a record with a comment line lost its fields. Second, an
+  array suffix after a generic application was dropped:
+  `Dict<string, number>[]` was checked as `Dict<string, number>`. Third,
+  `number[ ]` was checked as `number`.
+- U3b refuses a fraction or exponent literal type such as `1.5` with ZTS001.
+  The type store holds 16-bit integer literals only, and reading `1.5` as
+  `number` admits values that the type excludes. An integer literal type
+  outside -32768..32767 is still read as `number`, so `x: "a" | 40000`
+  admits `f(5)`. Decision 10 is open for that case.
+- A numeric literal type at the start of an annotation does not parse:
+  `x: 400` gets ZTS003, and `const v: 400 = 5;` gets ZTS021. The probable
+  cause is that a type start does not include a digit. This fails closed.
+  U3c owns it.
+- The leftover check of U3b sees text after the whole type only. Inside a
+  record, a parameter list, or a type argument list, malformed text is still
+  admitted: `{ x: }` reads as `{ x: unknown }`, `(x: number) =>` reads as a
+  function that returns `void`, and a missing separator is accepted in
+  `{ x: number y: string }`, `(x: number y: string) => number`, and
+  `Box<string number>`. An unclosed `number [` gets the indexed access
+  message. U3c owns these, together with the remaining X27 gap row
+  (`readonly { a: number }` and comma separators).
+- Two type sites still admit leftover type text after U3b: an explicit call
+  type argument, such as `f<number number>(1)`, and a generic constraint,
+  such as `<T extends number string>`. U3c owns them. U3c also checks that
+  every type parse that can note a refusal is followed by a flush, so a
+  noted refusal cannot be lost.

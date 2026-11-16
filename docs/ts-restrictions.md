@@ -265,14 +265,25 @@ tests: `boolean`, `number`, `string`, `array`, `Dict`, and `Bytes`. `null` and
 | A generic default, such as `function f<T = string>(a: T): T` | ZTS001 | Remove the default. Pass the type argument at each use |
 | A type-parameter modifier, such as `in`, `out`, or `const` | ZTS001 | Remove the modifier |
 | An `asserts` return type | ZTS001 | A type predicate `x is T`, or `assert` in the caller |
+| A keyof type, such as `keyof T` | ZTS001 | The key union, such as `"a" \| "b"` |
+| An indexed access type, such as `A["a"]` | ZTS001 | The field type |
+| An index signature, such as `{ [k: string]: number }` | ZTS001 | `Dict<string, number>` |
+| A mapped type, such as `{ [K in "a" \| "b"]: number }` | ZTS001 | The record type |
+| A conditional type, such as `T extends string ? number : boolean`, including one that uses infer | ZTS001 | The type that the condition selects |
+| A type-position typeof, such as `typeof base` | ZTS001 | The type itself |
+| A quoted key in a record type, such as `{ "a": number }` | ZTS001 | The key as a name, such as `{ a: number }` |
+| A type form outside the admitted grammar, such as `new () => T`, `unique symbol`, `[string?]`, `[a: string]`, `[...string[]]`, a rest parameter in a function type such as `(...a: string[]) => number`, a method signature such as `{ m(): number }`, and a call signature such as `{ (): number }` | ZTS001 | An admitted type form from section 5.7 of the specification |
+| An unrecognized type, such as `number number`, and an empty type, such as `structural L = ;` | ZTS001 | An admitted type from section 5.7 of the specification |
 
 The admitted types are listed in section 5.7 of the
 [specification](spec/zts-model-1.md). The specification also excludes these
 type features: higher-rank function types, `keyof`, indexed-access types,
 index signatures, type-position `typeof`, conditional types, mapped types,
 `infer`, overloads, and ambient declarations. The Types table gives the
-refusals of generic defaults, type-parameter modifiers, and `asserts` return
-types. The Declarations And Bindings table gives the refusals of
+refusals of generic defaults, type-parameter modifiers, `asserts` return
+types, `keyof`, indexed-access types, index signatures, mapped types,
+conditional types, `infer`, type-position `typeof`, and any other text that
+follows a type. The Declarations And Bindings table gives the refusals of
 overloads and of `declare`. `zts check` gives the other features no targeted
 diagnostic. The gap section below gives the observed behavior.
 
@@ -346,12 +357,9 @@ against the compiler.
 
 | Form | Observed result | Required |
 |---|---|---|
-| Index signatures, such as `{ [k: string]: number }` | Accepted, exit 0, also when used in a signature | A targeted refusal. Write `Dict<string, number>` |
 | `JSON.parse` and `JSON.stringify` | Accepted | ZTS629. Use `parseJson` or `stringifyJson` from `zttp:json`, or `decodeJson` from `zttp:decode` |
 | `match` on a call, such as `match (g()) { ... }` | Accepted, exit 0. The specification requires an identifier or a member path | A targeted refusal. Bind the value to a `const` first |
 | `for...of` over a fixed record | Accepted by the type and strict checks | A targeted refusal. Iterate an array, such as `Object.keys(r)` |
-| `keyof`, mapped types, conditional types, and type-position `typeof`, when unused | Accepted, exit 0 | A targeted refusal. Write the type explicitly |
-| `keyof`, mapped types, conditional types, and type-position `typeof`, when used in a signature | Unrelated errors ZTS201, ZTS203, or ZTS204 | A targeted refusal. Write the type explicitly |
 | A generic declaration with nine type parameters | Refused with ZTS203 on the ninth argument, not with a limit diagnostic | A limit diagnostic. The `meta` limits publish the limit |
 | Array members `forEach`, `pop`, `shift`, `unshift`, `splice` | Accepted | ZTS201. Write `for...of`, `slice`, or spread |
 | `import { ... } from "zttp:types"` | Refused with ZTS206 for a value import, and with ZTS053 for `import type` | ZTS053 for both. Write `Proof<T, P>` or `Effects<T, R>` directly. Both are ambient |
@@ -364,10 +372,8 @@ against the compiler.
 | A `match` that does not cover every case, as the return value | Refused with ZTS204. The check also reports ZTS205 as a warning | The same refusal in every position. Cover each member, or add `default` for an open domain |
 | A body that is not a block, such as `if (c) g();`, `else g();`, and `for (const k of xs) g();` | Accepted, exit 0 | A targeted refusal. Write the body as a block |
 | Type parameters on an arrow, such as `<T>(x: T) => x` | Accepted, exit 0 | ZTS001. Write the callback without type parameters |
-| A quoted key in a record type, such as `{ "a": number }`, when unused | Accepted, exit 0 | ZTS001. Write `{ a: number }` |
-| A quoted key in a record type, such as `{ "a": number }`, when read | Refused with ZTS201, "property does not exist on type" | ZTS001 on the declaration. Write `{ a: number }` |
 | A type name outside the admitted types, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error` | Accepted, exit 0 | A targeted refusal. Use an admitted type from section 5.7 of the specification |
-| A type form outside the admitted grammar, such as `new () => T`, `unique symbol`, `[string?]`, `[a: string]`, `[...string[]]`, `readonly { a: number }`, a rest parameter in a function type, a method signature, a call signature, and a record type with comma separators | Accepted, exit 0 | A targeted refusal. Write an admitted type form. A record type separates its fields with `;` |
+| A readonly record type, such as `readonly { a: number }`, and a record type with comma separators, such as `{ a: number, b: string }` | Accepted, exit 0 | ZTS001. Write an admitted type form. A record type separates its fields with `;` |
 | A `Dict` key type other than `string` or `number`, such as `Dict<boolean, string>` | Accepted, exit 0 | ZTS209. Use `string` or `number` as the key type |
 | `toReversed`, `Array.from`, `Array.of`, and a write to `xs.length` | Accepted, exit 0 | ZTS201 for the members and ZTS200 for the `length` write. Build a new array with `for...of` |
 | An array member call with an argument list that spec 6.5 does not give, such as `xs.slice(1)`, `xs.slice()`, `xs.toSorted()`, `xs.join()`, `xs.reduce(f)`, `xs.indexOf(v, i)`, and a three-parameter `map` callback | Accepted, exit 0. A four-parameter callback reports ZTS203 | ZTS202. Pass the arguments that the specification gives |

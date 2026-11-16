@@ -756,9 +756,16 @@ pub const Declaration = struct {
     authored_scope: u16,
 };
 
+pub const TypeRefusalKind = enum { keyof, indexed_access, index_signature, mapped, conditional, typeof_query, unsupported };
+
+/// A type form that the source profile refuses. `offset` is the first byte of the form.
+pub const TypeRefusal = struct { kind: TypeRefusalKind, offset: u32 };
+
 pub const Store = struct {
     allocator: std.mem.Allocator,
     source: []const u8,
+    /// The first refusal that a type parse noted. The runtime parser takes it after each parse.
+    refusal: ?TypeRefusal = null,
     nodes: std.ArrayListUnmanaged(Node) = .empty,
     members: std.ArrayListUnmanaged(Child) = .empty,
     fields: std.ArrayListUnmanaged(Field) = .empty,
@@ -820,6 +827,17 @@ pub const Store = struct {
         function_signatures: usize,
         type_only_modules: usize,
     };
+
+    /// Keeps the first refusal until the runtime parser takes it.
+    pub fn noteRefusal(self: *Store, refusal: ?TypeRefusal) void {
+        if (self.refusal == null) self.refusal = refusal;
+    }
+
+    pub fn takeRefusal(self: *Store) ?TypeRefusal {
+        const refusal = self.refusal;
+        self.refusal = null;
+        return refusal;
+    }
 
     pub fn checkpoint(self: *const Store) Checkpoint {
         return .{

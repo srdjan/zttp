@@ -11,6 +11,8 @@ const Span = store_mod.Span;
 const TypeValue = store_mod.TypeValue;
 const ReturnSyntax = store_mod.ReturnSyntax;
 const Store = store_mod.Store;
+const TypeRefusal = store_mod.TypeRefusal;
+const TypeRefusalKind = store_mod.TypeRefusalKind;
 const scan_mod = @import("type_syntax_scan.zig");
 const Cursor = scan_mod.Cursor;
 const skipTypeWhitespace = scan_mod.skipTypeWhitespace;
@@ -21,6 +23,7 @@ const trimWhitespaceEnd = scan_mod.trimWhitespaceEnd;
 const advanceCursorTo = scan_mod.advanceCursorTo;
 const containsOnlyTypeWhitespace = scan_mod.containsOnlyTypeWhitespace;
 const isTypeWhitespace = scan_mod.isTypeWhitespace;
+const skipTrivia = scan_mod.skipTrivia;
 const Annotation = store_mod.Annotation;
 const SemanticFragment = store_mod.SemanticFragment;
 const DeclarationKind = store_mod.DeclarationKind;
@@ -241,6 +244,7 @@ pub fn parseAdmittedTypeValueOutcome(
         },
         else => return err,
     };
+    store.noteRefusal(parser.refusal orelse leftoverRefusal(store.source, parsed.end, input.raw_span.end));
     try store.validateParsed(parsed.child, input.raw_span);
     const value: TypeValue = .{
         .root = parsed.child,
@@ -280,14 +284,14 @@ pub fn predicateHeader(source: []const u8, raw_span: Span) ?PredicateHeader {
     while (pos < end and isIdentifierContinue(source[pos])) pos += 1;
     const target_end = pos;
     const before_is = pos;
-    while (pos < end and isTypeWhitespace(source[pos])) pos += 1;
+    pos = skipTrivia(source, pos, end);
     if (pos == before_is or pos + 2 > end or !std.mem.eql(u8, source[pos..][0..2], "is")) {
         return null;
     }
     if (pos + 2 < end and isIdentifierContinue(source[pos + 2])) return null;
     pos += 2;
     const after_is = pos;
-    while (pos < end and isTypeWhitespace(source[pos])) pos += 1;
+    pos = skipTrivia(source, pos, end);
     if (pos == after_is) return null;
     const narrowed_end = trimWhitespaceEnd(source, @intCast(pos), raw_span.end);
     return .{
@@ -981,9 +985,40 @@ fn wordAt(source: []const u8, start: u32, end: u32, word: []const u8) bool {
 }
 
 fn skipWhitespaceWithin(source: []const u8, start: u32, end: u32) u32 {
-    var pos: usize = start;
-    while (pos < end and isTypeWhitespace(source[pos])) pos += 1;
-    return @intCast(pos);
+    return @intCast(skipTrivia(source, start, end));
+}
+
+/// Classifies the text that remains after the parsed type. The first byte of that
+/// text is where the type parser stopped, so the parser dropped it.
+fn leftoverRefusal(source: []const u8, from: u32, end: u32) ?TypeRefusal {
+    const start = skipWhitespaceWithin(source, from, end);
+    if (start >= end) return null;
+    const kind: TypeRefusalKind = switch (source[start]) {
+        '[' => blk: {
+            const inner = skipWhitespaceWithin(source, start + 1, end);
+            var pos = inner;
+            while (pos < end and isIdentifierContinue(source[pos])) pos += 1;
+            const after = skipWhitespaceWithin(source, pos, end);
+            if (pos > inner and after < end and source[after] == ':') break :blk .index_signature;
+            if (pos > inner and wordAt(source, after, end, "in")) break :blk .mapped;
+            break :blk .indexed_access;
+        },
+        else => if (leadingWord(source, start, end, "keyof"))
+            .keyof
+        else if (leadingWord(source, start, end, "typeof"))
+            .typeof_query
+        else if (leadingWord(source, start, end, "extends") or leadingWord(source, start, end, "infer"))
+            .conditional
+        else
+            .unsupported,
+    };
+    return .{ .kind = kind, .offset = start };
+}
+
+fn leadingWord(source: []const u8, start: u32, end: u32, word: []const u8) bool {
+    const last = start + word.len;
+    if (last > end or !std.mem.eql(u8, source[start..last], word)) return false;
+    return last == end or !isIdentifierContinue(source[last]);
 }
 
 pub fn trimSpan(source: []const u8, span: Span) Span {
@@ -1346,6 +1381,7 @@ fn parseDeclarationAndStoreCore(
                 } },
                 else => return err,
             };
+            store.noteRefusal(parser.refusal orelse leftoverRefusal(source, parsed.end, raw_end));
             try store.validateParsed(parsed.child, .{ .start = raw_start, .end = raw_end });
             body = .{ .present = .{
                 .root = parsed.child,
@@ -1416,8 +1452,6 @@ const PrimaryFrame = struct {
     start: u32,
     base: ParsedChild = .{ .child = .absent, .start = 0, .end = 0, .semantic_present = false },
     readonly_modifier_pending: bool = false,
-    ungrouped_named: bool = false,
-    consumed_array_suffix: bool = false,
     complete_after_child: bool = false,
 };
 
@@ -1496,6 +1530,7 @@ const SyntaxParser = struct {
     frames: std.ArrayListUnmanaged(Frame) = .empty,
     last: ?ParsedChild = null,
     exclusion_span: ?Span = null,
+    refusal: ?TypeRefusal = null,
 
     fn init(store: *Store, source: []const u8, start: u32, end: u32) SyntaxParser {
         return .{
@@ -1682,6 +1717,7 @@ const SyntaxParser = struct {
                         .semantic_present = false,
                     });
                 }
+                self.flagKeyword(ident);
                 if (std.mem.eql(u8, ident.text(self.source), "readonly")) {
                     const ident_end = self.pos;
                     self.skipWhitespace();
@@ -1707,7 +1743,6 @@ const SyntaxParser = struct {
                         frame.base = try self.makeNode(frame.start, ident.end, .named_reference, .{
                             .named_reference = ident,
                         });
-                        frame.ungrouped_named = true;
                         self.skipWhitespace();
                         if (self.matchByte('<')) {
                             frame.state = .wait_application;
@@ -1739,19 +1774,19 @@ const SyntaxParser = struct {
             },
             .wait_application => {
                 frame.base = self.takeLast();
-                frame.complete_after_child = true;
                 frame.state = .suffix;
             },
             .suffix => {
                 if (!frame.base.semantic_present) return self.complete(frame.base);
-                if (frame.complete_after_child or
-                    (frame.ungrouped_named and frame.consumed_array_suffix))
-                {
-                    return self.complete(frame.base);
-                }
+                if (frame.complete_after_child) return self.complete(frame.base);
                 self.skipWhitespace();
-                if (self.pos + 1 < self.end and self.source[self.pos] == '[' and self.source[self.pos + 1] == ']') {
-                    self.pos += 2;
+                if (self.pos < self.end and self.source[self.pos] == '[') {
+                    const close: u32 = @intCast(skipTrivia(self.source, self.pos + 1, self.end));
+                    if (close >= self.end or self.source[close] != ']') {
+                        self.flag(.indexed_access, self.pos);
+                        return self.complete(frame.base);
+                    }
+                    self.pos = close + 1;
                     const node = try self.store.appendNode(.{
                         .tag = .array,
                         .semantic_span = .{ .start = frame.start, .end = self.pos },
@@ -1763,7 +1798,6 @@ const SyntaxParser = struct {
                         .end = self.pos,
                         .semantic_present = true,
                     };
-                    frame.consumed_array_suffix = true;
                     return;
                 }
                 return self.complete(frame.base);
@@ -1890,6 +1924,9 @@ const SyntaxParser = struct {
 
     fn finishRecordAfterBreak(self: *SyntaxParser) !void {
         self.skipWhitespace();
+        if (self.pos < self.end and self.source[self.pos] == '[') {
+            if (leftoverRefusal(self.source, self.pos, self.end)) |refusal| self.flag(refusal.kind, refusal.offset);
+        }
         _ = self.matchByte('}');
         return self.finishRecord();
     }
@@ -2134,9 +2171,45 @@ const SyntaxParser = struct {
     }
 
     fn parseNumberLiteral(self: *SyntaxParser, start: u32) !ParsedChild {
+        // Section 5.7 admits number literal types. A decimal and a `0x` literal
+        // read in full. The store holds an integer literal only, so a fraction
+        // or an exponent is refused at the first byte of the literal: reading
+        // it as `number` would admit values that the type excludes. A literal
+        // outside `i16` reads as `number`. A numeric separator, a bigint
+        // suffix, or a `0b` or `0o` prefix follows the literal bytes, so the
+        // type is refused at the first byte of the literal.
         if (self.source[self.pos] == '-') self.pos += 1;
-        while (self.pos < self.end and std.ascii.isDigit(self.source[self.pos])) self.pos += 1;
-        const value = std.fmt.parseInt(i16, self.source[start..self.pos], 10) catch {
+        const digits_start = self.pos;
+        const hex = self.pos + 1 < self.end and self.source[self.pos] == '0' and
+            (self.source[self.pos + 1] == 'x' or self.source[self.pos + 1] == 'X');
+        var integral = true;
+        if (hex) {
+            self.pos += 2;
+            while (self.pos < self.end and std.ascii.isHex(self.source[self.pos])) self.pos += 1;
+            if (self.pos == digits_start + 2) self.flag(.unsupported, start);
+        } else {
+            while (self.pos < self.end and std.ascii.isDigit(self.source[self.pos])) self.pos += 1;
+            if (self.pos < self.end and self.source[self.pos] == '.') {
+                integral = false;
+                self.pos += 1;
+                while (self.pos < self.end and std.ascii.isDigit(self.source[self.pos])) self.pos += 1;
+            }
+            if (self.pos < self.end and (self.source[self.pos] == 'e' or self.source[self.pos] == 'E')) {
+                var exponent = self.pos + 1;
+                if (exponent < self.end and (self.source[exponent] == '+' or self.source[exponent] == '-')) exponent += 1;
+                if (exponent < self.end and std.ascii.isDigit(self.source[exponent])) {
+                    integral = false;
+                    self.pos = exponent;
+                    while (self.pos < self.end and std.ascii.isDigit(self.source[self.pos])) self.pos += 1;
+                }
+            }
+        }
+        if (self.pos < self.end and isIdentifierContinue(self.source[self.pos])) self.flag(.unsupported, start);
+        if (!integral) {
+            self.flag(.unsupported, start);
+            return self.makeNode(start, self.pos, .primitive, .{ .primitive = .number });
+        }
+        const value = std.fmt.parseInt(i16, self.source[start..self.pos], if (hex) 0 else 10) catch {
             return self.makeNode(start, self.pos, .primitive, .{ .primitive = .number });
         };
         return self.makeNode(start, self.pos, .literal_number, .{ .literal_number = value });
@@ -2186,8 +2259,19 @@ const SyntaxParser = struct {
         return parsed;
     }
 
+    fn flag(self: *SyntaxParser, kind: TypeRefusalKind, offset: u32) void {
+        if (self.refusal == null) self.refusal = .{ .kind = kind, .offset = offset };
+    }
+
+    fn flagKeyword(self: *SyntaxParser, ident: Span) void {
+        const text = ident.text(self.source);
+        if (std.mem.eql(u8, text, "keyof")) self.flag(.keyof, ident.start);
+        if (std.mem.eql(u8, text, "typeof")) self.flag(.typeof_query, ident.start);
+        if (std.mem.eql(u8, text, "infer") or std.mem.eql(u8, text, "extends")) self.flag(.conditional, ident.start);
+    }
+
     fn skipWhitespace(self: *SyntaxParser) void {
-        while (self.pos < self.end and isTypeWhitespace(self.source[self.pos])) self.pos += 1;
+        self.pos = @intCast(skipTrivia(self.source, self.pos, self.end));
     }
 
     fn matchByte(self: *SyntaxParser, byte: u8) bool {

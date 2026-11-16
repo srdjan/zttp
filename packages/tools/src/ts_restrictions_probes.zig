@@ -80,8 +80,12 @@ const mod_file: []const File = &.{.{ .name = "mod.ts", .text = "export function 
 const g_fn = "function g(): number {\n  return 1;\n}\n";
 
 /// A function whose one parameter has the type text `t`.
+fn paramText(comptime t: []const u8) []const u8 {
+    return top("function g(a: " ++ t ++ "): number {\n  return 1;\n}");
+}
+
 fn param(comptime t: []const u8) Source {
-    return c(top("function g(a: " ++ t ++ "): number {\n  return 1;\n}"));
+    return c(paramText(t));
 }
 
 /// A function that returns the array expression `e` over a `number[]` named `xs`.
@@ -1089,6 +1093,69 @@ pub const refusal_rows = [_]RefusalRow{
         .clean = c(top("function f(x: unknown): x is string {\n  return typeof x === \"string\";\n}")),
     },
     .{
+        .key = "A keyof type, such as `keyof T`",
+        .refused = &.{r("keyof T", top("structural K<T> = keyof T;"))},
+        .clean = c(top("structural K = \"a\" | \"b\";")),
+    },
+    .{
+        .key = "An indexed access type, such as `A[\"a\"]`",
+        .refused = &.{r("A[\"a\"]", top("structural A = { a: number };\nfunction f(x: A[\"a\"]): number {\n  return x;\n}"))},
+        .clean = c(top("structural A = { a: number };\nfunction f(x: number): number {\n  return x;\n}")),
+    },
+    .{
+        .key = "An index signature, such as `{ [k: string]: number }`",
+        .refused = &.{
+            r("{ [k: string]: number }", top("structural D = { [k: string]: number };")),
+            r("{ [k: string]: number }", top("function f(x: { [k: string]: number }): number {\n  return 1;\n}")),
+        },
+        .clean = c(top("structural D = Dict<string, number>;")),
+    },
+    .{
+        .key = "A mapped type, such as `{ [K in \"a\" | \"b\"]: number }`",
+        .refused = &.{r("{ [K in \"a\" | \"b\"]: number }", top("structural M = { [K in \"a\" | \"b\"]: number };"))},
+        .clean = c(top("structural M = { a: number; b: number };")),
+    },
+    .{
+        .key = "A conditional type, such as `T extends string ? number : boolean`, including one that uses infer",
+        .refused = &.{r("T extends string ? number : boolean", top("structural C<T> = T extends string ? number : boolean;"))},
+        .clean = c(top("structural C = number;")),
+    },
+    .{
+        .key = "A type-position typeof, such as `typeof base`",
+        .refused = &.{r("typeof base", top("const base: number = 1;\nfunction f(x: typeof base): number {\n  return x;\n}"))},
+        .clean = c(top("const base: number = 1;\nfunction f(x: number): number {\n  return x;\n}")),
+    },
+    .{
+        .key = "A quoted key in a record type, such as `{ \"a\": number }`",
+        .refused = &.{
+            r("{ \"a\": number }", top("structural R = { \"a\": number };")),
+            r("{ \"a\": number }", top("structural R = { \"a\": number };\nfunction g(r: R): number {\n  return r.a;\n}")),
+        },
+        .clean = c(top("structural R = { a: number };")),
+    },
+    .{
+        .key = "A type form outside the admitted grammar, such as `new () => T`, `unique symbol`, `[string?]`, `[a: string]`, `[...string[]]`, a rest parameter in a function type such as `(...a: string[]) => number`, a method signature such as `{ m(): number }`, and a call signature such as `{ (): number }`",
+        .refused = &.{
+            r("new () => T", paramText("new () => string")),
+            r("unique symbol", paramText("unique symbol")),
+            r("[string?]", paramText("[string?]")),
+            r("[a: string]", paramText("[a: string]")),
+            r("[...string[]]", paramText("[...string[]]")),
+            r("(...a: string[]) => number", paramText("(...a: string[]) => number")),
+            r("{ m(): number }", paramText("{ m(): number }")),
+            r("{ (): number }", paramText("{ (): number }")),
+        },
+        .clean = c(top("function g(a: [string]): number {\n  return 1;\n}")),
+    },
+    .{
+        .key = "An unrecognized type, such as `number number`, and an empty type, such as `structural L = ;`",
+        .refused = &.{
+            r("number number", top("structural L = number number;")),
+            r("structural L = ;", top("structural L = ;")),
+        },
+        .clean = c(top("structural L = number;")),
+    },
+    .{
         .key = "A declaration that binds two names, such as `const a = 1, b = 2;`",
         .refused = &.{r("const a = 1, b = 2;", body("  const a = 1, b = 2;"))},
         .clean = c(body("  const a = 1;\n  const b = 2;")),
@@ -1122,13 +1189,6 @@ pub const refusal_rows = [_]RefusalRow{
 
 pub const gap_rows = [_]GapRow{
     .{
-        .key = "Index signatures, such as `{ [k: string]: number }`",
-        .sources = &.{
-            c(top("structural M = { [k: string]: number };")),
-            c(top("structural M = { [k: string]: number };\nfunction g(m: M): number {\n  return 1;\n}")),
-        },
-    },
-    .{
         .key = "`JSON.parse` and `JSON.stringify`",
         .sources = &.{
             c(body("  const a = JSON.parse(\"1\");")),
@@ -1142,24 +1202,6 @@ pub const gap_rows = [_]GapRow{
     .{
         .key = "`for...of` over a fixed record",
         .sources = &.{c(body("  const o = { a: 1 };\n  for (const v of o) {\n    const y = v;\n  }"))},
-    },
-    .{
-        .key = "`keyof`, mapped types, conditional types, and type-position `typeof`, when unused",
-        .sources = &.{
-            c(top("structural K = keyof { a: number };")),
-            c(top("structural M = { [K in \"a\"]: number };")),
-            c(top("structural C = string extends string ? number : string;")),
-            c(top("const v = 1;\nstructural T = typeof v;")),
-        },
-    },
-    .{
-        .key = "`keyof`, mapped types, conditional types, and type-position `typeof`, when used in a signature",
-        .sources = &.{
-            c(top("function h(x: string): number {\n  return 1;\n}\nfunction g(a: keyof { a: number }): number {\n  return h(a);\n}")),
-            c(top("function g(a: { [K in \"a\"]: number }): number {\n  return a.a;\n}")),
-            c(top("function g(a: string extends string ? number : string): number {\n  return a;\n}")),
-            c(top("const v = 1;\nfunction g(a: typeof v): string {\n  return a;\n}")),
-        },
     },
     .{
         .key = "A generic declaration with nine type parameters",
@@ -1239,14 +1281,6 @@ pub const gap_rows = [_]GapRow{
         .sources = &.{c(top("function g(): number[] {\n  return [1].map(<T>(x: T) => x);\n}"))},
     },
     .{
-        .key = "A quoted key in a record type, such as `{ \"a\": number }`, when unused",
-        .sources = &.{c(top("structural R = { \"a\": number };"))},
-    },
-    .{
-        .key = "A quoted key in a record type, such as `{ \"a\": number }`, when read",
-        .sources = &.{c(top("structural R = { \"a\": number };\nfunction g(r: R): number {\n  return r.a;\n}"))},
-    },
-    .{
         .key = "A type name outside the admitted types, such as `Record<K, V>`, `Map`, `Set`, `bigint`, `symbol`, `Function`, `Exclude`, `NonNullable`, `Date`, `RegExp`, `Error`",
         .sources = &.{
             param("Record<string, number>"),
@@ -1264,17 +1298,9 @@ pub const gap_rows = [_]GapRow{
         },
     },
     .{
-        .key = "A type form outside the admitted grammar, such as `new () => T`, `unique symbol`, `[string?]`, `[a: string]`, `[...string[]]`, `readonly { a: number }`, a rest parameter in a function type, a method signature, a call signature, and a record type with comma separators",
+        .key = "A readonly record type, such as `readonly { a: number }`, and a record type with comma separators, such as `{ a: number, b: string }`",
         .sources = &.{
-            param("new () => string"),
-            param("unique symbol"),
-            param("[string?]"),
-            param("[a: string]"),
-            param("[...string[]]"),
             param("readonly { a: number }"),
-            param("(...a: string[]) => number"),
-            param("{ m(): number }"),
-            param("{ (): number }"),
             param("{ a: number, b: string }"),
         },
     },

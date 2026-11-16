@@ -429,16 +429,20 @@ test "direct source retains every syntax owner family" {
     try std.testing.expectEqualStrings("types.ts", owner.sourceView().name.?);
 }
 
-test "direct source retains tolerated annotation suffix" {
+test "direct source refuses leftover annotation text with ZTS001" {
     const source = "const tolerant: string ignored_suffix = \"kept\";";
     var owner: DirectCheckSource = undefined;
     try owner.initCompileInPlace(std.testing.allocator, std.testing.allocator, source, "tolerant.ts");
     defer owner.deinit();
-    const accepted = owner.acceptedCapabilities() orelse return error.TestUnexpectedResult;
-    try std.testing.expectEqual(@as(usize, 1), accepted.type_store.annotations.items.len);
+    try std.testing.expect(owner.acceptedCapabilities() == null);
+    const errors = owner.parserErrors();
+    try std.testing.expectEqual(@as(usize, 1), errors.len);
+    try std.testing.expectEqual(parser.ErrorKind.unsupported_feature, errors[0].kind);
+    try std.testing.expectEqual(@as(u32, 1), errors[0].location.line);
+    try std.testing.expectEqual(@as(u32, 24), errors[0].location.column);
     try std.testing.expectEqualStrings(
-        "string ignored_suffix",
-        accepted.type_store.annotations.items[0].raw_span.text(source),
+        "this type syntax is not supported; write an admitted type from section 5.7 of the specification",
+        errors[0].message,
     );
 }
 

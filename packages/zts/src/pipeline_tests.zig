@@ -7337,3 +7337,14 @@ test "ModuleAnalysisSession freezes writes_module_state in imported effects" {
     try analysis.setImportedEffects(&equivalent);
     try testing.expectError(error.ImportedEffectsFrozen, analysis.setImportedEffects(&changed));
 }
+
+test "array suffix after a generic application is an array of the application" {
+    try expectNoTypeDiagnostic("function f(x: Dict<string, number>[]): number { return x.length; }");
+    try expectNoTypeDiagnostic("function f(x: Result<number, string>[]): number { return x.length; }");
+    try expectNoTypeDiagnostic("function f(x: Dict<string, number>[][]): number { return x[0].length; }");
+}
+
+test "array brackets with trivia between them are an array" {
+    try expectNoTypeDiagnostic("function f(x: number[ ]): number { return x.length; }");
+    try expectNoTypeDiagnostic("function f(x: number[/* c */]): number { return x.length; }");
+}

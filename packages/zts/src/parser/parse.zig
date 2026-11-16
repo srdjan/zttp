@@ -988,6 +988,23 @@ pub const Parser = struct {
         self.errors.addErrorAt(.unsupported_feature, type_syntax.tokenAtOffset(self.source, offset), message);
     }
 
+    /// The type parser notes the first type form that it dropped or cannot express.
+    /// The source profile refuses it; the parser records the error and keeps parsing.
+    fn flushTypeRefusal(self: *Parser) void {
+        const refusal = self.type_store.takeRefusal() orelse return;
+        if (self.expression_profile or self.admission == null) return;
+        const message = switch (refusal.kind) {
+            .keyof => "`keyof` is not supported; write the key union, such as \"a\" | \"b\"",
+            .indexed_access => "an indexed access type is not supported; write the field type",
+            .index_signature => "an index signature is not supported; write `Dict<string, number>`",
+            .mapped => "a mapped type is not supported; write the record type",
+            .conditional => "a conditional type is not supported; write the type",
+            .typeof_query => "a type-position `typeof` is not supported; write the type",
+            .unsupported => "this type syntax is not supported; write an admitted type from section 5.7 of the specification",
+        };
+        self.errors.addErrorAt(.unsupported_feature, type_syntax.tokenAtOffset(self.source, refusal.offset), message);
+    }
+
     fn classifyAdmissionGenericList(self: *Parser, span: type_syntax.Span) !void {
         if (self.admission == null) return;
         if (span.start >= span.end or
@@ -1488,6 +1505,10 @@ pub const Parser = struct {
                 &admission_end,
             );
             body = try self.admittedTypeInput(after_equals, admission_end, true);
+            if (kind != .nominal and !self.expression_profile and body.?.raw_span.start == body.?.raw_span.end) {
+                self.type_store.noteRefusal(.{ .kind = .unsupported, .offset = body.?.raw_span.start });
+                self.flushTypeRefusal();
+            }
         }
 
         if (self.source_only) {
@@ -1577,6 +1598,7 @@ pub const Parser = struct {
             },
             .parsed => |span| span,
         };
+        self.flushTypeRefusal();
         if (body) |input| {
             self.admission_presentation = try self.admission_presentation.trackedWhitespaceAt(input.admission_end);
         }
@@ -2204,6 +2226,7 @@ pub const Parser = struct {
             },
         }
 
+        self.flushTypeRefusal();
         try self.resumeAfterRawErasureObserved(input.admission_end, binding_token);
         return annotation_index;
     }
@@ -2297,6 +2320,7 @@ pub const Parser = struct {
             },
         };
 
+        self.flushTypeRefusal();
         try self.resumeAfterRawErasureObserved(admission_end, previous_token);
         return value;
     }
@@ -2972,6 +2996,7 @@ pub const Parser = struct {
                 return error.ParseError;
             },
         };
+        self.flushTypeRefusal();
         try self.resolveAdmittedPredicateTarget(&value, params);
         try self.resumeAfterRawErasureObserved(input.admission_end, previous_token);
         return value;

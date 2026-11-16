@@ -1818,6 +1818,26 @@ pub fn isTypeWhitespace(byte: u8) bool {
     return byte == ' ' or byte == '\t' or byte == '\r' or byte == '\n';
 }
 
+/// Skips whitespace, `//` line comments, and `/* */` block comments in `source[start..end]`.
+/// An unterminated block comment is not skipped.
+pub fn skipTrivia(source: []const u8, start: usize, end: usize) usize {
+    var pos = start;
+    while (pos < end) {
+        if (isTypeWhitespace(source[pos])) {
+            pos += 1;
+        } else if (source[pos] == '/' and pos + 1 < end and source[pos + 1] == '/') {
+            pos += 2;
+            while (pos < end and source[pos] != '\n') pos += 1;
+        } else if (source[pos] == '/' and pos + 1 < end and source[pos + 1] == '*') {
+            var close = pos + 2;
+            while (close + 1 < end and !(source[close] == '*' and source[close + 1] == '/')) close += 1;
+            if (close + 1 >= end) break;
+            pos = close + 2;
+        } else break;
+    }
+    return pos;
+}
+
 pub fn classifyTypeSpan(
     source: []const u8,
     options: AdmissionTypeSpanOptions,

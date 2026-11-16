@@ -450,7 +450,7 @@ test "compound annotation keeps raw admission and semantic prefix ends separate"
         .failure, .excluded => return error.TestUnexpectedResult,
     };
     const annotation = store.annotations.items[0];
-    try std.testing.expectEqualStrings("number", parsed.semantic_span.text(source));
+    try std.testing.expectEqualStrings("number /* comment */ []", parsed.semantic_span.text(source));
     try std.testing.expectEqualStrings("number /* comment */ []", annotation.raw_span.text(source));
     try std.testing.expectEqualStrings(
         "number /* comment */ []  ",
