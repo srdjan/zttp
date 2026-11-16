@@ -434,12 +434,10 @@ pub const Resolver = struct {
     }
 
     /// True when a mutation of `binding` may occur anywhere in the program. An
-    /// assignment whose target roots at the binding counts. An assignment whose
-    /// target has an untracked root (a call result, a literal, a conditional)
-    /// also counts, because that root may alias the table: a missed mutation
-    /// is the unsound direction. The cost is that one untracked root anywhere
-    /// in the file makes every table, and every callee parameter read through
-    /// this function, look mutated.
+    /// assignment whose target roots at the binding counts. The parser admits
+    /// only a name at the root of an assignment target (spec `LValue`), so an
+    /// `untracked` answer here comes only from IR this resolver cannot read. It
+    /// also counts, because a missed mutation is the unsound direction.
     fn bindingIsMutated(self: *const Resolver, binding: ir.BindingRef) bool {
         const key = packBindingKey(binding.scope_id, binding.slot);
         for (0..self.ir_view.nodeCount()) |idx_usize| {
@@ -710,8 +708,8 @@ pub const Resolver = struct {
 
     /// Classify the root of an assignment target or a call receiver against
     /// the binding `key`. A member chain follows its object. An array literal
-    /// root, as in `[table][0]["GET /"] = f`, matches when any element roots
-    /// at the binding, because `[table][0]` is the table itself. Any other
+    /// receiver root, as in `[xs][0].push(1)`, matches when any element roots
+    /// at the binding, because `[xs][0]` is `xs` itself. Any other
     /// non-identifier root is `untracked`: reporting it as `other` would let a
     /// mutation through an unfollowed path leave the table looking stable,
     /// which is the unsound direction. An identifier with no binding answers

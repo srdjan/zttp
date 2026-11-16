@@ -857,3 +857,10 @@ later.
   and a receiver root can still be a call or an array literal. So its
   array-literal arm and its `untracked` answer stay. U4b-6c measures what
   only an assignment reaches before it deletes code.
+- U4b-6c deletes no code. It corrects the comments in
+  `handler_verifier.zig#HandlerVerifier.writesSharedState`,
+  `route_resolution.zig#Resolver.bindingIsMutated`, and
+  `route_resolution.zig#Resolver.assignmentRootMatch`. It removes the unused
+  `getBox` helper from the route-table test prelude, and it adds a test
+  that a table returned from a function and written through the result
+  stays unresolved.

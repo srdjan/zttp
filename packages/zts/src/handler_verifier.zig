@@ -2416,9 +2416,8 @@ pub const HandlerVerifier = struct {
         const base = switch (target_tag) {
             .identifier => target,
             .member_access, .computed_access => self.memberBase(target) orelse return false,
-            // exhaustive: any other target form names no binding to test, and the
-            // check returned for it before member writes were added. A write through
-            // a call result such as `getStore().x = 1` stays unchecked here.
+            // exhaustive: the parser admits only a name, a member path, or an index
+            // as an assignment target (spec `LValue`), so no other form reaches here.
             else => return false,
         };
 
@@ -3141,7 +3140,6 @@ const route_table_prelude =
     \\  const result = jwtVerify("token", "key");
     \\  return Response.text(String(result.value));
     \\}
-    \\function getBox() { return { n: 1 }; }
     \\
 ;
 
@@ -3276,6 +3274,17 @@ test "an alias of the table is unresolved" {
     ++ "\n" ++ route_table_dispatch);
     try std.testing.expect(counts.unresolved_dispatch);
     try std.testing.expect(counts.unchecked_result > 0);
+}
+
+test "a table returned from a function and written through the result is unresolved" {
+    const counts = try routeVerifierCounts(route_table_prelude ++
+        \\const routes = { "GET /": getHome };
+        \\function getTable() { return routes; }
+        \\function handler(req) {
+        \\  const t = getTable();
+        \\  t["GET /"] = bad;
+    ++ "\n" ++ route_table_dispatch);
+    try std.testing.expect(counts.unresolved_dispatch);
 }
 
 test "a binding read only through an object spread is not reported unused" {
