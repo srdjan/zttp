@@ -156,7 +156,7 @@ test "serialize writes the supported literal language exactly" {
     const source =
         \\const value = {
         \\  integer: 1,
-        \\  "float": 2.5,
+        \\  float: 2.5,
         \\  negativeInteger: -3,
         \\  negativeFloat: -4.25,
         \\  string: "line\nquote:\" slash:\\ tab:\t",
@@ -212,7 +212,7 @@ test "serialize refuses unsupported roots and partial literals without publishin
         // and a non-finite number gives text that is not JSON at all (U3.4).
         "const value = { type: \"object\", type: \"string\" };",
         "const value = { properties: { a: 1, b: 2, a: 3 } };",
-        "const value = [{ k: 1 }, { \"k\": 2, k: 3 }];",
+        "const value = [{ k: 1 }, { k: 2, k: 3 }];",
         "const value = { x: 1e999 };",
     };
 

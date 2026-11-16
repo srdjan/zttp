@@ -27,7 +27,7 @@ const schema_ok = schemaCompile(
 
 function handler(req: Request): Response {
   // Auth: check JWT from Authorization header
-  const auth_header = req.headers["authorization"];
+  const auth_header = req.headers.authorization;
   if (auth_header !== undefined) {
     const token = parseBearer(auth_header);
     if (token !== undefined) {

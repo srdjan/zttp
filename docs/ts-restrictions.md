@@ -202,8 +202,10 @@ boolean to text.
 | Object methods, getters, and setters | ZTS001 | A module-level function |
 | A computed record key `{ [k]: v }` | ZTS001 | A literal field name, or a `Dict` for dynamic keys |
 | A numeric record key `{ 1: "a" }` | ZTS001 | A string key, or an array for dense indices |
+| A quoted record key that is a name, such as `{ "a": 1 }` | ZTS001 | `{ a: 1 }`. A key that is not a name, such as `"Content-Type"`, stays quoted |
 | An object spread after an explicit key, or a second spread | ZTS614 | One leading spread: `{ ...base, x: 1 }` |
 | Dynamic property access `obj[key]` | ZTS605 | A typed field, such as `obj.a`, or a `Dict` read with `dictGet` |
+| A string-literal read of a key that is a name, such as `r["a"]` | ZTS605 | `r.a` |
 | `Object.assign`, `Object.freeze`, and `Object.isFrozen` | ZTS001 | Object spread |
 | A member that the runtime does not hold, such as `n.toFixed(2)` or `n.toString()` | ZTS201 | `String(n)` |
 | The array members `forEach`, `pop`, `shift`, `unshift`, `splice`, `toReversed`, and `concat`, and the string member `substring` | ZTS201 | `for...of`, `slice`, or spread `[...a, ...b]` for an array, and `slice` for a string |
@@ -408,9 +410,7 @@ against the compiler.
 | `FetchOptions` with no import | Accepted, exit 0. The specification names a module type through `import type` from its module, and `zttp:fetch` exports no type | An `import type` from `zttp:fetch` |
 | `DictKey` with no import, such as `<K extends DictKey>` | Accepted, exit 0. The `meta` ambient names do not list it | A published ambient name, or `string \| number` |
 | An assignment to a `const`, such as `const n: number = 1; n = 2;` | Refused with ZTS200, "type '2' is not assignable to type '1'" | A targeted refusal that names `const`. Write `let`, or bind a new name |
-| A quoted key in a record literal, such as `{ "a": 1 }` | Accepted, exit 0 | ZTS001. Write `{ a: 1 }` |
 | A spread with no explicit field after it, such as `{ ...o }` | Accepted, exit 0 | ZTS614. Use `o` itself, or add an explicit field after the spread |
-| A string-literal read of an identifier key, such as `r["a"]` | Accepted, exit 0 | ZTS605. Write `r.a` |
 | A call in an assignment target, such as `mk().n = 2` | Accepted, exit 0 | A targeted refusal. Bind the call result to a `const` first |
 | A higher-order callback that calls `push`, or that assigns a captured binding | Accepted, exit 0 | A targeted refusal. Build the result with `for...of` |
 | A top-level statement other than a registration call, such as `f();` and `if (c) { f(); }` | Accepted, exit 0 | A targeted refusal. Move the statement into a function. A bare `schemaCompile(...)` or `sql(...)` call with literal arguments stays admitted |

@@ -2563,7 +2563,7 @@ const weather_handler_src =
     \\    return Response.json({ error: "not_found" }, { status: 404 });
     \\  }
     \\  const upstream = fetch("https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m,relative_humidity_2m,wind_speed_10m,is_day&timezone=auto", {
-    \\    headers: { "Accept": "application/json" },
+    \\    headers: { Accept: "application/json" },
     \\    maxResponseBytes: 65536,
     \\  });
     \\  if (upstream.ok !== true) {
@@ -3001,7 +3001,7 @@ test "fetchWithRetry refuses an authorization header with a method it cannot rea
 test "fetchWithRetry refuses a mixed-case Authorization header" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const probe = try probeFetchWithRetry(arena.allocator(), "{ method: \"POST\", headers: { \"Content-Type\": \"text/plain\", \"Authorization\": \"Bearer t\" }, body: \"x\" }");
+    const probe = try probeFetchWithRetry(arena.allocator(), "{ method: \"POST\", headers: { \"Content-Type\": \"text/plain\", Authorization: \"Bearer t\" }, body: \"x\" }");
     try std.testing.expectEqual(@as(i64, 599), probe.status);
     try std.testing.expectEqualStrings("CredentialRefused", probe.err);
     try std.testing.expectEqual(@as(u32, 0), probe.served);
@@ -3010,7 +3010,7 @@ test "fetchWithRetry refuses a mixed-case Authorization header" {
 test "fetchWithRetry refuses a write with a cookie header or a proxy-authorization header" {
     var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena.deinit();
-    const cookie = try probeFetchWithRetry(arena.allocator(), "{ method: \"PATCH\", headers: { \"COOKIE\": \"sid=1\" }, body: \"x\" }");
+    const cookie = try probeFetchWithRetry(arena.allocator(), "{ method: \"PATCH\", headers: { COOKIE: \"sid=1\" }, body: \"x\" }");
     try std.testing.expectEqualStrings("CredentialRefused", cookie.err);
     try std.testing.expectEqual(@as(u32, 0), cookie.served);
     const proxy = try probeFetchWithRetry(arena.allocator(), "{ method: \"put\", headers: { \"Proxy-Authorization\": \"Basic x\" }, body: \"x\" }");

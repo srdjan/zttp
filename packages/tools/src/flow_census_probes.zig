@@ -232,7 +232,7 @@ const Vars = struct {
 fn srcOf(label: Label) []const u8 {
     return switch (label) {
         .secret => "env(\"API_TOKEN\") ?? \"\"",
-        .credential => "req.headers[\"authorization\"] ?? \"\"",
+        .credential => "req.headers.authorization ?? \"\"",
         .user_input => "req.url",
         .clean => "env(\"REGION\") ?? \"\"",
     };
@@ -1222,7 +1222,7 @@ const hand_written = [_]Hand{
         .reason = "mask with a literal bound declassifies a credential, so the log receives no credential",
         .body =
         \\function handler(req: Request): Claim<Response> {
-        \\  const t = req.headers["authorization"] ?? "";
+        \\  const t = req.headers.authorization ?? "";
         \\  logInfo(mask(t, 4), { n: 1 });
         \\  return Response.json({ ok: 1 });
         \\}

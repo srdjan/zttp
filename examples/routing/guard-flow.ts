@@ -15,7 +15,7 @@ function answerOptions(req: Request): Response | undefined {
 }
 
 function requireAuth(req: Request): Response | undefined {
-  const header = req.headers["authorization"] ?? "";
+  const header = req.headers.authorization ?? "";
   const token = parseBearer(header);
   if (token === undefined) return Response.json({ error: "unauthorized" }, { status: 401 });
   const secret = env("JWT_SECRET");

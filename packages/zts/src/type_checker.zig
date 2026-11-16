@@ -11108,7 +11108,7 @@ test "TypeChecker infers every supported JSON stringify schema literal" {
         \\import { schemaCompile, validateJson } from "zttp:validate";
         \\schemaCompile("matrix", JSON.stringify({
         \\  type: "object",
-        \\  "required": ["title", "count", "enabled", "items"],
+        \\  required: ["title", "count", "enabled", "items"],
         \\  properties: {
         \\    title: { type: "string", description: "line\nquote:\" slash:\\ tab:\t" },
         \\    count: { type: "number", minimum: -1.5, maximum: 2.25 },

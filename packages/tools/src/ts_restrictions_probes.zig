@@ -762,6 +762,14 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(body("  const o = { one: \"a\" };")),
     },
     .{
+        .key = "A quoted record key that is a name, such as `{ \"a\": 1 }`",
+        .refused = &.{
+            r("{ \"a\": 1 }", top("function g(): number {\n  const o = { \"a\": 1 };\n  return o.a;\n}")),
+            r("{ \"a\": 1 }", body("  const o = { b: 2, \"class\": 1 };")),
+        },
+        .clean = c(body("  const o = { \"Content-Type\": \"a\", \"GET /x\": \"b\", \"1a\": \"c\", a: \"d\" };")),
+    },
+    .{
         .key = "An object spread after an explicit key, or a second spread",
         .refused = &.{
             r("", body("  const base = { a: 1 };\n  const o = { x: 1, ...base };")),
@@ -773,6 +781,11 @@ const refusal_rows_b = [_]RefusalRow{
         .key = "Dynamic property access `obj[key]`",
         .refused = &.{r("obj[key]", top("function g(obj: { a: number }, key: string): number {\n  return obj[key];\n}"))},
         .clean = c(top("function g(obj: { a: number }): number {\n  return obj.a;\n}")),
+    },
+    .{
+        .key = "A string-literal read of a key that is a name, such as `r[\"a\"]`",
+        .refused = &.{r("r[\"a\"]", top("function g(): number {\n  const r = { a: 1 };\n  return r[\"a\"];\n}"))},
+        .clean = c(top("function g(): number {\n  const r = { a: 1 };\n  return r.a;\n}")),
     },
     .{
         .key = "`Object.assign`, `Object.freeze`, and `Object.isFrozen`",
@@ -1447,16 +1460,8 @@ pub const gap_rows = [_]GapRow{
         .sources = &.{c(top("function g(): number {\n  const n: number = 1;\n  n = 2;\n  return n;\n}"))},
     },
     .{
-        .key = "A quoted key in a record literal, such as `{ \"a\": 1 }`",
-        .sources = &.{c(top("function g(): number {\n  const o = { \"a\": 1 };\n  return o.a;\n}"))},
-    },
-    .{
         .key = "A spread with no explicit field after it, such as `{ ...o }`",
         .sources = &.{c(top("function g(): number {\n  const o = { a: 1 };\n  const p = { ...o };\n  return p.a;\n}"))},
-    },
-    .{
-        .key = "A string-literal read of an identifier key, such as `r[\"a\"]`",
-        .sources = &.{c(top("function g(): number {\n  const r = { a: 1 };\n  return r[\"a\"];\n}"))},
     },
     .{
         .key = "A call in an assignment target, such as `mk().n = 2`",

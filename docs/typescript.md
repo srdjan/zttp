@@ -479,7 +479,7 @@ In a union, a member that one union member does not hold adds `undefined` to the
 
 ### Writes Into Containers
 
-A write into a record field, an array element, or a tuple element must fit the type of that slot. `p.name = 5` and `p["name"] = 5` with `p: { name: string }`, and `xs[0] = "a"` with `xs: number[]`, get ZTS200. Each argument of `push` must fit the element type (ZTS203). On a union receiver, the value must fit the slot of each member that has one.
+A write into a record field, an array element, or a tuple element must fit the type of that slot. `p.name = 5` with `p: { name: string }`, and `xs[0] = "a"` with `xs: number[]`, get ZTS200. Each argument of `push` must fit the element type (ZTS203). On a union receiver, the value must fit the slot of each member that has one.
 
 A tuple type names its length. So `push` and a write to `length` on a tuple get ZTS200. Annotate the binding as an array, such as `string[]`, when the length must change.
 
@@ -496,7 +496,7 @@ Response.json({ ok: true }, { status: "201" });                           // ZTS
 Response.text("not found", 404);                                          // ZTS203: Response.text init must be a record, got 'number'
 ```
 
-The check reads an init literal member by member, and it reads the record type of a spread operand. For every other init, it reads the type of the value. The check does not refuse an init or a status when it cannot find the type. A call through `Response?.json` or through `Response["json"]` follows the same rule.
+The check reads an init literal member by member, and it reads the record type of a spread operand. For every other init, it reads the type of the value. The check does not refuse an init or a status when it cannot find the type. A call through `Response?.json` follows the same rule.
 
 `Response.redirect` takes a URL and an optional status number. It takes no init record. The check refuses a second argument that is not a number with ZTS203.
 

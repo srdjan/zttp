@@ -44,6 +44,7 @@ pub const TokenType = @import("token.zig").TokenType;
 pub const SourceLocation = @import("token.zig").SourceLocation;
 
 pub const Tokenizer = @import("tokenizer.zig").Tokenizer;
+pub const isNameText = @import("tokenizer.zig").isNameText;
 
 pub const trivia = @import("trivia.zig");
 pub const Trivia = @import("trivia.zig").Trivia;

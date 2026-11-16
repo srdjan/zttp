@@ -124,7 +124,7 @@ function handler(req: Request): WeatherProof<Response> {
       current: "temperature_2m,relative_humidity_2m,wind_speed_10m,is_day",
       timezone: "auto",
     },
-    headers: { "Accept": "application/json" },
+    headers: { Accept: "application/json" },
     maxResponseBytes: 65536,
   });
 

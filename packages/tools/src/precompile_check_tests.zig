@@ -3454,7 +3454,7 @@ test "an imported helper reads the authorization header of the request it is pas
     try fixture.add("dep.ts",
         \\import { logInfo } from "zttp:log";
         \\export function audit(req: Request): number {
-        \\  logInfo(req.headers["authorization"] ?? "", { n: 1 });
+        \\  logInfo(req.headers.authorization ?? "", { n: 1 });
         \\  return 1;
         \\}
         \\
@@ -10534,14 +10534,6 @@ const absent_read_refused = [_]AbsentReadCase{
     \\  return Response.json({ a: q.age });
     \\}
     },
-    .{ .name = "p02_computed_record_key", .expect = "ZTS309@5,ZTS500@3", .source =
-    \\structural P = { age: number };
-    \\structural W = { p: P | undefined };
-    \\function handler(req: Request): Response {
-    \\  const w: W = { p: undefined };
-    \\  return Response.json({ a: w["p"].age });
-    \\}
-    },
     .{ .name = "p03_match_arm_nullable_field", .expect = "ZTS216@6,ZTS309@7,ZTS500@3", .source =
     \\structural Q = { age: number };
     \\structural P = { q: Q | undefined };
@@ -10623,13 +10615,6 @@ const absent_read_refused = [_]AbsentReadCase{
     \\  let p: P | undefined = ps[0];
     \\  const a: number = p !== undefined && (() => { p = ps[1]; return 0; })() === 0 ? p.age : 0;
     \\  return Response.json({ a: a });
-    \\}
-    },
-    .{ .name = "p33_tracker_vs_phase_computed", .expect = "ZTS309@4,ZTS400@4,ZTS500@2", .source =
-    \\import { env } from "zttp:env";
-    \\function handler(req: Request): Response {
-    \\  const name = env("APP_NAME");
-    \\  return Response.json({ n: name["length"] });
     \\}
     },
     .{ .name = "p38_both_branches_assign", .expect = "ZTS309@6,ZTS500@2", .source =
@@ -10762,13 +10747,6 @@ const absent_read_refused = [_]AbsentReadCase{
     \\function handler(req: Request): Response {
     \\  const ps: P[] = [];
     \\  return Response.json({ a: ps[0].age });
-    \\}
-    },
-    .{ .name = "r05_computed_on_nullable", .expect = "ZTS309@4,ZTS500@2", .source =
-    \\structural P = { age: number };
-    \\function handler(req: Request): Response {
-    \\  const p: P | undefined = undefined;
-    \\  return Response.json({ a: p["age"] });
     \\}
     },
     .{ .name = "r06_method_call", .expect = "ZTS309@3,ZTS500@1", .source =
@@ -11266,7 +11244,7 @@ const absent_read_accepted = [_]AbsentReadCase{
     },
     .{ .name = "r15_header_index", .expect = "clean", .source =
     \\function handler(req: Request): Response {
-    \\  return Response.json({ a: req.headers["x"].length });
+    \\  return Response.json({ a: req.headers["x-id"].length });
     \\}
     },
     .{ .name = "r16_query_member", .expect = "clean", .source =
@@ -11475,7 +11453,7 @@ const absent_read_dict = [_]AbsentReadCase{
     \\  return Response.json({ t: f.current.time, lat: f.latitude });
     \\}
     },
-    .{ .name = "q34b_requestjson_isdict_index", .expect = "ZTS201@6,ZTS201@8", .source =
+    .{ .name = "q34b_requestjson_isdict_index", .expect = "ZTS201@6,ZTS201@8,ZTS605@8", .source =
     \\function handler(req: Request): Response {
     \\  const parsed = requestJson(req);
     \\  if (!parsed.ok) return Response.json({ error: "bad" }, { status: 400 });

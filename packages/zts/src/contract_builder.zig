@@ -3549,7 +3549,7 @@ test "builtin zttp:fetch extracts the Open-Meteo egress host from a literal url"
     // sole proven host with dynamic=false. This locks the demo's headline proof.
     const source =
         \\import { fetch } from "zttp:fetch";
-        \\const r = fetch("https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m&timezone=auto", { headers: { "Accept": "application/json" } });
+        \\const r = fetch("https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m&timezone=auto", { headers: { Accept: "application/json" } });
     ;
 
     var parser = try @import("zts-engine").parser.JsParser.initAdmission(allocator, allocator, source, .compile);

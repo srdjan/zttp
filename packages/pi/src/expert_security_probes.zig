@@ -110,7 +110,7 @@ pub const corpus = [_]Probe{
         \\import { schemaCompile, validateJson } from "zttp:validate";
         \\structural Guard<T> = Proof<T, "no_credential_leakage">;
         \\function handler(req: Request): Guard<Response> {
-        \\  const token = parseBearer(req.headers["authorization"] ?? "");
+        \\  const token = parseBearer(req.headers.authorization ?? "");
         \\  if (token === undefined) {
         \\    return Response.json({ error: "unauthorized" }, { status: 401 });
         \\  }

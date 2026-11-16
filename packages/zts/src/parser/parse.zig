@@ -5451,6 +5451,13 @@ pub const Parser = struct {
                         return error.ParseError;
                     } else if (self.check(.string_literal)) {
                         const key = self.current;
+                        // One spelling for a name key: `{ a: 1 }`. A key that
+                        // is not a name, such as "Content-Type", stays quoted.
+                        const quoted = key.text(self.source);
+                        if (quoted.len >= 2 and tokenizer_mod.isNameText(quoted[1 .. quoted.len - 1])) {
+                            self.errors.addErrorAt(.unsupported_feature, key, "a quoted record key that is a name is not supported; write the name without quotes, for example `{ a: 1 }`");
+                            return error.ParseError;
+                        }
                         if (try self.observeCommittedString(key)) return error.AdmissionRefused;
                         self.advance();
                         if (self.expression_profile) {

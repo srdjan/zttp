@@ -881,6 +881,15 @@ fn isIdentifierChar(c: u8) bool {
     return isIdentifierStart(c) or isDigit(c);
 }
 
+/// Whether `text` is one name, so a quoted key holding it could drop its quotes.
+pub fn isNameText(text: []const u8) bool {
+    if (text.len == 0 or !isIdentifierStart(text[0])) return false;
+    for (text[1..]) |c| {
+        if (!isIdentifierChar(c)) return false;
+    }
+    return true;
+}
+
 // --- Tests ---
 
 test "basic tokenization" {

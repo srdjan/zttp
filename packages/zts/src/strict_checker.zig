@@ -10,6 +10,7 @@ const handler_verifier = @import("handler_verifier.zig");
 const diagnostic_catalog = @import("diagnostic_catalog.zig");
 const diagnostic_projection = @import("diagnostic_projection.zig");
 const ir = @import("zts-engine").parser.ir;
+const engine_parser = @import("zts-engine").parser;
 const object = @import("zts-engine").object;
 const context = @import("zts-engine").context;
 const type_env_mod = @import("type_env.zig");
@@ -943,6 +944,14 @@ pub const StrictChecker = struct {
                             .node = node,
                             .message = "dynamic computed property access is not part of strict ZigTS",
                             .help = "use a typed field, a literal key, or validate/narrow the object before indexing",
+                        });
+                    } else if (self.isNameStringKey(member.computed)) {
+                        self.addDiagnostic(.{
+                            .severity = .err,
+                            .kind = .computed_property_access,
+                            .node = node,
+                            .message = "a string-literal read of a key that is a name is not part of strict ZigTS",
+                            .help = "read the field by name, for example `r.a` for `r[\"a\"]`",
                         });
                     }
                 }
@@ -2002,6 +2011,15 @@ pub const StrictChecker = struct {
             // exhaustive: any other key form is not static. A non-static key reports a dynamic computed property access error.
             else => false,
         };
+    }
+
+    /// Whether an index is a string literal that could be written as a member
+    /// name, such as `"a"` in `r["a"]`.
+    fn isNameStringKey(self: *const StrictChecker, node: NodeIndex) bool {
+        if (self.ir_view.getTag(node) != .lit_string) return false;
+        const index = self.ir_view.getStringIdx(node) orelse return false;
+        const text = self.ir_view.getString(index) orelse return false;
+        return engine_parser.isNameText(text);
     }
 
     /// Whether an argument is compiler-visible.

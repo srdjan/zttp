@@ -324,6 +324,10 @@ string with ZTS200, and extends the member census of the gate to the
 namespaces. U4a-3 takes X24 and X25. U4a-4 takes X31. U4a-5 refuses a number
 literal type that is not an integer in -32768..32767 (Decision 10 a).
 
+U4b runs as seven commits, one for each rule. U4b-1 takes X16 for record
+literal keys and the read `r["a"]`. U4b-2 takes X13, U4b-3 X14, U4b-4 X15,
+U4b-5 X18, U4b-6 G12 with N16, and U4b-7 N11 and N12.
+
 ### U2: parser refusals that move no hash (Sonnet, 3 sequential parts)
 
 The parts touch `packages/zts/src/parser/parse.zig`, so they run in order.
@@ -695,3 +699,22 @@ later.
   now lists the fraction and exponent refusal of U3b in the same row.
   A number literal value outside the range keeps the type `number`, which
   is sound for a value.
+- U4b-1 refuses a quoted record key that is a name, such as `{ "a": 1 }`,
+  with ZTS001, and a string-literal read of a key that is a name, such as
+  `r["a"]`, with ZTS605. A key that is not a name, such as
+  `"Content-Type"` or `"GET /health"`, stays quoted, because headers and
+  route tables need it. This finding stays open:
+  - A read through a `const` bound to a name string, such as
+    `const k = "a"; r[k]`, is admitted, because the strict checker treats
+    that binding as a static key.
+  U4b-1 moves the sources that used the refused forms: `req.headers.authorization`
+  in two examples, the contract fixture, the census probes, and the security
+  probe; `Accept:` in two fetch examples; and `req.query.city` in the
+  weather-egress corpus and its module example. It deletes the A3 cases
+  `p02_computed_record_key`, `p33_tracker_vs_phase_computed`, and
+  `r05_computed_on_nullable`, whose form is now refused before the verifier,
+  and it rewrites the bytecode identity lines of the four changed examples.
+- The U4a-3 to U4a-5 gates showed a second failed step, `test-proof-swallow`,
+  for the `catch` in `reportArrayCall`. Commit 29c1c9ce adds the allowlist
+  row. Each later gate compares the failed step count with the baseline of
+  218/221.

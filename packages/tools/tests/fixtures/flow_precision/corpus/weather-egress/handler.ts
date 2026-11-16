@@ -21,12 +21,12 @@ export function handler(req: Request): Proof<Response,
   | "canonical"
   | "cost_bounded"
 > {
-  const checked = validateObject("cityQuery", { city: req.query["city"] });
+  const checked = validateObject("cityQuery", { city: req.query.city });
   if (!checked.ok) {
     return Response.json({ error: "missing or invalid city query parameter" }, { status: 400 });
   }
   const upstream = fetch("https://api.open-meteo.com/v1/forecast", {
-    query: { city: checked.value["city"] },
+    query: { city: checked.value.city },
     maxResponseBytes: 65536
   });
   if (!upstream.ok) {

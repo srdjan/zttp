@@ -23,7 +23,7 @@ function handler(req: Request): WeatherProof<Response> {
 
   const upstream = fetch(
     "https://api.open-meteo.com/v1/forecast?latitude=52.52&longitude=13.41&current=temperature_2m,relative_humidity_2m,wind_speed_10m,is_day&timezone=auto",
-    { headers: { "Accept": "application/json" }, maxResponseBytes: 65536 },
+    { headers: { Accept: "application/json" }, maxResponseBytes: 65536 },
   );
 
   if (!upstream.ok) {
