@@ -312,7 +312,7 @@ dispatches. Bulk rewrite scripts are not allowed.
 | U5 | G4 |
 | U6 | The spec text for Decisions 3, 4, 6, and 7, and for N1 to N16 |
 
-U4a runs as four commits, one for each rule. U4a-1 refuses the array members
+U4a runs as five commits, one for each rule. U4a-1 refuses the array members
 `forEach`, `pop`, `shift`, `unshift`, `splice`, `toReversed`, and `concat`,
 and the string member `substring`. The checker already refused `reverse`
 because the runtime does not install it, so U4a-1 deletes the eight methods
@@ -321,7 +321,8 @@ U4a-2 refuses each member of an ambient namespace that the runtime does not
 install, such as `Math.nope` and `Object.create`. It deletes `Array.from`,
 `Array.of`, and `Object.hasOwn`, refuses a `length` write on an array or a
 string with ZTS200, and extends the member census of the gate to the
-namespaces. U4a-3 takes X24 and X25. U4a-4 takes X31.
+namespaces. U4a-3 takes X24 and X25. U4a-4 takes X31. U4a-5 refuses a number
+literal type that is not an integer in -32768..32767 (Decision 10 a).
 
 ### U2: parser refusals that move no hash (Sonnet, 3 sequential parts)
 
@@ -538,7 +539,8 @@ later.
   The type store holds 16-bit integer literals only, and reading `1.5` as
   `number` admits values that the type excludes. An integer literal type
   outside -32768..32767 is still read as `number`, so `x: "a" | 40000`
-  admits `f(5)`. Decision 10 is open for that case.
+  admits `f(5)`. Decision 10 (a) refuses that case with ZTS001. Unit U4a-5
+  makes the refusal, after U4a-4.
 - A numeric literal type at the start of an annotation does not parse:
   `x: 400` gets ZTS003, and `const v: 400 = 5;` gets ZTS021. The probable
   cause is that a type start does not include a digit. This fails closed.
@@ -661,3 +663,19 @@ later.
     `range.length` off the function itself is a different value. A probe of
     the run-time value can confirm what it reads.
   - The `JSON` line of the admitted members goes away with U5.
+- U4a-3 refuses an array member call whose argument count spec 6.5 does
+  not give, and a callback with more parameters than the method passes,
+  with ZTS202. It refuses `join` on an array whose element type is known
+  and is not `string`, with ZTS203. The callback now receives the element
+  and the index only. These findings stay open:
+  - The flow checker still models a callback parameter that names the
+    array itself. Checked source can no longer reach that parameter, so a
+    later unit can delete the model. U4a-3 deletes the two fixtures in
+    `flow_false_proofs.zig` that used it, `alias_callback_array_param` and
+    `iterated_array_write_literal_receiver`, and lowers the floor to 36.
+    The frozen corpus count in `flow_precision_expectations.zig` goes from
+    90 to 88. The 2026-10-20 dispositions plan still names both fixtures as
+    history.
+  - `join` on an array whose element type is not inferred, such as the
+    result of an untyped function, is admitted. The runtime writes a number
+    or a boolean element as text and skips `null` and `undefined`.

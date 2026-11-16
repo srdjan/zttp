@@ -52,7 +52,7 @@ pub const Fixture = struct {
 
 /// The count of fixtures at the time this file was written. The floor makes a
 /// deleted fixture a test failure instead of a silent loss.
-const minimum_fixtures: usize = 38;
+const minimum_fixtures: usize = 36;
 
 pub const fixtures = [_]Fixture{
     // -- A `let` reassigned in an `if` or `else` branch.
@@ -125,15 +125,6 @@ pub const fixtures = [_]Fixture{
     \\  return Response.html(parts.join(""));
     \\}
     },
-    // runtime: known-limits row "A write through an alias of an array" (callback array parameter)
-    .{ .name = "alias_callback_array_param", .property = .injection_safe, .source =
-    \\import { escapeHtml } from "zttp:text";
-    \\function handler(req: Request): Proof<Response, "injection_safe"> {
-    \\  const parts: string[] = [escapeHtml(req.url)];
-    \\  const out: string[] = parts.map((v: string, i: number, all: string[]): string => { all.push(req.url); return v; });
-    \\  return Response.html(parts.join(""));
-    \\}
-    },
     // -- A write into a later element of the array a callback iterates.
     // runtime: known-limits row "A write into a later element of the array that a forEach ... callback iterates"
     .{ .name = "iterated_array_write_foreach_html", .property = .injection_safe, .source =
@@ -163,16 +154,6 @@ pub const fixtures = [_]Fixture{
     \\  const secret: string = env("SECRET_KEY") ?? "";
     \\  const parts: string[] = ["a", "b"];
     \\  parts.map((v: string): string => { parts[1] = secret; logInfo("m", { v: v }); return v; });
-    \\  return Response.json({ ok: true });
-    \\}
-    },
-    // runtime: known-limits row "A write into a later element of the array that a forEach ... callback iterates" (array literal receiver)
-    .{ .name = "iterated_array_write_literal_receiver", .property = .no_secret_leakage, .source =
-    \\import { env } from "zttp:env";
-    \\import { logInfo } from "zttp:log";
-    \\function handler(req: Request): Proof<Response, "no_secret_leakage"> {
-    \\  const secret: string = env("SECRET_KEY") ?? "";
-    \\  ["a", "b"].map((v: string, i: number, all: string[]): string => { if (i === 0) { all[1] = secret; } logInfo("value", { value: v }); return v; });
     \\  return Response.json({ ok: true });
     \\}
     },

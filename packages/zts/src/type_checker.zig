@@ -1788,6 +1788,7 @@ pub const TypeChecker = struct {
                 self.walkExpr(c.callee);
                 self.reportUnionMemberCall(c.callee);
                 self.bindCallbackElement(c);
+                self.reportArrayCallShape(node, c);
                 if (self.closure_writes_outer) {
                     self.walkCallArgsThenKill(node, c);
                     return;
@@ -4560,8 +4561,8 @@ pub const TypeChecker = struct {
                 if (callback == null_type_idx) return null_type_idx;
                 const returned = self.callbackReturnType(callback);
                 if (returned == null_type_idx) return null_type_idx;
-                // `map` passes the element, its index, and the array.
-                const passed = [_]TypeIndex{ element, pool.idx_number, receiver_array };
+                // `map` passes the element and its index (spec 6.5).
+                const passed = [_]TypeIndex{ element, pool.idx_number };
                 if (!self.callbackAccepts(callback, &passed)) return null_type_idx;
                 return pool.addArray(self.allocator, returned);
             },
@@ -4583,8 +4584,8 @@ pub const TypeChecker = struct {
                 const joined = pool.addUnion(self.allocator, &members);
                 if (joined == null_type_idx) return null_type_idx;
                 // `reduce` passes the accumulator (the seed first, then each
-                // callback result), the element, its index, and the array.
-                const passed = [_]TypeIndex{ joined, element, pool.idx_number, receiver_array };
+                // callback result), the element, and its index (spec 6.5).
+                const passed = [_]TypeIndex{ joined, element, pool.idx_number };
                 if (!self.callbackAccepts(callback, &passed)) return null_type_idx;
                 return joined;
             },
@@ -5202,23 +5203,20 @@ pub const TypeChecker = struct {
     /// How the runtime calls the inline callback of an array method, which
     /// decides the parameters that the checker can type.
     const CallbackShape = enum {
-        /// `(element, index, array)`: `map`, `filter`, `find`, `findIndex`,
-        /// `forEach`, `some`, and `every`.
-        element_index_array,
-        /// Only the element is typed. `flatMap` is not installed.
-        element_only,
+        /// `(element, index)`: `map`, `filter`, `find`, `findIndex`, `some`,
+        /// and `every` (spec 6.5).
+        element_index,
         /// `toSorted` calls its comparator with two elements.
         comparator,
-        /// `reduce` calls `(accumulator, element, index, array)`.
+        /// `reduce` calls `(accumulator, element, index)`.
         reduce,
     };
 
     fn callbackShape(name: []const u8) ?CallbackShape {
-        const element_index_array = [_][]const u8{ "map", "filter", "find", "findIndex", "some", "every" };
-        for (element_index_array) |m| {
-            if (std.mem.eql(u8, m, name)) return .element_index_array;
+        const element_index = [_][]const u8{ "map", "filter", "find", "findIndex", "some", "every" };
+        for (element_index) |m| {
+            if (std.mem.eql(u8, m, name)) return .element_index;
         }
-        if (std.mem.eql(u8, name, "flatMap")) return .element_only;
         if (std.mem.eql(u8, name, "toSorted")) return .comparator;
         if (std.mem.eql(u8, name, "reduce")) return .reduce;
         return null;
@@ -5264,12 +5262,10 @@ pub const TypeChecker = struct {
         const elem = pool.getArrayElement(arr);
         if (elem == null_type_idx) return;
         switch (shape) {
-            .element_index_array => {
+            .element_index => {
                 _ = self.bindCallbackParam(func, 0, elem);
                 _ = self.bindCallbackParam(func, 1, pool.idx_number);
-                _ = self.bindCallbackParam(func, 2, arr);
             },
-            .element_only => _ = self.bindCallbackParam(func, 0, elem),
             .comparator => {
                 _ = self.bindCallbackParam(func, 0, elem);
                 _ = self.bindCallbackParam(func, 1, elem);
@@ -5277,7 +5273,6 @@ pub const TypeChecker = struct {
             .reduce => {
                 _ = self.bindCallbackParam(func, 1, elem);
                 _ = self.bindCallbackParam(func, 2, pool.idx_number);
-                _ = self.bindCallbackParam(func, 3, arr);
                 self.bindReduceAccumulator(c, arg, func, elem);
             },
         }
@@ -7729,11 +7724,9 @@ pub const TypeChecker = struct {
 
     fn callbackMethod(name: []const u8) ?CallbackMethod {
         return switch (callbackShape(name) orelse return null) {
-            .element_index_array => .element_methods,
+            .element_index => .element_methods,
             .comparator => .comparator,
             .reduce => .reduce,
-            // exhaustive: `flatMap` is not installed, so no row types it.
-            .element_only => null,
         };
     }
 
@@ -7802,6 +7795,90 @@ pub const TypeChecker = struct {
         return null;
     }
 
+    /// The argument count of each admitted array member, and the most
+    /// parameters its callback may declare, as spec 6.5 gives them. A member
+    /// with no callback has `callback_params` 0.
+    const ArrayCallShape = struct { name: []const u8, args: usize, callback_params: usize };
+    const array_call_shapes = [_]ArrayCallShape{
+        .{ .name = "every", .args = 1, .callback_params = 2 },
+        .{ .name = "filter", .args = 1, .callback_params = 2 },
+        .{ .name = "find", .args = 1, .callback_params = 2 },
+        .{ .name = "findIndex", .args = 1, .callback_params = 2 },
+        .{ .name = "includes", .args = 1, .callback_params = 0 },
+        .{ .name = "indexOf", .args = 1, .callback_params = 0 },
+        .{ .name = "join", .args = 1, .callback_params = 0 },
+        .{ .name = "map", .args = 1, .callback_params = 2 },
+        .{ .name = "reduce", .args = 2, .callback_params = 3 },
+        .{ .name = "slice", .args = 2, .callback_params = 0 },
+        .{ .name = "some", .args = 1, .callback_params = 2 },
+        .{ .name = "toSorted", .args = 1, .callback_params = 2 },
+    };
+
+    /// Refuse an array member call whose argument list or callback differs
+    /// from spec 6.5 (ZTS202), and a `join` over elements that are not
+    /// strings (ZTS203). The receiver must be an array, a tuple, or a union of
+    /// them.
+    fn reportArrayCallShape(self: *TypeChecker, node: NodeIndex, call: Node.CallExpr) void {
+        const member = self.ir_view.getMember(call.callee) orelse return;
+        if (member.computed != null_node) return;
+        const name = self.resolveAtomName(member.property) orelse return;
+        const shape = for (array_call_shapes) |candidate| {
+            if (std.mem.eql(u8, candidate.name, name)) break candidate;
+        } else return;
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        const receiver = self.callbackReceiver(self.inferType(member.object));
+        self.report_inference_diagnostics = previous;
+        const elements = receiver orelse return;
+
+        if (call.args_count != shape.args) {
+            self.reportArrayCall(node, .arg_count_mismatch, "`{s}` takes {d} argument(s) (spec 6.5)", .{ name, shape.args }, "write the arguments that the member takes, such as `xs.slice(start, end)` or `xs.reduce(f, init)`");
+            return;
+        }
+        // An element with no known type is not read here; `unknown` is.
+        const typed = elements.element == self.env.pool.idx_unknown or self.isDefiniteType(elements.element, 0);
+        if (std.mem.eql(u8, name, "join") and typed and !self.env.isAssignableTo(elements.element, self.env.pool.idx_string)) {
+            self.reportArrayCall(node, .arg_type_mismatch, "`join` takes an array of strings", .{}, "convert each element with `String` first, such as `xs.map((x) => String(x)).join(\",\")`");
+            return;
+        }
+        if (shape.callback_params == 0) return;
+        const arg = self.ir_view.getListIndex(call.args_start, 0);
+        const declared = self.callbackParamCount(arg) orelse return;
+        if (declared <= shape.callback_params) return;
+        self.reportArrayCall(node, .arg_count_mismatch, "the callback of `{s}` takes at most {d} parameter(s) (spec 6.5)", .{ name, shape.callback_params }, "remove the array parameter; read the array through its own name");
+    }
+
+    /// The number of parameters that the callback `arg` declares: an inline
+    /// function, or a value of a function type. Null for any other argument.
+    fn callbackParamCount(self: *TypeChecker, arg: NodeIndex) ?usize {
+        const tag = self.ir_view.getTag(arg) orelse return null;
+        if (tag == .arrow_function or tag == .function_expr) {
+            const func = self.ir_view.getFunction(arg) orelse return null;
+            return func.params_count;
+        }
+        const previous = self.report_inference_diagnostics;
+        self.report_inference_diagnostics = false;
+        defer self.report_inference_diagnostics = previous;
+        const callback_type = self.resolvedType(self.inferType(arg));
+        if (callback_type == null_type_idx or self.env.pool.getTag(callback_type) != .t_function) return null;
+        return self.env.pool.getFunctionInfo(callback_type).params.len;
+    }
+
+    fn reportArrayCall(
+        self: *TypeChecker,
+        node: NodeIndex,
+        kind: DiagnosticKind,
+        comptime format: []const u8,
+        args: anytype,
+        help: []const u8,
+    ) void {
+        const message = self.allocator.print(format, args) catch {
+            self.markAllocationFailure();
+            return;
+        };
+        self.addDiagnostic(.{ .severity = .err, .kind = kind, .node = node, .message = message, .help = help, .allocated = true });
+    }
+
     /// Compare the parameters of the callback argument of an array method
     /// with the values that the runtime passes (T1). Returns true after it
     /// reports a mismatch, so the call is reported once.
@@ -7833,17 +7910,17 @@ pub const TypeChecker = struct {
         }
         if (callback_type == null_type_idx or pool.getTag(callback_type) != .t_function) return false;
 
-        var passed: [4]TypeIndex = undefined;
+        var passed: [3]TypeIndex = undefined;
         var passed_count: usize = 0;
         switch (method) {
             .element_methods => {
-                passed = .{ receiver.element, pool.idx_number, receiver.array, null_type_idx };
-                passed_count = 3;
+                passed = .{ receiver.element, pool.idx_number, null_type_idx };
+                passed_count = 2;
             },
             .comparator => {
                 const element = self.withoutUndefined(receiver.element);
                 if (element == null_type_idx) return false;
-                passed = .{ element, element, null_type_idx, null_type_idx };
+                passed = .{ element, element, null_type_idx };
                 passed_count = 2;
             },
             .reduce => {
@@ -7852,10 +7929,13 @@ pub const TypeChecker = struct {
                     const seed = self.inferType(self.ir_view.getListIndex(call.args_start, 1));
                     accumulator = if (seed != null_type_idx and self.isDefiniteType(seed, 0)) pool.widenLiteral(seed) else null_type_idx;
                 }
-                passed = .{ accumulator, receiver.element, pool.idx_number, receiver.array };
-                passed_count = 4;
+                passed = .{ accumulator, receiver.element, pool.idx_number };
+                passed_count = 3;
             },
         }
+        // A callback with more parameters than the method passes is reported
+        // by `reportArrayCallShape` with ZTS202.
+        if (pool.getFunctionInfo(callback_type).params.len > passed_count) return false;
 
         const refused = self.firstRefusedCallbackParam(callback_type, passed[0..passed_count]);
         var param_position: usize = 0;
@@ -11110,12 +11190,12 @@ test "TypeChecker keeps the current JSON binding distinction for schemas" {
     , 0, 0);
 }
 
-test "TypeChecker: toSorted with no comparator type-checks clean" {
-    // The single comparator parameter is optional, so a zero-arg call is valid.
+test "TypeChecker: toSorted with no comparator is refused" {
+    // Spec 6.5 gives `toSorted` one comparator argument.
     try checkTypedSource(
         \\const nums = [3, 1, 2];
         \\const sorted = nums.toSorted();
-    , 0, 0);
+    , 1, 0);
 }
 
 // ---------------------------------------------------------------------------

@@ -260,7 +260,7 @@ test "every expected property holds" {
 /// Cases the whole frozen corpus holds: the precision manifest, the permanent
 /// unsafe fixtures, and the clean contrasts. The count keeps the floors below
 /// from passing over an emptied corpus.
-const frozen_corpus_cases: usize = 90;
+const frozen_corpus_cases: usize = 88;
 
 const CorpusTally = struct {
     cases: usize = 0,

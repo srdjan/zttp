@@ -89,8 +89,8 @@ fn param(comptime t: []const u8) Source {
 }
 
 /// A function that returns the array expression `e` over a `number[]` named `xs`.
-fn arr_call(comptime e: []const u8) Source {
-    return c(top("function g(xs: number[]): unknown {\n  return " ++ e ++ ";\n}"));
+fn arr_call(comptime span: []const u8, comptime e: []const u8) Refusal {
+    return r(span, top("function g(xs: number[]): unknown {\n  return " ++ e ++ ";\n}"));
 }
 
 const boundary_proof = "structural Boundary<T> = Proof<T, \"deterministic\" | \"read_only\">;\n";
@@ -819,6 +819,27 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("function g(): string[] {\n  return Object.keys({ a: 1 });\n}")),
     },
     .{
+        .key = "An array member call with an argument list that spec 6.5 does not give, such as `xs.slice(1)`, `xs.slice()`, `xs.toSorted()`, `xs.join()`, `xs.reduce(f)`, or `xs.indexOf(v, i)`, and a callback with a third parameter, such as `xs.map((x, i, all) => x)`",
+        .refused = &.{
+            arr_call("xs.slice(1)", "xs.slice(1)"),
+            arr_call("xs.slice()", "xs.slice()"),
+            arr_call("xs.toSorted()", "xs.toSorted()"),
+            r("xs.join()", top("function g(xs: string[]): string {\n  return xs.join();\n}")),
+            arr_call("xs.reduce(f)", "xs.reduce((a: number, b: number): number => a)"),
+            arr_call("xs.indexOf(v, i)", "xs.indexOf(1, 0)"),
+            arr_call("xs.map((x, i, all) => x)", "xs.map((x: number, i: number, all: number[]): number => x)"),
+        },
+        .clean = c(top("function g(xs: number[]): number {\n  const a = xs.slice(0, 1);\n  const b = xs.map((x: number, i: number): number => x + i);\n  return xs.reduce((acc: number, x: number, i: number): number => acc + x + i, 0);\n}")),
+    },
+    .{
+        .key = "`join` on an array of non-strings, such as `[1, 2].join(\"\")`",
+        .refused = &.{
+            r("join", top("function g(xs: number[]): string {\n  return xs.join(\"\");\n}")),
+            r("[1, 2].join(\"\")", top("function g(): string {\n  return [1, 2].join(\"\");\n}")),
+        },
+        .clean = c(top("function g(): string {\n  return [1, 2].map((x: number): string => String(x)).join(\"\");\n}")),
+    },
+    .{
         .key = "A numeric index read on a string, such as `s[0]`",
         .refused = &.{r("s[0]", body("  const s = \"abc\";\n  const c = s[0];"))},
         .clean = c(body("  const s = \"abc\";\n  const c = s.charAt(0);")),
@@ -1371,23 +1392,6 @@ pub const gap_rows = [_]GapRow{
             c(top(g_fn ++ "function h(c: boolean): number {\n  if (c) {\n    return 1;\n  } else g();\n  return 2;\n}")),
             c(top(g_fn ++ "function h(xs: number[]): number {\n  for (const k of xs) g();\n  return 2;\n}")),
         },
-    },
-    .{
-        .key = "An array member call with an argument list that spec 6.5 does not give, such as `xs.slice(1)`, `xs.slice()`, `xs.toSorted()`, `xs.join()`, `xs.reduce(f)`, `xs.indexOf(v, i)`, and a three-parameter `map` callback",
-        .sources = &.{
-            arr_call("xs.slice(1)"),
-            arr_call("xs.slice()"),
-            arr_call("xs.toSorted()"),
-            arr_call("xs.indexOf(1, 0)"),
-            arr_call("xs.includes(1, 0)"),
-            arr_call("xs.reduce((a: number, b: number): number => a)"),
-            arr_call("xs.map((x: number, i: number, all: number[]): number => x)"),
-            c(top("function g(xs: string[]): string {\n  return xs.join();\n}")),
-        },
-    },
-    .{
-        .key = "`join` on an array of non-strings, such as `[1, 2].join(\"\")`",
-        .sources = &.{c(top("function g(): string {\n  return [1, 2].join(\"\");\n}"))},
     },
     .{
         .key = "An index read or a `length` read on `Bytes`",

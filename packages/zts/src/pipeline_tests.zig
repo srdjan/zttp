@@ -4190,14 +4190,14 @@ test "builtin result: includes on an array is boolean" {
 test "builtin result: join on an array is string" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };
-        \\function f(xs: number[]): number { const p: Nope = xs.join(","); return 0; }
+        \\function f(xs: string[]): number { const p: Nope = xs.join(","); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "builtin result: join with a separator that is not a string is still string" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };
-        \\function f(xs: number[], n: number): number { const p: Nope = xs.join(n); return 0; }
+        \\function f(xs: string[], n: number): number { const p: Nope = xs.join(n); return 0; }
     , "type 'string' is not assignable to type '{ zz: Bytes }'");
 }
 
@@ -4243,25 +4243,11 @@ test "builtin result: reduce keeps the initial value type when it differs from t
     , "type 'string | number' is not assignable to type '{ zz: Bytes }'");
 }
 
-test "builtin result: reduce with no initial value joins the element and the callback return" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: number[], cb: (acc: number | string, n: number) => string): number { const p: Nope = xs.reduce(cb); return 0; }
-    , "type 'number | string' is not assignable to type '{ zz: Bytes }'");
-}
-
 test "builtin result: map with a callback whose parameter does not accept the element is ZTS203 and adds no result type" {
     try expectOneArgMismatch(
         \\structural Nope = { zz: Bytes };
         \\function f(xs: string[], cb: (n: number) => number): number { const p: Nope = xs.map(cb); return 0; }
     , "callback parameter '#1' is 'number', but map passes 'string'");
-}
-
-test "builtin result: map with a callback that takes more required parameters than the runtime passes is ZTS203 and adds no result type" {
-    try expectOneArgMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: number[], cb: (n: number, i: number, a: number[], extra: number) => string): number { const p: Nope = xs.map(cb); return 0; }
-    , "callback parameter '#4' is 'number', but map passes 'undefined'");
 }
 
 test "builtin result: reduce with an accumulator that does not accept the callback return is ZTS203 and adds no result type" {
@@ -5430,13 +5416,6 @@ test "callback parameter: the index of a map callback is number" {
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
-test "callback parameter: the array of a map callback is the receiver array type" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: string[]): number { xs.map((v, i, a) => { const p: Nope = a; return v; }); return 0; }
-    , "type 'string[]' is not assignable to type '{ zz: Bytes }'");
-}
-
 test "callback parameter: the index of a filter callback is number" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };
@@ -5463,13 +5442,6 @@ test "callback parameter: the index of a some callback is number" {
         \\structural Nope = { zz: Bytes };
         \\function f(xs: string[]): number { xs.some((v, i) => { const p: Nope = i; return true; }); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "callback parameter: the array of an every callback is the receiver array type" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: string[]): number { xs.every((v, i, a) => { const p: Nope = a; return true; }); return 0; }
-    , "type 'string[]' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "callback parameter: both parameters of a toSorted comparator are the element type" {
@@ -5503,13 +5475,6 @@ test "callback parameter: the accumulator of a reduce callback is the widened in
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
 }
 
-test "callback parameter: the accumulator of a reduce with no initial value is the element type" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: string[]): number { xs.reduce((acc, v) => { const p: Nope = acc; return v; }); return 0; }
-    , "type 'string' is not assignable to type '{ zz: Bytes }'");
-}
-
 test "callback parameter: the element of a reduce callback is the element type" {
     try expectOneMismatch(
         \\structural Nope = { zz: Bytes };
@@ -5522,13 +5487,6 @@ test "callback parameter: the index of a reduce callback is number" {
         \\structural Nope = { zz: Bytes };
         \\function f(xs: string[]): number { xs.reduce((acc, v, i) => { const p: Nope = i; return acc; }, 0); return 0; }
     , "type 'number' is not assignable to type '{ zz: Bytes }'");
-}
-
-test "callback parameter: the array of a reduce callback is the receiver array type" {
-    try expectOneMismatch(
-        \\structural Nope = { zz: Bytes };
-        \\function f(xs: string[]): number { xs.reduce((acc, v, i, a) => { const p: Nope = a; return acc; }, 0); return 0; }
-    , "type 'string[]' is not assignable to type '{ zz: Bytes }'");
 }
 
 test "callback parameter: a reduce callback that returns a different type than its accumulator is refused" {

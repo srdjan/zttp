@@ -397,17 +397,19 @@ A result has a type only when each argument has the type that the runtime reads.
 | `Object.values(o)` | `unknown[]`: a record can hold a field that its type does not name |
 | `Object.entries(o)` | `[string, unknown][]` |
 
-An unannotated parameter of an inline array callback takes the type of the value in its position: the element, the index (`number`), and the array. A `toSorted` comparator gets two elements. The loop variable of `for (const i of range(n))` is a `number`.
+An unannotated parameter of an inline array callback takes the type of the value in its position: the element and the index (`number`). A `reduce` callback gets the accumulator first, and a `toSorted` comparator gets two elements. The loop variable of `for (const i of range(n))` is a `number`.
 
 An unannotated `const` or `let` binding of an array literal widens each element type. `const ys = [4, 5]` is `number[]`, `const t = ["a", 1]` is `[string, number]`, and `const out = []` is `unknown[]`. The loop variable of `for...of` over a tuple is the union of the widened element types: over `[1, 2, 3]` it is a `number`, and over `["a", 1]` it is `string | number`. Over a union of arrays and tuples, it is the union of the element types of each member.
 
-An annotated or named callback of `map`, `filter`, `find`, `findIndex`, `some`, `every`, `toSorted`, or `reduce` must accept the value that the method passes in each position. A parameter past those values must accept `undefined`. Otherwise the call gets ZTS203:
+An annotated or named callback of `map`, `filter`, `find`, `findIndex`, `some`, `every`, `toSorted`, or `reduce` must accept the value that the method passes in each position. Otherwise the call gets ZTS203:
 
 ```javascript
 [1, 2].map((s: string) => s.toUpperCase());      // ZTS203: callback parameter 's' is 'string', but map passes 'number'
 [1, 2].map(sha256);                              // ZTS203: callback parameter '#1' is 'string', but map passes 'number'
 [1, 2].reduce((acc: string, n: number) => n, ""); // ZTS203: callback parameter 'acc' is 'string', but reduce passes 'number'
 ```
+
+A callback with a parameter past those values gets ZTS202, as does a call with an argument count that spec 6.5 does not give, such as `xs.slice(1)` or `xs.reduce(f)`. A `join` over elements that are not strings gets ZTS203.
 
 A named predicate whose parameters accept the element is accepted: `[1, 2].filter(isBig)` with `function isBig(n: number): boolean`.
 

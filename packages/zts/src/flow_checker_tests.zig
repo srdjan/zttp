@@ -1999,7 +1999,7 @@ test "an imported function carrying nothing keeps the property" {
     // The point of the cross-file summary: an ordinary helper in another file
     // must not cost the proof the way an untraceable call does.
     const imported =
-        \\export function greet(name) { return ["hello ", name].join(""); }
+        \\export function greet(name: string): string { return ["hello ", name].join(""); }
     ;
     const source =
         \\import { greet } from "./utils.ts";
