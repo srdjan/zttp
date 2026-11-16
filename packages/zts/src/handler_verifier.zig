@@ -3154,18 +3154,6 @@ const route_table_dispatch =
     \\}
 ;
 
-test "a table mutated through an array literal root is unresolved" {
-    // `[routes][0]` is the table itself. Before the fix the assignment root was
-    // not an identifier, the mutation was skipped, and the table proved stable.
-    const counts = try routeVerifierCounts(route_table_prelude ++
-        \\const routes = { "GET /": getHome };
-        \\function handler(req) {
-        \\  [routes][0]["GET /"] = bad;
-    ++ "\n" ++ route_table_dispatch);
-    try std.testing.expect(counts.unresolved_dispatch);
-    try std.testing.expect(counts.unchecked_result > 0);
-}
-
 test "a table iterated through an array literal is unresolved" {
     const counts = try routeVerifierCounts(route_table_prelude ++
         \\const routes = { "GET /": getHome };

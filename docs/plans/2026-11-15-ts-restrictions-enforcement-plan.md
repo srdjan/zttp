@@ -104,11 +104,13 @@ corpus outputs. Revision 2 of this table folds in the Fable review.
 | N15 | `Number.parseInt` and `Number.parseFloat` | 0 and 0 | `parseInt` and `parseFloat` | Adopt |
 | N16 | Any call in an assignment target, such as `mk().n = 2` (the spec requires only purity) | not measured | Bind the receiver to a `const` first | Adopt |
 | N17 | `else` after a branch that always returns | not measured | An early-return guard | Defer: low value |
+| N18 | An assignment target whose root is not a name, such as `[1, 2][0] = 5` and `[mk(), b][0].n = 2` | not measured | Bind the value to a `const` first, then assign through the name | Adopt |
 
 U0 measures each "not measured" count before U6 starts.
 
 Owner decision, 2026-11-15: adopt N1 to N5, N7, N8, and N10 to N16. Defer N6,
 N9, and N17.
+Owner decision, 2026-11-16: adopt N18 (Decision 13).
 
 ### Decisions 3 to 7: conflicts found by the U0 sweep
 
@@ -176,6 +178,40 @@ U4b-3b, deletes the code with its own gate.
 
 The rejected options were (b), which deletes the code in the U4b-3 commit,
 and (c), which keeps the code as defense in depth.
+
+### Decision 12: the code that handles an untracked assignment root
+
+After U4b-6, `route_resolution.zig` and `handler_verifier.zig` still treat
+an assignment root that is not a tracked name as a write that can reach any
+route table. The owner chose option (a) on 2026-11-16: search the scopes,
+then delete that code in its own unit. The rejected options were (b), which
+keeps the code as defense in depth, and (c), which deletes it at once.
+
+Correction: the premise of Decision 12 was wrong. After U4b-6 an array
+literal root still parses, and `[mk(), b][0].n = 2` writes through `b`. A
+`zts check` probe showed this. Decision 13 closes that path first.
+
+### Decision 13: the root of an assignment target is a name (N18)
+
+The owner chose option (a) on 2026-11-16. ZTS016 refuses an assignment
+target whose root is not a name, such as `[1, 2][0] = 5` and
+`[mk(), b][0].n = 2`. The spec grammar becomes `LValue ::= Ident
+AssignableSuffix*`, and the `AssignableExpr` production is deleted. Unit
+U4b-6b makes the refusal. Unit U4b-6c first adds a test that a table
+returned from a function and then written stays unresolved. Then U4b-6c
+deletes the untracked-root code. The rejected options were (b), which
+keeps the array-literal root and the code, and (c), which defers N18.
+
+### Decision 14: a closure that writes a captured table parameter
+
+`route_resolution.zig#Resolver.assignmentRootMatch` compares the binding key of an
+assignment root with the key of the route table. An upvalue reference
+carries the scope and slot of the closure, not of its source. So a closure
+that writes a captured table parameter does not match, and the route table
+stays resolved. A test outside the tree confirms the hole. The owner chose
+option (a) on 2026-11-16: commit the reproducing test and fix the hole in
+its own unit, R1. The rejected options were (b), which records the hole for
+later, and (c), which fixes it inside U4b-6c.
 
 ## Units
 
@@ -345,6 +381,8 @@ U4b runs as eight commits, one for each rule. U4b-1 takes X16 for record
 literal keys and the read `r["a"]`. U4b-2 takes X13, U4b-3 X14, U4b-4 X15,
 U4b-5 X18, U4b-6 G12 with N16, and U4b-7 N11 and N12. U4b-3b deletes the
 code that handles a duplicate declaration (Decision 11).
+U4b-6b takes N18 (Decision 13). U4b-6c deletes the untracked-root code
+(Decisions 12 and 13). R1 fixes the closure-capture hole (Decision 14).
 
 ### U2: parser refusals that move no hash (Sonnet, 3 sequential parts)
 
@@ -801,7 +839,21 @@ later.
   example and one `handler_verifier.zig` test of `getBox().n = 5`. These
   findings stay open:
   - `handler_verifier.zig` still treats an untracked assignment root as a
-    write that can reach any route table. No parsed input reaches that code
-    now.
+    write that can reach any route table. Correction: an array literal root
+    such as `[mk(), b][0].n = 2` still reaches that code after U4b-6.
+    U4b-6b refuses that root, and U4b-6c deletes the code.
   - `docs/coverage.json` and `docs/convergence.json` still carry the old
     grammar hash. They move with the U7 re-record.
+- U4b-6b refuses an assignment target whose root is not a name, such as
+  `[1, 2][0] = 5` and `[mk(), b][0].n = 2`, with ZTS016 at the root (N18,
+  Decision 13). A call root keeps the U4b-6 message at the callee. The spec
+  grammar and `grammar_registry.zig` replace `AssignableExpr` with `LValue
+  ::= Ident AssignableSuffix*`. The grammar hash moves again, so the same
+  pins as in U4b-6 move. One `handler_verifier.zig` test of
+  `[routes][0]["GET /"] = bad` is deleted, and one precompile case loses its
+  `[1, 2][0] = 5` line. The bible probes pin the refusal.
+  The scope of U4b-6c is smaller than Decision 13 says.
+  `route_resolution.zig#Resolver.assignmentRootMatch` also classifies call receivers,
+  and a receiver root can still be a call or an array literal. So its
+  array-literal arm and its `untracked` answer stay. U4b-6c measures what
+  only an assignment reaches before it deletes code.

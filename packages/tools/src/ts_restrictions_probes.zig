@@ -1393,6 +1393,14 @@ const refusal_rows_b = [_]RefusalRow{
         .clean = c(top("function mk(): { n: number } {\n  return { n: 1 };\n}\nfunction g(): number {\n  const m = mk();\n  m.n = 2;\n  return m.n;\n}")),
     },
     .{
+        .key = "An assignment target whose root is not a name, such as `[1, 2][0] = 5` and `[mk(), b][0].n = 2`",
+        .refused = &.{
+            r("[1, 2][0] = 5", body("  [1, 2][0] = 5;")),
+            r("[mk(), b][0].n = 2", top("function mk(): { n: number } {\n  return { n: 1 };\n}\nfunction g(): number {\n  const b = { n: 0 };\n  [mk(), b][0].n = 2;\n  return b.n;\n}")),
+        },
+        .clean = c(top("function g(): number {\n  const xs = [1, 2];\n  xs[0] = 5;\n  return xs.length;\n}")),
+    },
+    .{
         .key = "A bigint literal, such as `10n`",
         .refused = &.{r("10n", body("  const a = 10n;"))},
         .clean = c(body("  const a = 10;")),

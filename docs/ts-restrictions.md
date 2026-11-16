@@ -193,6 +193,7 @@ no user-defined iterator protocol.
 | Assignment in expression position, such as `const m = (n = 2);`, `a = b = 3;`, and `(a = 2);` | ZTS001 | Write the assignment as its own statement |
 | An assignment target that is not a name, a member path, or an index, such as `(n) = 2;` and `o.a?.a = 1;` | ZTS016 | Assign to a name, a member path, or an index |
 | A call in an assignment target, such as `mk().n = 2` and `mk().a.n = 2` | ZTS016 | Bind the call result to a `const` first |
+| An assignment target whose root is not a name, such as `[1, 2][0] = 5` and `[mk(), b][0].n = 2` | ZTS016 | Bind the value to a `const` first, then assign through the name |
 
 There is no truthiness conversion. A value of type `unknown` cannot enter a
 boolean context. `String(value)` is the only conversion from a number or a

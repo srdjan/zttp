@@ -12217,11 +12217,10 @@ const container_writes = [_]AbsentReadCase{
     \\  return Response.text(String(t.length + m.length + s.length));
     \\}
     },
-    .{ .name = "w1_mutation_and_write_on_a_fresh_array_literal_are_clean", .expect = "clean", .source =
+    .{ .name = "w1_read_and_push_on_a_fresh_array_literal_are_clean", .expect = "clean", .source =
     \\function handler(req: Request): Proof<Response, "read_only"> {
     \\  const last = [1, 2][1];
     \\  const n = ["a", 1].push(2);
-    \\  [1, 2][0] = 5;
     \\  return Response.json({ last: last, n: n });
     \\}
     },

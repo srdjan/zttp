@@ -4984,10 +4984,18 @@ pub const Parser = struct {
             self.errors.addErrorAt(.invalid_assignment_target, op_tok, "an assignment target must be a name, a member path, or an index; write `x = value`, `o.a = value`, or `xs[i] = value`, with no parentheses or `?.`");
             return error.ParseError;
         }
-        if (self.assignmentTargetCall(target)) |call| {
-            const callee = if (self.nodes.getCallData(call)) |data| data.callee else call;
-            self.errors.addError(.invalid_assignment_target, self.nodes.getLoc(callee), "a call in an assignment target is not supported; bind the call result to a `const` first");
-            return error.ParseError;
+        const root = self.assignmentTargetRoot(target);
+        switch (self.nodes.getTag(root)) {
+            .identifier => {},
+            .call => {
+                const callee = if (self.nodes.getCallData(root)) |data| data.callee else root;
+                self.errors.addError(.invalid_assignment_target, self.nodes.getLoc(callee), "a call in an assignment target is not supported; bind the call result to a `const` first");
+                return error.ParseError;
+            },
+            else => {
+                self.errors.addError(.invalid_assignment_target, self.nodes.getLoc(root), "the root of an assignment target must be a name; bind the value to a `const` first, then assign through the name");
+                return error.ParseError;
+            },
         }
         if (self.nodes.getTag(target) != .identifier) return;
         const binding = ir.IrView.fromIRStore(&self.nodes, &self.constants).getBinding(target) orelse return;
@@ -4997,19 +5005,18 @@ pub const Parser = struct {
         }
     }
 
-    /// The first call in the receiver chain of an assignment target, such as
-    /// `mk()` in `mk().a.n = 2`, or null.
-    fn assignmentTargetCall(self: *Parser, target: NodeIndex) ?NodeIndex {
+    /// The node at the base of the receiver chain of an assignment target,
+    /// such as `mk()` in `mk().a.n = 2` or `xs` in `xs[0] = 5`.
+    fn assignmentTargetRoot(self: *Parser, target: NodeIndex) NodeIndex {
         const view = ir.IrView.fromIRStore(&self.nodes, &self.constants);
         var current = target;
         while (true) {
             switch (self.nodes.getTag(current)) {
                 .member_access, .computed_access => {
-                    const member = view.getMember(current) orelse return null;
+                    const member = view.getMember(current) orelse return current;
                     current = member.object;
                 },
-                .call => return current,
-                else => return null,
+                else => return current,
             }
         }
     }

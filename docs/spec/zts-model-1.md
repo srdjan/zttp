@@ -1011,7 +1011,8 @@ validator is the parser's unique-parse insertion check, so the strictness
 never costs a human or agent a hand edit.
 
 An assignment statement evaluates its target subexpressions left to right and
-then the right-hand side. Subexpressions of an assignment target MUST be
+then the right-hand side. The root of an assignment target is a name, and its
+receiver chain contains no call. Subexpressions of an assignment target MUST be
 pure; an effectful receiver or index is evaluated into a named `const` before
 the assignment so evaluation order remains explicit.
 
@@ -1762,10 +1763,7 @@ Stmt         ::= BindingDecl
                | "continue" ";"
                | Block
 IfStmt       ::= "if" "(" Expr ")" Block ["else" (Block | IfStmt)]
-LValue       ::= Ident
-               | AssignableExpr "." Ident
-               | AssignableExpr "[" Expr "]"
-AssignableExpr ::= PrimaryExpr AssignableSuffix*
+LValue       ::= Ident AssignableSuffix*
 AssignableSuffix ::= "." Ident
                    | "[" Expr "]"
 

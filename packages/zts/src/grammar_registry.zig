@@ -152,11 +152,7 @@ pub const productions = [_]Production{
     },
     .{
         .name = "LValue",
-        .rhs = "Ident | AssignableExpr \".\" Ident | AssignableExpr \"[\" Expr \"]\"",
-    },
-    .{
-        .name = "AssignableExpr",
-        .rhs = "PrimaryExpr AssignableSuffix*",
+        .rhs = "Ident AssignableSuffix*",
     },
     .{
         .name = "AssignableSuffix",
